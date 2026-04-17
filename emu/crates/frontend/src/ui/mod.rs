@@ -84,10 +84,15 @@ pub fn apply_menu_action(state: &mut AppState, action: xmb::MenuAction) -> MenuO
             state.running = false;
             state.exec_history.clear();
             state.xmb.sync_run_label(false);
+            if let Some(bus) = state.bus.as_mut() {
+                bus.gpu.vram.clear();
+            }
             MenuOutcome::None
         }
         FillVramTestPattern => {
-            fill_vram_test_pattern(&mut state.vram);
+            if let Some(bus) = state.bus.as_mut() {
+                fill_vram_test_pattern(&mut bus.gpu.vram);
+            }
             MenuOutcome::None
         }
         ToggleRegisters => {
