@@ -40,13 +40,22 @@ pub fn draw_layout(
     state.xmb.draw(ctx, dt);
 
     if state.panels.hud {
-        hud::draw(ctx, &state.hud, &state.cpu);
+        hud::draw(ctx, &state.hud, &state.cpu, state.running);
     }
 }
 
 pub fn apply_menu_action(state: &mut AppState, action: xmb::MenuAction) -> MenuOutcome {
     use xmb::MenuAction::*;
     match action {
+        ToggleRun => {
+            state.running = !state.running;
+            state.xmb.sync_run_label(state.running);
+            // Auto-close the overlay so Run is observable immediately.
+            if state.running {
+                state.xmb.open = false;
+            }
+            MenuOutcome::None
+        }
         StepOne => {
             if let Some(bus) = state.bus.as_mut() {
                 let _ = state.cpu.step(bus);
@@ -55,6 +64,8 @@ pub fn apply_menu_action(state: &mut AppState, action: xmb::MenuAction) -> MenuO
         }
         Reset => {
             state.cpu = emulator_core::Cpu::new();
+            state.running = false;
+            state.xmb.sync_run_label(false);
             MenuOutcome::None
         }
         FillVramTestPattern => {
