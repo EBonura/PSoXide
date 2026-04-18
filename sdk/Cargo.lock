@@ -17,6 +17,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-gte"
+version = "0.1.0"
+
+[[package]]
 name = "psx-hw"
 version = "0.1.0"
 dependencies = [
@@ -51,6 +55,7 @@ name = "psx-sdk"
 version = "0.1.0"
 dependencies = [
  "psx-gpu",
+ "psx-gte",
  "psx-hw",
  "psx-io",
  "psx-pad",
