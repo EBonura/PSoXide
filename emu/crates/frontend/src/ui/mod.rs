@@ -51,16 +51,6 @@ pub fn draw_layout(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::Te
     });
 
     state.xmb.draw(ctx, dt);
-
-    if state.panels.hud {
-        hud::draw(
-            ctx,
-            &state.hud,
-            &state.cpu,
-            state.bus.as_ref(),
-            state.running,
-        );
-    }
 }
 
 pub fn apply_menu_action(state: &mut AppState, action: xmb::MenuAction) -> MenuOutcome {
@@ -140,10 +130,6 @@ pub fn apply_menu_action(state: &mut AppState, action: xmb::MenuAction) -> MenuO
         }
         ToggleVram => {
             state.panels.vram = !state.panels.vram;
-            MenuOutcome::None
-        }
-        ToggleHud => {
-            state.panels.hud = !state.panels.hud;
             MenuOutcome::None
         }
         Quit => MenuOutcome::Quit,
