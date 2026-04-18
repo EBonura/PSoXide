@@ -253,14 +253,19 @@ impl AppState {
             }
         }
 
-        // Swap everything at once — no half-loaded state.
+        // Swap everything at once — no half-loaded state. Start in
+        // the running state so the user sees the game boot
+        // immediately when they hit Enter in the XMB — matches a real
+        // PS1 where selecting a disc and pressing X fires it right up.
+        // The XMB's caller (`apply_menu_action::LaunchGame`) closes
+        // the overlay so the game is actually visible.
         self.bus = Some(bus);
         self.cpu = cpu;
-        self.running = false;
+        self.running = true;
         self.exec_history.clear();
         self.gpr_snapshot = None;
         self.current_game = Some(entry.clone());
-        self.xmb.sync_run_label(false);
+        self.xmb.sync_run_label(true);
         self.status_message = Some((
             format!("Launched: {}", entry.title),
             STATUS_MESSAGE_TTL_SECS,
