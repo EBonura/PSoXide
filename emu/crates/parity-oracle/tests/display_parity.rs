@@ -45,6 +45,18 @@ const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
 const CRASH_DISC: &str = "/home/user/Downloads/<rom-path>";
 const TEKKEN_DISC: &str =
     "/home/user/Downloads/<rom-path>";
+const GT2_DISC: &str =
+    "/home/user/Downloads/<rom-path>";
+const MGS_DISC: &str =
+    "/home/user/Downloads/<rom-path>";
+const RE2_DISC: &str =
+    "/home/user/Downloads/<rom-path>";
+const WIPEOUT1_DISC: &str =
+    "/home/user/Downloads/<rom-path>";
+const WIPEOUT2097_DISC: &str =
+    "/home/user/Downloads/<rom-path>";
+const WIPEOUT3_DISC: &str =
+    "/home/user/Downloads/<rom-path>";
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -487,10 +499,70 @@ fn parity_crash_boot() {
 #[ignore = "requires PCSX-Redux + a commercial title disc; ~4min in release"]
 fn parity_tekken_boot() {
     let schedule = [
-        Checkpoint { steps: 100_000_000, name: "sony_logo",    max_diverge_pct:  4.00 },
+        Checkpoint { steps: 100_000_000, name: "sony_logo",    max_diverge_pct: 0.05 },
         Checkpoint { steps: 300_000_000, name: "disc_handoff", max_diverge_pct: 10.00 },
         Checkpoint { steps: 500_000_000, name: "licensed",     max_diverge_pct: 40.00 },
         Checkpoint { steps: 800_000_000, name: "licensed_hold", max_diverge_pct: 40.00 },
     ];
     run_parity_suite("tekken", Some(TEKKEN_DISC), &schedule);
+}
+
+// ===================================================================
+// Parity-at-100M (Sony logo) for every game. At 100M steps, the
+// emulator has only finished the BIOS's logo phase — disc hasn't
+// been booted yet, so CPU timing drift is ~1% and the frame is
+// deterministic. This is where we can meaningfully demand 0%
+// pixel parity for any game.
+//
+// For later checkpoints (disc boot, title screen, gameplay),
+// CPU cycle drift dominates — at Crash 900M we're -6% off
+// Redux's tick count, so even with a pixel-exact renderer, the
+// game is at a slightly different animation frame than Redux.
+// Those checkpoints need cycle-accurate emulation work first.
+// ===================================================================
+
+fn sony_logo_schedule() -> &'static [Checkpoint] {
+    // Static schedule reused across every game's Sony-logo test.
+    // Budget is pinned tight (0.05%) — the renderer is pixel-
+    // exact here, so any divergence implies a CPU/memory-timing
+    // regression worth diagnosing.
+    &[
+        Checkpoint { steps: 100_000_000, name: "sony_logo", max_diverge_pct: 0.05 },
+    ]
+}
+
+#[test]
+#[ignore = "requires a commercial title disc"]
+fn parity_gt2_sony_logo() {
+    run_parity_suite("gt2", Some(GT2_DISC), sony_logo_schedule());
+}
+
+#[test]
+#[ignore = "requires a commercial title Disc 1"]
+fn parity_mgs_sony_logo() {
+    run_parity_suite("mgs", Some(MGS_DISC), sony_logo_schedule());
+}
+
+#[test]
+#[ignore = "requires a commercial title Disc 1"]
+fn parity_re2_sony_logo() {
+    run_parity_suite("re2", Some(RE2_DISC), sony_logo_schedule());
+}
+
+#[test]
+#[ignore = "requires a commercial title 1 disc"]
+fn parity_wipeout1_sony_logo() {
+    run_parity_suite("wipeout1", Some(WIPEOUT1_DISC), sony_logo_schedule());
+}
+
+#[test]
+#[ignore = "requires a commercial title 2097 disc"]
+fn parity_wipeout2097_sony_logo() {
+    run_parity_suite("wipeout2097", Some(WIPEOUT2097_DISC), sony_logo_schedule());
+}
+
+#[test]
+#[ignore = "requires a commercial title 3 disc"]
+fn parity_wipeout3_sony_logo() {
+    run_parity_suite("wipeout3", Some(WIPEOUT3_DISC), sony_logo_schedule());
 }
