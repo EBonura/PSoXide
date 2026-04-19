@@ -51,6 +51,10 @@ const MGS_DISC: &str =
     "/home/user/Downloads/<rom-path>";
 const RE2_DISC: &str =
     "/home/user/Downloads/<rom-path>";
+// The a commercial title rips have a quirky double-nested directory layout
+// from their CDRomance source — the inner `(v1.1) (Track 01).bin`
+// is the data track. Keeping the full path here (rather than
+// resolving via `.cue`) because our oracle reads raw BIN.
 const WIPEOUT1_DISC: &str =
     "/home/user/Downloads/<rom-path>";
 const WIPEOUT2097_DISC: &str =
