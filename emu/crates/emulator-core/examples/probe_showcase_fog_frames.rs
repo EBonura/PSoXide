@@ -18,10 +18,10 @@ fn main() {
     let mut cpu = Cpu::new();
     cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
 
-    // Ring-cross cycle: RING_SPACING / SCROLL_SPEED = 0x0800 / 0x40 = 32 frames.
-    // Sample across ≥ one cycle so we can see both the cross-over and
-    // the light orbit (11 s ≈ 660 frames) move the highlight.
-    let sample_targets: &[u64] = &[4, 16, 32, 48, 64, 96, 180];
+    // Light-orbit period is ~1024 frames (frame >> 2 → 256 angle
+    // units per full turn). Sample at ~1/8 revolution intervals so
+    // we can see the light sweep across the walls.
+    let sample_targets: &[u64] = &[16, 128, 256, 384, 512, 640, 768, 900];
     let mut cycles_at_last_pump = 0u64;
     for &target in sample_targets {
         while bus.irq().raise_counts()[0] < target {
