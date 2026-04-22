@@ -21,7 +21,7 @@ use std::path::PathBuf;
 fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "hello-tri".into());
     let bios = std::fs::read("/home/user/Downloads/bios/SCPH1001.BIN").expect("bios");
-    let exe_path = PathBuf::from("/home/user/Desktop/repos/PSoXide/build/examples/mipsel-sony-psx/release")
+    let exe_path = PathBuf::from("/home/user/Desktop/repos/psoxide/build/examples/mipsel-sony-psx/release")
         .join(format!("{name}.exe"));
     let exe_bytes = std::fs::read(&exe_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", exe_path.display()));
