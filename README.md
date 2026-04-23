@@ -2,7 +2,7 @@
   <img src="assets/branding/logo-wordmark.svg" alt="PSoXide" width="420">
 </p>
 
-<h1 align="center">PSoXide-3</h1>
+<h1 align="center">PSoXide</h1>
 
 <p align="center">
   <strong>A Rust-native PlayStation 1 development platform — full-stack rewrite, third attempt.</strong>
@@ -12,7 +12,7 @@
   <img src="assets/branding/logo-icon-player.png" alt="PSoXide player" width="120">
 </p>
 
-PSoXide-3 aims at an emulator + SDK + engine co-designed around the same hardware model, so asset formats, BIOS call shapes, and GPU command layouts stay coherent across the stack. The ultimate goal is an engine tuned tightly enough to push the PS1 to its limits — down to the kind of work FromSoftware did on their own PS1 RPGs (King's Field, Shadow Tower).
+PSoXide aims at an emulator + SDK + engine co-designed around the same hardware model, so asset formats, BIOS call shapes, and GPU command layouts stay coherent across the stack. The ultimate goal is an engine tuned tightly enough to push the PS1 to its limits — down to the kind of work FromSoftware did on their own PS1 RPGs (King's Field, Shadow Tower).
 
 This is attempt number three. It starts honest: a CPU interpreter whose every instruction is validated bit-identically against PCSX-Redux, peripherals grown one typed subsystem at a time, and a frontend designed for debugging from day one.
 
@@ -141,10 +141,10 @@ Validation is organized around named-game canaries rather than "support all game
 
 ## Prior art
 
-PSoXide-3 is the third attempt; the first two taught the architectural lessons:
+PSoXide is the third attempt; the first two taught the architectural lessons and are kept as private archives:
 
-- **[psoxide](../PSoXide)**: mature CPU, full SDK, working frontend. Stalled on the exponential-tail work of commercial-game parity. Its XMB menu, HUD bar, and gamepad module live on here.
-- **[PSoXide-2](../PSoXide-2)**: rewrite attempt that got to boot + flat triangles but never reached full stack. Its Redux-oracle harness and debug-panel layout are the direct ancestors of the current tooling.
+- **[PSoXide-v1](../psoxide-v1)**: unified platform monorepo (SDK + emulator + editor + integration). Mature CPU, full SDK, working frontend. Stalled on the exponential-tail work of commercial-game parity. Its XMB menu, HUD bar, and gamepad module live on here.
+- **[PSoXide-v2](../psoxide-v2)**: first focused-emulator attempt — got to boot + flat triangles but never reached full stack. Its Redux-oracle harness and debug-panel layout are the direct ancestors of the current tooling.
 
 ## License
 
