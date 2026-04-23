@@ -26,7 +26,7 @@ fn main() {
         .unwrap_or(4);
 
     let path = PathBuf::from(
-        "/home/user/Desktop/repos/PSoXide/emu/crates/emulator-core/target/parity-cache/redux-32b1a0fa4db70c8f-50000000.bin",
+        "/home/user/Desktop/repos/psoxide/emu/crates/emulator-core/target/parity-cache/redux-32b1a0fa4db70c8f-50000000.bin",
     );
     let file = File::open(&path).expect("open cache");
     let mut r = BufReader::new(file);

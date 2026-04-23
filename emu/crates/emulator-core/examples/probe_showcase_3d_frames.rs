@@ -7,7 +7,7 @@ use std::io::Write;
 fn main() {
     let bios = std::fs::read("/home/user/Downloads/bios/SCPH1001.BIN").expect("bios");
     let exe_bytes = std::fs::read(
-        "/home/user/Desktop/repos/PSoXide/build/examples/mipsel-sony-psx/release/showcase-3d.exe",
+        "/home/user/Desktop/repos/psoxide/build/examples/mipsel-sony-psx/release/showcase-3d.exe",
     )
     .expect("showcase-3d.exe");
     let exe = Exe::parse(&exe_bytes).expect("parse");
