@@ -51,7 +51,8 @@ use psx_iso::Disc;
 use std::path::PathBuf;
 
 const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
-const CRASH_DISC: &str = "/home/user/Downloads/<rom-path>";
+const CRASH_DISC: &str =
+    "/home/user/Downloads/<rom-path>";
 const TEKKEN_DISC: &str =
     "/home/user/Downloads/<rom-path>";
 
