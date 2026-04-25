@@ -10,7 +10,9 @@ use psx_iso::Exe;
 use std::io::Write;
 
 fn main() {
-    let name = std::env::args().nth(1).expect("usage: probe_any_example <name>");
+    let name = std::env::args()
+        .nth(1)
+        .expect("usage: probe_any_example <name>");
     let bios = std::fs::read("/home/user/Downloads/bios/SCPH1001.BIN").expect("bios");
     let exe_path = format!(
         "/home/user/Desktop/repos/psoxide/build/examples/mipsel-sony-psx/release/{name}.exe"
