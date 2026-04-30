@@ -5,7 +5,7 @@
 //! 2. `/home/user/Desktop/repos/pcsx-redux/pcsx-redux`
 //! 3. `/home/user/Desktop/repos/pcsx-redux/bins/Release/pcsx-redux`
 //!
-//! The `.app` bundle path is deliberately not tried — it launches the
+//! The `.app` bundle path is deliberately not tried -- it launches the
 //! GUI even when `-no-ui` is passed.
 
 use std::env;
