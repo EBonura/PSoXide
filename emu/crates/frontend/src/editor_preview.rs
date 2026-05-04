@@ -1355,9 +1355,9 @@ fn walk_model_instances(
             continue;
         }
 
-        // World position: same canonical room-local conversion
-        // used by entity bounds, lights, and placement picking.
-        let origin = node_room_local_origin(grid, &node.transform);
+        // Model placements are floor anchors: X/Z follow the
+        // authored node, Y is sampled from the floor under it.
+        let origin = floor_anchored_node_room_local_origin(grid, &node.transform);
 
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
         let instance_rotation = yaw_rotation_q12(yaw_q12);
@@ -1499,7 +1499,7 @@ fn walk_player_spawn_preview(
             continue;
         }
 
-        let origin = node_room_local_origin(grid, &node.transform);
+        let origin = floor_anchored_node_room_local_origin(grid, &node.transform);
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
         let instance_rotation = yaw_rotation_q12(yaw_q12);
 
@@ -1543,6 +1543,14 @@ fn node_room_local_origin(
     transform: &psxed_project::Transform3,
 ) -> psx_engine::WorldVertex {
     let [x, y, z] = spatial::node_preview_origin(grid, transform);
+    psx_engine::WorldVertex::new(x, y, z)
+}
+
+fn floor_anchored_node_room_local_origin(
+    grid: &WorldGrid,
+    transform: &psxed_project::Transform3,
+) -> psx_engine::WorldVertex {
+    let [x, y, z] = spatial::floor_anchored_node_preview_origin(grid, transform);
     psx_engine::WorldVertex::new(x, y, z)
 }
 

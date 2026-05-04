@@ -5,6 +5,7 @@
 
 mod history;
 mod icons;
+mod model_animation_viewer;
 mod model_import_preview;
 mod play_mode;
 mod style;
@@ -15,6 +16,7 @@ pub use play_mode::{
 };
 
 use crate::history::UndoStack;
+use crate::model_animation_viewer::ModelAnimationViewerState;
 use crate::style::*;
 
 use std::collections::{HashMap, HashSet};
@@ -232,6 +234,7 @@ pub struct EditorWorkspace {
     show_grid: bool,
     preview_fog: bool,
     view_2d: bool,
+    active_workspace: WorkspaceView,
     left_dock_open: bool,
     inspector_open: bool,
     resources_open: bool,
@@ -261,6 +264,8 @@ pub struct EditorWorkspace {
     /// animated preview. Keeping the handle alive across frames
     /// avoids submitting a texture id that egui has already freed.
     model_resource_preview_texture: Option<egui::TextureHandle>,
+    animation_viewer: ModelAnimationViewerState,
+    animation_viewer_preview_texture: Option<egui::TextureHandle>,
     texture_import_dialog: TextureImportDialog,
     model_import_dialog: ModelImportDialog,
     import_retired_textures: Vec<(u8, egui::TextureHandle)>,
@@ -1327,6 +1332,28 @@ enum ResourceFilter {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceView {
+    Room,
+    Animation,
+}
+
+impl WorkspaceView {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Room => "Room",
+            Self::Animation => "Animation Viewer",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Room => icons::GRID,
+            Self::Animation => icons::PLAY,
+        }
+    }
+}
+
 impl ResourceFilter {
     const fn label(self) -> &'static str {
         match self {
@@ -1480,6 +1507,7 @@ impl EditorWorkspace {
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
             view_2d: false,
+            active_workspace: WorkspaceView::Room,
             left_dock_open: true,
             inspector_open: true,
             resources_open: true,
@@ -1500,6 +1528,8 @@ impl EditorWorkspace {
             viewport_3d_free_initialized: false,
             texture_thumbs: HashMap::new(),
             model_resource_preview_texture: None,
+            animation_viewer: ModelAnimationViewerState::default(),
+            animation_viewer_preview_texture: None,
             texture_import_dialog: TextureImportDialog::default(),
             model_import_dialog: ModelImportDialog::default(),
             import_retired_textures: Vec::new(),
@@ -5665,8 +5695,8 @@ impl EditorWorkspace {
     /// Snap the selected node's Y-rotation up by 90°. No-op on
     /// macro / structural nodes (Root, World, Room, plain
     /// transform-only nodes) since they have no in-world heading.
-    /// The `MeshInstance` card and directional entity markers
-    /// (spawn / trigger / audio / portal) are all rotatable.
+    /// Entity hosts, the legacy `MeshInstance` card, and directional
+    /// markers (spawn / trigger / audio / portal) are rotatable.
     fn rotate_selected_yaw_90(&mut self) {
         let id = self.selected_node;
         if id == NodeId::ROOT {
@@ -5676,7 +5706,8 @@ impl EditorWorkspace {
         let Some(node) = scene.node(id) else { return };
         let rotatable = matches!(
             node.kind,
-            NodeKind::MeshInstance { .. }
+            NodeKind::Entity
+                | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Trigger { .. }
                 | NodeKind::AudioSource { .. }
@@ -5894,6 +5925,15 @@ impl EditorWorkspace {
                         ui.separator();
                         if ui.button("Frame Selection").clicked() {
                             self.frame_viewport();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Room Workspace").clicked() {
+                            self.active_workspace = WorkspaceView::Room;
+                            ui.close_menu();
+                        }
+                        if ui.button("Animation Viewer").clicked() {
+                            self.open_animation_viewer_for_current_selection();
                             ui.close_menu();
                         }
                     });
@@ -7088,6 +7128,15 @@ impl EditorWorkspace {
             return;
         }
 
+        if resource_can_open_in_animation_viewer(&resource_data)
+            && ui
+                .button(icons::label(icons::PLAY, "Open in Animation Viewer"))
+                .on_hover_text("Preview this asset in the central animation workspace.")
+                .clicked()
+        {
+            self.open_animation_viewer_for_resource(id);
+        }
+
         let Some(resource) = self.project.resource_mut(id) else {
             ui.weak("Resource missing");
             return;
@@ -7308,25 +7357,27 @@ impl EditorWorkspace {
             self.mark_dirty();
         }
         if ui
-            .button(icons::label(icons::PLUS, "Animation Set"))
-            .on_hover_text("Add a reusable model-independent animation role set.")
+            .button(icons::label(icons::PLUS, "Clip Role Map"))
+            .on_hover_text(
+                "Add a reusable idle/walk/run/turn mapping for compatible animation clips.",
+            )
             .clicked()
         {
             let id = self.project.add_resource(
-                "New Animation Set",
+                "New Clip Role Map",
                 ResourceData::AnimationSet(psxed_project::AnimationSetResource::default()),
             );
             self.replace_resource_selection(id);
             self.clear_node_selection_state();
             self.clear_primitive_selection_state();
             self.clear_sector_selection();
-            self.status = "Added animation set".to_string();
+            self.status = "Added clip role map".to_string();
             self.mark_dirty();
         }
         if ui
             .button(icons::label(icons::SCAN, "Catalogue Animations"))
             .on_hover_text(
-                "Build Skeleton, Animation Clip, and Animation Set resources from existing Model clip lists.",
+                "Build Skeleton, Animation Clip, and Clip Role Map resources from existing Model clip lists.",
             )
             .clicked()
         {
@@ -7349,9 +7400,16 @@ impl EditorWorkspace {
             }
         }
         if ui
+            .button(icons::label(icons::PLAY, "Animation Viewer"))
+            .on_hover_text("Open the central model and animation playback workspace.")
+            .clicked()
+        {
+            self.open_animation_viewer_for_current_selection();
+        }
+        if ui
             .button(icons::label(icons::MAP_PIN, "Starter Characters"))
             .on_hover_text(
-                "Sync the built-in player/enemy models, animation sets, and character profiles into this project.",
+                "Sync the built-in player/enemy models, clip role maps, and character profiles into this project.",
             )
             .clicked()
         {
@@ -7652,12 +7710,54 @@ impl EditorWorkspace {
         });
     }
 
+    fn open_animation_viewer_for_current_selection(&mut self) {
+        if let Some(resource_id) = self.selected_resource {
+            if self.open_animation_viewer_for_resource(resource_id) {
+                return;
+            }
+        }
+        let character_resource = self
+            .project
+            .active_scene()
+            .node(self.selected_node)
+            .and_then(|node| entity_character_resource_id(self, node));
+        if let Some(resource_id) = character_resource {
+            if self.open_animation_viewer_for_resource(resource_id) {
+                return;
+            }
+        }
+        self.active_workspace = WorkspaceView::Animation;
+        self.status = "Opened Animation Viewer".to_string();
+    }
+
+    fn open_animation_viewer_for_resource(&mut self, resource_id: ResourceId) -> bool {
+        let can_open = self
+            .project
+            .resource(resource_id)
+            .is_some_and(|resource| resource_can_open_in_animation_viewer(&resource.data));
+        if !can_open {
+            return false;
+        }
+        self.animation_viewer
+            .focus_resource(&self.project, resource_id);
+        self.active_workspace = WorkspaceView::Animation;
+        self.status = self
+            .project
+            .resource_name(resource_id)
+            .map(|name| format!("Opened {name} in Animation Viewer"))
+            .unwrap_or_else(|| "Opened Animation Viewer".to_string());
+        true
+    }
+
     fn draw_viewport(
         &mut self,
         ctx: &egui::Context,
         viewport_3d: EditorViewport3dPresentation,
         playtest_status: EditorPlaytestStatus,
     ) {
+        if viewport_3d.mode == EditorViewport3dMode::Play {
+            self.active_workspace = WorkspaceView::Room;
+        }
         egui::CentralPanel::default()
             .frame(viewport_frame())
             .show(ctx, |ui| {
@@ -7665,6 +7765,17 @@ impl EditorWorkspace {
                     ui.expand_to_include_rect(ui.max_rect());
                     self.draw_viewport_tabs(ui);
                     tool_panel_body(ui, |ui| {
+                        if self.active_workspace == WorkspaceView::Animation {
+                            model_animation_viewer::draw_model_animation_viewer(
+                                ui,
+                                &self.project,
+                                &self.project_dir,
+                                &mut self.animation_viewer,
+                                &mut self.animation_viewer_preview_texture,
+                            );
+                            return;
+                        }
+
                         self.draw_viewport_toolbar(ui);
                         ui.separator();
 
@@ -7833,21 +7944,39 @@ impl EditorWorkspace {
     }
 
     fn draw_viewport_tabs(&mut self, ui: &mut egui::Ui) {
-        // Single-tab placeholder: shows whatever Room is the
-        // current edit context. Multi-room tab switching can land
-        // alongside File→Open Project; for now just reflect reality
-        // instead of the previous hardcoded "Stone Room.room".
         let room_label = self
             .active_room_id()
             .and_then(|id| self.project.active_scene().node(id))
             .map(|node| node.name.as_str())
             .unwrap_or("(no room)");
         let title = format!("{room_label}.room");
-        tool_panel_header(ui, icons::GRID, &title, |ui| {
-            ui.label(
-                RichText::new(format!("Project: {}", self.project.name)).color(STUDIO_TEXT_WEAK),
-            );
-        });
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_HEADER)
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.set_min_height(24.0);
+                ui.horizontal(|ui| {
+                    for (view, label) in [
+                        (WorkspaceView::Room, title.as_str()),
+                        (WorkspaceView::Animation, WorkspaceView::Animation.label()),
+                    ] {
+                        let selected = self.active_workspace == view;
+                        if ui
+                            .selectable_label(selected, icons::label(view.icon(), label))
+                            .clicked()
+                        {
+                            self.active_workspace = view;
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("Project: {}", self.project.name))
+                                .color(STUDIO_TEXT_WEAK),
+                        );
+                    });
+                });
+            });
+        ui.separator();
     }
 
     fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -8196,11 +8325,21 @@ impl EditorWorkspace {
             // with the rendered marker / model exactly.
             let center_world = match enclosing_room.and_then(|id| scene.node(id)) {
                 Some(room_node) => match &room_node.kind {
-                    NodeKind::Room { grid } => psxed_project::spatial::node_preview_bounds_center(
-                        grid,
-                        &node.transform,
-                        half_extents,
-                    ),
+                    NodeKind::Room { grid } => {
+                        if node_is_floor_anchored(&node.kind) {
+                            psxed_project::spatial::floor_anchored_node_preview_bounds_center(
+                                grid,
+                                &node.transform,
+                                half_extents,
+                            )
+                        } else {
+                            psxed_project::spatial::node_preview_bounds_center(
+                                grid,
+                                &node.transform,
+                                half_extents,
+                            )
+                        }
+                    }
                     _ => continue,
                 },
                 None => {
@@ -11431,6 +11570,7 @@ fn draw_model_animated_import_preview(
         pitch_q12: (*preview_pitch_q12).rem_euclid(4096) as u16,
         radius: *preview_radius,
         show_animation_root,
+        show_bones: false,
     };
     let Some(image) = model_import_preview::render_import_model_preview_with_options(
         &preview.model_bytes,
@@ -12190,6 +12330,7 @@ fn draw_model_resource_preview_panel(
                     pitch_q12: pitch.rem_euclid(4096) as u16,
                     radius,
                     show_animation_root: false,
+                    show_bones: false,
                 },
             );
 
@@ -12652,7 +12793,7 @@ fn draw_animation_set_resource_editor(
     clip_options: &[AnimationClipOption],
 ) -> bool {
     let mut changed = false;
-    egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Animation Set"))
+    egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Clip Role Map"))
         .default_open(true)
         .show(ui, |ui| {
             changed |= resource_id_picker(
@@ -13065,7 +13206,7 @@ fn draw_character_resource_editor(
             }
             changed |= resource_id_picker(
                 ui,
-                "Animation Set",
+                "Clip Role Map",
                 "character-animation-set-picker",
                 &mut character.animation_set,
                 &ctx.animation_sets
@@ -13081,7 +13222,7 @@ fn draw_character_resource_editor(
             if character.animation_set.is_some() && selected_set.is_none() {
                 ui.colored_label(
                     Color32::from_rgb(220, 120, 100),
-                    "Animation Set resource is missing.",
+                    "Clip Role Map resource is missing.",
                 );
             }
             if let Some(set) = selected_set {
@@ -13091,7 +13232,7 @@ fn draw_character_resource_editor(
                 {
                     ui.colored_label(
                         Color32::from_rgb(220, 120, 100),
-                        "Animation Set targets a different skeleton than the selected Model.",
+                        "Clip Role Map targets a different skeleton than the selected Model.",
                     );
                 }
             }
@@ -13104,7 +13245,7 @@ fn draw_character_resource_editor(
             if character.animation_set.is_some() {
                 ui.label(
                     RichText::new(
-                        "Animation Set roles are used first; legacy clip indices below are fallbacks.",
+                        "Clip Role Map roles are used first; legacy clip indices below are fallbacks.",
                     )
                     .color(STUDIO_TEXT_WEAK)
                     .small(),
@@ -15045,6 +15186,16 @@ fn resource_lucide_color(data: &ResourceData, selected: bool) -> Color32 {
     }
 }
 
+fn resource_can_open_in_animation_viewer(data: &ResourceData) -> bool {
+    matches!(
+        data,
+        ResourceData::Model(_)
+            | ResourceData::AnimationClip(_)
+            | ResourceData::AnimationSet(_)
+            | ResourceData::Character(_)
+    )
+}
+
 fn draw_resource_card(
     ui: &mut egui::Ui,
     project: &ProjectDocument,
@@ -15459,7 +15610,7 @@ fn resource_detail(resource: &Resource) -> &'static str {
         ResourceData::Model(_) => "Model",
         ResourceData::Skeleton(_) => "Skeleton",
         ResourceData::AnimationClip(_) => "Animation Clip",
-        ResourceData::AnimationSet(_) => "Animation Set",
+        ResourceData::AnimationSet(_) => "Clip Role Map",
         ResourceData::Character(_) => "Character Profile",
         ResourceData::Weapon(_) => "Weapon",
         ResourceData::Mesh { .. } => "Mesh",
@@ -17754,6 +17905,13 @@ fn entity_bound_kind_and_size(
     }
 }
 
+fn node_is_floor_anchored(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Entity | NodeKind::MeshInstance { .. } | NodeKind::SpawnPoint { .. }
+    )
+}
+
 fn entity_model_resource<'a>(
     workspace: &'a EditorWorkspace,
     node: &psxed_project::SceneNode,
@@ -17790,6 +17948,30 @@ fn entity_model_resource<'a>(
                     }),
                     _ => None,
                 }),
+            _ => None,
+        })
+}
+
+fn entity_character_resource_id(
+    workspace: &EditorWorkspace,
+    node: &psxed_project::SceneNode,
+) -> Option<ResourceId> {
+    if let NodeKind::CharacterController {
+        character: Some(id),
+        ..
+    } = node.kind
+    {
+        return Some(id);
+    }
+    let scene = workspace.project.active_scene();
+    node.children
+        .iter()
+        .filter_map(|id| scene.node(*id))
+        .find_map(|child| match child.kind {
+            NodeKind::CharacterController {
+                character: Some(id),
+                ..
+            } => Some(id),
             _ => None,
         })
 }
@@ -17983,7 +18165,7 @@ fn catalogue_animation_library(
             animation_ids.push(clip_id);
         }
 
-        let set_name = format!("{} Animation Set", model.name);
+        let set_name = format!("{} Clip Role Map", model.name);
         let catalogued_set = build_animation_set_from_clips(project, skeleton_id, &animation_ids);
         let set_id = match find_animation_set_by_name(project, skeleton_id, &set_name) {
             Some(id) => {
@@ -19792,6 +19974,22 @@ mod tests {
         let node = workspace.project.active_scene().node(light).unwrap();
         assert_eq!(node.transform.rotation_degrees, [0.0, 0.0, 0.0]);
         assert!(!workspace.is_dirty());
+    }
+
+    #[test]
+    fn rotate_selected_yaw_rotates_entity_hosts() {
+        let mut project = ProjectDocument::new("entity-rotate");
+        let entity = project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Prop", NodeKind::Entity);
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("entity-rotate"), project);
+        workspace.selected_node = entity;
+
+        workspace.rotate_selected_yaw_90();
+
+        let node = workspace.project.active_scene().node(entity).unwrap();
+        assert_eq!(node.transform.rotation_degrees, [0.0, 90.0, 0.0]);
+        assert!(workspace.is_dirty());
     }
 
     #[test]

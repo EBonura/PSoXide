@@ -36,8 +36,9 @@
 //! 5. Push (l, r) to the host-facing output ring.
 //!
 //! SPU IRQ: if SPUCNT bit 6 (IRQEnable) is set and the IRQ address
-//! matches the sample-read pointer of any voice (or the data-transfer
-//! FIFO read pointer), we latch STATUS bit 6 and signal the bus.
+//! matches a voice sample-read pointer, a transfer FIFO access, or
+//! Redux's decoded/capture-buffer cursor in low SPU RAM, we latch
+//! STATUS bit 6 and signal the bus.
 //!
 //! Sample rate: 44_100 Hz. PSX clock is 33_868_800 Hz, so 1 sample =
 //! 768 cycles. We tick the SPU from the scheduler every [`SAMPLE_CYCLES`]
@@ -799,6 +800,12 @@ pub struct Spu {
     last_sample_cycle: u64,
     /// Total samples produced since reset -- diagnostic counter.
     samples_produced: u64,
+    /// Redux's decoded/capture-buffer IRQ cursor. When enabled, the
+    /// first 0x1000 bytes of SPU RAM are treated as four 0x400-byte
+    /// capture rings; the cursor advances by one halfword per output
+    /// sample and can trigger SPU IRQs for games that synchronize audio
+    /// streaming on that low-memory address range.
+    decode_irq_cursor: u32,
     /// SPU IRQ pending flag -- bus drains this to decide whether to
     /// raise `IrqSource::Spu`. Set when an enabled IRQ-addr match
     /// occurs on a voice's read pointer or the transfer-FIFO write.
@@ -869,6 +876,7 @@ impl Spu {
             cd_audio_in: std::collections::VecDeque::with_capacity(OUTPUT_BUFFER_CAP),
             last_sample_cycle: 0,
             samples_produced: 0,
+            decode_irq_cursor: 0,
             irq_pending: false,
             // Redux/hardware reset value -- must be non-zero or the
             // LFSR's NoiseWaveAdd lookup is stuck at index 0 forever.
@@ -1649,8 +1657,27 @@ impl Spu {
         }
         self.audio_out.push_back((out_l, out_r));
 
+        self.tick_decode_buffer_irq();
         self.samples_produced = self.samples_produced.saturating_add(1);
         1
+    }
+
+    fn tick_decode_buffer_irq(&mut self) {
+        if self.spucnt & (1 << 6) != 0 && self.irq_addr != 0 && self.irq_addr < 0x1000 {
+            for bank in 0..4 {
+                let cursor = self.decode_irq_cursor + bank * 0x400;
+                if self.irq_addr >= cursor && self.irq_addr < cursor + 2 {
+                    self.spustat |= 1 << 6;
+                    self.irq_pending = true;
+                    break;
+                }
+            }
+        }
+
+        self.decode_irq_cursor += 2;
+        if self.decode_irq_cursor > 0x3ff {
+            self.decode_irq_cursor = 0;
+        }
     }
 
     fn apply_kon_koff(&mut self) {
@@ -2245,6 +2272,30 @@ mod tests {
         s.write16(TRANSFER_ADDR, 0x0010);
         s.write16(TRANSFER_FIFO, 0xAAAA);
         assert!(!s.take_irq_pending());
+    }
+
+    #[test]
+    fn decoded_buffer_irq_fires_in_low_capture_banks() {
+        let mut s = Spu::new();
+        s.write16(SPUCNT, 1 << 6); // IRQ enable
+        s.write16(IRQ_ADDR, 0x0080); // 0x80 * 8 = 0x400 bytes
+
+        s.tick_sample(0);
+
+        assert!(s.take_irq_pending());
+        assert_ne!(s.spustat() & (1 << 6), 0);
+    }
+
+    #[test]
+    fn decoded_buffer_irq_ignores_zero_irq_address() {
+        let mut s = Spu::new();
+        s.write16(SPUCNT, 1 << 6); // IRQ enable
+        s.write16(IRQ_ADDR, 0x0000);
+
+        s.tick_sample(0);
+
+        assert!(!s.take_irq_pending());
+        assert_eq!(s.spustat() & (1 << 6), 0);
     }
 
     #[test]
