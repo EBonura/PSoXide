@@ -21,6 +21,7 @@ pub struct ImportPreviewOptions {
     pub pitch_q12: u16,
     pub radius: i32,
     pub show_animation_root: bool,
+    pub show_bones: bool,
 }
 
 pub fn render_import_model_preview_with_options(
@@ -89,6 +90,11 @@ pub fn render_import_model_preview_with_options(
             projection,
         )
     });
+    let joint_origins: Vec<Option<ProjectedVertex>> = if options.show_bones {
+        estimated_joint_points(&model, &joint_transforms, projection)
+    } else {
+        Vec::new()
+    };
 
     let mut projected = vec![None; model.vertex_count() as usize];
     for part_index in 0..model.part_count() {
@@ -150,6 +156,9 @@ pub fn render_import_model_preview_with_options(
             draw_animation_root_marker(&mut image, root);
         }
     }
+    if options.show_bones {
+        draw_bone_overlay(&mut image, &model, &joint_origins);
+    }
 
     Some(image)
 }
@@ -192,6 +201,52 @@ fn project_import_model_vertex(
         cpu_view_transform(&primary, vertex.position)
     };
     cpu_project_gte_view(view, projection)
+}
+
+fn estimated_joint_points(
+    model: &Model<'_>,
+    joint_transforms: &[JointViewTransform],
+    projection: WorldProjection,
+) -> Vec<Option<ProjectedVertex>> {
+    let mut sums = vec![[0i64; 3]; joint_transforms.len()];
+    let mut counts = vec![0i64; joint_transforms.len()];
+    for part_index in 0..model.part_count() {
+        let Some(part) = model.part(part_index) else {
+            continue;
+        };
+        let joint = part.joint_index() as usize;
+        if joint >= joint_transforms.len() {
+            continue;
+        }
+        let start = part.first_vertex();
+        let end = start.saturating_add(part.vertex_count());
+        for vertex_index in start..end {
+            let Some(vertex) = model.vertex(vertex_index) else {
+                continue;
+            };
+            sums[joint][0] += vertex.position.x as i64;
+            sums[joint][1] += vertex.position.y as i64;
+            sums[joint][2] += vertex.position.z as i64;
+            counts[joint] += 1;
+        }
+    }
+
+    joint_transforms
+        .iter()
+        .enumerate()
+        .map(|(joint, transform)| {
+            if counts[joint] > 0 {
+                let local = Vec3I16::new(
+                    clamp_i16((sums[joint][0] / counts[joint]) as i32),
+                    clamp_i16((sums[joint][1] / counts[joint]) as i32),
+                    clamp_i16((sums[joint][2] / counts[joint]) as i32),
+                );
+                cpu_project_gte_view(cpu_view_transform(transform, local), projection)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn cpu_view_transform(transform: &JointViewTransform, position: Vec3I16) -> ViewVertex {
@@ -339,6 +394,82 @@ fn draw_animation_root_marker(image: &mut ColorImage, projected: ProjectedVertex
     }
 }
 
+fn draw_bone_overlay(
+    image: &mut ColorImage,
+    model: &Model<'_>,
+    joints: &[Option<ProjectedVertex>],
+) {
+    let line = Color32::from_rgb(80, 230, 255);
+    let dot = Color32::from_rgb(255, 244, 130);
+    let count = model.joint_count().min(joints.len() as u16);
+    for joint_index in 0..count {
+        let Some(joint) = model.joint(joint_index) else {
+            continue;
+        };
+        let Some(parent) = joint.parent() else {
+            continue;
+        };
+        if parent >= count {
+            continue;
+        }
+        let Some(a) = joints.get(parent as usize).and_then(|p| *p) else {
+            continue;
+        };
+        let Some(b) = joints.get(joint_index as usize).and_then(|p| *p) else {
+            continue;
+        };
+        draw_image_line(
+            image,
+            a.sx as i32,
+            a.sy as i32,
+            b.sx as i32,
+            b.sy as i32,
+            line,
+        );
+    }
+    for projected in joints.iter().flatten() {
+        draw_joint_dot(image, projected.sx as i32, projected.sy as i32, dot);
+    }
+}
+
+fn draw_image_line(
+    image: &mut ColorImage,
+    mut x0: i32,
+    mut y0: i32,
+    x1: i32,
+    y1: i32,
+    color: Color32,
+) {
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        put_marker_pixel(image, x0, y0, color);
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = err.saturating_mul(2);
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn draw_joint_dot(image: &mut ColorImage, cx: i32, cy: i32, color: Color32) {
+    for y in -1..=1 {
+        for x in -1..=1 {
+            put_marker_pixel(image, cx + x, cy + y, color);
+        }
+    }
+}
+
 fn put_marker_pixel(image: &mut ColorImage, x: i32, y: i32, color: Color32) {
     if x < 0 || y < 0 || x >= PREVIEW_WIDTH as i32 || y >= PREVIEW_HEIGHT as i32 {
         return;
@@ -422,6 +553,7 @@ mod tests {
                 pitch_q12: 350,
                 radius: 1536,
                 show_animation_root: true,
+                show_bones: false,
             },
         )
         .expect("tracked cooked model should render");
@@ -436,5 +568,102 @@ mod tests {
             lit_pixels > 32,
             "expected the cooked model preview to draw visible pixels, got {lit_pixels}"
         );
+    }
+
+    #[test]
+    fn estimated_joint_points_skips_joints_without_owned_vertices() {
+        let model_bytes = two_joint_model_with_child_part();
+        let model = Model::from_bytes(&model_bytes).expect("model fixture");
+        let transforms = vec![
+            JointViewTransform {
+                rotation: Mat3I16::IDENTITY,
+                translation: Vec3I32::new(40, 0, 100),
+            },
+            JointViewTransform {
+                rotation: Mat3I16::IDENTITY,
+                translation: Vec3I32::new(0, 0, 100),
+            },
+        ];
+
+        let joints =
+            estimated_joint_points(&model, &transforms, WorldProjection::new(160, 120, 320, 1));
+
+        assert_eq!(joints.len(), 2);
+        assert_eq!(joints[0], None);
+        assert!(joints[1].is_some());
+    }
+
+    fn two_joint_model_with_child_part() -> Vec<u8> {
+        const ASSET_HEADER_SIZE: usize = 12;
+        const MODEL_HEADER_SIZE: usize = 16;
+        const JOINT_RECORD_SIZE: usize = 4;
+        const MATERIAL_RECORD_SIZE: usize = 8;
+        const PART_RECORD_SIZE: usize = 16;
+        const VERTEX_RECORD_SIZE: usize = 8;
+        const FACE_RECORD_SIZE: usize = 12;
+        const MODEL_VERSION: u16 = 4;
+        const MODEL_FLAGS_HAS_UVS: u16 = 1 << 1;
+        const MODEL_FLAGS_RIGID_SKINNED: u16 = 1 << 2;
+        const NO_JOINT: u16 = u16::MAX;
+        const NO_JOINT8: u8 = u8::MAX;
+
+        let payload_len = MODEL_HEADER_SIZE
+            + 2 * JOINT_RECORD_SIZE
+            + MATERIAL_RECORD_SIZE
+            + PART_RECORD_SIZE
+            + 3 * VERTEX_RECORD_SIZE
+            + FACE_RECORD_SIZE;
+        let mut out = Vec::with_capacity(ASSET_HEADER_SIZE + payload_len);
+        out.extend_from_slice(b"PSMD");
+        out.extend_from_slice(&MODEL_VERSION.to_le_bytes());
+        out.extend_from_slice(&(MODEL_FLAGS_HAS_UVS | MODEL_FLAGS_RIGID_SKINNED).to_le_bytes());
+        out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+
+        append_u16(&mut out, 2); // joints
+        append_u16(&mut out, 1); // parts
+        append_u16(&mut out, 3); // vertices
+        append_u16(&mut out, 1); // faces
+        append_u16(&mut out, 1); // materials
+        append_u16(&mut out, 128);
+        append_u16(&mut out, 128);
+        append_u16(&mut out, 0);
+
+        append_u16(&mut out, NO_JOINT);
+        append_u16(&mut out, 0);
+        append_u16(&mut out, 0);
+        append_u16(&mut out, 0);
+
+        append_u16(&mut out, 0);
+        append_u16(&mut out, 0);
+        out.extend_from_slice(&[255, 255, 255, 255]);
+
+        for value in [1u16, 0, 3, 0, 1, 0] {
+            append_u16(&mut out, value);
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+
+        for (x, y, z) in [(0i16, 0i16, 0i16), (48, 0, 0), (0, 48, 0)] {
+            append_i16(&mut out, x);
+            append_i16(&mut out, y);
+            append_i16(&mut out, z);
+            out.push(NO_JOINT8);
+            out.push(0);
+        }
+
+        for (vertex, u, v) in [(0u16, 0u8, 0u8), (1, 64, 0), (2, 0, 64)] {
+            append_u16(&mut out, vertex);
+            out.push(u);
+            out.push(v);
+        }
+
+        out
+    }
+
+    fn append_u16(out: &mut Vec<u8>, value: u16) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn append_i16(out: &mut Vec<u8>, value: i16) {
+        out.extend_from_slice(&value.to_le_bytes());
     }
 }
