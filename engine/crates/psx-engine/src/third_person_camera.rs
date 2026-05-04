@@ -158,8 +158,22 @@ impl ThirdPersonCameraState {
         target: ThirdPersonCameraTarget,
         config: ThirdPersonCameraConfig,
     ) {
+        self.snap_to_player_with_yaw(target, config, target.player_yaw.add(Angle::HALF));
+    }
+
+    /// Reset the camera around a player position using an explicit
+    /// orbit yaw. Useful for editor/playtest starts where the
+    /// authored player yaw should affect the model facing without
+    /// the camera immediately hiding that rotation by moving behind
+    /// the player.
+    pub fn snap_to_player_with_yaw(
+        &mut self,
+        target: ThirdPersonCameraTarget,
+        config: ThirdPersonCameraConfig,
+        yaw: Angle,
+    ) {
         let config = normalize_config(config);
-        self.yaw = target.player_yaw.add(Angle::HALF);
+        self.yaw = yaw;
         self.distance = config
             .distance
             .clamp(config.min_distance, config.max_distance);
@@ -843,6 +857,22 @@ mod tests {
         assert_eq!(camera.focus.y, target.player.y + config.target_height);
         assert!(camera.position.y > camera.focus.y);
         assert_eq!(camera.pitch_q12, default_pitch_q12(config));
+    }
+
+    #[test]
+    fn explicit_start_yaw_does_not_follow_player_yaw() {
+        let mut camera = ThirdPersonCameraState::new(Angle::ZERO);
+        let config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::QUARTER,
+            moving: false,
+            lock_target: None,
+        };
+
+        camera.snap_to_player_with_yaw(target, config, Angle::HALF);
+
+        assert_eq!(camera.yaw(), Angle::HALF);
     }
 
     #[test]

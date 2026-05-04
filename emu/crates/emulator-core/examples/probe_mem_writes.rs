@@ -1,6 +1,8 @@
 //! Trace every change to a given RAM word, step-by-step (no ISR
 //! folding) so the actual writing instruction's PC is captured --
-//! including writes from inside an IRQ handler.
+//! including writes from inside an IRQ handler. Set
+//! `PSOXIDE_MEM_WRITE_START=<user-steps>` to fast-forward with the
+//! normal folded step model before entering the raw watch window.
 //!
 //! ```bash
 //! cargo run --release -p emulator-core --example probe_mem_writes -- 0x800ED294 89184518
@@ -43,6 +45,10 @@ fn main() {
         .get(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(100_000_000);
+    let start_user_steps = std::env::var("PSOXIDE_MEM_WRITE_START")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
     let disc_path = args.get(2);
     let held_buttons = std::env::var("PSOXIDE_PAD1")
         .ok()
@@ -66,7 +72,22 @@ fn main() {
         }
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
-        bus.attach_memcard_port1(Vec::new());
+        if std::env::var_os("PSOXIDE_NO_MEMCARD").is_none() {
+            bus.attach_memcard_port1(Vec::new());
+        }
+    }
+
+    let mut current_pad_mask = u16::MAX;
+    for _ in 0..start_user_steps {
+        sync_pad_mask(&mut bus, held_buttons, &pad_pulses, &mut current_pad_mask);
+        let was_in_isr = cpu.in_isr();
+        cpu.step(&mut bus).expect("step");
+        if !was_in_isr && cpu.in_irq_handler() {
+            while cpu.in_irq_handler() {
+                sync_pad_mask(&mut bus, held_buttons, &pad_pulses, &mut current_pad_mask);
+                cpu.step(&mut bus).expect("isr step");
+            }
+        }
     }
 
     let mut targets = target_addrs
@@ -78,20 +99,18 @@ fn main() {
         })
         .collect::<Vec<_>>();
     let mut total_hits = 0usize;
-    let mut current_pad_mask = u16::MAX;
 
     // Pure single-stepping without ISR folding, so we can attribute
-    // each write to the exact PC (user or ISR). `up_to_step` is
-    // interpreted as user-side-equivalent budget -- we cap total steps
-    // at `up_to_step * 2` to allow for in-ISR time.
-    let max_raw_steps = up_to_step.saturating_mul(2);
+    // each write to the exact PC (user or ISR). With no start offset,
+    // `up_to_step` keeps its historical user-side-equivalent meaning;
+    // with `PSOXIDE_MEM_WRITE_START`, it is the raw watch-window size.
+    let max_raw_steps = if start_user_steps == 0 {
+        up_to_step.saturating_mul(2)
+    } else {
+        up_to_step
+    };
     for raw_step in 1..=max_raw_steps {
-        let vblank = bus.irq().raise_counts()[0];
-        let pad_mask = effective_mask(held_buttons, &pad_pulses, vblank);
-        if pad_mask != current_pad_mask {
-            bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
-            current_pad_mask = pad_mask;
-        }
+        sync_pad_mask(&mut bus, held_buttons, &pad_pulses, &mut current_pad_mask);
         let pre_pc = cpu.pc();
         let pre_ra = cpu.gpr(31);
         let pre_args = [cpu.gpr(4), cpu.gpr(5), cpu.gpr(6), cpu.gpr(7)];
@@ -145,4 +164,18 @@ fn parse_addrs(text: &str) -> Vec<u32> {
         .filter(|part| !part.trim().is_empty())
         .map(|part| parse_hex(part.trim()))
         .collect()
+}
+
+fn sync_pad_mask(
+    bus: &mut Bus,
+    held_buttons: u16,
+    pad_pulses: &[pad_support::PadPulse],
+    current_pad_mask: &mut u16,
+) {
+    let vblank = bus.irq().raise_counts()[0];
+    let pad_mask = effective_mask(held_buttons, pad_pulses, vblank);
+    if pad_mask != *current_pad_mask {
+        bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
+        *current_pad_mask = pad_mask;
+    }
 }
