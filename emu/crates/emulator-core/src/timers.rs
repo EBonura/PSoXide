@@ -216,8 +216,7 @@ impl Timers {
     /// handling in its counter model. Keep this as a no-op so bus-level
     /// VBlank dispatch can stay explicit without perturbing counter
     /// phase.
-    pub fn notify_vblank(&mut self) {
-    }
+    pub fn notify_vblank(&mut self) {}
 
     fn advance_timer(
         &mut self,

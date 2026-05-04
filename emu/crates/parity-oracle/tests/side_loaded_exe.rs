@@ -103,7 +103,10 @@ fn run_example_case(case: ExampleCase) {
     let settle_steps = post_vblank_settle_steps();
     eprintln!("[side-load-parity:{}] BIOS : {}", case.name, bios.display());
     eprintln!("[side-load-parity:{}] EXE  : {}", case.name, exe.display());
-    eprintln!("[side-load-parity:{}] warm : {warmup_steps} steps", case.name);
+    eprintln!(
+        "[side-load-parity:{}] warm : {warmup_steps} steps",
+        case.name
+    );
     eprintln!(
         "[side-load-parity:{}] settle: {settle_steps} post-vblank steps",
         case.name
@@ -117,7 +120,10 @@ fn run_example_case(case: ExampleCase) {
     let run_timeout = Duration::from_secs((warmup_steps / 200_000).max(60));
     redux.run(warmup_steps, run_timeout).expect("Redux warmup");
     let redux_info = redux.load_exe(&exe, LOAD_TIMEOUT).expect("Redux load_exe");
-    eprintln!("[side-load-parity:{}] Redux load: {redux_info:?}", case.name);
+    eprintln!(
+        "[side-load-parity:{}] Redux load: {redux_info:?}",
+        case.name
+    );
 
     let mut ours = load_local_exe_after_bios_warmup(&bios, &exe, warmup_steps);
 
@@ -128,7 +134,9 @@ fn run_example_case(case: ExampleCase) {
             .expect("Redux VBlank run");
         let our_steps = ours.run_vblanks(1, max_steps).expect("local VBlank run");
         if settle_steps > 0 {
-            redux.run(settle_steps, VBLANK_TIMEOUT).expect("Redux settle");
+            redux
+                .run(settle_steps, VBLANK_TIMEOUT)
+                .expect("Redux settle");
             ours.run_steps(settle_steps).expect("local settle");
         }
 
