@@ -276,18 +276,25 @@ impl Graphics {
 
     /// Pick the right internal-resolution multiplier for the current
     /// scale-mode + panel size and reallocate the HW target to it
-    /// if changed. Cheap when the size is stable; reallocation
-    /// clears the target so the frontend may want to flush a fresh
-    /// frame after toggling.
+    /// if changed. Cheap when the size is stable. Returns `true` when
+    /// the target was reallocated and needs a CPU-VRAM resync before
+    /// frame-log replay.
     pub fn update_hw_scale(
         &mut self,
         scale_mode: psx_gpu_render::ScaleMode,
         panel_size_px: (u32, u32),
         display_size: (u32, u32),
-    ) {
+    ) -> bool {
         let s = psx_gpu_render::HwRenderer::scale_for(scale_mode, panel_size_px, display_size);
         self.hw_renderer
-            .set_internal_scale(s, Some(&mut self.egui_renderer));
+            .set_internal_scale(s, Some(&mut self.egui_renderer))
+    }
+
+    /// Restore the HW renderer's persistent target from CPU VRAM.
+    /// This is needed immediately after internal scale changes because
+    /// reallocating the target necessarily clears its texture.
+    pub fn sync_hw_target_from_vram(&self, vram_words: &[u16]) {
+        self.hw_renderer.sync_target_from_vram(vram_words);
     }
 
     /// Upload a full VRAM snapshot to the GPU-side texture. Called once
