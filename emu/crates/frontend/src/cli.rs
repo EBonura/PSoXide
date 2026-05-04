@@ -576,8 +576,9 @@ fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<bool, String> {
     .map_err(|e| format!("request device: {e:?}"))?;
 
     let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
-    let vram_words: Vec<u16> = bus.gpu.vram.words().to_vec();
-    hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &vram_words);
+    let initial_vram =
+        vec![0u16; (psx_gpu_render::VRAM_WIDTH * psx_gpu_render::VRAM_HEIGHT) as usize];
+    hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
 
     let s = hw.internal_scale();
     let (w, h, rgba) = hw.read_subrect_rgba8(
