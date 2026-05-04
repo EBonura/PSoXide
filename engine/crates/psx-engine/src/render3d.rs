@@ -250,6 +250,29 @@ impl ProjectedTexturedGouraudVertex {
     }
 }
 
+/// Predecoded textured model face for runtime-hot model rendering.
+///
+/// Cooked `.psxmdl` face records are compact byte records. The generic
+/// parser keeps those records zero-copy and fallible, which is ideal for
+/// loaders and validation but wasteful in the per-frame face loop. Runtime
+/// code can decode them once into this compact POD record and pass the slice
+/// to the `*_predecoded_faces` submit methods.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct TexturedModelRenderFace {
+    /// Projected-vertex indices for the triangle corners.
+    pub vertex_indices: [u16; 3],
+    /// Texture coordinates for the triangle corners.
+    pub uvs: [(u8, u8); 3],
+}
+
+impl TexturedModelRenderFace {
+    /// Empty face record used for fixed-size static arrays.
+    pub const ZERO: Self = Self {
+        vertex_indices: [0; 3],
+        uvs: [(0, 0); 3],
+    };
+}
+
 /// Per-joint world-to-view transform for one render frame.
 ///
 /// `submit_textured_model` fills one entry per skin joint up-front so
@@ -1385,6 +1408,45 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             material,
             options,
             true,
+            None,
+        )
+    }
+
+    /// Submit an animated textured model using caller-predecoded face records.
+    ///
+    /// Vertex projection and skinning are unchanged from [`Self::submit_textured_model`],
+    /// but the face loop walks a compact runtime table instead of decoding
+    /// `.psxmdl` face bytes on every frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_textured_model_predecoded_faces(
+        &mut self,
+        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        model: Model<'_>,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+    ) -> TexturedModelRenderStats {
+        self.submit_textured_model_impl(
+            triangles,
+            model,
+            animation,
+            frame_q12,
+            camera,
+            origin,
+            instance_rotation,
+            projected_vertices,
+            joint_view_transforms,
+            material,
+            options,
+            true,
+            Some(faces),
         )
     }
 
@@ -1422,6 +1484,44 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             material,
             options,
             false,
+            None,
+        )
+    }
+
+    /// Submit a primary-joint animated textured model using predecoded faces.
+    ///
+    /// This combines the high-throughput primary-joint projection path with a
+    /// flat face table decoded once at runtime load.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_textured_model_primary_joints_predecoded_faces(
+        &mut self,
+        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        model: Model<'_>,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+    ) -> TexturedModelRenderStats {
+        self.submit_textured_model_impl(
+            triangles,
+            model,
+            animation,
+            frame_q12,
+            camera,
+            origin,
+            instance_rotation,
+            projected_vertices,
+            joint_view_transforms,
+            material,
+            options,
+            false,
+            Some(faces),
         )
     }
 
@@ -1440,18 +1540,21 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         material: TextureMaterial,
         options: WorldSurfaceOptions,
         blend_vertices: bool,
+        predecoded_faces: Option<&[TexturedModelRenderFace]>,
     ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
         let local_to_world = LocalToWorldScale::from_q12(model.local_to_world_q12());
         load_world_projection_gte(camera.projection);
 
         let joint_count = (model.joint_count() as usize).min(joint_view_transforms.len());
+        let pose_sample = animation.looped_pose_sample_q12(frame_q12);
+        crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_JOINTS);
         for (joint, joint_view_transform) in joint_view_transforms
             .iter_mut()
             .enumerate()
             .take(joint_count)
         {
-            *joint_view_transform = match animation.pose_looped_q12(frame_q12, joint as u16) {
+            *joint_view_transform = match pose_sample.and_then(|sample| sample.pose(joint as u16)) {
                 Some(pose) => {
                     let (rotation, translation) = textured_model_part_gte_transform(
                         camera,
@@ -1468,6 +1571,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 None => JointViewTransform::default(),
             };
         }
+        crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_JOINTS);
 
         let project_count = (model.vertex_count() as usize)
             .min(projected_vertices.len())
@@ -1478,6 +1582,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats.projected_vertices = project_count as u16;
 
         let mut part_index = 0;
+        crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         while part_index < model.part_count() {
             let Some(part) = model.part(part_index) else {
                 break;
@@ -1547,40 +1652,39 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
             part_index += 1;
         }
+        crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
 
         part_index = 0;
-        while part_index < model.part_count() {
-            let Some(part) = model.part(part_index) else {
-                break;
-            };
-            let first_face = part.first_face();
-            let last_face = first_face.saturating_add(part.face_count());
-            let mut face_index = first_face;
-            while face_index < last_face {
-                let Some(face) = model.face(face_index) else {
-                    break;
-                };
-                let Some(a) =
-                    textured_model_corner(projected_vertices, project_count, face.corners[0])
-                else {
+        let mut faces_considered = 0u32;
+        crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+        if let Some(faces) = predecoded_faces {
+            let mut face_index = 0usize;
+            while face_index < faces.len() {
+                let face = faces[face_index];
+                faces_considered = faces_considered.saturating_add(1);
+                let ia = face.vertex_indices[0] as usize;
+                let ib = face.vertex_indices[1] as usize;
+                let ic = face.vertex_indices[2] as usize;
+                if ia >= project_count || ib >= project_count || ic >= project_count {
                     stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
                     face_index += 1;
                     continue;
-                };
-                let Some(b) =
-                    textured_model_corner(projected_vertices, project_count, face.corners[1])
-                else {
-                    stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
-                    face_index += 1;
-                    continue;
-                };
-                let Some(c) =
-                    textured_model_corner(projected_vertices, project_count, face.corners[2])
-                else {
-                    stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
-                    face_index += 1;
-                    continue;
-                };
+                }
+                let a = ProjectedTexturedVertex::new(
+                    projected_vertices[ia],
+                    face.uvs[0].0 as i32,
+                    face.uvs[0].1 as i32,
+                );
+                let b = ProjectedTexturedVertex::new(
+                    projected_vertices[ib],
+                    face.uvs[1].0 as i32,
+                    face.uvs[1].1 as i32,
+                );
+                let c = ProjectedTexturedVertex::new(
+                    projected_vertices[ic],
+                    face.uvs[2].0 as i32,
+                    face.uvs[2].1 as i32,
+                );
 
                 if a.projected.sz < camera.projection.near_z
                     || b.projected.sz < camera.projection.near_z
@@ -1591,7 +1695,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     continue;
                 }
 
-                let tri_stats = self.submit_projected_textured_triangle(
+                let tri_stats = self.submit_projected_model_triangle_fast(
                     triangles,
                     [a, b, c],
                     material,
@@ -1599,16 +1703,154 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 );
                 merge_textured_model_stats(&mut stats, tri_stats);
                 if stats.primitive_overflow || stats.command_overflow {
+                    crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                    emit_textured_model_detail_counters(
+                        joint_count,
+                        model.part_count(),
+                        project_count,
+                        faces_considered,
+                    );
                     return stats;
                 }
 
                 face_index += 1;
             }
+        } else {
+            while part_index < model.part_count() {
+                let Some(part) = model.part(part_index) else {
+                    break;
+                };
+                let first_face = part.first_face();
+                let last_face = first_face.saturating_add(part.face_count());
+                let mut face_index = first_face;
+                while face_index < last_face {
+                    let Some(face) = model.face(face_index) else {
+                        break;
+                    };
+                    faces_considered = faces_considered.saturating_add(1);
+                    let Some(a) =
+                        textured_model_corner(projected_vertices, project_count, face.corners[0])
+                    else {
+                        stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
+                        face_index += 1;
+                        continue;
+                    };
+                    let Some(b) =
+                        textured_model_corner(projected_vertices, project_count, face.corners[1])
+                    else {
+                        stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
+                        face_index += 1;
+                        continue;
+                    };
+                    let Some(c) =
+                        textured_model_corner(projected_vertices, project_count, face.corners[2])
+                    else {
+                        stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
+                        face_index += 1;
+                        continue;
+                    };
 
-            part_index += 1;
+                    if a.projected.sz < camera.projection.near_z
+                        || b.projected.sz < camera.projection.near_z
+                        || c.projected.sz < camera.projection.near_z
+                    {
+                        stats.dropped_triangles = stats.dropped_triangles.saturating_add(1);
+                        face_index += 1;
+                        continue;
+                    }
+
+                    let tri_stats = self.submit_projected_model_triangle_fast(
+                        triangles,
+                        [a, b, c],
+                        material,
+                        options,
+                    );
+                    merge_textured_model_stats(&mut stats, tri_stats);
+                    if stats.primitive_overflow || stats.command_overflow {
+                        crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                        emit_textured_model_detail_counters(
+                            joint_count,
+                            model.part_count(),
+                            project_count,
+                            faces_considered,
+                        );
+                        return stats;
+                    }
+
+                    face_index += 1;
+                }
+
+                part_index += 1;
+            }
         }
+        crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+        emit_textured_model_detail_counters(
+            joint_count,
+            model.part_count(),
+            project_count,
+            faces_considered,
+        );
 
         stats
+    }
+
+    fn submit_projected_model_triangle_fast(
+        &mut self,
+        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        verts: [ProjectedTexturedVertex; 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let projected = [verts[0].projected, verts[1].projected, verts[2].projected];
+        if projected_back_facing(projected) {
+            return WorldRenderStats {
+                culled_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        }
+        if self.command_len >= self.commands.len() {
+            return WorldRenderStats {
+                command_overflow: true,
+                ..WorldRenderStats::default()
+            };
+        }
+
+        let Some(tri) = triangles.push(TriTextured::with_material(
+            [
+                (verts[0].projected.sx, verts[0].projected.sy),
+                (verts[1].projected.sx, verts[1].projected.sy),
+                (verts[2].projected.sx, verts[2].projected.sy),
+            ],
+            [
+                (verts[0].u as u8, verts[0].v as u8),
+                (verts[1].u as u8, verts[1].v as u8),
+                (verts[2].u as u8, verts[2].v as u8),
+            ],
+            material,
+        )) else {
+            return WorldRenderStats {
+                primitive_overflow: true,
+                ..WorldRenderStats::default()
+            };
+        };
+
+        let depth = CameraDepth::new(
+            ((verts[0].projected.sz + verts[1].projected.sz + verts[2].projected.sz) / 3)
+                .saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        WorldRenderStats {
+            submitted_triangles: 1,
+            ..WorldRenderStats::default()
+        }
     }
 
     fn submit_clipped_textured_triangle(
@@ -2823,6 +3065,30 @@ fn merge_textured_model_stats(stats: &mut TexturedModelRenderStats, next: WorldR
         .saturating_add(next.dropped_triangles);
     stats.primitive_overflow |= next.primitive_overflow;
     stats.command_overflow |= next.command_overflow;
+}
+
+fn emit_textured_model_detail_counters(
+    joint_count: usize,
+    part_count: u16,
+    project_count: usize,
+    faces_considered: u32,
+) {
+    crate::telemetry::counter(
+        crate::telemetry::counter::TEXTURED_MODEL_JOINTS,
+        joint_count as u32,
+    );
+    crate::telemetry::counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PARTS,
+        part_count as u32,
+    );
+    crate::telemetry::counter(
+        crate::telemetry::counter::TEXTURED_MODEL_VERTICES,
+        project_count as u32,
+    );
+    crate::telemetry::counter(
+        crate::telemetry::counter::TEXTURED_MODEL_FACES,
+        faces_considered,
+    );
 }
 
 fn clamp_i16(value: i32) -> i16 {

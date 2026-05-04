@@ -31,16 +31,19 @@
 extern crate psx_rt;
 
 use psx_asset::{Animation, Model, Texture};
-use psx_engine::draw_room_vertex_lit;
 use psx_engine::{
-    button, compute_joint_world_transform, telemetry, Angle, App, CharacterMotorAnim,
-    CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, CullMode,
-    DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform, LocalToWorldScale,
-    Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitiveArena, ProjectedVertex, Rgb8,
-    RoomPoint, RoomRender, RuntimeRoom, Scene, TexturedModelRenderStats, ThirdPersonCameraConfig,
+    button, compute_joint_world_transform, telemetry, Angle, App, CachedRoomCell,
+    CachedRoomSurface, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput,
+    CharacterMotorState, Config, Ctx, CullMode, DepthBand, DepthPolicy, DepthRange,
+    JointViewTransform, JointWorldTransform, LocalToWorldScale, Mat3I16, MaterialTint, OtFrame,
+    PointLightSample, PrimitiveArena, ProjectedVertex, Rgb8, RoomPoint, RoomRender, RuntimeRoom,
+    Scene, TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
     ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
     WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
     WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q8,
+};
+use psx_engine::{
+    cache_room_vertex_lit_surfaces, draw_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit,
 };
 #[cfg(feature = "world-grid-visible")]
 use psx_engine::{
@@ -48,16 +51,17 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
-    draw_quad_flat,
+    draw_quad_flat, draw_quad_textured_material,
     material::{TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::{TriTextured, TriTexturedGouraud},
 };
 use psx_level::{
     equipment_flags, find_asset_of_kind, room_flags, AssetId, AssetKind, EntityRecord,
-    LevelCharacterRecord, LevelMaterialRecord, LevelMaterialSidedness, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
-    ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
+    LevelCharacterRecord, LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord,
+    LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord, ModelClipIndex, ModelClipTableIndex,
+    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
+    WeaponHitShapeRecord,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
 
@@ -78,8 +82,9 @@ mod generated {
 
 use generated::{
     ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
-    MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_RESIDENCY,
-    ROOM_VISIBILITY, VISIBILITY_CELLS, VISIBLE_CELLS, WEAPONS, WEAPON_HITBOXES,
+    MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
+    PLAYER_SPAWN, ROOMS, ROOM_RESIDENCY, ROOM_VISIBILITY, VISIBILITY_CELLS, VISIBLE_CELLS, WEAPONS,
+    WEAPON_HITBOXES,
 };
 
 // VRAM layout. Room materials and model atlases live in
@@ -91,9 +96,10 @@ use generated::{
 // texture-window state so authored UV repetition samples only its tile
 // instead of requiring physically repeated texels.
 //
-// Model atlases: 8bpp tpage at (384, 256); stripe atlases
-// left-to-right (each atlas occupies its own halfword stride);
-// one CLUT row per atlas at y starting at 484 (below the
+// Model atlases: 8bpp pages starting at (384, 256), packed
+// left-to-right on 64-halfword boundaries. Each atlas gets a
+// tpage word matching its own VRAM origin, so mesh UVs stay local
+// to the atlas. One CLUT row per atlas starts at y=484 (below the
 // material CLUT band so the two never collide).
 const SHARED_TPAGE: Tpage = Tpage::new(640, 0, TexDepth::Bit4);
 const TPAGE_WORD: u16 = SHARED_TPAGE.uv_tpage_word(0);
@@ -112,7 +118,12 @@ const ROOM_CLUT_STRIDE: u16 = 16;
 const ROOM_CLUT_Y: u16 = 480;
 
 const MODEL_TPAGE: Tpage = Tpage::new(384, 256, TexDepth::Bit8);
-const MODEL_TPAGE_WORD: u16 = MODEL_TPAGE.uv_tpage_word(0);
+/// Minimum allocation quantum for an 8bpp model atlas. The GPU
+/// texture-page X field is 64-halfword aligned; keeping every atlas
+/// on that boundary lets meshes use local UVs unchanged.
+const MODEL_TPAGE_SLOT_HALFWORDS: u16 = 64;
+/// Maximum halfword width addressable by one 8bpp texture page.
+const MODEL_TPAGE_MAX_HALFWORDS: u16 = 128;
 /// First CLUT row used by model atlases. 256-entry CLUTs span
 /// a single row; we step one row down per uploaded atlas, so
 /// `MODEL_CLUT_BASE_Y + n` is the row for the n-th atlas.
@@ -121,6 +132,12 @@ const MODEL_CLUT_BASE_Y: u16 = 484;
 /// 4bpp 8x8 BIOS-style font atlas for the analog-mode gate prompt.
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
+static TARGET_LOCK_BLOB: &[u8] = include_bytes!("../assets/target_lock_64.psxt");
+const TARGET_LOCK_TPAGE: Tpage = Tpage::new(576, 0, TexDepth::Bit4);
+const TARGET_LOCK_CLUT: Clut = Clut::new(960, 480);
+const TARGET_LOCK_SCREEN_HALF: i32 = 24;
+const TARGET_LOCK_UV_MAX: u8 = 63;
+const TARGET_LOCK_SPIN_STEP_Q12: u32 = 28;
 
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
@@ -180,6 +197,13 @@ const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 const ROOM_GRID_VISIBILITY_RADIUS: u16 = 4;
 #[cfg(feature = "world-grid-visible")]
 const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 128;
+/// Cached room cell headers shared by the active room window. Rooms
+/// that exceed this fixed budget fall back to the uncached room draw.
+const MAX_CACHED_ROOM_CELLS: usize = 2048;
+/// Cached floor/ceiling/wall records shared by the active room
+/// window. This mirrors the room triangle arena order of magnitude:
+/// a cached surface emits up to two textured Gouraud triangles.
+const MAX_CACHED_ROOM_SURFACES: usize = 4096;
 
 const MAX_TEXTURED_TRIS: usize = 4096;
 
@@ -205,6 +229,8 @@ const MAX_RESIDENT_VRAM_ASSETS: usize = 32;
 /// Sized to the largest part vertex count we expect; instances
 /// over this cap drop their over-budget triangles graceful.
 const MODEL_VERTEX_CAP: usize = 1024;
+/// Predecoded face records shared by runtime model assets.
+const MAX_RUNTIME_MODEL_FACES: usize = 4096;
 /// Joint-transform scratch -- all biped rigs we currently cook
 /// fit comfortably in 32.
 const JOINT_CAP: usize = 32;
@@ -216,9 +242,12 @@ const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// needs one player model, but this keeps a little headroom for
 /// lightweight NPC experiments without introducing heap allocation.
 const MAX_RUNTIME_MODELS: usize = 8;
-/// Runtime animation cache capacity. Matches the residency table
-/// scale and avoids reparsing `.psxanim` headers per frame.
-const MAX_RUNTIME_MODEL_CLIPS: usize = 32;
+/// Runtime animation cache capacity. Demo-scale character sets can
+/// easily carry player + several enemy clip banks; keep this aligned
+/// with the residency table rather than the old single-character cap.
+const MAX_RUNTIME_MODEL_CLIPS: usize = 128;
+const MODEL_BOUNDS_CULLING_ENABLED: bool =
+    option_env!("PSXO_BENCH_DISABLE_MODEL_BOUNDS_CULL").is_none();
 
 /// Marker visualization tuning. Markers are debug stubs -- keep
 /// them visible at orbit-camera scales without dominating the
@@ -254,6 +283,10 @@ static mut TEXTURED_GOURAUD_TRIS: [TriTexturedGouraud; MAX_TEXTURED_TRIS] =
     [const { GOURAUD_TRI_ZERO }; MAX_TEXTURED_TRIS];
 static mut WORLD_COMMANDS: [WorldTriCommand; MAX_TEXTURED_TRIS] =
     [WorldTriCommand::EMPTY; MAX_TEXTURED_TRIS];
+static mut CACHED_ROOM_CELLS: [CachedRoomCell; MAX_CACHED_ROOM_CELLS] =
+    [CachedRoomCell::EMPTY; MAX_CACHED_ROOM_CELLS];
+static mut CACHED_ROOM_SURFACES: [CachedRoomSurface; MAX_CACHED_ROOM_SURFACES] =
+    [CachedRoomSurface::EMPTY; MAX_CACHED_ROOM_SURFACES];
 static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
     [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
 static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
@@ -379,6 +412,7 @@ impl RuntimeCharacter {
 /// Parsed, VRAM-bound model payload ready for the hot render path.
 #[derive(Copy, Clone)]
 struct RuntimeModelAsset {
+    index: ModelIndex,
     model: Model<'static>,
     material: TextureMaterial,
     clip_first: ModelClipTableIndex,
@@ -386,18 +420,28 @@ struct RuntimeModelAsset {
     default_clip: ModelClipIndex,
     socket_first: ModelSocketIndex,
     socket_count: u16,
+    face_first: u16,
+    face_count: u16,
     world_height: u16,
     local_to_world: LocalToWorldScale,
 }
 
 impl RuntimeModelAsset {
-    fn from_record(record: &LevelModelRecord) -> Option<Self> {
+    fn from_record(
+        index: ModelIndex,
+        record: &LevelModelRecord,
+        face_pool: &mut [TexturedModelRenderFace],
+        face_cursor: &mut usize,
+    ) -> Option<Self> {
         let mesh_asset = find_asset_of_kind(ASSETS, record.mesh_asset, AssetKind::ModelMesh)?;
         let model = Model::from_bytes(mesh_asset.bytes).ok()?;
         let texture_asset = record.texture_asset?;
         let atlas_asset = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture)?;
         let atlas_slot = ensure_model_atlas_uploaded(atlas_asset.id, atlas_asset.bytes)?;
+        let face_first = *face_cursor;
+        let face_count = decode_model_render_faces(model, face_pool, face_cursor)?;
         Some(Self {
+            index,
             model,
             material: TextureMaterial::opaque(
                 atlas_slot.clut_word,
@@ -409,6 +453,8 @@ impl RuntimeModelAsset {
             default_clip: record.default_clip,
             socket_first: record.socket_first,
             socket_count: record.socket_count,
+            face_first: face_first as u16,
+            face_count: face_count as u16,
             world_height: record.world_height,
             local_to_world: LocalToWorldScale::from_q12(model.local_to_world_q12()),
         })
@@ -419,12 +465,78 @@ impl RuntimeModelAsset {
         clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
         local_clip: ModelClipIndex,
     ) -> Option<Animation<'static>> {
+        let index = self.clip_table_index(local_clip)?.to_usize();
+        clips.get(index).copied().flatten()
+    }
+
+    fn clip_table_index(self, local_clip: ModelClipIndex) -> Option<ModelClipTableIndex> {
         if local_clip.raw() >= self.clip_count {
             return None;
         }
-        let index = self.clip_first.to_usize() + local_clip.to_usize();
-        clips.get(index).copied().flatten()
+        Some(ModelClipTableIndex(
+            self.clip_first.raw().saturating_add(local_clip.raw()),
+        ))
     }
+}
+
+fn decode_model_render_faces(
+    model: Model<'_>,
+    face_pool: &mut [TexturedModelRenderFace],
+    face_cursor: &mut usize,
+) -> Option<usize> {
+    let face_count = model.face_count() as usize;
+    if face_count > u16::MAX as usize || face_pool.len().saturating_sub(*face_cursor) < face_count {
+        return None;
+    }
+
+    let mut i = 0usize;
+    while i < face_count {
+        let face = model.face(i as u16)?;
+        face_pool[*face_cursor + i] = TexturedModelRenderFace {
+            vertex_indices: [
+                face.corners[0].vertex_index,
+                face.corners[1].vertex_index,
+                face.corners[2].vertex_index,
+            ],
+            uvs: [face.corners[0].uv, face.corners[1].uv, face.corners[2].uv],
+        };
+        i += 1;
+    }
+    *face_cursor += face_count;
+    Some(face_count)
+}
+
+fn runtime_model_faces<'a>(
+    model: RuntimeModelAsset,
+    face_pool: &'a [TexturedModelRenderFace],
+) -> &'a [TexturedModelRenderFace] {
+    let first = model.face_first as usize;
+    let count = model.face_count as usize;
+    let end = first.saturating_add(count).min(face_pool.len());
+    if first >= end || first >= face_pool.len() {
+        &[]
+    } else {
+        &face_pool[first..end]
+    }
+}
+
+#[derive(Copy, Clone)]
+struct ActiveRoomSurfaceCache {
+    cell_first: u16,
+    cell_count: u16,
+    surface_first: u16,
+    surface_count: u16,
+    ready: bool,
+}
+
+impl ActiveRoomSurfaceCache {
+    const EMPTY: Self = Self {
+        cell_first: 0,
+        cell_count: 0,
+        surface_first: 0,
+        surface_count: 0,
+        ready: false,
+    };
 }
 
 #[derive(Copy, Clone)]
@@ -437,6 +549,7 @@ struct ActiveRuntimeRoom {
     /// origin, in engine units.
     offset_x: i32,
     offset_z: i32,
+    surface_cache: ActiveRoomSurfaceCache,
 }
 
 struct Playtest {
@@ -478,9 +591,10 @@ struct Playtest {
     /// Runtime third-person camera rig. Updated from render so it
     /// can consume the same room collision view used for drawing.
     camera: ThirdPersonCameraState,
-    /// Index into `ENTITIES` for the current lock-on target. In this
-    /// vertical-slice pass generic entity markers stand in for
-    /// enemies until enemy records exist.
+    /// Index into `MODEL_INSTANCES` for the current lock-on target.
+    /// Player-controlled characters are consumed by the player path,
+    /// so remaining placed model instances are targetable actors for
+    /// this first gameplay pass.
     lock_target: Option<usize>,
     /// Automatic camera-only target. Suppressed after strong
     /// manual camera input until the player leaves target range.
@@ -492,8 +606,13 @@ struct Playtest {
     font: Option<FontAtlas>,
     /// Parsed models/materials, built once at init.
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    /// Predecoded model face records, shared by `models`.
+    model_faces: [TexturedModelRenderFace; MAX_RUNTIME_MODEL_FACES],
+    model_face_count: usize,
     /// Parsed animations, indexed like `MODEL_CLIPS`.
     clips: [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    /// VRAM-bound target indicator sprite material.
+    target_lock_material: Option<TextureMaterial>,
 }
 
 impl Playtest {
@@ -518,7 +637,10 @@ impl Playtest {
             spawn: RoomPoint::ZERO,
             font: None,
             models: [const { None }; MAX_RUNTIME_MODELS],
+            model_faces: [TexturedModelRenderFace::ZERO; MAX_RUNTIME_MODEL_FACES],
+            model_face_count: 0,
             clips: [const { None }; MAX_RUNTIME_MODEL_CLIPS],
+            target_lock_material: None,
         }
     }
 }
@@ -526,6 +648,7 @@ impl Playtest {
 impl Scene for Playtest {
     fn init(&mut self, _ctx: &mut Ctx) {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
+        self.target_lock_material = upload_target_lock_texture();
 
         // Empty manifest? Boot to a clear-coloured screen.
         if ROOMS.is_empty() {
@@ -716,25 +839,52 @@ impl Scene for Playtest {
                     );
                     let visibility =
                         GridVisibility::around(visibility_anchor, ROOM_GRID_VISIBILITY_RADIUS);
-                    let mut cells =
-                        [GridVisibleCell::EMPTY; MAX_PRECOMPUTED_VISIBLE_CELLS];
+                    let mut cells = [GridVisibleCell::EMPTY; MAX_PRECOMPUTED_VISIBLE_CELLS];
                     let stats = if let Some(count) = fill_precomputed_visible_cells(
                         active.index,
                         active.room.render(),
                         visibility_anchor,
                         &mut cells,
                     ) {
-                        draw_room_vertex_lit_visible_cells(
-                            active.room.render(),
-                            materials,
-                            &lighting,
-                            &room_camera,
-                            room_options,
-                            &cells[..count],
-                            visibility.screen_margin,
-                            &mut gouraud_triangles,
-                            &mut world,
-                        )
+                        if active.surface_cache.ready {
+                            let cell_first = active.surface_cache.cell_first as usize;
+                            let cell_end = cell_first
+                                .saturating_add(active.surface_cache.cell_count as usize)
+                                .min(MAX_CACHED_ROOM_CELLS);
+                            let surface_first = active.surface_cache.surface_first as usize;
+                            let surface_end = surface_first
+                                .saturating_add(active.surface_cache.surface_count as usize)
+                                .min(MAX_CACHED_ROOM_SURFACES);
+                            let cached_cells = unsafe { &CACHED_ROOM_CELLS[cell_first..cell_end] };
+                            let cached_surfaces =
+                                unsafe { &CACHED_ROOM_SURFACES[surface_first..surface_end] };
+                            draw_cached_room_vertex_lit_visible_cells(
+                                cached_cells,
+                                cached_surfaces,
+                                active.room.render().depth(),
+                                active.room.render().sector_size(),
+                                materials,
+                                &lighting,
+                                &room_camera,
+                                room_options,
+                                &cells[..count],
+                                visibility.screen_margin,
+                                &mut gouraud_triangles,
+                                &mut world,
+                            )
+                        } else {
+                            draw_room_vertex_lit_visible_cells(
+                                active.room.render(),
+                                materials,
+                                &lighting,
+                                &room_camera,
+                                room_options,
+                                &cells[..count],
+                                visibility.screen_margin,
+                                &mut gouraud_triangles,
+                                &mut world,
+                            )
+                        }
                     } else {
                         draw_room_vertex_lit(
                             active.room.render(),
@@ -797,6 +947,7 @@ impl Scene for Playtest {
                     room_options,
                     &lighting,
                     &self.models,
+                    &self.model_faces[..self.model_face_count],
                     &self.clips,
                     &mut triangles,
                     &mut world,
@@ -805,12 +956,26 @@ impl Scene for Playtest {
                 total_instance_stats.draws = total_instance_stats
                     .draws
                     .saturating_add(instance_stats.draws);
+                total_instance_stats.bounds_tests = total_instance_stats
+                    .bounds_tests
+                    .saturating_add(instance_stats.bounds_tests);
+                total_instance_stats.bounds_culled = total_instance_stats
+                    .bounds_culled
+                    .saturating_add(instance_stats.bounds_culled);
                 accumulate_model_stats(&mut total_instance_stats.stats, instance_stats.stats);
             }
 
             telemetry::counter(
                 telemetry::counter::MODEL_INSTANCE_DRAWS,
                 total_instance_stats.draws as u32,
+            );
+            telemetry::counter(
+                telemetry::counter::MODEL_INSTANCE_BOUNDS_TESTS,
+                total_instance_stats.bounds_tests as u32,
+            );
+            telemetry::counter(
+                telemetry::counter::MODEL_INSTANCE_BOUNDS_CULLED,
+                total_instance_stats.bounds_culled as u32,
             );
             emit_model_counters(
                 total_instance_stats.stats,
@@ -825,11 +990,12 @@ impl Scene for Playtest {
                 let player = self.motor.position();
                 let player_lighting = self.current_room_lighting(camera);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
-                let player_stats =
-                    player_lighting.map_or(TexturedModelRenderStats::default(), |lighting| {
+                let player_draw =
+                    player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         draw_player(
                             character,
                             &self.models,
+                            &self.model_faces[..self.model_face_count],
                             &self.clips,
                             player.x,
                             player.y,
@@ -848,14 +1014,24 @@ impl Scene for Playtest {
                     });
                 telemetry::stage_end(telemetry::stage::PLAYER);
                 emit_model_counters(
-                    player_stats,
+                    player_draw.stats,
                     telemetry::counter::PLAYER_PROJECTED_VERTICES,
                     telemetry::counter::PLAYER_SUBMITTED_TRIS,
                     telemetry::counter::PLAYER_CULLED_TRIS,
                     telemetry::counter::PLAYER_DROPPED_TRIS,
                 );
+                telemetry::counter(
+                    telemetry::counter::PLAYER_BOUNDS_TESTS,
+                    player_draw.bounds_tests as u32,
+                );
+                telemetry::counter(
+                    telemetry::counter::PLAYER_BOUNDS_CULLED,
+                    player_draw.bounds_culled as u32,
+                );
                 telemetry::stage_begin(telemetry::stage::EQUIPMENT);
-                let equipment_stats =
+                let equipment_stats = if player_draw.bounds_culled != 0 {
+                    EquipmentDrawStats::default()
+                } else {
                     player_lighting.map_or(EquipmentDrawStats::default(), |lighting| {
                         draw_player_equipment(
                             self.room_index,
@@ -876,7 +1052,8 @@ impl Scene for Playtest {
                             &mut triangles,
                             &mut world,
                         )
-                    });
+                    })
+                };
                 telemetry::stage_end(telemetry::stage::EQUIPMENT);
                 telemetry::counter(
                     telemetry::counter::EQUIPMENT_DRAWS,
@@ -914,6 +1091,13 @@ impl Scene for Playtest {
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         ot.submit();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
+
+        if let (Some(material), Some(target)) = (
+            self.target_lock_material,
+            self.lock_target_indicator_position(),
+        ) {
+            draw_lock_target_indicator(target, camera, ctx.time.elapsed_vblanks(), material);
+        }
     }
 }
 
@@ -972,6 +1156,7 @@ impl Playtest {
             self.clips[i] = None;
             i += 1;
         }
+        self.model_face_count = 0;
 
         for (index, clip) in MODEL_CLIPS.iter().enumerate() {
             if index >= MAX_RUNTIME_MODEL_CLIPS {
@@ -989,7 +1174,12 @@ impl Playtest {
             if index >= MAX_RUNTIME_MODELS {
                 break;
             }
-            self.models[index] = RuntimeModelAsset::from_record(record);
+            self.models[index] = RuntimeModelAsset::from_record(
+                ModelIndex(index as u16),
+                record,
+                &mut self.model_faces,
+                &mut self.model_face_count,
+            );
         }
     }
 
@@ -1078,6 +1268,8 @@ impl Playtest {
         self.materials = [const { None }; MAX_ROOM_MATERIALS];
         self.material_count = 0;
         self.active_rooms = [const { None }; MAX_ACTIVE_ROOMS];
+        let mut cached_cell_cursor = 0usize;
+        let mut cached_surface_cursor = 0usize;
 
         let current_index = self.room_index;
         let Some(current_record) = ROOMS.get(current_index.to_usize()) else {
@@ -1088,7 +1280,13 @@ impl Playtest {
         };
 
         let mut next_slot = 0usize;
-        if let Some(active) = build_active_room(current_index, current_record, current_record) {
+        if let Some(active) = build_active_room(
+            current_index,
+            current_record,
+            current_record,
+            &mut cached_cell_cursor,
+            &mut cached_surface_cursor,
+        ) {
             self.room = Some(active.room);
             self.materials = active.materials;
             self.material_count = active.material_count;
@@ -1107,7 +1305,13 @@ impl Playtest {
                 continue;
             }
             let index = RoomIndex::new(raw_index as u16);
-            if let Some(active) = build_active_room(index, record, current_record) {
+            if let Some(active) = build_active_room(
+                index,
+                record,
+                current_record,
+                &mut cached_cell_cursor,
+                &mut cached_surface_cursor,
+            ) {
                 self.active_rooms[next_slot] = Some(active);
                 next_slot += 1;
             }
@@ -1142,11 +1346,31 @@ impl Playtest {
     }
 
     fn target_position(&self, index: usize) -> Option<RoomPoint> {
-        let target = ENTITIES.get(index)?;
+        let target = MODEL_INSTANCES.get(index)?;
         if target.room != self.room_index {
             return None;
         }
         Some(RoomPoint::new(target.x, target.y, target.z))
+    }
+
+    fn lock_target_indicator_position(&self) -> Option<RoomPoint> {
+        self.target_indicator_position(self.lock_target?)
+    }
+
+    fn target_indicator_position(&self, index: usize) -> Option<RoomPoint> {
+        let target = MODEL_INSTANCES.get(index)?;
+        if target.room != self.room_index {
+            return None;
+        }
+        let height = MODELS
+            .get(target.model.to_usize())
+            .map(|model| model.world_height as i32)
+            .unwrap_or(1024);
+        Some(RoomPoint::new(
+            target.x,
+            target.y.saturating_add(height / 2),
+            target.z,
+        ))
     }
 
     fn lock_target_valid(&self, range: i32) -> bool {
@@ -1168,13 +1392,13 @@ impl Playtest {
         let cos_yaw = view_yaw.cos();
         let range_sq = square_i32_saturating(range);
         let mut best: Option<(usize, i32)> = None;
-        for (index, entity) in ENTITIES.iter().enumerate() {
-            if entity.room != self.room_index {
+        for (index, target) in MODEL_INSTANCES.iter().enumerate() {
+            if target.room != self.room_index {
                 continue;
             }
-            let target = RoomPoint::new(entity.x, entity.y, entity.z);
-            let dx = target.x.saturating_sub(player.x);
-            let dz = target.z.saturating_sub(player.z);
+            let point = RoomPoint::new(target.x, target.y, target.z);
+            let dx = point.x.saturating_sub(player.x);
+            let dz = point.z.saturating_sub(player.z);
             let dist_sq = square_i32_saturating(dx).saturating_add(square_i32_saturating(dz));
             if dist_sq == 0 || dist_sq > range_sq {
                 continue;
@@ -1222,7 +1446,7 @@ impl Playtest {
         let Some(current_index) = self.lock_target else {
             return;
         };
-        let Some(current) = ENTITIES.get(current_index) else {
+        let Some(current) = MODEL_INSTANCES.get(current_index) else {
             self.lock_target = None;
             return;
         };
@@ -1234,12 +1458,12 @@ impl Playtest {
         }
         let range_sq = square_i32_saturating(LOCK_RANGE);
         let mut best: Option<(usize, i32)> = None;
-        for (index, entity) in ENTITIES.iter().enumerate() {
-            if index == current_index || entity.room != self.room_index {
+        for (index, target) in MODEL_INSTANCES.iter().enumerate() {
+            if index == current_index || target.room != self.room_index {
                 continue;
             }
-            let dx = entity.x.saturating_sub(player.x);
-            let dz = entity.z.saturating_sub(player.z);
+            let dx = target.x.saturating_sub(player.x);
+            let dz = target.z.saturating_sub(player.z);
             let dist_sq = square_i32_saturating(dx).saturating_add(square_i32_saturating(dz));
             if dist_sq == 0 || dist_sq > range_sq {
                 continue;
@@ -1288,9 +1512,17 @@ fn ratio_q8_i32(numerator: i32, denominator: i32) -> i32 {
         .min(i32::MAX as u32) as i32
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+struct PlayerModelDrawStats {
+    stats: TexturedModelRenderStats,
+    bounds_tests: u16,
+    bounds_culled: u16,
+}
+
 fn draw_player(
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     x: i32,
     y: i32,
@@ -1305,13 +1537,13 @@ fn draw_player(
     lighting: &RuntimeRoomLighting,
     triangles: &mut PrimitiveArena<'_, TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-) -> TexturedModelRenderStats {
+) -> PlayerModelDrawStats {
     let Some(runtime_model) = models.get(character.model.to_usize()).copied().flatten() else {
-        return TexturedModelRenderStats::default();
+        return PlayerModelDrawStats::default();
     };
 
     let Some(anim) = runtime_model.clip(clips, clip_local) else {
-        return TexturedModelRenderStats::default();
+        return PlayerModelDrawStats::default();
     };
     // Phase the animation relative to the clip-start tick so
     // state changes don't pop into the middle of a new clip.
@@ -1320,6 +1552,22 @@ fn draw_player(
 
     let origin = floor_anchored_model_origin(x, y, z, runtime_model.world_height);
     let instance_rotation = yaw_rotation_matrix(yaw);
+    telemetry::stage_begin(telemetry::stage::PLAYER_BOUNDS);
+    let visible = match model_frame_bounds(runtime_model, clip_local, phase) {
+        Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => {
+            model_bounds_visible(camera, options, origin, instance_rotation, bounds)
+        }
+        _ => true,
+    };
+    telemetry::stage_end(telemetry::stage::PLAYER_BOUNDS);
+    if !visible {
+        return PlayerModelDrawStats {
+            stats: TexturedModelRenderStats::default(),
+            bounds_tests: 1,
+            bounds_culled: 1,
+        };
+    }
+
     let material = lighting.shade_model_material(origin, runtime_model.material);
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
@@ -1327,7 +1575,9 @@ fn draw_player(
         .with_material_layer(material)
         .with_textured_triangle_splitting(false);
 
-    world.submit_textured_model(
+    telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
+    let faces = runtime_model_faces(runtime_model, model_faces);
+    let stats = world.submit_textured_model_predecoded_faces(
         triangles,
         runtime_model.model,
         anim,
@@ -1339,7 +1589,14 @@ fn draw_player(
         unsafe { &mut JOINT_VIEW_TRANSFORMS },
         material,
         model_options,
-    )
+        faces,
+    );
+    telemetry::stage_end(telemetry::stage::PLAYER_DRAW);
+    PlayerModelDrawStats {
+        stats,
+        bounds_tests: 1,
+        bounds_culled: 0,
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -1725,6 +1982,8 @@ fn build_active_room(
     index: RoomIndex,
     record: &LevelRoomRecord,
     current_record: &LevelRoomRecord,
+    cached_cell_cursor: &mut usize,
+    cached_surface_cursor: &mut usize,
 ) -> Option<ActiveRuntimeRoom> {
     if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
         let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
@@ -1732,6 +1991,7 @@ fn build_active_room(
     let room = parse_runtime_room(record)?;
     let mut materials = [const { None }; MAX_ROOM_MATERIALS];
     let material_count = build_room_materials(record, &mut materials);
+    let surface_cache = cache_active_room_surfaces(room, cached_cell_cursor, cached_surface_cursor);
     Some(ActiveRuntimeRoom {
         index,
         room,
@@ -1739,7 +1999,45 @@ fn build_active_room(
         material_count,
         offset_x: room_origin_x(record).saturating_sub(room_origin_x(current_record)),
         offset_z: room_origin_z(record).saturating_sub(room_origin_z(current_record)),
+        surface_cache,
     })
+}
+
+fn cache_active_room_surfaces(
+    room: RuntimeRoom<'static>,
+    cached_cell_cursor: &mut usize,
+    cached_surface_cursor: &mut usize,
+) -> ActiveRoomSurfaceCache {
+    let cell_first = *cached_cell_cursor;
+    let surface_first = *cached_surface_cursor;
+    if cell_first >= MAX_CACHED_ROOM_CELLS || surface_first >= MAX_CACHED_ROOM_SURFACES {
+        return ActiveRoomSurfaceCache::EMPTY;
+    }
+
+    let stats = unsafe {
+        cache_room_vertex_lit_surfaces(
+            room.render(),
+            &mut CACHED_ROOM_CELLS[cell_first..],
+            &mut CACHED_ROOM_SURFACES[surface_first..],
+        )
+    };
+    if stats.overflow
+        || stats.cell_count == 0
+        || stats.cell_count > u16::MAX as usize
+        || stats.surface_count > u16::MAX as usize
+    {
+        return ActiveRoomSurfaceCache::EMPTY;
+    }
+
+    *cached_cell_cursor = (*cached_cell_cursor).saturating_add(stats.cell_count);
+    *cached_surface_cursor = (*cached_surface_cursor).saturating_add(stats.surface_count);
+    ActiveRoomSurfaceCache {
+        cell_first: cell_first as u16,
+        cell_count: stats.cell_count as u16,
+        surface_first: surface_first as u16,
+        surface_count: stats.surface_count as u16,
+        ready: true,
+    }
 }
 
 fn room_origin_x(record: &LevelRoomRecord) -> i32 {
@@ -1999,6 +2297,41 @@ const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
     (rgb[0], rgb[1], rgb[2])
 }
 
+fn upload_target_lock_texture() -> Option<TextureMaterial> {
+    let texture = Texture::from_bytes(TARGET_LOCK_BLOB).ok()?;
+    if texture.width() != 64 || texture.height() != 64 || texture.clut_entries() != 16 {
+        return None;
+    }
+
+    upload_bytes(
+        VramRect::new(
+            TARGET_LOCK_TPAGE.x(),
+            TARGET_LOCK_TPAGE.y(),
+            texture.halfwords_per_row(),
+            texture.height(),
+        ),
+        texture.pixel_bytes(),
+    );
+    upload_clut(
+        VramRect::new(
+            TARGET_LOCK_CLUT.x(),
+            TARGET_LOCK_CLUT.y(),
+            texture.clut_entries(),
+            1,
+        ),
+        texture.clut_bytes(),
+    );
+
+    Some(
+        TextureMaterial::opaque(
+            TARGET_LOCK_CLUT.uv_clut_word(),
+            TARGET_LOCK_TPAGE.uv_tpage_word(0),
+            (0x80, 0x80, 0x80),
+        )
+        .with_raw_texture(true),
+    )
+}
+
 /// Upload `asset_bytes` to VRAM if not already resident; return
 /// the slot record so the caller can build a TextureMaterial.
 /// Returns `None` if the texture parse fails or the VRAM table
@@ -2153,8 +2486,19 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     if count >= MAX_RESIDENT_VRAM_ASSETS {
         return None;
     }
+    if texture.height() > 256 || texture.halfwords_per_row() > MODEL_TPAGE_MAX_HALFWORDS {
+        return None;
+    }
 
     let tpage_x = MODEL_TPAGE.x() + unsafe { MODEL_TPAGE_X_CURSOR };
+    let slot_halfwords = if texture.halfwords_per_row() <= MODEL_TPAGE_SLOT_HALFWORDS {
+        MODEL_TPAGE_SLOT_HALFWORDS
+    } else {
+        MODEL_TPAGE_MAX_HALFWORDS
+    };
+    if tpage_x.checked_add(slot_halfwords)? > 1024 {
+        return None;
+    }
     let pix_rect = VramRect::new(
         tpage_x,
         MODEL_TPAGE.y(),
@@ -2162,23 +2506,24 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
         texture.height(),
     );
     upload_bytes(pix_rect, texture.pixel_bytes());
+    let tpage = Tpage::new(tpage_x, MODEL_TPAGE.y(), TexDepth::Bit8);
 
     // 256-entry CLUT: 256 halfwords on a single row.
     let clut_y = MODEL_CLUT_BASE_Y + atlas_count as u16;
     let clut_rect = VramRect::new(0, clut_y, texture.clut_entries(), 1);
-    upload_clut(clut_rect, texture.clut_bytes());
+    upload_opaque_clut(clut_rect, texture.clut_bytes());
 
     let slot = VramSlot {
         asset: asset_id,
         clut_word: Clut::new(0, clut_y).uv_clut_word(),
-        tpage_word: MODEL_TPAGE_WORD,
+        tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::NONE,
     };
 
     unsafe {
         VRAM_SLOTS[count] = Some(slot);
         VRAM_SLOT_COUNT = count + 1;
-        MODEL_TPAGE_X_CURSOR += texture.halfwords_per_row();
+        MODEL_TPAGE_X_CURSOR += slot_halfwords;
         MODEL_ATLAS_COUNT = atlas_count + 1;
         let _ = RESIDENCY.mark_vram_resident(asset_id);
     }
@@ -2195,6 +2540,8 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
 #[derive(Copy, Clone, Debug, Default)]
 struct ModelInstanceDrawStats {
     draws: u16,
+    bounds_tests: u16,
+    bounds_culled: u16,
     stats: TexturedModelRenderStats,
 }
 
@@ -2206,6 +2553,7 @@ fn draw_model_instances(
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     triangles: &mut PrimitiveArena<'_, TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -2233,18 +2581,35 @@ fn draw_model_instances(
         // model vertices are centred around their bounds.
         let origin =
             floor_anchored_model_origin(inst.x, inst.y, inst.z, runtime_model.world_height);
+        // Instance Y-axis rotation from authored yaw. PSX angle
+        // units (4096 per turn) → Q12 sin/cos via the existing
+        // GTE shim, then composed into a rotation matrix.
+        let instance_rotation = yaw_rotation_matrix(Angle::from_q12(inst.yaw as u16));
+        telemetry::stage_begin(telemetry::stage::MODEL_BOUNDS);
+        out.bounds_tests = out.bounds_tests.saturating_add(1);
+        let visible = match model_frame_bounds(runtime_model, clip_local, phase) {
+            Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => {
+                model_bounds_visible(camera, options, origin, instance_rotation, bounds)
+            }
+            None => true,
+            _ => true,
+        };
+        telemetry::stage_end(telemetry::stage::MODEL_BOUNDS);
+        if !visible {
+            out.bounds_culled = out.bounds_culled.saturating_add(1);
+            continue;
+        }
+
         let material = lighting.shade_model_material(origin, runtime_model.material);
         let model_options = options
             .with_depth_policy(DepthPolicy::Average)
             .with_cull_mode(CullMode::Back)
             .with_material_layer(material)
             .with_textured_triangle_splitting(false);
-        // Instance Y-axis rotation from authored yaw. PSX angle
-        // units (4096 per turn) → Q12 sin/cos via the existing
-        // GTE shim, then composed into a rotation matrix.
-        let instance_rotation = yaw_rotation_matrix(Angle::from_q12(inst.yaw as u16));
 
-        let stats = world.submit_textured_model_primary_joints(
+        telemetry::stage_begin(telemetry::stage::MODEL_DRAW);
+        let faces = runtime_model_faces(runtime_model, model_faces);
+        let stats = world.submit_textured_model_primary_joints_predecoded_faces(
             triangles,
             runtime_model.model,
             anim,
@@ -2256,7 +2621,9 @@ fn draw_model_instances(
             unsafe { &mut JOINT_VIEW_TRANSFORMS },
             material,
             model_options,
+            faces,
         );
+        telemetry::stage_end(telemetry::stage::MODEL_DRAW);
         accumulate_model_stats(&mut out.stats, stats);
         if stats.primitive_overflow || stats.command_overflow {
             out.draws = drawn as u16;
@@ -2307,6 +2674,87 @@ fn floor_anchored_model_origin(x: i32, y: i32, z: i32, world_height: u16) -> Wor
 
 fn model_origin_floor_lift(world_height: u16) -> i32 {
     (world_height as i32) / 2
+}
+
+const MODEL_BOUNDS_SCREEN_MARGIN: i32 = 96;
+
+fn model_frame_bounds(
+    runtime_model: RuntimeModelAsset,
+    clip_local: ModelClipIndex,
+    phase_q12: u32,
+) -> Option<LevelModelFrameBoundsRecord> {
+    let clip = runtime_model.clip_table_index(clip_local)?;
+    let record = MODEL_CLIP_BOUNDS.get(clip.to_usize()).copied()?;
+    if record.model != runtime_model.index || record.clip != clip || record.frame_count == 0 {
+        return None;
+    }
+    let frame = ((phase_q12 >> 12) % record.frame_count as u32) as usize;
+    MODEL_FRAME_BOUNDS
+        .get(record.first_frame.to_usize().saturating_add(frame))
+        .copied()
+}
+
+fn model_bounds_visible(
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    origin: WorldVertex,
+    rotation: Mat3I16,
+    bounds: LevelModelFrameBoundsRecord,
+) -> bool {
+    let center = rotate_bounds_center(rotation, bounds.center);
+    sphere_visible_to_camera(
+        camera,
+        options,
+        WorldVertex::new(
+            origin.x.saturating_add(center[0]),
+            origin.y.saturating_add(center[1]),
+            origin.z.saturating_add(center[2]),
+        ),
+        bounds.radius.max(0),
+        MODEL_BOUNDS_SCREEN_MARGIN,
+    )
+}
+
+fn rotate_bounds_center(rotation: Mat3I16, center: [i32; 3]) -> [i32; 3] {
+    [
+        dot_bounds_row_q12(rotation.m[0], center),
+        dot_bounds_row_q12(rotation.m[1], center),
+        dot_bounds_row_q12(rotation.m[2], center),
+    ]
+}
+
+fn dot_bounds_row_q12(row: [i16; 3], center: [i32; 3]) -> i32 {
+    let x = (row[0] as i32).saturating_mul(center[0]);
+    let y = (row[1] as i32).saturating_mul(center[1]);
+    let z = (row[2] as i32).saturating_mul(center[2]);
+    x.saturating_add(y).saturating_add(z) >> 12
+}
+
+fn sphere_visible_to_camera(
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    center: WorldVertex,
+    radius: i32,
+    screen_margin: i32,
+) -> bool {
+    let view = camera.view_vertex(center);
+    let near = camera.projection.near_z.max(1);
+    let far = options.depth_range.far().max(near);
+    if view.z < near.saturating_sub(radius) || view.z > far.saturating_add(radius) {
+        return false;
+    }
+
+    let z = view.z.max(near);
+    let focal = camera.projection.focal_length.max(1);
+    let half_w = (camera.projection.screen_x as i32)
+        .saturating_add(screen_margin)
+        .max(1);
+    let half_h = (camera.projection.screen_y as i32)
+        .saturating_add(screen_margin)
+        .max(1);
+    let projected_x = view.x.abs().saturating_sub(radius).saturating_mul(focal);
+    let projected_y = view.y.abs().saturating_sub(radius).saturating_mul(focal);
+    projected_x <= half_w.saturating_mul(z) && projected_y <= half_h.saturating_mul(z)
 }
 
 /// Draw one tinted cube per generated entity record. Cubes
@@ -2384,6 +2832,50 @@ fn draw_entity_markers(
             }
         }
     }
+}
+
+fn draw_lock_target_indicator(
+    target: RoomPoint,
+    camera: WorldCamera,
+    elapsed_vblanks: u32,
+    material: TextureMaterial,
+) {
+    let Some(center) = camera.project_world(target.to_world_vertex()) else {
+        return;
+    };
+    let spin =
+        Angle::from_q12((elapsed_vblanks.wrapping_mul(TARGET_LOCK_SPIN_STEP_Q12) & 0x0fff) as u16);
+    let h = TARGET_LOCK_SCREEN_HALF;
+    let verts = [
+        rotated_screen_vertex(center, -h, -h, spin),
+        rotated_screen_vertex(center, h, -h, spin),
+        rotated_screen_vertex(center, -h, h, spin),
+        rotated_screen_vertex(center, h, h, spin),
+    ];
+    let uvs = [
+        (0, 0),
+        (TARGET_LOCK_UV_MAX, 0),
+        (0, TARGET_LOCK_UV_MAX),
+        (TARGET_LOCK_UV_MAX, TARGET_LOCK_UV_MAX),
+    ];
+    draw_quad_textured_material(verts, uvs, material);
+}
+
+fn rotated_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle) -> (i16, i16) {
+    let sin = angle.sin().raw();
+    let cos = angle.cos().raw();
+    let rx = ox
+        .saturating_mul(cos)
+        .saturating_sub(oy.saturating_mul(sin))
+        >> 12;
+    let ry = ox
+        .saturating_mul(sin)
+        .saturating_add(oy.saturating_mul(cos))
+        >> 12;
+    (
+        clamp_i16((center.sx as i32).saturating_add(rx)),
+        clamp_i16((center.sy as i32).saturating_add(ry)),
+    )
 }
 
 #[no_mangle]
