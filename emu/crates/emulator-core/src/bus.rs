@@ -375,6 +375,12 @@ impl Bus {
         self.sio0.attach_port1(device);
     }
 
+    /// Remove any memory card from port 1 while preserving the pad.
+    pub fn detach_memcard_port1(&mut self) {
+        let device = std::mem::take(self.sio0.port1_mut()).without_memcard();
+        self.sio0.attach_port1(device);
+    }
+
     /// Snapshot the port-1 memcard bytes for persistence. `None`
     /// when there's no card on port 1 or the card hasn't been
     /// written since load.
@@ -510,6 +516,12 @@ impl Bus {
         if let Some(p) = pad {
             device = device.with_pad(p);
         }
+        self.sio0.attach_port2(device);
+    }
+
+    /// Remove any memory card from port 2 while preserving the pad.
+    pub fn detach_memcard_port2(&mut self) {
+        let device = std::mem::take(self.sio0.port2_mut()).without_memcard();
         self.sio0.attach_port2(device);
     }
 
@@ -777,6 +789,7 @@ impl Bus {
                     if self.complete_dma_channel(4) {
                         dma_edge = true;
                     }
+                    self.service_spu_irq();
                 }
                 EventSlot::GpuOtcDma => {
                     if self.complete_dma_channel(6) {
@@ -905,6 +918,12 @@ impl Bus {
         }
     }
 
+    fn service_spu_irq(&mut self) {
+        if self.spu.take_irq_pending() {
+            self.irq.raise(IrqSource::Spu);
+        }
+    }
+
     /// Cumulative cycles since reset.
     pub fn cycles(&self) -> u64 {
         self.cycles
@@ -954,9 +973,7 @@ impl Bus {
         }
         for _ in 0..n {
             self.spu.tick_sample(self.cycles);
-            if self.spu.take_irq_pending() {
-                self.irq.raise(IrqSource::Spu);
-            }
+            self.service_spu_irq();
         }
     }
 
@@ -1305,6 +1322,7 @@ impl Bus {
                 addr = addr.wrapping_add(step);
             }
         }
+        self.service_spu_irq();
         Some(halfword_count / 2)
     }
 
@@ -1900,6 +1918,7 @@ impl Bus {
         }
         if Spu::contains(phys) {
             self.spu.write32_at(phys, value, self.cycles);
+            self.service_spu_irq();
             return;
         }
         if Sio0::contains(phys) {
@@ -2067,6 +2086,7 @@ impl Bus {
         }
         if Spu::contains(phys) {
             self.spu.write16_at(phys, value, self.cycles);
+            self.service_spu_irq();
             return;
         }
         if Sio0::contains(phys) {
@@ -2439,6 +2459,34 @@ mod tests {
         bus.spu.dma_read(&mut copied);
         assert_eq!(copied[0], 0x2000);
         assert_eq!(copied[31], 0x201F);
+    }
+
+    #[test]
+    fn spu_dma_irq_addr_match_raises_irq9_immediately() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        bus.spu.write16(crate::spu::IRQ_ADDR, 0);
+        bus.spu.write16(crate::spu::SPUCNT, (2 << 4) | (1 << 6));
+        bus.dma.dpcr = 1 << (4 * 4 + 3);
+        write_ram_u16(&mut bus.ram[..], 0x100, 0xCAFE);
+
+        bus.dma.channels[4].base = 0x100;
+        bus.dma.channels[4].block_control = (1 << 16) | 1;
+        bus.dma.channels[4].channel_control = 0x0100_0201;
+        bus.run_dma_channel(4);
+
+        assert_ne!(bus.irq.stat() & (1 << (IrqSource::Spu as u32)), 0);
+    }
+
+    #[test]
+    fn decoded_buffer_spu_irq_reaches_i_stat() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.spu.write16(crate::spu::IRQ_ADDR, 0x0080); // 0x400 bytes
+        bus.spu.write16(crate::spu::SPUCNT, 1 << 6);
+
+        bus.run_spu_samples(1);
+
+        assert_ne!(bus.irq.stat() & (1 << (IrqSource::Spu as u32)), 0);
     }
 
     #[test]

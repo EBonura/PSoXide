@@ -93,6 +93,9 @@ pub struct Sio0 {
     /// Whether the current byte will be followed by a delayed SIO
     /// event.
     pending_ack: bool,
+    /// Whether the current byte should raise the SIO IRQ via the
+    /// no-device DSR timeout path instead of a visible ACK pulse.
+    pending_dsr_timeout: bool,
     /// Legacy shifter state for the older delayed-byte path.
     transfer_busy: bool,
     /// Legacy wait state for the older delayed-byte path.
@@ -138,6 +141,7 @@ impl Sio0 {
             pending_rx: 0xFF,
             queued_tx: None,
             pending_ack: false,
+            pending_dsr_timeout: false,
             transfer_busy: false,
             awaiting_ack: false,
             transfer_deadline: None,
@@ -354,14 +358,20 @@ impl Sio0 {
                 if deadline <= now {
                     self.ack_deadline = None;
                     self.awaiting_ack = false;
-                    // Keep IRQ and visible ACK/DSR in phase. Crash's
-                    // BIOS pad handler samples the ACK level while it
-                    // services the interrupt; raising IRQ at RX-ready
-                    // time makes digital polls stop before the high
-                    // button byte.
-                    self.ack_input = true;
-                    self.ack_end_deadline = Some(deadline.saturating_add(ACK_PULSE_TICKS));
-                    if self.ctrl & ctrl_bit::ACK_IRQ_ENABLE != 0 {
+                    let ack_pulse = self.pending_ack;
+                    let dsr_timeout = self.pending_dsr_timeout;
+                    self.pending_ack = false;
+                    self.pending_dsr_timeout = false;
+                    if ack_pulse {
+                        // Keep IRQ and visible ACK/DSR in phase. Crash's
+                        // BIOS pad handler samples the ACK level while it
+                        // services the interrupt; raising IRQ at RX-ready
+                        // time makes digital polls stop before the high
+                        // button byte.
+                        self.ack_input = true;
+                        self.ack_end_deadline = Some(deadline.saturating_add(ACK_PULSE_TICKS));
+                    }
+                    if (ack_pulse || dsr_timeout) && self.ctrl & ctrl_bit::ACK_IRQ_ENABLE != 0 {
                         self.irq_latched = true;
                         self.pending_irq = true;
                     }
@@ -431,29 +441,36 @@ impl Sio0 {
             self.ack_input = false;
             self.ack_end_deadline = None;
         }
-        let (rx, ack, ack_delay_ticks) = if self.ctrl & ctrl_bit::JOYN_OUTPUT != 0 {
+        let (rx, ack, device_present, ack_delay_ticks) = if self.ctrl & ctrl_bit::JOYN_OUTPUT != 0 {
             let port = self.active_port();
-            let (rx, ack) = port.exchange(value);
+            let result = port.exchange_detailed(value);
             let ack_delay_ticks = if port.selected_is_memcard() {
                 MEMCARD_ACK_DELAY_TICKS
             } else {
                 PAD_ACK_DELAY_TICKS
             };
-            (rx, ack, ack_delay_ticks)
+            (
+                result.rx,
+                result.ack,
+                result.device_present,
+                ack_delay_ticks,
+            )
         } else {
-            (0xFF, false, PAD_ACK_DELAY_TICKS)
+            (0xFF, false, true, PAD_ACK_DELAY_TICKS)
         };
+        let dsr_timeout = !ack && !device_present;
         self.pending_rx = rx;
         self.pending_ack = ack;
+        self.pending_dsr_timeout = dsr_timeout;
         self.ack_delay_ticks = ack_delay_ticks;
         self.rx = Some(rx);
         self.transfer_busy = false;
         self.awaiting_ack = false;
         self.transfer_deadline = None;
-        self.ack_deadline = if ack && self.ctrl & ctrl_bit::ACK_IRQ_ENABLE != 0 {
+        self.ack_deadline = if ack || dsr_timeout {
             Some(
                 now.saturating_add(self.transfer_ticks())
-                    .saturating_add(ack_delay_ticks),
+                    .saturating_add(if ack { ack_delay_ticks } else { 0 }),
             )
         } else {
             None
@@ -480,6 +497,7 @@ impl Sio0 {
             self.pending_rx = 0xFF;
             self.queued_tx = None;
             self.pending_ack = false;
+            self.pending_dsr_timeout = false;
             self.transfer_busy = false;
             self.awaiting_ack = false;
             self.transfer_deadline = None;
@@ -507,6 +525,7 @@ impl Sio0 {
             self.ack_input = false;
             self.queued_tx = None;
             self.pending_ack = false;
+            self.pending_dsr_timeout = false;
             self.transfer_busy = false;
             self.awaiting_ack = false;
             self.transfer_deadline = None;
@@ -780,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_ack_without_irq_enable_does_not_raise_irq() {
+    fn controller_ack_without_irq_enable_is_visible_but_does_not_raise_irq() {
         use crate::pad::{DigitalPad, PortDevice};
 
         let mut sio = Sio0::new();
@@ -791,10 +810,10 @@ mod tests {
         sio.tick(DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS);
 
         let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
-        assert_eq!(
+        assert_ne!(
             stat & stat_bit::ACK_INPUT,
             0,
-            "without ACK IRQ enable, no delayed ACK event is scheduled"
+            "ACK input level is independent from ACK IRQ enable"
         );
         assert_eq!(
             stat & stat_bit::IRQ,
@@ -805,6 +824,77 @@ mod tests {
             !sio.take_pending_irq(),
             "bus IRQ must stay quiet without enable"
         );
+    }
+
+    #[test]
+    fn no_device_dsr_timeout_raises_irq_without_ack_input() {
+        use crate::pad::PortDevice;
+
+        let mut sio = Sio0::new();
+        sio.attach_port1(PortDevice::empty());
+        sio.write16(
+            Sio0::BASE + 0xA,
+            ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
+        );
+        sio.write16(Sio0::BASE + 0xE, 0x0088);
+
+        sio.write8_at(Sio0::BASE, 0x01, 10);
+        assert_eq!(sio.debug_ack_deadline(), Some(10 + 0x88 * 8));
+        assert_eq!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::ACK_INPUT,
+            0,
+            "empty slots must not expose a visible ACK pulse"
+        );
+
+        sio.tick(10 + 0x88 * 8 - 1);
+        assert_eq!(
+            sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ,
+            0,
+            "DSR timeout IRQ must wait for the baud-clocked deadline"
+        );
+
+        sio.tick(10 + 0x88 * 8);
+        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
+        assert_eq!(stat & stat_bit::ACK_INPUT, 0);
+        assert_ne!(stat & stat_bit::IRQ, 0);
+        assert!(sio.take_pending_irq());
+        assert!(!sio.take_pending_irq());
+    }
+
+    #[test]
+    fn controller_final_no_ack_byte_does_not_arm_timeout_irq() {
+        use crate::pad::{DigitalPad, PortDevice};
+
+        let mut sio = Sio0::new();
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.write16(
+            Sio0::BASE + 0xA,
+            ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE,
+        );
+        sio.write16(Sio0::BASE + 0xE, 0x0088);
+
+        let mut now = 10u64;
+        for tx in [0x01, 0x42, 0x00, 0x00] {
+            sio.write8_at(Sio0::BASE, tx, now);
+            sio.tick(now + 0x88 * 8);
+            assert!(sio.take_pending_irq(), "byte 0x{tx:02x} should ACK");
+            sio.write16(
+                Sio0::BASE + 0xA,
+                ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE | ctrl_bit::ACK,
+            );
+            let _ = sio.read8(Sio0::BASE);
+            now += 0x88 * 8 + 1;
+        }
+
+        sio.write8_at(Sio0::BASE, 0x00, now);
+        assert_eq!(
+            sio.debug_ack_deadline(),
+            None,
+            "the final byte of a real controller poll drops ACK without arming a DSR timeout"
+        );
+        sio.tick(now + 0x88 * 8);
+        assert!(!sio.take_pending_irq());
+        assert_eq!(sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ, 0);
     }
 
     #[test]

@@ -770,9 +770,77 @@ impl GridHorizontalFace {
         self.dropped_corner = None;
     }
 
+    /// Interpolated height at local sector coordinates in the
+    /// editor grid convention. `local_z = 0` is the south / low-Z
+    /// edge, while authored corners are stored as
+    /// `[NW, NE, SE, SW]`.
+    pub fn height_at_local(&self, local_x: i32, local_z: i32, sector_size: i32) -> i32 {
+        let sector_size = sector_size.max(1);
+        let [nw, ne, se, sw] = self.heights;
+        // Reuse the same Z-flipped convention the cooker writes:
+        // runtime local Z=0 corresponds to the editor's south edge.
+        let runtime_heights = [sw, se, ne, nw];
+        let runtime_split = match self.split {
+            GridSplit::NorthWestSouthEast => GridSplit::NorthEastSouthWest,
+            GridSplit::NorthEastSouthWest => GridSplit::NorthWestSouthEast,
+        };
+        height_at_local_for_split(
+            runtime_heights,
+            runtime_split,
+            local_x,
+            local_z,
+            sector_size,
+        )
+    }
+
     /// `true` when the face is currently a triangle.
     pub const fn is_triangle(&self) -> bool {
         self.dropped_corner.is_some()
+    }
+}
+
+fn height_at_local_for_split(
+    heights: [i32; 4],
+    split: GridSplit,
+    local_x: i32,
+    local_z: i32,
+    sector_size: i32,
+) -> i32 {
+    let sector_size = sector_size.max(1);
+    let u = local_x.clamp(0, sector_size);
+    let v = local_z.clamp(0, sector_size);
+    let [nw, ne, se, sw] = heights;
+    match split {
+        GridSplit::NorthWestSouthEast => {
+            if v <= u {
+                nw.saturating_add(mul_sector_i32(ne.saturating_sub(nw), u - v, sector_size))
+                    .saturating_add(mul_sector_i32(se.saturating_sub(nw), v, sector_size))
+            } else {
+                nw.saturating_add(mul_sector_i32(se.saturating_sub(sw), u, sector_size))
+                    .saturating_add(mul_sector_i32(sw.saturating_sub(nw), v, sector_size))
+            }
+        }
+        GridSplit::NorthEastSouthWest => {
+            if u + v <= sector_size {
+                nw.saturating_add(mul_sector_i32(ne.saturating_sub(nw), u, sector_size))
+                    .saturating_add(mul_sector_i32(sw.saturating_sub(nw), v, sector_size))
+            } else {
+                sw.saturating_add(mul_sector_i32(se.saturating_sub(sw), u, sector_size))
+                    .saturating_add(mul_sector_i32(
+                        ne.saturating_sub(se),
+                        sector_size - v,
+                        sector_size,
+                    ))
+            }
+        }
+    }
+}
+
+fn mul_sector_i32(delta: i32, amount: i32, sector_size: i32) -> i32 {
+    if sector_size <= 0 {
+        0
+    } else {
+        delta.saturating_mul(amount) / sector_size
     }
 }
 
@@ -1861,6 +1929,24 @@ impl WorldGrid {
         (world_z / self.sector_size as f32).floor() as i32
     }
 
+    /// Floor height under a room-local world-space X/Z point.
+    /// Returns `None` when the point is outside the allocated grid
+    /// or the addressed sector has no floor face.
+    pub fn floor_height_at_room_local(&self, world_x: i32, world_z: i32) -> Option<i32> {
+        let s = self.sector_size;
+        if s <= 0 {
+            return None;
+        }
+        let wcx = world_x.div_euclid(s);
+        let wcz = world_z.div_euclid(s);
+        let (sx, sz) = self.world_cell_to_array(wcx, wcz)?;
+        let sector = self.sector(sx, sz)?;
+        let floor = sector.floor.as_ref()?;
+        let local_x = world_x.rem_euclid(s);
+        let local_z = world_z.rem_euclid(s);
+        Some(floor.height_at_local(local_x, local_z, s))
+    }
+
     /// Translate a world-cell coordinate to its array index, or
     /// `None` if the cell isn't currently allocated.
     pub fn world_cell_to_array(&self, wcx: i32, wcz: i32) -> Option<(u16, u16)> {
@@ -2656,7 +2742,7 @@ impl ResourceData {
             Self::Model(_) => "Model",
             Self::Skeleton(_) => "Skeleton",
             Self::AnimationClip(_) => "Animation Clip",
-            Self::AnimationSet(_) => "Animation Set",
+            Self::AnimationSet(_) => "Clip Role Map",
             Self::Mesh { .. } => "Mesh",
             Self::Scene { .. } => "Scene",
             Self::Script { .. } => "Script",
@@ -4374,6 +4460,27 @@ impl Default for ProjectDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn horizontal_face_height_samples_editor_corner_convention() {
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [100, 200, 300, 400];
+
+        assert_eq!(floor.height_at_local(0, 1024, 1024), 100);
+        assert_eq!(floor.height_at_local(1024, 1024, 1024), 200);
+        assert_eq!(floor.height_at_local(1024, 0, 1024), 300);
+        assert_eq!(floor.height_at_local(0, 0, 1024), 400);
+    }
+
+    #[test]
+    fn grid_floor_height_handles_negative_origin_cells() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.origin = [-1, -1];
+        grid.set_floor(0, 0, 256, None);
+
+        assert_eq!(grid.floor_height_at_room_local(-512, -512), Some(256));
+        assert_eq!(grid.floor_height_at_room_local(0, 0), None);
+    }
 
     #[test]
     fn snap_height_rounds_to_nearest_quantum() {

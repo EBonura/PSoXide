@@ -360,11 +360,13 @@ pub fn build_package(
             continue;
         };
         let room_index = chunk.room_index;
-        let pos = node_chunk_local_position(node, grid, chunk);
+        let raw_pos = node_chunk_local_position(node, grid, chunk);
+        let floor_pos = floor_anchored_node_chunk_local_position(node, grid, chunk);
         let yaw = yaw_from_degrees(node.transform.rotation_degrees[1]);
 
         match &node.kind {
             NodeKind::Entity => {
+                let pos = floor_pos;
                 let character_controller = component_character_controller(scene, node);
                 let is_player_controlled =
                     character_controller.is_some_and(|controller| controller.player);
@@ -462,6 +464,7 @@ pub fn build_package(
                 }
             }
             NodeKind::SpawnPoint { player: true, .. } => {
+                let pos = floor_pos;
                 let NodeKind::SpawnPoint { character, .. } = &node.kind else {
                     unreachable!();
                 };
@@ -473,6 +476,7 @@ pub fn build_package(
                 });
             }
             NodeKind::SpawnPoint { player: false, .. } => {
+                let pos = floor_pos;
                 entities.push(PlaytestEntity {
                     room: room_index,
                     kind: PlaytestEntityKind::Marker,
@@ -498,6 +502,7 @@ pub fn build_package(
                 //     resource → falls through to a legacy
                 //     entity marker so authored placements
                 //     don't disappear silently.
+                let pos = floor_pos;
                 let model_id = mesh.and_then(|id| {
                     project
                         .resource(id)
@@ -550,7 +555,7 @@ pub fn build_package(
                     node.name.as_str(),
                     grid,
                     room_index,
-                    pos,
+                    raw_pos,
                     *color,
                     *intensity,
                     *radius,
@@ -855,7 +860,7 @@ fn cook_player_character(
     if let Some((_, set_name, set)) = animation_set {
         if set.skeleton.is_some() && model_skeleton.is_some() && set.skeleton != model_skeleton {
             report.error(format!(
-                "Character '{}' animation set '{}' targets a different skeleton than its model",
+                "Character '{}' clip role map '{}' targets a different skeleton than its model",
                 resource.name, set_name
             ));
             return None;
@@ -882,7 +887,7 @@ fn cook_player_character(
                     }
                     None => {
                         report.error(format!(
-                            "Character '{}' animation set '{}' {role_label} clip is not compatible with model '{}'",
+                            "Character '{}' clip role map '{}' {role_label} clip is not compatible with model '{}'",
                             resource.name, set_name, model.name
                         ));
                         return None;
@@ -2413,6 +2418,23 @@ fn node_chunk_local_position(
     ]
 }
 
+/// Like [`node_chunk_local_position`], but treats the node as a
+/// floor anchor: X/Z come from the authored transform and Y is
+/// sampled from the floor directly underneath when possible.
+fn floor_anchored_node_chunk_local_position(
+    node: &SceneNode,
+    grid: &WorldGrid,
+    chunk: &AuthoredRoomChunk,
+) -> [i32; 3] {
+    let mut pos = node_chunk_local_position(node, grid, chunk);
+    let world =
+        grid.editor_to_room_local([node.transform.translation[0], node.transform.translation[2]]);
+    if let Some(floor_y) = grid.floor_height_at_room_local(world[0] as i32, world[2] as i32) {
+        pos[1] = floor_y;
+    }
+    pos
+}
+
 /// Convert an editor euler-degrees-Y rotation to a PSX angle
 /// unit (`0..4096`).
 fn yaw_from_degrees(degrees: f32) -> i16 {
@@ -3881,6 +3903,81 @@ mod tests {
             package.model_instances[0].model,
             package.model_instances[1].model
         );
+    }
+
+    #[test]
+    fn entity_model_instance_preserves_authored_yaw() {
+        let mut project = ProjectDocument::starter();
+        let model_id = player_model_resource_id(&project);
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        let entity = scene.add_node(room_id, "Rotated Prop", NodeKind::Entity);
+        if let Some(node) = scene.node_mut(entity) {
+            node.transform.rotation_degrees[1] = 90.0;
+        }
+        scene.add_node(
+            entity,
+            "Model Renderer",
+            NodeKind::ModelRenderer {
+                model: Some(model_id),
+                material: None,
+            },
+        );
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        assert_eq!(package.model_instances.len(), 1);
+        assert_eq!(package.model_instances[0].yaw, 1024);
+    }
+
+    #[test]
+    fn entity_model_instance_y_snaps_to_floor_under_authored_xz() {
+        let mut project = ProjectDocument::starter();
+        let model_id = player_model_resource_id(&project);
+        let floor_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a room material")
+            .id;
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        if let Some(room) = scene.node_mut(room_id) {
+            let NodeKind::Room { grid } = &mut room.kind else {
+                panic!("starter room is a room");
+            };
+            let (sx, sz) = grid.editor_cells_to_array([0.0, 0.0]).unwrap();
+            grid.set_floor(sx, sz, 512, Some(floor_material));
+        }
+        let entity = scene.add_node(room_id, "Floor Snapped Prop", NodeKind::Entity);
+        if let Some(node) = scene.node_mut(entity) {
+            node.transform.translation = [0.0, 9.0, 0.0];
+        }
+        scene.add_node(
+            entity,
+            "Model Renderer",
+            NodeKind::ModelRenderer {
+                model: Some(model_id),
+                material: None,
+            },
+        );
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        assert_eq!(package.model_instances.len(), 1);
+        assert_eq!(package.model_instances[0].y, 512);
     }
 
     #[test]

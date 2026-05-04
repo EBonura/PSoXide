@@ -15,6 +15,7 @@ mod pad_support;
 
 use std::path::PathBuf;
 
+use emulator_core::gpu::GpuCmdLogEntry;
 use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, Vram,
     DISC_FAST_BOOT_WARMUP_STEPS, VRAM_HEIGHT, VRAM_WIDTH,
@@ -78,9 +79,14 @@ fn main() {
         .ok()
         .and_then(|s| parse_xy(&s));
     let print_uploads = std::env::var("PSOXIDE_PRINT_UPLOADS").is_ok();
+    let print_gp0_recent = std::env::var("PSOXIDE_PRINT_GP0_RECENT").is_ok();
     let force_u8 = std::env::var("PSOXIDE_FORCE_U8")
         .ok()
         .and_then(|s| parse_force_u8(&s));
+    let force_u8_start = std::env::var("PSOXIDE_FORCE_U8_START")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
     let held_buttons = std::env::var("PSOXIDE_PAD1")
         .ok()
         .and_then(|s| parse_u16_mask(&s))
@@ -90,7 +96,11 @@ fn main() {
         .filter(|s| !s.trim().is_empty())
         .map(|s| parse_pad_pulses(&s).expect("valid PSOXIDE_PAD1_PULSES"))
         .unwrap_or_default();
-    if trace_display_pixel.is_some() || trace_vram_pixel.is_some() || print_uploads {
+    if trace_display_pixel.is_some()
+        || trace_vram_pixel.is_some()
+        || print_uploads
+        || print_gp0_recent
+    {
         bus.gpu.enable_pixel_tracer();
     }
 
@@ -105,7 +115,12 @@ fn main() {
     }
     bus.cdrom.insert_disc(Some(disc));
     bus.attach_digital_pad_port1();
-    bus.attach_memcard_port1(Vec::new());
+    if std::env::var_os("PSOXIDE_NO_MEMCARD").is_some() {
+        bus.detach_memcard_port1();
+        bus.detach_memcard_port2();
+    } else {
+        bus.attach_memcard_port1(Vec::new());
+    }
     let mut current_pad_mask = u16::MAX;
 
     println!(
@@ -136,8 +151,10 @@ fn main() {
     );
 
     for step in 0..steps {
-        if let Some((addr, value)) = force_u8 {
-            let _ = bus.write8_safe(addr, value);
+        if step >= force_u8_start {
+            if let Some((addr, value)) = force_u8 {
+                let _ = bus.write8_safe(addr, value);
+            }
         }
         let vblank = bus.irq().raise_counts()[0];
         let pad_mask = effective_mask(held_buttons, &pad_pulses, vblank);
@@ -248,6 +265,10 @@ fn main() {
         let limit = limit.parse::<usize>().unwrap_or(64);
         print_recent_uploads(&bus.gpu, limit);
     }
+    if let Ok(limit) = std::env::var("PSOXIDE_PRINT_GP0_RECENT") {
+        let limit = limit.parse::<usize>().unwrap_or(64);
+        print_recent_gp0(&bus.gpu, limit);
+    }
     if dma_log_enabled {
         let log = bus.drain_dma_log();
         let cdr_log = log
@@ -298,6 +319,10 @@ fn main() {
     }
     if let Some((x, y)) = trace_vram_pixel {
         trace_pixel_owner(&bus.gpu, &format!("vram ({x},{y})"), x, y);
+    }
+    if let Ok(limit) = std::env::var("PSOXIDE_PRINT_MMIO") {
+        let limit = limit.parse::<usize>().unwrap_or(160);
+        print_mmio_tail(&bus, limit);
     }
 
     if let Ok(path) = std::env::var("PSOXIDE_DISPLAY_DUMP") {
@@ -577,6 +602,89 @@ fn print_recent_uploads(gpu: &emulator_core::Gpu, limit: usize) {
     }
 }
 
+fn print_recent_gp0(gpu: &emulator_core::Gpu, limit: usize) {
+    let start = gpu.cmd_log.len().saturating_sub(limit);
+    println!(
+        "recent_gp0 last={} total_seen={}",
+        gpu.cmd_log.len() - start,
+        gpu.cmd_log.len()
+    );
+    for entry in gpu.cmd_log.iter().skip(start) {
+        let words = entry
+            .fifo
+            .iter()
+            .take(8)
+            .map(|word| format!("0x{word:08x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if entry.fifo.len() > 8 { ", ..." } else { "" };
+        println!(
+            "  idx={} op=0x{:02x} words={} [{}{}]{}",
+            entry.index,
+            entry.opcode,
+            entry.fifo.len(),
+            words,
+            suffix,
+            describe_gp0_entry(entry),
+        );
+    }
+}
+
+fn describe_gp0_entry(entry: &GpuCmdLogEntry) -> String {
+    let fifo = &entry.fifo;
+    match entry.opcode {
+        0x60..=0x63 | 0x64..=0x67 | 0x68..=0x6b | 0x70..=0x73 | 0x74..=0x77 | 0x78..=0x7b
+            if fifo.len() >= 3 =>
+        {
+            let xy = fifo[1];
+            let wh = fifo[2];
+            let x = xy & 0x3ff;
+            let y = (xy >> 16) & 0x1ff;
+            let w = wh & 0x3ff;
+            let h = (wh >> 16) & 0x1ff;
+            format!(" rect=({}, {}) {}x{}", x, y, w, h)
+        }
+        0xa0 if fifo.len() >= 3 => {
+            let xy = fifo[1];
+            let wh = fifo[2];
+            let x = xy & 0x3ff;
+            let y = (xy >> 16) & 0x1ff;
+            let raw_w = wh & 0x3ff;
+            let raw_h = (wh >> 16) & 0x1ff;
+            let w = if raw_w == 0 { 1024 } else { raw_w };
+            let h = if raw_h == 0 { 512 } else { raw_h };
+            format!(" upload=({}, {}) {}x{}", x, y, w, h)
+        }
+        0xe3 if fifo.len() == 1 => {
+            let word = fifo[0];
+            let x = word & 0x3ff;
+            let y = (word >> 10) & 0x1ff;
+            format!(" draw_area_top_left=({}, {})", x, y)
+        }
+        0xe4 if fifo.len() == 1 => {
+            let word = fifo[0];
+            let x = word & 0x3ff;
+            let y = (word >> 10) & 0x1ff;
+            format!(" draw_area_bottom_right=({}, {})", x, y)
+        }
+        0xe5 if fifo.len() == 1 => {
+            let word = fifo[0];
+            let x = sign_extend_11((word & 0x7ff) as i32);
+            let y = sign_extend_11(((word >> 11) & 0x7ff) as i32);
+            format!(" draw_offset=({}, {})", x, y)
+        }
+        _ => String::new(),
+    }
+}
+
+fn sign_extend_11(value: i32) -> i32 {
+    if value & 0x400 != 0 {
+        value | !0x7ff
+    } else {
+        value
+    }
+}
+
 fn print_gp1_recent(gpu: &emulator_core::Gpu, limit: usize) {
     let history = gpu.gp1_write_history();
     let start = history.len().saturating_sub(limit);
@@ -705,6 +813,41 @@ fn print_sample(step: u64, cpu: &Cpu, bus: &Bus) {
         dma01 = format!("{}/{}", starts[0], starts[1]),
         gpu_dma = starts[2],
     );
+}
+
+#[cfg(feature = "trace-mmio")]
+fn print_mmio_tail(bus: &Bus, limit: usize) {
+    let entries = bus
+        .mmio_trace
+        .iter_chronological()
+        .filter(|entry| is_mmio_interest(entry.addr))
+        .collect::<Vec<_>>();
+    println!("mmio_tail last={} matched={}", limit, entries.len());
+    let skip = entries.len().saturating_sub(limit);
+    for entry in entries.iter().skip(skip) {
+        println!(
+            "  cyc={:>12} {} addr=0x{:08x} value=0x{:08x}",
+            entry.cycle,
+            entry.kind.tag(),
+            entry.addr,
+            entry.value,
+        );
+    }
+}
+
+#[cfg(not(feature = "trace-mmio"))]
+fn print_mmio_tail(_bus: &Bus, _limit: usize) {
+    println!("mmio_tail unavailable; rebuild with --features emulator-core/trace-mmio");
+}
+
+#[cfg(feature = "trace-mmio")]
+fn is_mmio_interest(addr: u32) -> bool {
+    (0x1f80_1800..=0x1f80_1803).contains(&addr)
+        || (0x1f80_1810..=0x1f80_1827).contains(&addr)
+        || (0x1f80_1040..=0x1f80_104f).contains(&addr)
+        || (0x1f80_1070..=0x1f80_1074).contains(&addr)
+        || (0x1f80_10f0..=0x1f80_10ff).contains(&addr)
+        || (0x1f80_1100..=0x1f80_112f).contains(&addr)
 }
 
 fn dump_vram_ppm(vram: &Vram, path: &str) -> std::io::Result<()> {

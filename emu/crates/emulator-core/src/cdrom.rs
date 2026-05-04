@@ -302,6 +302,9 @@ pub struct CdRom {
     /// count the game requested. A blown-out number means we're
     /// chaining extra events somewhere.
     pub sector_events_scheduled: u64,
+    /// DataReady sector events that advanced the read stream without
+    /// raising a CPU-visible CDROM IRQ. Diagnostic for XA streams.
+    data_ready_suppressed: u64,
     /// Loaded disc image, if any. When `Some`, `disc_present` is also
     /// true and GetID / ReadN follow the disc-present paths; when
     /// `None`, they fall back to the "please insert disc" path.
@@ -446,6 +449,7 @@ impl CdRom {
             cdrom_irq_log: Vec::new(),
             cdrom_irq_log_cap: 0,
             sector_events_scheduled: 0,
+            data_ready_suppressed: 0,
             disc: None,
             data_fifo: VecDeque::new(),
             data_fifo_ready: false,
@@ -532,6 +536,11 @@ impl CdRom {
         self.xa_left.reset();
         self.xa_right.reset();
         self.cd_audio.clear();
+    }
+
+    fn suppress_data_ready(&mut self) -> bool {
+        self.data_ready_suppressed = self.data_ready_suppressed.saturating_add(1);
+        false
     }
 
     fn clear_data_fifo(&mut self) {
@@ -1128,7 +1137,6 @@ impl CdRom {
 
     fn cmd_pause(&mut self) {
         let was_motor_on = self.motor_on;
-        let ack_stat = self.stat_byte();
         // Pause halts the sector-read chain but leaves the motor on.
         // Missing this flip meant DataReady events kept chaining
         // `load_next_sector + schedule_sector_event` indefinitely
@@ -1140,6 +1148,7 @@ impl CdRom {
         self.location_changed = false;
         self.drive_status &= !drive_status_bit::PLAYING;
         self.reset_xa_stream();
+        let ack_stat = self.stat_byte();
         self.schedule_first_response(vec![ack_stat]);
         let stat = self.stat_byte();
         // Redux uses a short ~7000-cycle follow-up when the drive is
@@ -1410,7 +1419,7 @@ impl CdRom {
                             self.data_fifo.clear();
                             self.data_fifo_ready = false;
                             self.data_transfer_active = false;
-                            return false;
+                            return self.suppress_data_ready();
                         }
                         self.xa_first_sector = -1;
                     }
@@ -1422,13 +1431,7 @@ impl CdRom {
                 let whole_sector = self.mode & 0x20 != 0;
                 let sector_mode = raw[15];
                 if whole_sector {
-                    if sector_mode == 1 {
-                        self.data_fifo.extend(raw[12..16].iter().copied());
-                        self.data_fifo.extend([0; 8]);
-                        self.data_fifo.extend(raw[16..16 + 2048].iter().copied());
-                    } else {
-                        self.data_fifo.extend(raw[12..12 + 2340].iter().copied());
-                    }
+                    self.data_fifo.extend(raw[12..12 + 2340].iter().copied());
                 } else if sector_mode == 1 {
                     self.data_fifo.extend(raw[16..16 + 2048].iter().copied());
                 } else {
@@ -1436,7 +1439,10 @@ impl CdRom {
                 }
                 self.data_fifo_ready = !self.data_fifo.is_empty();
                 self.data_transfer_active = false;
-                return !suppress_data_ready;
+                if suppress_data_ready {
+                    return self.suppress_data_ready();
+                }
+                return true;
             }
 
             // Raw-sector miss means we ran off the end of the image.
@@ -1955,6 +1961,12 @@ impl CdRom {
     /// boot. Diagnostic.
     pub fn data_fifo_pops(&self) -> u64 {
         self.data_fifo_pops
+    }
+
+    /// Number of sector events consumed without a CPU-visible
+    /// DataReady IRQ since reset.
+    pub fn data_ready_suppressed(&self) -> u64 {
+        self.data_ready_suppressed
     }
 
     /// `true` when the request register's bit-7 latch has armed the
@@ -2509,6 +2521,21 @@ mod tests {
     }
 
     #[test]
+    fn load_next_sector_whole_sector_mode1_keeps_full_raw_payload() {
+        let mut cd = CdRom::new();
+        let mut raw = raw_sector([0x00, 0x02, 0x00, 0x01], [0; 4], 0x5D);
+        raw[2064..2352].fill(0xE7);
+        cd.mode = 0x20;
+        cd.insert_disc(Some(Disc::from_bin(raw.clone())));
+
+        cd.load_next_sector();
+
+        assert_eq!(cd.data_fifo_len(), 2340);
+        let bytes: Vec<u8> = cd.data_fifo.iter().copied().collect();
+        assert_eq!(bytes, raw[12..12 + 2340].to_vec());
+    }
+
+    #[test]
     fn load_next_sector_mode1_uses_payload_after_header() {
         let mut cd = CdRom::new();
         let mut raw = raw_sector([0x00, 0x02, 0x00, 0x01], [0; 4], 0x00);
@@ -2686,8 +2713,8 @@ mod tests {
         assert!(cd.tick(ack_deadline + 1));
         assert_eq!(
             cd.read8(BASE + 1),
-            drive_status_bit::MOTOR_ON | drive_status_bit::READING,
-            "Pause ACK should report the pre-pause read state"
+            drive_status_bit::MOTOR_ON,
+            "Pause ACK should report the stopped read state"
         );
         cd.irq_flag = 0;
         let pause_complete = cd

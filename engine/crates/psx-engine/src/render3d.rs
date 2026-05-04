@@ -3634,6 +3634,46 @@ mod tests {
     }
 
     #[test]
+    fn textured_model_gte_transform_applies_instance_rotation() {
+        let projection = WorldProjection::new(160, 118, 320, 48);
+        let target = WorldVertex::new(0, 512, 0);
+        let camera = WorldCamera::orbit_yaw(projection, target, 1120, 2048, Angle::from_q12(220));
+        let pose = JointPose {
+            matrix: Mat3I16::IDENTITY.m,
+            translation: Vec3I32::new(0, 0, 0),
+        };
+        let origin = WorldVertex::new(0, 512, 0);
+        let local = Vec3I16::new(128, 0, 0);
+        let quarter_yaw = Mat3I16 {
+            m: [[0, 0, 0x1000], [0, 0x1000, 0], [-0x1000, 0, 0]],
+        };
+
+        let cpu_world = WorldVertex::new(origin.x, origin.y, origin.z - local.x as i32);
+        let cpu_view = camera.view_vertex(cpu_world);
+        let cpu_projected = camera.project_world(cpu_world).expect("in front");
+
+        let (rotation, translation) = textured_model_part_gte_transform(
+            camera,
+            pose,
+            quarter_yaw,
+            LocalToWorldScale::IDENTITY,
+            origin,
+        );
+        let gte_x = translation.x + dot_q12_row_i16(rotation.m[0], local);
+        let gte_y = translation.y + dot_q12_row_i16(rotation.m[1], local);
+        let gte_z = translation.z + dot_q12_row_i16(rotation.m[2], local);
+
+        assert_close_i32(gte_x, cpu_view.x, 4);
+        assert_close_i32(gte_y, -cpu_view.y, 4);
+        assert_close_i32(gte_z, cpu_view.z, 4);
+
+        let gte_sx = projection.screen_x as i32 + (gte_x * projection.focal_length) / gte_z;
+        let gte_sy = projection.screen_y as i32 + (gte_y * projection.focal_length) / gte_z;
+        assert_close_i32(gte_sx, cpu_projected.sx as i32, 1);
+        assert_close_i32(gte_sy, cpu_projected.sy as i32, 1);
+    }
+
+    #[test]
     fn world_projection_accepts_vertices_on_near_plane() {
         let projection = WorldProjection::new(160, 120, 200, 40);
 
