@@ -939,51 +939,34 @@ impl Scene for Playtest {
                 );
                 telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
                 telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
+                let player = self.motor.position();
+                let instance_depth_pass = player_actor_depth_for_room(
+                    active,
+                    self.character,
+                    &self.models,
+                    player,
+                    &room_camera,
+                )
+                .map(ModelInstanceDepthPass::BehindPlayer)
+                .unwrap_or(ModelInstanceDepthPass::All);
                 let instance_stats = draw_model_instances(
                     active.index,
                     ctx.time.elapsed_vblanks(),
                     ctx.time.video_hz(),
                     &room_camera,
-                    room_options,
+                    actor_options,
                     &lighting,
                     &self.models,
                     &self.model_faces[..self.model_face_count],
                     &self.clips,
+                    instance_depth_pass,
                     &mut triangles,
                     &mut world,
                 );
                 telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
-                total_instance_stats.draws = total_instance_stats
-                    .draws
-                    .saturating_add(instance_stats.draws);
-                total_instance_stats.bounds_tests = total_instance_stats
-                    .bounds_tests
-                    .saturating_add(instance_stats.bounds_tests);
-                total_instance_stats.bounds_culled = total_instance_stats
-                    .bounds_culled
-                    .saturating_add(instance_stats.bounds_culled);
-                accumulate_model_stats(&mut total_instance_stats.stats, instance_stats.stats);
+                accumulate_model_instance_draw_stats(&mut total_instance_stats, instance_stats);
             }
 
-            telemetry::counter(
-                telemetry::counter::MODEL_INSTANCE_DRAWS,
-                total_instance_stats.draws as u32,
-            );
-            telemetry::counter(
-                telemetry::counter::MODEL_INSTANCE_BOUNDS_TESTS,
-                total_instance_stats.bounds_tests as u32,
-            );
-            telemetry::counter(
-                telemetry::counter::MODEL_INSTANCE_BOUNDS_CULLED,
-                total_instance_stats.bounds_culled as u32,
-            );
-            emit_model_counters(
-                total_instance_stats.stats,
-                telemetry::counter::MODEL_INSTANCE_PROJECTED_VERTICES,
-                telemetry::counter::MODEL_INSTANCE_SUBMITTED_TRIS,
-                telemetry::counter::MODEL_INSTANCE_CULLED_TRIS,
-                telemetry::counter::MODEL_INSTANCE_DROPPED_TRIS,
-            );
             // Player draws through the same compact model path as
             // placed model instances.
             if let Some(character) = self.character {
@@ -1075,6 +1058,71 @@ impl Scene for Playtest {
                     telemetry::counter::EQUIPMENT_DROPPED_TRIS,
                 );
             }
+
+            if self.character.is_some() {
+                let player = self.motor.position();
+                for active in self.active_rooms.iter().flatten().copied() {
+                    let room_camera = camera_for_room(camera, active);
+                    let Some(player_depth) = player_actor_depth_for_room(
+                        active,
+                        self.character,
+                        &self.models,
+                        player,
+                        &room_camera,
+                    ) else {
+                        continue;
+                    };
+                    let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
+                        continue;
+                    };
+                    let lighting = RuntimeRoomLighting {
+                        room_index: active.index,
+                        ambient: Rgb8::from_array(active.room.render().ambient_color()),
+                        camera: room_camera,
+                        fog_enabled: room_record.flags & room_flags::FOG_ENABLED != 0,
+                        fog_rgb: Rgb8::from_array(room_record.fog_rgb),
+                        fog_near: room_record.fog_near,
+                        fog_far: room_record.fog_far,
+                    };
+                    telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
+                    let instance_stats = draw_model_instances(
+                        active.index,
+                        ctx.time.elapsed_vblanks(),
+                        ctx.time.video_hz(),
+                        &room_camera,
+                        actor_options,
+                        &lighting,
+                        &self.models,
+                        &self.model_faces[..self.model_face_count],
+                        &self.clips,
+                        ModelInstanceDepthPass::InFrontOfPlayer(player_depth),
+                        &mut triangles,
+                        &mut world,
+                    );
+                    telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
+                    accumulate_model_instance_draw_stats(&mut total_instance_stats, instance_stats);
+                }
+            }
+
+            telemetry::counter(
+                telemetry::counter::MODEL_INSTANCE_DRAWS,
+                total_instance_stats.draws as u32,
+            );
+            telemetry::counter(
+                telemetry::counter::MODEL_INSTANCE_BOUNDS_TESTS,
+                total_instance_stats.bounds_tests as u32,
+            );
+            telemetry::counter(
+                telemetry::counter::MODEL_INSTANCE_BOUNDS_CULLED,
+                total_instance_stats.bounds_culled as u32,
+            );
+            emit_model_counters(
+                total_instance_stats.stats,
+                telemetry::counter::MODEL_INSTANCE_PROJECTED_VERTICES,
+                telemetry::counter::MODEL_INSTANCE_SUBMITTED_TRIS,
+                telemetry::counter::MODEL_INSTANCE_CULLED_TRIS,
+                telemetry::counter::MODEL_INSTANCE_DROPPED_TRIS,
+            );
         }
 
         telemetry::counter(
@@ -2117,6 +2165,24 @@ fn camera_for_room(camera: WorldCamera, active: ActiveRuntimeRoom) -> WorldCamer
     )
 }
 
+fn player_actor_depth_for_room(
+    active: ActiveRuntimeRoom,
+    character: Option<RuntimeCharacter>,
+    models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    player: RoomPoint,
+    camera: &WorldCamera,
+) -> Option<i32> {
+    let character = character?;
+    let runtime_model = models.get(character.model.to_usize()).copied().flatten()?;
+    let origin = floor_anchored_model_origin(
+        player.x.saturating_sub(active.offset_x),
+        player.y,
+        player.z.saturating_sub(active.offset_z),
+        runtime_model.world_height,
+    );
+    Some(camera.view_vertex(origin).z)
+}
+
 /// Walk `room.material_first..material_first + material_count`,
 /// resolve each material's texture asset, and build a
 /// TextureMaterial in `out` indexed by `local_slot`. Each
@@ -2545,6 +2611,33 @@ struct ModelInstanceDrawStats {
     stats: TexturedModelRenderStats,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ModelInstanceDepthPass {
+    All,
+    BehindPlayer(i32),
+    InFrontOfPlayer(i32),
+}
+
+impl ModelInstanceDepthPass {
+    fn includes(self, depth: i32) -> bool {
+        match self {
+            Self::All => true,
+            Self::BehindPlayer(player_depth) => depth >= player_depth,
+            Self::InFrontOfPlayer(player_depth) => depth < player_depth,
+        }
+    }
+}
+
+fn accumulate_model_instance_draw_stats(
+    total: &mut ModelInstanceDrawStats,
+    stats: ModelInstanceDrawStats,
+) {
+    total.draws = total.draws.saturating_add(stats.draws);
+    total.bounds_tests = total.bounds_tests.saturating_add(stats.bounds_tests);
+    total.bounds_culled = total.bounds_culled.saturating_add(stats.bounds_culled);
+    accumulate_model_stats(&mut total.stats, stats.stats);
+}
+
 fn draw_model_instances(
     current_room: RoomIndex,
     elapsed_vblanks: u32,
@@ -2555,6 +2648,7 @@ fn draw_model_instances(
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    depth_pass: ModelInstanceDepthPass,
     triangles: &mut PrimitiveArena<'_, TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
@@ -2581,6 +2675,9 @@ fn draw_model_instances(
         // model vertices are centred around their bounds.
         let origin =
             floor_anchored_model_origin(inst.x, inst.y, inst.z, runtime_model.world_height);
+        if !depth_pass.includes(camera.view_vertex(origin).z) {
+            continue;
+        }
         // Instance Y-axis rotation from authored yaw. PSX angle
         // units (4096 per turn) → Q12 sin/cos via the existing
         // GTE shim, then composed into a rotation matrix.
@@ -2676,7 +2773,8 @@ fn model_origin_floor_lift(world_height: u16) -> i32 {
     (world_height as i32) / 2
 }
 
-const MODEL_BOUNDS_SCREEN_MARGIN: i32 = 96;
+const MODEL_BOUNDS_SCREEN_MARGIN: i32 = 192;
+const MODEL_BOUNDS_RUNTIME_RADIUS_PAD: i32 = 128;
 
 fn model_frame_bounds(
     runtime_model: RuntimeModelAsset,
@@ -2710,7 +2808,10 @@ fn model_bounds_visible(
             origin.y.saturating_add(center[1]),
             origin.z.saturating_add(center[2]),
         ),
-        bounds.radius.max(0),
+        bounds
+            .radius
+            .max(0)
+            .saturating_add(MODEL_BOUNDS_RUNTIME_RADIUS_PAD),
         MODEL_BOUNDS_SCREEN_MARGIN,
     )
 }
