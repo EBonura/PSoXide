@@ -8,10 +8,14 @@
 
 #[path = "support/disc.rs"]
 mod disc_support;
+#[path = "support/pad.rs"]
+mod pad_support;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use emulator_core::{Bus, Cpu};
+use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
 
 #[derive(Copy, Clone)]
 struct PendingCall {
@@ -34,12 +38,23 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(120_000_000);
     let disc_path = std::env::args().nth(2);
+    let held_buttons = std::env::var("PSOXIDE_PAD1")
+        .ok()
+        .and_then(|s| parse_u16_mask(&s))
+        .unwrap_or(0);
+    let pad_pulses = std::env::var("PSOXIDE_PAD1_PULSES")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| parse_pad_pulses(&s).expect("valid PSOXIDE_PAD1_PULSES"))
+        .unwrap_or_default();
 
     let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     if let Some(ref path) = disc_path {
-        let disc = disc_support::load_disc_path(std::path::Path::new(path)).expect("disc");
+        let disc = disc_support::load_disc_path(Path::new(path)).expect("disc");
         bus.cdrom.insert_disc(Some(disc));
+        bus.attach_digital_pad_port1();
+        bus.attach_memcard_port1(Vec::new());
     }
     let mut cpu = Cpu::new();
 
@@ -47,8 +62,16 @@ fn main() {
     let mut stats: BTreeMap<u32, HandleStats> = BTreeMap::new();
     let mut printed = 0u32;
     let max_prints = 64u32;
+    let mut current_pad_mask = u16::MAX;
 
     for step in 0..max_steps {
+        let vblank = bus.irq().raise_counts()[0];
+        let pad_mask = effective_mask(held_buttons, &pad_pulses, vblank);
+        if pad_mask != current_pad_mask {
+            bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
+            current_pad_mask = pad_mask;
+        }
+
         let pc = cpu.pc();
         if pending.is_none() && pc == 0x0000_00b0 && cpu.gpr(9) as u8 == 0x0b {
             pending = Some(PendingCall {
@@ -73,10 +96,8 @@ fn main() {
                     entry.false_count = entry.false_count.saturating_add(1);
                 }
 
-                let should_print = printed < max_prints
-                    || ret != 0
-                    || entry.total.is_power_of_two()
-                    || call.handle == 0;
+                let should_print =
+                    printed < max_prints || ret != 0 || entry.total.is_power_of_two();
                 if should_print {
                     println!(
                         "TestEvent call@step={} handle={:#010x} -> v0={} pc={:#010x} cycles={}",
@@ -94,6 +115,12 @@ fn main() {
 
         if pending.is_none() && !was_in_isr && cpu.in_irq_handler() {
             while cpu.in_irq_handler() {
+                let vblank = bus.irq().raise_counts()[0];
+                let pad_mask = effective_mask(held_buttons, &pad_pulses, vblank);
+                if pad_mask != current_pad_mask {
+                    bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
+                    current_pad_mask = pad_mask;
+                }
                 cpu.step(&mut bus).expect("isr step");
             }
         }

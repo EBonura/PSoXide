@@ -450,6 +450,20 @@ impl Bus {
             .unwrap_or_default()
     }
 
+    /// Histogram of memory-card command bytes observed on port 1.
+    pub fn port1_memcard_command_histogram(&self) -> Option<&[u32; 256]> {
+        self.sio0.port1().memcard().map(|m| m.command_histogram())
+    }
+
+    /// Recent memory-card protocol events seen on port 1.
+    pub fn port1_memcard_recent_events(&self) -> Vec<crate::pad::MemcardEvent> {
+        self.sio0
+            .port1()
+            .memcard()
+            .map(|m| m.recent_events())
+            .unwrap_or_default()
+    }
+
     /// Histogram of transaction-leading bytes seen on SIO0 port 1.
     pub fn port1_first_byte_histogram(&self) -> &[u32; 256] {
         self.sio0.port1().first_byte_histogram()
