@@ -4936,21 +4936,24 @@ mod tests {
             &r.data,
             ResourceData::Texture { psxt_path } if psxt_path.ends_with("dirt.psxt")
         )));
-        // Starter ships the obsidian wraith model so users can
-        // place + playtest a real animated character without
-        // running the import flow first.
-        let wraith = project
+        // Starter ships the obsidian wraith model plus a shared
+        // standalone FBX animation library, so characters are
+        // animated without relying on model-local Meshy clips.
+        let (wraith_id, wraith) = project
             .resources
             .iter()
             .find_map(|r| match &r.data {
-                ResourceData::Model(m) if r.name == "Obsidian Wraith" => Some(m),
+                ResourceData::Model(m) if r.name == "Obsidian Wraith" => Some((r.id, m)),
                 _ => None,
             })
             .expect("starter model resource missing");
         assert!(wraith.model_path.ends_with("obsidian_wraith.psxmdl"));
         assert!(wraith.texture_path.is_some());
-        assert!(!wraith.clips.is_empty());
-        assert!(wraith.default_clip.is_some());
+        assert!(wraith.clips.is_empty());
+        assert_eq!(wraith.default_clip, Some(0));
+        let resolved_clips = project.resolved_model_animation_clips(wraith_id);
+        assert_eq!(resolved_clips.len(), 9);
+        assert_eq!(resolved_clips[0].name, "Standalone FBX / neutral idle");
         assert_eq!(wraith.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
     }
 
