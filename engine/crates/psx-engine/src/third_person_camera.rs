@@ -5,7 +5,7 @@
 //! read the cooked grid room through [`RoomCollision`]. It supplies the
 //! common action-camera pieces a game wants on top of [`WorldCamera`]:
 //! manual orbit cooldown, automatic re-alignment, camera lag, lock-on
-//! framing, and a spring-arm collision solve that shortens the boom
+//! facing, and a spring-arm collision solve that shortens the boom
 //! without taking yaw control away from the player.
 
 use crate::{Angle, RoomCollision, RoomPoint, WorldCamera, WorldProjection, Q12};
@@ -322,21 +322,7 @@ fn camera_focus_goal(
     target: ThirdPersonCameraTarget,
     config: ThirdPersonCameraConfig,
 ) -> RoomPoint {
-    let player = player_focus(target.player, config.target_height);
-    if let Some(lock) = target.lock_target {
-        let lock_focus = player_focus(lock, config.target_height / 2);
-        RoomPoint::new(
-            midpoint_i32(player.x, lock_focus.x),
-            midpoint_i32(player.y, lock_focus.y),
-            midpoint_i32(player.z, lock_focus.z),
-        )
-    } else {
-        player
-    }
-}
-
-fn midpoint_i32(a: i32, b: i32) -> i32 {
-    a.saturating_add(b.saturating_sub(a) / 2)
+    player_focus(target.player, config.target_height)
 }
 
 fn solve_camera_collision(
@@ -857,6 +843,33 @@ mod tests {
         assert_eq!(camera.focus.y, target.player.y + config.target_height);
         assert!(camera.position.y > camera.focus.y);
         assert_eq!(camera.pitch_q12, default_pitch_q12(config));
+    }
+
+    #[test]
+    fn lock_on_keeps_focus_on_player() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let config = ThirdPersonCameraConfig::character(1400, 700, 400);
+        let mut target = ThirdPersonCameraTarget {
+            player: RoomPoint::new(128, 32, -64),
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+        camera.snap_to_player(target, config);
+
+        target.lock_target = Some(RoomPoint::new(4096, 1024, 4096));
+        let frame = camera.update(
+            WorldProjection::new(160, 120, 320, 64),
+            None,
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
+
+        assert_eq!(
+            frame.focus,
+            player_focus(target.player, config.target_height)
+        );
     }
 
     #[test]

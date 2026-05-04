@@ -12,6 +12,7 @@
 //! - `PSOXIDE_PAD1_PULSES='0x0008@1200+4,0x4000@1250+1'` presses one
 //!   or more masks for a fixed number of VBlanks starting at the given
 //!   VBlank count. Format per entry: `<mask>@<start_vblank>+<frames>`.
+//! - `PSOXIDE_VISIBLE_DUMP=/tmp/frame.ppm` dumps the final display frame.
 //!
 //! Best used with MMIO tracing enabled:
 //!
@@ -146,6 +147,10 @@ fn main() {
     println!("display:    {w}x{h}  hash=0x{display_hash:016x}");
     dump_pad_mask_changes(&pad_mask_changes);
     dump_pad_histogram(&bus);
+    if let Ok(path) = std::env::var("PSOXIDE_VISIBLE_DUMP") {
+        dump_visible_ppm(&bus, &path).expect("visible dump");
+        println!("\nvisible dump: {path}");
+    }
 
     #[cfg(feature = "trace-mmio")]
     dump_trace(&bus);
@@ -346,6 +351,18 @@ fn dump_pad_histogram(bus: &Bus) {
             );
         }
     }
+}
+
+fn dump_visible_ppm(bus: &Bus, path: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let (rgba, width, height) = bus.gpu.display_rgba8();
+    let mut file = std::fs::File::create(path)?;
+    writeln!(file, "P6\n{width} {height}\n255")?;
+    for px in rgba.chunks_exact(4) {
+        file.write_all(&px[..3])?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "trace-mmio")]

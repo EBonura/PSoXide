@@ -190,6 +190,129 @@ impl GridVisibleCell {
     }
 }
 
+/// Predecoded room cell header used by the cached vertex-lit room
+/// renderer.
+///
+/// The cache stores cells in flat `[x * depth + z]` order so a
+/// cooked visible-cell reference can jump directly to its surface
+/// range without asking the `.psxw` room view for its sector again.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CachedRoomCell {
+    /// Grid X coordinate inside the cooked room.
+    pub x: u16,
+    /// Grid Z coordinate inside the cooked room.
+    pub z: u16,
+    /// Minimum authored surface height in room-local engine units.
+    pub min_y: i32,
+    /// Maximum authored surface height in room-local engine units.
+    pub max_y: i32,
+    /// First surface record for this cell inside the room surface cache.
+    pub surface_first: u16,
+    /// Number of cached floor/ceiling/wall surfaces in this cell.
+    pub surface_count: u16,
+}
+
+impl CachedRoomCell {
+    /// Empty placeholder for fixed runtime cache arrays.
+    pub const EMPTY: Self = Self {
+        x: 0,
+        z: 0,
+        min_y: 0,
+        max_y: 0,
+        surface_first: 0,
+        surface_count: 0,
+    };
+
+    const fn new(
+        x: u16,
+        z: u16,
+        min_y: i32,
+        max_y: i32,
+        surface_first: u16,
+        surface_count: u16,
+    ) -> Self {
+        Self {
+            x,
+            z,
+            min_y,
+            max_y,
+            surface_first,
+            surface_count,
+        }
+    }
+}
+
+impl WorldSurfaceSample {
+    /// Empty placeholder used by fixed runtime cache arrays.
+    pub const EMPTY: Self = Self {
+        kind: WorldSurfaceKind::Floor,
+        sx: 0,
+        sz: 0,
+        center: RoomPoint::ZERO,
+        baked_vertex_rgb: None,
+        ordinal: 0,
+    };
+}
+
+/// Predecoded vertex-lit room surface.
+///
+/// This stores the frame-invariant half of room drawing: material
+/// slot, emitted vertex order, UV order, split id, and the surface
+/// lighting sample. Per-frame work still applies camera projection,
+/// culling, fog, and final ordering-table submission.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CachedRoomSurface {
+    /// Local room material slot referenced by this surface.
+    pub material_slot: u16,
+    /// Emitted quad vertices in the same order the uncached path
+    /// would submit them.
+    pub vertices: [WorldVertex; 4],
+    /// Texture-page-relative UVs matching `vertices`.
+    pub uvs: [(u8, u8); 4],
+    /// Surface lighting/material sample.
+    pub sample: WorldSurfaceSample,
+    /// Authored diagonal split id for floors/ceilings.
+    pub split: u8,
+}
+
+impl CachedRoomSurface {
+    /// Empty placeholder for fixed runtime cache arrays.
+    pub const EMPTY: Self = Self {
+        material_slot: 0,
+        vertices: [WorldVertex::ZERO; 4],
+        uvs: [(0, 0); 4],
+        sample: WorldSurfaceSample::EMPTY,
+        split: SPLIT_NW_SE,
+    };
+
+    const fn new(
+        material_slot: u16,
+        vertices: [WorldVertex; 4],
+        uvs: [(u8, u8); 4],
+        sample: WorldSurfaceSample,
+        split: u8,
+    ) -> Self {
+        Self {
+            material_slot,
+            vertices,
+            uvs,
+            sample,
+            split,
+        }
+    }
+}
+
+/// Result from building a cached room surface stream.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CachedRoomSurfaceCacheStats {
+    /// Number of cached cell headers written.
+    pub cell_count: usize,
+    /// Number of cached surface records written.
+    pub surface_count: usize,
+    /// `true` when the caller-provided arrays were too small.
+    pub overflow: bool,
+}
+
 /// Hook used by [`draw_room_lit`] to vary material tint per room
 /// surface.
 pub trait WorldSurfaceLighting {
@@ -250,7 +373,6 @@ impl WorldSurfaceLighting for NoWorldSurfaceLighting {
 /// Used by tests to spell the split id explicitly; runtime
 /// emission falls through to this case for any non-`SPLIT_NE_SW`
 /// id.
-#[cfg(test)]
 const SPLIT_NW_SE: u8 = 0;
 /// Alternate split id (NE→SW diagonal). Mirrors
 /// `psxed_format::world::split::NORTH_EAST_SOUTH_WEST`.
@@ -600,6 +722,329 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
                 ));
     }
     stats
+}
+
+/// Predecode all renderable floor, ceiling, and wall surfaces in a
+/// room into caller-owned fixed arrays.
+///
+/// Cell headers are written in flat `[x * depth + z]` order for the
+/// whole room grid. Surface records are only written for populated
+/// sectors that reference a material slot and have valid geometry.
+/// If either output slice is too small, `overflow` is set and callers
+/// should fall back to the uncached room renderer for that room.
+pub fn cache_room_vertex_lit_surfaces(
+    room: RoomRender<'_, '_>,
+    cells_out: &mut [CachedRoomCell],
+    surfaces_out: &mut [CachedRoomSurface],
+) -> CachedRoomSurfaceCacheStats {
+    let width = room.width();
+    let depth = room.depth();
+    let cell_count = (width as usize).saturating_mul(depth as usize);
+    if cell_count > cells_out.len() || cell_count > u16::MAX as usize {
+        return CachedRoomSurfaceCacheStats {
+            cell_count: 0,
+            surface_count: 0,
+            overflow: true,
+        };
+    }
+
+    let sector_size = room.sector_size();
+    let mut surface_count = 0usize;
+    let mut sx = 0u16;
+    while sx < width {
+        let mut sz = 0u16;
+        while sz < depth {
+            let cell_index = sx as usize * depth as usize + sz as usize;
+            let surface_first = surface_count;
+            cells_out[cell_index] = CachedRoomCell::new(sx, sz, 0, 0, surface_first as u16, 0);
+
+            let Some(sector) = room.sector(sx, sz) else {
+                sz += 1;
+                continue;
+            };
+
+            if sector.has_floor() {
+                if let Some(slot) = sector.floor_material() {
+                    let heights = sector.floor_heights();
+                    let sample = WorldSurfaceSample {
+                        kind: WorldSurfaceKind::Floor,
+                        sx,
+                        sz,
+                        center: horizontal_face_center(sx, sz, sector_size, heights),
+                        baked_vertex_rgb: room.floor_light(sx, sz),
+                        ordinal: 0,
+                    };
+                    if !cache_room_surface(
+                        surfaces_out,
+                        &mut surface_count,
+                        CachedRoomSurface::new(
+                            slot,
+                            horizontal_vertices(sx, sz, sector_size, heights),
+                            sector.floor_uvs(),
+                            sample,
+                            sector.floor_split(),
+                        ),
+                    ) {
+                        return CachedRoomSurfaceCacheStats {
+                            cell_count,
+                            surface_count,
+                            overflow: true,
+                        };
+                    }
+                }
+            }
+
+            if sector.has_ceiling() {
+                if let Some(slot) = sector.ceiling_material() {
+                    let heights = sector.ceiling_heights();
+                    let sample = WorldSurfaceSample {
+                        kind: WorldSurfaceKind::Ceiling,
+                        sx,
+                        sz,
+                        center: horizontal_face_center(sx, sz, sector_size, heights),
+                        baked_vertex_rgb: room.ceiling_light(sx, sz),
+                        ordinal: 0,
+                    };
+                    if !cache_room_surface(
+                        surfaces_out,
+                        &mut surface_count,
+                        CachedRoomSurface::new(
+                            slot,
+                            reverse_quad_winding(horizontal_vertices(sx, sz, sector_size, heights)),
+                            reverse_quad_winding(sector.ceiling_uvs()),
+                            sample,
+                            sector.ceiling_split(),
+                        ),
+                    ) {
+                        return CachedRoomSurfaceCacheStats {
+                            cell_count,
+                            surface_count,
+                            overflow: true,
+                        };
+                    }
+                }
+            }
+
+            let mut i = 0;
+            while i < sector.wall_count() {
+                if let Some(wall) = room.sector_wall(sector, i) {
+                    if let Some(vertices) =
+                        wall_vertices(sx, sz, sector_size, wall.direction(), wall.heights())
+                    {
+                        let sample = WorldSurfaceSample {
+                            kind: WorldSurfaceKind::Wall {
+                                direction: wall.direction(),
+                            },
+                            sx,
+                            sz,
+                            center: RoomPoint::new(
+                                average4_i32(
+                                    vertices[0].x,
+                                    vertices[1].x,
+                                    vertices[2].x,
+                                    vertices[3].x,
+                                ),
+                                average4_i32(
+                                    vertices[0].y,
+                                    vertices[1].y,
+                                    vertices[2].y,
+                                    vertices[3].y,
+                                ),
+                                average4_i32(
+                                    vertices[0].z,
+                                    vertices[1].z,
+                                    vertices[2].z,
+                                    vertices[3].z,
+                                ),
+                            ),
+                            baked_vertex_rgb: room.wall_light(sector, i),
+                            ordinal: i,
+                        };
+                        if !cache_room_surface(
+                            surfaces_out,
+                            &mut surface_count,
+                            CachedRoomSurface::new(
+                                wall.material(),
+                                vertices,
+                                wall.uvs(),
+                                sample,
+                                SPLIT_NW_SE,
+                            ),
+                        ) {
+                            return CachedRoomSurfaceCacheStats {
+                                cell_count,
+                                surface_count,
+                                overflow: true,
+                            };
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            let surface_len = surface_count.saturating_sub(surface_first);
+            if surface_len > u16::MAX as usize || surface_first > u16::MAX as usize {
+                return CachedRoomSurfaceCacheStats {
+                    cell_count,
+                    surface_count,
+                    overflow: true,
+                };
+            }
+            if surface_len > 0 {
+                let (min_y, max_y) = sector_y_bounds(room, sector);
+                cells_out[cell_index] = CachedRoomCell::new(
+                    sx,
+                    sz,
+                    min_y,
+                    max_y,
+                    surface_first as u16,
+                    surface_len as u16,
+                );
+            }
+
+            sz += 1;
+        }
+        sx += 1;
+    }
+
+    CachedRoomSurfaceCacheStats {
+        cell_count,
+        surface_count,
+        overflow: false,
+    }
+}
+
+/// Draw a vertex-lit room from cached surface records and a cooked
+/// visible-cell list.
+///
+/// This is the hot-path counterpart to
+/// [`cache_room_vertex_lit_surfaces`]. It preserves the same
+/// projection, culling, lighting/fog, and material sidedness behavior
+/// as [`draw_room_vertex_lit_visible_cells`] while avoiding per-frame
+/// room-sector decode work.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_cached_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighting>(
+    cached_cells: &[CachedRoomCell],
+    cached_surfaces: &[CachedRoomSurface],
+    room_depth: u16,
+    sector_size: i32,
+    materials: &[WorldRenderMaterial],
+    lighting: &L,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    visible_cells: &[GridVisibleCell],
+    screen_margin: i32,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> GridVisibilityStats {
+    let mut stats = GridVisibilityStats::default();
+    let depth = room_depth as usize;
+    if depth == 0 {
+        return stats;
+    }
+
+    for visible in visible_cells {
+        let cell_index = visible.x as usize * depth + visible.z as usize;
+        let Some(cell) = cached_cells.get(cell_index).copied() else {
+            continue;
+        };
+        if cell.surface_count == 0 || cell.x != visible.x || cell.z != visible.z {
+            continue;
+        }
+
+        stats.cells_considered = stats.cells_considered.saturating_add(1);
+        if !cell_visible_to_camera(
+            camera,
+            options,
+            cell.x,
+            cell.z,
+            sector_size.max(1),
+            cell.min_y,
+            cell.max_y,
+            screen_margin,
+        ) {
+            stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
+            continue;
+        }
+
+        stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        let first = cell.surface_first as usize;
+        let end = first
+            .saturating_add(cell.surface_count as usize)
+            .min(cached_surfaces.len());
+        let mut i = first;
+        while i < end {
+            stats.surfaces_considered =
+                stats
+                    .surfaces_considered
+                    .saturating_add(draw_cached_room_surface(
+                        cached_surfaces[i],
+                        materials,
+                        lighting,
+                        camera,
+                        options,
+                        triangles,
+                        world,
+                    ));
+            i += 1;
+        }
+    }
+    stats
+}
+
+fn cache_room_surface(
+    surfaces_out: &mut [CachedRoomSurface],
+    surface_count: &mut usize,
+    surface: CachedRoomSurface,
+) -> bool {
+    if *surface_count >= surfaces_out.len() || *surface_count >= u16::MAX as usize {
+        return false;
+    }
+    surfaces_out[*surface_count] = surface;
+    *surface_count += 1;
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
+    surface: CachedRoomSurface,
+    materials: &[WorldRenderMaterial],
+    lighting: &L,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> u16 {
+    let Some(&material) = materials.get(surface.material_slot as usize) else {
+        return 0;
+    };
+    let colors = vertex_lighting_colors(lighting, surface.sample, material, surface.vertices);
+    match surface.sample.kind {
+        WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => submit_split_quad_vertex_lit(
+            camera,
+            options.with_depth_policy(DepthPolicy::Farthest),
+            CullMode::Back,
+            material,
+            surface.vertices,
+            surface.uvs,
+            colors,
+            surface.split,
+            triangles,
+            world,
+        ),
+        WorldSurfaceKind::Wall { .. } => submit_quad_vertex_lit(
+            camera,
+            options,
+            CullMode::Back,
+            material,
+            surface.vertices,
+            surface.uvs,
+            colors,
+            triangles,
+            world,
+        ),
+    }
+    1
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1406,6 +1851,16 @@ const fn cell_bounds(sx: u16, sz: u16, sector_size: i32) -> (i32, i32, i32, i32)
     let z0 = (sz as i32) * sector_size;
     let z1 = ((sz as i32) + 1) * sector_size;
     (x0, x1, z0, z1)
+}
+
+fn horizontal_vertices(sx: u16, sz: u16, sector_size: i32, heights: [i32; 4]) -> [WorldVertex; 4] {
+    let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
+    [
+        WorldVertex::new(x0, heights[0], z0),
+        WorldVertex::new(x1, heights[1], z0),
+        WorldVertex::new(x1, heights[2], z1),
+        WorldVertex::new(x0, heights[3], z1),
+    ]
 }
 
 fn horizontal_face_center(sx: u16, sz: u16, sector_size: i32, heights: [i32; 4]) -> RoomPoint {

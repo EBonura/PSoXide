@@ -95,8 +95,9 @@ pub use render3d::{
     project_model_vertex_with_joint_transforms, CullMode, DepthPolicy, GouraudMeshOptions,
     GouraudRenderPass, GouraudTriCommand, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, MeshRenderStats, ProjectedTexturedVertex, ProjectedVertex,
-    TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection,
-    WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+    TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera,
+    WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions,
+    WorldTriCommand,
 };
 // Re-export the GTE math types callers need to construct
 // arguments for `submit_textured_model` (instance rotation,
@@ -115,10 +116,12 @@ pub use world::{
     SectorCollision, SectorRender, WallCollision, WallRender, WorldMaterialId, GRID_SECTOR_SIZE,
 };
 pub use world_render::{
-    draw_room, draw_room_lit, draw_room_lit_grid_visible, draw_room_vertex_lit,
-    draw_room_vertex_lit_grid_visible, draw_room_vertex_lit_visible_cells, GridVisibility,
-    GridVisibilityStats, GridVisibleCell, NoWorldSurfaceLighting, SurfaceSidedness,
-    WorldRenderMaterial, WorldSurfaceKind, WorldSurfaceLighting, WorldSurfaceSample,
+    cache_room_vertex_lit_surfaces, draw_cached_room_vertex_lit_visible_cells, draw_room,
+    draw_room_lit, draw_room_lit_grid_visible, draw_room_vertex_lit,
+    draw_room_vertex_lit_grid_visible, draw_room_vertex_lit_visible_cells, CachedRoomCell,
+    CachedRoomSurface, CachedRoomSurfaceCacheStats, GridVisibility, GridVisibilityStats,
+    GridVisibleCell, NoWorldSurfaceLighting, SurfaceSidedness, WorldRenderMaterial,
+    WorldSurfaceKind, WorldSurfaceLighting, WorldSurfaceSample,
 };
 
 /// Button-mask constants (UP, DOWN, CROSS, START, …) re-exported

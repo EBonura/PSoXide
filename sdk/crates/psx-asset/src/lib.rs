@@ -827,6 +827,16 @@ impl<'a> Animation<'a> {
     /// playback treats the final stored frame as the duplicate of
     /// frame 0 and blends `frame_count - 2` back to frame 0.
     pub fn pose_looped_q12(&self, frame_q12: u32, joint_index: u16) -> Option<JointPose> {
+        self.looped_pose_sample_q12(frame_q12)?.pose(joint_index)
+    }
+
+    /// Precomputed looping frame pair for sampling multiple joints at
+    /// the same animation phase.
+    ///
+    /// Renderers should prefer this when walking every joint in a
+    /// model: the expensive loop-frame modulo and alpha calculation
+    /// happens once per draw instead of once per joint.
+    pub fn looped_pose_sample_q12(&self, frame_q12: u32) -> Option<AnimationPoseSample<'a>> {
         if self.frame_count == 0 {
             return None;
         }
@@ -838,14 +848,34 @@ impl<'a> Animation<'a> {
         } else {
             base_frame + 1
         };
-        let alpha_q12 = (frame_q12 & 0x0fff) as u16;
-        if alpha_q12 == 0 || base_frame == next_frame {
-            return self.pose(base_frame, joint_index);
+        Some(AnimationPoseSample {
+            animation: *self,
+            base_frame,
+            next_frame,
+            alpha_q12: (frame_q12 & 0x0fff) as u16,
+        })
+    }
+}
+
+/// Reusable frame-pair sampler for one animation phase.
+#[derive(Copy, Clone, Debug)]
+pub struct AnimationPoseSample<'a> {
+    animation: Animation<'a>,
+    base_frame: u16,
+    next_frame: u16,
+    alpha_q12: u16,
+}
+
+impl AnimationPoseSample<'_> {
+    /// Joint pose at this sample's precomputed looping phase.
+    pub fn pose(&self, joint_index: u16) -> Option<JointPose> {
+        if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
+            return self.animation.pose(self.base_frame, joint_index);
         }
 
-        let a = self.pose(base_frame, joint_index)?;
-        let b = self.pose(next_frame, joint_index)?;
-        Some(lerp_pose_q12(a, b, alpha_q12))
+        let a = self.animation.pose(self.base_frame, joint_index)?;
+        let b = self.animation.pose(self.next_frame, joint_index)?;
+        Some(lerp_pose_q12(a, b, self.alpha_q12))
     }
 }
 
@@ -1961,6 +1991,8 @@ mod tests {
         let halfway = animation.pose_looped_q12(0x0800, 0).unwrap();
         assert_eq!(halfway.matrix[0][0], 3072);
         assert_eq!(halfway.translation, Vec3I32::new(50, -50, 25));
+        let sample = animation.looped_pose_sample_q12(0x0800).unwrap();
+        assert_eq!(sample.pose(0), Some(halfway));
 
         let wrapped = animation.pose_looped_q12(0x1800, 0).unwrap();
         assert_eq!(wrapped.matrix[0][0], 3072);

@@ -5,35 +5,81 @@
 
 #[path = "support/disc.rs"]
 mod disc_support;
+#[path = "support/pad.rs"]
+mod pad_support;
 
-use emulator_core::{Bus, Cpu};
+use emulator_core::{
+    fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
+};
+use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
 use std::path::Path;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let n: u64 = args
+    let mut fastboot = false;
+    let mut positional = Vec::new();
+    for arg in std::env::args().skip(1) {
+        if arg == "--fastboot" {
+            fastboot = true;
+        } else {
+            positional.push(arg);
+        }
+    }
+    let n: u64 = positional
         .first()
         .and_then(|s| s.parse().ok())
         .unwrap_or(260_000_000);
-    let disc_path = args
+    let disc_path = positional
         .get(1)
-        .expect("usage: probe_spin_state <steps> <disc.bin>");
+        .expect("usage: probe_spin_state [--fastboot] <steps> <disc.bin>");
+    let held_buttons = std::env::var("PSOXIDE_PAD1")
+        .ok()
+        .and_then(|s| parse_u16_mask(&s))
+        .unwrap_or(0);
+    let pad_pulses = std::env::var("PSOXIDE_PAD1_PULSES")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| parse_pad_pulses(&s).expect("valid PSOXIDE_PAD1_PULSES"))
+        .unwrap_or_default();
 
     let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     let disc = disc_support::load_disc_path(Path::new(disc_path)).expect("disc readable");
-    bus.cdrom.insert_disc(Some(disc));
     let mut cpu = Cpu::new();
+    if fastboot {
+        warm_bios_for_disc_fast_boot(&mut bus, &mut cpu, DISC_FAST_BOOT_WARMUP_STEPS)
+            .expect("BIOS warmup");
+        let info = fast_boot_disc_with_hle(&mut bus, &mut cpu, &disc, false).expect("fast boot");
+        println!(
+            "fastboot={} entry=0x{:08x} load=0x{:08x} payload={}B",
+            info.boot_path, info.initial_pc, info.load_addr, info.payload_len
+        );
+    }
+    bus.cdrom.insert_disc(Some(disc));
+    bus.attach_digital_pad_port1();
+    bus.attach_memcard_port1(Vec::new());
 
     let stop_cycles = std::env::var("PSOXIDE_STOP_CYCLES")
         .ok()
         .and_then(|s| s.parse::<u64>().ok());
+    let mut current_pad_mask = u16::MAX;
     let mut user_steps = 0u64;
     while user_steps < n && stop_cycles.map_or(true, |target| bus.cycles() < target) {
+        let vblank = bus.irq().raise_counts()[0];
+        let pad_mask = effective_mask(held_buttons, &pad_pulses, vblank);
+        if pad_mask != current_pad_mask {
+            bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
+            current_pad_mask = pad_mask;
+        }
         let was_in_isr = cpu.in_isr();
         cpu.step(&mut bus).expect("step");
         if !was_in_isr && cpu.in_irq_handler() {
             while cpu.in_irq_handler() {
+                let vblank = bus.irq().raise_counts()[0];
+                let pad_mask = effective_mask(held_buttons, &pad_pulses, vblank);
+                if pad_mask != current_pad_mask {
+                    bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
+                    current_pad_mask = pad_mask;
+                }
                 cpu.step(&mut bus).expect("isr step");
             }
         }
@@ -42,8 +88,19 @@ fn main() {
 
     let pc = cpu.pc();
     println!(
-        "steps={user_steps} requested_steps={n} cycles={} pc=0x{pc:08x}",
-        bus.cycles()
+        "steps={user_steps} requested_steps={n} cycles={} pc=0x{pc:08x} vblank={}",
+        bus.cycles(),
+        bus.irq().raise_counts()[0],
+    );
+    println!(
+        "pad: held=0x{held_buttons:04x} pulses={}",
+        format_pad_pulses(&pad_pulses)
+    );
+    println!(
+        "display_hash=0x{:016x} size={}x{}",
+        bus.gpu.display_hash().0,
+        bus.gpu.display_hash().1,
+        bus.gpu.display_hash().2,
     );
     println!(
         "sr=0x{:08x} cause=0x{:08x} epc=0x{:08x} istat=0x{:03x} imask=0x{:03x}",
@@ -122,6 +179,22 @@ fn main() {
             cpu.exception_counts()[9],
         );
     }
+}
+
+fn format_pad_pulses(pulses: &[pad_support::PadPulse]) -> String {
+    if pulses.is_empty() {
+        return "(none)".into();
+    }
+    pulses
+        .iter()
+        .map(|pulse| {
+            format!(
+                "0x{:04x}@{}+{}",
+                pulse.mask, pulse.start_vblank, pulse.frames
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn dump_gprs(cpu: &Cpu) {

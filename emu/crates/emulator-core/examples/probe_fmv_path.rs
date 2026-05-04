@@ -10,6 +10,8 @@
 
 #[path = "support/disc.rs"]
 mod disc_support;
+#[path = "support/pad.rs"]
+mod pad_support;
 
 use std::path::PathBuf;
 
@@ -17,6 +19,7 @@ use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, Vram,
     DISC_FAST_BOOT_WARMUP_STEPS, VRAM_HEIGHT, VRAM_WIDTH,
 };
+use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
 
 const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
 const DEFAULT_DISC: &str = "/Users/ebonura/Downloads/ps1 games/Metal Gear Solid (USA) (Disc 1) (Rev 1)/Metal Gear Solid (USA) (Disc 1) (Rev 1).cue";
@@ -57,6 +60,14 @@ fn main() {
     if dma_log_enabled {
         bus.set_dma_log_enabled(true);
     }
+    let cdr_log_cap = std::env::var("PSOXIDE_CDR_LOG")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    if cdr_log_cap > 0 {
+        bus.cdrom.enable_command_log(cdr_log_cap);
+        bus.cdrom.enable_response_log(cdr_log_cap);
+    }
     let mut cycles_at_last_pump = 0u64;
     let mut next_sample = 0u64;
     let mut error = None;
@@ -70,6 +81,15 @@ fn main() {
     let force_u8 = std::env::var("PSOXIDE_FORCE_U8")
         .ok()
         .and_then(|s| parse_force_u8(&s));
+    let held_buttons = std::env::var("PSOXIDE_PAD1")
+        .ok()
+        .and_then(|s| parse_u16_mask(&s))
+        .unwrap_or(0);
+    let pad_pulses = std::env::var("PSOXIDE_PAD1_PULSES")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| parse_pad_pulses(&s).expect("valid PSOXIDE_PAD1_PULSES"))
+        .unwrap_or_default();
     if trace_display_pixel.is_some() || trace_vram_pixel.is_some() || print_uploads {
         bus.gpu.enable_pixel_tracer();
     }
@@ -85,6 +105,8 @@ fn main() {
     }
     bus.cdrom.insert_disc(Some(disc));
     bus.attach_digital_pad_port1();
+    bus.attach_memcard_port1(Vec::new());
+    let mut current_pad_mask = u16::MAX;
 
     println!(
         "fmv probe: steps={} mode={} bios={} disc={}",
@@ -92,6 +114,10 @@ fn main() {
         if fastboot { "fastboot" } else { "bios" },
         bios_path.display(),
         disc_path.display()
+    );
+    println!(
+        "pad: held=0x{held_buttons:04x} pulses={}",
+        format_pad_pulses(&pad_pulses)
     );
     println!(
         "{:>11} {:>12} {:>10} {:>18} {:>7} {:>7} {:>7} {:>7} {:>9} {:>9} {:>9} {:>9}",
@@ -112,6 +138,12 @@ fn main() {
     for step in 0..steps {
         if let Some((addr, value)) = force_u8 {
             let _ = bus.write8_safe(addr, value);
+        }
+        let vblank = bus.irq().raise_counts()[0];
+        let pad_mask = effective_mask(held_buttons, &pad_pulses, vblank);
+        if pad_mask != current_pad_mask {
+            bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
+            current_pad_mask = pad_mask;
         }
         if step >= next_sample {
             print_sample(step, &cpu, &bus);
@@ -147,6 +179,9 @@ fn main() {
     );
     if let Some((header, subheader)) = bus.cdrom.debug_last_sector() {
         println!("cdrom_last_sector: header={header:02x?} subheader={subheader:02x?}");
+    }
+    if cdr_log_cap > 0 {
+        print_cdrom_logs(&bus);
     }
     println!(
         "mdec: state={:?} commands={} params={} macroblocks={} queued_rle={} next_rle={:?}",
@@ -297,6 +332,49 @@ fn main() {
             "force24 dump: {path} ({width}x{height}) base=({}, {})",
             x.unwrap_or_else(|| bus.gpu.display_area().x),
             y.unwrap_or_else(|| bus.gpu.display_area().y)
+        );
+    }
+}
+
+fn format_pad_pulses(pulses: &[pad_support::PadPulse]) -> String {
+    if pulses.is_empty() {
+        return "(none)".into();
+    }
+    pulses
+        .iter()
+        .map(|pulse| {
+            format!(
+                "0x{:04x}@{}+{}",
+                pulse.mask, pulse.start_vblank, pulse.frames
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_cdrom_logs(bus: &Bus) {
+    println!("cdrom_command_log:");
+    for entry in bus.cdrom.command_log() {
+        let params = entry.params[..entry.param_len as usize]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "  cycle={} cmd=0x{:02x} params=[{}]",
+            entry.cycle, entry.command, params
+        );
+    }
+    println!("cdrom_response_log:");
+    for entry in bus.cdrom.response_log() {
+        let bytes = entry.bytes[..entry.len as usize]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "  cycle={} irq={:?} bytes=[{}]",
+            entry.cycle, entry.irq, bytes
         );
     }
 }
