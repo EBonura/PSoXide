@@ -528,6 +528,11 @@ impl ApplicationHandler for Shell {
                         bus.gpu.enable_cmd_log();
                     }
                 }
+                let hw_frame_start_vram = self
+                    .state
+                    .bus
+                    .as_ref()
+                    .map(|bus| bus.gpu.vram.words().to_vec());
 
                 // Run loop: retire one video frame's worth of PSX cycles
                 // if we're in run mode. Any execution error auto-pauses
@@ -651,7 +656,7 @@ impl ApplicationHandler for Shell {
 
                 let cmd_log_start = Instant::now();
                 let frame_log = if let Some(bus) = state.bus.as_mut() {
-                    std::mem::take(&mut bus.gpu.cmd_log)
+                    bus.gpu.drain_completed_cmd_log()
                 } else {
                     Vec::new()
                 };
@@ -693,7 +698,7 @@ impl ApplicationHandler for Shell {
                 profile.vram_upload_ms = elapsed_ms(vram_upload_start);
 
                 let display_upload_start = Instant::now();
-                gfx.prepare_24bpp_display(state.bus.as_ref().map(|b| &b.gpu));
+                gfx.prepare_display(state.bus.as_ref().map(|b| &b.gpu));
                 profile.display_upload_ms = elapsed_ms(display_upload_start);
 
                 // Match the HW renderer's internal scale to the
@@ -715,8 +720,11 @@ impl ApplicationHandler for Shell {
                     })
                     .unwrap_or((320, 240));
                 let hw_scale_start = Instant::now();
-                let hw_scale_changed =
-                    gfx.update_hw_scale(scale_mode, state.framebuffer_present_size_px, display_size);
+                let hw_scale_changed = gfx.update_hw_scale(
+                    scale_mode,
+                    state.framebuffer_present_size_px,
+                    display_size,
+                );
                 profile.hw_scale_ms = elapsed_ms(hw_scale_start);
                 profile.hw_scale = gfx.hw_internal_scale() as f32;
 
@@ -726,13 +734,15 @@ impl ApplicationHandler for Shell {
                 // the active display sub-rect.
                 if let Some(bus) = state.bus.as_mut() {
                     let clone_start = Instant::now();
-                    let vram_words = bus.gpu.vram.words().to_vec();
+                    let frame_start_vram = hw_frame_start_vram
+                        .as_deref()
+                        .unwrap_or_else(|| bus.gpu.vram.words());
                     profile.hw_vram_clone_ms = elapsed_ms(clone_start);
                     if hw_scale_changed {
-                        gfx.sync_hw_target_from_vram(&vram_words);
+                        gfx.sync_hw_target_from_vram(frame_start_vram);
                     }
                     let hw_render_start = Instant::now();
-                    gfx.render_hw_frame(&bus.gpu, &frame_log, &vram_words);
+                    gfx.render_hw_frame(&bus.gpu, &frame_log, frame_start_vram);
                     profile.hw_render_ms = elapsed_ms(hw_render_start);
                 } else {
                     let empty_log: Vec<emulator_core::gpu::GpuCmdLogEntry> = Vec::new();
@@ -781,26 +791,11 @@ impl ApplicationHandler for Shell {
                 }
 
                 let vram_tex = gfx.vram_texture_id();
-                let use_24bpp_display = state
-                    .bus
-                    .as_ref()
-                    .map(|b| b.gpu.display_area().bpp24)
-                    .unwrap_or(false);
-                let (display_tex, framebuffer_source) = if use_24bpp_display {
-                    (
-                        gfx.display_texture_id(),
-                        ui::framebuffer::FramebufferSource::CpuDisplay,
-                    )
-                } else {
-                    (
-                        gfx.hw_texture_id(),
-                        ui::framebuffer::FramebufferSource::HardwareVram,
-                    )
-                };
+                let (display_tex, display_uv) = frontend_display(state.bus.as_ref(), gfx);
                 let editor_viewport = if state.embedded_playtest_running() {
                     psxed_ui::EditorViewport3dPresentation::play(
                         display_tex,
-                        editor_play_uv(state.bus.as_ref(), framebuffer_source),
+                        display_uv,
                         editor_play_metrics(state),
                     )
                 } else {
@@ -816,7 +811,7 @@ impl ApplicationHandler for Shell {
                         vram_tex,
                         display_tex,
                         editor_viewport.clone(),
-                        framebuffer_source,
+                        display_uv,
                         dt,
                     )
                 });
@@ -881,40 +876,53 @@ fn gpu_log_has_draw(log: &[emulator_core::gpu::GpuCmdLogEntry]) -> bool {
     log.iter().any(|entry| matches!(entry.opcode, 0x20..=0x7F))
 }
 
-fn editor_play_uv(
+fn frontend_display(
     bus: Option<&emulator_core::Bus>,
-    source: ui::framebuffer::FramebufferSource,
-) -> egui::Rect {
-    let area = bus
-        .map(|b| b.gpu.display_area())
+    gfx: &gfx::Graphics,
+) -> (egui::TextureId, egui::Rect) {
+    let area = display_area_or_default(bus);
+    if area.bpp24 {
+        return (gfx.display_texture_id(), cpu_display_uv(area));
+    }
+    (gfx.hw_texture_id(), hw_display_uv(area))
+}
+
+fn display_area_or_default(bus: Option<&emulator_core::Bus>) -> emulator_core::DisplayArea {
+    bus.map(|b| b.gpu.display_area())
         .unwrap_or(emulator_core::DisplayArea {
             x: 0,
             y: 0,
             width: 320,
             height: 240,
             bpp24: false,
-        });
+        })
+}
+
+fn cpu_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
     let width = area.width.max(320) as f32;
     let height = area.height.max(240) as f32;
-    match source {
-        ui::framebuffer::FramebufferSource::CpuDisplay => egui::Rect::from_min_max(
-            egui::pos2(0.0, 0.0),
-            egui::pos2(
-                width / gfx::MAX_DISPLAY_WIDTH as f32,
-                height / gfx::MAX_DISPLAY_HEIGHT as f32,
-            ),
+    egui::Rect::from_min_max(
+        egui::pos2(0.0, 0.0),
+        egui::pos2(
+            width / gfx::MAX_DISPLAY_WIDTH as f32,
+            height / gfx::MAX_DISPLAY_HEIGHT as f32,
         ),
-        ui::framebuffer::FramebufferSource::HardwareVram => egui::Rect::from_min_max(
-            egui::pos2(
-                area.x as f32 / psx_gpu_render::VRAM_WIDTH as f32,
-                area.y as f32 / psx_gpu_render::VRAM_HEIGHT as f32,
-            ),
-            egui::pos2(
-                (area.x as f32 + width) / psx_gpu_render::VRAM_WIDTH as f32,
-                (area.y as f32 + height) / psx_gpu_render::VRAM_HEIGHT as f32,
-            ),
+    )
+}
+
+fn hw_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
+    let width = area.width.max(320) as f32;
+    let height = area.height.max(240) as f32;
+    egui::Rect::from_min_max(
+        egui::pos2(
+            area.x as f32 / psx_gpu_render::VRAM_WIDTH as f32,
+            area.y as f32 / psx_gpu_render::VRAM_HEIGHT as f32,
         ),
-    }
+        egui::pos2(
+            (area.x as f32 + width) / psx_gpu_render::VRAM_WIDTH as f32,
+            (area.y as f32 + height) / psx_gpu_render::VRAM_HEIGHT as f32,
+        ),
+    )
 }
 
 fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytestMetrics> {

@@ -524,6 +524,33 @@ impl Gpu {
         self.cmd_log_enabled
     }
 
+    /// Drain only complete command-log entries.
+    ///
+    /// CPU→VRAM uploads are one GP0 setup packet followed by many
+    /// payload writes. The setup entry owns the payload words in
+    /// `cmd_log`; if a frontend drains the log mid-upload, the
+    /// remaining payload would otherwise append to an entry that has
+    /// already been moved out. Keep that in-flight upload entry in
+    /// place and return only the commands before it.
+    pub fn drain_completed_cmd_log(&mut self) -> Vec<GpuCmdLogEntry> {
+        let Some(pending_index) = self.vram_upload.and_then(|t| t.cmd_log_index) else {
+            return std::mem::take(&mut self.cmd_log);
+        };
+        if pending_index >= self.cmd_log.len() {
+            return std::mem::take(&mut self.cmd_log);
+        }
+
+        let pending = self.cmd_log.split_off(pending_index);
+        let drained = std::mem::replace(&mut self.cmd_log, pending);
+        if let Some(upload) = self.vram_upload.as_mut() {
+            upload.cmd_log_index = Some(0);
+        }
+        if let Some(entry) = self.cmd_log.first_mut() {
+            entry.index = 0;
+        }
+        drained
+    }
+
     /// Look up which command drew the pixel at (x, y), returning
     /// `None` if no command has touched that pixel since the tracer
     /// was enabled (or if the tracer is off). The returned entry
@@ -3990,6 +4017,43 @@ mod tests {
         assert_eq!(gpu.vram.get_pixel(0, 0), 0x1111);
         assert_eq!(gpu.vram.get_pixel(1, 0), 0x2222);
         assert_eq!(gpu.vram.get_pixel(2, 0), 0x3333);
+    }
+
+    #[test]
+    fn cmd_log_drain_keeps_in_flight_upload_payload_attached() {
+        let mut gpu = Gpu::new();
+        gpu.enable_cmd_log();
+
+        gpu.gp0_push(0xE1_00_00_00);
+        gpu.gp0_push(0xA0_00_00_00);
+        gpu.gp0_push(0x0000_0000); // x=0, y=0
+        gpu.gp0_push(0x0001_0003); // w=3, h=1 -> 2 payload words
+        gpu.gp0_push(0x2222_1111);
+
+        let drained = gpu.drain_completed_cmd_log();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].opcode, 0xE1);
+        assert_eq!(gpu.cmd_log.len(), 1);
+        assert_eq!(gpu.cmd_log[0].opcode, 0xA0);
+        assert_eq!(
+            gpu.cmd_log[0].fifo,
+            vec![0xA0_00_00_00, 0x0000_0000, 0x0001_0003, 0x2222_1111]
+        );
+
+        gpu.gp0_push(0x4444_3333);
+        let drained = gpu.drain_completed_cmd_log();
+        assert!(gpu.cmd_log.is_empty());
+        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            drained[0].fifo,
+            vec![
+                0xA0_00_00_00,
+                0x0000_0000,
+                0x0001_0003,
+                0x2222_1111,
+                0x4444_3333
+            ]
+        );
     }
 
     #[test]
