@@ -6,13 +6,22 @@
 //! counter, a flag) that we're not updating correctly.
 //!
 //! ```bash
-//! PSOXIDE_DISC=path/to/game.bin \
+//! PSOXIDE_DISC=path/to/game.cue \
+//! PSOXIDE_PAD1_PULSES="0x0008@600+8,0x4000@650+8" \
 //!   cargo run -p emulator-core --example bios_syscall_probe --release -- 2000000000
 //! ```
 
+#[path = "support/disc.rs"]
+mod disc_support;
+#[path = "support/pad.rs"]
+mod pad_support;
+
 use emulator_core::{Bus, Cpu};
-use psx_iso::Disc;
+use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
 use std::path::PathBuf;
+
+const SPU_PUMP_CYCLES: u64 = 560_000;
+const SPU_FRAME_SAMPLES: usize = 735;
 
 fn main() {
     let n: u64 = std::env::args()
@@ -26,11 +35,38 @@ fn main() {
     let bios = std::fs::read(&bios_path).expect("BIOS readable");
     let mut bus = Bus::new(bios).expect("bus");
     if let Ok(disc_path) = std::env::var("PSOXIDE_DISC") {
-        let disc_bytes = std::fs::read(&disc_path).expect("disc readable");
-        bus.cdrom.insert_disc(Some(Disc::from_bin(disc_bytes)));
+        let disc = disc_support::load_disc_path(&PathBuf::from(&disc_path)).expect("disc readable");
+        bus.cdrom.insert_disc(Some(disc));
         eprintln!("[probe] mounted {disc_path}");
     }
+    bus.attach_digital_pad_port1();
+    if std::env::var_os("PSOXIDE_NO_MEMCARD").is_some() {
+        bus.detach_memcard_port1();
+        bus.detach_memcard_port2();
+    } else {
+        bus.attach_memcard_port1(Vec::new());
+    }
     let mut cpu = Cpu::new();
+    let held_buttons = std::env::var("PSOXIDE_PAD1")
+        .ok()
+        .and_then(|s| parse_u16_mask(&s))
+        .unwrap_or(0);
+    let pad_pulses = std::env::var("PSOXIDE_PAD1_PULSES")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| parse_pad_pulses(&s).expect("valid PSOXIDE_PAD1_PULSES"))
+        .unwrap_or_default();
+    let trace_start = std::env::var("PSOXIDE_SYSCALL_TRACE_START")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
+    let trace_limit = std::env::var("PSOXIDE_SYSCALL_TRACE_LIMIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(128);
+    let mut trace_count = 0usize;
+    let mut current_pad_mask = u16::MAX;
+    let mut cycles_at_last_pump = 0u64;
 
     // Histograms: [table][function_index] → call count.
     //   table 0 = A-functions @ 0xa0
@@ -53,6 +89,7 @@ fn main() {
     let mut last_cdrom_cmd_count: u64 = 0;
 
     for i in 0..n {
+        sync_pad_mask(&mut bus, held_buttons, &pad_pulses, &mut current_pad_mask);
         // Before each step, sample pc -- dispatch happens when we
         // execute at exactly 0xa0 / 0xb0 / 0xc0 (the J to the
         // table dispatcher). `t1` carries the function number.
@@ -70,6 +107,21 @@ fn main() {
                 recent.pop_front();
             }
             recent.push_back((i, t, t1, cpu.gprs()[31]));
+            if i >= trace_start && trace_count < trace_limit {
+                trace_count += 1;
+                eprintln!(
+                    "[syscall] step={i} cyc={} {}(0x{t1:02X}) {} \
+                     a0=0x{:08x} a1=0x{:08x} a2=0x{:08x} a3=0x{:08x} ra=0x{:08x}",
+                    bus.cycles(),
+                    ["A", "B", "C"][t as usize],
+                    function_name(t, t1),
+                    cpu.gprs()[4],
+                    cpu.gprs()[5],
+                    cpu.gprs()[6],
+                    cpu.gprs()[7],
+                    cpu.gprs()[31],
+                );
+            }
 
             // Putchar capture: argument is in $a0.
             let a0 = cpu.gprs()[4];
@@ -105,6 +157,11 @@ fn main() {
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[probe] step {i} error: {e:?}");
             break;
+        }
+        if bus.cycles().saturating_sub(cycles_at_last_pump) > SPU_PUMP_CYCLES {
+            cycles_at_last_pump = bus.cycles();
+            bus.run_spu_samples(SPU_FRAME_SAMPLES);
+            let _ = bus.spu.drain_audio();
         }
 
         // After each step, check whether a new CDROM command
@@ -183,6 +240,20 @@ fn main() {
             "  step {step:>10}  {}(0x{:02X}) {} ra=0x{:08x}",
             labels[*table as usize], fn_no, name, ra
         );
+    }
+}
+
+fn sync_pad_mask(
+    bus: &mut Bus,
+    held_buttons: u16,
+    pad_pulses: &[pad_support::PadPulse],
+    current_pad_mask: &mut u16,
+) {
+    let vblank = bus.irq().raise_counts()[0];
+    let pad_mask = effective_mask(held_buttons, pad_pulses, vblank);
+    if pad_mask != *current_pad_mask {
+        bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
+        *current_pad_mask = pad_mask;
     }
 }
 
