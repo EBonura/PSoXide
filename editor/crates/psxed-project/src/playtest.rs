@@ -306,6 +306,8 @@ pub fn build_package(
     let mut entities: Vec<PlaytestEntity> = Vec::new();
     let mut models: Vec<PlaytestModel> = Vec::new();
     let mut model_clips: Vec<PlaytestModelClip> = Vec::new();
+    let mut model_clip_bounds: Vec<PlaytestModelClipBounds> = Vec::new();
+    let mut model_frame_bounds: Vec<PlaytestModelFrameBounds> = Vec::new();
     let mut model_sockets: Vec<PlaytestModelSocket> = Vec::new();
     let mut model_instances: Vec<PlaytestModelInstance> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
@@ -392,6 +394,8 @@ pub fn build_package(
                             &mut assets,
                             &mut models,
                             &mut model_clips,
+                            &mut model_clip_bounds,
+                            &mut model_frame_bounds,
                             &mut model_sockets,
                             &mut model_instances,
                             &mut model_for_resource,
@@ -426,6 +430,8 @@ pub fn build_package(
                             &mut assets,
                             &mut models,
                             &mut model_clips,
+                            &mut model_clip_bounds,
+                            &mut model_frame_bounds,
                             &mut model_sockets,
                             &mut model_for_resource,
                             &mut weapon_hitboxes,
@@ -511,6 +517,8 @@ pub fn build_package(
                         &mut assets,
                         &mut models,
                         &mut model_clips,
+                        &mut model_clip_bounds,
+                        &mut model_frame_bounds,
                         &mut model_sockets,
                         &mut model_instances,
                         &mut model_for_resource,
@@ -682,6 +690,8 @@ pub fn build_package(
                         &mut assets,
                         &mut models,
                         &mut model_clips,
+                        &mut model_clip_bounds,
+                        &mut model_frame_bounds,
                         &mut model_sockets,
                         &mut model_for_resource,
                         &mut characters,
@@ -742,6 +752,8 @@ pub fn build_package(
             visible_cells,
             models,
             model_clips,
+            model_clip_bounds,
+            model_frame_bounds,
             model_sockets,
             model_instances,
             weapon_hitboxes,
@@ -771,6 +783,8 @@ fn cook_player_character(
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
+    model_clip_bounds: &mut Vec<PlaytestModelClipBounds>,
+    model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut std::collections::HashMap<ResourceId, u16>,
     characters: &mut Vec<PlaytestCharacter>,
@@ -815,6 +829,8 @@ fn cook_player_character(
         assets,
         models,
         model_clips,
+        model_clip_bounds,
+        model_frame_bounds,
         model_sockets,
         model_for_resource,
         report,
@@ -1008,6 +1024,8 @@ fn register_model_for_instance(
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
+    model_clip_bounds: &mut Vec<PlaytestModelClipBounds>,
+    model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut std::collections::HashMap<ResourceId, u16>,
     report: &mut PlaytestValidationReport,
@@ -1077,7 +1095,7 @@ fn register_model_for_instance(
     let mesh_asset_index = assets.len();
     assets.push(PlaytestAsset {
         kind: PlaytestAssetKind::ModelMesh,
-        bytes: mesh_bytes,
+        bytes: mesh_bytes.clone(),
         filename: format!("{folder}/mesh.psxmdl"),
         source_label: resource.name.clone(),
     });
@@ -1169,6 +1187,44 @@ fn register_model_for_instance(
             ));
             return None;
         }
+        let frame_first = match u16::try_from(model_frame_bounds.len()) {
+            Ok(index) => index,
+            Err(_) => {
+                report.error(format!(
+                    "Model '{}' clip '{}': too many baked model-bound frames",
+                    resource.name, clip.name
+                ));
+                return None;
+            }
+        };
+        let clip_index = match u16::try_from(model_clips.len()) {
+            Ok(index) => index,
+            Err(_) => {
+                report.error(format!(
+                    "Model '{}' has too many animation clips for the playtest manifest",
+                    resource.name
+                ));
+                return None;
+            }
+        };
+        let baked_bounds = bake_model_clip_frame_bounds(&parsed_model, &parsed_anim);
+        let frame_count = match u16::try_from(baked_bounds.len()) {
+            Ok(count) => count,
+            Err(_) => {
+                report.error(format!(
+                    "Model '{}' clip '{}': too many baked model-bound frames",
+                    resource.name, clip.name
+                ));
+                return None;
+            }
+        };
+        model_frame_bounds.extend(baked_bounds);
+        model_clip_bounds.push(PlaytestModelClipBounds {
+            model: model_index,
+            clip: clip_index,
+            first_frame: frame_first,
+            frame_count,
+        });
         let asset_index = assets.len();
         let safe_clip = sanitise_model_dirname(&clip.name);
         assets.push(PlaytestAsset {
@@ -1261,6 +1317,230 @@ fn register_model_for_instance(
     Some(model_index)
 }
 
+const MODEL_FRAME_BOUNDS_PAD_UNITS: i32 = 64;
+
+#[derive(Clone, Copy)]
+struct ModelBoundsJointTransform {
+    matrix: [[i16; 3]; 3],
+    translation: [i32; 3],
+}
+
+fn bake_model_clip_frame_bounds(
+    model: &psx_asset::Model<'_>,
+    animation: &psx_asset::Animation<'_>,
+) -> Vec<PlaytestModelFrameBounds> {
+    let frame_count = animation.frame_count();
+    let cycle_frames = frame_count.saturating_sub(1).max(1);
+    let mut out = Vec::with_capacity(cycle_frames as usize);
+    let mut frame = 0u16;
+    while frame < cycle_frames {
+        let next = if cycle_frames <= 1 || frame + 1 >= cycle_frames {
+            0
+        } else {
+            frame + 1
+        };
+        out.push(bake_model_frame_pair_bounds(model, animation, frame, next));
+        frame += 1;
+    }
+    out
+}
+
+fn bake_model_frame_pair_bounds(
+    model: &psx_asset::Model<'_>,
+    animation: &psx_asset::Animation<'_>,
+    a: u16,
+    b: u16,
+) -> PlaytestModelFrameBounds {
+    let mut min = [i32::MAX; 3];
+    let mut max = [i32::MIN; 3];
+    accumulate_model_frame_bounds(model, animation, a, &mut min, &mut max);
+    if b != a {
+        accumulate_model_frame_bounds(model, animation, b, &mut min, &mut max);
+    }
+
+    if min[0] == i32::MAX {
+        return PlaytestModelFrameBounds {
+            center: [0, 0, 0],
+            radius: MODEL_FRAME_BOUNDS_PAD_UNITS,
+        };
+    }
+
+    let center = [
+        average_i32(min[0], max[0]),
+        average_i32(min[1], max[1]),
+        average_i32(min[2], max[2]),
+    ];
+    let radius = aabb_radius(min, max).saturating_add(MODEL_FRAME_BOUNDS_PAD_UNITS);
+    PlaytestModelFrameBounds { center, radius }
+}
+
+fn accumulate_model_frame_bounds(
+    model: &psx_asset::Model<'_>,
+    animation: &psx_asset::Animation<'_>,
+    frame: u16,
+    min: &mut [i32; 3],
+    max: &mut [i32; 3],
+) {
+    let joint_count = model.joint_count().min(animation.joint_count());
+    let mut joints = Vec::with_capacity(joint_count as usize);
+    let mut joint = 0u16;
+    while joint < joint_count {
+        if let Some(pose) = animation.pose(frame, joint) {
+            joints.push(model_bounds_joint_transform(
+                pose,
+                model.local_to_world_q12(),
+            ));
+        }
+        joint += 1;
+    }
+
+    let mut part_index = 0u16;
+    while part_index < model.part_count() {
+        let Some(part) = model.part(part_index) else {
+            part_index += 1;
+            continue;
+        };
+        let primary_joint = part.joint_index() as usize;
+        let Some(primary) = joints.get(primary_joint).copied() else {
+            part_index += 1;
+            continue;
+        };
+        let first = part.first_vertex();
+        let end = first
+            .saturating_add(part.vertex_count())
+            .min(model.vertex_count());
+        let mut vertex_index = first;
+        while vertex_index < end {
+            if let Some(vertex) = model.vertex(vertex_index) {
+                let mut point = transform_model_bounds_vertex(primary, vertex);
+                if vertex.is_blend() {
+                    if let Some(secondary) = joints.get(vertex.joint1 as usize).copied() {
+                        let secondary_point = transform_model_bounds_vertex(secondary, vertex);
+                        point = lerp_bounds_point(point, secondary_point, vertex.blend);
+                    }
+                }
+                include_bounds_point(point, min, max);
+            }
+            vertex_index += 1;
+        }
+        part_index += 1;
+    }
+}
+
+fn model_bounds_joint_transform(
+    pose: psx_asset::JointPose,
+    local_to_world_q12: u16,
+) -> ModelBoundsJointTransform {
+    let mut matrix = [[0i16; 3]; 3];
+    let mut row = 0usize;
+    while row < 3 {
+        let mut col = 0usize;
+        while col < 3 {
+            matrix[row][col] =
+                clamp_i16_i64(((pose.matrix[col][row] as i64) * (local_to_world_q12 as i64)) >> 12);
+            col += 1;
+        }
+        row += 1;
+    }
+    ModelBoundsJointTransform {
+        matrix,
+        translation: [
+            apply_q12_i32(pose.translation.x, local_to_world_q12),
+            apply_q12_i32(pose.translation.y, local_to_world_q12),
+            apply_q12_i32(pose.translation.z, local_to_world_q12),
+        ],
+    }
+}
+
+fn transform_model_bounds_vertex(
+    transform: ModelBoundsJointTransform,
+    vertex: psx_asset::ModelVertex,
+) -> [i32; 3] {
+    let vx = vertex.position.x as i64;
+    let vy = vertex.position.y as i64;
+    let vz = vertex.position.z as i64;
+    let row = |row: [i16; 3], translation: i32| -> i32 {
+        let value = ((row[0] as i64) * vx + (row[1] as i64) * vy + (row[2] as i64) * vz) >> 12;
+        clamp_i32_i64(value.saturating_add(translation as i64))
+    };
+    [
+        row(transform.matrix[0], transform.translation[0]),
+        row(transform.matrix[1], transform.translation[1]),
+        row(transform.matrix[2], transform.translation[2]),
+    ]
+}
+
+fn lerp_bounds_point(a: [i32; 3], b: [i32; 3], t: u8) -> [i32; 3] {
+    let t = t as i64;
+    let inv = 256 - t;
+    [
+        clamp_i32_i64(((a[0] as i64) * inv + (b[0] as i64) * t) >> 8),
+        clamp_i32_i64(((a[1] as i64) * inv + (b[1] as i64) * t) >> 8),
+        clamp_i32_i64(((a[2] as i64) * inv + (b[2] as i64) * t) >> 8),
+    ]
+}
+
+fn include_bounds_point(point: [i32; 3], min: &mut [i32; 3], max: &mut [i32; 3]) {
+    let mut axis = 0usize;
+    while axis < 3 {
+        min[axis] = min[axis].min(point[axis]);
+        max[axis] = max[axis].max(point[axis]);
+        axis += 1;
+    }
+}
+
+fn average_i32(a: i32, b: i32) -> i32 {
+    (((a as i64) + (b as i64)) / 2).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn aabb_radius(min: [i32; 3], max: [i32; 3]) -> i32 {
+    let half_x = half_extent_u128(min[0], max[0]);
+    let half_y = half_extent_u128(min[1], max[1]);
+    let half_z = half_extent_u128(min[2], max[2]);
+    let square = half_x
+        .saturating_mul(half_x)
+        .saturating_add(half_y.saturating_mul(half_y))
+        .saturating_add(half_z.saturating_mul(half_z));
+    ceil_sqrt_u128(square).min(i32::MAX as u128) as i32
+}
+
+fn half_extent_u128(min: i32, max: i32) -> u128 {
+    let extent = (max as i64).saturating_sub(min as i64).unsigned_abs() as u128;
+    (extent + 1) / 2
+}
+
+fn ceil_sqrt_u128(value: u128) -> u128 {
+    if value <= 1 {
+        return value;
+    }
+    let mut hi = 1u128;
+    while hi.saturating_mul(hi) < value {
+        hi = hi.saturating_mul(2);
+    }
+    let mut lo = hi / 2;
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if mid.saturating_mul(mid) >= value {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
+}
+
+fn apply_q12_i32(value: i32, q12: u16) -> i32 {
+    clamp_i32_i64(((value as i64) * (q12 as i64)) >> 12)
+}
+
+fn clamp_i16_i64(value: i64) -> i16 {
+    value.clamp(i16::MIN as i64, i16::MAX as i64) as i16
+}
+
+fn clamp_i32_i64(value: i64) -> i32 {
+    value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
 fn push_model_instance_for_resource(
     project: &ProjectDocument,
     project_root: &Path,
@@ -1273,6 +1553,8 @@ fn push_model_instance_for_resource(
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
+    model_clip_bounds: &mut Vec<PlaytestModelClipBounds>,
+    model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_instances: &mut Vec<PlaytestModelInstance>,
     model_for_resource: &mut HashMap<ResourceId, u16>,
@@ -1285,6 +1567,8 @@ fn push_model_instance_for_resource(
         assets,
         models,
         model_clips,
+        model_clip_bounds,
+        model_frame_bounds,
         model_sockets,
         model_for_resource,
         report,
@@ -1326,6 +1610,8 @@ fn register_weapon_for_equipment(
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
+    model_clip_bounds: &mut Vec<PlaytestModelClipBounds>,
+    model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut HashMap<ResourceId, u16>,
     weapon_hitboxes: &mut Vec<PlaytestWeaponHitbox>,
@@ -1359,6 +1645,8 @@ fn register_weapon_for_equipment(
             assets,
             models,
             model_clips,
+            model_clip_bounds,
+            model_frame_bounds,
             model_sockets,
             model_for_resource,
             report,
@@ -2744,6 +3032,15 @@ mod tests {
             package.model_animation_asset_count(),
             package.model_clips.len()
         );
+        assert_eq!(package.model_clip_bounds.len(), package.model_clips.len());
+        assert!(!package.model_frame_bounds.is_empty());
+        for bounds in &package.model_clip_bounds {
+            let first = bounds.first_frame as usize;
+            let count = bounds.frame_count as usize;
+            assert!(count > 0);
+            assert!(first + count <= package.model_frame_bounds.len());
+            assert!(package.model_frame_bounds[first].radius > 0);
+        }
     }
 
     #[test]
@@ -3594,9 +3891,13 @@ mod tests {
         assert!(src.contains("LevelModelRecord"));
         assert!(src.contains("LevelModelInstanceRecord"));
         assert!(src.contains("LevelModelClipRecord"));
+        assert!(src.contains("LevelModelClipBoundsRecord"));
+        assert!(src.contains("LevelModelFrameBoundsRecord"));
         assert!(src.contains("MODEL_INSTANCES"));
         assert!(src.contains("MODELS"));
         assert!(src.contains("MODEL_CLIPS"));
+        assert!(src.contains("MODEL_CLIP_BOUNDS"));
+        assert!(src.contains("MODEL_FRAME_BOUNDS"));
         assert!(src.contains("AssetKind::ModelMesh"));
         assert!(src.contains("AssetKind::ModelAnimation"));
     }

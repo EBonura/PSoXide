@@ -4,10 +4,11 @@
 
 use psx_level::{
     EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCharacterRecord, LevelMaterialRecord,
-    LevelModelClipRecord, LevelModelInstanceRecord, LevelModelRecord, LevelModelSocketRecord,
-    LevelRoomRecord, LevelRoomVisibilityRecord, LevelVisibilityCellRecord,
-    LevelVisibleCellRecord, LevelWeaponRecord, PlayerControllerRecord, PlayerSpawnRecord,
-    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
+    LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
+    LevelModelInstanceRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
+    LevelRoomVisibilityRecord, LevelVisibilityCellRecord, LevelVisibleCellRecord,
+    LevelWeaponRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
+    RoomResidencyRecord, WeaponHitboxRecord,
 };
 
 pub static ASSETS: &[LevelAssetRecord] = &[];
@@ -28,6 +29,8 @@ pub static PLAYER_SPAWN: PlayerSpawnRecord = PlayerSpawnRecord {
 };
 
 pub static MODEL_CLIPS: &[LevelModelClipRecord] = &[];
+pub static MODEL_CLIP_BOUNDS: &[LevelModelClipBoundsRecord] = &[];
+pub static MODEL_FRAME_BOUNDS: &[LevelModelFrameBoundsRecord] = &[];
 pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];
 pub static MODELS: &[LevelModelRecord] = &[];
 pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
