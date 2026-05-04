@@ -167,10 +167,14 @@ fn main() {
     let starts = bus.dma_start_triggers();
     println!("dma_start_triggers: {starts:?}");
     println!(
-        "cdrom: irq_counts={:?} pending={} fifo={} audio_queue={} sector_events={} mode=0x{:02x} filter={:?} read_lba={}",
+        "cdrom: irq_counts={:?} irq_flag=0x{:02x} irq_mask=0x{:02x} pending={} fifo={} ready={} armed={} audio_queue={} sector_events={} mode=0x{:02x} filter={:?} read_lba={}",
         bus.cdrom.irq_type_counts,
+        bus.cdrom.irq_flag(),
+        bus.cdrom.irq_mask_value(),
         bus.cdrom.pending_queue_len(),
         bus.cdrom.data_fifo_len(),
+        bus.cdrom.data_fifo_ready(),
+        bus.cdrom.data_transfer_armed(),
         bus.cdrom.cd_audio_queue_len(),
         bus.cdrom.sector_events_scheduled,
         bus.cdrom.debug_mode(),
@@ -201,19 +205,11 @@ fn main() {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    print_watch_words(
-        &bus,
-        &[
-            ("re2_vblank_counter", 0x800a_cd00),
-            ("re2_wait_base", 0x800a_bbe8),
-            ("re2_input_ptr", 0x800a_bbdc),
-            ("re2_movie_state", 0x800d_7680),
-            ("re2_movie_flags", 0x800d_7684),
-            ("re2_movie_ptr0", 0x800d_7670),
-            ("re2_movie_ptr1", 0x800d_75d8),
-            ("re2_str_ptr", 0x800f_8980),
-        ],
-    );
+    let mut watch_words = default_watch_words();
+    if let Ok(extra) = std::env::var("PSOXIDE_WATCH_WORDS") {
+        watch_words.extend(parse_watch_words(&extra));
+    }
+    print_watch_words(&bus, &watch_words);
     print_pad_trace(&bus);
     let da = bus.gpu.display_area();
     let display_starts = bus
@@ -380,6 +376,28 @@ fn print_cdrom_logs(bus: &Bus) {
 }
 
 fn print_pad_trace(bus: &Bus) {
+    println!("port1_first_histogram:");
+    for (value, &count) in bus.port1_first_byte_histogram().iter().enumerate() {
+        if count > 0 {
+            println!("  0x{value:02x}: {count}");
+        }
+    }
+    if let Some(hist) = bus.port1_pad_command_histogram() {
+        println!("port1_pad_command_histogram:");
+        for (value, &count) in hist.iter().enumerate() {
+            if count > 0 {
+                println!("  0x{value:02x}: {count}");
+            }
+        }
+    }
+    if let Some(hist) = bus.port1_memcard_command_histogram() {
+        println!("port1_memcard_command_histogram:");
+        for (value, &count) in hist.iter().enumerate() {
+            if count > 0 {
+                println!("  0x{value:02x}: {count}");
+            }
+        }
+    }
     let cmds = bus
         .port1_pad_recent_commands()
         .into_iter()
@@ -412,6 +430,13 @@ fn print_pad_trace(bus: &Bus) {
             poll.complete, poll.len, tx, rx
         );
     }
+    println!("port1_memcard_recent_events:");
+    for (i, event) in bus.port1_memcard_recent_events().iter().enumerate() {
+        println!(
+            "  #{i}: kind={:?} cmd=0x{:02x} frame={} byte={} status=0x{:02x}",
+            event.kind, event.command, event.frame, event.byte_index, event.status
+        );
+    }
 }
 
 fn parse_xy(text: &str) -> Option<(u16, u16)> {
@@ -431,6 +456,47 @@ fn parse_u32(text: &str) -> Option<u32> {
     } else {
         text.parse().ok()
     }
+}
+
+fn default_watch_words() -> Vec<(&'static str, u32)> {
+    vec![
+        ("re2_vblank_counter", 0x800a_cd00),
+        ("re2_wait_base", 0x800a_bbe8),
+        ("re2_input_ptr", 0x800a_bbdc),
+        ("re2_movie_state", 0x800d_7680),
+        ("re2_movie_flags", 0x800d_7684),
+        ("re2_movie_ptr0", 0x800d_7670),
+        ("re2_movie_ptr1", 0x800d_75d8),
+        ("re2_str_ptr", 0x800f_8980),
+        ("mgs_console_gate", 0x800a_64e0),
+        ("mgs_console_char", 0x800a_64e4),
+        ("mgs_console_arg", 0x800a_64e8),
+        ("mgs_exec_counter", 0x800a_64a8),
+        ("mgs_task_index", 0x800c_3518),
+        ("mgs_task_slot0", 0x800c_33a0),
+        ("mgs_task_slot1", 0x800c_33c0),
+        ("mgs_task_slot2", 0x800c_33e0),
+        ("mgs_pad_bytes", 0x800c_3bd8),
+    ]
+}
+
+fn parse_watch_words(text: &str) -> Vec<(&'static str, u32)> {
+    let mut out = Vec::new();
+    for entry in text.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (label, addr_text) = match entry.split_once(':') {
+            Some((label, addr)) => (label.trim().to_string(), addr.trim()),
+            None => (entry.to_string(), entry),
+        };
+        if let Some(addr) = parse_u32(addr_text) {
+            let leaked: &'static str = Box::leak(label.into_boxed_str());
+            out.push((leaked, addr));
+        }
+    }
+    out
 }
 
 fn trace_pixel_owner(gpu: &emulator_core::Gpu, label: &str, x: u16, y: u16) {
