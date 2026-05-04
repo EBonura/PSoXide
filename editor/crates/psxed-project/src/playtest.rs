@@ -2441,11 +2441,10 @@ mod tests {
         assert_eq!(pc.character, 0);
         assert_eq!(pc.spawn, package.spawn.unwrap());
         let character = &package.characters[0];
-        // Crimson local clips are agree/run/walk; idle comes
-        // from the shared Wraith idle library clip appended to
-        // the compatible resolved clip list.
-        assert_eq!(character.idle_clip, 6);
-        assert_eq!(character.walk_clip, 2);
+        // Starter characters use the shared standalone FBX
+        // library rather than model-local Meshy clips.
+        assert_eq!(character.idle_clip, 0);
+        assert_eq!(character.walk_clip, 1);
         assert_eq!(character.run_clip, 1);
         assert_eq!(character.turn_clip, CHARACTER_CLIP_NONE);
     }
@@ -3315,7 +3314,7 @@ mod tests {
     #[test]
     fn equipment_component_emits_weapon_and_hitbox_records() {
         let starter = ProjectDocument::starter();
-        let starter_model = starter
+        let mut starter_model = starter
             .resources
             .iter()
             .find_map(|resource| match &resource.data {
@@ -3323,6 +3322,10 @@ mod tests {
                 _ => None,
             })
             .expect("starter has a model");
+        starter_model.clips.push(crate::ModelAnimationClip {
+            name: "neutral idle".to_string(),
+            psxanim_path: "assets/animations/standalone_fbx/neutral_idle.psxanim".to_string(),
+        });
         let mut project = ProjectDocument::new("equipment-test");
         let texture = project.add_resource(
             "Floor Texture",
@@ -3339,9 +3342,9 @@ mod tests {
             "Wraith Character",
             ResourceData::Character(crate::CharacterResource {
                 model: Some(model),
-                idle_clip: Some(3),
-                walk_clip: Some(7),
-                run_clip: Some(4),
+                idle_clip: Some(0),
+                walk_clip: Some(0),
+                run_clip: Some(0),
                 ..crate::CharacterResource::defaults()
             }),
         );
@@ -3389,7 +3392,7 @@ mod tests {
             entity,
             "Animator",
             NodeKind::Animator {
-                clip: Some(3),
+                clip: Some(0),
                 autoplay: true,
             },
         );
