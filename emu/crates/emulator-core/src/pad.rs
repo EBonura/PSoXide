@@ -923,6 +923,50 @@ impl Default for DigitalPad {
 pub const MEMCARD_SIZE: usize = 128 * 1024;
 /// One "frame" (the unit of read/write on the serial protocol).
 pub const MEMCARD_FRAME_SIZE: usize = 128;
+const MEMCARD_RECENT_EVENTS: usize = 32;
+
+/// Coarse memory-card protocol event captured for diagnostics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MemcardEvent {
+    /// Event class.
+    pub kind: MemcardEventKind,
+    /// Memory-card command byte, usually `0x52` read, `0x57` write,
+    /// or `0x53` get-id.
+    pub command: u8,
+    /// 128-byte frame selected by the command, when applicable.
+    pub frame: u16,
+    /// Byte index within the active memory-card transaction.
+    pub byte_index: u16,
+    /// Command-specific status byte, usually the end marker.
+    pub status: u8,
+}
+
+impl Default for MemcardEvent {
+    fn default() -> Self {
+        Self {
+            kind: MemcardEventKind::Select,
+            command: 0,
+            frame: 0,
+            byte_index: 0,
+            status: 0,
+        }
+    }
+}
+
+/// Kind of memory-card protocol event.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MemcardEventKind {
+    /// The host selected the memory-card device with `0x81`.
+    Select,
+    /// The host sent a memory-card command byte.
+    Command,
+    /// A read/write command selected a frame.
+    Frame,
+    /// A command reached its terminal response.
+    End,
+    /// The host sent an unsupported command byte.
+    Unsupported,
+}
 
 /// PSX memory card emulator. 128 KiB byte buffer + a small
 /// protocol state machine for the Read/Write/GetID commands the
@@ -964,6 +1008,11 @@ pub struct MemoryCard {
     /// `flag_new` transition and lets the frontend know whether to
     /// persist the card on shutdown.
     dirty: bool,
+    command_histogram: [u32; 256],
+    recent_events: [MemcardEvent; MEMCARD_RECENT_EVENTS],
+    recent_event_head: usize,
+    recent_event_len: usize,
+    current_command: u8,
 }
 
 /// Top-level state of the memory-card protocol. Each transaction
@@ -1052,6 +1101,11 @@ impl MemoryCard {
             byte_index: 0,
             spdr: 0xFF,
             dirty: false,
+            command_histogram: [0; 256],
+            recent_events: [MemcardEvent::default(); MEMCARD_RECENT_EVENTS],
+            recent_event_head: 0,
+            recent_event_len: 0,
+            current_command: 0,
         }
     }
 
@@ -1108,6 +1162,11 @@ impl MemoryCard {
             byte_index: 0,
             spdr: 0xFF,
             dirty: false,
+            command_histogram: [0; 256],
+            recent_events: [MemcardEvent::default(); MEMCARD_RECENT_EVENTS],
+            recent_event_head: 0,
+            recent_event_len: 0,
+            current_command: 0,
         }
     }
 
@@ -1128,6 +1187,29 @@ impl MemoryCard {
         &self.bytes
     }
 
+    /// Histogram of command bytes observed after the `0x81` access byte.
+    pub fn command_histogram(&self) -> &[u32; 256] {
+        &self.command_histogram
+    }
+
+    /// Recent memory-card protocol events, oldest first.
+    pub fn recent_events(&self) -> Vec<MemcardEvent> {
+        let mut out = Vec::with_capacity(self.recent_event_len);
+        if self.recent_event_len == 0 {
+            return out;
+        }
+        let start = if self.recent_event_len == self.recent_events.len() {
+            self.recent_event_head
+        } else {
+            0
+        };
+        for i in 0..self.recent_event_len {
+            let idx = (start + i) % self.recent_events.len();
+            out.push(self.recent_events[idx]);
+        }
+        out
+    }
+
     /// Reset the state machine to idle. Called when the SIO port
     /// deselects this device.
     fn reset(&mut self) {
@@ -1138,6 +1220,7 @@ impl MemoryCard {
         self.write_checksum = 0;
         self.write_buffer_len = 0;
         self.spdr = 0xFF;
+        self.current_command = 0;
     }
 
     /// Compute the flag byte -- `0x08` when new, `0x00` once at
@@ -1166,6 +1249,7 @@ impl MemoryCard {
             MemcardState::Idle => {
                 if tx == 0x81 {
                     self.state = MemcardState::GotAddr;
+                    self.record_event(MemcardEventKind::Select, tx, 0, self.flag_byte());
                     // Classic response: the flag byte (NEW=0x08 /
                     // OK=0x00).
                     (self.flag_byte(), true)
@@ -1176,20 +1260,25 @@ impl MemoryCard {
             MemcardState::GotAddr => match tx {
                 0x52 => {
                     // "R" -- read.
+                    self.record_command(tx);
                     self.state = MemcardState::Read(MemcardReadState::SendId1);
                     (0x5A, true)
                 }
                 0x57 => {
                     // "W" -- write.
+                    self.record_command(tx);
                     self.state = MemcardState::Write(MemcardWriteState::SendId1);
                     (0x5A, true)
                 }
                 0x53 => {
                     // "S" -- get ID.
+                    self.record_command(tx);
                     self.state = MemcardState::GetId(MemcardGetIdState::SendId1);
                     (0x5A, true)
                 }
                 _ => {
+                    self.record_command(tx);
+                    self.record_event(MemcardEventKind::Unsupported, tx, 0, 0xFF);
                     self.reset();
                     (0xFF, false)
                 }
@@ -1218,6 +1307,7 @@ impl MemoryCard {
             }
             RxLsb => {
                 self.frame_lsb = tx;
+                self.record_current_frame(MemcardEventKind::Frame, 0);
                 self.state = MemcardState::Read(SendAck1);
                 (0x5C, true)
             }
@@ -1256,6 +1346,7 @@ impl MemoryCard {
                 (self.write_checksum, true)
             }
             SendEnd => {
+                self.record_current_frame(MemcardEventKind::End, 0x47);
                 self.reset();
                 (0x47, true)
             }
@@ -1282,6 +1373,7 @@ impl MemoryCard {
                 self.frame_lsb = tx;
                 self.write_checksum = self.frame_msb ^ self.frame_lsb;
                 self.write_buffer_len = 0;
+                self.record_current_frame(MemcardEventKind::Frame, 0);
                 self.state = MemcardState::Write(RxData(0));
                 (tx, true)
             }
@@ -1306,6 +1398,7 @@ impl MemoryCard {
                     self.state = MemcardState::Write(SendAck1);
                     (0x5C, true)
                 } else {
+                    self.record_current_frame(MemcardEventKind::End, 0x4E);
                     self.reset();
                     (0x4E, false)
                 }
@@ -1316,6 +1409,7 @@ impl MemoryCard {
             }
             SendAck2 => {
                 let end = if self.dirty { 0x47 } else { 0x4E };
+                self.record_current_frame(MemcardEventKind::End, end);
                 self.reset();
                 (end, true)
             }
@@ -1355,6 +1449,7 @@ impl MemoryCard {
                 }
             }
             SendEnd => {
+                self.record_event(MemcardEventKind::End, 0x53, 0, 0x00);
                 self.reset();
                 (0x00, false)
             }
@@ -1376,6 +1471,33 @@ impl MemoryCard {
             self.dirty = true;
             self.flag_new = false;
         }
+    }
+
+    fn record_command(&mut self, command: u8) {
+        self.current_command = command;
+        self.command_histogram[command as usize] =
+            self.command_histogram[command as usize].saturating_add(1);
+        self.record_event(MemcardEventKind::Command, command, 0, 0);
+    }
+
+    fn record_current_frame(&mut self, kind: MemcardEventKind, status: u8) {
+        let frame = ((self.frame_msb as u16) << 8) | self.frame_lsb as u16;
+        self.record_event(kind, self.current_command, frame, status);
+    }
+
+    fn record_event(&mut self, kind: MemcardEventKind, command: u8, frame: u16, status: u8) {
+        self.recent_events[self.recent_event_head] = MemcardEvent {
+            kind,
+            command,
+            frame,
+            byte_index: self.byte_index.min(u16::MAX as usize) as u16,
+            status,
+        };
+        self.recent_event_head = (self.recent_event_head + 1) % self.recent_events.len();
+        self.recent_event_len = self
+            .recent_event_len
+            .saturating_add(1)
+            .min(self.recent_events.len());
     }
 }
 
