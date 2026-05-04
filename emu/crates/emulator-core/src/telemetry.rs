@@ -41,6 +41,20 @@ pub mod stage {
     pub const MODEL_INSTANCES: u16 = 8;
     /// Player model rendering.
     pub const PLAYER: u16 = 9;
+    /// Whole-model bounds tests for placed model instances.
+    pub const MODEL_BOUNDS: u16 = 13;
+    /// Placed model draw calls after bounds culling.
+    pub const MODEL_DRAW: u16 = 14;
+    /// Whole-player bounds test.
+    pub const PLAYER_BOUNDS: u16 = 15;
+    /// Player model draw call after bounds culling.
+    pub const PLAYER_DRAW: u16 = 16;
+    /// Textured model joint pose sampling and transform setup.
+    pub const TEXTURED_MODEL_JOINTS: u16 = 17;
+    /// Textured model vertex projection.
+    pub const TEXTURED_MODEL_PROJECT: u16 = 18;
+    /// Textured model face culling, packet build, and command enqueue.
+    pub const TEXTURED_MODEL_FACES: u16 = 19;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -50,7 +64,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 13;
+pub const STAGE_COUNT: usize = 20;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -100,10 +114,26 @@ pub mod counter {
     pub const EQUIPMENT_CULLED_TRIS: u16 = 22;
     /// Triangles dropped for equipment models.
     pub const EQUIPMENT_DROPPED_TRIS: u16 = 23;
+    /// Placed model instance bounds tests.
+    pub const MODEL_INSTANCE_BOUNDS_TESTS: u16 = 24;
+    /// Placed model instances rejected by whole-model bounds.
+    pub const MODEL_INSTANCE_BOUNDS_CULLED: u16 = 25;
+    /// Player bounds tests.
+    pub const PLAYER_BOUNDS_TESTS: u16 = 26;
+    /// Player draws rejected by whole-model bounds.
+    pub const PLAYER_BOUNDS_CULLED: u16 = 27;
+    /// Joints sampled for textured model submits.
+    pub const TEXTURED_MODEL_JOINTS: u16 = 28;
+    /// Parts walked for textured model submits.
+    pub const TEXTURED_MODEL_PARTS: u16 = 29;
+    /// Vertices projected for textured model submits.
+    pub const TEXTURED_MODEL_VERTICES: u16 = 30;
+    /// Face records considered by textured model submits.
+    pub const TEXTURED_MODEL_FACES: u16 = 31;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 24;
+pub const COUNTER_COUNT: usize = 32;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,6 +333,13 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::ENTITY_MARKERS => "entity markers",
         stage::MODEL_INSTANCES => "model instances",
         stage::PLAYER => "player",
+        stage::MODEL_BOUNDS => "model bounds",
+        stage::MODEL_DRAW => "model draw",
+        stage::PLAYER_BOUNDS => "player bounds",
+        stage::PLAYER_DRAW => "player draw",
+        stage::TEXTURED_MODEL_JOINTS => "mdl joints",
+        stage::TEXTURED_MODEL_PROJECT => "mdl project",
+        stage::TEXTURED_MODEL_FACES => "mdl faces",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
@@ -336,6 +373,14 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::EQUIPMENT_SUBMITTED_TRIS => "equipment tris",
         counter::EQUIPMENT_CULLED_TRIS => "equipment culled",
         counter::EQUIPMENT_DROPPED_TRIS => "equipment dropped",
+        counter::MODEL_INSTANCE_BOUNDS_TESTS => "model bound tests",
+        counter::MODEL_INSTANCE_BOUNDS_CULLED => "model bound culled",
+        counter::PLAYER_BOUNDS_TESTS => "player bound tests",
+        counter::PLAYER_BOUNDS_CULLED => "player bound culled",
+        counter::TEXTURED_MODEL_JOINTS => "mdl joints",
+        counter::TEXTURED_MODEL_PARTS => "mdl parts",
+        counter::TEXTURED_MODEL_VERTICES => "mdl verts",
+        counter::TEXTURED_MODEL_FACES => "mdl faces",
         _ => "unknown",
     }
 }
