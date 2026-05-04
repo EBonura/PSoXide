@@ -410,15 +410,25 @@ impl Translator {
         if self.wireframe {
             self.push_wire_tri(v0, color, v1, color, v2, color, BlendKind::Opaque);
         } else {
-            self.push_tex_tri_psx(v0, uv0, v1, uv1, v2, uv2, color, prim_flags, kind);
+            self.push_tex_tri_psx(
+                v0,
+                uv16(uv0),
+                v1,
+                uv16(uv1),
+                v2,
+                uv16(uv2),
+                color,
+                prim_flags,
+                kind,
+            );
         }
     }
 
     /// `0x2C..=0x2F` -- textured quad. Packet:
     ///   `[cmd+tint, v0, uv0+clut, v1, uv1+tpage, v2, uv2, v3, uv3]`
-    /// Decomposes to two triangles using the same winding the CPU
-    /// rasterizer's `draw_textured_quad` uses (`v0,v1,v2` then
-    /// `v1,v3,v2`), so semi-trans / mask behaviour stays
+    /// Decomposes to two triangles using the same winding/order the
+    /// CPU rasterizer's `draw_textured_quad` uses (`v1,v3,v2` then
+    /// `v0,v1,v2`), so semi-trans / mask behaviour stays
     /// pixel-equivalent in later phases.
     fn emit_tex_quad(&mut self, fifo: &[u32]) {
         if fifo.len() < 9 {
@@ -441,11 +451,31 @@ impl Translator {
         let kind = self.blend_kind(cmd);
 
         if self.wireframe {
-            self.push_wire_tri(v0, color, v1, color, v2, color, BlendKind::Opaque);
             self.push_wire_tri(v1, color, v3, color, v2, color, BlendKind::Opaque);
+            self.push_wire_tri(v0, color, v1, color, v2, color, BlendKind::Opaque);
         } else {
-            self.push_tex_tri_psx(v0, uv0, v1, uv1, v2, uv2, color, prim_flags, kind);
-            self.push_tex_tri_psx(v1, uv1, v3, uv3, v2, uv2, color, prim_flags, kind);
+            self.push_tex_tri_psx(
+                v1,
+                uv16(uv1),
+                v3,
+                uv16(uv3),
+                v2,
+                uv16(uv2),
+                color,
+                prim_flags,
+                kind,
+            );
+            self.push_tex_tri_psx(
+                v0,
+                uv16(uv0),
+                v1,
+                uv16(uv1),
+                v2,
+                uv16(uv2),
+                color,
+                prim_flags,
+                kind,
+            );
         }
     }
 
@@ -497,11 +527,11 @@ impl Translator {
     fn push_tex_tri_psx(
         &mut self,
         v0: (i32, i32),
-        uv0: (u8, u8),
+        uv0: (u16, u16),
         v1: (i32, i32),
-        uv1: (u8, u8),
+        uv1: (u16, u16),
         v2: (i32, i32),
-        uv2: (u8, u8),
+        uv2: (u16, u16),
         color: [u8; 4],
         prim_flags: u32,
         kind: BlendKind,
@@ -543,21 +573,21 @@ impl Translator {
     fn push_tex_tri(
         &mut self,
         v0: (i32, i32),
-        uv0: (u8, u8),
+        uv0: (u16, u16),
         v1: (i32, i32),
-        uv1: (u8, u8),
+        uv1: (u16, u16),
         v2: (i32, i32),
-        uv2: (u8, u8),
+        uv2: (u16, u16),
         color: [u8; 4],
         prim_flags: u32,
         kind: BlendKind,
     ) {
         let clip = self.current_clip();
         let tex_window = self.tex_window_word();
-        let make = |v: (i32, i32), uv: (u8, u8)| HwVertex {
+        let make = |v: (i32, i32), uv: (u16, u16)| HwVertex {
             pos: [v.0 as i16, v.1 as i16],
             color,
-            uv: [uv.0 as u16, uv.1 as u16],
+            uv: [uv.0, uv.1],
             flags: prim_flags,
             tex_window,
         };
@@ -640,7 +670,19 @@ impl Translator {
         if self.wireframe {
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, BlendKind::Opaque);
         } else {
-            self.push_tex_tri_shaded_psx(v0, uv0, c0, v1, uv1, c1, v2, uv2, c2, prim_flags, kind);
+            self.push_tex_tri_shaded_psx(
+                v0,
+                uv16(uv0),
+                c0,
+                v1,
+                uv16(uv1),
+                c1,
+                v2,
+                uv16(uv2),
+                c2,
+                prim_flags,
+                kind,
+            );
         }
     }
 
@@ -670,11 +712,35 @@ impl Translator {
         let prim_flags = self.tex_prim_flags(cmd, clut);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
-            self.push_wire_tri(v0, c0, v1, c1, v2, c2, BlendKind::Opaque);
             self.push_wire_tri(v1, c1, v3, c3, v2, c2, BlendKind::Opaque);
+            self.push_wire_tri(v0, c0, v1, c1, v2, c2, BlendKind::Opaque);
         } else {
-            self.push_tex_tri_shaded_psx(v0, uv0, c0, v1, uv1, c1, v2, uv2, c2, prim_flags, kind);
-            self.push_tex_tri_shaded_psx(v1, uv1, c1, v3, uv3, c3, v2, uv2, c2, prim_flags, kind);
+            self.push_tex_tri_shaded_psx(
+                v1,
+                uv16(uv1),
+                c1,
+                v3,
+                uv16(uv3),
+                c3,
+                v2,
+                uv16(uv2),
+                c2,
+                prim_flags,
+                kind,
+            );
+            self.push_tex_tri_shaded_psx(
+                v0,
+                uv16(uv0),
+                c0,
+                v1,
+                uv16(uv1),
+                c1,
+                v2,
+                uv16(uv2),
+                c2,
+                prim_flags,
+                kind,
+            );
         }
     }
 
@@ -707,13 +773,13 @@ impl Translator {
     fn push_tex_tri_shaded_psx(
         &mut self,
         v0: (i32, i32),
-        uv0: (u8, u8),
+        uv0: (u16, u16),
         c0: [u8; 4],
         v1: (i32, i32),
-        uv1: (u8, u8),
+        uv1: (u16, u16),
         c1: [u8; 4],
         v2: (i32, i32),
-        uv2: (u8, u8),
+        uv2: (u16, u16),
         c2: [u8; 4],
         prim_flags: u32,
         kind: BlendKind,
@@ -755,23 +821,23 @@ impl Translator {
     fn push_tex_tri_shaded(
         &mut self,
         v0: (i32, i32),
-        uv0: (u8, u8),
+        uv0: (u16, u16),
         c0: [u8; 4],
         v1: (i32, i32),
-        uv1: (u8, u8),
+        uv1: (u16, u16),
         c1: [u8; 4],
         v2: (i32, i32),
-        uv2: (u8, u8),
+        uv2: (u16, u16),
         c2: [u8; 4],
         prim_flags: u32,
         kind: BlendKind,
     ) {
         let clip = self.current_clip();
         let tex_window = self.tex_window_word();
-        let make = |v: (i32, i32), uv: (u8, u8), c: [u8; 4]| HwVertex {
+        let make = |v: (i32, i32), uv: (u16, u16), c: [u8; 4]| HwVertex {
             pos: [v.0 as i16, v.1 as i16],
             color: c,
-            uv: [uv.0 as u16, uv.1 as u16],
+            uv: [uv.0, uv.1],
             flags: prim_flags,
             tex_window,
         };
@@ -915,26 +981,50 @@ impl Translator {
         let color = tex_tint(cmd);
         let prim_flags = self.tex_prim_flags(cmd, clut);
         let kind = self.blend_kind(cmd);
-        // Sprite UVs step 1 texel per pixel -- top-left at uv0,
-        // bottom-right at uv0 + (w, h). The GPU rasterizer
-        // interpolates UV continuously across the quad, giving
-        // subpixel UV at fractional internal scale -- texture
-        // detail tracks output resolution. Wrap to 0..=255 happens
-        // in the shader's `page_uv`.
+        // Sprite UV counters are 8-bit on PS1 and wrap per pixel.
+        // Host-GPU interpolation cannot represent a 255→0 jump
+        // inside one quad, so split at U/V wrap boundaries. E1's
+        // rectangle flip bits reverse the counter direction.
         let u0 = uv0.0 as i32;
         let v0 = uv0.1 as i32;
-        let uw = w;
-        let uh = h;
-        let uv_a = (u0 as u8, v0 as u8);
-        let uv_b = ((u0 + uw) as u8, v0 as u8);
-        let uv_c = (u0 as u8, (v0 + uh) as u8);
-        let uv_d = ((u0 + uw) as u8, (v0 + uh) as u8);
-        let p_a = (x, y);
-        let p_b = (x + w, y);
-        let p_c = (x, y + h);
-        let p_d = (x + w, y + h);
-        self.push_tex_tri_psx(p_a, uv_a, p_b, uv_b, p_c, uv_c, color, prim_flags, kind);
-        self.push_tex_tri_psx(p_b, uv_b, p_d, uv_d, p_c, uv_c, color, prim_flags, kind);
+        let flip_x = self.state.flip_x;
+        let flip_y = self.state.flip_y;
+        let mut dy = 0;
+        while dy < h {
+            let src_y = if flip_y { v0 + h - 1 - dy } else { v0 + dy };
+            let y_phase = src_y & 0xFF;
+            let chunk_h = (h - dy).min(if flip_y { y_phase + 1 } else { 256 - y_phase });
+            let (uv_top_v, uv_bottom_v) = if flip_y {
+                ((y_phase + 1) as u16, (y_phase + 1 - chunk_h) as u16)
+            } else {
+                (y_phase as u16, (y_phase + chunk_h) as u16)
+            };
+
+            let mut dx = 0;
+            while dx < w {
+                let src_x = if flip_x { u0 + w - 1 - dx } else { u0 + dx };
+                let x_phase = src_x & 0xFF;
+                let chunk_w = (w - dx).min(if flip_x { x_phase + 1 } else { 256 - x_phase });
+                let (uv_left_u, uv_right_u) = if flip_x {
+                    ((x_phase + 1) as u16, (x_phase + 1 - chunk_w) as u16)
+                } else {
+                    (x_phase as u16, (x_phase + chunk_w) as u16)
+                };
+
+                let p_a = (x + dx, y + dy);
+                let p_b = (x + dx + chunk_w, y + dy);
+                let p_c = (x + dx, y + dy + chunk_h);
+                let p_d = (x + dx + chunk_w, y + dy + chunk_h);
+                let uv_a = (uv_left_u, uv_top_v);
+                let uv_b = (uv_right_u, uv_top_v);
+                let uv_c = (uv_left_u, uv_bottom_v);
+                let uv_d = (uv_right_u, uv_bottom_v);
+                self.push_tex_tri_psx(p_a, uv_a, p_b, uv_b, p_c, uv_c, color, prim_flags, kind);
+                self.push_tex_tri_psx(p_b, uv_b, p_d, uv_d, p_c, uv_c, color, prim_flags, kind);
+                dx += chunk_w;
+            }
+            dy += chunk_h;
+        }
     }
 }
 
@@ -995,6 +1085,10 @@ fn sign_extend_11(v: i32) -> i32 {
     }
 }
 
+fn uv16(uv: (u8, u8)) -> (u16, u16) {
+    (uv.0 as u16, uv.1 as u16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,6 +1138,41 @@ mod tests {
     }
 
     #[test]
+    fn textured_quad_uses_cpu_redux_split_order() {
+        let log = [entry(
+            0x2C,
+            vec![
+                0x2C80_8080,
+                xy(10, 10),
+                uv(1, 2, 0),
+                xy(20, 10),
+                uv(11, 2, 0),
+                xy(10, 20),
+                uv(1, 12, 0),
+                xy(20, 20),
+                uv(11, 12, 0),
+            ],
+        )];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        assert_eq!(frame.total(), 6);
+        let actual: Vec<([i16; 2], [u16; 2])> =
+            frame.vertices.iter().map(|v| (v.pos, v.uv)).collect();
+        assert_eq!(
+            actual,
+            vec![
+                ([20, 10], [11, 2]),
+                ([20, 20], [11, 12]),
+                ([10, 20], [1, 12]),
+                ([10, 10], [1, 2]),
+                ([20, 10], [11, 2]),
+                ([10, 20], [1, 12]),
+            ]
+        );
+    }
+
+    #[test]
     fn textured_tri_carries_active_texture_window_to_vertices() {
         let log = [
             entry(0xE2, vec![0xE204_2318]),
@@ -1067,6 +1196,67 @@ mod tests {
         for v in frame.vertices {
             assert_eq!(v.tex_window, 0x4040_C0C0);
         }
+    }
+
+    #[test]
+    fn textured_rect_splits_at_u_wrap_boundary() {
+        let log = [entry(
+            0x65,
+            vec![0x6580_8080, xy(10, 20), uv(250, 0, 0), xy(20, 1)],
+        )];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        assert_eq!(frame.total(), 12);
+        let actual: Vec<([i16; 2], [u16; 2])> =
+            frame.vertices.iter().map(|v| (v.pos, v.uv)).collect();
+        assert_eq!(
+            &actual[0..6],
+            &[
+                ([10, 20], [250, 0]),
+                ([16, 20], [256, 0]),
+                ([10, 21], [250, 1]),
+                ([16, 20], [256, 0]),
+                ([16, 21], [256, 1]),
+                ([10, 21], [250, 1]),
+            ]
+        );
+        assert_eq!(
+            &actual[6..12],
+            &[
+                ([16, 20], [0, 0]),
+                ([30, 20], [14, 0]),
+                ([16, 21], [0, 1]),
+                ([30, 20], [14, 0]),
+                ([30, 21], [14, 1]),
+                ([16, 21], [0, 1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn textured_rect_honors_draw_mode_x_flip() {
+        let log = [
+            entry(0xE1, vec![0xE100_1000]),
+            entry(0x65, vec![0x6580_8080, xy(10, 20), uv(0, 0, 0), xy(20, 1)]),
+        ];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        assert_eq!(frame.total(), 6);
+        let actual: Vec<([i16; 2], [u16; 2])> =
+            frame.vertices.iter().map(|v| (v.pos, v.uv)).collect();
+        assert_eq!(
+            actual,
+            vec![
+                ([10, 20], [20, 0]),
+                ([30, 20], [0, 0]),
+                ([10, 21], [20, 1]),
+                ([30, 20], [0, 0]),
+                ([30, 21], [0, 1]),
+                ([10, 21], [20, 1]),
+            ]
+        );
     }
 
     #[test]
