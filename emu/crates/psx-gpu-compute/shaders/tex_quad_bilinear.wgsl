@@ -7,8 +7,9 @@
 // rectangle; for non-affine UV layouts the bilinear math here
 // produces different pixels than triangle-split barycentric.
 //
-// Layout assumption (matches CPU): v0 top-left, v1 top-right,
-// v2 bottom-left, v3 bottom-right. UVs in the same order.
+// Layout assumption (matches CPU): v0/v2 share one vertical edge,
+// v1/v3 share the other, but either edge may be left/right and either
+// row may be top/bottom. UVs follow the submitted vertex order.
 //
 // i64 emulation helpers identical to the scanline shaders — see
 // `tex_tri_scanline.wgsl` for explanation.
@@ -194,11 +195,17 @@ fn modulate_tint(texel: u32, tint_packed: u32) -> u32 {
 
 @compute @workgroup_size(8, 8)
 fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
-    // Quad bbox: v0 is top-left, v3 is bottom-right.
-    let left = prim.v0.x;
-    let right = prim.v1.x;
-    let top = prim.v0.y;
-    let bottom = prim.v2.y;
+    // Quad bbox: normalize axis-aligned quads whose submitted edge
+    // order is mirrored. Tekken 3's P2 VS portrait uses v0/v2 on the
+    // right edge and v1/v3 on the left edge.
+    let x0 = prim.v0.x;
+    let x1 = prim.v1.x;
+    let y0 = prim.v0.y;
+    let y1 = prim.v2.y;
+    let left = min(x0, x1);
+    let right = max(x0, x1);
+    let top = min(y0, y1);
+    let bottom = max(y0, y1);
     let width = right - left;
     let height = bottom - top;
     if width <= 0 || height <= 0 { return; }
@@ -222,25 +229,61 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     //   delta_col_u = (right_u - pos_u) / width
     //   u = (pos_u + col * delta_col_u) >> 16
     let u0 = i32(prim.uv0 & 0xFFu);
-    let v0 = i32((prim.uv0 >> 8u) & 0xFFu);
+    let vv0 = i32((prim.uv0 >> 8u) & 0xFFu);
     let u1 = i32(prim.uv1 & 0xFFu);
-    let v1 = i32((prim.uv1 >> 8u) & 0xFFu);
+    let vv1 = i32((prim.uv1 >> 8u) & 0xFFu);
     let u2 = i32(prim.uv2 & 0xFFu);
-    let v2 = i32((prim.uv2 >> 8u) & 0xFFu);
+    let vv2 = i32((prim.uv2 >> 8u) & 0xFFu);
     let u3 = i32(prim.uv3 & 0xFFu);
-    let v3 = i32((prim.uv3 >> 8u) & 0xFFu);
+    let vv3 = i32((prim.uv3 >> 8u) & 0xFFu);
+
+    var top_a_u: i32;
+    var top_a_v: i32;
+    var bottom_a_u: i32;
+    var bottom_a_v: i32;
+    var top_b_u: i32;
+    var top_b_v: i32;
+    var bottom_b_u: i32;
+    var bottom_b_v: i32;
+    if y0 <= y1 {
+        top_a_u = u0; bottom_a_u = u2; top_b_u = u1; bottom_b_u = u3;
+        top_a_v = vv0; bottom_a_v = vv2; top_b_v = vv1; bottom_b_v = vv3;
+    } else {
+        top_a_u = u2; bottom_a_u = u0; top_b_u = u3; bottom_b_u = u1;
+        top_a_v = vv2; bottom_a_v = vv0; top_b_v = vv3; bottom_b_v = vv1;
+    }
+
+    var left_top_u: i32;
+    var left_top_v: i32;
+    var left_bottom_u: i32;
+    var left_bottom_v: i32;
+    var right_top_u: i32;
+    var right_top_v: i32;
+    var right_bottom_u: i32;
+    var right_bottom_v: i32;
+    if x0 <= x1 {
+        left_top_u = top_a_u; left_bottom_u = bottom_a_u;
+        left_top_v = top_a_v; left_bottom_v = bottom_a_v;
+        right_top_u = top_b_u; right_bottom_u = bottom_b_u;
+        right_top_v = top_b_v; right_bottom_v = bottom_b_v;
+    } else {
+        left_top_u = top_b_u; left_bottom_u = bottom_b_u;
+        left_top_v = top_b_v; left_bottom_v = bottom_b_v;
+        right_top_u = top_a_u; right_bottom_u = bottom_a_u;
+        right_top_v = top_a_v; right_bottom_v = bottom_a_v;
+    }
 
     // Q16.16 = original << 16. Pack as I64: hi=0 (since values are
     // small positive), lo = (value << 16) as u32. For negatives we
     // sign-extend.
-    let left_u0 = i64_pack(u0 >> 16, u32(u0) << 16u);
-    let left_v0 = i64_pack(v0 >> 16, u32(v0) << 16u);
-    let right_u0 = i64_pack(u1 >> 16, u32(u1) << 16u);
-    let right_v0 = i64_pack(v1 >> 16, u32(v1) << 16u);
-    let bl_u = i64_pack(u2 >> 16, u32(u2) << 16u);
-    let bl_v = i64_pack(v2 >> 16, u32(v2) << 16u);
-    let br_u = i64_pack(u3 >> 16, u32(u3) << 16u);
-    let br_v = i64_pack(v3 >> 16, u32(v3) << 16u);
+    let left_u0 = i64_pack(left_top_u >> 16, u32(left_top_u) << 16u);
+    let left_v0 = i64_pack(left_top_v >> 16, u32(left_top_v) << 16u);
+    let right_u0 = i64_pack(right_top_u >> 16, u32(right_top_u) << 16u);
+    let right_v0 = i64_pack(right_top_v >> 16, u32(right_top_v) << 16u);
+    let bl_u = i64_pack(left_bottom_u >> 16, u32(left_bottom_u) << 16u);
+    let bl_v = i64_pack(left_bottom_v >> 16, u32(left_bottom_v) << 16u);
+    let br_u = i64_pack(right_bottom_u >> 16, u32(right_bottom_u) << 16u);
+    let br_v = i64_pack(right_bottom_v >> 16, u32(right_bottom_v) << 16u);
 
     let delta_left_u = i64_div_i32(i64_sub(bl_u, left_u0), height);
     let delta_left_v = i64_div_i32(i64_sub(bl_v, left_v0), height);

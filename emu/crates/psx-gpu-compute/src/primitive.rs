@@ -560,24 +560,26 @@ impl ShadedTexTri {
 ///
 /// The CPU dispatches this via the fast path when a textured quad's
 /// vertices form an axis-aligned rectangle (`v0.y == v1.y &&
-/// v2.y == v3.y && v0.x == v2.x && v1.x == v3.x`). Triangle splits
-/// produce different pixels for non-affine UV layouts (the diagonal
-/// `v3.uv = v1.uv + v2.uv - v0.uv` affine condition often fails on
-/// V), so for parity we have to match the bilinear math here.
+/// v2.y == v3.y && v0.x == v2.x && v1.x == v3.x`). The submitted
+/// vertical edge order may still be mirrored; Tekken 3 uses that for
+/// the P2 VS portrait. Triangle splits produce different pixels for
+/// non-affine UV layouts (the diagonal `v3.uv = v1.uv + v2.uv -
+/// v0.uv` affine condition often fails on V), so for parity we have
+/// to match the bilinear math here.
 ///
 /// WGSL counterpart in `shaders/tex_quad_bilinear.wgsl`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct TexQuadBilinear {
-    /// Top-left, top-right, bottom-left, bottom-right vertices in
-    /// the order the CPU's fast path reads them after the same
-    /// axis-aligned check. All four are screen-space (already
-    /// include drawing offset).
+    /// Submitted vertices in the order the CPU's fast path receives
+    /// them: first vertical edge, second vertical edge. The shader
+    /// normalizes left/right and top/bottom before interpolation.
+    /// All four are screen-space and already include drawing offset.
     pub v0: [i32; 2],
     pub v1: [i32; 2],
     pub v2: [i32; 2],
     pub v3: [i32; 2],
-    /// Same corner ordering as the vertices. UV is `u | (v << 8)`.
+    /// Same submitted ordering as the vertices. UV is `u | (v << 8)`.
     pub uv0: u32,
     pub uv1: u32,
     pub uv2: u32,
@@ -624,9 +626,9 @@ impl TexQuadBilinear {
     }
 
     /// Test whether a 4-vertex textured quad's geometry matches the
-    /// axis-aligned shape the CPU's fast path expects. Vertex order
-    /// (top-left, top-right, bottom-left, bottom-right) is what the
-    /// CPU's check assumes -- see `Gpu::draw_textured_quad`.
+    /// axis-aligned shape the CPU's fast path expects. The check only
+    /// requires matching horizontal rows and vertical edge columns; it
+    /// deliberately accepts left/right or top/bottom mirrored order.
     pub fn is_axis_aligned(v0: (i32, i32), v1: (i32, i32), v2: (i32, i32), v3: (i32, i32)) -> bool {
         v0.1 == v1.1 && v2.1 == v3.1 && v0.0 == v2.0 && v1.0 == v3.0
     }
@@ -776,6 +778,20 @@ mod tests {
             (578, 352),
             (482, 368),
             (578, 368),
+        ));
+        // Mirrored horizontally, as seen in Tekken 3's P2 portrait.
+        assert!(TexQuadBilinear::is_axis_aligned(
+            (578, 352),
+            (482, 352),
+            (578, 368),
+            (482, 368),
+        ));
+        // Mirrored vertically; still the CPU fast-path shape.
+        assert!(TexQuadBilinear::is_axis_aligned(
+            (482, 368),
+            (578, 368),
+            (482, 352),
+            (578, 352),
         ));
         // Skewed (different tops): NOT axis-aligned.
         assert!(!TexQuadBilinear::is_axis_aligned(
