@@ -13,7 +13,7 @@
 # with cargo build in their own directory so they can use their own
 # .cargo/config.toml for the mipsel-sony-psx target.
 
-.PHONY: help check test canaries fmt lint clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke parity run \
+.PHONY: help check test canaries fmt lint clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run \
         test-sdk \
         psxed assets \
         examples hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
@@ -47,6 +47,11 @@ help:
 	@echo "    make oracle-smoke - smoke: launch headless Redux and verify Lua runs"
 	@echo "    make oracle-side-load - compare side-loaded SDK EXEs against Redux"
 	@echo "    make oracle-disc-smoke - compare a local PSOXIDE_DISC checkpoint against Redux"
+	@echo "    make commercial-visual-guards - run all local commercial visual guards"
+	@echo "    make tekken-mode-guard - assert Tekken 3 mode-select coverage"
+	@echo "    make tekken-vs-guard - assert Tekken 3 VS portrait coverage"
+	@echo "    make tekken-fight-guard - assert Tekken 3 early-fight HUD/stage/fighter coverage"
+	@echo "    make tekken-late-fight-guard - assert Tekken 3 late-fight sky/fighter coverage"
 	@echo "    make test-sdk     - build every SDK example + run Milestone-C regression suite"
 	@echo ""
 	@echo "  SDK examples (build mipsel-sony-psx binaries):"
@@ -155,6 +160,31 @@ oracle-side-load: examples
 
 oracle-disc-smoke:
 	cd emu && cargo test -p parity-oracle --test commercial_disc_smoke -- --ignored --nocapture
+
+commercial-visual-guards:
+	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
+		--all \
+		--out-dir $${PSOXIDE_VISUAL_GUARD_OUT:-/tmp/psoxide-commercial-guards}
+
+tekken-mode-guard:
+	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
+		--guard tekken3-mode-select \
+		--out-dir $${PSOXIDE_TEKKEN_MODE_GUARD_OUT:-/tmp/tekken_mode_guard}
+
+tekken-vs-guard:
+	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
+		--guard tekken3-vs-portrait \
+		--out-dir $${PSOXIDE_TEKKEN_GUARD_OUT:-/tmp/tekken_owner_guard}
+
+tekken-fight-guard:
+	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
+		--guard tekken3-early-fight \
+		--out-dir $${PSOXIDE_TEKKEN_FIGHT_GUARD_OUT:-/tmp/tekken_fight_guard}
+
+tekken-late-fight-guard:
+	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
+		--guard tekken3-late-fight \
+		--out-dir $${PSOXIDE_TEKKEN_LATE_FIGHT_GUARD_OUT:-/tmp/tekken_late_fight_guard}
 
 parity:
 	cd emu && cargo test -p emulator-core --release --features trace-cop2 --test parity -- --ignored --nocapture

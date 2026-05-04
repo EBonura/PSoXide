@@ -1325,8 +1325,8 @@ impl Rasterizer {
         if quad.exceeds_hw_extent() {
             return false;
         }
-        let w = quad.v1[0] - quad.v0[0];
-        let h = quad.v2[1] - quad.v0[1];
+        let w = (quad.v1[0] - quad.v0[0]).abs();
+        let h = (quad.v2[1] - quad.v0[1]).abs();
         if w <= 0 || h <= 0 {
             return false;
         }
@@ -3086,6 +3086,88 @@ mod tests {
                 .map(|(x, y, c, g)| format!("  ({x},{y}) cpu=0x{c:04x} gpu=0x{g:04x}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+        );
+    }
+
+    fn assert_tex_quad_bilinear_order_matches_cpu(
+        v: [(i32, i32); 4],
+        uv: [(u8, u8); 4],
+        context: &str,
+    ) {
+        let tpage_x = 512u32;
+        let tpage_y = 256u32;
+        let tpage_word = make_tpage_word(tpage_x, tpage_y, 2, 0);
+
+        let mut vram = vec![0u16; 1024 * 512];
+        for y in 0..4u16 {
+            for x in 0..4u16 {
+                vram[(tpage_y as usize + y as usize) * 1024 + (tpage_x as usize + x as usize)] =
+                    0x1000 + (y << 4) + x;
+            }
+        }
+
+        let mut cpu = Gpu::new();
+        for (i, &w) in vram.iter().enumerate() {
+            cpu.vram.set_pixel((i % 1024) as u16, (i / 1024) as u16, w);
+        }
+        cpu.gp0_push(0xE3000000);
+        cpu.gp0_push(0xE4000000 | 1023 | (511 << 10));
+        cpu.gp0_push(0x2D000000);
+        cpu.gp0_push(pack_xy(v[0]));
+        cpu.gp0_push(uv_pack(uv[0]));
+        cpu.gp0_push(pack_xy(v[1]));
+        cpu.gp0_push((tpage_word << 16) | uv_pack(uv[1]));
+        cpu.gp0_push(pack_xy(v[2]));
+        cpu.gp0_push(uv_pack(uv[2]));
+        cpu.gp0_push(pack_xy(v[3]));
+        cpu.gp0_push(uv_pack(uv[3]));
+        let cpu_words = cpu.vram.words().to_vec();
+
+        assert!(
+            TexQuadBilinear::is_axis_aligned(v[0], v[1], v[2], v[3]),
+            "{context} quad should use the bilinear path"
+        );
+        let vg = VramGpu::new_headless();
+        vg.upload_full(&vram).unwrap();
+        let r = Rasterizer::new(&vg);
+        let quad = TexQuadBilinear::new(
+            v[0],
+            v[1],
+            v[2],
+            v[3],
+            uv[0],
+            uv[1],
+            uv[2],
+            uv[3],
+            0,
+            0,
+            (0x80, 0x80, 0x80),
+            PrimFlags::RAW_TEXTURE,
+            BlendMode::Average,
+        );
+        let tp = Tpage::new(tpage_x, tpage_y, 2);
+        assert!(r.dispatch_tex_quad_bilinear(&vg, &quad, &tp, &DrawArea::full_vram()));
+        let gpu_words = vg.download_full().unwrap();
+
+        assert_eq!(&gpu_words[0..4], &cpu_words[0..4]);
+        assert_eq!(gpu_words, cpu_words, "{context}");
+    }
+
+    #[test]
+    fn tex_quad_bilinear_right_to_left_order_matches_cpu() {
+        assert_tex_quad_bilinear_order_matches_cpu(
+            [(4i32, 0i32), (0, 0), (4, 4), (0, 4)],
+            [(4u8, 0u8), (0, 0), (4, 4), (0, 4)],
+            "right-to-left Tekken-style",
+        );
+    }
+
+    #[test]
+    fn tex_quad_bilinear_bottom_to_top_order_matches_cpu() {
+        assert_tex_quad_bilinear_order_matches_cpu(
+            [(0i32, 4i32), (4, 4), (0, 0), (4, 0)],
+            [(0u8, 4u8), (4, 4), (0, 0), (4, 0)],
+            "bottom-to-top",
         );
     }
 
