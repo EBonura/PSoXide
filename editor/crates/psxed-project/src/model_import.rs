@@ -1,4 +1,4 @@
-//! Cooked-model bundle registration + GLB import.
+//! Cooked-model bundle registration + source model import.
 //!
 //! Two entry points feed the same end product --
 //! [`ResourceData::Model`] -- from different sources:
@@ -8,8 +8,8 @@
 //!   `.psxt` atlas, and any number of `.psxanim` clips. Use this
 //!   when the assets ship with the repo or were cooked elsewhere.
 //!
-//! * [`import_glb_model`] runs the GLB through the rigid-model
-//!   cooker (`psxed_gltf::convert_rigid_model_path`), drops the
+//! * [`import_glb_model`] runs GLB/glTF/FBX sources through the
+//!   rigid-model cooker, drops the
 //!   cooked outputs under `project/assets/models/<safe_name>/`,
 //!   then registers them. Use this for fresh authoring.
 //!
@@ -280,9 +280,9 @@ pub enum ModelImportError {
         /// Underlying error message.
         detail: String,
     },
-    /// GLB conversion failed inside `psxed_gltf`.
+    /// Source model conversion failed inside `psxed_gltf`.
     GlbConversionFailed {
-        /// Source `.glb` path.
+        /// Source model path.
         source: PathBuf,
         /// Diagnostic message.
         detail: String,
@@ -328,7 +328,7 @@ impl std::fmt::Display for ModelImportError {
             ),
             Self::Io { path, detail } => write!(f, "{}: {detail}", path.display()),
             Self::GlbConversionFailed { source, detail } => {
-                write!(f, "{}: GLB conversion failed: {detail}", source.display())
+                write!(f, "{}: model conversion failed: {detail}", source.display())
             }
             Self::OutputExists(path) => write!(
                 f,
@@ -495,7 +495,7 @@ pub fn register_cooked_model_bundle(
     Ok(model_id)
 }
 
-/// Convert a `.glb` (or `.gltf`) source through the rigid-model
+/// Convert a `.glb`, `.gltf`, or `.fbx` source through the rigid-model
 /// cooker, write the cooked outputs under
 /// `project_root/assets/models/<safe_name>/`, then register that
 /// directory as a [`ResourceData::Model`].
@@ -511,12 +511,27 @@ pub fn import_glb_model(
     project_root: &Path,
     config: psxed_gltf::RigidModelConfig,
 ) -> Result<ResourceId, ModelImportError> {
-    let package = psxed_gltf::convert_rigid_model_path(source_path, &config).map_err(|e| {
-        ModelImportError::GlbConversionFailed {
-            source: source_path.to_path_buf(),
-            detail: format!("{e}"),
-        }
-    })?;
+    import_model_with_animation_sources(
+        project,
+        source_path,
+        &[],
+        output_name,
+        project_root,
+        config,
+    )
+}
+
+/// Convert a model source plus optional standalone FBX animation takes
+/// through the rigid-model cooker and register the cooked bundle.
+pub fn import_model_with_animation_sources(
+    project: &mut ProjectDocument,
+    source_path: &Path,
+    extra_animation_paths: &[PathBuf],
+    output_name: &str,
+    project_root: &Path,
+    config: psxed_gltf::RigidModelConfig,
+) -> Result<ResourceId, ModelImportError> {
+    let package = convert_rigid_model_source(source_path, extra_animation_paths, &config)?;
 
     let safe = safe_dir_name(output_name);
     let bundle_dir = project_root.join("assets").join("models").join(&safe);
@@ -569,7 +584,7 @@ pub fn import_glb_model(
     register_cooked_model_bundle(project, &bundle_dir, output_name, Some(project_root))
 }
 
-/// Convert a GLB/glTF into the cooked model package without
+/// Convert a GLB/glTF/FBX into the cooked model package without
 /// writing files or mutating a project. The editor uses this for
 /// the import preview dialog so authors can inspect the baked
 /// model, atlas, and animation clips before committing the bundle.
@@ -577,11 +592,47 @@ pub fn preview_glb_model(
     source_path: &Path,
     config: psxed_gltf::RigidModelConfig,
 ) -> Result<psxed_gltf::RigidModelPackage, ModelImportError> {
-    psxed_gltf::convert_rigid_model_path(source_path, &config).map_err(|e| {
-        ModelImportError::GlbConversionFailed {
+    preview_model_with_animation_sources(source_path, &[], config)
+}
+
+/// Convert a model source plus optional standalone FBX animation takes
+/// without writing files or mutating a project.
+pub fn preview_model_with_animation_sources(
+    source_path: &Path,
+    extra_animation_paths: &[PathBuf],
+    config: psxed_gltf::RigidModelConfig,
+) -> Result<psxed_gltf::RigidModelPackage, ModelImportError> {
+    convert_rigid_model_source(source_path, extra_animation_paths, &config)
+}
+
+fn convert_rigid_model_source(
+    source_path: &Path,
+    extra_animation_paths: &[PathBuf],
+    config: &psxed_gltf::RigidModelConfig,
+) -> Result<psxed_gltf::RigidModelPackage, ModelImportError> {
+    let is_fbx = source_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("fbx"));
+    let result = if is_fbx && !extra_animation_paths.is_empty() {
+        psxed_gltf::convert_fbx_rigid_model_path_with_animation_paths(
+            source_path,
+            extra_animation_paths,
+            config,
+        )
+    } else if is_fbx {
+        psxed_gltf::convert_fbx_rigid_model_path(source_path, config)
+    } else if extra_animation_paths.is_empty() {
+        psxed_gltf::convert_rigid_model_path(source_path, config)
+    } else {
+        return Err(ModelImportError::GlbConversionFailed {
             source: source_path.to_path_buf(),
-            detail: format!("{e}"),
-        }
+            detail: "extra FBX animation takes currently require an FBX model source".to_string(),
+        });
+    };
+    result.map_err(|e| ModelImportError::GlbConversionFailed {
+        source: source_path.to_path_buf(),
+        detail: format!("{e}"),
     })
 }
 
