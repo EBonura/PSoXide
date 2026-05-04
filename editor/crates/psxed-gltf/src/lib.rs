@@ -15,8 +15,8 @@
 //! current PSXM runtime format has no UV/material table. That is the
 //! next format bump once we are ready for textured imported models.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
 use gltf::animation::{Interpolation, Property};
 use gltf::image::Source;
@@ -61,6 +61,8 @@ impl Default for Config {
 pub enum Error {
     /// glTF parser/importer failure.
     Import(gltf::Error),
+    /// FBX parser/importer failure.
+    FbxImport(String),
     /// A primitive had no POSITION attribute.
     MissingPositions { primitive_index: usize },
     /// A primitive mode cannot be represented as triangles.
@@ -83,6 +85,8 @@ pub enum Error {
     TextureCook(psxed_tex::Error),
     /// The GLB has no skinned mesh suitable for `.psxmdl` cooking.
     MissingSkinnedMesh,
+    /// The FBX has no skinned mesh suitable for `.psxmdl` cooking.
+    MissingFbxSkinnedMesh,
     /// A skinned primitive is missing data needed by the native model cooker.
     MissingAttribute {
         /// glTF primitive index.
@@ -131,6 +135,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Import(error) => write!(f, "glTF import failed: {error}"),
+            Self::FbxImport(error) => write!(f, "FBX import failed: {error}"),
             Self::MissingPositions { primitive_index } => {
                 write!(f, "primitive #{primitive_index} is missing POSITION data")
             }
@@ -148,6 +153,7 @@ impl std::fmt::Display for Error {
             Self::Cook(error) => write!(f, "PSXM encode failed: {error}"),
             Self::TextureCook(error) => write!(f, "PSXT encode failed: {error}"),
             Self::MissingSkinnedMesh => write!(f, "glTF scene contains no skinned mesh"),
+            Self::MissingFbxSkinnedMesh => write!(f, "FBX scene contains no skinned mesh"),
             Self::MissingAttribute {
                 primitive_index,
                 attribute,
@@ -552,6 +558,60 @@ pub fn convert_rigid_model_path(
     convert_rigid_model_document(&document, &buffers, cfg)
 }
 
+/// Convert a binary/ascii FBX file into native model/animation/texture blobs.
+pub fn convert_fbx_rigid_model_path(
+    path: impl AsRef<Path>,
+    cfg: &RigidModelConfig,
+) -> Result<RigidModelPackage, Error> {
+    let path = path.as_ref();
+    let scene = load_fbx_scene(path)?;
+    convert_fbx_rigid_model_scene(&scene, cfg)
+}
+
+/// Convert an FBX model plus standalone FBX animation takes into native blobs.
+pub fn convert_fbx_rigid_model_path_with_animation_paths(
+    path: impl AsRef<Path>,
+    animation_paths: &[PathBuf],
+    cfg: &RigidModelConfig,
+) -> Result<RigidModelPackage, Error> {
+    let scene = load_fbx_scene(path.as_ref())?;
+    let mut animation_scenes = Vec::with_capacity(animation_paths.len());
+    for path in animation_paths {
+        animation_scenes.push((
+            load_fbx_scene(path)?,
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string),
+        ));
+    }
+    let extra_sources: Vec<FbxExtraAnimationScene<'_>> = animation_scenes
+        .iter()
+        .map(|(scene, fallback_name)| FbxExtraAnimationScene {
+            scene,
+            fallback_name: fallback_name.as_deref(),
+        })
+        .collect();
+    convert_fbx_rigid_model_scene_with_extra_animations(&scene, &extra_sources, cfg)
+}
+
+fn load_fbx_scene(path: &Path) -> Result<ufbx::SceneRoot, Error> {
+    let filename = path.to_string_lossy();
+    ufbx::load_file(
+        &filename,
+        ufbx::LoadOpts {
+            target_axes: ufbx::CoordinateAxes::right_handed_y_up(),
+            target_unit_meters: 1.0,
+            clean_skin_weights: true,
+            generate_missing_normals: true,
+            load_external_files: true,
+            ignore_missing_external_files: true,
+            filename: ufbx::StringOpt::Ref(&filename),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| Error::FbxImport(format!("{error:?}")))
+}
+
 /// Convert an in-memory `.glb` into native model/animation/texture blobs.
 pub fn convert_rigid_model_slice(
     bytes: &[u8],
@@ -743,6 +803,825 @@ fn finish_rigid_model_document(
         texture,
         report,
     })
+}
+
+#[derive(Clone, Copy)]
+struct FbxExtraAnimationScene<'a> {
+    scene: &'a ufbx::Scene,
+    fallback_name: Option<&'a str>,
+}
+
+fn convert_fbx_rigid_model_scene(
+    scene: &ufbx::Scene,
+    cfg: &RigidModelConfig,
+) -> Result<RigidModelPackage, Error> {
+    convert_fbx_rigid_model_scene_with_extra_animations(scene, &[], cfg)
+}
+
+fn convert_fbx_rigid_model_scene_with_extra_animations(
+    scene: &ufbx::Scene,
+    extra_animation_scenes: &[FbxExtraAnimationScene<'_>],
+    cfg: &RigidModelConfig,
+) -> Result<RigidModelPackage, Error> {
+    if cfg.animation_fps == 0 {
+        return Err(Error::BadSkin("animation sample rate must be non-zero"));
+    }
+
+    let (mesh_node, mesh, skin) = fbx_skinned_mesh(scene)?;
+    let node_indices = fbx_node_indices(scene);
+    let parents = fbx_parent_indices(scene, &node_indices);
+    let base_trs = fbx_base_trs(scene);
+
+    let mut joints = Vec::new();
+    let mut inverse_bind_matrices = Vec::new();
+    for cluster in &skin.clusters {
+        let Some(bone_node) = cluster.bone_node.as_deref() else {
+            return Err(Error::BadSkin("FBX skin cluster has no bone node"));
+        };
+        let joint_index = fbx_node_index(&node_indices, bone_node)?;
+        joints.push(joint_index);
+        inverse_bind_matrices.push(fbx_matrix_to_mat4(cluster.geometry_to_bone));
+    }
+    if joints.is_empty() {
+        return Err(Error::BadSkin("FBX skin has no joints"));
+    }
+    ensure_u16("joints", joints.len())?;
+
+    let root_joint_nodes = root_joint_nodes(&joints, &parents);
+    let mut source = read_fbx_skinned_mesh(mesh, skin, joints.len())?;
+    if source.faces.is_empty() {
+        return Err(Error::Empty);
+    }
+    assign_face_joints(&mut source, joints.len());
+
+    let precision_bounds = collect_fbx_precision_bounds(
+        scene,
+        extra_animation_scenes,
+        &source,
+        &parents,
+        &base_trs,
+        &root_joint_nodes,
+        &joints,
+        &inverse_bind_matrices,
+        cfg.animation_fps,
+        cfg.normalize_root_translation,
+        cfg.strip_animation_scale,
+    )?;
+    let bounds = ModelBounds::from_min_max(
+        precision_bounds.min,
+        precision_bounds.max,
+        MODEL_LOCAL_COORD_LIMIT,
+    )?;
+    if prune_detached_face_islands(
+        &mut source,
+        &bounds,
+        cfg.prune_detached_face_islands as usize,
+    ) > 0
+    {
+        if source.faces.is_empty() {
+            return Err(Error::Empty);
+        }
+        let precision_bounds = collect_fbx_precision_bounds(
+            scene,
+            extra_animation_scenes,
+            &source,
+            &parents,
+            &base_trs,
+            &root_joint_nodes,
+            &joints,
+            &inverse_bind_matrices,
+            cfg.animation_fps,
+            cfg.normalize_root_translation,
+            cfg.strip_animation_scale,
+        )?;
+        let bounds = ModelBounds::from_min_max(
+            precision_bounds.min,
+            precision_bounds.max,
+            MODEL_LOCAL_COORD_LIMIT,
+        )?;
+        return finish_fbx_rigid_model_scene(
+            scene,
+            cfg,
+            source,
+            bounds,
+            precision_bounds,
+            &parents,
+            &base_trs,
+            &root_joint_nodes,
+            &joints,
+            &inverse_bind_matrices,
+            mesh_node,
+            mesh,
+            extra_animation_scenes,
+        );
+    }
+
+    finish_fbx_rigid_model_scene(
+        scene,
+        cfg,
+        source,
+        bounds,
+        precision_bounds,
+        &parents,
+        &base_trs,
+        &root_joint_nodes,
+        &joints,
+        &inverse_bind_matrices,
+        mesh_node,
+        mesh,
+        extra_animation_scenes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_fbx_rigid_model_scene(
+    scene: &ufbx::Scene,
+    cfg: &RigidModelConfig,
+    source: SkinnedSourceMesh,
+    bounds: ModelBounds,
+    precision_bounds: PrecisionBounds,
+    parents: &[Option<usize>],
+    base_trs: &[Trs],
+    root_joint_nodes: &[usize],
+    joints: &[usize],
+    inverse_bind_matrices: &[[[f32; 4]; 4]],
+    _mesh_node: &ufbx::Node,
+    mesh: &ufbx::Mesh,
+    extra_animation_scenes: &[FbxExtraAnimationScene<'_>],
+) -> Result<RigidModelPackage, Error> {
+    let local_height = bounds.encoded_axis_size(precision_bounds.min[1], precision_bounds.max[1]);
+    let local_to_world_q12 = choose_local_to_world_q12(local_height, cfg.world_height);
+    let material_color = first_fbx_material_base_color(mesh);
+    let texture = cook_fbx_base_color_texture(mesh, material_color, cfg)?;
+    let (model, cooked_vertices, parts) = cook_model_blob(
+        &source,
+        &bounds,
+        parents,
+        joints,
+        material_color,
+        cfg.texture_width,
+        cfg.texture_height,
+        local_to_world_q12,
+    )?;
+    let clips = cook_all_fbx_animations(
+        scene,
+        extra_animation_scenes,
+        parents,
+        base_trs,
+        root_joint_nodes,
+        joints,
+        inverse_bind_matrices,
+        &bounds,
+        cfg.animation_fps,
+        cfg.normalize_root_translation,
+        cfg.strip_animation_scale,
+    )?;
+
+    let animation_bytes = clips.iter().map(|c| c.bytes.len()).sum();
+    let clip_frames = clips
+        .iter()
+        .map(|c| (c.sanitized_name.clone(), c.frames))
+        .collect();
+    let report = RigidModelReport {
+        source_vertices: source.vertices.len(),
+        cooked_vertices,
+        faces: source.faces.len(),
+        parts,
+        joints: joints.len(),
+        clip_frames,
+        local_height: local_height.max(0) as usize,
+        local_to_world_q12,
+        model_bytes: model.len(),
+        animation_bytes,
+        texture_bytes: texture.as_ref().map_or(0, Vec::len),
+    };
+
+    Ok(RigidModelPackage {
+        model,
+        clips,
+        texture,
+        report,
+    })
+}
+
+fn fbx_skinned_mesh<'a>(
+    scene: &'a ufbx::Scene,
+) -> Result<(&'a ufbx::Node, &'a ufbx::Mesh, &'a ufbx::SkinDeformer), Error> {
+    for node in &scene.nodes {
+        let Some(mesh) = node.mesh.as_deref() else {
+            continue;
+        };
+        let Some(skin) = mesh.skin_deformers.as_ref().first().map(AsRef::as_ref) else {
+            continue;
+        };
+        if mesh.num_vertices > 0 && mesh.num_faces > 0 {
+            return Ok((node, mesh, skin));
+        }
+    }
+    Err(Error::MissingFbxSkinnedMesh)
+}
+
+fn fbx_node_indices(scene: &ufbx::Scene) -> HashMap<usize, usize> {
+    let mut out = HashMap::new();
+    for (index, node) in scene.nodes.as_ref().iter().enumerate() {
+        out.insert(node.as_ref() as *const ufbx::Node as usize, index);
+    }
+    out
+}
+
+fn fbx_node_index(node_indices: &HashMap<usize, usize>, node: &ufbx::Node) -> Result<usize, Error> {
+    node_indices
+        .get(&(node as *const ufbx::Node as usize))
+        .copied()
+        .ok_or(Error::BadSkin("FBX node is not in the scene node table"))
+}
+
+fn fbx_parent_indices(
+    scene: &ufbx::Scene,
+    node_indices: &HashMap<usize, usize>,
+) -> Vec<Option<usize>> {
+    scene
+        .nodes
+        .iter()
+        .map(|node| {
+            node.parent
+                .as_deref()
+                .and_then(|parent| fbx_node_index(node_indices, parent).ok())
+        })
+        .collect()
+}
+
+fn fbx_base_trs(scene: &ufbx::Scene) -> Vec<Trs> {
+    scene
+        .nodes
+        .iter()
+        .map(|node| fbx_transform_to_trs(node.local_transform))
+        .collect()
+}
+
+fn fbx_transform_to_trs(transform: ufbx::Transform) -> Trs {
+    Trs {
+        translation: fbx_vec3(transform.translation),
+        rotation: fbx_quat(transform.rotation),
+        scale: fbx_vec3(transform.scale),
+    }
+}
+
+fn fbx_vec3(v: ufbx::Vec3) -> [f32; 3] {
+    [v.x as f32, v.y as f32, v.z as f32]
+}
+
+fn fbx_vec2(v: ufbx::Vec2) -> [f32; 2] {
+    [v.x as f32, v.y as f32]
+}
+
+fn fbx_quat(q: ufbx::Quat) -> [f32; 4] {
+    [q.x as f32, q.y as f32, q.z as f32, q.w as f32]
+}
+
+fn fbx_matrix_to_mat4(m: ufbx::Matrix) -> [[f32; 4]; 4] {
+    [
+        [m.m00 as f32, m.m10 as f32, m.m20 as f32, 0.0],
+        [m.m01 as f32, m.m11 as f32, m.m21 as f32, 0.0],
+        [m.m02 as f32, m.m12 as f32, m.m22 as f32, 0.0],
+        [m.m03 as f32, m.m13 as f32, m.m23 as f32, 1.0],
+    ]
+}
+
+fn read_fbx_skinned_mesh(
+    mesh: &ufbx::Mesh,
+    skin: &ufbx::SkinDeformer,
+    joint_count: usize,
+) -> Result<SkinnedSourceMesh, Error> {
+    if !mesh.vertex_position.exists {
+        return Err(Error::MissingAttribute {
+            primitive_index: 0,
+            attribute: "POSITION",
+        });
+    }
+
+    let mut source = SkinnedSourceMesh::default();
+    let mut normal_faces = Vec::new();
+    let mut triangulated = Vec::new();
+    for face in mesh.faces.iter().copied() {
+        triangulated.clear();
+        ufbx::triangulate_face_vec(&mut triangulated, mesh, face);
+        for tri in triangulated.chunks_exact(3) {
+            let mut indices = [0usize; 3];
+            for (corner, fbx_index) in tri.iter().copied().enumerate() {
+                let fbx_index = fbx_index as usize;
+                let Some(source_vertex_index) = mesh
+                    .vertex_indices
+                    .get(fbx_index)
+                    .copied()
+                    .map(|index| index as usize)
+                else {
+                    return Err(Error::BadSkin("FBX face index is outside vertex table"));
+                };
+                let position = fbx_vec3(mesh.vertex_position[fbx_index]);
+                let normal = if mesh.vertex_normal.exists {
+                    normalize3(fbx_vec3(mesh.vertex_normal[fbx_index]))
+                } else {
+                    [0.0, 1.0, 0.0]
+                };
+                let uv = if mesh.vertex_uv.exists {
+                    fbx_vec2(mesh.vertex_uv[fbx_index])
+                } else {
+                    [0.0, 0.0]
+                };
+                let (joints, weights) = fbx_skin_weights(skin, source_vertex_index, joint_count);
+                let cleaned_joints = joint_indices_or_zero(joints, weights);
+                indices[corner] = source.vertices.len();
+                source.vertices.push(SourceVertex {
+                    position,
+                    normal,
+                    uv,
+                    joints: cleaned_joints,
+                    weights,
+                    dominant_joint: dominant_vertex_joint(cleaned_joints, weights),
+                });
+            }
+            normal_faces.push(indices);
+            source.faces.push(SourceFace {
+                indices: [indices[0], indices[2], indices[1]],
+                joint: 0,
+            });
+        }
+    }
+    rebuild_source_normals(&mut source, &normal_faces);
+    Ok(source)
+}
+
+fn fbx_skin_weights(
+    skin: &ufbx::SkinDeformer,
+    vertex_index: usize,
+    joint_count: usize,
+) -> ([u16; 4], [f32; 4]) {
+    let mut influences: Vec<(u16, f32)> = Vec::new();
+    if let Some(vertex) = skin.vertices.get(vertex_index) {
+        let begin = vertex.weight_begin as usize;
+        let end = begin.saturating_add(vertex.num_weights as usize);
+        for weight in skin.weights.get(begin..end).unwrap_or(&[]) {
+            let joint = weight.cluster_index as usize;
+            if joint < joint_count && weight.weight > 0.0 {
+                influences.push((joint as u16, weight.weight as f32));
+            }
+        }
+    }
+    influences.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let mut joints = [0u16; 4];
+    let mut weights = [0.0f32; 4];
+    let mut total = 0.0f32;
+    for (slot, (joint, weight)) in influences.into_iter().take(4).enumerate() {
+        joints[slot] = joint;
+        weights[slot] = weight;
+        total += weight;
+    }
+    if total > 0.0 {
+        for weight in &mut weights {
+            *weight /= total;
+        }
+    } else {
+        weights[0] = 1.0;
+    }
+    (joints, weights)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_fbx_precision_bounds(
+    scene: &ufbx::Scene,
+    extra_animation_scenes: &[FbxExtraAnimationScene<'_>],
+    source: &SkinnedSourceMesh,
+    parents: &[Option<usize>],
+    base_trs: &[Trs],
+    root_joint_nodes: &[usize],
+    joints: &[usize],
+    inverse_bind_matrices: &[[[f32; 4]; 4]],
+    fps: u16,
+    normalize_root_translation: bool,
+    strip_animation_scale: bool,
+) -> Result<PrecisionBounds, Error> {
+    let mut bounds = BoundsAccumulator::new();
+    include_pose_bounds(
+        &mut bounds,
+        base_trs,
+        source,
+        parents,
+        joints,
+        inverse_bind_matrices,
+        strip_animation_scale,
+    );
+
+    for stack in &scene.anim_stacks {
+        let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
+            continue;
+        };
+        let frame_count = ((max_time - min_time) * fps as f64).round() as usize + 1;
+        ensure_u16("animation frames", frame_count)?;
+        for frame in 0..frame_count {
+            let time = (min_time + frame as f64 / fps as f64).min(max_time);
+            let mut frame_trs = evaluate_fbx_frame_trs(scene, &stack.anim, time);
+            if normalize_root_translation {
+                restore_root_translations(&mut frame_trs, base_trs, root_joint_nodes);
+            }
+            include_pose_bounds(
+                &mut bounds,
+                &frame_trs,
+                source,
+                parents,
+                joints,
+                inverse_bind_matrices,
+                strip_animation_scale,
+            );
+        }
+    }
+
+    for extra in extra_animation_scenes {
+        let mapping = fbx_animation_node_mapping(scene, extra.scene);
+        validate_fbx_animation_mapping(extra.scene, &mapping)?;
+        for stack in &extra.scene.anim_stacks {
+            let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
+                continue;
+            };
+            let frame_count = ((max_time - min_time) * fps as f64).round() as usize + 1;
+            ensure_u16("animation frames", frame_count)?;
+            for frame in 0..frame_count {
+                let time = (min_time + frame as f64 / fps as f64).min(max_time);
+                let mut frame_trs = evaluate_mapped_fbx_frame_trs(
+                    extra.scene,
+                    &stack.anim,
+                    time,
+                    base_trs,
+                    &mapping,
+                );
+                if normalize_root_translation {
+                    restore_root_translations(&mut frame_trs, base_trs, root_joint_nodes);
+                }
+                include_pose_bounds(
+                    &mut bounds,
+                    &frame_trs,
+                    source,
+                    parents,
+                    joints,
+                    inverse_bind_matrices,
+                    strip_animation_scale,
+                );
+            }
+        }
+    }
+
+    bounds.finish()
+}
+
+fn fbx_stack_time_range(stack: &ufbx::AnimStack) -> Option<(f64, f64)> {
+    let min_time = stack.time_begin;
+    let max_time = stack.time_end;
+    if min_time.is_finite() && max_time.is_finite() && max_time >= min_time {
+        Some((min_time, max_time))
+    } else {
+        None
+    }
+}
+
+fn evaluate_fbx_frame_trs(scene: &ufbx::Scene, anim: &ufbx::Anim, time: f64) -> Vec<Trs> {
+    scene
+        .nodes
+        .iter()
+        .map(|node| fbx_transform_to_trs(node.evaluate_transform(anim, time)))
+        .collect()
+}
+
+fn evaluate_mapped_fbx_frame_trs(
+    animation_scene: &ufbx::Scene,
+    anim: &ufbx::Anim,
+    time: f64,
+    base_trs: &[Trs],
+    mapping: &[Option<usize>],
+) -> Vec<Trs> {
+    let evaluated: Vec<Trs> = animation_scene
+        .nodes
+        .iter()
+        .map(|node| fbx_transform_to_trs(node.evaluate_transform(anim, time)))
+        .collect();
+    base_trs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(model_index, base)| {
+            mapping
+                .get(model_index)
+                .copied()
+                .flatten()
+                .and_then(|animation_index| evaluated.get(animation_index).copied())
+                .unwrap_or(base)
+        })
+        .collect()
+}
+
+fn fbx_animation_node_mapping(
+    model_scene: &ufbx::Scene,
+    animation_scene: &ufbx::Scene,
+) -> Vec<Option<usize>> {
+    let mut animation_nodes = HashMap::new();
+    for (index, node) in animation_scene.nodes.iter().enumerate() {
+        let key = fbx_node_match_key(&node.element.name);
+        if !key.is_empty() {
+            animation_nodes.entry(key).or_insert(index);
+        }
+    }
+    model_scene
+        .nodes
+        .iter()
+        .map(|node| {
+            let key = fbx_node_match_key(&node.element.name);
+            animation_nodes.get(&key).copied()
+        })
+        .collect()
+}
+
+fn validate_fbx_animation_mapping(
+    animation_scene: &ufbx::Scene,
+    mapping: &[Option<usize>],
+) -> Result<(), Error> {
+    if animation_scene.anim_stacks.is_empty() || mapping.iter().any(Option::is_some) {
+        Ok(())
+    } else {
+        Err(Error::BadSkin(
+            "FBX animation shares no named skeleton nodes with the model",
+        ))
+    }
+}
+
+fn fbx_node_match_key(name: &str) -> String {
+    name.rsplit([':', '|'])
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cook_all_fbx_animations(
+    scene: &ufbx::Scene,
+    extra_animation_scenes: &[FbxExtraAnimationScene<'_>],
+    parents: &[Option<usize>],
+    base_trs: &[Trs],
+    root_joint_nodes: &[usize],
+    joints: &[usize],
+    inverse_bind_matrices: &[[[f32; 4]; 4]],
+    bounds: &ModelBounds,
+    fps: u16,
+    normalize_root_translation: bool,
+    strip_animation_scale: bool,
+) -> Result<Vec<CookedClip>, Error> {
+    let mut clips = Vec::new();
+    for (index, stack) in scene.anim_stacks.iter().enumerate() {
+        let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
+            continue;
+        };
+        let Some(bytes) = cook_fbx_animation_bytes(
+            scene,
+            &stack.anim,
+            parents,
+            base_trs,
+            root_joint_nodes,
+            joints,
+            inverse_bind_matrices,
+            bounds,
+            min_time,
+            max_time,
+            fps,
+            normalize_root_translation,
+            strip_animation_scale,
+            None,
+        )?
+        else {
+            continue;
+        };
+        let frames = animation_frame_count_from_bytes(&bytes);
+        let raw_name = fbx_stack_source_name(stack, None);
+        clips.push(CookedClip {
+            source_name: raw_name.clone(),
+            sanitized_name: sanitize_clip_name(raw_name.as_deref(), index),
+            bytes,
+            frames,
+        });
+    }
+    let mut clip_index = clips.len();
+    for extra in extra_animation_scenes {
+        let mapping = fbx_animation_node_mapping(scene, extra.scene);
+        validate_fbx_animation_mapping(extra.scene, &mapping)?;
+        for stack in &extra.scene.anim_stacks {
+            let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
+                continue;
+            };
+            let Some(bytes) = cook_fbx_animation_bytes(
+                extra.scene,
+                &stack.anim,
+                parents,
+                base_trs,
+                root_joint_nodes,
+                joints,
+                inverse_bind_matrices,
+                bounds,
+                min_time,
+                max_time,
+                fps,
+                normalize_root_translation,
+                strip_animation_scale,
+                Some(&mapping),
+            )?
+            else {
+                continue;
+            };
+            let frames = animation_frame_count_from_bytes(&bytes);
+            let raw_name = fbx_stack_source_name(stack, extra.fallback_name);
+            clips.push(CookedClip {
+                source_name: raw_name.clone(),
+                sanitized_name: sanitize_clip_name(raw_name.as_deref(), clip_index),
+                bytes,
+                frames,
+            });
+            clip_index += 1;
+        }
+    }
+    Ok(clips)
+}
+
+fn fbx_stack_source_name(stack: &ufbx::AnimStack, fallback_name: Option<&str>) -> Option<String> {
+    let stack_name = stack.element.name.trim();
+    if !stack_name.is_empty() && stack_name != "Take 001" && stack_name != "mixamo.com" {
+        Some(stack_name.to_string())
+    } else {
+        fallback_name.map(str::to_string)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cook_fbx_animation_bytes(
+    scene: &ufbx::Scene,
+    anim: &ufbx::Anim,
+    parents: &[Option<usize>],
+    base_trs: &[Trs],
+    root_joint_nodes: &[usize],
+    joints: &[usize],
+    inverse_bind_matrices: &[[[f32; 4]; 4]],
+    bounds: &ModelBounds,
+    min_time: f64,
+    max_time: f64,
+    fps: u16,
+    normalize_root_translation: bool,
+    strip_animation_scale: bool,
+    node_mapping: Option<&[Option<usize>]>,
+) -> Result<Option<Vec<u8>>, Error> {
+    let duration = max_time - min_time;
+    let frame_count = (duration * fps as f64).round() as usize + 1;
+    ensure_u16("animation frames", frame_count)?;
+
+    let payload_len = psxed_format::animation::AnimationHeader::SIZE
+        + frame_count * joints.len() * psxed_format::animation::POSE_RECORD_SIZE;
+    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
+    append_asset_header(
+        &mut out,
+        psxed_format::animation::MAGIC,
+        psxed_format::animation::VERSION,
+        0,
+        payload_len,
+    )?;
+    append_u16(&mut out, ensure_u16("joints", joints.len())?);
+    append_u16(&mut out, ensure_u16("animation frames", frame_count)?);
+    append_u16(&mut out, fps);
+    append_u16(&mut out, 0);
+
+    for frame in 0..frame_count {
+        let time = (min_time + frame as f64 / fps as f64).min(max_time);
+        let mut frame_trs = if let Some(mapping) = node_mapping {
+            evaluate_mapped_fbx_frame_trs(scene, anim, time, base_trs, mapping)
+        } else {
+            evaluate_fbx_frame_trs(scene, anim, time)
+        };
+        if normalize_root_translation {
+            restore_root_translations(&mut frame_trs, base_trs, root_joint_nodes);
+        }
+        let locals: Vec<[[f32; 4]; 4]> = frame_trs.iter().map(|trs| trs.matrix()).collect();
+        let globals = compute_global_matrices(parents, &locals);
+        for (joint_index, node_index) in joints.iter().copied().enumerate() {
+            let mut skin = mul_matrix(&globals[node_index], &inverse_bind_matrices[joint_index]);
+            if strip_animation_scale {
+                skin = strip_pose_scale(skin);
+            }
+            append_pose_record(&mut out, &skin, bounds);
+        }
+    }
+
+    Ok(Some(out))
+}
+
+fn first_fbx_material_base_color(mesh: &ufbx::Mesh) -> [u8; 4] {
+    let Some(material) = mesh.materials.as_ref().first().map(AsRef::as_ref) else {
+        return [255, 255, 255, 255];
+    };
+    let map = if material.pbr.base_color.has_value {
+        &material.pbr.base_color
+    } else {
+        &material.fbx.diffuse_color
+    };
+    if map.has_value {
+        [
+            linear_to_u8(map.value_vec4.x as f32),
+            linear_to_u8(map.value_vec4.y as f32),
+            linear_to_u8(map.value_vec4.z as f32),
+            linear_to_u8(map.value_vec4.w as f32),
+        ]
+    } else {
+        [255, 255, 255, 255]
+    }
+}
+
+fn cook_fbx_base_color_texture(
+    mesh: &ufbx::Mesh,
+    fallback_color: [u8; 4],
+    cfg: &RigidModelConfig,
+) -> Result<Option<Vec<u8>>, Error> {
+    let tex_cfg = psxed_tex::Config {
+        width: cfg.texture_width,
+        height: cfg.texture_height,
+        depth: cfg.texture_depth,
+        crop: psxed_tex::CropMode::None,
+        resampler: psxed_tex::Resampler::Lanczos3,
+    };
+    for material in &mesh.materials {
+        let texture = material
+            .pbr
+            .base_color
+            .texture
+            .as_deref()
+            .or_else(|| material.fbx.diffuse_color.texture.as_deref());
+        let Some(texture) = texture else {
+            continue;
+        };
+        if !texture.content.is_empty() {
+            return psxed_tex::convert(&texture.content, &tex_cfg)
+                .map(Some)
+                .map_err(Error::TextureCook);
+        }
+        for filename in [
+            &texture.absolute_filename,
+            &texture.filename,
+            &texture.relative_filename,
+        ] {
+            if filename.is_empty() {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(filename.as_ref()) {
+                return psxed_tex::convert(&bytes, &tex_cfg)
+                    .map(Some)
+                    .map_err(Error::TextureCook);
+            }
+        }
+    }
+
+    let bmp = solid_color_bmp(
+        cfg.texture_width.max(1) as u32,
+        cfg.texture_height.max(1) as u32,
+        fallback_color,
+    );
+    psxed_tex::convert(&bmp, &tex_cfg)
+        .map(Some)
+        .map_err(Error::TextureCook)
+}
+
+fn solid_color_bmp(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
+    let row_stride = (width * 3).div_ceil(4) * 4;
+    let pixel_bytes = row_stride * height;
+    let file_size = 14 + 40 + pixel_bytes;
+    let mut out = Vec::with_capacity(file_size as usize);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&file_size.to_le_bytes());
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&(14u32 + 40u32).to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(width as i32).to_le_bytes());
+    out.extend_from_slice(&(height as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&pixel_bytes.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    let pad = (row_stride - width * 3) as usize;
+    for _ in 0..height {
+        for _ in 0..width {
+            out.push(color[2]);
+            out.push(color[1]);
+            out.push(color[0]);
+        }
+        out.extend(std::iter::repeat(0u8).take(pad));
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug)]
