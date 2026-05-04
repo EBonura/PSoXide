@@ -143,15 +143,25 @@ impl HwRenderer {
 
     /// Reallocate the target to the requested internal scale. Cheap
     /// when unchanged. Reallocation clears the new texture to opaque
-    /// black; in-flight VRAM contents are lost -- frontend may want
-    /// to flush a fresh full-frame redraw after toggling.
+    /// black; callers should resync the target from CPU VRAM when this
+    /// returns `true`.
     pub fn set_internal_scale(
         &mut self,
         scale: u32,
         egui_renderer: Option<&mut egui_wgpu::Renderer>,
-    ) {
+    ) -> bool {
         self.target
-            .ensure_scale(&self.device, &self.queue, egui_renderer, scale);
+            .ensure_scale(&self.device, &self.queue, egui_renderer, scale)
+    }
+
+    /// Rebuild the persistent HW target from the CPU VRAM mirror.
+    /// Use after internal-scale reallocations, which necessarily
+    /// clear the target texture while CPU VRAM still contains the
+    /// authoritative persistent PSX pixels.
+    pub fn sync_target_from_vram(&self, vram_words: &[u16]) {
+        self.write_scaled_vram_rect_wrapped(0, 0, VRAM_WIDTH, VRAM_HEIGHT, |col, row| {
+            vram_words[(row * VRAM_WIDTH + col) as usize]
+        });
     }
 
     /// Render one frame's `cmd_log` into the persistent VRAM target.
@@ -565,4 +575,71 @@ fn bgr15_to_rgba8(pixel: u16) -> [u8; 4] {
         (b5 << 3) | (b5 >> 2),
         0xFF,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headless_renderer() -> Option<HwRenderer> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("psx-hw-sync-test-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+            },
+            None,
+        ))
+        .ok()?;
+        Some(HwRenderer::new_headless(device, queue))
+    }
+
+    fn pixel_block(renderer: &HwRenderer, psx_x: u32, psx_y: u32) -> Vec<[u8; 4]> {
+        let scale = renderer.internal_scale();
+        let (_, _, rgba) =
+            renderer.read_subrect_rgba8(psx_x * scale, psx_y * scale, scale, scale);
+        rgba.chunks_exact(4)
+            .map(|px| [px[0], px[1], px[2], px[3]])
+            .collect()
+    }
+
+    #[test]
+    fn sync_target_from_vram_restores_pixels_after_scale_reallocation() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW sync test: no headless wgpu adapter");
+            return;
+        };
+
+        let psx_x = 37;
+        let psx_y = 29;
+        let color = 0x001F;
+        let mut vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        vram_words[(psx_y * VRAM_WIDTH + psx_x) as usize] = color;
+
+        renderer.sync_target_from_vram(&vram_words);
+        assert_eq!(pixel_block(&renderer, psx_x, psx_y), vec![bgr15_to_rgba8(color)]);
+
+        assert!(!renderer.set_internal_scale(1, None));
+        assert!(renderer.set_internal_scale(2, None));
+        assert_eq!(
+            pixel_block(&renderer, psx_x, psx_y),
+            vec![[0, 0, 0, 255]; 4]
+        );
+
+        renderer.sync_target_from_vram(&vram_words);
+        assert_eq!(
+            pixel_block(&renderer, psx_x, psx_y),
+            vec![bgr15_to_rgba8(color); 4]
+        );
+    }
 }

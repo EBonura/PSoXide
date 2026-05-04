@@ -197,6 +197,11 @@ make test       # fast non-ignored tests
 make fmt        # rustfmt across every workspace/tool
 make lint       # clippy -D warnings across every workspace/tool
 make canaries   # ignored BIOS/commercial-game canaries
+make commercial-visual-guards # all local commercial visual guards
+make tekken-mode-guard # Tekken 3 mode-select visual guard
+make tekken-vs-guard # Tekken 3 VS portrait visual guard
+make tekken-fight-guard # Tekken 3 early-fight visual guard
+make tekken-late-fight-guard # Tekken 3 late-fight visual guard
 ```
 
 SDK and engine examples:

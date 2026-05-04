@@ -1,6 +1,6 @@
 //! Boot Tekken 3 to the VS pre-fight screen, enable the pixel-owner
 //! tracer ONLY for the frame that paints the VS screen, and dump the
-//! GP0 commands that drew the LEFT (working) vs RIGHT (broken) portrait.
+//! GP0 commands that drew the LEFT and RIGHT portraits.
 //!
 //! Strategy:
 //! 1. Run for `--enable-at` cycles with input pulses to get past the
@@ -13,86 +13,44 @@
 //! ```bash
 //! PSOXIDE_DISC="/path/to/Tekken 3 (USA).cue" \
 //! cargo run -p emulator-core --example probe_tekken_vs_pixel_owner \
-//!   --release -- --enable-at 340000000 --trace-cycles 8000000
+//!   --release -- --enable-at 300000000 --trace-cycles 60000000 \
+//!   --assert-right-portrait-texquad
 //! ```
 
 #[path = "support/disc.rs"]
 mod disc_support;
+#[path = "support/pad.rs"]
+mod pad_support;
 
 use emulator_core::gpu::GpuCmdLogEntry;
 use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
+use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask, PadPulse};
 use std::io::Write;
 use std::path::PathBuf;
 
-#[derive(Copy, Clone, Debug)]
-struct PadPulse {
-    mask: u16,
-    start_vblank: u64,
-    frames: u64,
-}
-
-fn parse_u16_mask(s: &str) -> Option<u16> {
-    let s = s.trim();
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u16::from_str_radix(hex, 16).ok()
-    } else {
-        s.parse().ok()
-    }
-}
-
-fn parse_pad_pulses(text: &str) -> Vec<PadPulse> {
-    let mut out = Vec::new();
-    for entry in text.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let (mask_text, rest) = entry.split_once('@').unwrap();
-        let mask = parse_u16_mask(mask_text).unwrap();
-        let (start_text, frames_text) = match rest.split_once('+') {
-            Some((s, f)) => (s.trim(), f.trim()),
-            None => (rest.trim(), "1"),
-        };
-        out.push(PadPulse {
-            mask,
-            start_vblank: start_text.parse().unwrap(),
-            frames: frames_text.parse().unwrap(),
-        });
-    }
-    out
-}
-
-fn effective_mask(base: u16, pulses: &[PadPulse], current_vblank: u64) -> u16 {
-    let mut mask = base;
-    for p in pulses {
-        if current_vblank >= p.start_vblank && current_vblank < p.start_vblank + p.frames {
-            mask |= p.mask;
-        }
-    }
-    mask
-}
-
 fn main() {
-    let mut enable_at: u64 = 340_000_000;
-    let mut trace_cycles: u64 = 8_000_000;
+    let mut enable_at: u64 = 300_000_000;
+    let mut trace_cycles: u64 = 60_000_000;
     let mut held_mask: u16 = 0;
     let mut pulses: Vec<PadPulse> = parse_pad_pulses(
         "0x0008@100+30,0x0008@500+30,0x0008@850+30,0x4000@950+10,0x4000@1100+10,0x4000@1300+10,0x4000@1500+10",
-    );
+    )
+    .expect("default Tekken pad pulses should parse");
     let mut out_dir = PathBuf::from("/tmp/tekken_owner");
     let mut left_x: u16 = 70;
     let mut left_y: u16 = 110;
     let mut right_x: u16 = 280;
     let mut right_y: u16 = 280;
+    let mut assert_right_portrait_texquad = false;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--enable-at" => enable_at = it.next().unwrap().parse().unwrap(),
             "--trace-cycles" => trace_cycles = it.next().unwrap().parse().unwrap(),
             "--pad-mask" => held_mask = parse_u16_mask(&it.next().unwrap()).unwrap(),
-            "--pad-pulses" => pulses = parse_pad_pulses(&it.next().unwrap()),
+            "--pad-pulses" => pulses = parse_pad_pulses(&it.next().unwrap()).unwrap(),
             "--out-dir" => out_dir = PathBuf::from(it.next().unwrap()),
             "--left-xy" => {
                 let s = it.next().unwrap();
@@ -106,6 +64,7 @@ fn main() {
                 right_x = x.parse().unwrap();
                 right_y = y.parse().unwrap();
             }
+            "--assert-right-portrait-texquad" => assert_right_portrait_texquad = true,
             other => panic!("unknown argument: {other}"),
         }
     }
@@ -214,7 +173,10 @@ fn main() {
     };
 
     probe("LEFT portrait", left_x, left_y);
-    probe("RIGHT portrait (broken)", right_x, right_y);
+    probe("RIGHT portrait", right_x, right_y);
+    if assert_right_portrait_texquad {
+        assert_right_portrait_texquad_owner(&bus, right_x, right_y);
+    }
 
     // For each TexQuad we found, dump:
     //  - first 32 texture bytes at the tpage origin (to see if the
@@ -230,11 +192,14 @@ fn main() {
     };
 
     eprintln!("\n=== VRAM dumps for the RIGHT-portrait textured quads ===");
-    eprintln!("    King's TexQuads point to tpage_x=832 tpage_y=256 (8bpp), CLUT 0x7dd8 / 0x7dd4 / 0x7dd0");
+    eprintln!(
+        "    Right portrait TexQuads point to tpage_x=832 tpage_y=256 (8bpp), \
+         CLUT 0x7dd8 / 0x7dd4 / 0x7dd0"
+    );
     // The upload was 63 wide x 252 tall starting at (833,256). Sample
     // rows across the entire vertical span to see WHICH rows got
     // data and which didn't.
-    eprintln!("    King upload range: x=[833..896) y=[256..508)");
+    eprintln!("    Right portrait upload range: x=[833..896) y=[256..508)");
     for y in (256..508).step_by(20) {
         let mut nonzero = 0;
         for col in 0..63u16 {
@@ -327,6 +292,82 @@ fn main() {
             print_entry(entry);
         }
     }
+}
+
+fn assert_right_portrait_texquad_owner(bus: &Bus, right_x: u16, right_y: u16) {
+    let da = bus.gpu.display_area();
+    let vx = da.x.wrapping_add(right_x);
+    let vy = da.y.wrapping_add(right_y);
+    let Some(entry) = bus.gpu.pixel_owner_at(vx, vy) else {
+        eprintln!(
+            "[guard] FAIL: right portrait centre display=({right_x},{right_y}) \
+             vram=({vx},{vy}) has no pixel owner"
+        );
+        std::process::exit(2);
+    };
+
+    if !matches!(entry.opcode, 0x2C..=0x2F) {
+        eprintln!(
+            "[guard] FAIL: right portrait centre display=({right_x},{right_y}) \
+             vram=({vx},{vy}) was last drawn by opcode 0x{:02x}, expected TexQuad",
+            entry.opcode
+        );
+        print_entry(entry);
+        std::process::exit(2);
+    }
+
+    let Some(v) = texquad_vertices(entry) else {
+        eprintln!(
+            "[guard] FAIL: right portrait centre owner cmd #{} is TexQuad but has \
+             malformed FIFO length {}",
+            entry.index,
+            entry.fifo.len()
+        );
+        print_entry(entry);
+        std::process::exit(2);
+    };
+
+    if !(texquad_is_axis_aligned(v) && texquad_is_mirrored_x(v)) {
+        eprintln!(
+            "[guard] FAIL: right portrait centre owner cmd #{} is not the mirrored \
+             axis-aligned TexQuad shape that regressed",
+            entry.index
+        );
+        print_entry(entry);
+        std::process::exit(2);
+    }
+
+    eprintln!(
+        "[guard] ok: right portrait centre display=({right_x},{right_y}) \
+         vram=({vx},{vy}) owner cmd #{} is mirrored TexQuad",
+        entry.index
+    );
+}
+
+fn texquad_vertices(entry: &GpuCmdLogEntry) -> Option<[(i32, i32); 4]> {
+    if entry.fifo.len() < 8 {
+        return None;
+    }
+    Some([
+        decode_vertex(entry.fifo[1]),
+        decode_vertex(entry.fifo[3]),
+        decode_vertex(entry.fifo[5]),
+        decode_vertex(entry.fifo[7]),
+    ])
+}
+
+fn texquad_is_axis_aligned(v: [(i32, i32); 4]) -> bool {
+    v[0].1 == v[1].1 && v[2].1 == v[3].1 && v[0].0 == v[2].0 && v[1].0 == v[3].0
+}
+
+fn texquad_is_mirrored_x(v: [(i32, i32); 4]) -> bool {
+    v[0].0 > v[1].0
+}
+
+fn decode_vertex(word: u32) -> (i32, i32) {
+    let x = ((word & 0x7FF) as i32) << 21 >> 21;
+    let y = (((word >> 16) & 0x7FF) as i32) << 21 >> 21;
+    (x, y)
 }
 
 #[allow(clippy::collapsible_match)]
