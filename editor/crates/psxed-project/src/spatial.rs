@@ -37,6 +37,17 @@ pub fn node_preview_origin(grid: &WorldGrid, transform: &Transform3) -> RoomPoin
     ]
 }
 
+/// Origin of a floor-anchored node in editor preview world space.
+/// X/Z come from the authored transform; Y is sampled from the
+/// floor directly under that X/Z when one exists.
+pub fn floor_anchored_node_preview_origin(grid: &WorldGrid, transform: &Transform3) -> RoomPoint {
+    let mut origin = node_preview_origin(grid, transform);
+    if let Some(floor_y) = grid.floor_height_at_room_local(origin[0], origin[2]) {
+        origin[1] = floor_y;
+    }
+    origin
+}
+
 /// Floating-point form of [`node_preview_origin`].
 pub fn node_preview_origin_f32(grid: &WorldGrid, transform: &Transform3) -> RoomPointF {
     let xz = grid.editor_to_room_local([transform.translation[0], transform.translation[2]]);
@@ -55,6 +66,21 @@ pub fn node_preview_bounds_center(
 ) -> RoomPointF {
     let origin = node_preview_origin_f32(grid, transform);
     [origin[0], origin[1] + half_extents[1], origin[2]]
+}
+
+/// Centre of a selectable floor-anchored node bound in editor
+/// preview world space.
+pub fn floor_anchored_node_preview_bounds_center(
+    grid: &WorldGrid,
+    transform: &Transform3,
+    half_extents: [f32; 3],
+) -> RoomPointF {
+    let origin = floor_anchored_node_preview_origin(grid, transform);
+    [
+        origin[0] as f32,
+        origin[1] as f32 + half_extents[1],
+        origin[2] as f32,
+    ]
 }
 
 /// Origin of a node in cooked `.psxw` room-local space.
