@@ -138,6 +138,12 @@ enum Selected {
     Memcard,
 }
 
+pub(crate) struct SerialExchange {
+    pub rx: u8,
+    pub ack: bool,
+    pub device_present: bool,
+}
+
 impl PortDevice {
     /// Build an empty port -- no pad, no memcard.
     pub const fn empty() -> Self {
@@ -169,6 +175,16 @@ impl PortDevice {
         self
     }
 
+    /// Remove the memory card from this port while preserving any
+    /// attached controller.
+    pub fn without_memcard(mut self) -> Self {
+        self.memcard = None;
+        if matches!(self.selected, Some(Selected::Memcard)) {
+            self.selected = None;
+        }
+        self
+    }
+
     /// Clock one byte across the serial link. Returns the device's
     /// RX byte and whether the device is holding `/DSR` low (ACK)
     /// to request another byte.
@@ -180,14 +196,41 @@ impl PortDevice {
     /// - `0x81` → memcard (if present)
     /// - anything else (or selected slot is empty) → `0xFF`, no ACK
     pub fn exchange(&mut self, tx: u8) -> (u8, bool) {
+        let result = self.exchange_detailed(tx);
+        (result.rx, result.ack)
+    }
+
+    pub(crate) fn exchange_detailed(&mut self, tx: u8) -> SerialExchange {
         match self.selected {
             Some(Selected::Pad) => match &mut self.pad {
-                Some(pad) => pad.exchange(tx),
-                None => (0xFF, false),
+                Some(pad) => {
+                    let (rx, ack) = pad.exchange(tx);
+                    SerialExchange {
+                        rx,
+                        ack,
+                        device_present: true,
+                    }
+                }
+                None => SerialExchange {
+                    rx: 0xFF,
+                    ack: false,
+                    device_present: false,
+                },
             },
             Some(Selected::Memcard) => match &mut self.memcard {
-                Some(card) => card.exchange(tx),
-                None => (0xFF, false),
+                Some(card) => {
+                    let (rx, ack) = card.exchange(tx);
+                    SerialExchange {
+                        rx,
+                        ack,
+                        device_present: true,
+                    }
+                }
+                None => SerialExchange {
+                    rx: 0xFF,
+                    ack: false,
+                    device_present: false,
+                },
             },
             None => {
                 // First byte decides the target.
@@ -201,20 +244,41 @@ impl PortDevice {
                             // controller. Real hardware returns a
                             // dummy/Hi-Z byte here; the actual ID bytes
                             // start on the following command byte.
-                            (0xFF, true)
+                            SerialExchange {
+                                rx: 0xFF,
+                                ack: true,
+                                device_present: true,
+                            }
                         } else {
-                            (0xFF, false)
+                            SerialExchange {
+                                rx: 0xFF,
+                                ack: false,
+                                device_present: false,
+                            }
                         }
                     }
                     0x81 => {
                         if let Some(card) = self.memcard.as_mut() {
                             self.selected = Some(Selected::Memcard);
-                            card.exchange(tx)
+                            let (rx, ack) = card.exchange(tx);
+                            SerialExchange {
+                                rx,
+                                ack,
+                                device_present: true,
+                            }
                         } else {
-                            (0xFF, false)
+                            SerialExchange {
+                                rx: 0xFF,
+                                ack: false,
+                                device_present: false,
+                            }
                         }
                     }
-                    _ => (0xFF, false),
+                    _ => SerialExchange {
+                        rx: 0xFF,
+                        ack: false,
+                        device_present: false,
+                    },
                 }
             }
         }
@@ -923,7 +987,7 @@ impl Default for DigitalPad {
 pub const MEMCARD_SIZE: usize = 128 * 1024;
 /// One "frame" (the unit of read/write on the serial protocol).
 pub const MEMCARD_FRAME_SIZE: usize = 128;
-const MEMCARD_RECENT_EVENTS: usize = 32;
+const MEMCARD_RECENT_EVENTS: usize = 256;
 
 /// Coarse memory-card protocol event captured for diagnostics.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
