@@ -1548,7 +1548,7 @@ pub fn build_ui(
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
     editor_viewport: psxed_ui::EditorViewport3dPresentation,
-    framebuffer_source: ui::framebuffer::FramebufferSource,
+    display_uv: egui::Rect,
     dt: f32,
 ) {
     ui::draw_layout(
@@ -1557,7 +1557,7 @@ pub fn build_ui(
         vram_tex,
         display_tex,
         editor_viewport,
-        framebuffer_source,
+        display_uv,
         dt,
     );
 }

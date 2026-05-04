@@ -356,6 +356,75 @@ impl HwPipeline {
         );
     }
 
+    /// Upload a wrapped sub-rect into the GPU-side `R16Uint` VRAM
+    /// texture. Used by the live renderer's command-ordered VRAM
+    /// mirror so texture reads see CPU→VRAM uploads and VRAM copies
+    /// at the right point in the GP0 stream.
+    pub fn upload_vram_rect_wrapped(
+        &self,
+        queue: &wgpu::Queue,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        pixel_at: impl Fn(u32, u32) -> u16,
+    ) {
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let mut row = 0;
+        while row < h {
+            let dst_y = (y + row) & (VRAM_HEIGHT - 1);
+            let chunk_h = (h - row).min(VRAM_HEIGHT - dst_y);
+            let mut col = 0;
+            while col < w {
+                let dst_x = (x + col) & (VRAM_WIDTH - 1);
+                let chunk_w = (w - col).min(VRAM_WIDTH - dst_x);
+
+                let row_bytes = chunk_w * 2;
+                let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                let padded_row_bytes = row_bytes.div_ceil(align) * align;
+                let padded_words = padded_row_bytes as usize / 2;
+                let mut words = vec![0u16; padded_words * chunk_h as usize];
+
+                for src_y in 0..chunk_h {
+                    let dst_row = src_y as usize * padded_words;
+                    for src_x in 0..chunk_w {
+                        words[dst_row + src_x as usize] = pixel_at(col + src_x, row + src_y);
+                    }
+                }
+
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.vram_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: dst_x,
+                            y: dst_y,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&words),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_row_bytes),
+                        rows_per_image: Some(chunk_h),
+                    },
+                    wgpu::Extent3d {
+                        width: chunk_w,
+                        height: chunk_h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+
+                col += chunk_w;
+            }
+            row += chunk_h;
+        }
+    }
+
     pub fn pipeline(&self, kind: BlendKind) -> &wgpu::RenderPipeline {
         &self.pipelines[kind.index()]
     }

@@ -61,6 +61,7 @@ pub struct HwRenderer {
     pipeline: HwPipeline,
     target: RenderTarget,
     translator: Translator,
+    texture_words: Vec<u16>,
 }
 
 /// Toolbar Native↔Window selector. Mirrors the frontend's
@@ -96,6 +97,7 @@ impl HwRenderer {
             pipeline,
             target,
             translator: Translator::new(),
+            texture_words: vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize],
         }
     }
 
@@ -110,6 +112,7 @@ impl HwRenderer {
             pipeline,
             target,
             translator: Translator::new(),
+            texture_words: vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize],
         }
     }
 
@@ -158,7 +161,8 @@ impl HwRenderer {
     /// Use after internal-scale reallocations, which necessarily
     /// clear the target texture while CPU VRAM still contains the
     /// authoritative persistent PSX pixels.
-    pub fn sync_target_from_vram(&self, vram_words: &[u16]) {
+    pub fn sync_target_from_vram(&mut self, vram_words: &[u16]) {
+        self.sync_texture_from_vram(vram_words);
         self.write_scaled_vram_rect_wrapped(0, 0, VRAM_WIDTH, VRAM_HEIGHT, |col, row| {
             vram_words[(row * VRAM_WIDTH + col) as usize]
         });
@@ -167,10 +171,11 @@ impl HwRenderer {
     /// Render one frame's `cmd_log` into the persistent VRAM target.
     /// Always loads the existing texture -- never clears -- so PSX
     /// VRAM-style persistence holds across frames. `vram_words` is
-    /// the CPU rasterizer's VRAM (post-frame) which the fragment
-    /// shader reads for textured primitives.
+    /// the CPU rasterizer's VRAM snapshot from the start of this
+    /// `cmd_log`; CPU→VRAM uploads and VRAM copies update the shader
+    /// source texture as the command stream is replayed.
     pub fn render_frame(&mut self, gpu: &Gpu, cmd_log: &[GpuCmdLogEntry], vram_words: &[u16]) {
-        self.pipeline.upload_vram(&self.queue, vram_words);
+        self.sync_texture_from_vram(vram_words);
 
         let mut segment_start = 0;
         for (i, entry) in cmd_log.iter().enumerate() {
@@ -248,7 +253,7 @@ impl HwRenderer {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    fn mirror_vram_image_op(&self, entry: &GpuCmdLogEntry, vram_words: &[u16]) {
+    fn mirror_vram_image_op(&mut self, entry: &GpuCmdLogEntry, vram_words: &[u16]) {
         match entry.opcode {
             0x80..=0x9F => self.mirror_vram_copy(entry),
             0xA0..=0xBF => self.mirror_vram_upload(entry, vram_words),
@@ -256,7 +261,7 @@ impl HwRenderer {
         }
     }
 
-    fn mirror_vram_copy(&self, entry: &GpuCmdLogEntry) {
+    fn mirror_vram_copy(&mut self, entry: &GpuCmdLogEntry) {
         if entry.fifo.len() < 4 {
             return;
         }
@@ -274,6 +279,9 @@ impl HwRenderer {
         if w == 0 || h == 0 {
             return;
         }
+
+        self.copy_texture_words_wrapped(sx, sy, dx, dy, w, h);
+        self.upload_texture_words_rect(dx, dy, w, h);
 
         let scale = self.target.scale();
         let out_w = w * scale;
@@ -376,7 +384,7 @@ impl HwRenderer {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    fn mirror_vram_upload(&self, entry: &GpuCmdLogEntry, vram_words: &[u16]) {
+    fn mirror_vram_upload(&mut self, entry: &GpuCmdLogEntry, vram_words: &[u16]) {
         if entry.fifo.len() < 3 {
             return;
         }
@@ -390,6 +398,12 @@ impl HwRenderer {
         let h = if raw_h == 0 { VRAM_HEIGHT } else { raw_h };
         let payload = entry.fifo.get(3..).unwrap_or(&[]);
         if payload.is_empty() {
+            self.write_texture_words_rect_wrapped(x, y, w, h, |col, row| {
+                let xx = (x + col) & (VRAM_WIDTH - 1);
+                let yy = (y + row) & (VRAM_HEIGHT - 1);
+                vram_words[(yy * VRAM_WIDTH + xx) as usize]
+            });
+            self.upload_texture_words_rect(x, y, w, h);
             self.write_scaled_vram_rect_wrapped(x, y, w, h, |col, row| {
                 let xx = (x + col) & (VRAM_WIDTH - 1);
                 let yy = (y + row) & (VRAM_HEIGHT - 1);
@@ -398,6 +412,18 @@ impl HwRenderer {
             return;
         }
 
+        self.write_texture_words_rect_wrapped(x, y, w, h, |col, row| {
+            let pixel_index = row * w + col;
+            let Some(&word) = payload.get((pixel_index / 2) as usize) else {
+                return 0;
+            };
+            if pixel_index & 1 == 0 {
+                word as u16
+            } else {
+                (word >> 16) as u16
+            }
+        });
+        self.upload_texture_words_rect(x, y, w, h);
         self.write_scaled_vram_rect_wrapped(x, y, w, h, |col, row| {
             let pixel_index = row * w + col;
             let Some(&word) = payload.get((pixel_index / 2) as usize) else {
@@ -409,6 +435,60 @@ impl HwRenderer {
                 (word >> 16) as u16
             }
         });
+    }
+
+    fn sync_texture_from_vram(&mut self, vram_words: &[u16]) {
+        if vram_words.len() != self.texture_words.len() {
+            return;
+        }
+        self.texture_words.copy_from_slice(vram_words);
+        self.pipeline.upload_vram(&self.queue, &self.texture_words);
+    }
+
+    fn copy_texture_words_wrapped(&mut self, sx: u32, sy: u32, dx: u32, dy: u32, w: u32, h: u32) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        let mut row_buf = vec![0u16; w as usize];
+        for row in 0..h {
+            let src_y = (sy + row) & (VRAM_HEIGHT - 1);
+            let dst_y = (dy + row) & (VRAM_HEIGHT - 1);
+            for col in 0..w {
+                let src_x = (sx + col) & (VRAM_WIDTH - 1);
+                row_buf[col as usize] = self.texture_words[(src_y * VRAM_WIDTH + src_x) as usize];
+            }
+            for col in 0..w {
+                let dst_x = (dx + col) & (VRAM_WIDTH - 1);
+                self.texture_words[(dst_y * VRAM_WIDTH + dst_x) as usize] = row_buf[col as usize];
+            }
+        }
+    }
+
+    fn write_texture_words_rect_wrapped(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        pixel_at: impl Fn(u32, u32) -> u16,
+    ) {
+        for row in 0..h {
+            let yy = (y + row) & (VRAM_HEIGHT - 1);
+            for col in 0..w {
+                let xx = (x + col) & (VRAM_WIDTH - 1);
+                self.texture_words[(yy * VRAM_WIDTH + xx) as usize] = pixel_at(col, row);
+            }
+        }
+    }
+
+    fn upload_texture_words_rect(&self, x: u32, y: u32, w: u32, h: u32) {
+        let words = &self.texture_words;
+        self.pipeline
+            .upload_vram_rect_wrapped(&self.queue, x, y, w, h, |col, row| {
+                let xx = (x + col) & (VRAM_WIDTH - 1);
+                let yy = (y + row) & (VRAM_HEIGHT - 1);
+                words[(yy * VRAM_WIDTH + xx) as usize]
+            });
     }
 
     fn write_scaled_vram_rect_wrapped(
@@ -606,8 +686,7 @@ mod tests {
 
     fn pixel_block(renderer: &HwRenderer, psx_x: u32, psx_y: u32) -> Vec<[u8; 4]> {
         let scale = renderer.internal_scale();
-        let (_, _, rgba) =
-            renderer.read_subrect_rgba8(psx_x * scale, psx_y * scale, scale, scale);
+        let (_, _, rgba) = renderer.read_subrect_rgba8(psx_x * scale, psx_y * scale, scale, scale);
         rgba.chunks_exact(4)
             .map(|px| [px[0], px[1], px[2], px[3]])
             .collect()
@@ -627,7 +706,10 @@ mod tests {
         vram_words[(psx_y * VRAM_WIDTH + psx_x) as usize] = color;
 
         renderer.sync_target_from_vram(&vram_words);
-        assert_eq!(pixel_block(&renderer, psx_x, psx_y), vec![bgr15_to_rgba8(color)]);
+        assert_eq!(
+            pixel_block(&renderer, psx_x, psx_y),
+            vec![bgr15_to_rgba8(color)]
+        );
 
         assert!(!renderer.set_internal_scale(1, None));
         assert!(renderer.set_internal_scale(2, None));

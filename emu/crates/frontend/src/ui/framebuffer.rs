@@ -1,16 +1,11 @@
 //! Framebuffer view for the central panel.
 //!
-//! The central panel usually presents the hardware renderer's
-//! VRAM-shaped target. 24bpp video frames use a packed CPU-decoded
-//! display texture because RGB888 pixels straddle 16-bit VRAM cells.
+//! The central panel presents the selected visible display texture.
+//! Normal 15-bit gameplay samples the host-GPU renderer's VRAM-shaped
+//! target; 24bpp scanout samples the packed display texture until the
+//! HW path grows RGB888 display decoding.
 
-use emulator_core::{Bus, DisplayArea};
-
-use crate::gfx::{MAX_DISPLAY_HEIGHT, MAX_DISPLAY_WIDTH};
 use crate::theme;
-
-const DEFAULT_FB_WIDTH: f32 = 320.0;
-const DEFAULT_FB_HEIGHT: f32 = 240.0;
 
 /// CRT display aspect ratio for NTSC. The visible area is 4:3
 /// regardless of which horizontal-resolution mode the game picks
@@ -18,43 +13,12 @@ const DEFAULT_FB_HEIGHT: f32 = 240.0;
 /// squash horizontally on a real CRT, not stretch into 16:9.
 const CRT_ASPECT: f32 = 4.0 / 3.0;
 
-/// Which texture layout the framebuffer is currently sampling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FramebufferSource {
-    /// Packed visible display at texture origin, produced by
-    /// `Gpu::display_rgba8` for 24bpp video modes.
-    CpuDisplay,
-    /// VRAM-shaped hardware-renderer target. The active display area
-    /// lives at its real PSX VRAM coordinates.
-    HardwareVram,
-}
-
 pub fn draw(
     ui: &mut egui::Ui,
     display_tex: egui::TextureId,
-    source: FramebufferSource,
-    bus: Option<&Bus>,
+    display_uv: egui::Rect,
     present_size_px: &mut (u32, u32),
 ) {
-    let reported = bus.map(|b| b.gpu.display_area()).unwrap_or(DisplayArea {
-        x: 0,
-        y: 0,
-        width: DEFAULT_FB_WIDTH as u16,
-        height: DEFAULT_FB_HEIGHT as u16,
-        bpp24: false,
-    });
-    let area = if reported.width == 0 || reported.height == 0 {
-        DisplayArea {
-            x: reported.x,
-            y: reported.y,
-            width: DEFAULT_FB_WIDTH as u16,
-            height: DEFAULT_FB_HEIGHT as u16,
-            bpp24: reported.bpp24,
-        }
-    } else {
-        reported
-    };
-
     theme::viz_frame(ui, "", |ui| {
         let avail = ui.available_rect_before_wrap();
         if avail.width() <= 0.0 || avail.height() <= 0.0 {
@@ -70,29 +34,9 @@ pub fn draw(
             (rect.height() * pixels_per_point).round().max(1.0) as u32,
         );
 
-        let uv = match source {
-            FramebufferSource::CpuDisplay => egui::Rect::from_min_max(
-                egui::pos2(0.0, 0.0),
-                egui::pos2(
-                    area.width as f32 / MAX_DISPLAY_WIDTH as f32,
-                    area.height as f32 / MAX_DISPLAY_HEIGHT as f32,
-                ),
-            ),
-            FramebufferSource::HardwareVram => egui::Rect::from_min_max(
-                egui::pos2(
-                    area.x as f32 / psx_gpu_render::VRAM_WIDTH as f32,
-                    area.y as f32 / psx_gpu_render::VRAM_HEIGHT as f32,
-                ),
-                egui::pos2(
-                    (area.x + area.width) as f32 / psx_gpu_render::VRAM_WIDTH as f32,
-                    (area.y + area.height) as f32 / psx_gpu_render::VRAM_HEIGHT as f32,
-                ),
-            ),
-        };
-
         ui.allocate_rect(avail, egui::Sense::hover());
         egui::Image::new((display_tex, rect.size()))
-            .uv(uv)
+            .uv(display_uv)
             .paint_at(ui, rect);
     });
 }
