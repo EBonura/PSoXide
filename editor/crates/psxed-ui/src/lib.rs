@@ -50,27 +50,34 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/obsidian_wraith",
     "assets/models/crimson_cross_knight",
     "assets/models/hooded_wretch",
-    "assets/models/obsidian_warden",
+    "assets/models/crowned_wraith",
+    "assets/animations/standalone_fbx",
 ];
 const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Obsidian Wraith",
     "Crimson Cross Knight",
     "Hooded Wretch",
-    "Obsidian Warden",
+    "Crowned Wraith",
 ];
 const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Obsidian Wraith Enemy Set",
     "Crimson Cross Knight Player Set",
     "Hooded Wretch Enemy Set",
-    "Obsidian Warden Enemy Set",
+    "Crowned Wraith Enemy Set",
 ];
 const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &[
     "Crimson Cross Knight Player",
     "Obsidian Wraith Enemy",
     "Hooded Wretch Enemy",
-    "Obsidian Warden Enemy",
+    "Crowned Wraith Enemy",
 ];
 const LEGACY_WRAITH_HERO_PROFILE_NAME: &str = "Wraith Hero";
+const LEGACY_OBSIDIAN_WARDEN_ASSET_DIR: &str = "assets/models/obsidian_warden";
+const LEGACY_OBSIDIAN_WARDEN_RESOURCE_NAMES: &[&str] = &[
+    "Obsidian Warden",
+    "Obsidian Warden Enemy Set",
+    "Obsidian Warden Enemy",
+];
 
 /// Discrete action a scene-tree row can produce in one frame.
 ///
@@ -7352,8 +7359,12 @@ impl EditorWorkspace {
             match sync_starter_character_catalogue(&mut self.project, &self.project_dir) {
                 Ok(report) => {
                     self.status = format!(
-                        "Synced starter characters: {} added, {} updated, {} file(s) copied",
-                        report.resources_added, report.resources_updated, report.files_copied
+                        "Synced starter characters: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
+                        report.resources_added,
+                        report.resources_updated,
+                        report.resources_removed,
+                        report.files_copied,
+                        report.files_removed
                     );
                     if report.changed() {
                         self.mark_dirty();
@@ -10025,12 +10036,18 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 struct StarterCharacterSyncReport {
     resources_added: usize,
     resources_updated: usize,
+    resources_removed: usize,
     files_copied: usize,
+    files_removed: usize,
 }
 
 impl StarterCharacterSyncReport {
     const fn changed(&self) -> bool {
-        self.resources_added > 0 || self.resources_updated > 0 || self.files_copied > 0
+        self.resources_added > 0
+            || self.resources_updated > 0
+            || self.resources_removed > 0
+            || self.files_copied > 0
+            || self.files_removed > 0
     }
 }
 
@@ -10071,8 +10088,12 @@ fn load_project_with_starter_catalogue(
     match project.save_to_path(&project_file) {
         Ok(()) => {
             let status = format!(
-                "Synced starter characters: {} added, {} updated, {} file(s) copied",
-                report.resources_added, report.resources_updated, report.files_copied
+                "Synced starter characters: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
+                report.resources_added,
+                report.resources_updated,
+                report.resources_removed,
+                report.files_copied,
+                report.files_removed
             );
             Ok((project, Some(status), false))
         }
@@ -10089,6 +10110,10 @@ fn should_auto_sync_starter_character_catalogue(project: &ProjectDocument) -> bo
         matches!(resource.data, ResourceData::Character(_))
             && resource.name == LEGACY_WRAITH_HERO_PROFILE_NAME
     });
+    let has_legacy_obsidian_warden = project
+        .resources
+        .iter()
+        .any(legacy_obsidian_warden_resource);
     let has_starter_character_asset =
         project
             .resources
@@ -10108,7 +10133,9 @@ fn should_auto_sync_starter_character_catalogue(project: &ProjectDocument) -> bo
         })
     });
 
-    missing_canonical_profile && (has_legacy_starter_character || has_starter_character_asset)
+    has_legacy_obsidian_warden
+        || (missing_canonical_profile
+            && (has_legacy_starter_character || has_starter_character_asset))
 }
 
 fn sync_starter_character_catalogue(
@@ -10117,6 +10144,7 @@ fn sync_starter_character_catalogue(
 ) -> Result<StarterCharacterSyncReport, String> {
     let starter = ProjectDocument::starter();
     let mut report = StarterCharacterSyncReport::default();
+    purge_legacy_obsidian_warden_catalogue(project, project_root, &mut report)?;
     let mut id_map: HashMap<ResourceId, ResourceId> = HashMap::new();
 
     for phase in [
@@ -10153,6 +10181,61 @@ fn sync_starter_character_catalogue(
     report.files_copied = copy_starter_character_asset_dirs(project_root)
         .map_err(|error| format!("copy starter character assets: {error}"))?;
     Ok(report)
+}
+
+fn purge_legacy_obsidian_warden_catalogue(
+    project: &mut ProjectDocument,
+    project_root: &Path,
+    report: &mut StarterCharacterSyncReport,
+) -> Result<(), String> {
+    let ids: Vec<ResourceId> = project
+        .resources
+        .iter()
+        .filter(|resource| legacy_obsidian_warden_resource(resource))
+        .map(|resource| resource.id)
+        .collect();
+    for id in ids {
+        if project.delete_resource(id).is_some() {
+            report.resources_removed += 1;
+        }
+    }
+
+    let legacy_dir = project_root.join(LEGACY_OBSIDIAN_WARDEN_ASSET_DIR);
+    if legacy_dir.exists() {
+        let removed_files = count_files_recursive(&legacy_dir).unwrap_or(0);
+        std::fs::remove_dir_all(&legacy_dir)
+            .map_err(|error| format!("remove legacy Obsidian Warden assets: {error}"))?;
+        report.files_removed += removed_files;
+    }
+
+    Ok(())
+}
+
+fn legacy_obsidian_warden_resource(resource: &Resource) -> bool {
+    if LEGACY_OBSIDIAN_WARDEN_RESOURCE_NAMES.contains(&resource.name.as_str()) {
+        return true;
+    }
+
+    match &resource.data {
+        ResourceData::Model(model) => {
+            legacy_obsidian_warden_asset_path(&model.model_path)
+                || model
+                    .texture_path
+                    .as_deref()
+                    .is_some_and(legacy_obsidian_warden_asset_path)
+                || model
+                    .clips
+                    .iter()
+                    .any(|clip| legacy_obsidian_warden_asset_path(&clip.psxanim_path))
+        }
+        ResourceData::AnimationClip(clip) => legacy_obsidian_warden_asset_path(&clip.psxanim_path),
+        _ => false,
+    }
+}
+
+fn legacy_obsidian_warden_asset_path(path: &str) -> bool {
+    path.strip_prefix(LEGACY_OBSIDIAN_WARDEN_ASSET_DIR)
+        .is_some_and(|remaining| remaining.starts_with('/'))
 }
 
 fn starter_catalogue_resource_matches_phase(
@@ -10310,6 +10393,19 @@ fn copy_dir_recursive_missing(src: &Path, dst: &Path) -> std::io::Result<usize> 
         }
     }
     Ok(copied)
+}
+
+fn count_files_recursive(path: &Path) -> std::io::Result<usize> {
+    let mut count = 0;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            count += count_files_recursive(&entry.path())?;
+        } else {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn draw_transform_policy_editor(
@@ -19233,6 +19329,77 @@ mod tests {
         ));
         assert!(dir
             .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
+            .is_file());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn open_directory_purges_legacy_obsidian_warden_catalogue() {
+        let dir = test_temp_dir("purge-obsidian-warden");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut project = ProjectDocument::starter();
+        let skeleton = project
+            .resources
+            .iter()
+            .find_map(|resource| (resource.name == "Meshy Biped Skeleton").then_some(resource.id))
+            .expect("starter skeleton");
+        let legacy_model = project.add_resource(
+            "Obsidian Warden",
+            ResourceData::Model(psxed_project::ModelResource {
+                model_path: "assets/models/obsidian_warden/obsidian_warden.psxmdl".to_string(),
+                texture_path: Some(
+                    "assets/models/obsidian_warden/obsidian_warden_128x128_8bpp.psxt".to_string(),
+                ),
+                skeleton: Some(skeleton),
+                clips: vec![psxed_project::ModelAnimationClip {
+                    name: "walking".to_string(),
+                    psxanim_path: "assets/models/obsidian_warden/obsidian_warden_walking.psxanim"
+                        .to_string(),
+                }],
+                default_clip: Some(0),
+                preview_clip: Some(0),
+                world_height: 1024,
+                scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+                attachments: Vec::new(),
+            }),
+        );
+        let legacy_set = project.add_resource(
+            "Obsidian Warden Enemy Set",
+            ResourceData::AnimationSet(psxed_project::AnimationSetResource {
+                skeleton: Some(skeleton),
+                ..psxed_project::AnimationSetResource::default()
+            }),
+        );
+        let mut legacy_character = psxed_project::CharacterResource::defaults();
+        legacy_character.model = Some(legacy_model);
+        legacy_character.animation_set = Some(legacy_set);
+        project.add_resource(
+            "Obsidian Warden Enemy",
+            ResourceData::Character(legacy_character),
+        );
+
+        let legacy_asset_dir = dir.join(LEGACY_OBSIDIAN_WARDEN_ASSET_DIR);
+        std::fs::create_dir_all(&legacy_asset_dir).unwrap();
+        std::fs::write(legacy_asset_dir.join("obsidian_warden.psxmdl"), b"old").unwrap();
+        project.save_to_path(dir.join("project.ron")).unwrap();
+
+        let workspace = EditorWorkspace::open_directory(&dir).unwrap();
+
+        assert!(!workspace.is_dirty());
+        assert!(!workspace.project().resources.iter().any(|resource| {
+            resource.name.contains("Obsidian Warden") || legacy_obsidian_warden_resource(resource)
+        }));
+        assert!(project_has_resource_name(
+            workspace.project(),
+            "Crowned Wraith Enemy",
+            |data| matches!(data, ResourceData::Character(_))
+        ));
+        assert!(!legacy_asset_dir.exists());
+        assert!(dir
+            .join("assets/animations/standalone_fbx/neutral_idle.psxanim")
             .is_file());
 
         let _ = std::fs::remove_dir_all(dir);
