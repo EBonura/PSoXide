@@ -80,17 +80,19 @@ impl RenderTarget {
 
     /// Resize to a new internal-resolution multiplier. Cheap when
     /// `new_scale` is unchanged; reallocates + re-registers + clears
-    /// to black otherwise. Cap at [`MAX_SCALE`].
+    /// to black otherwise. Cap at [`MAX_SCALE`]. Returns whether the
+    /// target was reallocated and therefore lost persistent VRAM
+    /// contents.
     pub fn ensure_scale(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         egui_renderer: Option<&mut egui_wgpu::Renderer>,
         new_scale: u32,
-    ) {
+    ) -> bool {
         let s = new_scale.clamp(1, MAX_SCALE);
         if s == self.scale {
-            return;
+            return false;
         }
         let (texture, view) = create_target(device, s);
         clear_to_black(device, queue, &view);
@@ -100,6 +102,7 @@ impl RenderTarget {
         self.texture = texture;
         self.view = view;
         self.scale = s;
+        true
     }
 
     pub fn view(&self) -> &wgpu::TextureView {
