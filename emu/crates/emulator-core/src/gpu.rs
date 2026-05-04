@@ -1731,10 +1731,14 @@ impl Gpu {
         if triangle_exceeds_hw_extent(v1, v3, v2) || triangle_exceeds_hw_extent(v0, v1, v2) {
             return true;
         }
-        let left = v0.0;
-        let right = v1.0;
-        let top = v0.1;
-        let bottom = v2.1;
+        let x0 = v0.0;
+        let x1 = v1.0;
+        let y0 = v0.1;
+        let y1 = v2.1;
+        let left = x0.min(x1);
+        let right = x0.max(x1);
+        let top = y0.min(y1);
+        let bottom = y0.max(y1);
         let width = right - left;
         let height = bottom - top;
         if width <= 0 || height <= 0 {
@@ -1756,14 +1760,25 @@ impl Gpu {
         let clut_x = (clut_word & 0x3F) * 16;
         let clut_y = (clut_word >> 6) & 0x1FF;
         let tpage_mode = self.tex_blend_mode;
-        let left_u0 = (t0.0 as i64) << 16;
-        let left_v0 = (t0.1 as i64) << 16;
-        let right_u0 = (t1.0 as i64) << 16;
-        let right_v0 = (t1.1 as i64) << 16;
-        let delta_left_u = (((t2.0 as i64) << 16) - left_u0) / height as i64;
-        let delta_left_v = (((t2.1 as i64) << 16) - left_v0) / height as i64;
-        let delta_right_u = (((t3.0 as i64) << 16) - right_u0) / height as i64;
-        let delta_right_v = (((t3.1 as i64) << 16) - right_v0) / height as i64;
+        let (top_a, bottom_a, top_b, bottom_b) = if y0 <= y1 {
+            (t0, t2, t1, t3)
+        } else {
+            (t2, t0, t3, t1)
+        };
+        let (left_top, left_bottom, right_top, right_bottom) = if x0 <= x1 {
+            (top_a, bottom_a, top_b, bottom_b)
+        } else {
+            (top_b, bottom_b, top_a, bottom_a)
+        };
+
+        let left_u0 = (left_top.0 as i64) << 16;
+        let left_v0 = (left_top.1 as i64) << 16;
+        let right_u0 = (right_top.0 as i64) << 16;
+        let right_v0 = (right_top.1 as i64) << 16;
+        let delta_left_u = (((left_bottom.0 as i64) << 16) - left_u0) / height as i64;
+        let delta_left_v = (((left_bottom.1 as i64) << 16) - left_v0) / height as i64;
+        let delta_right_u = (((right_bottom.0 as i64) << 16) - right_u0) / height as i64;
+        let delta_right_v = (((right_bottom.1 as i64) << 16) - right_v0) / height as i64;
 
         for py in y_start..=y_end {
             let row = (py - top) as i64;
@@ -4336,6 +4351,63 @@ mod tests {
             0,
             "oversize split half should be skipped independently",
         );
+    }
+
+    #[test]
+    fn axis_aligned_textured_quad_draws_right_to_left_order() {
+        // Tekken 3 mirrors the P2 VS portrait by submitting an axis-
+        // aligned textured quad whose first vertical edge is on the
+        // right and second vertical edge is on the left. The fast path
+        // must draw it instead of treating the negative X span as
+        // "handled but empty".
+        let mut gpu = Gpu::new();
+        let tpage = prepare_opaque_15bpp_texture(&mut gpu);
+        for y in 0..4 {
+            for x in 0..4 {
+                gpu.vram.set_pixel(x, 256 + y, 0x1000 + (y << 4) + x);
+            }
+        }
+
+        gpu.write32(GP0_ADDR, 0x2D00_0000); // raw textured quad
+        gpu.write32(GP0_ADDR, pack_test_vertex(4, 0)); // v0: top-right
+        gpu.write32(GP0_ADDR, pack_test_uv(4, 0, 0));
+        gpu.write32(GP0_ADDR, pack_test_vertex(0, 0)); // v1: top-left
+        gpu.write32(GP0_ADDR, pack_test_uv(0, 0, tpage));
+        gpu.write32(GP0_ADDR, pack_test_vertex(4, 4)); // v2: bottom-right
+        gpu.write32(GP0_ADDR, pack_test_uv(4, 4, 0));
+        gpu.write32(GP0_ADDR, pack_test_vertex(0, 4)); // v3: bottom-left
+        gpu.write32(GP0_ADDR, pack_test_uv(0, 4, 0));
+
+        assert_eq!(gpu.vram.get_pixel(0, 0), 0x1000);
+        assert_eq!(gpu.vram.get_pixel(1, 0), 0x1001);
+        assert_eq!(gpu.vram.get_pixel(2, 0), 0x1002);
+        assert_eq!(gpu.vram.get_pixel(3, 0), 0x1003);
+    }
+
+    #[test]
+    fn axis_aligned_textured_quad_draws_bottom_to_top_order() {
+        let mut gpu = Gpu::new();
+        let tpage = prepare_opaque_15bpp_texture(&mut gpu);
+        for y in 0..4 {
+            for x in 0..4 {
+                gpu.vram.set_pixel(x, 256 + y, 0x1000 + (y << 4) + x);
+            }
+        }
+
+        gpu.write32(GP0_ADDR, 0x2D00_0000); // raw textured quad
+        gpu.write32(GP0_ADDR, pack_test_vertex(0, 4)); // v0: bottom-left
+        gpu.write32(GP0_ADDR, pack_test_uv(0, 4, 0));
+        gpu.write32(GP0_ADDR, pack_test_vertex(4, 4)); // v1: bottom-right
+        gpu.write32(GP0_ADDR, pack_test_uv(4, 4, tpage));
+        gpu.write32(GP0_ADDR, pack_test_vertex(0, 0)); // v2: top-left
+        gpu.write32(GP0_ADDR, pack_test_uv(0, 0, 0));
+        gpu.write32(GP0_ADDR, pack_test_vertex(4, 0)); // v3: top-right
+        gpu.write32(GP0_ADDR, pack_test_uv(4, 0, 0));
+
+        assert_eq!(gpu.vram.get_pixel(0, 0), 0x1000);
+        assert_eq!(gpu.vram.get_pixel(1, 0), 0x1001);
+        assert_eq!(gpu.vram.get_pixel(0, 3), 0x1030);
+        assert_eq!(gpu.vram.get_pixel(1, 3), 0x1031);
     }
 
     #[test]

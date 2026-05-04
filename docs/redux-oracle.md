@@ -130,6 +130,75 @@ the patched Redux binary is missing. When all inputs are present, it
 boots BIOS plus disc in both emulators, advances to the checkpoint, and
 requires the visible display dimensions and hash to match Redux.
 
+## Commercial visual guards
+
+Local commercial visual guards live in the
+`commercial_visual_guard` example. They do not need Redux and do not
+store golden commercial-game images. A guard fast-boots a disc, drives
+an input pulse script, enables GPU pixel-owner tracing for a chosen
+window, and checks structural rendering assertions.
+
+List available guards with:
+
+```bash
+cargo run -p emulator-core --example commercial_visual_guard -- --list
+```
+
+Run every registered guard with:
+
+```bash
+make commercial-visual-guards
+```
+
+The Tekken 3 guards cover four commercial visual-parity windows:
+
+- `tekken3-mode-select` checks the mode-select/menu display size,
+  title/logo coverage, option-list coverage, and sampled color
+  diversity. This protects the screen where the live HW renderer can
+  expose target-persistence bugs after presentation scale changes.
+- `tekken3-vs-portrait` checks the VS frame's display size, then
+  samples the upper, middle, and lower bands of Eddy's portrait and
+  fails unless each sample is owned by one of the mirrored
+  axis-aligned TexQuad packets that draw the portrait. It also checks
+  textured coverage and color diversity for Xiaoyu's portrait, plus
+  mirrored TexQuad coverage and color diversity for Eddy's portrait.
+- `tekken3-early-fight` checks the early fight display size, HUD
+  coverage, stage coverage, textured owner coverage across both
+  fighters, and sampled color diversity inside each fighter region.
+  This protects the full gameplay render path without storing a golden
+  screenshot.
+- `tekken3-late-fight` checks a later fight camera with a sky-heavy
+  background, a knocked-down fighter, and the standing fighter. It also
+  checks fighter color diversity, covering a different
+  camera/background composition from the early fight guard.
+
+```bash
+export PSOXIDE_DISC="/absolute/path/to/Tekken 3 (USA).cue"
+export PSOXIDE_BIOS=/absolute/path/to/SCPH1001.BIN
+make tekken-mode-guard
+make tekken-vs-guard
+make tekken-fight-guard
+make tekken-late-fight-guard
+```
+
+On success the guard prints `[guard] ok` lines and writes
+`final.ppm` in the output directory. On regression it exits non-zero
+and prints the failing structural assertion, including owner-command
+details for sampled-pixel failures. Use these guards before broader
+manual Tekken visual sweeps; the sweep probe remains useful for
+finding new artifacts after the fixed windows are protected.
+
+Set `PSOXIDE_VISUAL_GUARD_OUT=/tmp/somewhere` to override the
+all-guards output root, `PSOXIDE_TEKKEN_MODE_GUARD_OUT=/tmp/somewhere`
+for the mode-select shortcut, or
+`PSOXIDE_TEKKEN_GUARD_OUT=/tmp/somewhere` for the VS shortcut. Use
+`PSOXIDE_TEKKEN_FIGHT_GUARD_OUT=/tmp/somewhere` for the early-fight
+shortcut, or
+`PSOXIDE_TEKKEN_LATE_FIGHT_GUARD_OUT=/tmp/somewhere` for the
+late-fight shortcut. The verbose `probe_tekken_vs_pixel_owner`
+example remains available when iterating on probe arguments or printing
+the surrounding GP0/VRAM diagnostics.
+
 ## Managing Redux changes
 
 Keep Redux changes in the Redux fork/branch. Keep PSoXide changes in
