@@ -107,8 +107,9 @@ fn main() {
     .expect("request device");
 
     let mut hw = HwRenderer::new_headless(device, queue);
-    let vram_words: Vec<u16> = bus.gpu.vram.words().to_vec();
-    hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &vram_words);
+    let initial_vram =
+        vec![0u16; (psx_gpu_render::VRAM_WIDTH * psx_gpu_render::VRAM_HEIGHT) as usize];
+    hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
     // Display sub-rect of the VRAM-shaped target (= what the
     // central panel paints in the live frontend).
     let s = hw.internal_scale();
