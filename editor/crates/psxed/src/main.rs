@@ -31,10 +31,11 @@
 //!   --no-material-colors    Ignore glTF material base colours and use palette cycling.
 //! ```
 //!
-//! ## `glb-model` -- skinned glTF/GLB → `.psxmdl` + `.psxanim` + `.psxt`
+//! ## `glb-model`/`fbx-model` -- skinned model source → `.psxmdl` + `.psxanim` + `.psxt`
 //!
 //! ```bash
 //! psxed glb-model SRC.glb --out-dir assets/models/name --name name [options]
+//! psxed fbx-model SRC.fbx --out-dir assets/models/name --name name [options]
 //!
 //! Options:
 //!   --texture-size WxH    Target texture dimensions (default 128x128).
@@ -43,6 +44,7 @@
 //!   --world-height N      Suggested engine/world height (default 1024).
 //!   --center-animation-root
 //!                         Freeze root-joint translation while sampling clips.
+//!   --animation PATH     Add a standalone FBX animation take. Repeatable.
 //!   --prune-detached-islands N
 //!                         Drop cooked-position detached islands up to N faces (default 4).
 //! ```
@@ -65,7 +67,7 @@
 //! - `font`  -- TTF or bitmap → psx-font atlas
 //! - `scene` -- edit a .pscene JSON and cook it into runtime format
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -76,7 +78,7 @@ fn main() -> ExitCode {
     }
     let result = match args[1].as_str() {
         "glb" | "gltf" => run_glb(&args[2..]),
-        "glb-model" | "gltf-model" => run_glb_model(&args[2..]),
+        "glb-model" | "gltf-model" | "fbx-model" => run_glb_model(&args[2..]),
         "obj" => run_obj(&args[2..]),
         "tex" => run_tex(&args[2..]),
         "-h" | "--help" | "help" => {
@@ -103,7 +105,7 @@ USAGE:
 SUBCOMMANDS:
     glb     Convert a glTF/.glb scene mesh to .psxm format
     glb-model
-            Convert a skinned glTF/.glb model to .psxmdl/.psxanim/.psxt
+            Convert a skinned GLB/glTF/FBX model to .psxmdl/.psxanim/.psxt
     obj     Convert a Wavefront .obj mesh to .psxm format
     tex     Convert a PNG/JPG/BMP image to .psxt format
     help    Show this message
@@ -124,13 +126,14 @@ GLB SUBCOMMAND:
                           [--no-material-colors]
 
 GLB-MODEL SUBCOMMAND:
-    psxed glb-model <input.glb|input.gltf> --out-dir <directory>
+    psxed glb-model <input.glb|input.gltf|input.fbx> --out-dir <directory>
                           [--name asset_name]
                           [--texture-size WxH]     (default 128x128)
                           [--texture-depth 4|8|15] (default 8)
                           [--anim-fps N]           (default 15)
                           [--world-height N]       (default 1024)
                           [--center-animation-root]
+                          [--animation <anim.fbx>] (repeatable)
                           [--prune-detached-islands N] (default 4)
 
 TEX SUBCOMMAND:
@@ -305,6 +308,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
     let mut animation_fps: u16 = 15;
     let mut world_height: u16 = 1024;
     let mut normalize_root_translation = false;
+    let mut animation_paths: Vec<PathBuf> = Vec::new();
     let mut prune_detached_face_islands =
         psxed_gltf::RigidModelConfig::default().prune_detached_face_islands;
 
@@ -364,6 +368,13 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
             "--center-animation-root" | "--normalize-root-translation" => {
                 normalize_root_translation = true;
             }
+            "--animation" | "--anim" => {
+                i += 1;
+                animation_paths
+                    .push(PathBuf::from(args.get(i).ok_or_else(|| {
+                        "expected path after --animation".to_string()
+                    })?));
+            }
             "--prune-detached-islands" => {
                 i += 1;
                 let val = args
@@ -390,7 +401,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         i += 1;
     }
 
-    let input = input.ok_or("missing input GLB/glTF path")?;
+    let input = input.ok_or("missing input GLB/glTF/FBX path")?;
     let out_dir = out_dir.ok_or("missing --out-dir directory")?;
     let name = name.unwrap_or_else(|| default_asset_name(&input));
     let cfg = psxed_gltf::RigidModelConfig {
@@ -403,8 +414,8 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         strip_animation_scale: true,
         prune_detached_face_islands,
     };
-    let package =
-        psxed_gltf::convert_rigid_model_path(&input, &cfg).map_err(|e| format!("convert: {e}"))?;
+    let package = convert_rigid_model_source(&input, &animation_paths, &cfg)
+        .map_err(|e| format!("convert: {e}"))?;
 
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
     let model_path = out_dir.join(format!("{name}.psxmdl"));
@@ -431,7 +442,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
     };
 
     eprintln!(
-        "[psxed glb-model] {} -> {} ({} src verts, {} cooked verts, {} faces, {} parts, {} joints)",
+        "[psxed model] {} -> {} ({} src verts, {} cooked verts, {} faces, {} parts, {} joints)",
         input.display(),
         model_path.display(),
         package.report.source_vertices,
@@ -441,14 +452,14 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         package.report.joints,
     );
     eprintln!(
-        "[psxed glb-model] precision local_height={} local_to_world_q12={} target_world_height={}",
+        "[psxed model] precision local_height={} local_to_world_q12={} target_world_height={}",
         package.report.local_height, package.report.local_to_world_q12, world_height
     );
     if clip_paths.is_empty() {
-        eprintln!("[psxed glb-model] no animations in source");
+        eprintln!("[psxed model] no animations in source");
     } else {
         eprintln!(
-            "[psxed glb-model] {} clips @ {}Hz, {} bytes total",
+            "[psxed model] {} clips @ {}Hz, {} bytes total",
             clip_paths.len(),
             animation_fps,
             package.report.animation_bytes
@@ -456,7 +467,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         for (path, clip) in &clip_paths {
             let label = clip.source_name.as_deref().unwrap_or(&clip.sanitized_name);
             eprintln!(
-                "[psxed glb-model]   {} ({} frames, {} bytes) <- {}",
+                "[psxed model]   {} ({} frames, {} bytes) <- {}",
                 path.display(),
                 clip.frames,
                 clip.bytes.len(),
@@ -466,7 +477,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
     }
     if let Some(path) = texture_path {
         eprintln!(
-            "[psxed glb-model] texture {} ({}x{} {}bpp, {} bytes)",
+            "[psxed model] texture {} ({}x{} {}bpp, {} bytes)",
             path.display(),
             texture_width,
             texture_height,
@@ -475,6 +486,28 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn convert_rigid_model_source(
+    input: &Path,
+    animation_paths: &[PathBuf],
+    cfg: &psxed_gltf::RigidModelConfig,
+) -> Result<psxed_gltf::RigidModelPackage, psxed_gltf::Error> {
+    let is_fbx = input
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("fbx"));
+    if is_fbx && !animation_paths.is_empty() {
+        psxed_gltf::convert_fbx_rigid_model_path_with_animation_paths(input, animation_paths, cfg)
+    } else if is_fbx {
+        psxed_gltf::convert_fbx_rigid_model_path(input, cfg)
+    } else if !animation_paths.is_empty() {
+        Err(psxed_gltf::Error::FbxImport(
+            "extra FBX animation takes currently require an FBX model source".to_string(),
+        ))
+    } else {
+        psxed_gltf::convert_rigid_model_path(input, cfg)
+    }
 }
 
 fn run_obj(args: &[String]) -> Result<(), String> {
