@@ -362,6 +362,7 @@ struct ResourceClick {
 struct ModelImportDialog {
     open: bool,
     source_path: String,
+    animation_paths: Vec<String>,
     output_name: String,
     texture_width: i32,
     texture_height: i32,
@@ -382,6 +383,7 @@ impl Default for ModelImportDialog {
         Self {
             open: false,
             source_path: String::new(),
+            animation_paths: Vec::new(),
             output_name: String::new(),
             texture_width: 128,
             texture_height: 128,
@@ -2640,6 +2642,8 @@ impl EditorWorkspace {
 
         enum Action {
             BrowseSource,
+            BrowseAnimations,
+            ClearAnimations,
             Preview,
             Import,
             Close,
@@ -2659,7 +2663,7 @@ impl EditorWorkspace {
                     ui.vertical(|ui| {
                         ui.set_width(300.0);
                         ui.label(RichText::new("Source").strong());
-                        ui.label(RichText::new("GLB/glTF path").color(STUDIO_TEXT_WEAK).small());
+                        ui.label(RichText::new("Model path").color(STUDIO_TEXT_WEAK).small());
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut dialog.source_path)
@@ -2667,12 +2671,46 @@ impl EditorWorkspace {
                             );
                             if ui
                                 .button(icons::label(icons::FOLDER, "Browse"))
-                                .on_hover_text("Choose a .glb or .gltf file")
+                                .on_hover_text("Choose a .glb, .gltf, or .fbx file")
                                 .clicked()
                             {
                                 action = Some(Action::BrowseSource);
                             }
                         });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Extra FBX animations")
+                                    .color(STUDIO_TEXT_WEAK)
+                                    .small(),
+                            );
+                            if ui
+                                .button(icons::label(icons::FILE_PLUS, "Add"))
+                                .on_hover_text(
+                                    "Add standalone .fbx animation takes to bake with this model.",
+                                )
+                                .clicked()
+                            {
+                                action = Some(Action::BrowseAnimations);
+                            }
+                            if !dialog.animation_paths.is_empty()
+                                && ui.button("Clear").clicked()
+                            {
+                                action = Some(Action::ClearAnimations);
+                            }
+                        });
+                        for path in dialog.animation_paths.iter().take(5) {
+                            ui.label(RichText::new(path).color(STUDIO_TEXT_WEAK).small());
+                        }
+                        if dialog.animation_paths.len() > 5 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "+{} more",
+                                    dialog.animation_paths.len() - 5
+                                ))
+                                .color(STUDIO_TEXT_WEAK)
+                                .small(),
+                            );
+                        }
                         ui.label(RichText::new("Resource name").color(STUDIO_TEXT_WEAK).small());
                         ui.text_edit_singleline(&mut dialog.output_name);
                         if dialog.output_name.trim().is_empty() {
@@ -2828,6 +2866,18 @@ impl EditorWorkspace {
                     self.run_model_import_preview(ctx);
                 }
             }
+            Some(Action::BrowseAnimations) => {
+                if self.choose_model_import_animation_sources() {
+                    self.run_model_import_preview(ctx);
+                }
+            }
+            Some(Action::ClearAnimations) => {
+                self.model_import_dialog.animation_paths.clear();
+                self.retire_model_import_preview();
+                self.model_import_dialog.status = Some(ModelImportStatus::Info(
+                    "Cleared extra animations".to_string(),
+                ));
+            }
             Some(Action::Preview) => self.run_model_import_preview(ctx),
             Some(Action::Import) => self.commit_model_import(),
             Some(Action::Close) => self.close_model_import_dialog(),
@@ -2860,13 +2910,18 @@ impl EditorWorkspace {
         let source = self.model_import_source_path();
         if source.as_os_str().is_empty() {
             self.model_import_dialog.status = Some(ModelImportStatus::Error(
-                "Choose a GLB/glTF source path.".to_string(),
+                "Choose a GLB/glTF/FBX source path.".to_string(),
             ));
             return;
         }
         let config = self.model_import_config();
+        let animation_sources = self.model_import_animation_source_paths();
         let world_height = config.world_height as i32;
-        match psxed_project::model_import::preview_glb_model(&source, config) {
+        match psxed_project::model_import::preview_model_with_animation_sources(
+            &source,
+            &animation_sources,
+            config,
+        ) {
             Ok(package) => {
                 let decoded_atlas = package
                     .texture
@@ -2929,8 +2984,8 @@ impl EditorWorkspace {
 
     fn choose_model_import_source(&mut self) -> bool {
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Choose GLB/glTF model")
-            .add_filter("glTF model", &["glb", "gltf"]);
+            .set_title("Choose model source")
+            .add_filter("Model source", &["glb", "gltf", "fbx"]);
         let current = self.model_import_source_path();
         if let Some(dir) = Self::path_parent_or_self(&current) {
             dialog = dialog.set_directory(dir);
@@ -2959,19 +3014,50 @@ impl EditorWorkspace {
         true
     }
 
+    fn choose_model_import_animation_sources(&mut self) -> bool {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Choose FBX animation takes")
+            .add_filter("FBX animation", &["fbx"]);
+        let current = self.model_import_source_path();
+        if let Some(dir) = Self::path_parent_or_self(&current) {
+            dialog = dialog.set_directory(dir);
+        } else if self.project_dir.is_dir() {
+            dialog = dialog.set_directory(&self.project_dir);
+        }
+
+        let Some(paths) = dialog.pick_files() else {
+            return false;
+        };
+        for path in paths {
+            let stored = Self::display_project_path(&path, &self.project_dir);
+            if !self.model_import_dialog.animation_paths.contains(&stored) {
+                self.model_import_dialog.animation_paths.push(stored);
+            }
+        }
+        self.retire_model_import_preview();
+        self.model_import_dialog.selected_clip = 0;
+        self.model_import_dialog.status = Some(ModelImportStatus::Info(format!(
+            "{} extra animation source(s)",
+            self.model_import_dialog.animation_paths.len()
+        )));
+        true
+    }
+
     fn commit_model_import(&mut self) {
         let source = self.model_import_source_path();
         if source.as_os_str().is_empty() {
             self.model_import_dialog.status = Some(ModelImportStatus::Error(
-                "Choose a GLB/glTF source path.".to_string(),
+                "Choose a GLB/glTF/FBX source path.".to_string(),
             ));
             return;
         }
         let output_name = self.model_import_output_name(&source);
         let config = self.model_import_config();
-        match psxed_project::model_import::import_glb_model(
+        let animation_sources = self.model_import_animation_source_paths();
+        match psxed_project::model_import::import_model_with_animation_sources(
             &mut self.project,
             &source,
+            &animation_sources,
             &output_name,
             &self.project_dir,
             config,
@@ -3016,6 +3102,23 @@ impl EditorWorkspace {
         } else {
             self.project_dir.join(path)
         }
+    }
+
+    fn model_import_animation_source_paths(&self) -> Vec<PathBuf> {
+        self.model_import_dialog
+            .animation_paths
+            .iter()
+            .filter_map(|path| {
+                let trimmed = path.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if Path::new(trimmed).is_absolute() {
+                    Some(PathBuf::from(trimmed))
+                } else {
+                    Some(self.project_dir.join(trimmed))
+                }
+            })
+            .collect()
     }
 
     fn model_import_output_name(&self, source: &Path) -> String {
@@ -7264,7 +7367,7 @@ impl EditorWorkspace {
         if ui
             .button(icons::label(icons::FILE_PLUS, "Import Model"))
             .on_hover_text(
-                "Open the GLB/glTF model import preview with atlas, clip, and root-centering controls.",
+                "Open the GLB/glTF/FBX model import preview with atlas, clip, and root-centering controls.",
             )
             .clicked()
         {
@@ -11539,7 +11642,7 @@ fn draw_psxt_stats(ui: &mut egui::Ui, stats: PsxtStats) {
 /// Inspector for a [`ResourceData::Model`]. Lets the user edit
 /// the model + atlas paths, manage the clip list, choose
 /// preview / default clips, and view parsed model + clip
-/// statistics. The "Register Cooked Folder" / "Import GLB"
+/// statistics. The "Register Cooked Folder" / "Import Model"
 /// helpers run via deferred actions stored in
 /// [`ModelInspectorAction`] so the caller can apply them after
 /// dropping the mutable resource borrow.
@@ -11638,7 +11741,7 @@ fn draw_model_resource_editor(
 
             ui.label(
                 RichText::new(
-                    "Use Resources -> Import Model for GLB/glTF preview, root-centering, and bundle import.",
+                    "Use Resources -> Import Model for GLB/glTF/FBX preview, root-centering, and bundle import.",
                 )
                 .color(STUDIO_TEXT_WEAK)
                 .small(),
