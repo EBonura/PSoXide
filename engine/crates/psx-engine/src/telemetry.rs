@@ -25,6 +25,20 @@ pub mod stage {
     pub const MODEL_INSTANCES: u16 = 8;
     /// Player model rendering.
     pub const PLAYER: u16 = 9;
+    /// Whole-model bounds tests for placed model instances.
+    pub const MODEL_BOUNDS: u16 = 13;
+    /// Placed model draw calls after bounds culling.
+    pub const MODEL_DRAW: u16 = 14;
+    /// Whole-player bounds test.
+    pub const PLAYER_BOUNDS: u16 = 15;
+    /// Player model draw call after bounds culling.
+    pub const PLAYER_DRAW: u16 = 16;
+    /// Textured model joint pose sampling and transform setup.
+    pub const TEXTURED_MODEL_JOINTS: u16 = 17;
+    /// Textured model vertex projection.
+    pub const TEXTURED_MODEL_PROJECT: u16 = 18;
+    /// Textured model face culling, packet build, and command enqueue.
+    pub const TEXTURED_MODEL_FACES: u16 = 19;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -81,6 +95,22 @@ pub mod counter {
     pub const EQUIPMENT_CULLED_TRIS: u16 = 22;
     /// Triangles dropped for equipment models.
     pub const EQUIPMENT_DROPPED_TRIS: u16 = 23;
+    /// Placed model instance bounds tests.
+    pub const MODEL_INSTANCE_BOUNDS_TESTS: u16 = 24;
+    /// Placed model instances rejected by whole-model bounds.
+    pub const MODEL_INSTANCE_BOUNDS_CULLED: u16 = 25;
+    /// Player bounds tests.
+    pub const PLAYER_BOUNDS_TESTS: u16 = 26;
+    /// Player draws rejected by whole-model bounds.
+    pub const PLAYER_BOUNDS_CULLED: u16 = 27;
+    /// Joints sampled for textured model submits.
+    pub const TEXTURED_MODEL_JOINTS: u16 = 28;
+    /// Parts walked for textured model submits.
+    pub const TEXTURED_MODEL_PARTS: u16 = 29;
+    /// Vertices projected for textured model submits.
+    pub const TEXTURED_MODEL_VERTICES: u16 = 30;
+    /// Face records considered by textured model submits.
+    pub const TEXTURED_MODEL_FACES: u16 = 31;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;

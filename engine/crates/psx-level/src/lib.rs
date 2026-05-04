@@ -103,6 +103,11 @@ typed_index! {
     pub struct ModelSocketIndex;
 }
 
+typed_index! {
+    /// Index into the generated `MODEL_FRAME_BOUNDS` table.
+    pub struct ModelFrameBoundsIndex;
+}
+
 /// Room record flags.
 pub mod room_flags {
     /// Per-room fog/depth cue is enabled.
@@ -497,6 +502,41 @@ pub struct LevelModelClipRecord {
     pub name: &'static str,
     /// Cooked `.psxanim` asset.
     pub animation_asset: AssetId,
+}
+
+/// Bounds metadata for one global model-clip entry.
+///
+/// The generated table is emitted in the same order as
+/// `MODEL_CLIPS`, so runtime code can index it by
+/// [`ModelClipTableIndex`] and avoid walking broad asset tables
+/// during the frame path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelModelClipBoundsRecord {
+    /// Owning model.
+    pub model: ModelIndex,
+    /// Global clip table entry these frame bounds describe.
+    pub clip: ModelClipTableIndex,
+    /// First frame-bound record for this clip.
+    pub first_frame: ModelFrameBoundsIndex,
+    /// Number of frame-bound records.
+    pub frame_count: u16,
+    /// Reserved.
+    pub flags: u16,
+}
+
+/// Conservative local-space sphere for one sampled animation frame.
+///
+/// `center` is relative to the model origin after model-local
+/// animation and model-local-to-world scale have been applied, but
+/// before instance yaw and world translation. `radius` is in engine
+/// world units and intentionally conservative so culling never clips
+/// a visible animated limb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelModelFrameBoundsRecord {
+    /// Model-local center in engine world units.
+    pub center: [i32; 3],
+    /// Conservative sphere radius in engine world units.
+    pub radius: i32,
 }
 
 /// One cooked PSX model: `.psxmdl` mesh, optional `.psxt`

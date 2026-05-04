@@ -171,6 +171,28 @@ pub struct PlaytestModelClip {
     pub animation_asset_index: usize,
 }
 
+/// Bounds-table slice for one global model clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelClipBounds {
+    /// Owning model index in [`PlaytestPackage::models`].
+    pub model: u16,
+    /// Global clip index in [`PlaytestPackage::model_clips`].
+    pub clip: u16,
+    /// First index in [`PlaytestPackage::model_frame_bounds`].
+    pub first_frame: u16,
+    /// Number of frame-bound records for this clip.
+    pub frame_count: u16,
+}
+
+/// Conservative local-space sphere for one animation frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelFrameBounds {
+    /// Model-local center in engine world units.
+    pub center: [i32; 3],
+    /// Conservative radius in engine world units.
+    pub radius: i32,
+}
+
 /// One named model attachment socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestModelSocket {
@@ -482,6 +504,10 @@ pub struct PlaytestPackage {
     pub models: Vec<PlaytestModel>,
     /// Per-model clip records ordered as `(model, clip_index)`.
     pub model_clips: Vec<PlaytestModelClip>,
+    /// Per-global-clip bounds slices.
+    pub model_clip_bounds: Vec<PlaytestModelClipBounds>,
+    /// Flattened per-frame model bounds.
+    pub model_frame_bounds: Vec<PlaytestModelFrameBounds>,
     /// Per-model socket records ordered as `(model, socket_index)`.
     pub model_sockets: Vec<PlaytestModelSocket>,
     /// Placed model instances, room-local coordinates.

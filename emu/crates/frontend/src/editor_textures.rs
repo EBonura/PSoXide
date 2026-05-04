@@ -433,10 +433,9 @@ impl EditorTextures {
             }
         }
 
-        // CLUT: 256 halfwords on a single row. Stamp the STP bit
-        // on non-zero entries the same way the room-material
-        // path does so opaque atlases never accidentally trigger
-        // semi-transparency.
+        // CLUT: 256 halfwords on a single row. Model atlases are
+        // opaque by default just like room materials, so palette
+        // index 0 must preview as black instead of punching holes.
         let clut_bytes = texture.clut_bytes();
         if clut_bytes.len() < 512 {
             return None;
@@ -444,7 +443,7 @@ impl EditorTextures {
         for i in 0..256 {
             let off = i * 2;
             let raw = u16::from_le_bytes([clut_bytes[off], clut_bytes[off + 1]]);
-            let marked = if raw == 0 { 0 } else { raw | 0x8000 };
+            let marked = opaque_room_clut_entry(raw);
             let vram_idx = (clut_y as usize) * VRAM_WIDTH as usize + i;
             self.vram[vram_idx] = marked;
         }
@@ -846,5 +845,11 @@ mod tests {
     fn imported_room_clut_keeps_palette_zero_opaque() {
         assert_eq!(opaque_room_clut_entry(0), 0x8000);
         assert_eq!(opaque_room_clut_entry(0x1234), 0x9234);
+    }
+
+    #[test]
+    fn imported_model_clut_uses_same_opaque_policy() {
+        assert_eq!(opaque_room_clut_entry(0), 0x8000);
+        assert_eq!(opaque_room_clut_entry(0x001F), 0x801F);
     }
 }

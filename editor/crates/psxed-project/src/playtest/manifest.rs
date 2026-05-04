@@ -309,6 +309,28 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Per-clip frame-bound slices, ordered like MODEL_CLIPS.\n");
+    out.push_str("pub static MODEL_CLIP_BOUNDS: &[LevelModelClipBoundsRecord] = &[\n");
+    for bounds in &package.model_clip_bounds {
+        let _ = writeln!(
+            out,
+            "    LevelModelClipBoundsRecord {{ model: ModelIndex({}), clip: ModelClipTableIndex({}), first_frame: ModelFrameBoundsIndex({}), frame_count: {}, flags: 0 }},",
+            bounds.model, bounds.clip, bounds.first_frame, bounds.frame_count,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Conservative per-frame model bounds in model-local engine units.\n");
+    out.push_str("pub static MODEL_FRAME_BOUNDS: &[LevelModelFrameBoundsRecord] = &[\n");
+    for bounds in &package.model_frame_bounds {
+        let _ = writeln!(
+            out,
+            "    LevelModelFrameBoundsRecord {{ center: [{}, {}, {}], radius: {} }},",
+            bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Model attachment sockets, ordered by model.\n");
     out.push_str("pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[\n");
     for socket in &package.model_sockets {
@@ -627,16 +649,15 @@ fn include_model_in_residency(
 }
 
 /// Resolve the per-asset `static` name for the include_bytes
-/// statement. Mirrors the filename so a reader can grep
-/// `ROOM_000_BYTES` and immediately know it points at
-/// `rooms/room_000.psxw`. The `_index` parameter is reserved
-/// for future asset kinds with no filename component.
-fn asset_static_name(asset: &PlaytestAsset, _index: usize) -> String {
+/// statement. The asset index is part of the symbol because
+/// model folders intentionally reuse generic filenames such as
+/// `mesh.psxmdl` and `atlas.psxt`.
+fn asset_static_name(asset: &PlaytestAsset, index: usize) -> String {
     let stem = Path::new(&asset.filename)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(&asset.filename);
-    format!("{}_BYTES", stem.to_ascii_uppercase())
+    format!("ASSET_{index:03}_{}_BYTES", stem.to_ascii_uppercase())
 }
 
 fn purge_directory_files(dir: &Path, ext: &str) -> std::io::Result<()> {
@@ -728,7 +749,9 @@ use psx_level::{
     LevelAssetRecord,
     LevelCharacterRecord,
     LevelMaterialRecord,
+    LevelModelClipBoundsRecord,
     LevelModelClipRecord,
+    LevelModelFrameBoundsRecord,
     LevelModelInstanceRecord,
     LevelModelRecord,
     LevelModelSocketRecord,
@@ -742,6 +765,7 @@ use psx_level::{
     MODEL_CLIP_INHERIT,
     ModelClipIndex,
     ModelClipTableIndex,
+    ModelFrameBoundsIndex,
     ModelIndex,
     ModelSocketIndex,
     PlayerControllerRecord,
