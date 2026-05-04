@@ -262,9 +262,10 @@ impl Graphics {
     /// Drive the hardware renderer for one frame. Walks `cmd_log`,
     /// issues wgpu draw calls for the supported primitive types,
     /// and leaves the result in the renderer's VRAM-shaped target.
-    /// `vram_words` is the CPU rasterizer's VRAM (post-frame),
-    /// uploaded into the GPU-side `R16Uint` so textured primitives
-    /// can sample the right texels + CLUT entries.
+    /// `vram_words` is the CPU rasterizer's VRAM at the start of
+    /// `cmd_log`; image ops update the shader's source texture as
+    /// replay advances so textured primitives sample command-order
+    /// texels + CLUT entries.
     pub fn render_hw_frame(
         &mut self,
         gpu: &Gpu,
@@ -293,7 +294,7 @@ impl Graphics {
     /// Restore the HW renderer's persistent target from CPU VRAM.
     /// This is needed immediately after internal scale changes because
     /// reallocating the target necessarily clears its texture.
-    pub fn sync_hw_target_from_vram(&self, vram_words: &[u16]) {
+    pub fn sync_hw_target_from_vram(&mut self, vram_words: &[u16]) {
         self.hw_renderer.sync_target_from_vram(vram_words);
     }
 
@@ -326,11 +327,11 @@ impl Graphics {
         );
     }
 
-    /// Upload the CPU-decoded display area for 24bpp presentation.
-    /// Normal 15bpp/CLUT rendering stays on the HW target; this path
-    /// exists because PS1 24bpp display pixels are packed as byte
-    /// triplets across 16-bit VRAM cells.
-    pub fn prepare_24bpp_display(&self, gpu: Option<&Gpu>) {
+    /// Upload the CPU-decoded visible display area for 24bpp scanout.
+    /// Normal 15-bit gameplay presents the HW renderer target; this
+    /// fallback exists because PS1 24bpp pixels are RGB888 triplets
+    /// packed across 16-bit VRAM cells.
+    pub fn prepare_display(&self, gpu: Option<&Gpu>) {
         let Some(gpu) = gpu else {
             self.clear_display_texture();
             return;

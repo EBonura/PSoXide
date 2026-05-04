@@ -23,7 +23,7 @@ pub fn draw_layout(
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
     editor_viewport: psxed_ui::EditorViewport3dPresentation,
-    framebuffer_source: framebuffer::FramebufferSource,
+    display_uv: egui::Rect,
     dt: f32,
 ) {
     state.hud.update(dt, state.cpu.tick());
@@ -74,8 +74,7 @@ pub fn draw_layout(
         framebuffer::draw(
             ui,
             display_tex,
-            framebuffer_source,
-            state.bus.as_ref(),
+            display_uv,
             &mut state.framebuffer_present_size_px,
         );
     });

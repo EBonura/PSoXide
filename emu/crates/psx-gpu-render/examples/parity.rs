@@ -106,8 +106,9 @@ fn main() {
     .expect("request device");
 
     let mut hw = HwRenderer::new_headless(device, queue);
-    let vram_words: Vec<u16> = bus.gpu.vram.words().to_vec();
-    hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &vram_words);
+    let initial_vram =
+        vec![0u16; (psx_gpu_render::VRAM_WIDTH * psx_gpu_render::VRAM_HEIGHT) as usize];
+    hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
     // Extract just the display sub-rect from the VRAM-shaped target
     // -- that's what the user sees on screen, and what the CPU
     // `display_rgba8()` returns. At Native scale (S=1) the sub-rect

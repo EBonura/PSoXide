@@ -2886,6 +2886,7 @@ dependencies = [
  "egui-wgpu",
  "emulator-core",
  "pollster 0.3.0",
+ "psoxide-settings",
  "psx-gpu",
  "psx-gpu-compute",
  "psx-iso",
