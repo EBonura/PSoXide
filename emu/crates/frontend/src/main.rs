@@ -699,8 +699,9 @@ impl ApplicationHandler for Shell {
                 // Match the HW renderer's internal scale to the
                 // current Native↔Window mode + framebuffer pixel budget.
                 // Cheap when stable; reallocates the VRAM-shaped
-                // target on change (which clears it -- the next
-                // cmd_log replay paints a fresh frame).
+                // target on change. Reallocation clears the target,
+                // so we immediately resync it from CPU VRAM before
+                // replaying this frame's command log.
                 let scale_mode = match state.scale_mode {
                     app::ScaleMode::Native => psx_gpu_render::ScaleMode::Native,
                     app::ScaleMode::Window => psx_gpu_render::ScaleMode::Window,
@@ -714,7 +715,8 @@ impl ApplicationHandler for Shell {
                     })
                     .unwrap_or((320, 240));
                 let hw_scale_start = Instant::now();
-                gfx.update_hw_scale(scale_mode, state.framebuffer_present_size_px, display_size);
+                let hw_scale_changed =
+                    gfx.update_hw_scale(scale_mode, state.framebuffer_present_size_px, display_size);
                 profile.hw_scale_ms = elapsed_ms(hw_scale_start);
                 profile.hw_scale = gfx.hw_internal_scale() as f32;
 
@@ -726,6 +728,9 @@ impl ApplicationHandler for Shell {
                     let clone_start = Instant::now();
                     let vram_words = bus.gpu.vram.words().to_vec();
                     profile.hw_vram_clone_ms = elapsed_ms(clone_start);
+                    if hw_scale_changed {
+                        gfx.sync_hw_target_from_vram(&vram_words);
+                    }
                     let hw_render_start = Instant::now();
                     gfx.render_hw_frame(&bus.gpu, &frame_log, &vram_words);
                     profile.hw_render_ms = elapsed_ms(hw_render_start);
