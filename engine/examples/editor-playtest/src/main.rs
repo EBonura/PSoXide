@@ -680,8 +680,11 @@ impl Scene for Playtest {
         self.load_active_room_window();
         self.anim_state = PlayerAnim::Idle;
         self.anim_start_tick = 0;
-        self.camera
-            .snap_to_player(self.camera_target(None, false), self.camera_config());
+        self.camera.snap_to_player_with_yaw(
+            self.camera_target(None, false),
+            self.camera_config(),
+            CAMERA_START_YAW,
+        );
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
