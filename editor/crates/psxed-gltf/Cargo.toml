@@ -15,6 +15,7 @@ gltf         = "1"
 psxed-format = { path = "../psxed-format" }
 psxed-obj    = { path = "../psxed-obj" }
 psxed-tex    = { path = "../psxed-tex" }
+ufbx         = "0.10"
 
 [dev-dependencies]
 psx-asset = { path = "../../../sdk/crates/psx-asset" }
