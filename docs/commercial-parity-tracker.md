@@ -107,6 +107,7 @@ the shared issue instead of inventing a per-game bug.
 | 2026-05-05 | Full local library, 16 discovered sheets. | `local_lockstep_sweep --root ~/Downloads/ps1 games --steps 20000000 --interval 10000 --no-visual` | 15 mountable images matched Redux CPU checkpoints through 20M user steps. Tomb Raider was loader-blocked by missing ECM conversion. | `target/local-lockstep/local-20m-20260505/SUMMARY.txt` |
 | 2026-05-05 | Top-25 local subset, 11 legally local targets. | `local_lockstep_sweep --disc ... --steps 50000000 --interval 10000 --no-visual` | All 11 matched Redux CPU checkpoints through 50M user steps. Framebuffer parity was intentionally skipped. | `target/local-lockstep/top25-local-50m-20260505/SUMMARY.txt` |
 | 2026-05-05 | Top-25 local subset, 11 legally local targets. | `local_lockstep_sweep --disc ... --steps 100000000 --interval 10000` | All 11 matched Redux CPU checkpoints through 100M user steps and visible framebuffer parity at `640x478` with `diff=0/611840`. | `target/local-lockstep/crash-100m-visual-20260505/SUMMARY.txt`; `target/local-lockstep/top25-local-rest-100m-visual-20260505/SUMMARY.txt` |
+| 2026-05-05 | Resident Evil 2 route toward "Original Game" / no-load path. | `local_lockstep_sweep --disc RE2.cue --steps 300000000 --interval 1000000 --no-visual --pad-pulses 0x0008@3150+30,0x4000@3250+20,0x0040@5120+12,0x0040@5160+12,0x4000@5200+30` | First route-level CPU checkpoint break is tick-only in `(266M, 267M]`: PC and GPR/COP2 state hash still match, but PSoXide is 402 cycles ahead of Redux. | `target/local-lockstep/re2-route-300m-20260505/SUMMARY.txt` |
 
 Note: the 2026-05-05 sweep reports were generated before the harness
 started printing visual `skip` explicitly. The command line is the
@@ -123,7 +124,7 @@ source of truth for those rows: framebuffer comparison was disabled.
 | 5 | Gran Turismo 2 | `Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).cue` | Swept to 100M CPU checkpoints with visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-K stretch target. | No CPU or BIOS-logo visual break through 100M. | Plan a menu/race route and record its first parity break. |
 | 6 | Metal Gear Solid | `Metal Gear Solid (USA) (Disc 1) (Rev 1).cue` | Swept to 100M CPU checkpoints with visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-G target. | No CPU or BIOS-logo visual break through 100M. | Route to first complex MDEC sequence and compare against Redux there. |
 | 7 | Metal Slug X | `Metal Slug X (USA).cue` | Swept to 100M CPU checkpoints with visible framebuffer parity, `640x478`, `diff=0/611840`. | No CPU or BIOS-logo visual break through 100M. | Add a gameplay route and record its first parity break. |
-| 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Swept to 100M CPU checkpoints with visible framebuffer parity, `640x478`, `diff=0/611840`. Local `re2_gameplay` route reaches the first playable room, but that route is not Redux-backed yet. | No CPU or BIOS-logo visual break through 100M. Gameplay route parity not measured. | Add a Redux-backed route through "Original Game" into gameplay, then compare MDEC count, display area/hash, and CD-ROM state. |
+| 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Swept to 100M CPU checkpoints with visible framebuffer parity, `640x478`, `diff=0/611840`. Local cold-boot route reaches the first playable room at 2.2B user steps. Redux-backed route sweep is pinned to a 300M timing break before route input becomes active. | CPU/timing break in `(266M, 267M]`: ours `{tick:608542101 pc:0x8008605c state:64e648f7c3560511}`; Redux `{tick:608541699 pc:0x8008605c state:64e648f7c3560511}`. Visual skipped. | Refine the pre-input window with an exact no-pad trace, then inspect CD-ROM/DMA scheduler timing around RE2 executable startup and first MDEC stream setup. |
 | 9 | Silent Hill | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 10 | Final Fantasy VII | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 11 | Yu-Gi-Oh! Forbidden Memories | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
@@ -155,6 +156,44 @@ source of truth for those rows: framebuffer comparison was disabled.
 ## Finding template
 
 Append dated findings here when a sweep produces new evidence.
+
+### 2026-05-05 - Resident Evil 2 route timing drift
+
+Disc:
+`/Users/ebonura/Downloads/ps1 games/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue`
+
+BIOS:
+`/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN`
+
+Redux:
+`/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux`
+
+Command:
+`local_lockstep_sweep --disc RE2.cue --steps 300000000 --interval 1000000 --no-visual --pad-pulses 0x0008@3150+30,0x4000@3250+20,0x0040@5120+12,0x0040@5160+12,0x4000@5200+30`
+
+Steps / interval / visual:
+300,000,000 / 1,000,000 / skipped.
+
+Last matching checkpoint:
+266,000,000 user steps.
+
+First coarse mismatch:
+`(266000000, 267000000]`; ours `{tick:608542101 pc:0x8008605c state:64e648f7c3560511}`; Redux `{tick:608541699 pc:0x8008605c state:64e648f7c3560511}`.
+
+Exact mismatch:
+Skipped by the current pad-routed exact-trace guard. The mismatch occurs before the first scheduled route input, so the next pass should refine this as a no-pad exact window or teach the harness to exact-trace pad routes while the pad schedule is inactive.
+
+Visual diff:
+Skipped. A separate local `probe_fmv_path` run with the same route reaches the first playable room at 2.2B user steps.
+
+Artifacts:
+`target/local-lockstep/re2-route-300m-20260505/`
+
+Subsystem hypothesis:
+Timing/scheduler drift, likely CD-ROM/DMA cadence during RE2 executable startup or first MDEC stream setup. This is not yet a renderer failure: the first pinned mismatch has identical PC and GPR/COP2 state hash.
+
+Next probe:
+Refine `(266M, 267M]` with exact instruction tracing, then correlate the first tick delta with CD-ROM IRQ counts, DMA start/finish cadence, and MDEC command submission.
 
 ```text
 YYYY-MM-DD - Game title

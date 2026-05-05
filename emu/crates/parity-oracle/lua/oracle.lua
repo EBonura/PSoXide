@@ -859,7 +859,9 @@ local function run()
                         if i % m == 0 then
                             local tick = tonumber(PCSX.getCPUCycles())
                             local pc = tonumber(regs.pc)
-                            send_nowait(string.format("chk step=%d tick=%d pc=%d", i, tick, pc))
+                            send_nowait(string.format(
+                                "chk step=%d tick=%d pc=%d state=%s",
+                                i, tick, pc, cpu_state_hash_hex()))
                             emissions = emissions + 1
                             io.flush()
                         end
@@ -868,7 +870,9 @@ local function run()
                     if ok then
                         local tick = tonumber(PCSX.getCPUCycles())
                         local pc = tonumber(regs.pc)
-                        send(string.format("run_checkpoint_pad ok step=%d tick=%d pc=%d", n, tick, pc))
+                        send(string.format(
+                            "run_checkpoint_pad ok step=%d tick=%d pc=%d state=%s",
+                            n, tick, pc, cpu_state_hash_hex()))
                     end
                 end
             end
