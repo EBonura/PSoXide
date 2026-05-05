@@ -495,21 +495,6 @@ impl FrameProfiler {
     }
 }
 
-/// Paint the floating profiler window.
-pub fn draw(ctx: &egui::Context, profiler: &mut FrameProfiler) {
-    if profiler.average().is_none() {
-        return;
-    };
-
-    egui::Window::new("Frame Profiler")
-        .default_size(egui::vec2(540.0, 450.0))
-        .min_width(460.0)
-        .resizable(true)
-        .show(ctx, |ui| {
-            draw_contents(ui, profiler);
-        });
-}
-
 /// Paint profiler contents inside an existing container.
 pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
     let Some(avg) = profiler.average() else {
