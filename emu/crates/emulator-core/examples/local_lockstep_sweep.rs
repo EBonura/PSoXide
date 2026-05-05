@@ -580,17 +580,22 @@ fn pinpoint_exact_divergence(
         step_user(&mut cpu, &mut bus, cfg, &mut current_pad_mask)
             .map_err(|e| format!("skip ours step {step}: {e}"))?;
     }
-    if cfg.uses_pad() {
-        return Ok(Some(
-            "exact divergence trace skipped for pad-routed run; use the coarse checkpoint window above as the current route break"
-                .to_string(),
-        ));
-    }
+    let initial_pad_mask = current_pad_mask;
+    let mut pad_mask_changed = false;
     let mut ours = Vec::with_capacity(window as usize);
     for offset in 0..window {
         let rec = step_user(&mut cpu, &mut bus, cfg, &mut current_pad_mask)
             .map_err(|e| format!("record ours step {}: {e}", start + offset + 1))?;
+        if cfg.uses_pad() && current_pad_mask != initial_pad_mask {
+            pad_mask_changed = true;
+        }
         ours.push(rec);
+    }
+    if cfg.uses_pad() && pad_mask_changed {
+        return Ok(Some(
+            "exact divergence trace skipped for pad-routed run because the pad mask changes inside this window; use a smaller interval or exact-trace a pre-input window"
+                .to_string(),
+        ));
     }
 
     let lua = OracleConfig::default_lua_dir().join("oracle.lua");
@@ -603,9 +608,29 @@ fn pinpoint_exact_divergence(
         .map_err(|e| format!("Redux handshake: {e}"))?;
     if start > 0 {
         let timeout = Duration::from_secs((start / 200_000).max(60));
-        redux
-            .run(start, timeout)
-            .map_err(|e| format!("Redux skip to {start}: {e}"))?;
+        if cfg.uses_pad() {
+            let pulse_tuples = cfg.pad_pulse_tuples();
+            redux
+                .run_checkpoint_pad(
+                    start,
+                    start,
+                    1,
+                    cfg.pad_mask,
+                    &pulse_tuples,
+                    timeout,
+                    |_step, _tick, _pc| Ok(()),
+                )
+                .map_err(|e| format!("Redux pad skip to {start}: {e}"))?;
+        } else {
+            redux
+                .run(start, timeout)
+                .map_err(|e| format!("Redux skip to {start}: {e}"))?;
+        }
+    } else if cfg.uses_pad() {
+        return Ok(Some(
+            "exact divergence trace skipped for pad-routed run at step 0 because Redux needs a pad priming command before tracing"
+                .to_string(),
+        ));
     }
     let theirs = redux
         .step(window as u32, STEP_TIMEOUT)
