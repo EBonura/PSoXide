@@ -784,7 +784,9 @@ impl DigitalPad {
             0x43 => {
                 if self.step == 2 {
                     if tx == 0x01 {
-                        self.mode_before_config = self.mode;
+                        if self.mode != PadMode::Config {
+                            self.mode_before_config = self.mode;
+                        }
                         self.mode = PadMode::Config;
                     } else if tx == 0x00 && self.mode == PadMode::Config {
                         self.mode = self.mode_before_config;
@@ -1803,6 +1805,51 @@ mod tests {
         for (tx, expected) in seq4c1.into_iter().zip(expected4c1) {
             assert_eq!(pad.exchange(tx), expected);
         }
+    }
+
+    #[test]
+    fn reentrant_config_enter_preserves_requested_analog_mode() {
+        let mut pad = DigitalPad::new();
+
+        // RE2 first enters config from Digital, but clocks only the
+        // digital-length shape because the command byte still reports
+        // the current Digital ID.
+        assert_eq!(pad.exchange(0x43), (0x41, true));
+        assert_eq!(pad.exchange(0x00), (0x5A, true));
+        assert_eq!(pad.exchange(0x01).0, 0xFF);
+        assert_eq!(pad.exchange(0x00).0, 0xFF);
+        pad.reset();
+        assert_eq!(pad.mode(), PadMode::Config);
+
+        // Request Analog while in config mode.
+        let set_analog = [0x44, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00];
+        for tx in set_analog {
+            let _ = pad.exchange(tx);
+        }
+        assert_eq!(pad.mode(), PadMode::Config);
+
+        // Some retail drivers send 0x43/0x01 again while already in
+        // config. That must not overwrite the saved post-config mode.
+        let enter_again = [0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+        for tx in enter_again {
+            let _ = pad.exchange(tx);
+        }
+
+        let query_mode = [0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut rx = [0u8; 8];
+        for (i, tx) in query_mode.into_iter().enumerate() {
+            rx[i] = pad.exchange(tx).0;
+        }
+        assert_eq!(
+            rx,
+            [0xF3, 0x5A, 0x01, 0x02, 0x01, 0x02, 0x01, 0x00]
+        );
+
+        let exit_config = [0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        for tx in exit_config {
+            let _ = pad.exchange(tx);
+        }
+        assert_eq!(pad.mode(), PadMode::Analog);
     }
 
     #[test]
