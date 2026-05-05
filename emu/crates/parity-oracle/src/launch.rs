@@ -541,6 +541,58 @@ impl ReduxProcess {
         Ok(tick)
     }
 
+    /// [`run_state_checkpoint`], but with a VBlank-timed pad schedule
+    /// applied on Redux's side. This is the preferred route-level
+    /// commercial-game parity primitive because it preserves the same
+    /// CPU/COP2 state digest as the no-input sweep.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_state_checkpoint_pad<F>(
+        &mut self,
+        n: u64,
+        interval: u64,
+        port: u32,
+        base_mask: u16,
+        pulses: &[(u16, u64, u64)],
+        timeout: Duration,
+        mut on_checkpoint: F,
+    ) -> Result<StateCheckpoint, OracleError>
+    where
+        F: FnMut(StateCheckpoint) -> Result<(), OracleError>,
+    {
+        if interval == 0 || n == 0 || port == 0 {
+            return Err(OracleError::Protocol {
+                expected: "n > 0, interval > 0, port > 0".to_string(),
+                got: format!("n={n} interval={interval} port={port}"),
+            });
+        }
+        let pulse_spec = if pulses.is_empty() {
+            "-".to_string()
+        } else {
+            pulses
+                .iter()
+                .map(|(mask, start_vblank, frames)| format!("{mask}@{start_vblank}+{frames}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        self.send_command(&format!(
+            "run_checkpoint_pad {n} {interval} {port} {base_mask} {pulse_spec}"
+        ))?;
+        let expected_checkpoints = n / interval;
+        for _ in 0..expected_checkpoints {
+            let line = self.wait_for_response(timeout)?;
+            let checkpoint = parse_state_checkpoint(&line)?;
+            on_checkpoint(checkpoint)?;
+        }
+        let final_line = self.wait_for_response(timeout)?;
+        let rest = final_line
+            .strip_prefix("run_checkpoint_pad ok ")
+            .ok_or_else(|| OracleError::Protocol {
+                expected: "run_checkpoint_pad ok ...".to_string(),
+                got: final_line.clone(),
+            })?;
+        parse_state_kv(rest, &final_line)
+    }
+
     /// Silently advance Redux by `n` instructions without emitting
     /// per-step records. The caller typically follows this with a
     /// `vram_hash` / `regs` / `peek32` query to capture only the

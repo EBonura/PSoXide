@@ -18,6 +18,8 @@
 
 #[path = "support/disc.rs"]
 mod disc_support;
+#[path = "support/pad.rs"]
+mod pad_support;
 
 use std::fs;
 use std::io::Write;
@@ -25,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use emulator_core::{Bus, Cpu, ExecutionError};
+use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask, PadPulse};
 use parity_oracle::{OracleConfig, ReduxProcess, StateCheckpoint};
 use psx_trace::InstructionRecord;
 
@@ -43,6 +46,8 @@ struct Config {
     limit: Option<usize>,
     visual: bool,
     exact_window: u64,
+    pad_mask: u16,
+    pad_pulses: Vec<PadPulse>,
     report_dir: PathBuf,
 }
 
@@ -90,11 +95,12 @@ fn main() {
     }
 
     println!(
-        "local lockstep sweep: games={} steps={} interval={} visual={} report={}",
+        "local lockstep sweep: games={} steps={} interval={} visual={} pad={} report={}",
         games.len(),
         cfg.steps,
         cfg.interval,
         cfg.visual,
+        if cfg.uses_pad() { "yes" } else { "no" },
         cfg.report_dir.display(),
     );
 
@@ -156,6 +162,15 @@ fn parse_args() -> Config {
         limit: None,
         visual: true,
         exact_window: 10_000,
+        pad_mask: std::env::var("PSOXIDE_PAD1")
+            .ok()
+            .and_then(|s| parse_u16_mask(&s))
+            .unwrap_or(0),
+        pad_pulses: std::env::var("PSOXIDE_PAD1_PULSES")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| parse_pad_pulses(&s).expect("PSOXIDE_PAD1_PULSES parses"))
+            .unwrap_or_default(),
         report_dir: default_report_dir(),
     };
 
@@ -169,6 +184,12 @@ fn parse_args() -> Config {
             "--interval" => cfg.interval = take_u64(&mut args, "--interval"),
             "--limit" => cfg.limit = Some(take_usize(&mut args, "--limit")),
             "--exact-window" => cfg.exact_window = take_u64(&mut args, "--exact-window"),
+            "--pad-mask" => cfg.pad_mask = take_mask(&mut args, "--pad-mask"),
+            "--pad-pulses" => {
+                let spec = take_string(&mut args, "--pad-pulses");
+                cfg.pad_pulses =
+                    parse_pad_pulses(&spec).unwrap_or_else(|e| panic!("--pad-pulses: {e}"));
+            }
             "--report-dir" => cfg.report_dir = take_path(&mut args, "--report-dir"),
             "--no-visual" => cfg.visual = false,
             "--help" | "-h" => {
@@ -189,8 +210,11 @@ fn parse_args() -> Config {
 }
 
 fn take_path(args: &mut impl Iterator<Item = String>, flag: &str) -> PathBuf {
+    PathBuf::from(take_string(args, flag))
+}
+
+fn take_string(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
     args.next()
-        .map(PathBuf::from)
         .unwrap_or_else(|| panic!("{flag} requires a value"))
 }
 
@@ -208,6 +232,11 @@ fn take_usize(args: &mut impl Iterator<Item = String>, flag: &str) -> usize {
         .unwrap_or_else(|_| panic!("{flag} requires an integer"))
 }
 
+fn take_mask(args: &mut impl Iterator<Item = String>, flag: &str) -> u16 {
+    let value = take_string(args, flag);
+    parse_u16_mask(&value).unwrap_or_else(|| panic!("{flag} requires a u16 mask"))
+}
+
 fn print_help() {
     println!(
         "\
@@ -221,6 +250,8 @@ Options:
   --interval N         CPU state checkpoint interval (default: 10000)
   --exact-window N     full-trace window after first coarse mismatch (default: 10000)
   --limit N            run only the first N discovered games
+  --pad-mask MASK      always-held port-1 buttons, decimal or 0x hex
+  --pad-pulses SPEC    VBlank pulses: <mask>@<start>+<frames>[,...]
   --report-dir PATH    report output dir
   --no-visual          skip final screenshot byte comparison
 "
@@ -261,8 +292,11 @@ fn run_game(cfg: &Config, name: &str, disc: &Path) -> Result<GameResult, String>
     let mut bus = Bus::new(bios).map_err(|e| format!("bus init: {e}"))?;
     let image = disc_support::load_disc_path(disc)?;
     bus.cdrom.insert_disc(Some(image));
+    if cfg.uses_pad() {
+        bus.attach_digital_pad_port1();
+    }
     let mut cpu = Cpu::new();
-    let ours = run_ours_checkpoints(&mut cpu, &mut bus, cfg.steps, cfg.interval)?;
+    let ours = run_ours_checkpoints(&mut cpu, &mut bus, cfg)?;
     eprintln!(
         "  ours: {} checkpoints in {:.1}s",
         ours.checkpoints.len(),
@@ -280,12 +314,45 @@ fn run_game(cfg: &Config, name: &str, disc: &Path) -> Result<GameResult, String>
 
     let timeout = Duration::from_secs((cfg.steps / 200_000).max(60));
     let mut redux_checks = Vec::with_capacity(ours.checkpoints.len());
-    let redux_final = redux
-        .run_state_checkpoint(cfg.steps, cfg.interval, timeout, |cp| {
-            redux_checks.push(cp);
-            Ok(())
-        })
-        .map_err(|e| format!("Redux state checkpoints: {e}"))?;
+    let redux_progress_stride = (ours.checkpoints.len() / 10).max(1);
+    let redux_final = if cfg.uses_pad() {
+        let pulse_tuples = cfg.pad_pulse_tuples();
+        redux
+            .run_state_checkpoint_pad(
+                cfg.steps,
+                cfg.interval,
+                1,
+                cfg.pad_mask,
+                &pulse_tuples,
+                timeout,
+                |cp| {
+                    redux_checks.push(cp);
+                    if redux_checks.len() % redux_progress_stride == 0 {
+                        eprintln!(
+                            "  redux progress: {}/{}",
+                            redux_checks.len(),
+                            ours.checkpoints.len()
+                        );
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Redux pad state checkpoints: {e}"))?
+    } else {
+        redux
+            .run_state_checkpoint(cfg.steps, cfg.interval, timeout, |cp| {
+                redux_checks.push(cp);
+                if redux_checks.len() % redux_progress_stride == 0 {
+                    eprintln!(
+                        "  redux progress: {}/{}",
+                        redux_checks.len(),
+                        ours.checkpoints.len()
+                    );
+                }
+                Ok(())
+            })
+            .map_err(|e| format!("Redux state checkpoints: {e}"))?
+    };
     eprintln!("  redux: {} checkpoints", redux_checks.len());
 
     let first_checkpoint_mismatch = compare_checkpoints(
@@ -340,31 +407,52 @@ struct OurRun {
     final_checkpoint: StateCheckpoint,
 }
 
-fn run_ours_checkpoints(
-    cpu: &mut Cpu,
-    bus: &mut Bus,
-    steps: u64,
-    interval: u64,
-) -> Result<OurRun, String> {
-    let mut checkpoints = Vec::with_capacity((steps / interval) as usize);
-    for step in 1..=steps {
-        step_user(cpu, bus).map_err(|e| format!("our CPU at step {step}: {e}"))?;
-        if step % interval == 0 {
+fn run_ours_checkpoints(cpu: &mut Cpu, bus: &mut Bus, cfg: &Config) -> Result<OurRun, String> {
+    let mut checkpoints = Vec::with_capacity((cfg.steps / cfg.interval) as usize);
+    let mut current_pad_mask = None;
+    let progress_stride = progress_stride(cfg.steps, cfg.interval);
+    if cfg.uses_pad() {
+        sync_pad_mask(bus, cfg, &mut current_pad_mask);
+    }
+    for step in 1..=cfg.steps {
+        step_user(cpu, bus, cfg, &mut current_pad_mask)
+            .map_err(|e| format!("our CPU at step {step}: {e}"))?;
+        if step % cfg.interval == 0 {
             checkpoints.push(state_checkpoint(step, cpu, bus));
+            if step % progress_stride == 0 {
+                eprintln!("  ours progress: {step}/{}", cfg.steps);
+            }
         }
     }
     Ok(OurRun {
         checkpoints,
-        final_checkpoint: state_checkpoint(steps, cpu, bus),
+        final_checkpoint: state_checkpoint(cfg.steps, cpu, bus),
     })
 }
 
-fn step_user(cpu: &mut Cpu, bus: &mut Bus) -> Result<InstructionRecord, ExecutionError> {
+fn progress_stride(steps: u64, interval: u64) -> u64 {
+    let checkpoint_count = steps / interval;
+    let checkpoints_per_report = (checkpoint_count / 10).max(1);
+    interval * checkpoints_per_report
+}
+
+fn step_user(
+    cpu: &mut Cpu,
+    bus: &mut Bus,
+    cfg: &Config,
+    current_pad_mask: &mut Option<u16>,
+) -> Result<InstructionRecord, ExecutionError> {
     let was_in_isr = cpu.in_isr();
     let mut rec = cpu.step_traced(bus)?;
+    if cfg.uses_pad() {
+        sync_pad_mask(bus, cfg, current_pad_mask);
+    }
     if !was_in_isr && cpu.in_irq_handler() {
         while cpu.in_irq_handler() {
             let r = cpu.step_traced(bus)?;
+            if cfg.uses_pad() {
+                sync_pad_mask(bus, cfg, current_pad_mask);
+            }
             rec.tick = r.tick;
             rec.gprs = r.gprs;
             rec.cop2_data = snapshot_cop2(cpu).0;
@@ -480,13 +568,27 @@ fn pinpoint_exact_divergence(
     let mut bus = Bus::new(bios).map_err(|e| format!("bus init: {e}"))?;
     let image = disc_support::load_disc_path(disc)?;
     bus.cdrom.insert_disc(Some(image));
+    if cfg.uses_pad() {
+        bus.attach_digital_pad_port1();
+    }
     let mut cpu = Cpu::new();
+    let mut current_pad_mask = None;
+    if cfg.uses_pad() {
+        sync_pad_mask(&mut bus, cfg, &mut current_pad_mask);
+    }
     for step in 1..=start {
-        step_user(&mut cpu, &mut bus).map_err(|e| format!("skip ours step {step}: {e}"))?;
+        step_user(&mut cpu, &mut bus, cfg, &mut current_pad_mask)
+            .map_err(|e| format!("skip ours step {step}: {e}"))?;
+    }
+    if cfg.uses_pad() {
+        return Ok(Some(
+            "exact divergence trace skipped for pad-routed run; use the coarse checkpoint window above as the current route break"
+                .to_string(),
+        ));
     }
     let mut ours = Vec::with_capacity(window as usize);
     for offset in 0..window {
-        let rec = step_user(&mut cpu, &mut bus)
+        let rec = step_user(&mut cpu, &mut bus, cfg, &mut current_pad_mask)
             .map_err(|e| format!("record ours step {}: {e}", start + offset + 1))?;
         ours.push(rec);
     }
@@ -572,6 +674,44 @@ fn first_record_diff(
         ));
     }
     None
+}
+
+impl Config {
+    fn uses_pad(&self) -> bool {
+        self.pad_mask != 0 || !self.pad_pulses.is_empty()
+    }
+
+    fn pad_pulse_tuples(&self) -> Vec<(u16, u64, u64)> {
+        self.pad_pulses
+            .iter()
+            .map(|pulse| (pulse.mask, pulse.start_vblank, pulse.frames))
+            .collect()
+    }
+}
+
+fn sync_pad_mask(bus: &mut Bus, cfg: &Config, current_mask: &mut Option<u16>) {
+    let next = effective_mask(cfg.pad_mask, &cfg.pad_pulses, bus.irq().raise_counts()[0]);
+    if current_mask.is_some_and(|mask| mask == next) {
+        return;
+    }
+    bus.set_port1_buttons(emulator_core::ButtonState::from_bits(next));
+    *current_mask = Some(next);
+}
+
+fn format_pad_pulses(pulses: &[PadPulse]) -> String {
+    if pulses.is_empty() {
+        return "-".to_string();
+    }
+    pulses
+        .iter()
+        .map(|pulse| {
+            format!(
+                "0x{:04x}@{}+{}",
+                pulse.mask, pulse.start_vblank, pulse.frames
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn compare_visual(
@@ -876,6 +1016,8 @@ fn write_index_summary(cfg: &Config, results: &[GameResult]) {
     writeln!(file, "steps: {}", cfg.steps).unwrap();
     writeln!(file, "interval: {}", cfg.interval).unwrap();
     writeln!(file, "visual: {}", cfg.visual).unwrap();
+    writeln!(file, "pad_mask: 0x{:04x}", cfg.pad_mask).unwrap();
+    writeln!(file, "pad_pulses: {}", format_pad_pulses(&cfg.pad_pulses)).unwrap();
     writeln!(file).unwrap();
     writeln!(file, "{:<44} {:<6} {:<6} disc", "game", "cpu", "visual").unwrap();
     for r in results {
