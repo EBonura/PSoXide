@@ -122,6 +122,11 @@ pub struct AppState {
     /// but no instruction stepping is possible. Unused until the step
     /// button lands alongside the Menu.
     pub bus: Option<Bus>,
+    /// Incremented whenever CPU-owned VRAM is replaced or mutated outside
+    /// normal GP0 command replay. The shell uses this to rebuild the
+    /// persistent hardware-renderer target from the CPU truth before
+    /// replaying the next command log.
+    pub gpu_resync_generation: u64,
     pub menu: MenuState,
     pub hud: HudState,
     /// Rolling frame-time breakdown, visible from the profiler toolbar button.
@@ -261,6 +266,7 @@ impl AppState {
             bus
         });
 
+        let initial_gpu_resync_generation = if bus.is_some() { 1 } else { 0 };
         let mut out = Self {
             workspace: Workspace::Emulator,
             editor,
@@ -271,6 +277,7 @@ impl AppState {
             framebuffer_present_size_px: (320, 240),
             cpu,
             bus,
+            gpu_resync_generation: initial_gpu_resync_generation,
             menu: MenuState::new(),
             hud: HudState::default(),
             profiler: ui::profiler::FrameProfiler::default(),
@@ -429,6 +436,7 @@ impl AppState {
         // The Menu's caller (`apply_menu_action::LaunchGame`) closes
         // the overlay so the game is actually visible.
         self.bus = Some(bus);
+        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
         self.running = true;
         self.workspace = Workspace::Emulator;
@@ -1121,6 +1129,7 @@ impl AppState {
         let _ = bus.force_port1_analog_mode();
 
         self.bus = Some(bus);
+        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.cpu = cpu;
         self.exec_history.clear();
         self.gpr_snapshot = None;

@@ -350,6 +350,7 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
         state.menu.sync_run_label(false);
         if let Some(bus) = state.bus.as_mut() {
             bus.gpu.vram.clear();
+            state.gpu_resync_generation = state.gpu_resync_generation.wrapping_add(1);
         }
     }
 
