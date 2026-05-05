@@ -1,0 +1,161 @@
+# Commercial parity tracker
+
+This is the game-by-game ledger for commercial PlayStation compatibility
+work. It is intentionally parity-first: a title is not tracked as
+"works" or "does not work"; it is tracked by the earliest observed point
+where PSoXide stops matching the reference emulator, plus the evidence
+needed to decide which emulation subsystem to improve next.
+
+The reference oracle is the external PCSX-Redux build documented in
+[`docs/redux-oracle.md`](redux-oracle.md). Test media must come from
+legally owned discs or already-authorized preservation images.
+
+## Parity workflow
+
+Use `local_lockstep_sweep` as the default per-title workflow. It boots
+the same disc in PSoXide and PCSX-Redux, records CPU-state checkpoints,
+narrows the first coarse mismatch with an exact instruction window, and
+optionally compares the final visible framebuffer byte-for-byte.
+
+```bash
+export PSOXIDE_BIOS="/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN"
+export PSOXIDE_REDUX_BIN="/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux"
+
+cargo run --manifest-path emu/Cargo.toml \
+  -p emulator-core \
+  --example local_lockstep_sweep \
+  --release -- \
+  --root "/Users/ebonura/Downloads/ps1 games" \
+  --steps 100000000 \
+  --interval 10000 \
+  --report-dir target/local-lockstep/top25-20260505
+```
+
+For a single game, pass one or more explicit discs:
+
+```bash
+cargo run --manifest-path emu/Cargo.toml \
+  -p emulator-core \
+  --example local_lockstep_sweep \
+  --release -- \
+  --disc "/absolute/path/to/Game.cue" \
+  --steps 100000000 \
+  --interval 10000 \
+  --report-dir target/local-lockstep/game-name-20260505
+```
+
+Use `probe_local_games_boot` only as a loader and smoke triage tool. It
+does not prove parity unless the result is later compared to Redux.
+
+```bash
+cargo run --manifest-path emu/Cargo.toml \
+  --release \
+  -p emulator-core \
+  --example probe_local_games_boot -- \
+  0 "/Users/ebonura/Downloads/ps1 games"
+```
+
+## Recording rules
+
+Every row should eventually have:
+
+- reference: Redux commit, BIOS image, disc path, image format;
+- command: exact `local_lockstep_sweep` or route-specific command;
+- checkpoint budget: steps, interval, visual comparison on/off;
+- first matching checkpoint and first mismatching checkpoint;
+- exact mismatch line from the generated per-game `SUMMARY.txt`;
+- visual diff size, first pixel diff, and artifact directory if visual
+  parity was enabled;
+- subsystem hypothesis: CPU, DMA, CD-ROM, GPU, GTE, MDEC, SPU, SIO/pad,
+  timing/scheduler, loader, or unknown;
+- next probe that would either confirm or disprove that hypothesis.
+
+Do not mark a game green from an interactive/manual run alone. Manual
+screenshots and structural visual guards are useful evidence, but the
+tracker state should remain "route works, parity not measured" until a
+Redux-backed row exists.
+
+## Status vocabulary
+
+| Status | Meaning |
+|---|---|
+| Not local | The target is not available in the local legal test library. |
+| Loader blocked | The image exists, but the loader cannot mount it yet. |
+| Unswept | The image loads, but no Redux parity sweep has been recorded. |
+| Swept to N | PSoXide matched Redux up to N user steps. |
+| CPU break | CPU PC/register/COP2/tick parity diverged first. |
+| Visual break | CPU checkpoints matched, but the visible display diverged. |
+| Route works, parity not measured | A local functional route reaches a useful point, but no Redux comparison pins it. |
+| Parity-pinned | A route has a frozen Redux-backed regression. |
+
+## Shared findings
+
+These are cross-cutting findings that may explain multiple game rows.
+When a title first breaks at one of these points, keep it attached to
+the shared issue instead of inventing a per-game bug.
+
+| Finding | Evidence | Likely owner | Next action |
+|---|---|---|---|
+| BIOS Sony-logo display parity is byte-exact at 100M steps. | `docs/milestones.md` records Redux-visible hash `0xa3ac6881044333d0` for the no-disc path and the early disc-logo phase. | GPU, DMA, BIOS boot baseline | Keep as a cheap smoke guard before deeper per-title sweeps. |
+| Instruction-level parity ceiling is step 19,474,543. The first full divergence is step 19,474,544. | `docs/milestones.md`; `probe_cycle_first_divergence`; parity cache under `target/parity-cache/`. | DMA IRQ scheduling order | Use `probe_dma_schedules`, `probe_dma_timeline`, and `probe_isr_trace` before attributing early title failures to game-specific code. |
+| Crash long-run display phase drifts from Redux even after the disc-check path is stable. | Milestone D notes: Crash 300M/900M reaches a different animation phase while static rendering is byte-exact. | Timing/scheduler, likely DMA IRQ cadence | Close or bound the timing drift before treating later Crash title/FMVs as renderer failures. |
+
+## Top-25 parity ledger
+
+| # | Game | Local image | Current parity state | First break or blocker | Next parity action |
+|---|---|---|---|---|---|
+| 1 | Crash Bandicoot | `Crash Bandicoot (USA).cue` | Milestone-D canary; BIOS/disc-check path partially proven, but long-run display phase is not Redux-aligned. | Shared CPU/timing ceiling: exact instruction parity currently breaks at step 19,474,544; Crash visual phase drift appears by later checkpoints. | Run a fresh `local_lockstep_sweep --disc` row and attach it to the DMA-IRQ scheduling thread if the first exact mismatch is shared. |
+| 2 | Tekken 3 | `Tekken 3 (USA).cue` | Structural visual guards cover mode select, VS portraits, and fight screens; those are not Redux parity rows. | No per-title lockstep row recorded in this tracker yet. | Sweep to 100M, then promote one existing visual guard window into a Redux route once CPU parity is bounded. |
+| 3 | Marvel vs. Capcom: Clash of Super Heroes | `Marvel vs. Capcom - Clash of Super Heroes (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 4 | CTR: Crash Team Racing | `CTR - Crash Team Racing (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 5 | Gran Turismo 2 | `Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).cue` | Unswept; milestone-K stretch target. | Unknown. | Run baseline lockstep sweep, then plan a menu/race route if the break is not shared. |
+| 6 | Metal Gear Solid | `Metal Gear Solid (USA) (Disc 1) (Rev 1).cue` | Unswept; milestone-G target. | Unknown. | Run baseline lockstep sweep, then route to first complex MDEC sequence. |
+| 7 | Metal Slug X | `Metal Slug X (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Route works locally to the first playable room via `re2_gameplay` ignored regression; parity not measured. | No Redux lockstep row for the gameplay route recorded here. | Sweep baseline boot first, then add a Redux-backed route through "Original Game" into gameplay. |
+| 9 | Silent Hill | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 10 | Final Fantasy VII | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 11 | Yu-Gi-Oh! Forbidden Memories | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 12 | Spider-Man | `Spider-Man (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 13 | Medal of Honor | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 14 | Castlevania: Symphony of the Night | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 15 | Resident Evil 3: Nemesis | `Resident Evil 3 - Nemesis (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 16 | Tony Hawk's Pro Skater 2 | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 17 | Street Fighter Collection / Alpha 2 Gold | `Street Fighter Collection - Street Fighter Alpha 2 Gold (USA) (Disc 2).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 18 | Need for Speed III: Hot Pursuit | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 19 | Disney's Tarzan | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 20 | Mortal Kombat 4 | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 21 | Jackie Chan Stuntmaster | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 22 | Harry Potter and the Sorcerer's Stone | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 23 | Digimon World | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 24 | Crash Bandicoot: Warped | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+| 25 | Mega Man X4 | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
+
+## Extra local images
+
+| Game | Local image | Current parity state | First break or blocker | Next parity action |
+|---|---|---|---|---|
+| Celeste Classic PSX | `Celeste Classic PSX (Homebrew).cue` | Local homebrew image; not part of the commercial top-25 set. | No Redux parity row recorded. | Use as an optional lightweight route after commercial boot parity stabilizes. |
+| Tomb Raider | `Tomb Raider (USA) (Greatest Hits).ccd` with `.img.ecm` | Loader blocked until ECM conversion is available. | Needs `unecm`, `ecm-uncompress`, or `PSOXIDE_UNECM` external converter. | Install or configure ECM converter, verify CCD mount, then sweep baseline parity. |
+| WipEout | `WipEout (Europe) (v1.1).cue` | Unswept; PAL/EU coverage candidate. | Unknown. | Run baseline sweep with the correct PAL BIOS when doing region-specific parity. |
+| WipEout 2097 | `WipEout 2097 (Europe).cue` | Unswept; milestone-J target. | Unknown. | Use `SCPH5502.BIN` for PAL timing sweep and record the first exact mismatch. |
+| WipEout 3: Special Edition | `WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It).cue` | Unswept; extra PAL stress case. | Unknown. | Sweep after WipEout 2097 gives the primary PAL finding. |
+
+## Finding template
+
+Append dated findings here when a sweep produces new evidence.
+
+```text
+YYYY-MM-DD - Game title
+Disc:
+BIOS:
+Redux:
+Command:
+Steps / interval / visual:
+Last matching checkpoint:
+First coarse mismatch:
+Exact mismatch:
+Visual diff:
+Artifacts:
+Subsystem hypothesis:
+Next probe:
+```
