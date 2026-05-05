@@ -682,9 +682,14 @@ fn decode_block(
     iqtab: &[i32; DSIZE2],
 ) -> bool {
     // First word: quantization scale (high 6 bits) + DC coefficient (low 10).
-    let head = match rl.pop_front() {
-        Some(v) => v,
-        None => return false,
+    let head = loop {
+        match rl.pop_front() {
+            // FE00h at the start of a new block is DMA padding, not an
+            // empty Cr/Cb/Y block. RE2 room images pad MDEC streams this way.
+            Some(MDEC_END_OF_DATA) => continue,
+            Some(v) => break v,
+            None => return false,
+        }
     };
     let q_scale = rle_run(head);
     block.fill(0);
@@ -1150,6 +1155,31 @@ mod tests {
         let mut out = [0u32; 1];
         m.dma_read_out(&mut out);
         assert_eq!(m.macroblocks_decoded(), 1);
+    }
+
+    #[test]
+    fn rle_block_decode_skips_leading_padding_sentinels() {
+        let mut rl = std::collections::VecDeque::from([
+            MDEC_END_OF_DATA,
+            MDEC_END_OF_DATA,
+            0x0010,
+            MDEC_END_OF_DATA,
+        ]);
+        let mut block = [0i32; DSIZE2];
+        let iqtab = [1i32; DSIZE2];
+
+        assert!(decode_block(&mut rl, &mut block, &iqtab));
+        assert!(rl.is_empty());
+    }
+
+    #[test]
+    fn rle_block_decode_returns_false_for_padding_only_stream() {
+        let mut rl = std::collections::VecDeque::from([MDEC_END_OF_DATA, MDEC_END_OF_DATA]);
+        let mut block = [0i32; DSIZE2];
+        let iqtab = [1i32; DSIZE2];
+
+        assert!(!decode_block(&mut rl, &mut block, &iqtab));
+        assert!(rl.is_empty());
     }
 
     #[test]
