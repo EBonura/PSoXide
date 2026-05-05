@@ -90,6 +90,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.menu.sync_run_label(false);
             if let Some(bus) = state.bus.as_mut() {
                 bus.gpu.vram.clear();
+                state.gpu_resync_generation = state.gpu_resync_generation.wrapping_add(1);
             }
             MenuOutcome::None
         }
@@ -100,6 +101,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
         FillVramTestPattern => {
             if let Some(bus) = state.bus.as_mut() {
                 fill_vram_test_pattern(&mut bus.gpu.vram);
+                state.gpu_resync_generation = state.gpu_resync_generation.wrapping_add(1);
             }
             MenuOutcome::None
         }
