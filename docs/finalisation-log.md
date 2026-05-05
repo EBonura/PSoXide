@@ -99,6 +99,8 @@ missing from the top-25 target set.
 
 Extra local compatibility images outside this top 25:
 - `Celeste Classic PSX (Homebrew).cue`;
+- `adaptive (USA) (Greatest Hits).ccd` with `.img.ecm` pending
+  external ECM decode;
 - `a commercial title (Europe) (v1.1).cue`;
 - `a commercial title 2097 (Europe).cue`;
 - `a commercial title 3 - Special Edition (Europe) (En,Fr,De,Es,It).cue`.
