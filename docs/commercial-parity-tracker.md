@@ -97,30 +97,41 @@ the shared issue instead of inventing a per-game bug.
 | Finding | Evidence | Likely owner | Next action |
 |---|---|---|---|
 | BIOS Sony-logo display parity is byte-exact at 100M steps. | `docs/milestones.md` records Redux-visible hash `0xa3ac6881044333d0` for the no-disc path and the early disc-logo phase. | GPU, DMA, BIOS boot baseline | Keep as a cheap smoke guard before deeper per-title sweeps. |
-| Instruction-level parity ceiling is step 19,474,543. The first full divergence is step 19,474,544. | `docs/milestones.md`; `probe_cycle_first_divergence`; parity cache under `target/parity-cache/`. | DMA IRQ scheduling order | Use `probe_dma_schedules`, `probe_dma_timeline`, and `probe_isr_trace` before attributing early title failures to game-specific code. |
+| Historical instruction-record cache first diverges at step 19,474,544, but the commercial checkpoint sweep now stays aligned beyond that point. | `docs/milestones.md`; `probe_cycle_first_divergence`; parity cache under `target/parity-cache/`; 2026-05-05 checkpoint sweeps below. | DMA IRQ scheduling order, or an exact-record transient not visible in 10k checkpoint state. | Re-run exact tracing around 19,474,544 before treating this as an active commercial-game blocker. |
 | Crash long-run display phase drifts from Redux even after the disc-check path is stable. | Milestone D notes: Crash 300M/900M reaches a different animation phase while static rendering is byte-exact. | Timing/scheduler, likely DMA IRQ cadence | Close or bound the timing drift before treating later Crash title/FMVs as renderer failures. |
+
+## Latest sweep evidence
+
+| Date | Scope | Command shape | Result | Evidence |
+|---|---|---|---|---|
+| 2026-05-05 | Full local library, 16 discovered sheets. | `local_lockstep_sweep --root ~/Downloads/ps1 games --steps 20000000 --interval 10000 --no-visual` | 15 mountable images matched Redux CPU checkpoints through 20M user steps. Tomb Raider was loader-blocked by missing ECM conversion. | `target/local-lockstep/local-20m-20260505/SUMMARY.txt` |
+| 2026-05-05 | Top-25 local subset, 11 legally local targets. | `local_lockstep_sweep --disc ... --steps 50000000 --interval 10000 --no-visual` | All 11 matched Redux CPU checkpoints through 50M user steps. Framebuffer parity was intentionally skipped. | `target/local-lockstep/top25-local-50m-20260505/SUMMARY.txt` |
+
+Note: the 2026-05-05 sweep reports were generated before the harness
+started printing visual `skip` explicitly. The command line is the
+source of truth for those rows: framebuffer comparison was disabled.
 
 ## Top-25 parity ledger
 
 | # | Game | Local image | Current parity state | First break or blocker | Next parity action |
 |---|---|---|---|---|---|
-| 1 | Crash Bandicoot | `Crash Bandicoot (USA).cue` | Milestone-D canary; BIOS/disc-check path partially proven, but long-run display phase is not Redux-aligned. | Shared CPU/timing ceiling: exact instruction parity currently breaks at step 19,474,544; Crash visual phase drift appears by later checkpoints. | Run a fresh `local_lockstep_sweep --disc` row and attach it to the DMA-IRQ scheduling thread if the first exact mismatch is shared. |
-| 2 | Tekken 3 | `Tekken 3 (USA).cue` | Structural visual guards cover mode select, VS portraits, and fight screens; those are not Redux parity rows. | No per-title lockstep row recorded in this tracker yet. | Sweep to 100M, then promote one existing visual guard window into a Redux route once CPU parity is bounded. |
-| 3 | Marvel vs. Capcom: Clash of Super Heroes | `Marvel vs. Capcom - Clash of Super Heroes (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
-| 4 | CTR: Crash Team Racing | `CTR - Crash Team Racing (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
-| 5 | Gran Turismo 2 | `Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).cue` | Unswept; milestone-K stretch target. | Unknown. | Run baseline lockstep sweep, then plan a menu/race route if the break is not shared. |
-| 6 | Metal Gear Solid | `Metal Gear Solid (USA) (Disc 1) (Rev 1).cue` | Unswept; milestone-G target. | Unknown. | Run baseline lockstep sweep, then route to first complex MDEC sequence. |
-| 7 | Metal Slug X | `Metal Slug X (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
-| 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Route works locally to the first playable room via `re2_gameplay` ignored regression; parity not measured. | No Redux lockstep row for the gameplay route recorded here. | Sweep baseline boot first, then add a Redux-backed route through "Original Game" into gameplay. |
+| 1 | Crash Bandicoot | `Crash Bandicoot (USA).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. Milestone-D canary still has later visual-phase drift noted in `docs/milestones.md`. | No CPU checkpoint break through 50M. Later Crash title/FMVs remain unpinned. | Run 100M with visual enabled, then route toward title/FMVs if the BIOS-logo frame still matches. |
+| 2 | Tekken 3 | `Tekken 3 (USA).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. Structural visual guards cover mode select, VS portraits, and fight screens, but they are not Redux rows. | No CPU checkpoint break through 50M. | Run 100M with visual enabled, then promote one existing visual guard window into a Redux route once CPU parity remains bounded. |
+| 3 | Marvel vs. Capcom: Clash of Super Heroes | `Marvel vs. Capcom - Clash of Super Heroes (USA).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. | No CPU checkpoint break through 50M. | Run 100M with visual enabled; if still aligned, add a menu/fight route. |
+| 4 | CTR: Crash Team Racing | `CTR - Crash Team Racing (USA).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. | No CPU checkpoint break through 50M. | Run 100M with visual enabled; if still aligned, add a race-start route. |
+| 5 | Gran Turismo 2 | `Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. Milestone-K stretch target. | No CPU checkpoint break through 50M. | Run 100M with visual enabled, then plan a menu/race route if the break is not shared. |
+| 6 | Metal Gear Solid | `Metal Gear Solid (USA) (Disc 1) (Rev 1).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. Milestone-G target. | No CPU checkpoint break through 50M. | Route to first complex MDEC sequence and compare against Redux there. |
+| 7 | Metal Slug X | `Metal Slug X (USA).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. | No CPU checkpoint break through 50M. | Run 100M with visual enabled; if still aligned, add a gameplay route. |
+| 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. Local `re2_gameplay` route reaches the first playable room, but that route is not Redux-backed yet. | No CPU checkpoint break through 50M. Gameplay route parity not measured. | Add a Redux-backed route through "Original Game" into gameplay, then compare MDEC count, display area/hash, and CD-ROM state. |
 | 9 | Silent Hill | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 10 | Final Fantasy VII | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 11 | Yu-Gi-Oh! Forbidden Memories | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
-| 12 | Spider-Man | `Spider-Man (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 12 | Spider-Man | `Spider-Man (USA).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. | No CPU checkpoint break through 50M. | Run 100M with visual enabled; if still aligned, add a gameplay route. |
 | 13 | Medal of Honor | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 14 | Castlevania: Symphony of the Night | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
-| 15 | Resident Evil 3: Nemesis | `Resident Evil 3 - Nemesis (USA).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 15 | Resident Evil 3: Nemesis | `Resident Evil 3 - Nemesis (USA).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. | No CPU checkpoint break through 50M. | Run 100M with visual enabled; if still aligned, add a route through Capcom's movie/background path. |
 | 16 | Tony Hawk's Pro Skater 2 | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
-| 17 | Street Fighter Collection / Alpha 2 Gold | `Street Fighter Collection - Street Fighter Alpha 2 Gold (USA) (Disc 2).cue` | Unswept. | Unknown. | Run baseline lockstep sweep and record the first exact mismatch. |
+| 17 | Street Fighter Collection / Alpha 2 Gold | `Street Fighter Collection - Street Fighter Alpha 2 Gold (USA) (Disc 2).cue` | Swept to 50M CPU checkpoints; framebuffer parity skipped. | No CPU checkpoint break through 50M. | Run 100M with visual enabled; if still aligned, add a fight route. |
 | 18 | Need for Speed III: Hot Pursuit | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 19 | Disney's Tarzan | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 20 | Mortal Kombat 4 | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
@@ -134,11 +145,11 @@ the shared issue instead of inventing a per-game bug.
 
 | Game | Local image | Current parity state | First break or blocker | Next parity action |
 |---|---|---|---|---|
-| Celeste Classic PSX | `Celeste Classic PSX (Homebrew).cue` | Local homebrew image; not part of the commercial top-25 set. | No Redux parity row recorded. | Use as an optional lightweight route after commercial boot parity stabilizes. |
+| Celeste Classic PSX | `Celeste Classic PSX (Homebrew).cue` | Swept to 20M CPU checkpoints; framebuffer parity skipped. Local homebrew image, not part of the commercial top-25 set. | No CPU checkpoint break through 20M. | Use as an optional lightweight route after commercial boot parity stabilizes. |
 | Tomb Raider | `Tomb Raider (USA) (Greatest Hits).ccd` with `.img.ecm` | Loader blocked until ECM conversion is available. | Needs `unecm`, `ecm-uncompress`, or `PSOXIDE_UNECM` external converter. | Install or configure ECM converter, verify CCD mount, then sweep baseline parity. |
-| WipEout | `WipEout (Europe) (v1.1).cue` | Unswept; PAL/EU coverage candidate. | Unknown. | Run baseline sweep with the correct PAL BIOS when doing region-specific parity. |
-| WipEout 2097 | `WipEout 2097 (Europe).cue` | Unswept; milestone-J target. | Unknown. | Use `SCPH5502.BIN` for PAL timing sweep and record the first exact mismatch. |
-| WipEout 3: Special Edition | `WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It).cue` | Unswept; extra PAL stress case. | Unknown. | Sweep after WipEout 2097 gives the primary PAL finding. |
+| WipEout | `WipEout (Europe) (v1.1).cue` | Swept to 20M CPU checkpoints with the default SCPH1001 baseline; framebuffer parity skipped. | No CPU checkpoint break through 20M in that baseline. PAL BIOS parity remains pending. | Run baseline sweep with the correct PAL BIOS when doing region-specific parity. |
+| WipEout 2097 | `WipEout 2097 (Europe).cue` | Swept to 20M CPU checkpoints with the default SCPH1001 baseline; framebuffer parity skipped. Milestone-J target. | No CPU checkpoint break through 20M in that baseline. PAL BIOS parity remains pending. | Use `SCPH5502.BIN` for PAL timing sweep and record the first exact mismatch. |
+| WipEout 3: Special Edition | `WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It).cue` | Swept to 20M CPU checkpoints with the default SCPH1001 baseline; framebuffer parity skipped. | No CPU checkpoint break through 20M in that baseline. PAL BIOS parity remains pending. | Sweep after WipEout 2097 gives the primary PAL finding. |
 
 ## Finding template
 
