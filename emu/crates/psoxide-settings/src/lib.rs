@@ -44,4 +44,4 @@ pub const SETTINGS_VERSION: u32 = 3;
 
 /// Current version for `library.ron`. Cache files from older
 /// versions are discarded silently -- the scanner regenerates them.
-pub const LIBRARY_VERSION: u32 = 1;
+pub const LIBRARY_VERSION: u32 = 2;
