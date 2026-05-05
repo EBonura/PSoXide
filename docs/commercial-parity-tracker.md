@@ -55,6 +55,22 @@ cargo run --manifest-path emu/Cargo.toml \
   0 "/Users/ebonura/Downloads/ps1 games"
 ```
 
+Use `commercial_route_matrix` as the route-progress ratchet. It BIOS
+boots local images, applies the per-game route script or generic triage
+script, classifies the blocker bucket, writes `SUMMARY.md` plus
+`matrix.csv`, and prints the exact `local_lockstep_sweep` command needed
+to pin the route against Redux.
+
+```bash
+cargo run --manifest-path emu/Cargo.toml \
+  -p emulator-core \
+  --example commercial_route_matrix \
+  --release -- \
+  --root "/Users/ebonura/Downloads/ps1 games" \
+  --steps 300000000 \
+  --report-dir target/commercial-route-matrix/local-300m
+```
+
 ## Recording rules
 
 Every row should eventually have:
@@ -74,6 +90,20 @@ Do not mark a game green from an interactive/manual run alone. Manual
 screenshots and structural visual guards are useful evidence, but the
 tracker state should remain "route works, parity not measured" until a
 Redux-backed row exists.
+
+## Playable ratchet
+
+A title is not playable until an automated BIOS-boot route:
+
+- reaches an actual controllable gameplay state;
+- accepts input in that state;
+- renders a coherent framebuffer;
+- survives a fixed soak window without panic or hang;
+- has the first route parity break recorded against Redux.
+
+`commercial_route_matrix` may report `playable-candidate` when structural
+guards look promising, but that still is not playable. Promote it only
+after a game-specific route guard and Redux-backed parity row exist.
 
 ## Status vocabulary
 
@@ -98,7 +128,7 @@ the shared issue instead of inventing a per-game bug.
 | Finding | Evidence | Likely owner | Next action |
 |---|---|---|---|
 | BIOS Sony-logo display parity is byte-exact at 100M steps. | `docs/milestones.md` records Redux-visible hash `0xa3ac6881044333d0` for the no-disc path; 2026-05-05 sweeps below confirm zero visible-frame diff at 100M for all 11 local top-25 targets. | GPU, DMA, BIOS boot baseline | Keep as a cheap smoke guard before deeper per-title sweeps. |
-| The 100M top-25 sweeps validate the cold BIOS boot baseline only; they do not prove menu or gameplay support. | Route-progress probes on 2026-05-05: CTR remains on the SCEA splash through 300M in both BIOS and direct-EXE modes; Metal Slug X displays `NO METAL SLUG X DATA DETECTED. DATA LOAD CANCELED.` by 300M in BIOS mode and by 100M in direct-EXE mode; Marvel vs. Capcom reaches the Capcom movie/logo path but is not gameplay-validated. | CD-ROM, DMA/timing, GPU, scheduler, loader state | Keep `commercial_disc_progress` red until these routes make real post-boot progress, then promote passing routes into Redux-backed sweeps. |
+| The 100M top-25 sweeps validate the cold BIOS boot baseline only; they do not prove menu or gameplay support. | Route-progress probes on 2026-05-05: CTR remains on the SCEA splash through 300M in both BIOS and direct-EXE modes; Metal Slug X displays `NO METAL SLUG X DATA DETECTED. DATA LOAD CANCELED.` without route input, but the route matrix can move it to a loading screen at 300M; Marvel vs. Capcom reaches the Capcom movie/logo path but is not gameplay-validated. | CD-ROM, DMA/timing, GPU, scheduler, loader state | Use `commercial_route_matrix` first, then promote each passing route into a Redux-backed `local_lockstep_sweep`. |
 | Historical instruction-record cache first diverges at step 19,474,544, but the commercial checkpoint sweep now stays aligned beyond that point. | `docs/milestones.md`; `probe_cycle_first_divergence`; parity cache under `target/parity-cache/`; 2026-05-05 checkpoint sweeps below. | DMA IRQ scheduling order, or an exact-record transient not visible in 10k checkpoint state. | Re-run exact tracing around 19,474,544 before treating this as an active commercial-game blocker. |
 | Crash long-run display phase drifts from Redux even after the disc-check path is stable. | Milestone D notes: Crash 300M/900M reaches a different animation phase while static rendering is byte-exact. | Timing/scheduler, likely DMA IRQ cadence | Close or bound the timing drift before treating later Crash title/FMVs as renderer failures. |
 
@@ -111,6 +141,8 @@ the shared issue instead of inventing a per-game bug.
 | 2026-05-05 | Top-25 local subset, 11 legally local targets. | `local_lockstep_sweep --disc ... --steps 100000000 --interval 10000` | All 11 matched Redux CPU checkpoints through 100M user steps and BIOS/Sony-logo visible framebuffer parity at `640x478` with `diff=0/611840`. This is not gameplay validation. | `target/local-lockstep/crash-100m-visual-20260505/SUMMARY.txt`; `target/local-lockstep/top25-local-rest-100m-visual-20260505/SUMMARY.txt` |
 | 2026-05-05 | Resident Evil 2 route toward "Original Game" / no-load path. | `local_lockstep_sweep --disc RE2.cue --steps 300000000 --interval 1000000 --no-visual --pad-pulses 0x0008@3150+30,0x4000@3250+20,0x0040@5120+12,0x0040@5160+12,0x4000@5200+30` | First route-level CPU checkpoint break is tick-only in `(266M, 267M]`: PC and GPR/COP2 state hash still match, but PSoXide is 402 cycles ahead of Redux. | `target/local-lockstep/re2-route-300m-20260505/SUMMARY.txt` |
 | 2026-05-05 | Route-progress spot checks for CTR, Marvel vs. Capcom, and Metal Slug X. | `probe_fmv_path ...` and `probe_fmv_path --fastboot ...`; reproduced by ignored tests in `emu/crates/emulator-core/tests/commercial_disc_progress.rs`. | CTR is blocked on the SCEA splash through 300M in BIOS and direct-EXE modes (`0xbfb9bb04fb7042d8`); Metal Slug X reports no game data by 300M in BIOS mode and by 100M in direct-EXE mode (`0x09369767b12fc5f2`); Marvel vs. Capcom reaches the Capcom movie/logo path but no gameplay route is pinned. | Local repro logs/screenshots; use `commercial_disc_progress` as the red guard. |
+| 2026-05-05 | Route matrix canaries for CTR and Metal Slug X. | `commercial_route_matrix --disc CTR.cue --disc MetalSlugX.cue --steps 300000000 --report-dir target/commercial-route-matrix/canaries-20260505` | CTR remains `boot/license` at the SCEA splash (`0xbfb9bb04fb7042d8`). Metal Slug X becomes `route-progress` with generic input, reaches a loading screen (`0x36cb4b8cb6c42d59`), and still needs gameplay confirmation plus Redux parity. | `target/commercial-route-matrix/canaries-20260505/SUMMARY.md`; `target/commercial-route-matrix/canaries-20260505/matrix.csv` |
+| 2026-05-05 | Full local route matrix, 16 discovered sheets. | `commercial_route_matrix --root ~/Downloads/ps1 games --steps 300000000 --wall-timeout-secs 120 --report-dir target/commercial-route-matrix/local-300m-20260505` | No title is playable yet. Buckets: `render/gpu=4`, `fmv/mdec=4`, `unknown=3`, `boot/license=2`, `route-progress=1`, `menu-input=1`, `loader=1`. Every row includes the next `local_lockstep_sweep` parity command. | `target/commercial-route-matrix/local-300m-20260505/SUMMARY.md`; `target/commercial-route-matrix/local-300m-20260505/matrix.csv` |
 
 Note: the 2026-05-05 sweep reports were generated before the harness
 started printing visual `skip` explicitly. The command line is the
@@ -122,11 +154,11 @@ source of truth for those rows: framebuffer comparison was disabled.
 |---|---|---|---|---|---|
 | 1 | Crash Bandicoot | `Crash Bandicoot (USA).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-D canary still has later visual-phase drift noted in `docs/milestones.md`. | No CPU or BIOS-logo visual break through 100M. Later Crash title/FMVs remain unpinned. | Route toward title/FMVs and record the first non-logo parity break. |
 | 2 | Tekken 3 | `Tekken 3 (USA).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Structural visual guards cover mode select, VS portraits, and fight screens, but they are not Redux rows. | No CPU or BIOS-logo visual break through 100M. | Promote one existing visual guard window into a Redux route now that the boot baseline is clean. |
-| 3 | Marvel vs. Capcom: Clash of Super Heroes | `Marvel vs. Capcom - Clash of Super Heroes (USA).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Route-progress probes reach the Capcom movie/logo path, but no menu/fight route is validated. | No CPU or BIOS-logo visual break through 100M. Gameplay support is unpinned. | Add a menu/fight route first, then record its first parity break. |
+| 3 | Marvel vs. Capcom: Clash of Super Heroes | `Marvel vs. Capcom - Clash of Super Heroes (USA).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. The 300M route matrix classifies the generic fighter route as `fmv/mdec`; the dumped frame is movie/effect content, not gameplay. | No CPU or BIOS-logo visual break through 100M. Gameplay support is unpinned. | Add a real menu/fight route with explicit gameplay guards, then record its first parity break. |
 | 4 | CTR: Crash Team Racing | `CTR - Crash Team Racing (USA).cue` | Commercial route blocked: stuck on the SCEA splash through 300M steps in BIOS and direct-EXE modes (`display_hash=0xbfb9bb04fb7042d8`). Cold BIOS sweep still matches Redux through 100M BIOS/Sony-logo parity. | The route does not reach title/menu/race; no gameplay route is validated. | Inspect CD-ROM/DMA/GPU state around the post-license SCEA splash, then promote a race-start route into Redux parity. |
 | 5 | Gran Turismo 2 | `Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-K stretch target. | No CPU or BIOS-logo visual break through 100M. | Plan a menu/race route and record its first parity break. |
 | 6 | Metal Gear Solid | `Metal Gear Solid (USA) (Disc 1) (Rev 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-G target. | No CPU or BIOS-logo visual break through 100M. | Route to first complex MDEC sequence and compare against Redux there. |
-| 7 | Metal Slug X | `Metal Slug X (USA).cue` | Commercial route blocked: visible error `NO METAL SLUG X DATA DETECTED. DATA LOAD CANCELED.` by 300M in BIOS mode and by 100M in direct-EXE mode (`display_hash=0x09369767b12fc5f2`). Cold BIOS sweep still matches Redux through 100M BIOS/Sony-logo parity. | The game reaches its no-data screen; direct-EXE mode has `sector_events=0`, BIOS mode has reads but still ends in the same blocker. | Compare CD-ROM command/sector delivery and DMA cadence against Redux across the game-data detection window, then promote a gameplay route into Redux parity. |
+| 7 | Metal Slug X | `Metal Slug X (USA).cue` | Route-progress: without route input it reaches `NO METAL SLUG X DATA DETECTED. DATA LOAD CANCELED.`; with generic route input the route matrix reaches a loading screen at 300M (`display_hash=0x36cb4b8cb6c42d59`). Cold BIOS sweep still matches Redux through 100M BIOS/Sony-logo parity. | Data detection can be passed, but gameplay is not confirmed. A 600M extension was manually stopped after exceeding the interactive loop budget before progress reporting was added. | Run the route matrix with a bounded longer budget, then promote the first route-progress window into Redux parity with the emitted `local_lockstep_sweep` command. |
 | 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Local cold-boot route reaches the first playable room at 2.2B user steps. Redux-backed route sweep is pinned to a 300M timing break before route input becomes active. | CPU/timing break in `(266M, 267M]`: ours `{tick:608542101 pc:0x8008605c state:64e648f7c3560511}`; Redux `{tick:608541699 pc:0x8008605c state:64e648f7c3560511}`. Visual skipped. | Refine the pre-input window with an exact no-pad trace, then inspect CD-ROM/DMA scheduler timing around RE2 executable startup and first MDEC stream setup. |
 | 9 | Silent Hill | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 10 | Final Fantasy VII | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
