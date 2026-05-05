@@ -37,8 +37,8 @@ const BAR_HEIGHT: f32 = 34.0;
 const TOOLBAR_MARGIN_X: f32 = 8.0;
 /// Gap between the metrics lane and the controls lane.
 const TOOLBAR_CLUSTER_GAP: f32 = 8.0;
-/// Right-side lane: transport, volume slider, BIOS toggle, debug toggles.
-const CONTROLS_WIDTH: f32 = 600.0;
+/// Right-side lane: transport, volume slider, BIOS toggle, debug tools.
+const CONTROLS_WIDTH: f32 = 480.0;
 /// Keep enough room for the status dot + RUNNING/PAUSED label.
 const METRICS_MIN_WIDTH: f32 = 116.0;
 /// Slider width used in the toolbar.
@@ -213,33 +213,13 @@ fn draw_boot_toggle(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-/// Debug-panel toggle cluster. Each button reflects the current on/off
-/// state of its panel -- active buttons tint with the "running" green;
-/// inactive stay dim. Clicking flips the panel's visibility.
+/// Debug-tool toggle cluster.
 fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
     debug_toggle(
         ui,
-        icons::LAYERS,
-        "Toggle VRAM viewer",
-        &mut state.panels.vram,
-    );
-    debug_toggle(
-        ui,
-        icons::MONITOR,
-        "Toggle frame profiler",
-        &mut state.panels.profiler,
-    );
-    debug_toggle(
-        ui,
-        icons::TERMINAL,
-        "Toggle memory viewer",
-        &mut state.panels.memory,
-    );
-    debug_toggle(
-        ui,
-        icons::CPU,
-        "Toggle CPU registers panel",
-        &mut state.panels.registers,
+        icons::BUG,
+        "Toggle debug sidebar",
+        &mut state.panels.debug_sidebar,
     );
     // Wireframe mode lives on the GPU, not a frontend panel -- we
     // dereference through Bus to flip it.

@@ -497,142 +497,151 @@ impl FrameProfiler {
 
 /// Paint the floating profiler window.
 pub fn draw(ctx: &egui::Context, profiler: &mut FrameProfiler) {
-    let Some(avg) = profiler.average() else {
+    if profiler.average().is_none() {
         return;
     };
-    let latest = profiler.latest().unwrap_or(avg);
 
     egui::Window::new("Frame Profiler")
         .default_size(egui::vec2(540.0, 450.0))
         .min_width(460.0)
         .resizable(true)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                metric(ui, "EMU Hz", format!("{:.1}", avg.emulated_vblank_hz()));
-                metric(ui, "DRAW Hz", format!("{:.1}", avg.psx_draw_hz()));
-                metric(ui, "DRAW/V", format!("{:.2}", avg.psx_draw_vblanks));
-                metric(ui, "CAP", format!("{:.0}", avg.psx_step_cap_misses));
-            });
-            ui.horizontal(|ui| {
-                metric(ui, "STEP", format!("{:.0}%", avg.psx_budget_percent()));
-                metric(ui, "VBL/R", format!("{:.1}", avg.psx_vblanks));
-                metric(
-                    ui,
-                    "CYC/F",
-                    format!("{:.0}", avg.bus_cycles_per_guest_frame()),
-                );
-                metric(
-                    ui,
-                    "BUD/F",
-                    format!("{:.0}", avg.budget_cycles_per_guest_frame()),
-                );
-                metric(
-                    ui,
-                    "INS/F",
-                    format!("{:.0}", avg.cpu_ticks_per_guest_frame()),
-                );
-            });
-            ui.horizontal(|ui| {
-                metric(
-                    ui,
-                    "CMD/F",
-                    format!("{:.0}", avg.gpu_cmds_per_guest_frame()),
-                );
-                metric(
-                    ui,
-                    "DRAW/F",
-                    format!("{:.0}", avg.gpu_draw_cmds_per_guest_frame()),
-                );
-                metric(
-                    ui,
-                    "IMG/F",
-                    format!("{:.0}", avg.gpu_image_cmds_per_guest_frame()),
-                );
-                metric(ui, "GTE/F", format!("{:.0}", avg.gte_ops_per_guest_frame()));
-                metric(
-                    ui,
-                    "GTEC/F",
-                    format!("{:.0}", avg.gte_cycles_per_guest_frame()),
-                );
-            });
-            ui.horizontal(|ui| {
-                metric(ui, "HOST FPS", format!("{:.1}", avg.host_fps()));
-                metric(ui, "HOST AVG", format!("{:.2} ms", avg.total_ms));
-                metric(ui, "HOST LAST", format!("{:.2} ms", latest.total_ms));
-                metric(ui, "UI", format!("{:.2} ms", avg.egui.total_ms));
-                metric(ui, "HW", format!("{:.2} ms", avg.hw_render_ms));
-                metric(ui, "SCALE", format!("{:.0}x", latest.hw_scale.max(1.0)));
-            });
-
-            ui.add_space(4.0);
-            draw_history(ui, profiler);
-            ui.add_space(6.0);
-
-            let max_ms = avg.total_ms.max(BUDGET_60_MS).max(1.0);
-            egui::Grid::new("frame-profiler-stage-grid")
-                .num_columns(3)
-                .spacing(egui::vec2(8.0, 3.0))
-                .striped(false)
-                .show(ui, |ui| {
-                    for (label, ms) in avg.stage_rows() {
-                        stage_row(ui, label, ms, max_ms);
-                    }
-                });
-
-            if avg.guest.has_data() {
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new("Guest Runtime")
-                        .color(theme::ACCENT)
-                        .monospace()
-                        .size(theme::FONT_SIZE_SMALL),
-                );
-                ui.horizontal(|ui| {
-                    metric(ui, "GFR/R", format!("{:.1}", avg.guest.frames));
-                    metric(
-                        ui,
-                        "UPD/F",
-                        format!(
-                            "{:.0}",
-                            avg.guest.stage_cycles_per_guest_frame(
-                                emulator_core::telemetry::stage::UPDATE as usize
-                            )
-                        ),
-                    );
-                    metric(
-                        ui,
-                        "REN",
-                        format!(
-                            "{:.0}",
-                            avg.guest.stage_cycles_per_hit(
-                                emulator_core::telemetry::stage::RENDER as usize
-                            )
-                        ),
-                    );
-                    metric(
-                        ui,
-                        "MOD",
-                        format!(
-                            "{:.0}",
-                            avg.guest.stage_cycles_per_hit(
-                                emulator_core::telemetry::stage::MODEL_INSTANCES as usize
-                            )
-                        ),
-                    );
-                });
-                draw_guest_runtime(ui, avg.guest);
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.small_button("Log Snapshot").clicked() {
-                    eprintln!("{}", format_log_line("ui", latest));
-                }
-                if ui.small_button("Clear").clicked() {
-                    profiler.clear();
-                }
-            });
+            draw_contents(ui, profiler);
         });
+}
+
+/// Paint profiler contents inside an existing container.
+pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
+    let Some(avg) = profiler.average() else {
+        ui.monospace("(no frame samples yet)");
+        return;
+    };
+    let latest = profiler.latest().unwrap_or(avg);
+
+    ui.horizontal_wrapped(|ui| {
+        metric(ui, "EMU Hz", format!("{:.1}", avg.emulated_vblank_hz()));
+        metric(ui, "DRAW Hz", format!("{:.1}", avg.psx_draw_hz()));
+        metric(ui, "DRAW/V", format!("{:.2}", avg.psx_draw_vblanks));
+        metric(ui, "CAP", format!("{:.0}", avg.psx_step_cap_misses));
+    });
+    ui.horizontal_wrapped(|ui| {
+        metric(ui, "STEP", format!("{:.0}%", avg.psx_budget_percent()));
+        metric(ui, "VBL/R", format!("{:.1}", avg.psx_vblanks));
+        metric(
+            ui,
+            "CYC/F",
+            format!("{:.0}", avg.bus_cycles_per_guest_frame()),
+        );
+        metric(
+            ui,
+            "BUD/F",
+            format!("{:.0}", avg.budget_cycles_per_guest_frame()),
+        );
+        metric(
+            ui,
+            "INS/F",
+            format!("{:.0}", avg.cpu_ticks_per_guest_frame()),
+        );
+    });
+    ui.horizontal_wrapped(|ui| {
+        metric(
+            ui,
+            "CMD/F",
+            format!("{:.0}", avg.gpu_cmds_per_guest_frame()),
+        );
+        metric(
+            ui,
+            "DRAW/F",
+            format!("{:.0}", avg.gpu_draw_cmds_per_guest_frame()),
+        );
+        metric(
+            ui,
+            "IMG/F",
+            format!("{:.0}", avg.gpu_image_cmds_per_guest_frame()),
+        );
+        metric(ui, "GTE/F", format!("{:.0}", avg.gte_ops_per_guest_frame()));
+        metric(
+            ui,
+            "GTEC/F",
+            format!("{:.0}", avg.gte_cycles_per_guest_frame()),
+        );
+    });
+    ui.horizontal_wrapped(|ui| {
+        metric(ui, "HOST FPS", format!("{:.1}", avg.host_fps()));
+        metric(ui, "HOST AVG", format!("{:.2} ms", avg.total_ms));
+        metric(ui, "HOST LAST", format!("{:.2} ms", latest.total_ms));
+        metric(ui, "UI", format!("{:.2} ms", avg.egui.total_ms));
+        metric(ui, "HW", format!("{:.2} ms", avg.hw_render_ms));
+        metric(ui, "SCALE", format!("{:.0}x", latest.hw_scale.max(1.0)));
+    });
+
+    ui.add_space(4.0);
+    draw_history(ui, profiler);
+    ui.add_space(6.0);
+
+    let max_ms = avg.total_ms.max(BUDGET_60_MS).max(1.0);
+    egui::Grid::new("frame-profiler-stage-grid")
+        .num_columns(3)
+        .spacing(egui::vec2(8.0, 3.0))
+        .striped(false)
+        .show(ui, |ui| {
+            for (label, ms) in avg.stage_rows() {
+                stage_row(ui, label, ms, max_ms);
+            }
+        });
+
+    if avg.guest.has_data() {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Guest Runtime")
+                .color(theme::ACCENT)
+                .monospace()
+                .size(theme::FONT_SIZE_SMALL),
+        );
+        ui.horizontal_wrapped(|ui| {
+            metric(ui, "GFR/R", format!("{:.1}", avg.guest.frames));
+            metric(
+                ui,
+                "UPD/F",
+                format!(
+                    "{:.0}",
+                    avg.guest.stage_cycles_per_guest_frame(
+                        emulator_core::telemetry::stage::UPDATE as usize
+                    )
+                ),
+            );
+            metric(
+                ui,
+                "REN",
+                format!(
+                    "{:.0}",
+                    avg.guest
+                        .stage_cycles_per_hit(emulator_core::telemetry::stage::RENDER as usize)
+                ),
+            );
+            metric(
+                ui,
+                "MOD",
+                format!(
+                    "{:.0}",
+                    avg.guest.stage_cycles_per_hit(
+                        emulator_core::telemetry::stage::MODEL_INSTANCES as usize
+                    )
+                ),
+            );
+        });
+        draw_guest_runtime(ui, avg.guest);
+    }
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if ui.small_button("Log Snapshot").clicked() {
+            eprintln!("{}", format_log_line("ui", latest));
+        }
+        if ui.small_button("Clear").clicked() {
+            profiler.clear();
+        }
+    });
 }
 
 fn metric(ui: &mut egui::Ui, label: &str, value: String) {
