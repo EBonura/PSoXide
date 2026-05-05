@@ -59,13 +59,13 @@ pub enum MenuAction {
     ChooseBiosPath,
     /// Pick and persist the games library root.
     ChooseGamesPath,
-    /// Toggle visibility of the register side panel.
+    /// Toggle visibility of the register sidebar section.
     ToggleRegisters,
-    /// Toggle visibility of the memory viewer panel.
+    /// Toggle visibility of the memory viewer sidebar section.
     ToggleMemory,
-    /// Toggle visibility of the VRAM bottom panel.
+    /// Toggle visibility of the VRAM sidebar section.
     ToggleVram,
-    /// Toggle visibility of the frame-profiler window.
+    /// Toggle visibility of the frame-profiler sidebar section.
     ToggleProfiler,
     /// Quit the application.
     Quit,
@@ -788,22 +788,22 @@ fn build_debug_category() -> Category {
         icon: icons::BUG,
         items: vec![
             MenuItem {
-                label: "Toggle registers panel".into(),
+                label: "Toggle registers section".into(),
                 action: MenuAction::ToggleRegisters,
                 value: None,
             },
             MenuItem {
-                label: "Toggle memory panel".into(),
+                label: "Toggle memory section".into(),
                 action: MenuAction::ToggleMemory,
                 value: None,
             },
             MenuItem {
-                label: "Toggle VRAM panel".into(),
+                label: "Toggle VRAM section".into(),
                 action: MenuAction::ToggleVram,
                 value: None,
             },
             MenuItem {
-                label: "Toggle profiler".into(),
+                label: "Toggle profiler section".into(),
                 action: MenuAction::ToggleProfiler,
                 value: None,
             },
