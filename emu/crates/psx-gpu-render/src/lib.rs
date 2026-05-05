@@ -64,6 +64,16 @@ pub struct HwRenderer {
     texture_words: Vec<u16>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct VramCopyRect {
+    sx: u32,
+    sy: u32,
+    dx: u32,
+    dy: u32,
+    w: u32,
+    h: u32,
+}
+
 /// Toolbar Native↔Window selector. Mirrors the frontend's
 /// `app::ScaleMode` so this crate doesn't depend on `frontend`.
 /// The renderer translates this + a panel-size hint into an
@@ -262,20 +272,17 @@ impl HwRenderer {
     }
 
     fn mirror_vram_copy(&mut self, entry: &GpuCmdLogEntry) {
-        if entry.fifo.len() < 4 {
+        let Some(rect) = decode_vram_copy_packet(&entry.fifo) else {
             return;
-        }
-        let src = entry.fifo[1];
-        let dst = entry.fifo[2];
-        let wh = entry.fifo[3];
-        let sx = src & (VRAM_WIDTH - 1);
-        let sy = (src >> 16) & (VRAM_HEIGHT - 1);
-        let dx = dst & (VRAM_WIDTH - 1);
-        let dy = (dst >> 16) & (VRAM_HEIGHT - 1);
-        let raw_w = wh & 0xFFFF;
-        let raw_h = (wh >> 16) & 0xFFFF;
-        let w = if raw_w == 0 { VRAM_WIDTH } else { raw_w };
-        let h = if raw_h == 0 { VRAM_HEIGHT } else { raw_h };
+        };
+        let VramCopyRect {
+            sx,
+            sy,
+            dx,
+            dy,
+            w,
+            h,
+        } = rect;
         if w == 0 || h == 0 {
             return;
         }
@@ -645,6 +652,25 @@ fn is_vram_image_op(entry: &GpuCmdLogEntry) -> bool {
     matches!(entry.opcode, 0x80..=0xBF)
 }
 
+fn decode_vram_copy_packet(fifo: &[u32]) -> Option<VramCopyRect> {
+    if fifo.len() < 4 {
+        return None;
+    }
+    let src = fifo[1];
+    let dst = fifo[2];
+    let wh = fifo[3];
+    let raw_w = wh & (VRAM_WIDTH - 1);
+    let raw_h = (wh >> 16) & (VRAM_HEIGHT - 1);
+    Some(VramCopyRect {
+        sx: src & (VRAM_WIDTH - 1),
+        sy: (src >> 16) & (VRAM_HEIGHT - 1),
+        dx: dst & (VRAM_WIDTH - 1),
+        dy: (dst >> 16) & (VRAM_HEIGHT - 1),
+        w: if raw_w == 0 { VRAM_WIDTH } else { raw_w },
+        h: if raw_h == 0 { VRAM_HEIGHT } else { raw_h },
+    })
+}
+
 fn bgr15_to_rgba8(pixel: u16) -> [u8; 4] {
     let r5 = (pixel & 0x1F) as u8;
     let g5 = ((pixel >> 5) & 0x1F) as u8;
@@ -690,6 +716,24 @@ mod tests {
         rgba.chunks_exact(4)
             .map(|px| [px[0], px[1], px[2], px[3]])
             .collect()
+    }
+
+    #[test]
+    fn vram_copy_packet_decode_masks_psx_fields() {
+        let rect = decode_vram_copy_packet(&[0x80_00_00_00, 0x0203_0402, 0x0206_0405, 0x0201_0402])
+            .unwrap();
+
+        assert_eq!(
+            rect,
+            VramCopyRect {
+                sx: 2,
+                sy: 3,
+                dx: 5,
+                dy: 6,
+                w: 2,
+                h: 1,
+            }
+        );
     }
 
     #[test]
