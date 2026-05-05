@@ -28,13 +28,15 @@ use std::time::{Duration, Instant};
 
 use emulator_core::{Bus, Cpu, ExecutionError};
 use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask, PadPulse};
-use parity_oracle::{OracleConfig, ReduxProcess, StateCheckpoint};
+use parity_oracle::{OracleConfig, OracleError, ReduxProcess, StateCheckpoint};
 use psx_trace::InstructionRecord;
 
 const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
 const DEFAULT_GAMES_ROOT: &str = "/Users/ebonura/Downloads/ps1 games";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
+const FAST_FORWARD_CHECKPOINT_INTERVAL: u64 = 1_000_000;
+const FAST_FORWARD_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
 struct Config {
@@ -48,6 +50,8 @@ struct Config {
     exact_window: u64,
     pad_mask: u16,
     pad_pulses: Vec<PadPulse>,
+    redux_timeout: Option<Duration>,
+    redux_wall_timeout: Option<Duration>,
     report_dir: PathBuf,
 }
 
@@ -123,7 +127,7 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("  ERROR: {e}");
-                results.push(GameResult {
+                let result = GameResult {
                     name,
                     disc: disc.clone(),
                     cpu_ok: false,
@@ -132,7 +136,11 @@ fn main() {
                     first_checkpoint_mismatch: None,
                     exact_mismatch: Some(e),
                     visual_diff: None,
-                });
+                };
+                let game_dir = cfg.report_dir.join(&result.name);
+                let _ = fs::create_dir_all(&game_dir);
+                write_game_summary(&game_dir, &result);
+                results.push(result);
             }
         }
     }
@@ -171,6 +179,14 @@ fn parse_args() -> Config {
             .filter(|s| !s.trim().is_empty())
             .map(|s| parse_pad_pulses(&s).expect("PSOXIDE_PAD1_PULSES parses"))
             .unwrap_or_default(),
+        redux_timeout: std::env::var("PSOXIDE_REDUX_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs),
+        redux_wall_timeout: std::env::var("PSOXIDE_REDUX_WALL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs),
         report_dir: default_report_dir(),
     };
 
@@ -189,6 +205,18 @@ fn parse_args() -> Config {
                 let spec = take_string(&mut args, "--pad-pulses");
                 cfg.pad_pulses =
                     parse_pad_pulses(&spec).unwrap_or_else(|e| panic!("--pad-pulses: {e}"));
+            }
+            "--redux-timeout-secs" => {
+                cfg.redux_timeout = Some(Duration::from_secs(take_u64(
+                    &mut args,
+                    "--redux-timeout-secs",
+                )));
+            }
+            "--redux-wall-timeout-secs" => {
+                cfg.redux_wall_timeout = Some(Duration::from_secs(take_u64(
+                    &mut args,
+                    "--redux-wall-timeout-secs",
+                )));
             }
             "--report-dir" => cfg.report_dir = take_path(&mut args, "--report-dir"),
             "--no-visual" => cfg.visual = false,
@@ -252,6 +280,10 @@ Options:
   --limit N            run only the first N discovered games
   --pad-mask MASK      always-held port-1 buttons, decimal or 0x hex
   --pad-pulses SPEC    VBlank pulses: <mask>@<start>+<frames>[,...]
+  --redux-timeout-secs N
+                       per-checkpoint Redux timeout (default: derived from --interval)
+  --redux-wall-timeout-secs N
+                       abort Redux route parity after N wall seconds
   --report-dir PATH    report output dir
   --no-visual          skip final screenshot byte comparison
 "
@@ -307,17 +339,62 @@ fn run_game(cfg: &Config, name: &str, disc: &Path) -> Result<GameResult, String>
     let mut oracle_cfg =
         OracleConfig::new(cfg.bios.clone(), lua).map_err(|e| format!("oracle config: {e}"))?;
     oracle_cfg = oracle_cfg.with_disc(disc.to_path_buf());
-    let mut redux = ReduxProcess::launch(&oracle_cfg).map_err(|e| format!("launch Redux: {e}"))?;
+    let mut redux =
+        Some(ReduxProcess::launch(&oracle_cfg).map_err(|e| format!("launch Redux: {e}"))?);
     redux
+        .as_mut()
+        .expect("Redux launched")
         .handshake(HANDSHAKE_TIMEOUT)
         .map_err(|e| format!("Redux handshake: {e}"))?;
 
-    let timeout = Duration::from_secs((cfg.steps / 200_000).max(60));
+    let timeout = redux_checkpoint_timeout(cfg);
     let mut redux_checks = Vec::with_capacity(ours.checkpoints.len());
     let redux_progress_stride = (ours.checkpoints.len() / 10).max(1);
-    let redux_final = if cfg.uses_pad() {
+    let redux_started = Instant::now();
+    let mut checkpoint_index = 0usize;
+    let mut first_checkpoint_mismatch = None;
+    let mut on_redux_checkpoint = |cp: StateCheckpoint| {
+        let idx = checkpoint_index;
+        checkpoint_index += 1;
+        redux_checks.push(cp);
+        if redux_checks.len() == 1
+            || redux_checks.len() % redux_progress_stride == 0
+            || redux_checks.len() == ours.checkpoints.len()
+        {
+            eprintln!(
+                "  redux progress: {}/{}",
+                redux_checks.len(),
+                ours.checkpoints.len()
+            );
+        }
+        if let Some(timeout) = cfg.redux_wall_timeout {
+            if redux_started.elapsed() > timeout {
+                return Err(OracleError::Protocol {
+                    expected: "Redux route parity within wall budget".to_string(),
+                    got: format!(
+                        "wall timeout after {:.1}s at checkpoint {}/{}",
+                        redux_started.elapsed().as_secs_f64(),
+                        redux_checks.len(),
+                        ours.checkpoints.len()
+                    ),
+                });
+            }
+        }
+        if first_checkpoint_mismatch.is_none() {
+            if let Some(mismatch) =
+                compare_stream_checkpoint(cfg.interval, &ours.checkpoints, idx, cp)
+            {
+                first_checkpoint_mismatch = Some(mismatch);
+                return Err(checkpoint_abort_error(mismatch));
+            }
+        }
+        Ok(())
+    };
+    let redux_result = if cfg.uses_pad() {
         let pulse_tuples = cfg.pad_pulse_tuples();
         redux
+            .as_mut()
+            .expect("Redux running")
             .run_state_checkpoint_pad(
                 cfg.steps,
                 cfg.interval,
@@ -325,43 +402,46 @@ fn run_game(cfg: &Config, name: &str, disc: &Path) -> Result<GameResult, String>
                 cfg.pad_mask,
                 &pulse_tuples,
                 timeout,
-                |cp| {
-                    redux_checks.push(cp);
-                    if redux_checks.len() % redux_progress_stride == 0 {
-                        eprintln!(
-                            "  redux progress: {}/{}",
-                            redux_checks.len(),
-                            ours.checkpoints.len()
-                        );
-                    }
-                    Ok(())
-                },
+                &mut on_redux_checkpoint,
             )
-            .map_err(|e| format!("Redux pad state checkpoints: {e}"))?
+            .map_err(|e| format!("Redux pad state checkpoints: {e}"))
     } else {
         redux
-            .run_state_checkpoint(cfg.steps, cfg.interval, timeout, |cp| {
-                redux_checks.push(cp);
-                if redux_checks.len() % redux_progress_stride == 0 {
-                    eprintln!(
-                        "  redux progress: {}/{}",
-                        redux_checks.len(),
-                        ours.checkpoints.len()
-                    );
-                }
-                Ok(())
-            })
-            .map_err(|e| format!("Redux state checkpoints: {e}"))?
+            .as_mut()
+            .expect("Redux running")
+            .run_state_checkpoint(cfg.steps, cfg.interval, timeout, &mut on_redux_checkpoint)
+            .map_err(|e| format!("Redux state checkpoints: {e}"))
     };
-    eprintln!("  redux: {} checkpoints", redux_checks.len());
+    let redux_final = match redux_result {
+        Ok(final_checkpoint) => {
+            eprintln!("  redux: {} checkpoints", redux_checks.len());
+            Some(final_checkpoint)
+        }
+        Err(_e) if first_checkpoint_mismatch.is_some() => {
+            eprintln!(
+                "  redux: stopped after first mismatch at checkpoint {}/{}",
+                redux_checks.len(),
+                ours.checkpoints.len()
+            );
+            if let Some(redux) = redux.take() {
+                let _ = redux.terminate();
+            }
+            None
+        }
+        Err(e) => return Err(e),
+    };
 
-    let first_checkpoint_mismatch = compare_checkpoints(
-        cfg.interval,
-        &ours.checkpoints,
-        ours.final_checkpoint,
-        &redux_checks,
-        redux_final,
-    );
+    let first_checkpoint_mismatch = match (first_checkpoint_mismatch, redux_final) {
+        (Some(mismatch), _) => Some(mismatch),
+        (None, Some(redux_final)) => compare_checkpoints(
+            cfg.interval,
+            &ours.checkpoints,
+            ours.final_checkpoint,
+            &redux_checks,
+            redux_final,
+        ),
+        (None, None) => None,
+    };
 
     let exact_mismatch = if let Some(mismatch) = first_checkpoint_mismatch {
         let window = (mismatch.checkpoint.step - mismatch.previous_step).min(cfg.exact_window);
@@ -371,15 +451,19 @@ fn run_game(cfg: &Config, name: &str, disc: &Path) -> Result<GameResult, String>
         None
     };
 
-    let visual_diff = if cfg.visual {
-        Some(compare_visual(&mut redux, &bus, &game_dir, "final")?)
+    let visual_diff = if cfg.visual && first_checkpoint_mismatch.is_none() {
+        let redux = redux.as_mut().expect("Redux available for visual check");
+        Some(compare_visual(redux, &bus, &game_dir, "final")?)
     } else {
         None
     };
 
-    redux.send_command("quit").ok();
-    let _ = redux.wait_for_response(Duration::from_secs(2));
-    let _ = redux.terminate();
+    if first_checkpoint_mismatch.is_none() {
+        let mut redux = redux.take().expect("Redux available for clean shutdown");
+        redux.send_command("quit").ok();
+        let _ = redux.wait_for_response(Duration::from_secs(2));
+        let _ = redux.terminate();
+    }
 
     let cpu_ok = first_checkpoint_mismatch.is_none() && exact_mismatch.is_none();
     let visual_ok = visual_diff
@@ -391,7 +475,7 @@ fn run_game(cfg: &Config, name: &str, disc: &Path) -> Result<GameResult, String>
         name: name.to_string(),
         disc: disc.to_path_buf(),
         cpu_ok,
-        visual_checked: cfg.visual,
+        visual_checked: visual_diff.is_some(),
         visual_ok,
         first_checkpoint_mismatch,
         exact_mismatch,
@@ -550,6 +634,60 @@ fn compare_checkpoints(
     None
 }
 
+fn compare_stream_checkpoint(
+    interval: u64,
+    ours: &[StateCheckpoint],
+    index: usize,
+    redux: StateCheckpoint,
+) -> Option<Mismatch> {
+    let ours_checkpoint = ours.get(index).copied().unwrap_or(StateCheckpoint {
+        step: ((index as u64) + 1) * interval,
+        tick: 0,
+        pc: 0,
+        state_hash: 0,
+    });
+    if same_state(ours_checkpoint, redux) {
+        return None;
+    }
+    let previous_step = if index == 0 {
+        0
+    } else {
+        ours.get(index - 1)
+            .map(|checkpoint| checkpoint.step)
+            .unwrap_or(index as u64 * interval)
+    };
+    Some(Mismatch {
+        previous_step,
+        checkpoint: redux,
+        ours: ours_checkpoint,
+        redux,
+    })
+}
+
+fn checkpoint_abort_error(mismatch: Mismatch) -> OracleError {
+    OracleError::Protocol {
+        expected: "matching Redux route checkpoint".to_string(),
+        got: format!(
+            "first mismatch at step {}: ours tick={} pc=0x{:08x} state={:016x}; redux tick={} pc=0x{:08x} state={:016x}",
+            mismatch.checkpoint.step,
+            mismatch.ours.tick,
+            mismatch.ours.pc,
+            mismatch.ours.state_hash,
+            mismatch.redux.tick,
+            mismatch.redux.pc,
+            mismatch.redux.state_hash,
+        ),
+    }
+}
+
+fn redux_checkpoint_timeout(cfg: &Config) -> Duration {
+    if let Some(timeout) = cfg.redux_timeout {
+        return timeout;
+    }
+    let secs = (cfg.interval / 100_000).clamp(60, 600);
+    Duration::from_secs(secs)
+}
+
 fn same_state(a: StateCheckpoint, b: StateCheckpoint) -> bool {
     a.step == b.step && a.tick == b.tick && a.pc == b.pc && a.state_hash == b.state_hash
 }
@@ -607,23 +745,43 @@ fn pinpoint_exact_divergence(
         .handshake(HANDSHAKE_TIMEOUT)
         .map_err(|e| format!("Redux handshake: {e}"))?;
     if start > 0 {
-        let timeout = Duration::from_secs((start / 200_000).max(60));
+        let ff_interval = start.min(FAST_FORWARD_CHECKPOINT_INTERVAL).max(1);
+        let expected_checkpoints = start / ff_interval;
+        let progress_stride = (expected_checkpoints / 10).max(1);
+        let mut emitted = 0u64;
         if cfg.uses_pad() {
             let pulse_tuples = cfg.pad_pulse_tuples();
             redux
                 .run_checkpoint_pad(
                     start,
-                    start,
+                    ff_interval,
                     1,
                     cfg.pad_mask,
                     &pulse_tuples,
-                    timeout,
-                    |_step, _tick, _pc| Ok(()),
+                    FAST_FORWARD_CHECKPOINT_TIMEOUT,
+                    |step, _tick, _pc| {
+                        emitted += 1;
+                        if emitted % progress_stride == 0 || step == start {
+                            eprintln!("  exact redux ff progress: {step}/{start}");
+                        }
+                        Ok(())
+                    },
                 )
                 .map_err(|e| format!("Redux pad skip to {start}: {e}"))?;
         } else {
             redux
-                .run(start, timeout)
+                .run_checkpoint(
+                    start,
+                    ff_interval,
+                    FAST_FORWARD_CHECKPOINT_TIMEOUT,
+                    |step, _tick, _pc| {
+                        emitted += 1;
+                        if emitted % progress_stride == 0 || step == start {
+                            eprintln!("  exact redux ff progress: {step}/{start}");
+                        }
+                        Ok(())
+                    },
+                )
                 .map_err(|e| format!("Redux skip to {start}: {e}"))?;
         }
     } else if cfg.uses_pad() {
@@ -1066,5 +1224,66 @@ fn visual_status(result: &GameResult) -> &'static str {
         "ok"
     } else {
         "FAIL"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cp(step: u64, tick: u64, pc: u32, state_hash: u64) -> StateCheckpoint {
+        StateCheckpoint {
+            step,
+            tick,
+            pc,
+            state_hash,
+        }
+    }
+
+    #[test]
+    fn stream_checkpoint_accepts_matching_state() {
+        let ours = [cp(10, 100, 0x8000_0000, 0x1234)];
+
+        assert!(compare_stream_checkpoint(10, &ours, 0, ours[0]).is_none());
+    }
+
+    #[test]
+    fn stream_checkpoint_records_first_mismatch_window() {
+        let ours = [
+            cp(10, 100, 0x8000_0000, 0x1111),
+            cp(20, 200, 0x8000_0010, 0x2222),
+        ];
+        let redux = cp(20, 201, 0x8000_0010, 0x2222);
+
+        let mismatch = compare_stream_checkpoint(10, &ours, 1, redux).unwrap();
+
+        assert_eq!(mismatch.previous_step, 10);
+        assert_eq!(mismatch.checkpoint.step, 20);
+        assert_eq!(mismatch.ours.tick, 200);
+        assert_eq!(mismatch.redux.tick, 201);
+    }
+
+    #[test]
+    fn redux_timeout_is_interval_based_and_overridable() {
+        let mut cfg = Config {
+            bios: PathBuf::new(),
+            root: PathBuf::new(),
+            discs: Vec::new(),
+            steps: 1,
+            interval: 1_000_000,
+            limit: None,
+            visual: false,
+            exact_window: 1,
+            pad_mask: 0,
+            pad_pulses: Vec::new(),
+            redux_timeout: None,
+            redux_wall_timeout: None,
+            report_dir: PathBuf::new(),
+        };
+
+        assert_eq!(redux_checkpoint_timeout(&cfg), Duration::from_secs(60));
+
+        cfg.redux_timeout = Some(Duration::from_secs(7));
+        assert_eq!(redux_checkpoint_timeout(&cfg), Duration::from_secs(7));
     }
 }

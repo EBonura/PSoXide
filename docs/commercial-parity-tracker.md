@@ -15,7 +15,10 @@ legally owned discs or already-authorized preservation images.
 Use `local_lockstep_sweep` as the default per-title workflow. It boots
 the same disc in PSoXide and PCSX-Redux, records CPU-state checkpoints,
 narrows the first coarse mismatch with an exact instruction window, and
-optionally compares the final visible framebuffer byte-for-byte.
+optionally compares the final visible framebuffer byte-for-byte. The
+harness compares Redux checkpoints as they arrive and terminates the
+Redux run at the first mismatch, so long route sweeps should now produce
+bounded first-break evidence instead of waiting for the full route.
 
 ```bash
 export PSOXIDE_BIOS="/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN"
@@ -41,6 +44,8 @@ cargo run --manifest-path emu/Cargo.toml \
   --disc "/absolute/path/to/Game.cue" \
   --steps 100000000 \
   --interval 10000 \
+  --redux-timeout-secs 60 \
+  --redux-wall-timeout-secs 900 \
   --report-dir target/local-lockstep/game-name-20260505
 ```
 
@@ -143,6 +148,7 @@ the shared issue instead of inventing a per-game bug.
 | 2026-05-05 | Route-progress spot checks for CTR, Marvel vs. Capcom, and Metal Slug X. | `probe_fmv_path ...` and `probe_fmv_path --fastboot ...`; reproduced by ignored tests in `emu/crates/emulator-core/tests/commercial_disc_progress.rs`. | CTR is blocked on the SCEA splash through 300M in BIOS and direct-EXE modes (`0xbfb9bb04fb7042d8`); Metal Slug X reports no game data by 300M in BIOS mode and by 100M in direct-EXE mode (`0x09369767b12fc5f2`); Marvel vs. Capcom reaches the Capcom movie/logo path but no gameplay route is pinned. | Local repro logs/screenshots; use `commercial_disc_progress` as the red guard. |
 | 2026-05-05 | Route matrix canaries for CTR and Metal Slug X. | `commercial_route_matrix --disc CTR.cue --disc MetalSlugX.cue --steps 300000000 --report-dir target/commercial-route-matrix/canaries-20260505` | CTR remains `boot/license` at the SCEA splash (`0xbfb9bb04fb7042d8`). Metal Slug X becomes `route-progress` with generic input, reaches a loading screen (`0x36cb4b8cb6c42d59`), and still needs gameplay confirmation plus Redux parity. | `target/commercial-route-matrix/canaries-20260505/SUMMARY.md`; `target/commercial-route-matrix/canaries-20260505/matrix.csv` |
 | 2026-05-05 | Full local route matrix, 16 discovered sheets. | `commercial_route_matrix --root ~/Downloads/ps1 games --steps 300000000 --wall-timeout-secs 120 --report-dir target/commercial-route-matrix/local-300m-20260505` | No title is playable yet. Buckets: `render/gpu=4`, `fmv/mdec=4`, `unknown=3`, `boot/license=2`, `route-progress=1`, `menu-input=1`, `loader=1`. Every row includes the next `local_lockstep_sweep` parity command. | `target/commercial-route-matrix/local-300m-20260505/SUMMARY.md`; `target/commercial-route-matrix/local-300m-20260505/matrix.csv` |
+| 2026-05-05 | CTR routed parity harness smoke. | `local_lockstep_sweep --disc CTR.cue --steps 10000000 --interval 1000000 --no-visual --pad-pulses ...` followed by streaming-harness regression smokes with `--redux-timeout-secs 60 --redux-wall-timeout-secs 120`. | CTR route CPU state matches Redux through 10M routed user steps. This does not reach gameplay; it validates the route/parity plumbing before longer SCEA-splash first-break sweeps. | `target/local-lockstep/ctr-smoke-10m-20260505/SUMMARY.txt`; `target/local-lockstep/ctr-stream-wall-smoke-1m-20260505/SUMMARY.txt` |
 
 Note: the 2026-05-05 sweep reports were generated before the harness
 started printing visual `skip` explicitly. The command line is the
@@ -216,7 +222,9 @@ First coarse mismatch:
 `(266000000, 267000000]`; ours `{tick:608542101 pc:0x8008605c state:64e648f7c3560511}`; Redux `{tick:608541699 pc:0x8008605c state:64e648f7c3560511}`.
 
 Exact mismatch:
-Skipped by the current pad-routed exact-trace guard. The mismatch occurs before the first scheduled route input, so the next pass should refine this as a no-pad exact window or teach the harness to exact-trace pad routes while the pad schedule is inactive.
+Skipped by the old pad-routed exact-trace guard. The harness now
+fast-forwards pad-routed exact probes with progress reporting and should
+be able to refine this window while the pad schedule is inactive.
 
 Visual diff:
 Skipped. A separate local `probe_fmv_path` run with the same route reaches the first playable room at 2.2B user steps.
