@@ -626,18 +626,32 @@ impl AppState {
                 }
                 GameKind::Exe if is_internal_example_exe(&e.path) => continue,
                 GameKind::Exe => {
-                    let item = MenuLibraryItem {
-                        id: e.id.clone(),
-                        title: e.title.clone(),
-                        subtitle: format_subtitle(e),
-                    };
-                    if project_root
+                    if let Some(root) = project_root
                         .as_ref()
-                        .is_some_and(|root| path_is_under(&e.path, root))
+                        .filter(|root| path_is_under(&e.path, root))
                     {
-                        projects.push(item);
+                        if let Some(metadata) = project_build_menu_metadata(&e.path, root) {
+                            if !metadata.current {
+                                continue;
+                            }
+                            projects.push(MenuLibraryItem {
+                                id: e.id.clone(),
+                                title: metadata.title,
+                                subtitle: metadata.subtitle,
+                            });
+                        } else {
+                            projects.push(MenuLibraryItem {
+                                id: e.id.clone(),
+                                title: e.title.clone(),
+                                subtitle: format_subtitle(e),
+                            });
+                        }
                     } else {
-                        examples.push(item);
+                        examples.push(MenuLibraryItem {
+                            id: e.id.clone(),
+                            title: e.title.clone(),
+                            subtitle: format_subtitle(e),
+                        });
                     }
                 }
                 GameKind::Unknown => {}
@@ -1107,6 +1121,7 @@ impl AppState {
             .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
         std::fs::create_dir_all(dest_dir)
             .map_err(|error| format!("mkdir {}: {error}", dest_dir.display()))?;
+        remove_stale_project_build_exes(&dest_path)?;
         let bytes = std::fs::copy(&source_path, &dest_path).map_err(|error| {
             format!(
                 "copy {} to {}: {error}",
@@ -1227,6 +1242,13 @@ fn path_is_under(path: &Path, root: &Path) -> bool {
     match (path.canonicalize(), root.canonicalize()) {
         (Ok(path), Ok(root)) => path.starts_with(root),
         _ => path.starts_with(root),
+    }
+}
+
+fn paths_equivalent(path: &Path, other: &Path) -> bool {
+    match (path.canonicalize(), other.canonicalize()) {
+        (Ok(path), Ok(other)) => path == other,
+        _ => path == other,
     }
 }
 
@@ -1492,6 +1514,79 @@ fn safe_project_exe_stem(name: &str) -> String {
     psxed_project::project_file_stem(name)
 }
 
+fn remove_stale_project_build_exes(dest_path: &Path) -> Result<usize, String> {
+    let dest_dir = dest_path
+        .parent()
+        .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
+    let dest_name = dest_path
+        .file_name()
+        .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
+    if !dest_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0;
+    for entry in std::fs::read_dir(dest_dir)
+        .map_err(|error| format!("read {}: {error}", dest_dir.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read {}: {error}", dest_dir.display()))?;
+        let path = entry.path();
+        let is_exe = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+        if !is_exe || path.file_name().is_some_and(|name| name == dest_name) {
+            continue;
+        }
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("remove {}: {error}", path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectBuildMenuMetadata {
+    title: String,
+    subtitle: String,
+    current: bool,
+}
+
+fn project_build_menu_metadata(
+    path: &Path,
+    project_root: &Path,
+) -> Option<ProjectBuildMenuMetadata> {
+    let project_dir = project_dir_for_build_exe(path, project_root)?;
+    let project =
+        psxed_project::ProjectDocument::load_from_path(project_dir.join("project.ron")).ok()?;
+    let expected_stem = safe_project_exe_stem(&project.name);
+    let actual_stem = path.file_stem()?.to_str()?;
+    let subtitle = path
+        .strip_prefix(project_root)
+        .ok()
+        .and_then(|relative| relative.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string());
+    Some(ProjectBuildMenuMetadata {
+        title: project.name,
+        subtitle,
+        current: actual_stem == expected_stem,
+    })
+}
+
+fn project_dir_for_build_exe(path: &Path, project_root: &Path) -> Option<PathBuf> {
+    let mut dir = path.parent()?;
+    loop {
+        if dir.join("project.ron").is_file() {
+            return Some(dir.to_path_buf());
+        }
+        if paths_equivalent(dir, project_root) {
+            return None;
+        }
+        dir = dir.parent()?;
+    }
+}
+
 /// Read `PSOXIDE_DISC` → disc image → `Disc`. Accepts raw BIN/ISO and
 /// CUE-backed multitrack images. Logs and returns `None` on any trouble
 /// so a misconfigured path doesn't wedge the frontend.
@@ -1589,5 +1684,66 @@ mod tests {
                 .join("baked")
                 .join("demo_project.exe")
         );
+    }
+
+    #[test]
+    fn project_build_export_removes_stale_sibling_exes() {
+        let root = frontend_test_temp_dir("stale-project-build-exes");
+        let baked = root.join("baked");
+        std::fs::create_dir_all(&baked).unwrap();
+        let stale = baked.join("untitled_ps1_project.exe");
+        let current = baked.join("demo2.exe");
+        let notes = baked.join("notes.txt");
+        std::fs::write(&stale, b"old").unwrap();
+        std::fs::write(&current, b"new").unwrap();
+        std::fs::write(&notes, b"keep").unwrap();
+
+        assert_eq!(remove_stale_project_build_exes(&current).unwrap(), 1);
+        assert!(!stale.exists());
+        assert!(current.exists());
+        assert!(notes.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_build_menu_metadata_uses_project_name_and_marks_stale_exes() {
+        let root = frontend_test_temp_dir("project-build-menu-metadata");
+        let project_dir = root.join("demo2");
+        let baked = project_dir.join("baked");
+        std::fs::create_dir_all(&baked).unwrap();
+        psxed_project::ProjectDocument::new("Demo Two")
+            .save_to_path(project_dir.join("project.ron"))
+            .unwrap();
+
+        let current = baked.join("demo_two.exe");
+        let stale = baked.join("untitled_ps1_project.exe");
+        std::fs::write(&current, b"current").unwrap();
+        std::fs::write(&stale, b"stale").unwrap();
+
+        let current_metadata = project_build_menu_metadata(&current, &root).unwrap();
+        assert_eq!(current_metadata.title, "Demo Two");
+        assert!(current_metadata.subtitle.contains("demo2"));
+        assert!(current_metadata.current);
+
+        let stale_metadata = project_build_menu_metadata(&stale, &root).unwrap();
+        assert_eq!(stale_metadata.title, "Demo Two");
+        assert!(!stale_metadata.current);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn frontend_test_temp_dir(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "psoxide-frontend-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

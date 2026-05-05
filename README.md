@@ -71,6 +71,8 @@ What is not done:
   needs project templates, import UX, richer validation, undo depth,
   packaging, and more stable authoring ergonomics.
 - The SDK and engine APIs are not semver-stable.
+- Cross-cutting finalisation work is tracked in
+  [docs/finalisation-log.md](docs/finalisation-log.md).
 - Public release legal cleanup is not finished. See
   [docs/license-audit.md](docs/license-audit.md).
 - No release binaries are published. Build from source.

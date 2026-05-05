@@ -13,10 +13,10 @@
 //! - **Region** -- inferred from the PSX license-text sector at
 //!   LBA 4 (`Licensed by Sony Computer Entertainment America /
 //!   Europe / Japan`).
-//! - **Stable ID** -- a 16-hex-char FNV-1a-64 fingerprint over the
-//!   license text + PVD identifier bytes. Same disc → same ID
-//!   regardless of filename, so renaming a BIN doesn't orphan
-//!   its savestates.
+//! - **Stable ID** -- a 16-hex-char FNV-1a-64 fingerprint. Disc IDs
+//!   use license text + PVD identifier bytes, so renaming a BIN
+//!   doesn't orphan its savestates. EXE IDs include the file path so
+//!   project builds with the same filename remain launch-distinct.
 //!
 //! Results are cached in `library.ron` alongside the source file's
 //! last-modified time. A subsequent scan skips re-parsing files
@@ -448,7 +448,7 @@ fn parse_entry(path: &Path, kind: GameKind, size: u64, mtime: u64) -> LibraryEnt
         },
         GameKind::DiscCue => parse_cue(path, size, mtime, &fallback_title),
         GameKind::Exe => LibraryEntry {
-            id: fingerprint(&[fallback_title.as_bytes(), b"exe"]),
+            id: exe_fingerprint(path, &fallback_title),
             path: path.to_path_buf(),
             kind,
             title: fallback_title,
@@ -804,6 +804,12 @@ fn fingerprint(parts: &[&[u8]]) -> String {
     format!("{h:016x}")
 }
 
+fn exe_fingerprint(path: &Path, fallback_title: &str) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path_label = canonical.to_string_lossy();
+    fingerprint(&[path_label.as_bytes(), fallback_title.as_bytes(), b"exe"])
+}
+
 /// Scratch helper used in tests: build a synthetic 2352-byte
 /// sector with the given user-data payload at the standard
 /// Mode-2-Form-1 offset. Real BIN parsing uses the same layout.
@@ -935,6 +941,22 @@ mod tests {
         let changed2 = lib.scan(tmp.path()).unwrap();
         assert_eq!(changed2, 0);
         assert_eq!(lib.entries.len(), 2);
+    }
+
+    #[test]
+    fn exe_ids_include_path_to_disambiguate_project_builds() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a").join("baked");
+        let b = tmp.path().join("b").join("baked");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("untitled_ps1_project.exe"), b"fake exe 1").unwrap();
+        std::fs::write(b.join("untitled_ps1_project.exe"), b"fake exe 2").unwrap();
+
+        let mut lib = Library::default();
+        lib.scan(tmp.path()).unwrap();
+        assert_eq!(lib.entries.len(), 2);
+        assert_ne!(lib.entries[0].id, lib.entries[1].id);
     }
 
     #[test]
