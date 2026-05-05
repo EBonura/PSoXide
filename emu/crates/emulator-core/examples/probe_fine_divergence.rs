@@ -18,6 +18,8 @@ use parity_oracle::{OracleConfig, ReduxProcess};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const TRACE_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+const FAST_FORWARD_CHECKPOINT_INTERVAL: u64 = 1_000_000;
+const FAST_FORWARD_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct PadPulse {
@@ -137,15 +139,25 @@ fn main() {
             .iter()
             .map(|pulse| (pulse.mask, pulse.start_vblank, pulse.frames))
             .collect::<Vec<_>>();
+        let ff_interval = start.min(FAST_FORWARD_CHECKPOINT_INTERVAL).max(1);
+        let expected_checkpoints = start / ff_interval;
+        let progress_stride = (expected_checkpoints / 10).max(1);
+        let mut emitted = 0u64;
         redux
             .run_checkpoint_pad(
                 start,
-                start.max(1),
+                ff_interval,
                 1,
                 held_buttons,
                 &pulse_tuples,
-                ff_timeout,
-                |_step, _tick, _pc| Ok(()),
+                FAST_FORWARD_CHECKPOINT_TIMEOUT,
+                |step, _tick, _pc| {
+                    emitted += 1;
+                    if emitted % progress_stride == 0 || step == start {
+                        eprintln!("[redux] ff progress: {step}/{start}");
+                    }
+                    Ok(())
+                },
             )
             .expect("fast-forward with pad");
     } else if start > 0 {
