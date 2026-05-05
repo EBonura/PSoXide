@@ -1154,11 +1154,13 @@ impl Gpu {
             0x74..=0x77 => self.draw_textured_rect_sized(8, 8),
             0x7C..=0x7F => self.draw_textured_rect_sized(16, 16),
             // CPU→VRAM transfer -- 3 words of setup, then `w*h/2`
-            // words of pixel data follow as a separate mode.
-            0xA0 => self.begin_vram_upload(),
-            // VRAM→CPU transfer -- 3 words of setup, pixel words are
-            // then pulled by the CPU via GPUREAD.
-            0xC0 => self.begin_vram_download(),
+            // words of pixel data follow as a separate mode. Hardware
+            // ignores the lower 29 bits for transfer commands, so all
+            // opcodes in this top-bit group behave as image upload.
+            0xA0..=0xBF => self.begin_vram_upload(),
+            // VRAM→CPU transfer -- same top-bit-group decoding as upload;
+            // pixel words are then pulled by the CPU via GPUREAD.
+            0xC0..=0xDF => self.begin_vram_download(),
             // VRAM→VRAM copy -- source rect blitted to dest rect.
             0x80..=0x9F => self.vram_to_vram_copy(),
             _ => {}
@@ -4017,6 +4019,31 @@ mod tests {
         assert_eq!(gpu.vram.get_pixel(0, 0), 0x1111);
         assert_eq!(gpu.vram.get_pixel(1, 0), 0x2222);
         assert_eq!(gpu.vram.get_pixel(2, 0), 0x3333);
+    }
+
+    #[test]
+    fn cpu_vram_upload_ignores_opcode_low_bits() {
+        let mut gpu = Gpu::new();
+
+        gpu.gp0_push(0xAA_12_34_56);
+        gpu.gp0_push(0x0000_0000); // x=0, y=0
+        gpu.gp0_push(0x0001_0002); // w=2, h=1 -> 1 payload word
+        gpu.gp0_push(0x2222_1111);
+
+        assert_eq!(gpu.vram.get_pixel(0, 0), 0x1111);
+        assert_eq!(gpu.vram.get_pixel(1, 0), 0x2222);
+    }
+
+    #[test]
+    fn vram_cpu_download_ignores_opcode_low_bits() {
+        let mut gpu = Gpu::new();
+        gpu.vram.set_pixel(4, 5, 0xCAFE);
+
+        gpu.gp0_push(0xD7_12_34_56);
+        gpu.gp0_push(0x0005_0004); // x=4, y=5
+        gpu.gp0_push(0x0001_0001); // w=1, h=1
+
+        assert_eq!(gpu.read32(GP0_ADDR).unwrap(), 0x0000_CAFE);
     }
 
     #[test]
