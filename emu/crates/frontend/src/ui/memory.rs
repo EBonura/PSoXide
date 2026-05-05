@@ -63,27 +63,20 @@ impl MemoryView {
     }
 }
 
-pub fn draw(
-    ctx: &egui::Context,
+/// Paint the memory viewer inside an existing container.
+pub fn draw_contents(
+    ui: &mut egui::Ui,
     view: &mut MemoryView,
     bus: Option<&Bus>,
     cpu: &Cpu,
     breakpoints: &mut BTreeSet<u32>,
 ) {
-    egui::SidePanel::right("memory")
-        .resizable(true)
-        .default_width(420.0)
-        .min_width(340.0)
-        .show(ctx, |ui| {
-            theme::viz_frame(ui, "Memory", |ui| {
-                draw_header(ui, view, cpu, breakpoints);
-                ui.separator();
-                match view.mode {
-                    ViewMode::Hex => draw_hex_dump(ui, view, bus, breakpoints, cpu.pc()),
-                    ViewMode::Disasm => draw_disasm(ui, view, bus, breakpoints, cpu.pc()),
-                }
-            });
-        });
+    draw_header(ui, view, cpu, breakpoints);
+    ui.separator();
+    match view.mode {
+        ViewMode::Hex => draw_hex_dump(ui, view, bus, breakpoints, cpu.pc()),
+        ViewMode::Disasm => draw_disasm(ui, view, bus, breakpoints, cpu.pc()),
+    }
 }
 
 fn draw_header(

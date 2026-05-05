@@ -5,6 +5,7 @@
 //! (bottom/side get clipped to remaining space), then the central area,
 //! then free-floating overlays (Menu, HUD) on top.
 
+pub mod debug_sidebar;
 pub mod framebuffer;
 pub mod hud;
 pub mod memory;
@@ -42,32 +43,12 @@ pub fn draw_layout(
     }
 
     // Top-bar controls go first so the central panel (framebuffer)
-    // clips to what's left under them. Docked side panels come next.
+    // clips to what's left under them. The unified debug sidebar
+    // docks next so the framebuffer gives it room.
     toolbar::draw(ctx, state);
 
-    if state.panels.registers {
-        registers::draw(
-            ctx,
-            &state.cpu,
-            &state.exec_history,
-            &mut state.breakpoints,
-            &mut state.gpr_snapshot,
-        );
-    }
-    if state.panels.memory {
-        memory::draw(
-            ctx,
-            &mut state.memory_view,
-            state.bus.as_ref(),
-            &state.cpu,
-            &mut state.breakpoints,
-        );
-    }
-    if state.panels.vram {
-        vram::draw(ctx, vram_tex);
-    }
-    if state.panels.profiler {
-        profiler::draw(ctx, &mut state.profiler);
+    if state.panels.debug_sidebar {
+        debug_sidebar::draw(ctx, state, vram_tex);
     }
 
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -172,18 +153,22 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             MenuOutcome::None
         }
         ToggleRegisters => {
+            state.panels.debug_sidebar = true;
             state.panels.registers = !state.panels.registers;
             MenuOutcome::None
         }
         ToggleMemory => {
+            state.panels.debug_sidebar = true;
             state.panels.memory = !state.panels.memory;
             MenuOutcome::None
         }
         ToggleVram => {
+            state.panels.debug_sidebar = true;
             state.panels.vram = !state.panels.vram;
             MenuOutcome::None
         }
         ToggleProfiler => {
+            state.panels.debug_sidebar = true;
             state.panels.profiler = !state.panels.profiler;
             MenuOutcome::None
         }
