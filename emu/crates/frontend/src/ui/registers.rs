@@ -42,30 +42,22 @@ const EXC_CODES: &[(u32, &str)] = &[
     (12, "Ov"),
 ];
 
-/// Paint the register viewer as a left-docked resizable side panel.
-pub fn draw(
-    ctx: &egui::Context,
+/// Paint the register viewer inside an existing container.
+pub fn draw_contents(
+    ui: &mut egui::Ui,
     cpu: &Cpu,
     history: &VecDeque<InstructionRecord>,
     breakpoints: &mut BTreeSet<u32>,
     snapshot: &mut Option<[u32; 32]>,
 ) {
-    egui::SidePanel::left("registers")
-        .resizable(true)
-        .default_width(340.0)
-        .min_width(260.0)
-        .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                theme::section(ui, "GPR", |ui| draw_gprs(ui, cpu, snapshot));
-                theme::section(ui, "PC / HI / LO", |ui| draw_pc_hi_lo(ui, cpu));
-                theme::section(ui, "COP0", |ui| draw_cop0(ui, cpu));
-                theme::section(ui, "Retired", |ui| {
-                    ui.monospace(format!("tick = {}", cpu.tick()));
-                });
-                theme::section(ui, "Breakpoints", |ui| draw_breakpoints(ui, breakpoints));
-                theme::section(ui, "Execution history", |ui| draw_history(ui, history));
-            });
-        });
+    theme::section(ui, "GPR", |ui| draw_gprs(ui, cpu, snapshot));
+    theme::section(ui, "PC / HI / LO", |ui| draw_pc_hi_lo(ui, cpu));
+    theme::section(ui, "COP0", |ui| draw_cop0(ui, cpu));
+    theme::section(ui, "Retired", |ui| {
+        ui.monospace(format!("tick = {}", cpu.tick()));
+    });
+    theme::section(ui, "Breakpoints", |ui| draw_breakpoints(ui, breakpoints));
+    theme::section(ui, "Execution history", |ui| draw_history(ui, history));
 }
 
 fn draw_breakpoints(ui: &mut egui::Ui, breakpoints: &mut BTreeSet<u32>) {
