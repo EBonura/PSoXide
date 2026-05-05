@@ -1480,10 +1480,18 @@ impl Bus {
         } else {
             4
         };
-        for _ in 0..total_words {
-            let word = read_ram_u32(&self.ram[..], addr);
-            self.gpu.gp0_push(word);
-            addr = addr.wrapping_add(step);
+        if to_device {
+            for _ in 0..total_words {
+                let word = read_ram_u32(&self.ram[..], addr);
+                self.gpu.gp0_push(word);
+                addr = addr.wrapping_add(step);
+            }
+        } else {
+            for _ in 0..total_words {
+                let word = self.gpu.read32(crate::gpu::GP0_ADDR).unwrap_or(0);
+                write_ram_u32(&mut self.ram[..], addr, word);
+                addr = addr.wrapping_add(step);
+            }
         }
         // Redux's formulas: mem2vram uses `7 * block_count` (the
         // "X-Files video interlace. Experimental delay depending
@@ -2137,6 +2145,13 @@ fn read_ram_u32(ram: &[u8], phys: u32) -> u32 {
     }
 }
 
+fn write_ram_u32(ram: &mut [u8], phys: u32, value: u32) {
+    let offset = (phys & 0x001F_FFFF) as usize;
+    if offset + 4 <= ram.len() {
+        ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+}
+
 /// Halfword read from a RAM slice at a physical RAM offset. SPU DMA is
 /// halfword-based in Redux: the BCR product counts 16-bit samples and
 /// the completion delay is half that product.
@@ -2433,6 +2448,30 @@ mod tests {
         bus.run_dma_channel(3);
 
         assert_eq!(bus.scheduler.target(EventSlot::CdrDma), Some(101));
+    }
+
+    #[test]
+    fn gpu_block_dma_from_device_reads_gpuread_instead_of_pushing_gp0() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.vram.set_pixel(4, 5, 0xCAFE);
+        bus.gpu.vram.set_pixel(5, 5, 0xBEEF);
+
+        bus.gpu.gp0_push(0xC0_00_00_00);
+        bus.gpu.gp0_push(0x0005_0004);
+        bus.gpu.gp0_push(0x0001_0002);
+        let hist_before = bus.gpu.gp0_opcode_histogram();
+
+        // If the DMA path ignores direction, this word is pushed to GP0
+        // as a fill command. Correct direction reads GPUREAD into RAM.
+        write_ram_u32(&mut bus.ram[..], 0x300, 0x0200_FF00);
+        bus.dma.channels[2].base = 0x300;
+        bus.dma.channels[2].block_control = 1;
+        bus.dma.channels[2].channel_control = 0x0100_0200;
+
+        assert_eq!(bus.run_dma_gpu(), Some(1));
+        assert_eq!(read_ram_u32(&bus.ram[..], 0x300), 0xBEEF_CAFE);
+        assert_eq!(bus.gpu.gp0_opcode_histogram(), hist_before);
     }
 
     #[test]
