@@ -99,6 +99,8 @@ missing from the top-25 target set.
 
 Extra local compatibility images outside this top 25:
 - `Celeste Classic PSX (Homebrew).cue`;
+- `Tomb Raider (USA) (Greatest Hits).ccd` with `.img.ecm` pending
+  external ECM decode;
 - `WipEout (Europe) (v1.1).cue`;
 - `WipEout 2097 (Europe).cue`;
 - `WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It).cue`.
