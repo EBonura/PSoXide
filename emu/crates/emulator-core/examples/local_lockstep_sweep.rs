@@ -51,6 +51,7 @@ struct GameResult {
     name: String,
     disc: PathBuf,
     cpu_ok: bool,
+    visual_checked: bool,
     visual_ok: bool,
     first_checkpoint_mismatch: Option<Mismatch>,
     exact_mismatch: Option<String>,
@@ -120,6 +121,7 @@ fn main() {
                     name,
                     disc: disc.clone(),
                     cpu_ok: false,
+                    visual_checked: false,
                     visual_ok: false,
                     first_checkpoint_mismatch: None,
                     exact_mismatch: Some(e),
@@ -322,6 +324,7 @@ fn run_game(cfg: &Config, name: &str, disc: &Path) -> Result<GameResult, String>
         name: name.to_string(),
         disc: disc.to_path_buf(),
         cpu_ok,
+        visual_checked: cfg.visual,
         visual_ok,
         first_checkpoint_mismatch,
         exact_mismatch,
@@ -788,7 +791,7 @@ fn print_game_result(result: &GameResult) {
     println!(
         "  cpu={} visual={}",
         if result.cpu_ok { "OK" } else { "FAIL" },
-        if result.visual_ok { "OK" } else { "FAIL" },
+        visual_status(result),
     );
     if let Some(m) = result.first_checkpoint_mismatch {
         println!(
@@ -830,7 +833,7 @@ fn write_game_summary(dir: &Path, result: &GameResult) {
     writeln!(file, "game: {}", result.name).unwrap();
     writeln!(file, "disc: {}", result.disc.display()).unwrap();
     writeln!(file, "cpu_ok: {}", result.cpu_ok).unwrap();
-    writeln!(file, "visual_ok: {}", result.visual_ok).unwrap();
+    writeln!(file, "visual: {}", visual_status(result)).unwrap();
     if let Some(m) = result.first_checkpoint_mismatch {
         writeln!(
             file,
@@ -872,6 +875,7 @@ fn write_index_summary(cfg: &Config, results: &[GameResult]) {
     let mut file = fs::File::create(&path).expect("create index summary");
     writeln!(file, "steps: {}", cfg.steps).unwrap();
     writeln!(file, "interval: {}", cfg.interval).unwrap();
+    writeln!(file, "visual: {}", cfg.visual).unwrap();
     writeln!(file).unwrap();
     writeln!(file, "{:<44} {:<6} {:<6} disc", "game", "cpu", "visual").unwrap();
     for r in results {
@@ -880,10 +884,20 @@ fn write_index_summary(cfg: &Config, results: &[GameResult]) {
             "{:<44} {:<6} {:<6} {}",
             r.name,
             if r.cpu_ok { "ok" } else { "FAIL" },
-            if r.visual_ok { "ok" } else { "FAIL" },
+            visual_status(r),
             r.disc.display(),
         )
         .unwrap();
     }
     println!("summary: {}", path.display());
+}
+
+fn visual_status(result: &GameResult) -> &'static str {
+    if !result.visual_checked {
+        "skip"
+    } else if result.visual_ok {
+        "ok"
+    } else {
+        "FAIL"
+    }
 }
