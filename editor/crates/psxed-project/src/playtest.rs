@@ -416,10 +416,34 @@ pub fn build_package(
                             position: pos,
                             character: controller.character,
                         });
-                    } else if warned_unsupported.insert("NonPlayerEntity") {
-                        report.warn(
-                            "Non-player Entity character components are skipped in this pass",
-                        );
+                    } else if component_model_renderer(scene, node).is_none() {
+                        let Some(character_id) = controller.character else {
+                            report.warn(format!(
+                                "Non-player Character Controller on '{}' has no Character — skipped",
+                                node.name
+                            ));
+                            continue;
+                        };
+                        if !push_character_controller_idle_instance(
+                            project,
+                            project_root,
+                            node.name.as_str(),
+                            character_id,
+                            room_index,
+                            pos,
+                            yaw,
+                            &mut assets,
+                            &mut models,
+                            &mut model_clips,
+                            &mut model_clip_bounds,
+                            &mut model_frame_bounds,
+                            &mut model_sockets,
+                            &mut model_instances,
+                            &mut model_for_resource,
+                            &mut report,
+                        ) {
+                            return (None, report);
+                        }
                     }
                 }
 
@@ -1605,6 +1629,147 @@ fn push_model_instance_for_resource(
         flags: 0,
     });
     true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_character_controller_idle_instance(
+    project: &ProjectDocument,
+    project_root: &Path,
+    node_name: &str,
+    character_id: ResourceId,
+    room_index: u16,
+    pos: [i32; 3],
+    yaw: i16,
+    assets: &mut Vec<PlaytestAsset>,
+    models: &mut Vec<PlaytestModel>,
+    model_clips: &mut Vec<PlaytestModelClip>,
+    model_clip_bounds: &mut Vec<PlaytestModelClipBounds>,
+    model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
+    model_sockets: &mut Vec<PlaytestModelSocket>,
+    model_instances: &mut Vec<PlaytestModelInstance>,
+    model_for_resource: &mut HashMap<ResourceId, u16>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let Some(resource) = project.resource(character_id) else {
+        report.error(format!(
+            "Non-player Character Controller '{node_name}' references Character #{} which doesn't exist",
+            character_id.raw()
+        ));
+        return false;
+    };
+    let ResourceData::Character(character) = &resource.data else {
+        report.error(format!(
+            "Non-player Character Controller '{node_name}' references resource '{}' which is not a Character",
+            resource.name
+        ));
+        return false;
+    };
+    let Some(model_resource_id) = character.model else {
+        report.error(format!(
+            "Character '{}' has no Model assigned — required for non-player Entity '{}'",
+            resource.name, node_name
+        ));
+        return false;
+    };
+    let Some(model_index) = register_model_for_instance(
+        project,
+        project_root,
+        model_resource_id,
+        assets,
+        models,
+        model_clips,
+        model_clip_bounds,
+        model_frame_bounds,
+        model_sockets,
+        model_for_resource,
+        report,
+    ) else {
+        return false;
+    };
+    let Some(clip) = character_idle_clip_for_model_instance(
+        project,
+        resource.name.as_str(),
+        character,
+        model_resource_id,
+        &models[model_index as usize],
+        report,
+    ) else {
+        return false;
+    };
+    model_instances.push(PlaytestModelInstance {
+        room: room_index,
+        model: model_index,
+        clip,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        yaw,
+        flags: 0,
+    });
+    true
+}
+
+fn character_idle_clip_for_model_instance(
+    project: &ProjectDocument,
+    character_name: &str,
+    character: &crate::CharacterResource,
+    model_resource_id: ResourceId,
+    model: &PlaytestModel,
+    report: &mut PlaytestValidationReport,
+) -> Option<u16> {
+    let model_skeleton =
+        project
+            .resource(model_resource_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Model(model) => model.skeleton,
+                _ => None,
+            });
+    let animation_set = character.animation_set.and_then(|id| {
+        let resource = project.resource(id)?;
+        match &resource.data {
+            ResourceData::AnimationSet(set) => Some((resource.name.as_str(), set)),
+            _ => None,
+        }
+    });
+    if let Some((set_name, set)) = animation_set {
+        if set.skeleton.is_some() && model_skeleton.is_some() && set.skeleton != model_skeleton {
+            report.error(format!(
+                "Character '{character_name}' clip role map '{set_name}' targets a different skeleton than its model"
+            ));
+            return None;
+        }
+        if let Some(animation_id) = set.role_clip(AnimationRole::Idle) {
+            return match project.resolved_model_animation_index(model_resource_id, animation_id) {
+                Some(index) if index < model.clip_count => Some(index),
+                Some(index) => {
+                    report.error(format!(
+                        "Character '{character_name}' idle clip resolves to {index}, out of range ({} clips on model)",
+                        model.clip_count
+                    ));
+                    None
+                }
+                None => {
+                    report.error(format!(
+                        "Character '{character_name}' clip role map '{set_name}' idle clip is not compatible with model '{}'",
+                        model.name
+                    ));
+                    None
+                }
+            };
+        }
+    }
+
+    match character.idle_clip {
+        Some(idx) if idx < model.clip_count => Some(idx),
+        Some(idx) => {
+            report.error(format!(
+                "Character '{character_name}' idle clip {idx} out of range ({} clips on model)",
+                model.clip_count
+            ));
+            None
+        }
+        None => Some(model.default_clip),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3934,6 +4099,49 @@ mod tests {
         let package = package.expect("cooks");
         assert_eq!(package.model_instances.len(), 1);
         assert_eq!(package.model_instances[0].yaw, 1024);
+    }
+
+    #[test]
+    fn non_player_character_controller_cooks_idle_model_instance_with_yaw() {
+        let mut project = ProjectDocument::starter();
+        let character_id = player_character_resource_id(&project);
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        let enemy = scene.add_node(room_id, "Facing Enemy", NodeKind::Entity);
+        if let Some(node) = scene.node_mut(enemy) {
+            node.transform.translation = [0.5, 0.0, 0.5];
+            node.transform.rotation_degrees[1] = 180.0;
+        }
+        scene.add_node(
+            enemy,
+            "Character Controller",
+            NodeKind::CharacterController {
+                character: Some(character_id),
+                player: false,
+            },
+        );
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Non-player Entity character")),
+            "non-player character controller should cook, warnings: {:?}",
+            report.warnings
+        );
+        let package = package.expect("cooks");
+        assert_eq!(package.model_instances.len(), 1);
+        let instance = package.model_instances[0];
+        assert_eq!(instance.yaw, 2048);
+        assert_eq!(instance.model, package.characters[0].model);
+        assert_eq!(instance.clip, package.characters[0].idle_clip);
     }
 
     #[test]
