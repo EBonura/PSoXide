@@ -1166,22 +1166,22 @@ impl Gpu {
     }
 
     /// GP0 0x80 -- copy a rectangle of VRAM to another VRAM location.
-    /// Packet: `[cmd, src_xy, dst_xy, wh]`. PS1 hardware masks the
-    /// coordinates to VRAM size and wraps at the edges; our `get_pixel`
-    /// / `set_pixel` already do that, so a simple double loop suffices.
+    /// Packet: `[cmd, src_xy, dst_xy, wh]`. PS1 hardware uses the
+    /// same packed VRAM fields as CPU upload/download: 10-bit X/width
+    /// and 9-bit Y/height, with zero width/height meaning full
+    /// 1024/512. The pixel accesses wrap at VRAM edges.
     /// We buffer the source row into a temp so that overlapping
     /// src/dst rects blit correctly.
     fn vram_to_vram_copy(&mut self) {
         let src_word = self.gp0_fifo[1];
         let dst_word = self.gp0_fifo[2];
         let wh_word = self.gp0_fifo[3];
-        let sx = (src_word & 0xFFFF) as u16;
-        let sy = ((src_word >> 16) & 0xFFFF) as u16;
-        let dx = (dst_word & 0xFFFF) as u16;
-        let dy = ((dst_word >> 16) & 0xFFFF) as u16;
-        // Width / height: 0 → 1024 / 512 (mask-and-wrap convention).
-        let raw_w = (wh_word & 0xFFFF) as u16;
-        let raw_h = ((wh_word >> 16) & 0xFFFF) as u16;
+        let sx = (src_word & 0x3FF) as u16;
+        let sy = ((src_word >> 16) & 0x1FF) as u16;
+        let dx = (dst_word & 0x3FF) as u16;
+        let dy = ((dst_word >> 16) & 0x1FF) as u16;
+        let raw_w = (wh_word & 0x3FF) as u16;
+        let raw_h = ((wh_word >> 16) & 0x1FF) as u16;
         let w = if raw_w == 0 { 1024 } else { raw_w };
         let h = if raw_h == 0 { 512 } else { raw_h };
         let mut row = vec![0u16; w as usize];
@@ -4053,6 +4053,33 @@ mod tests {
                 0x2222_1111,
                 0x4444_3333
             ]
+        );
+    }
+
+    #[test]
+    fn vram_copy_masks_coordinates_and_size_fields() {
+        let mut gpu = Gpu::new();
+
+        gpu.vram.set_pixel(2, 3, 0x1111);
+        gpu.vram.set_pixel(3, 3, 0x2222);
+        gpu.vram.set_pixel(4, 3, 0x3333);
+        gpu.vram.set_pixel(5, 6, 0xAAAA);
+        gpu.vram.set_pixel(6, 6, 0xBBBB);
+        gpu.vram.set_pixel(7, 6, 0xCCCC);
+
+        gpu.write32(GP0_ADDR, 0x80_00_00_00);
+        // High coordinate bits must be ignored: src=(2,3), dst=(5,6).
+        gpu.write32(GP0_ADDR, 0x0203_0402);
+        gpu.write32(GP0_ADDR, 0x0206_0405);
+        // High size bits must be ignored: width=2, height=1.
+        gpu.write32(GP0_ADDR, 0x0201_0402);
+
+        assert_eq!(gpu.vram.get_pixel(5, 6), 0x1111);
+        assert_eq!(gpu.vram.get_pixel(6, 6), 0x2222);
+        assert_eq!(
+            gpu.vram.get_pixel(7, 6),
+            0xCCCC,
+            "masked copy width must not spill into the next pixel"
         );
     }
 
