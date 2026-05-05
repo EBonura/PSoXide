@@ -19,14 +19,15 @@ use emulator_core::{
 
 const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
 const DEFAULT_RE2_DISC: &str = "/Users/ebonura/Downloads/ps1 games/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue";
-const GAMEPLAY_STEPS: u64 = 900_000_000;
+const GAMEPLAY_STEPS: u64 = 1_200_000_000;
 const SPU_PUMP_CYCLES: u64 = 560_000;
 const SPU_FRAME_SAMPLES: usize = 735;
-const EXPECTED_GAMEPLAY_DISPLAY_HASH: u64 = 0x9b42_33cb_7b58_7e5e;
+const EXPECTED_GAMEPLAY_MDEC_MACROBLOCKS: u64 = 170_500;
+const EXPECTED_GAMEPLAY_DISPLAY_HASH: u64 = 0x3561_f30a_06ff_207d;
 
 #[test]
-#[ignore = "requires local RE2 Disc 1 + BIOS; long-running (~15s in release)"]
-fn re2_dualshock_disc1_reaches_first_playable_room_without_gp0_readback_corruption() {
+#[ignore = "requires local RE2 Disc 1 + BIOS; long-running"]
+fn re2_dualshock_disc1_selects_original_game_and_reaches_first_playable_room() {
     let bios = std::fs::read(asset_path("PSOXIDE_BIOS", DEFAULT_BIOS)).expect("BIOS readable");
     let disc_path = asset_path("PSOXIDE_RE2_DISC", DEFAULT_RE2_DISC);
     let disc = psoxide_settings::library::load_disc_from_cue(&disc_path).expect("RE2 cue loads");
@@ -44,7 +45,7 @@ fn re2_dualshock_disc1_reaches_first_playable_room_without_gp0_readback_corrupti
     let mut cycles_at_last_pump = bus.cycles();
     for _ in 0..GAMEPLAY_STEPS {
         let vblank = bus.irq().raise_counts()[0];
-        let pad_mask = re2_start_skip_mask(vblank);
+        let pad_mask = re2_original_game_route_mask(vblank);
         if pad_mask != current_pad_mask {
             bus.set_port1_buttons(ButtonState::from_bits(pad_mask));
             current_pad_mask = pad_mask;
@@ -62,7 +63,10 @@ fn re2_dualshock_disc1_reaches_first_playable_room_without_gp0_readback_corrupti
         (area.x, area.y, area.width, area.height, area.bpp24),
         (0, 240, 320, 240, false)
     );
-    assert_eq!(bus.mdec.macroblocks_decoded(), 30_400);
+    assert_eq!(
+        bus.mdec.macroblocks_decoded(),
+        EXPECTED_GAMEPLAY_MDEC_MACROBLOCKS
+    );
     assert_eq!(bus.mdec.queued_rle_halfwords(), 0);
 
     let gp0 = bus.gpu.gp0_opcode_histogram();
@@ -105,16 +109,21 @@ fn asset_path(env_key: &str, fallback: &str) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(fallback))
 }
 
-fn re2_start_skip_mask(vblank: u64) -> u16 {
-    const PULSES: &[(u64, u64)] = &[(100, 30), (500, 30), (850, 30)];
-    if PULSES
+fn re2_original_game_route_mask(vblank: u64) -> u16 {
+    const PULSES: &[(u64, u64, u16)] = &[
+        (100, 30, button::START),
+        (500, 30, button::START),
+        (650, 20, button::DOWN),
+        (700, 30, button::CROSS),
+        (800, 30, button::CROSS),
+        (900, 30, button::CROSS),
+    ];
+    PULSES
         .iter()
-        .any(|&(start, frames)| vblank >= start && vblank < start + frames)
-    {
-        button::START
-    } else {
-        0
-    }
+        .find_map(|&(start, frames, mask)| {
+            (vblank >= start && vblank < start + frames).then_some(mask)
+        })
+        .unwrap_or(0)
 }
 
 fn dump_visible_ppm(gpu: &emulator_core::Gpu, path: &str) -> std::io::Result<()> {
