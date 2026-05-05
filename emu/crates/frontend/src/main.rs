@@ -142,6 +142,13 @@ struct Shell {
     /// compute backend is active -- when off, GPU still runs (so it
     /// stays in sync) but the user sees CPU output.
     display_gpu_compute: bool,
+    /// Last CPU-VRAM generation that has been copied into the persistent
+    /// hardware-renderer target.
+    hw_seen_gpu_resync_generation: u64,
+    /// Previous frame's scanout mode. Returning from 24bpp video to
+    /// 15bpp gameplay needs a target rebuild because the visible panel
+    /// was using the CPU-decoded fallback while 24bpp was active.
+    hw_last_display_bpp24: bool,
 }
 
 impl Default for Shell {
@@ -193,6 +200,8 @@ impl Shell {
             audio_cycle_accum: 0,
             compute_backend,
             display_gpu_compute: gpu_compute,
+            hw_seen_gpu_resync_generation: 0,
+            hw_last_display_bpp24: false,
         }
     }
 }
@@ -727,6 +736,18 @@ impl ApplicationHandler for Shell {
                 );
                 profile.hw_scale_ms = elapsed_ms(hw_scale_start);
                 profile.hw_scale = gfx.hw_internal_scale() as f32;
+                let hw_target_needs_resync = {
+                    let display_bpp24 = state
+                        .bus
+                        .as_ref()
+                        .is_some_and(|bus| bus.gpu.display_area().bpp24);
+                    hw_target_needs_resync(
+                        &mut self.hw_seen_gpu_resync_generation,
+                        &mut self.hw_last_display_bpp24,
+                        state.gpu_resync_generation,
+                        display_bpp24,
+                    )
+                };
 
                 // Drive the hardware renderer once per frame. The
                 // VRAM-shaped target persists across frames the way
@@ -738,7 +759,7 @@ impl ApplicationHandler for Shell {
                         .as_deref()
                         .unwrap_or_else(|| bus.gpu.vram.words());
                     profile.hw_vram_clone_ms = elapsed_ms(clone_start);
-                    if hw_scale_changed {
+                    if hw_scale_changed || hw_target_needs_resync {
                         gfx.sync_hw_target_from_vram(frame_start_vram);
                     }
                     let hw_render_start = Instant::now();
@@ -876,6 +897,19 @@ fn gpu_log_has_draw(log: &[emulator_core::gpu::GpuCmdLogEntry]) -> bool {
     log.iter().any(|entry| matches!(entry.opcode, 0x20..=0x7F))
 }
 
+fn hw_target_needs_resync(
+    seen_generation: &mut u64,
+    last_display_bpp24: &mut bool,
+    current_generation: u64,
+    current_display_bpp24: bool,
+) -> bool {
+    let generation_changed = *seen_generation != current_generation;
+    *seen_generation = current_generation;
+    let leaving_24bpp = *last_display_bpp24 && !current_display_bpp24;
+    *last_display_bpp24 = current_display_bpp24;
+    generation_changed || leaving_24bpp
+}
+
 fn frontend_display(
     bus: Option<&emulator_core::Bus>,
     gfx: &gfx::Graphics,
@@ -989,5 +1023,34 @@ mod tests {
             key_to_pad_button(&Key::Character("x".into()), &bindings),
             None
         );
+    }
+
+    #[test]
+    fn hw_resync_tracks_cpu_vram_generation_changes() {
+        let mut seen = 0;
+        let mut last_24bpp = false;
+
+        assert!(!hw_target_needs_resync(
+            &mut seen,
+            &mut last_24bpp,
+            0,
+            false
+        ));
+        assert!(hw_target_needs_resync(&mut seen, &mut last_24bpp, 1, false));
+        assert!(!hw_target_needs_resync(
+            &mut seen,
+            &mut last_24bpp,
+            1,
+            false
+        ));
+    }
+
+    #[test]
+    fn hw_resync_when_leaving_24bpp_scanout() {
+        let mut seen = 7;
+        let mut last_24bpp = false;
+
+        assert!(!hw_target_needs_resync(&mut seen, &mut last_24bpp, 7, true));
+        assert!(hw_target_needs_resync(&mut seen, &mut last_24bpp, 7, false));
     }
 }
