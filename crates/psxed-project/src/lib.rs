@@ -2992,8 +2992,8 @@ pub enum NodeKind {
     /// Character/controller component. It binds an entity to a reusable
     /// [`ResourceData::Character`] profile. When `player` is true this is
     /// the component-tree replacement for a legacy player
-    /// [`SpawnPoint`](Self::SpawnPoint); non-player character cooking lands
-    /// after NPC runtime records exist.
+    /// [`SpawnPoint`](Self::SpawnPoint); non-player controllers cook as
+    /// idle model instances until dedicated NPC runtime records exist.
     CharacterController {
         /// Character profile resource.
         #[serde(default)]
