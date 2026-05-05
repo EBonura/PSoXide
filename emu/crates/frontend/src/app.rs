@@ -32,16 +32,30 @@ pub const EXEC_HISTORY_CAP: usize = 16;
 /// library browser (Games / Examples columns), so we don't have
 /// a separate "library" panel -- it's integrated into the shell
 /// the PSX way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PanelVisibility {
-    /// CPU registers + exec history side panel.
+    /// Unified emulator diagnostics sidebar.
+    pub debug_sidebar: bool,
+    /// CPU registers + exec history section.
     pub registers: bool,
-    /// Memory / disassembly dual-pane viewer.
+    /// Memory / disassembly viewer section.
     pub memory: bool,
-    /// VRAM thumbnail at the bottom of the screen.
+    /// VRAM viewer section.
     pub vram: bool,
-    /// Floating frame-profiler window.
+    /// Frame-profiler section.
     pub profiler: bool,
+}
+
+impl Default for PanelVisibility {
+    fn default() -> Self {
+        Self {
+            debug_sidebar: false,
+            registers: true,
+            memory: true,
+            vram: true,
+            profiler: true,
+        }
+    }
 }
 
 /// Hardware-renderer internal scale mode. Both modes use the same
@@ -1339,11 +1353,10 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
         return StepFrameReport::default();
     };
 
-    // Only fill `exec_history` when the registers panel is open --
-    // otherwise the 404-byte `InstructionRecord` per step is pure
-    // overhead. The panel is closed by default on first run, so
-    // most users get the fast `step()` path automatically.
-    let trace = state.panels.registers;
+    // Only fill `exec_history` while the register section can be
+    // inspected; otherwise the 404-byte `InstructionRecord` per step
+    // is pure overhead.
+    let trace = state.panels.debug_sidebar && state.panels.registers;
     let cycles_before = bus.cycles();
     let tick_before = state.cpu.tick();
     let vblank_before = bus.irq().raise_counts()[0];
