@@ -36,6 +36,16 @@ use crate::primitive::{
 use crate::rasterizer::Rasterizer;
 use crate::vram::{self, VramGpu};
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct VramCopyRect {
+    sx: u32,
+    sy: u32,
+    dx: u32,
+    dy: u32,
+    w: u32,
+    h: u32,
+}
+
 /// Compute backend -- owns `VramGpu` + `Rasterizer` plus the replay
 /// state needed to interpret each GP0 packet.
 pub struct ComputeBackend {
@@ -643,21 +653,56 @@ impl ComputeBackend {
     // ========== VRAM-to-VRAM copy ==========
 
     fn handle_vram_copy(&mut self, fifo: &[u32]) {
-        if fifo.len() < 4 {
+        let Some(rect) = decode_vram_copy_packet(fifo) else {
             return;
-        }
-        let src = fifo[1];
-        let dst = fifo[2];
-        let wh = fifo[3];
-        let sx = src & 0xFFFF;
-        let sy = (src >> 16) & 0xFFFF;
-        let dx = dst & 0xFFFF;
-        let dy = (dst >> 16) & 0xFFFF;
-        let raw_w = wh & 0xFFFF;
-        let raw_h = (wh >> 16) & 0xFFFF;
-        let w = if raw_w == 0 { 1024 } else { raw_w };
-        let h = if raw_h == 0 { 512 } else { raw_h };
-        self.rasterizer
-            .dispatch_vram_copy(&self.vram, (sx, sy), (dx, dy), (w, h));
+        };
+        self.rasterizer.dispatch_vram_copy(
+            &self.vram,
+            (rect.sx, rect.sy),
+            (rect.dx, rect.dy),
+            (rect.w, rect.h),
+        );
+    }
+}
+
+fn decode_vram_copy_packet(fifo: &[u32]) -> Option<VramCopyRect> {
+    if fifo.len() < 4 {
+        return None;
+    }
+    let src = fifo[1];
+    let dst = fifo[2];
+    let wh = fifo[3];
+    let raw_w = wh & (vram::VRAM_WIDTH - 1);
+    let raw_h = (wh >> 16) & (vram::VRAM_HEIGHT - 1);
+    Some(VramCopyRect {
+        sx: src & (vram::VRAM_WIDTH - 1),
+        sy: (src >> 16) & (vram::VRAM_HEIGHT - 1),
+        dx: dst & (vram::VRAM_WIDTH - 1),
+        dy: (dst >> 16) & (vram::VRAM_HEIGHT - 1),
+        w: if raw_w == 0 { vram::VRAM_WIDTH } else { raw_w },
+        h: if raw_h == 0 { vram::VRAM_HEIGHT } else { raw_h },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vram_copy_packet_decode_masks_psx_fields() {
+        let rect = decode_vram_copy_packet(&[0x80_00_00_00, 0x0203_0402, 0x0206_0405, 0x0201_0402])
+            .unwrap();
+
+        assert_eq!(
+            rect,
+            VramCopyRect {
+                sx: 2,
+                sy: 3,
+                dx: 5,
+                dy: 6,
+                w: 2,
+                h: 1,
+            }
+        );
     }
 }
