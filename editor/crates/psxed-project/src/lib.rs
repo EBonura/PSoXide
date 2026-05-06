@@ -1208,6 +1208,43 @@ fn horizontal_edge_heights_for_wall(
     }
 }
 
+fn set_horizontal_edge_heights(heights: &mut [i32; 4], direction: GridDirection, edge: [i32; 2]) {
+    match direction {
+        GridDirection::North => {
+            heights[Corner::NW.idx()] = edge[0];
+            heights[Corner::NE.idx()] = edge[1];
+        }
+        GridDirection::East => {
+            heights[Corner::NE.idx()] = edge[0];
+            heights[Corner::SE.idx()] = edge[1];
+        }
+        GridDirection::South => {
+            heights[Corner::SE.idx()] = edge[0];
+            heights[Corner::SW.idx()] = edge[1];
+        }
+        GridDirection::West => {
+            heights[Corner::SW.idx()] = edge[0];
+            heights[Corner::NW.idx()] = edge[1];
+        }
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => {}
+    }
+}
+
+fn wall_top_edge_heights(walls: &[GridVerticalFace]) -> Option<[i32; 2]> {
+    walls
+        .iter()
+        .max_by_key(|wall| {
+            i64::from(wall.heights[WallCorner::TL.idx()])
+                + i64::from(wall.heights[WallCorner::TR.idx()])
+        })
+        .map(|wall| {
+            [
+                wall.heights[WallCorner::TL.idx()],
+                wall.heights[WallCorner::TR.idx()],
+            ]
+        })
+}
+
 /// Hard caps on a single room's authoring shape. The cooker
 /// rejects past these, and the editor inspector warns as the
 /// budget approaches them -- both to keep the cooked `.psxw`
@@ -1504,6 +1541,48 @@ impl WorldGrid {
         }
     }
 
+    /// Set or replace a ceiling, inheriting edge heights from
+    /// touching ceilings first and touching wall tops second. Wall
+    /// tops win so a newly-painted ceiling sits on the surrounding
+    /// authored wall geometry instead of cutting through it.
+    pub fn set_ceiling_aligned_to_neighbors(
+        &mut self,
+        x: u16,
+        z: u16,
+        material: Option<ResourceId>,
+    ) {
+        let heights = self.ceiling_heights_aligned_to_neighbors(x, z);
+        let fallback_height = default_wall_height_for_sector_size(self.sector_size);
+        if let Some(sector) = self.ensure_sector(x, z) {
+            let mut ceiling = GridHorizontalFace::flat(fallback_height, material);
+            ceiling.heights = heights;
+            sector.ceiling = Some(ceiling);
+        }
+    }
+
+    /// Candidate ceiling heights for editor placement. The returned
+    /// order is `[NW, NE, SE, SW]`.
+    pub fn ceiling_heights_aligned_to_neighbors(&self, x: u16, z: u16) -> [i32; 4] {
+        let mut heights = self
+            .sector(x, z)
+            .and_then(|sector| sector.ceiling.as_ref())
+            .map(|ceiling| ceiling.heights)
+            .unwrap_or([default_wall_height_for_sector_size(self.sector_size); 4]);
+
+        for direction in GridDirection::CARDINAL {
+            if let Some(edge) = self.neighbor_ceiling_edge_heights(x, z, direction) {
+                set_horizontal_edge_heights(&mut heights, direction, edge);
+            }
+        }
+        for direction in GridDirection::CARDINAL {
+            if let Some(edge) = self.touching_wall_top_edge_heights(x, z, direction) {
+                set_horizontal_edge_heights(&mut heights, direction, edge);
+            }
+        }
+
+        heights.map(snap_height)
+    }
+
     /// Add a wall to an edge.
     pub fn add_wall(
         &mut self,
@@ -1605,6 +1684,41 @@ impl WorldGrid {
         direction: GridDirection,
     ) -> Option<[i32; 2]> {
         self.horizontal_edge_heights_for_wall(x, z, direction, HorizontalSurface::Ceiling)
+    }
+
+    fn neighbor_ceiling_edge_heights(
+        &self,
+        x: u16,
+        z: u16,
+        direction: GridDirection,
+    ) -> Option<[i32; 2]> {
+        let (nx, nz, opposite) = self.neighbor_across_cardinal_edge(x, z, direction)?;
+        let mut heights = self
+            .sector(nx, nz)
+            .and_then(|sector| HorizontalSurface::Ceiling.edge_heights(sector, opposite))?;
+        heights.swap(0, 1);
+        Some(heights)
+    }
+
+    fn touching_wall_top_edge_heights(
+        &self,
+        x: u16,
+        z: u16,
+        direction: GridDirection,
+    ) -> Option<[i32; 2]> {
+        if let Some(heights) = self
+            .sector(x, z)
+            .and_then(|sector| wall_top_edge_heights(sector.walls.get(direction)))
+        {
+            return Some(heights);
+        }
+
+        let (nx, nz, opposite) = self.neighbor_across_cardinal_edge(x, z, direction)?;
+        let mut heights = self
+            .sector(nx, nz)
+            .and_then(|sector| wall_top_edge_heights(sector.walls.get(opposite)))?;
+        heights.swap(0, 1);
+        Some(heights)
     }
 
     fn horizontal_edge_heights_for_wall(
@@ -4744,6 +4858,49 @@ mod tests {
             .first()
             .unwrap();
         assert_eq!(wall.heights, [256, 384, 1100, 1000]);
+    }
+
+    #[test]
+    fn ceiling_placement_aligns_edge_to_touching_wall_top() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.ensure_sector(0, 0)
+            .unwrap()
+            .walls
+            .get_mut(GridDirection::North)
+            .push(GridVerticalFace::with_heights([0, 0, 1472, 1344], None));
+
+        grid.set_ceiling_aligned_to_neighbors(0, 0, None);
+
+        let ceiling = grid.sector(0, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.heights, [1344, 1472, 2048, 2048]);
+    }
+
+    #[test]
+    fn ceiling_placement_aligns_edge_to_touching_neighbor_wall_top() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.ensure_sector(0, 0)
+            .unwrap()
+            .walls
+            .get_mut(GridDirection::East)
+            .push(GridVerticalFace::with_heights([0, 0, 1600, 1504], None));
+
+        grid.set_ceiling_aligned_to_neighbors(1, 0, None);
+
+        let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.heights, [1504, 2048, 2048, 1600]);
+    }
+
+    #[test]
+    fn ceiling_placement_aligns_edge_to_touching_neighbor_ceiling() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        let mut ceiling = GridHorizontalFace::flat(2048, None);
+        ceiling.heights = [1024, 1152, 1280, 1408];
+        grid.ensure_sector(0, 0).unwrap().ceiling = Some(ceiling);
+
+        grid.set_ceiling_aligned_to_neighbors(1, 0, None);
+
+        let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.heights, [1152, 2048, 2048, 1280]);
     }
 
     #[test]
