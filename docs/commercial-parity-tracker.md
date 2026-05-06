@@ -265,6 +265,12 @@ The stock 30-pulse route passes the earlier data-detection failure and reaches t
 Visible evidence:
 `target/commercial-route-matrix/metal-slug-x-530m-after-rect-span-20260506/Metal_Slug_X__USA_/metal-slug-x-data.ppm` is a fully black visible frame. The display mode history shows the game alternating display starts between `(0,0)` and `(0,240)`, so the next render probe should inspect both VRAM pages and the GP1 display-start cadence before assuming the content itself was not rendered.
 
+Follow-up page evidence:
+`probe_fmv_path 400000000` with full VRAM and visible dumps shows real visible content at 400M: display page `(0,240)` has `24804/76800` nonblack pixels and 175 distinct sampled colours. `probe_fmv_path 530000000` shows both configured display pages `(0,0)` and `(0,240)` completely black, while offscreen VRAM regions at `x=320` and `x=512` still contain texture/content data. Recent GP0 logs confirm this is not a display-start decode error: the game explicitly issues repeated `GP0 0x02` clears for both 320x240 buffers after reprogramming draw areas.
+
+550M boundary:
+The stock route completes at 545M (`display_hash=0x1100fdb97cd50325`, GPU DMA `1773`) but does not reach the 550M checkpoint in a useful wall-clock budget. Host samples are dominated by `Gpu::paint_rect`. A gated mono-rect trace identifies the hot packet as repeated `GP0 0x62` variable-size subtractive rectangles: `cmd=0x62dfdfdf`, `pos=0xff80ff60`, `size=0x01000140`, clipped to `(8,8) 304x224`, colour `0x6f7b`, mode `Sub`. The same packet repeats thousands of times after the 525M checkpoint. CD-ROM delivery is not advancing in this window (`955` data IRQs, `read_lba=2926`, FIFO pops unchanged), so the route is likely sitting in a render/loading wait loop rather than progressing toward gameplay.
+
 Extended-input route result:
 A longer pulse schedule changes the route after 400M: hashes advance through `0xc7841dc90e810978`, `0xaa651a5fdbd301c1`, `0x9d8612f8339fb5af`, and `0x8ced4c5a4f1797ac` by 475M, with GPU DMA increasing from 892 to 1355. By 500M the route is still black on the visible page but has more CD traffic (`979` data IRQs) and much heavier GP0 traffic. Host samples after 500M are dominated by `Gpu::paint_rect` called from GP0 writes, especially semi-transparent monochrome rectangle traffic.
 
@@ -289,7 +295,7 @@ Subsystem hypothesis:
 Local game progress is no longer blocked at data detection. The active local blocker is render/GPU/display-page behavior after the loading path, with a secondary harness-throughput issue under heavy rectangle traffic. The active parity blocker is the Redux pad-route oracle throughput, not a proven emulator divergence.
 
 Next probe:
-First make `run_checkpoint_pad` emit bounded intermediate progress or reduce per-step Lua overhead so Metal Slug X can be parity-pinned beyond 1M with route input. Then inspect VRAM page `(0,0)` versus `(0,240)` around 500M-530M to decide whether the black visible frame is a display-start issue, a missing texture/upload issue, or expected transition content.
+First make `run_checkpoint_pad` emit bounded intermediate progress or reduce per-step Lua overhead so Metal Slug X can be parity-pinned beyond 1M with route input. Then compare the 525M-550M wait loop against Redux: if Redux keeps receiving CD sectors or exits the subtractive-rect loop, the owner is likely CD-ROM/DMA/scheduler. If Redux repeats the same loop, route input/game-specific menu state is the next suspect.
 
 ```text
 
