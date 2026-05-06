@@ -391,6 +391,564 @@
                 tags: ["standalone", "attack"],
             )),
         ),
+        /*[30]*/ (
+            id: (54),
+            name: "Torment Stone Brick 1",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_brick_1.psxt",
+            ),
+        ),
+        /*[31]*/ (
+            id: (55),
+            name: "Torment Stone Brick 1",
+            data: Material((
+                texture: Some((54)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[32]*/ (
+            id: (56),
+            name: "Torment Stone Brick 2",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_brick_2.psxt",
+            ),
+        ),
+        /*[33]*/ (
+            id: (57),
+            name: "Torment Stone Brick 2",
+            data: Material((
+                texture: Some((56)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[34]*/ (
+            id: (58),
+            name: "Torment Stone Brick 3",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_brick_3.psxt",
+            ),
+        ),
+        /*[35]*/ (
+            id: (59),
+            name: "Torment Stone Brick 3",
+            data: Material((
+                texture: Some((58)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[36]*/ (
+            id: (60),
+            name: "Torment Stone Brick 4",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_brick_4.psxt",
+            ),
+        ),
+        /*[37]*/ (
+            id: (61),
+            name: "Torment Stone Brick 4",
+            data: Material((
+                texture: Some((60)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[38]*/ (
+            id: (62),
+            name: "Torment Stone Floor 1",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_floor_1.psxt",
+            ),
+        ),
+        /*[39]*/ (
+            id: (63),
+            name: "Torment Stone Floor 1",
+            data: Material((
+                texture: Some((62)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[40]*/ (
+            id: (64),
+            name: "Torment Stone Floor 2",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_floor_2.psxt",
+            ),
+        ),
+        /*[41]*/ (
+            id: (65),
+            name: "Torment Stone Floor 2",
+            data: Material((
+                texture: Some((64)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[42]*/ (
+            id: (66),
+            name: "Torment Stone Floor 3",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_floor_3.psxt",
+            ),
+        ),
+        /*[43]*/ (
+            id: (67),
+            name: "Torment Stone Floor 3",
+            data: Material((
+                texture: Some((66)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[44]*/ (
+            id: (68),
+            name: "Torment Stone Floor 4",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_floor_4.psxt",
+            ),
+        ),
+        /*[45]*/ (
+            id: (69),
+            name: "Torment Stone Floor 4",
+            data: Material((
+                texture: Some((68)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[46]*/ (
+            id: (70),
+            name: "Torment Stone General 1",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_general_1.psxt",
+            ),
+        ),
+        /*[47]*/ (
+            id: (71),
+            name: "Torment Stone General 1",
+            data: Material((
+                texture: Some((70)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[48]*/ (
+            id: (72),
+            name: "Torment Stone General 2",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_general_2.psxt",
+            ),
+        ),
+        /*[49]*/ (
+            id: (73),
+            name: "Torment Stone General 2",
+            data: Material((
+                texture: Some((72)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[50]*/ (
+            id: (74),
+            name: "Torment Stone General 3",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_general_3.psxt",
+            ),
+        ),
+        /*[51]*/ (
+            id: (75),
+            name: "Torment Stone General 3",
+            data: Material((
+                texture: Some((74)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[52]*/ (
+            id: (76),
+            name: "Torment Stone General 4",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_general_4.psxt",
+            ),
+        ),
+        /*[53]*/ (
+            id: (77),
+            name: "Torment Stone General 4",
+            data: Material((
+                texture: Some((76)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[54]*/ (
+            id: (78),
+            name: "Torment Stone General 5",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_general_5.psxt",
+            ),
+        ),
+        /*[55]*/ (
+            id: (79),
+            name: "Torment Stone General 5",
+            data: Material((
+                texture: Some((78)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[56]*/ (
+            id: (80),
+            name: "Torment Stone General 6",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_general_6.psxt",
+            ),
+        ),
+        /*[57]*/ (
+            id: (81),
+            name: "Torment Stone General 6",
+            data: Material((
+                texture: Some((80)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[58]*/ (
+            id: (82),
+            name: "Torment Stone Wall 1",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_wall_1.psxt",
+            ),
+        ),
+        /*[59]*/ (
+            id: (83),
+            name: "Torment Stone Wall 1",
+            data: Material((
+                texture: Some((82)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[60]*/ (
+            id: (84),
+            name: "Torment Stone Wall 2",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_wall_2.psxt",
+            ),
+        ),
+        /*[61]*/ (
+            id: (85),
+            name: "Torment Stone Wall 2",
+            data: Material((
+                texture: Some((84)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[62]*/ (
+            id: (86),
+            name: "Torment Stone Wall 3",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_wall_3.psxt",
+            ),
+        ),
+        /*[63]*/ (
+            id: (87),
+            name: "Torment Stone Wall 3",
+            data: Material((
+                texture: Some((86)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[64]*/ (
+            id: (88),
+            name: "Torment Stone Wall 4",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_wall_4.psxt",
+            ),
+        ),
+        /*[65]*/ (
+            id: (89),
+            name: "Torment Stone Wall 4",
+            data: Material((
+                texture: Some((88)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[66]*/ (
+            id: (90),
+            name: "Torment Stone Rubble",
+            data: Texture(
+                psxt_path: "assets/textures/torment_stone_rubble.psxt",
+            ),
+        ),
+        /*[67]*/ (
+            id: (91),
+            name: "Torment Stone Rubble",
+            data: Material((
+                texture: Some((90)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[68]*/ (
+            id: (92),
+            name: "Torment Rot Wood 1",
+            data: Texture(
+                psxt_path: "assets/textures/torment_rot_wood_1.psxt",
+            ),
+        ),
+        /*[69]*/ (
+            id: (93),
+            name: "Torment Rot Wood 1",
+            data: Material((
+                texture: Some((92)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[70]*/ (
+            id: (94),
+            name: "Torment Rot Wood 2",
+            data: Texture(
+                psxt_path: "assets/textures/torment_rot_wood_2.psxt",
+            ),
+        ),
+        /*[71]*/ (
+            id: (95),
+            name: "Torment Rot Wood 2",
+            data: Material((
+                texture: Some((94)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[72]*/ (
+            id: (96),
+            name: "Torment Rot Wood 3",
+            data: Texture(
+                psxt_path: "assets/textures/torment_rot_wood_3.psxt",
+            ),
+        ),
+        /*[73]*/ (
+            id: (97),
+            name: "Torment Rot Wood 3",
+            data: Material((
+                texture: Some((96)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[74]*/ (
+            id: (98),
+            name: "Torment Grating 1",
+            data: Texture(
+                psxt_path: "assets/textures/torment_grating_1.psxt",
+            ),
+        ),
+        /*[75]*/ (
+            id: (99),
+            name: "Torment Grating 1",
+            data: Material((
+                texture: Some((98)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[76]*/ (
+            id: (100),
+            name: "Torment Grating 2",
+            data: Texture(
+                psxt_path: "assets/textures/torment_grating_2.psxt",
+            ),
+        ),
+        /*[77]*/ (
+            id: (101),
+            name: "Torment Grating 2",
+            data: Material((
+                texture: Some((100)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[78]*/ (
+            id: (102),
+            name: "Torment Grating 3",
+            data: Texture(
+                psxt_path: "assets/textures/torment_grating_3.psxt",
+            ),
+        ),
+        /*[79]*/ (
+            id: (103),
+            name: "Torment Grating 3",
+            data: Material((
+                texture: Some((102)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[80]*/ (
+            id: (104),
+            name: "Torment Wasteland 1",
+            data: Texture(
+                psxt_path: "assets/textures/torment_wasteland_1.psxt",
+            ),
+        ),
+        /*[81]*/ (
+            id: (105),
+            name: "Torment Wasteland 1",
+            data: Material((
+                texture: Some((104)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[82]*/ (
+            id: (106),
+            name: "Torment Wasteland 2",
+            data: Texture(
+                psxt_path: "assets/textures/torment_wasteland_2.psxt",
+            ),
+        ),
+        /*[83]*/ (
+            id: (107),
+            name: "Torment Wasteland 2",
+            data: Material((
+                texture: Some((106)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[84]*/ (
+            id: (108),
+            name: "Torment Wasteland 3",
+            data: Texture(
+                psxt_path: "assets/textures/torment_wasteland_3.psxt",
+            ),
+        ),
+        /*[85]*/ (
+            id: (109),
+            name: "Torment Wasteland 3",
+            data: Material((
+                texture: Some((108)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[86]*/ (
+            id: (110),
+            name: "Torment Wasteland 4",
+            data: Texture(
+                psxt_path: "assets/textures/torment_wasteland_4.psxt",
+            ),
+        ),
+        /*[87]*/ (
+            id: (111),
+            name: "Torment Wasteland 4",
+            data: Material((
+                texture: Some((110)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[88]*/ (
+            id: (112),
+            name: "Torment Wasteland 5",
+            data: Texture(
+                psxt_path: "assets/textures/torment_wasteland_5.psxt",
+            ),
+        ),
+        /*[89]*/ (
+            id: (113),
+            name: "Torment Wasteland 5",
+            data: Material((
+                texture: Some((112)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[90]*/ (
+            id: (114),
+            name: "Torment Wasteland 6",
+            data: Texture(
+                psxt_path: "assets/textures/torment_wasteland_6.psxt",
+            ),
+        ),
+        /*[91]*/ (
+            id: (115),
+            name: "Torment Wasteland 6",
+            data: Material((
+                texture: Some((114)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
     ],
-    next_resource_id: 54,
+    next_resource_id: 116,
 )

@@ -7301,24 +7301,30 @@ impl EditorWorkspace {
                 ui.set_width(content_width);
                 tool_panel_frame().show(ui, |ui| {
                     ui.expand_to_include_rect(ui.max_rect());
-                    tool_panel_header(ui, icons::LAYERS, "Resources", |ui| {
-                        self.draw_resource_panel_actions(ui);
-                    });
+                    self.draw_resource_panel_header(ui);
                     tool_panel_body(ui, |ui| {
                         let content_width = ui.available_width().max(1.0);
-                        let body_height = ui.available_height().max(1.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("psxed_content_browser_body")
-                            .max_width(content_width)
-                            .max_height(body_height)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_width(content_width);
-                                self.draw_resources_tab(ui);
-                            });
+                        ui.set_width(content_width);
+                        self.draw_resources_tab(ui);
                     });
                 });
             });
+    }
+
+    fn draw_resource_panel_header(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_HEADER)
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.set_min_height(24.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(icons::text(icons::LAYERS, 15.0).color(STUDIO_ACCENT));
+                    ui.label(RichText::new("Resources").strong().color(STUDIO_TEXT));
+                    ui.separator();
+                    self.draw_resource_panel_actions(ui);
+                });
+            });
+        ui.separator();
     }
 
     fn draw_resource_panel_actions(&mut self, ui: &mut egui::Ui) {
@@ -7587,6 +7593,7 @@ impl EditorWorkspace {
     }
 
     fn draw_resources_tab(&mut self, ui: &mut egui::Ui) {
+        let tab_height = ui.available_height().max(1.0);
         ui.horizontal(|ui| {
             section_frame().show(ui, |ui| {
                 // Frame inherits the outer `ui.horizontal` layout, so
@@ -7595,6 +7602,7 @@ impl EditorWorkspace {
                 // intended.
                 ui.vertical(|ui| {
                     ui.set_width(180.0);
+                    ui.set_min_height((tab_height - 14.0).max(1.0));
                     panel_heading(ui, icons::SCAN, "Filter");
                     ui.add_space(2.0);
                     ui.selectable_value(
@@ -7615,7 +7623,9 @@ impl EditorWorkspace {
             ui.add_space(4.0);
 
             ui.vertical(|ui| {
-                let search_width = ui.available_width().max(240.0);
+                let pane_width = ui.available_width().max(1.0);
+                ui.set_width(pane_width);
+                let search_width = pane_width;
                 ui.add(
                     egui::TextEdit::singleline(&mut self.resource_search)
                         .hint_text("Filter resources")
@@ -7632,8 +7642,13 @@ impl EditorWorkspace {
                     })
                     .map(|resource| resource.id)
                     .collect();
-                egui::ScrollArea::horizontal()
-                    .id_salt("psxed_resource_cards")
+                let cards_height = ui.available_height().max(1.0);
+                egui::ScrollArea::both()
+                    .id_salt("psxed_resource_card_pane")
+                    .max_width(pane_width)
+                    .max_height(cards_height)
+                    .min_scrolled_width(pane_width)
+                    .min_scrolled_height(cards_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
