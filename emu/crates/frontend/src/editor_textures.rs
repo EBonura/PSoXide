@@ -27,10 +27,15 @@ use std::path::{Path, PathBuf};
 
 use psx_asset::Texture;
 use psx_gpu_render::{VRAM_HEIGHT, VRAM_WIDTH};
+use psxed_project::streaming::collect_scene_resource_use;
 use psxed_project::{MaterialResource, ProjectDocument, Resource, ResourceData, ResourceId};
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
 const ROOM_TPAGE_TEXEL_HEIGHT: usize = 256;
+const ROOM_FIRST_TPAGE: u8 = 5;
+const ROOM_LAST_TPAGE: u8 = 15;
+const ROOM_CLUT_Y: u16 = 480;
+const ROOM_CLUT_HALFWORDS: u16 = 16;
 
 /// Cached tpage/CLUT for one Material resource.
 #[derive(Debug, Clone, Copy)]
@@ -43,18 +48,10 @@ pub struct MaterialSlot {
     pub clut_word: u16,
 }
 
-/// Cache row keeping the slot together with the source signature so
-/// we know when to invalidate. Re-uploading on every change leaks
-/// the previous tpage / CLUT band; that's fine for editor lifetime
-/// (we have ~10 tpages × 32 CLUT slots of slack), but we do skip the
-/// re-upload entirely when the signature hasn't moved.
+/// Cache row keeping the slot assigned to a material.
 #[derive(Debug, Clone)]
 struct CacheEntry {
     slot: MaterialSlot,
-    /// Path of the `.psxt` resource that produced this slot. Empty
-    /// string when the material has no texture or the file couldn't
-    /// be read -- then the slot holds a procedural fallback pattern.
-    signature: String,
 }
 
 /// Owns the editor renderer's VRAM mirror plus the per-material
@@ -78,6 +75,10 @@ pub struct EditorTextures {
     vram: Box<[u16]>,
     cache: HashMap<ResourceId, CacheEntry>,
     model_cache: HashMap<ResourceId, ModelAtlasCacheEntry>,
+    /// Ordered material ids, texture paths, and fallback names used to
+    /// populate the limited room-material VRAM band. Scene-used
+    /// materials are prioritized ahead of unused library resources.
+    room_signature: Vec<(ResourceId, String, String)>,
     /// Index into the tpage row, starts at 5 (after the framebuffer
     /// at tpages 0..4) and bumps by 1 per uploaded texture.
     next_tpage: u8,
@@ -93,10 +94,9 @@ pub struct EditorTextures {
     next_model_clut_y: u16,
 }
 
-/// Model atlas cache entry. Same shape as `CacheEntry` but
-/// keyed by the Model resource id and signed by the atlas path
-/// so editing `texture_path` triggers a re-upload on the next
-/// `refresh_models` call.
+/// Model atlas cache entry keyed by the Model resource id and signed by
+/// the atlas path so editing `texture_path` triggers a re-upload on the
+/// next `refresh_models` call.
 #[derive(Debug, Clone)]
 struct ModelAtlasCacheEntry {
     slot: MaterialSlot,
@@ -112,10 +112,11 @@ impl EditorTextures {
             vram: vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize].into_boxed_slice(),
             cache: HashMap::new(),
             model_cache: HashMap::new(),
+            room_signature: Vec::new(),
             // tpages 0..4 cover the framebuffer at x=0..256; the
             // editor paints into the 320×240 subrect of x=0..320,
             // so tpage 5 (x=320) is the first one fully clear.
-            next_tpage: 5,
+            next_tpage: ROOM_FIRST_TPAGE,
             next_clut_x: 0,
             // Model atlases live at the tpage row at y=256.
             // Cursor advances by halfword stride per atlas.
@@ -144,7 +145,8 @@ impl EditorTextures {
         self.model_cache.get(&id).map(|e| e.slot)
     }
 
-    /// Walk every Material resource and ensure its texture is in VRAM.
+    /// Walk scene-used Materials first, then unused library Materials,
+    /// and ensure as many as fit have textures in VRAM.
     ///
     /// Resolution order per material:
     ///
@@ -156,31 +158,55 @@ impl EditorTextures {
     ///    pattern (brick / stone / wood / metal / glass / default
     ///    checker) so the preview is never blank.
     ///
-    /// Cached signature is `psxt_path` so editing the path
-    /// re-uploads on the next refresh; unchanged paths short-circuit.
+    /// The editor preview's room-material region is intentionally small:
+    /// it uses one physically tiled 4bpp tpage per Material so plain
+    /// UV wrapping matches the renderer path. Projects can contain more
+    /// Materials than that, so authored scene materials must get slots
+    /// before unused resource-library entries.
     pub fn refresh(&mut self, project: &ProjectDocument, project_root: &Path) {
-        for resource in &project.resources {
-            let ResourceData::Material(material) = &resource.data else {
-                continue;
-            };
-            let signature = texture_path(project, material).unwrap_or_default();
-            if self
-                .cache
-                .get(&resource.id)
-                .is_some_and(|entry| entry.signature == signature)
-            {
-                continue;
-            }
-            if self.next_tpage > 15 || self.next_clut_x + 16 > VRAM_WIDTH as u16 {
+        let plan = material_upload_plan(project);
+        let room_signature: Vec<(ResourceId, String, String)> = plan
+            .iter()
+            .map(|item| (item.id, item.signature.clone(), item.name.clone()))
+            .collect();
+        if self.room_signature == room_signature {
+            return;
+        }
+
+        self.clear_room_materials();
+        self.room_signature = room_signature;
+
+        for item in plan {
+            if !self.has_room_material_slot() {
                 // Out of slots. Don't insert a stale cache entry.
-                continue;
+                break;
             }
             let slot = self
-                .upload_real_psxt(&signature, project_root)
-                .unwrap_or_else(|| self.upload_procedural(&resource.name));
-            self.cache
-                .insert(resource.id, CacheEntry { slot, signature });
+                .upload_real_psxt(&item.signature, project_root)
+                .unwrap_or_else(|| self.upload_procedural(&item.name));
+            self.cache.insert(item.id, CacheEntry { slot });
         }
+    }
+
+    fn has_room_material_slot(&self) -> bool {
+        self.next_tpage <= ROOM_LAST_TPAGE
+            && self.next_clut_x + ROOM_CLUT_HALFWORDS <= VRAM_WIDTH as u16
+    }
+
+    fn clear_room_materials(&mut self) {
+        self.cache.clear();
+        self.next_tpage = ROOM_FIRST_TPAGE;
+        self.next_clut_x = 0;
+
+        let x0 = ROOM_FIRST_TPAGE as usize * ROOM_TPAGE_HALFWORDS;
+        let x1 = (ROOM_LAST_TPAGE as usize + 1) * ROOM_TPAGE_HALFWORDS;
+        for row in 0..ROOM_TPAGE_TEXEL_HEIGHT {
+            let base = row * VRAM_WIDTH as usize;
+            self.vram[base + x0..base + x1].fill(0);
+        }
+
+        let clut_base = ROOM_CLUT_Y as usize * VRAM_WIDTH as usize;
+        self.vram[clut_base..clut_base + VRAM_WIDTH as usize].fill(0);
     }
 
     /// Read `path` and upload the parsed PSXT into the next free
@@ -209,7 +235,7 @@ impl EditorTextures {
         let tpage_x = tpage_index * 64;
         let tpage_y = 0;
         let clut_x = self.next_clut_x;
-        let clut_y = 480;
+        let clut_y = ROOM_CLUT_Y;
 
         // Room material autotiling expands UVs beyond the native
         // texture rectangle. The PSX only wraps inside a texture
@@ -249,7 +275,7 @@ impl EditorTextures {
             clut_word: pack_clut_word(clut_x, clut_y),
         };
         self.next_tpage += 1;
-        self.next_clut_x += 16;
+        self.next_clut_x += ROOM_CLUT_HALFWORDS;
         Some(slot)
     }
 
@@ -292,7 +318,7 @@ impl EditorTextures {
         let tpage_x = tpage_index * 64;
         let tpage_y = 0;
         let clut_x = self.next_clut_x;
-        let clut_y = 480;
+        let clut_y = ROOM_CLUT_Y;
         self.upload_4bpp(tpage_x, tpage_y, &pattern.pixels);
         self.upload_clut(clut_x, clut_y, &pattern.palette);
         let slot = MaterialSlot {
@@ -300,7 +326,7 @@ impl EditorTextures {
             clut_word: pack_clut_word(clut_x, clut_y),
         };
         self.next_tpage += 1;
-        self.next_clut_x += 16;
+        self.next_clut_x += ROOM_CLUT_HALFWORDS;
         slot
     }
 
@@ -465,6 +491,42 @@ impl EditorTextures {
         self.next_model_tpage_x = aligned_tpage_x.saturating_add(HALFWORDS_PER_TPAGE);
         self.next_model_clut_y = self.next_model_clut_y.saturating_add(1);
         Some(slot)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MaterialUploadPlan {
+    id: ResourceId,
+    name: String,
+    signature: String,
+}
+
+fn material_upload_plan(project: &ProjectDocument) -> Vec<MaterialUploadPlan> {
+    let mut ids = collect_scene_resource_use(project).materials;
+    for resource in &project.resources {
+        if matches!(&resource.data, ResourceData::Material(_)) {
+            push_unique_resource_id(&mut ids, resource.id);
+        }
+    }
+
+    ids.into_iter()
+        .filter_map(|id| {
+            let resource = project.resource(id)?;
+            let ResourceData::Material(material) = &resource.data else {
+                return None;
+            };
+            Some(MaterialUploadPlan {
+                id,
+                name: resource.name.clone(),
+                signature: texture_path(project, material).unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn push_unique_resource_id(ids: &mut Vec<ResourceId>, id: ResourceId) {
+    if !ids.contains(&id) {
+        ids.push(id);
     }
 }
 
@@ -791,10 +853,19 @@ fn align_up_to(value: u16, boundary: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_up_to, opaque_room_clut_entry, EditorTextures, ROOM_TPAGE_HALFWORDS,
-        ROOM_TPAGE_TEXEL_HEIGHT,
+        align_up_to, material_upload_plan, opaque_room_clut_entry, EditorTextures,
+        ROOM_TPAGE_HALFWORDS, ROOM_TPAGE_TEXEL_HEIGHT,
     };
     use psx_gpu_render::VRAM_WIDTH;
+    use psxed_project::{MaterialResource, NodeKind, ProjectDocument, ResourceData, WorldGrid};
+    use std::path::Path;
+
+    fn add_material(
+        project: &mut ProjectDocument,
+        name: impl Into<String>,
+    ) -> psxed_project::ResourceId {
+        project.add_resource(name, ResourceData::Material(MaterialResource::opaque(None)))
+    }
 
     #[test]
     fn align_up_to_handles_aligned_and_misaligned_values() {
@@ -851,5 +922,27 @@ mod tests {
     fn imported_model_clut_uses_same_opaque_policy() {
         assert_eq!(opaque_room_clut_entry(0), 0x8000);
         assert_eq!(opaque_room_clut_entry(0x001F), 0x801F);
+    }
+
+    #[test]
+    fn refresh_prioritizes_scene_materials_over_resource_order() {
+        let mut project = ProjectDocument::new("preview");
+        let unused: Vec<_> = (0..12)
+            .map(|index| add_material(&mut project, format!("Unused {index}")))
+            .collect();
+        let used = add_material(&mut project, "Active Late Material");
+        let grid = WorldGrid::stone_room(1, 1, 1024, Some(used), Some(used));
+
+        let scene = project.active_scene_mut();
+        scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+
+        let plan = material_upload_plan(&project);
+        assert_eq!(plan.first().map(|item| item.id), Some(used));
+
+        let mut textures = EditorTextures::new();
+        textures.refresh(&project, Path::new("."));
+
+        assert!(textures.slot(used).is_some());
+        assert!(textures.slot(unused[10]).is_none());
     }
 }
