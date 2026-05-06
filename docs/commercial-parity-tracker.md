@@ -149,6 +149,7 @@ the shared issue instead of inventing a per-game bug.
 | 2026-05-05 | Route matrix canaries for CTR and Metal Slug X. | `commercial_route_matrix --disc CTR.cue --disc MetalSlugX.cue --steps 300000000 --report-dir target/commercial-route-matrix/canaries-20260505` | CTR remains `boot/license` at the SCEA splash (`0xbfb9bb04fb7042d8`). Metal Slug X becomes `route-progress` with generic input, reaches a loading screen (`0x36cb4b8cb6c42d59`), and still needs gameplay confirmation plus Redux parity. | `target/commercial-route-matrix/canaries-20260505/SUMMARY.md`; `target/commercial-route-matrix/canaries-20260505/matrix.csv` |
 | 2026-05-05 | Full local route matrix, 16 discovered sheets. | `commercial_route_matrix --root ~/Downloads/ps1 games --steps 300000000 --wall-timeout-secs 120 --report-dir target/commercial-route-matrix/local-300m-20260505` | No title is playable yet. Buckets: `render/gpu=4`, `fmv/mdec=4`, `unknown=3`, `boot/license=2`, `route-progress=1`, `menu-input=1`, `loader=1`. Every row includes the next `local_lockstep_sweep` parity command. | `target/commercial-route-matrix/local-300m-20260505/SUMMARY.md`; `target/commercial-route-matrix/local-300m-20260505/matrix.csv` |
 | 2026-05-05 | CTR routed parity harness smoke. | `local_lockstep_sweep --disc CTR.cue --steps 10000000 --interval 1000000 --no-visual --pad-pulses ...` followed by streaming-harness regression smokes with `--redux-timeout-secs 60 --redux-wall-timeout-secs 120`. | CTR route CPU state matches Redux through 10M routed user steps. This does not reach gameplay; it validates the route/parity plumbing before longer SCEA-splash first-break sweeps. | `target/local-lockstep/ctr-smoke-10m-20260505/SUMMARY.txt`; `target/local-lockstep/ctr-stream-wall-smoke-1m-20260505/SUMMARY.txt` |
+| 2026-05-06 | Metal Slug X target switch. | `commercial_route_matrix --disc MetalSlugX.cue --steps 530000000 --dump-visible`, `probe_fmv_path` with extended START/CROSS/DOWN pulses, and short `local_lockstep_sweep` smoke runs. | Stock route advances beyond the 300M loading-screen state to a 530M black visible frame: `render/gpu`, `display_hash=0x1100fdb97cd50325`, `pc=0x8006e5dc`, `vblank=2147`, CD data IRQs `955`, pad polls `1139`, MDEC MB `0`. Extended input changes the route after 400M and drives heavy GPU DMA, but after 500M host samples are dominated by `Gpu::paint_rect` semi-transparent monochrome rectangles. A 1M no-pad Redux smoke passes; a 25M pad-routed Redux sweep times out before the first checkpoint because the Lua pad oracle is too slow at route scale. | `target/commercial-route-matrix/metal-slug-x-530m-after-rect-span-20260506/`; `target/metal-slug-x-500m-long-pulses.ppm`; `target/metal-slug-x-530m-after-rect-span.sample.txt`; `target/local-lockstep/metal-slug-x-smoke-1m-20260506/`; `target/local-lockstep/metal-slug-x-route-25m-20260506/` |
 
 Note: the 2026-05-05 sweep reports were generated before the harness
 started printing visual `skip` explicitly. The command line is the
@@ -164,7 +165,7 @@ source of truth for those rows: framebuffer comparison was disabled.
 | 4 | CTR: Crash Team Racing | `CTR - Crash Team Racing (USA).cue` | Commercial route blocked: stuck on the SCEA splash through 300M steps in BIOS and direct-EXE modes (`display_hash=0xbfb9bb04fb7042d8`). Cold BIOS sweep still matches Redux through 100M BIOS/Sony-logo parity. | The route does not reach title/menu/race; no gameplay route is validated. | Inspect CD-ROM/DMA/GPU state around the post-license SCEA splash, then promote a race-start route into Redux parity. |
 | 5 | Gran Turismo 2 | `Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-K stretch target. | No CPU or BIOS-logo visual break through 100M. | Plan a menu/race route and record its first parity break. |
 | 6 | Metal Gear Solid | `Metal Gear Solid (USA) (Disc 1) (Rev 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-G target. | No CPU or BIOS-logo visual break through 100M. | Route to first complex MDEC sequence and compare against Redux there. |
-| 7 | Metal Slug X | `Metal Slug X (USA).cue` | Route-progress: without route input it reaches `NO METAL SLUG X DATA DETECTED. DATA LOAD CANCELED.`; with generic route input the route matrix reaches a loading screen at 300M (`display_hash=0x36cb4b8cb6c42d59`). Cold BIOS sweep still matches Redux through 100M BIOS/Sony-logo parity. | Data detection can be passed, but gameplay is not confirmed. A 600M extension was manually stopped after exceeding the interactive loop budget before progress reporting was added. | Run the route matrix with a bounded longer budget, then promote the first route-progress window into Redux parity with the emitted `local_lockstep_sweep` command. |
+| 7 | Metal Slug X | `Metal Slug X (USA).cue` | Route-progress/render blocked: without route input it reaches `NO METAL SLUG X DATA DETECTED. DATA LOAD CANCELED.`; with generic route input the matrix reaches a loading screen at 300M (`display_hash=0x36cb4b8cb6c42d59`) and then a black 320x240 visible frame at 530M (`display_hash=0x1100fdb97cd50325`). Cold BIOS no-pad Redux smoke still passes at 1M; the pad-routed Redux oracle path is too slow for 25M+ checkpoints. | Data detection can be passed, but gameplay is not confirmed. The current local blocker is black-frame/render progress after 530M plus renderer throughput under heavy semi-transparent rectangle traffic. The current parity blocker is oracle pad-route performance, not a pinned emulator divergence. | Make `run_checkpoint_pad` checkpoint-friendly or faster, then pin the 300M/530M route against Redux. In parallel, add a Metal Slug X-specific gameplay guard and inspect why the visible display start alternates between VRAM pages while the 530M visible page is black. |
 | 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Local cold-boot route reaches the first playable room at 2.2B user steps. Redux-backed route sweep is pinned to a 300M timing break before route input becomes active. | CPU/timing break in `(266M, 267M]`: ours `{tick:608542101 pc:0x8008605c state:64e648f7c3560511}`; Redux `{tick:608541699 pc:0x8008605c state:64e648f7c3560511}`. Visual skipped. | Refine the pre-input window with an exact no-pad trace, then inspect CD-ROM/DMA scheduler timing around RE2 executable startup and first MDEC stream setup. |
 | 9 | Silent Hill | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 10 | Final Fantasy VII | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
@@ -238,7 +239,60 @@ Timing/scheduler drift, likely CD-ROM/DMA cadence during RE2 executable startup 
 Next probe:
 Refine `(266M, 267M]` with exact instruction tracing, then correlate the first tick delta with CD-ROM IRQ counts, DMA start/finish cadence, and MDEC command submission.
 
+### 2026-05-06 - Metal Slug X route/render target
+
+Disc:
+`/Users/ebonura/Downloads/ps1 games/Metal Slug X (USA)/Metal Slug X (USA).cue`
+
+BIOS:
+`/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN`
+
+Redux:
+`/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux`
+
+Commands:
+`commercial_route_matrix --disc MetalSlugX.cue --steps 530000000 --wall-timeout-secs 120 --dump-visible --report-dir target/commercial-route-matrix/metal-slug-x-530m-after-rect-span-20260506`
+
+`probe_fmv_path 500000000 MetalSlugX.cue` and `probe_fmv_path 530000000 MetalSlugX.cue` with 150 extended START/CROSS/DOWN pulses through vblank 3332.
+
+`local_lockstep_sweep --disc MetalSlugX.cue --steps 1000000 --interval 1000000 --exact-window 0 --no-visual`
+
+`local_lockstep_sweep --disc MetalSlugX.cue --steps 25000000 --interval 25000000 --exact-window 0 --no-visual --pad-pulses ...`
+
+Local route result:
+The stock 30-pulse route passes the earlier data-detection failure and reaches the 300M loading-screen state (`display_hash=0x36cb4b8cb6c42d59`). Extending the same stock route to 530M reaches a new black visible frame classified as `render/gpu`: `display_hash=0x1100fdb97cd50325`, display `320x240`, `pc=0x8006e5dc`, cycles `1212263862`, vblank `2147`, CD data IRQs `955`, sector events `955`, FIFO pops `1963508`, pad polls `1139`, memcard commands `77`, and MDEC macroblocks `0`.
+
+Visible evidence:
+`target/commercial-route-matrix/metal-slug-x-530m-after-rect-span-20260506/Metal_Slug_X__USA_/metal-slug-x-data.ppm` is a fully black visible frame. The display mode history shows the game alternating display starts between `(0,0)` and `(0,240)`, so the next render probe should inspect both VRAM pages and the GP1 display-start cadence before assuming the content itself was not rendered.
+
+Extended-input route result:
+A longer pulse schedule changes the route after 400M: hashes advance through `0xc7841dc90e810978`, `0xaa651a5fdbd301c1`, `0x9d8612f8339fb5af`, and `0x8ced4c5a4f1797ac` by 475M, with GPU DMA increasing from 892 to 1355. By 500M the route is still black on the visible page but has more CD traffic (`979` data IRQs) and much heavier GP0 traffic. Host samples after 500M are dominated by `Gpu::paint_rect` called from GP0 writes, especially semi-transparent monochrome rectangle traffic.
+
+Code change:
+The monochrome rectangle raster path now writes clipped rows directly through `Vram::words_mut()` when pixel-owner tracing is disabled, and uses `Vram::fill_rect_unwrapped()` for opaque unmasked spans. This preserves blending/mask behavior while avoiding wrapped per-pixel `get_pixel`/`set_pixel` calls. It does not change the 530M stock route classification or visible output.
+
+Redux parity status:
+The no-pad 1M Redux smoke passes, proving the disc and base oracle still work. The 25M pad-routed sweep times out before the first checkpoint; the Redux child is alive but the Lua `run_checkpoint_pad` path is too slow for route-scale checkpoints because it must step and monitor pad/vblank state in Lua. No Metal Slug X route parity break is pinned yet.
+
+Artifacts:
+`target/commercial-route-matrix/metal-slug-x-530m-after-rect-span-20260506/`
+
+`target/metal-slug-x-500m-long-pulses.ppm`
+
+`target/metal-slug-x-530m-after-rect-span.sample.txt`
+
+`target/local-lockstep/metal-slug-x-smoke-1m-20260506/`
+
+`target/local-lockstep/metal-slug-x-route-25m-20260506/`
+
+Subsystem hypothesis:
+Local game progress is no longer blocked at data detection. The active local blocker is render/GPU/display-page behavior after the loading path, with a secondary harness-throughput issue under heavy rectangle traffic. The active parity blocker is the Redux pad-route oracle throughput, not a proven emulator divergence.
+
+Next probe:
+First make `run_checkpoint_pad` emit bounded intermediate progress or reduce per-step Lua overhead so Metal Slug X can be parity-pinned beyond 1M with route input. Then inspect VRAM page `(0,0)` versus `(0,240)` around 500M-530M to decide whether the black visible frame is a display-start issue, a missing texture/upload issue, or expected transition content.
+
 ```text
+
 YYYY-MM-DD - Game title
 Disc:
 BIOS:
