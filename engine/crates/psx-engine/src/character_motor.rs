@@ -18,39 +18,39 @@ pub struct CharacterMotorConfig {
     /// Capsule radius in world units. Collision currently samples
     /// the centre plus four cardinal points around this radius.
     pub radius: i32,
-    /// Forward/backward walking speed in world units per frame.
+    /// Forward/backward walking speed in world units per display frame.
     pub walk_speed: i32,
-    /// Sprint speed in world units per frame.
+    /// Sprint speed in world units per display frame.
     pub run_speed: i32,
-    /// Turn speed per frame.
+    /// Turn speed per display frame.
     pub yaw_step: Angle,
     /// Maximum stamina, in Q12-style arbitrary units.
     pub stamina_max_q12: i32,
     /// Minimum stamina required to start sprinting.
     pub sprint_min_q12: i32,
-    /// Stamina spent per sprinting frame.
+    /// Stamina spent per sprinting display frame.
     pub sprint_drain_q12: i32,
-    /// Stamina recovered per grounded non-sprint frame.
+    /// Stamina recovered per grounded non-sprint display frame.
     pub stamina_recover_q12: i32,
     /// Stamina spent to start a roll.
     pub roll_cost_q12: i32,
-    /// Roll travel speed in world units per frame.
+    /// Roll travel speed in world units per display frame.
     pub roll_speed: i32,
-    /// Frames where roll keeps moving.
+    /// Display frames where roll keeps moving.
     pub roll_active_frames: u8,
-    /// Recovery frames after roll movement ends.
+    /// Recovery display frames after roll movement ends.
     pub roll_recovery_frames: u8,
-    /// Roll invulnerability frames from action start.
+    /// Roll invulnerability display frames from action start.
     pub roll_invulnerable_frames: u8,
     /// Stamina spent to start a backstep.
     pub backstep_cost_q12: i32,
-    /// Backstep travel speed in world units per frame.
+    /// Backstep travel speed in world units per display frame.
     pub backstep_speed: i32,
-    /// Frames where backstep keeps moving.
+    /// Display frames where backstep keeps moving.
     pub backstep_active_frames: u8,
-    /// Recovery frames after backstep movement ends.
+    /// Recovery display frames after backstep movement ends.
     pub backstep_recovery_frames: u8,
-    /// Backstep invulnerability frames from action start.
+    /// Backstep invulnerability display frames from action start.
     pub backstep_invulnerable_frames: u8,
 }
 
@@ -80,7 +80,7 @@ impl CharacterMotorConfig {
     }
 }
 
-/// Per-frame abstract movement intent.
+/// Per-display-frame abstract movement intent.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct CharacterMotorInput {
     /// Signed turn intent. Negative turns left, positive turns right.
