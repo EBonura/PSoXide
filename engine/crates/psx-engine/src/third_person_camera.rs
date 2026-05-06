@@ -43,6 +43,8 @@ pub struct ThirdPersonCameraConfig {
     pub manual_cooldown_frames: u8,
     /// Maximum auto-align yaw movement per frame.
     pub auto_align_step: Angle,
+    /// Maximum lock-on yaw movement per frame.
+    pub lock_on_align_step: Angle,
     /// Position lag strength as a power-of-two divisor.
     pub position_lag_shift: u8,
     /// Focus lag strength as a power-of-two divisor.
@@ -67,6 +69,7 @@ impl ThirdPersonCameraConfig {
             pitch_max_q12: 704,
             manual_cooldown_frames: 42,
             auto_align_step: Angle::from_q12(18),
+            lock_on_align_step: Angle::from_q12(128),
             position_lag_shift: 2,
             focus_lag_shift: 2,
             distance_lag_shift: 3,
@@ -215,16 +218,17 @@ impl ThirdPersonCameraState {
         }
 
         let player_back_yaw = target.player_yaw.add(Angle::HALF);
-        let desired_yaw = if let Some(lock) = target.lock_target {
-            yaw_to_point(target.player, lock).add(Angle::HALF)
+        let (desired_yaw, yaw_step) = if let Some(lock) = target.lock_target {
+            (
+                yaw_to_point(target.player, lock).add(Angle::HALF),
+                config.lock_on_align_step,
+            )
         } else if input.recenter || (target.moving && self.manual_cooldown == 0) {
-            player_back_yaw
+            (player_back_yaw, config.auto_align_step)
         } else {
-            self.yaw
+            (self.yaw, config.auto_align_step)
         };
-        self.yaw = self
-            .yaw
-            .approach_q12(desired_yaw, config.auto_align_step.as_q12());
+        self.yaw = self.yaw.approach_q12(desired_yaw, yaw_step.as_q12());
         if input.recenter {
             self.pitch_q12 = approach_i16(
                 self.pitch_q12,
@@ -321,6 +325,9 @@ fn normalize_config(mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraCon
     }
     if config.auto_align_step == Angle::ZERO {
         config.auto_align_step = Angle::from_q12(1);
+    }
+    if config.lock_on_align_step == Angle::ZERO {
+        config.lock_on_align_step = config.auto_align_step;
     }
     config.position_lag_shift = config.position_lag_shift.min(6);
     config.focus_lag_shift = config.focus_lag_shift.min(6);
@@ -900,6 +907,30 @@ mod tests {
             frame.focus,
             player_focus(target.player, config.target_height)
         );
+    }
+
+    #[test]
+    fn lock_on_uses_dedicated_fast_yaw_step() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        config.auto_align_step = Angle::from_q12(18);
+        config.lock_on_align_step = Angle::from_q12(128);
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: Some(RoomPoint::new(4096, 0, 0)),
+        };
+
+        let frame = camera.update(
+            WorldProjection::new(160, 120, 320, 64),
+            None,
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
+
+        assert_eq!(frame.yaw, Angle::HALF.add_signed_q12(128));
     }
 
     #[test]
