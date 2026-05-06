@@ -708,27 +708,35 @@ impl Scene for Playtest {
         if ctx.just_pressed(button::SELECT) {
             self.free_orbit = !self.free_orbit;
         }
+        let delta_vblanks = ctx.time.delta_vblanks();
         if self.free_orbit {
             let (right_x, right_y) = ctx.pad.sticks.right_centered();
-            self.orbit_yaw =
-                self.orbit_yaw
-                    .add_signed_q12(stick_to_yaw_delta(psx_engine::InputAxis::new(
-                        right_x.saturating_neg(),
-                    )));
+            self.orbit_yaw = self.orbit_yaw.add_signed_q12(scale_i16_by_vblanks(
+                stick_to_yaw_delta(psx_engine::InputAxis::new(right_x.saturating_neg())),
+                delta_vblanks,
+            ));
             self.orbit_radius = (self.orbit_radius
-                + stick_to_radius_delta(psx_engine::InputAxis::new(right_y)))
+                + scale_i32_by_vblanks(
+                    stick_to_radius_delta(psx_engine::InputAxis::new(right_y)),
+                    delta_vblanks,
+                ))
             .clamp(CAMERA_RADIUS_MIN, CAMERA_RADIUS_MAX);
+            let button_yaw_step =
+                scale_i16_by_vblanks(CAMERA_YAW_STEP.as_q12() as i16, delta_vblanks);
+            let button_radius_step = scale_i32_by_vblanks(CAMERA_RADIUS_STEP, delta_vblanks);
             if ctx.is_held(button::RIGHT) {
-                self.orbit_yaw = self.orbit_yaw.add(CAMERA_YAW_STEP);
+                self.orbit_yaw = self.orbit_yaw.add_signed_q12(button_yaw_step);
             }
             if ctx.is_held(button::LEFT) {
-                self.orbit_yaw = self.orbit_yaw.sub(CAMERA_YAW_STEP);
+                self.orbit_yaw = self
+                    .orbit_yaw
+                    .add_signed_q12(button_yaw_step.saturating_neg());
             }
             if ctx.is_held(button::UP) {
-                self.orbit_radius = (self.orbit_radius - CAMERA_RADIUS_STEP).max(CAMERA_RADIUS_MIN);
+                self.orbit_radius = (self.orbit_radius - button_radius_step).max(CAMERA_RADIUS_MIN);
             }
             if ctx.is_held(button::DOWN) {
-                self.orbit_radius = (self.orbit_radius + CAMERA_RADIUS_STEP).min(CAMERA_RADIUS_MAX);
+                self.orbit_radius = (self.orbit_radius + button_radius_step).min(CAMERA_RADIUS_MAX);
             }
             return;
         }
@@ -740,7 +748,9 @@ impl Scene for Playtest {
         } else {
             self.room.as_ref().map(|room| room.collision())
         };
-        let motor_frame = self.motor.update(collision, input, config);
+        let motor_frame = self
+            .motor
+            .update_vblanks(collision, input, config, delta_vblanks);
         self.update_current_room_from_player();
 
         // Animation state comes from the reusable motor, but the
@@ -1315,7 +1325,14 @@ impl Playtest {
             None
         };
         self.camera
-            .update(PROJECTION, collision, target, input, config)
+            .update_vblanks(
+                PROJECTION,
+                collision,
+                target,
+                input,
+                config,
+                ctx.time.delta_vblanks(),
+            )
             .camera
     }
 
