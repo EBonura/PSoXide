@@ -161,6 +161,8 @@ const CAMERA_STICK_DEADZONE: i16 = 18;
 const CAMERA_STICK_YAW_STEP: i16 = 64;
 const CAMERA_STICK_PITCH_STEP: i16 = 48;
 const CAMERA_SOFT_LOCK_BREAK_STICK: i16 = 72;
+const LOCK_SWITCH_STICK_THRESHOLD: i16 = 72;
+const LOCK_SWITCH_STICK_RELEASE: i16 = 36;
 const LOCK_RANGE: i32 = 4096;
 const LOCK_BREAK_RANGE: i32 = 5120;
 const SOFT_LOCK_RANGE: i32 = 3072;
@@ -596,6 +598,7 @@ struct Playtest {
     /// so remaining placed model instances are targetable actors for
     /// this first gameplay pass.
     lock_target: Option<usize>,
+    lock_switch_stick_held: bool,
     /// Automatic camera-only target. Suppressed after strong
     /// manual camera input until the player leaves target range.
     soft_lock_target: Option<usize>,
@@ -632,6 +635,7 @@ impl Playtest {
             orbit_radius: CAMERA_START_RADIUS,
             camera: ThirdPersonCameraState::new(CAMERA_START_YAW),
             lock_target: None,
+            lock_switch_stick_held: false,
             soft_lock_target: None,
             soft_lock_suppressed: false,
             spawn: RoomPoint::ZERO,
@@ -693,6 +697,7 @@ impl Scene for Playtest {
                 Some(_) => None,
                 None => self.find_best_lock_target(LOCK_RANGE),
             };
+            self.lock_switch_stick_held = false;
             self.soft_lock_target = None;
         }
 
@@ -750,10 +755,9 @@ impl Scene for Playtest {
         if self.lock_target.is_some() {
             if !self.lock_target_valid(LOCK_BREAK_RANGE) {
                 self.lock_target = None;
-            } else if ctx.just_pressed(button::R2) {
-                self.switch_lock_target(1);
-            } else if ctx.just_pressed(button::L2) {
-                self.switch_lock_target(-1);
+                self.lock_switch_stick_held = false;
+            } else {
+                self.update_lock_target_switch(ctx);
             }
         }
         if SOFT_LOCK_ENABLED {
@@ -1291,7 +1295,15 @@ impl Playtest {
     }
 
     fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
-        let input = camera_input(ctx);
+        let input = if self.lock_target.is_some() {
+            ThirdPersonCameraInput {
+                yaw_delta_q12: 0,
+                pitch_delta_q12: 0,
+                recenter: ctx.is_held(button::L1),
+            }
+        } else {
+            camera_input(ctx)
+        };
         let lock_target = self
             .lock_target_position()
             .or_else(|| self.soft_lock_target_position());
@@ -1384,6 +1396,7 @@ impl Playtest {
         self.room_index = next_room;
         self.motor.relocate(local);
         self.lock_target = None;
+        self.lock_switch_stick_held = false;
         self.soft_lock_target = None;
         self.load_active_room_window();
     }
@@ -1491,6 +1504,27 @@ impl Playtest {
             Some(index) if self.target_index_valid(index, SOFT_LOCK_BREAK_RANGE) => {}
             _ => self.soft_lock_target = self.find_best_lock_target(SOFT_LOCK_RANGE),
         }
+    }
+
+    fn update_lock_target_switch(&mut self, ctx: &Ctx) {
+        if ctx.just_pressed(button::R2) {
+            self.switch_lock_target(1);
+        } else if ctx.just_pressed(button::L2) {
+            self.switch_lock_target(-1);
+        }
+
+        let (right_x, _) = ctx.pad.sticks.right_centered();
+        let magnitude = abs_i16(right_x);
+        if magnitude <= LOCK_SWITCH_STICK_RELEASE {
+            self.lock_switch_stick_held = false;
+            return;
+        }
+        if magnitude < LOCK_SWITCH_STICK_THRESHOLD || self.lock_switch_stick_held {
+            return;
+        }
+
+        self.switch_lock_target(if right_x > 0 { -1 } else { 1 });
+        self.lock_switch_stick_held = true;
     }
 
     fn switch_lock_target(&mut self, direction: i32) {
