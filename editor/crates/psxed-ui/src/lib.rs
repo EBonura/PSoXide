@@ -3234,11 +3234,16 @@ impl EditorWorkspace {
         // tool -- click-and-drag floors / walls / entities into the
         // world. Camera movement lives on middle / secondary so the
         // user can reframe mid-edit without giving up the tool.
-        if response.dragged_by(egui::PointerButton::Middle)
-            || response.dragged_by(egui::PointerButton::Secondary)
+        if !dnd_active
+            && (response.dragged_by(egui::PointerButton::Middle)
+                || response.dragged_by(egui::PointerButton::Secondary))
         {
-            let delta = ui.input(|input| input.pointer.delta());
-            self.rotate_viewport_3d_camera(delta);
+            let (delta, shift) = ui.input(|input| (input.pointer.delta(), input.modifiers.shift));
+            if shift {
+                self.pan_viewport_3d_camera(delta, rect.size());
+            } else {
+                self.rotate_viewport_3d_camera(delta);
+            }
         }
 
         // Hover tracking: every frame the pointer is over the panel,
@@ -3428,23 +3433,37 @@ impl EditorWorkspace {
     }
 
     fn rotate_viewport_3d_camera(&mut self, delta: Vec2) {
-        // 0.5 px -> 1 q12-step keeps the viewport responsive without
+        // 0.25 q12-step per pixel keeps the viewport responsive without
         // making a small wrist flick spin the camera multiple turns.
-        const CAMERA_DRAG_STEP: f32 = 0.5;
+        const CAMERA_DRAG_STEP: f32 = 0.25;
         let yaw_delta = (delta.x * CAMERA_DRAG_STEP) as i16 as u16;
         let pitch_delta = (delta.y * CAMERA_DRAG_STEP) as i32;
         match self.viewport_3d_camera_mode {
             ViewportCameraMode::Orbit => {
                 self.viewport_3d_yaw = self.viewport_3d_yaw.wrapping_add(yaw_delta);
-                self.viewport_3d_pitch = self
-                    .viewport_3d_pitch
-                    .wrapping_add(pitch_delta as i16 as u16);
+                self.viewport_3d_pitch =
+                    add_q12_signed_clamped(self.viewport_3d_pitch, pitch_delta, -960, 960);
             }
             ViewportCameraMode::Free => {
                 self.viewport_3d_free_yaw = self.viewport_3d_free_yaw.wrapping_sub(yaw_delta);
                 self.viewport_3d_free_pitch =
                     add_q12_signed_clamped(self.viewport_3d_free_pitch, -pitch_delta, -960, 960);
                 self.viewport_3d_free_initialized = true;
+            }
+        }
+    }
+
+    fn pan_viewport_3d_camera(&mut self, delta: Vec2, panel_size: Vec2) {
+        let world_delta = viewport_3d_pan_delta(self.viewport_3d_camera(), panel_size, delta);
+        match self.viewport_3d_camera_mode {
+            ViewportCameraMode::Orbit => {
+                for (axis, amount) in world_delta.into_iter().enumerate() {
+                    self.viewport_3d_target[axis] =
+                        round_to_i32(self.viewport_3d_target[axis] as f32 + amount);
+                }
+            }
+            ViewportCameraMode::Free => {
+                self.move_free_camera_world(world_delta);
             }
         }
     }
@@ -5003,9 +5022,7 @@ impl EditorWorkspace {
                 format!("Painted floor at {sx},{sz}")
             }
             ViewTool::PaintCeiling => {
-                if let Some(sector) = grid.ensure_sector(sx, sz) {
-                    sector.ceiling = Some(GridHorizontalFace::flat(sector_size_i, floor_mat));
-                }
+                grid.set_ceiling_aligned_to_neighbors(sx, sz, floor_mat);
                 format!("Painted ceiling at {sx},{sz}")
             }
             ViewTool::PaintWall => {
@@ -16815,6 +16832,24 @@ fn camera_forward_from_angles(yaw_q12: u16, pitch_q12: u16) -> [f32; 3] {
     normalize3([-cos_p * sin_y, sin_p, -cos_p * cos_y])
 }
 
+fn viewport_3d_pan_delta(
+    camera: ViewportCameraState,
+    panel_size: Vec2,
+    pointer_delta: Vec2,
+) -> [f32; 3] {
+    let basis = camera.basis();
+    let width = panel_size.x.max(1.0);
+    let height = panel_size.y.max(1.0);
+    let radius = (camera.radius as f32).max(1.0);
+    let right = -pointer_delta.x * radius / width;
+    let up = pointer_delta.y * radius * 0.75 / height;
+    [
+        basis.right[0] * right + basis.up[0] * up,
+        basis.right[1] * right + basis.up[1] * up,
+        basis.right[2] * right + basis.up[2] * up,
+    ]
+}
+
 fn round_to_i32(value: f32) -> i32 {
     value.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
@@ -19420,6 +19455,36 @@ mod tests {
         assert_vec3_approx(dir, [0.0, 0.0, -1.0]);
         assert_eq!(camera.anchor_i32(), [10, 20, 30]);
         assert_eq!(camera.position_i32(), [10, 20, 1030]);
+    }
+
+    #[test]
+    fn viewport_3d_pan_delta_tracks_pointer_drag_plane() {
+        let camera = ViewportCameraState {
+            mode: ViewportCameraMode::Orbit,
+            yaw_q12: 0,
+            pitch_q12: 0,
+            radius: 1000,
+            target: [0, 0, 0],
+            position: [0, 0, 0],
+        };
+
+        let delta =
+            viewport_3d_pan_delta(camera, Vec2::new(1000.0, 750.0), Vec2::new(100.0, 100.0));
+
+        assert_vec3_approx(delta, [-100.0, 100.0, 0.0]);
+    }
+
+    #[test]
+    fn orbit_camera_rotation_uses_slow_step_and_clamps_pitch() {
+        let mut workspace =
+            EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        workspace.viewport_3d_yaw = 0;
+        workspace.viewport_3d_pitch = signed_to_q12(940);
+
+        workspace.rotate_viewport_3d_camera(Vec2::new(100.0, 200.0));
+
+        assert_eq!(workspace.viewport_3d_yaw, 25);
+        assert_eq!(workspace.viewport_3d_pitch, signed_to_q12(960));
     }
 
     #[test]
