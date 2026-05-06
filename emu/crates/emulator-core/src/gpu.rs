@@ -1498,6 +1498,48 @@ impl Gpu {
         if left > right || top > bottom {
             return;
         }
+        if self.pixel_owner.is_none() {
+            if mode == BlendMode::Opaque && !self.mask_check_before_draw {
+                let color = if self.mask_set_on_draw {
+                    color | 0x8000
+                } else {
+                    color
+                };
+                self.vram.fill_rect_unwrapped(
+                    left as u16,
+                    top as u16,
+                    right as u16,
+                    bottom as u16,
+                    color,
+                );
+                return;
+            }
+
+            let left = left as usize;
+            let right = right as usize;
+            let top = top as usize;
+            let bottom = bottom as usize;
+            let set_mask = self.mask_set_on_draw;
+            let check_mask = self.mask_check_before_draw;
+            for py in top..=bottom {
+                let row_start = py * VRAM_WIDTH;
+                for existing in &mut self.vram.words_mut()[row_start + left..=row_start + right] {
+                    if check_mask && *existing & 0x8000 != 0 {
+                        continue;
+                    }
+                    let mut pixel = if mode == BlendMode::Opaque {
+                        color
+                    } else {
+                        blend_pixel(*existing, color, mode)
+                    };
+                    if set_mask {
+                        pixel |= 0x8000;
+                    }
+                    *existing = pixel;
+                }
+            }
+            return;
+        }
         for py in top..=bottom {
             for px in left..=right {
                 self.plot_pixel(px as u16, py as u16, color, mode);
@@ -3835,6 +3877,24 @@ mod tests {
         gpu.write32(GP0_ADDR, 0xE600_0002); // check-before-draw
         gpu.plot_pixel(30, 30, 0x5678, BlendMode::Opaque);
         assert_eq!(gpu.vram.get_pixel(30, 30), 0x5678);
+    }
+
+    #[test]
+    fn paint_rect_span_path_preserves_blend_and_mask_rules() {
+        let mut gpu = Gpu::new();
+        let bg = 10 | (10 << 5) | (10 << 10);
+        let fg = 20 | (20 << 5) | (20 << 10);
+        gpu.vram.set_pixel(10, 10, bg);
+        gpu.vram.set_pixel(11, 10, 0x8000 | 0x1234);
+        gpu.write32(GP0_ADDR, 0xE600_0003); // set-on-draw + check-before-draw
+
+        gpu.paint_rect(10, 10, 2, 1, fg, BlendMode::AddQuarter);
+
+        assert_eq!(
+            gpu.vram.get_pixel(10, 10),
+            0x8000 | blend_pixel(bg, fg, BlendMode::AddQuarter)
+        );
+        assert_eq!(gpu.vram.get_pixel(11, 10), 0x8000 | 0x1234);
     }
 
     #[test]
