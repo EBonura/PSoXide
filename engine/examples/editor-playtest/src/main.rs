@@ -137,7 +137,7 @@ const TARGET_LOCK_TPAGE: Tpage = Tpage::new(576, 0, TexDepth::Bit4);
 const TARGET_LOCK_CLUT: Clut = Clut::new(960, 480);
 const TARGET_LOCK_SCREEN_HALF: i32 = 24;
 const TARGET_LOCK_UV_MAX: u8 = 63;
-const TARGET_LOCK_SPIN_STEP_Q12: u32 = 28;
+const TARGET_LOCK_SPIN_STEP_Q12: u32 = 12;
 
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
@@ -180,6 +180,8 @@ const FOLLOW_TARGET_HEIGHT_DEFAULT: i32 = 0;
 /// debug value.
 const FALLBACK_PLAYER_YAW_STEP: Angle = Angle::from_q12(32);
 const FALLBACK_PLAYER_SPEED: i32 = 32;
+const PLAYER_SPEED_SCALE_NUM: i32 = 3;
+const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 const RUN_BUTTON: u16 = button::CIRCLE;
 
 #[cfg(feature = "ot-2048")]
@@ -374,7 +376,7 @@ impl RuntimeCharacter {
     /// quanta (`4096 quanta = full turn`, runtime targets 60 Hz)
     /// up-front so the per-frame update path is just a wrapping
     /// add.
-    const fn from_record(c: &LevelCharacterRecord) -> Self {
+    fn from_record(c: &LevelCharacterRecord) -> Self {
         // 4096 q12 / 360 deg = 11 q12 per deg, divided by
         // 60 Hz target ≈ 0.19 q12 per deg/frame. We approximate
         // as `(deg * 4096) / (360 * 60)` which is exact for the
@@ -387,8 +389,8 @@ impl RuntimeCharacter {
             run_clip: c.run_clip,
             _turn_clip: c.turn_clip,
             radius: c.radius as i32,
-            walk_speed: c.walk_speed,
-            run_speed: c.run_speed,
+            walk_speed: scaled_player_speed(c.walk_speed),
+            run_speed: scaled_player_speed(c.run_speed),
             yaw_step: Angle::from_q12(yaw_step_q12),
             camera_distance: c.camera_distance,
             camera_height: c.camera_height,
@@ -408,6 +410,15 @@ impl RuntimeCharacter {
 
     fn motor_config(&self) -> CharacterMotorConfig {
         CharacterMotorConfig::character(self.radius, self.walk_speed, self.run_speed, self.yaw_step)
+    }
+}
+
+fn scaled_player_speed(speed: i32) -> i32 {
+    let scaled = speed.saturating_mul(PLAYER_SPEED_SCALE_NUM) / PLAYER_SPEED_SCALE_DEN;
+    if speed > 0 {
+        scaled.max(1)
+    } else {
+        scaled
     }
 }
 
@@ -1253,8 +1264,8 @@ impl Playtest {
             Some(c) => c.motor_config(),
             None => CharacterMotorConfig::character(
                 0,
-                FALLBACK_PLAYER_SPEED,
-                FALLBACK_PLAYER_SPEED,
+                scaled_player_speed(FALLBACK_PLAYER_SPEED),
+                scaled_player_speed(FALLBACK_PLAYER_SPEED),
                 FALLBACK_PLAYER_YAW_STEP,
             ),
         }
