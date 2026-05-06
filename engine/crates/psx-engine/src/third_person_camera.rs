@@ -12,6 +12,7 @@ use crate::{Angle, RoomCollision, RoomPoint, WorldCamera, WorldProjection, Q12};
 
 const RAY_STEPS_MAX: i32 = 8;
 const RAY_STEPS_MIN: i32 = 3;
+const MAX_CAMERA_CATCHUP_VBLANKS: u16 = 4;
 
 // Mirrors psxed_format::world::direction::* without adding a direct
 // psxed-format dependency just for byte constants.
@@ -39,11 +40,11 @@ pub struct ThirdPersonCameraConfig {
     pub pitch_min_q12: i16,
     /// Highest manual pitch, in signed Q0.12 turn units.
     pub pitch_max_q12: i16,
-    /// Frames before auto-alignment resumes after manual camera input.
+    /// Display frames before auto-alignment resumes after manual camera input.
     pub manual_cooldown_frames: u8,
-    /// Maximum auto-align yaw movement per frame.
+    /// Maximum auto-align yaw movement per display frame.
     pub auto_align_step: Angle,
-    /// Maximum lock-on yaw movement per frame.
+    /// Maximum lock-on yaw movement per display frame.
     pub lock_on_align_step: Angle,
     /// Position lag strength as a power-of-two divisor.
     pub position_lag_shift: u8,
@@ -51,7 +52,7 @@ pub struct ThirdPersonCameraConfig {
     pub focus_lag_shift: u8,
     /// Ease-out strength when collision lets the camera extend again.
     pub distance_lag_shift: u8,
-    /// Frames to hold the shortened boom before easing out.
+    /// Display frames to hold the shortened boom before easing out.
     pub collision_release_delay_frames: u8,
 }
 
@@ -78,7 +79,7 @@ impl ThirdPersonCameraConfig {
     }
 }
 
-/// Per-frame camera input.
+/// Per-display-frame camera input.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThirdPersonCameraInput {
     /// Signed manual yaw delta in Q0.12 angle units.
@@ -190,8 +191,42 @@ impl ThirdPersonCameraState {
         self.last_rotated = false;
     }
 
-    /// Advance the controller and build a render camera.
+    /// Advance the controller by one display tick and build a render camera.
     pub fn update(
+        &mut self,
+        projection: WorldProjection,
+        collision: Option<RoomCollision<'_, '_>>,
+        target: ThirdPersonCameraTarget,
+        input: ThirdPersonCameraInput,
+        config: ThirdPersonCameraConfig,
+    ) -> ThirdPersonCameraFrame {
+        self.update_one_vblank(projection, collision, target, input, config)
+    }
+
+    /// Advance the controller by elapsed display ticks and build a render camera.
+    ///
+    /// Heavy render paths can miss VBlanks. The camera catches up
+    /// with bounded fixed substeps so yaw limits, cooldowns, easing,
+    /// and collision recovery keep their authored display-time speed.
+    pub fn update_vblanks(
+        &mut self,
+        projection: WorldProjection,
+        collision: Option<RoomCollision<'_, '_>>,
+        target: ThirdPersonCameraTarget,
+        input: ThirdPersonCameraInput,
+        config: ThirdPersonCameraConfig,
+        delta_vblanks: u16,
+    ) -> ThirdPersonCameraFrame {
+        let steps = delta_vblanks.max(1).min(MAX_CAMERA_CATCHUP_VBLANKS);
+        let mut final_frame = None;
+        for _ in 0..steps {
+            final_frame =
+                Some(self.update_one_vblank(projection, collision, target, input, config));
+        }
+        final_frame.expect("camera catch-up always runs at least one substep")
+    }
+
+    fn update_one_vblank(
         &mut self,
         projection: WorldProjection,
         collision: Option<RoomCollision<'_, '_>>,
@@ -931,6 +966,33 @@ mod tests {
         );
 
         assert_eq!(frame.yaw, Angle::HALF.add_signed_q12(128));
+    }
+
+    #[test]
+    fn vblank_delta_matches_repeated_camera_updates() {
+        let mut stepped = ThirdPersonCameraState::new(Angle::ZERO);
+        let mut caught_up = ThirdPersonCameraState::new(Angle::ZERO);
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        config.auto_align_step = Angle::from_q12(32);
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::new(1024, 0, 1024),
+            player_yaw: Angle::QUARTER,
+            moving: true,
+            lock_target: None,
+        };
+        let input = ThirdPersonCameraInput::default();
+
+        stepped.snap_to_player_with_yaw(target, config, Angle::ZERO);
+        caught_up.snap_to_player_with_yaw(target, config, Angle::ZERO);
+        let _ = stepped.update(projection, None, target, input, config);
+        let expected = stepped.update(projection, None, target, input, config);
+        let actual = caught_up.update_vblanks(projection, None, target, input, config, 2);
+
+        assert_eq!(actual, expected);
+        assert_eq!(caught_up.yaw(), stepped.yaw());
+        assert_eq!(caught_up.position(), stepped.position());
+        assert_eq!(caught_up.focus(), stepped.focus());
     }
 
     #[test]
