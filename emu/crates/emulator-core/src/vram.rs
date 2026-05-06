@@ -32,9 +32,41 @@ impl Vram {
         self.data.as_ref()
     }
 
+    /// Expose the raw 16bpp words mutably for bulk GPU operations.
+    pub fn words_mut(&mut self) -> &mut [u16] {
+        self.data.as_mut()
+    }
+
     /// Zero all pixels.
     pub fn clear(&mut self) {
         self.data.fill(0);
+    }
+
+    /// Fill an already-clipped, non-wrapping rectangle.
+    ///
+    /// This is for GPU rasterizer hot paths after draw-area clipping has
+    /// proven the coordinates are inside native VRAM bounds. Public callers
+    /// that need hardware coordinate wrapping should use `set_pixel`.
+    pub fn fill_rect_unwrapped(
+        &mut self,
+        left: u16,
+        top: u16,
+        right: u16,
+        bottom: u16,
+        color: u16,
+    ) {
+        let left = (left as usize).min(VRAM_WIDTH - 1);
+        let right = (right as usize).min(VRAM_WIDTH - 1);
+        let top = (top as usize).min(VRAM_HEIGHT - 1);
+        let bottom = (bottom as usize).min(VRAM_HEIGHT - 1);
+        if left > right || top > bottom {
+            return;
+        }
+        for y in top..=bottom {
+            let start = y * VRAM_WIDTH + left;
+            let end = y * VRAM_WIDTH + right + 1;
+            self.data[start..end].fill(color);
+        }
     }
 
     /// Read a single pixel with wrap-around on both axes.
@@ -105,5 +137,18 @@ mod tests {
         let mut vram = Vram::new();
         vram.set_pixel(1024, 512, 0x1234); // wraps to (0, 0)
         assert_eq!(vram.get_pixel(0, 0), 0x1234);
+    }
+
+    #[test]
+    fn fill_rect_unwrapped_fills_only_clipped_span() {
+        let mut vram = Vram::new();
+
+        vram.fill_rect_unwrapped(2, 3, 4, 5, 0x55AA);
+
+        assert_eq!(vram.get_pixel(1, 3), 0);
+        assert_eq!(vram.get_pixel(2, 3), 0x55AA);
+        assert_eq!(vram.get_pixel(4, 5), 0x55AA);
+        assert_eq!(vram.get_pixel(5, 5), 0);
+        assert_eq!(vram.get_pixel(2, 6), 0);
     }
 }
