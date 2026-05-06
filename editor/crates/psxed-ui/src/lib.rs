@@ -39,7 +39,10 @@ use psxed_project::{
     MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_QUANTUM,
 };
 
-const LEFT_DOCK_MAX_WIDTH: f32 = 420.0;
+const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
+const CONTENT_BROWSER_MIN_HEIGHT: f32 = 48.0;
+const CENTRAL_WORKSPACE_MIN_WIDTH: f32 = 360.0;
+const CENTRAL_WORKSPACE_MIN_HEIGHT: f32 = 220.0;
 const LEFT_DOCK_LABEL_CHARS: usize = 34;
 const ENTITY_POSITION_STEP: f32 = 0.1;
 const EDITOR_OUTLINE_STROKE_WIDTH: f32 = 1.25;
@@ -47,6 +50,8 @@ const EDITOR_SELECTED_OUTLINE_STROKE_WIDTH: f32 = 3.0;
 const EDITOR_OUTLINE_ACCENT: Color32 = Color32::from_rgb(165, 238, 255);
 const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
+const RESOURCE_CARD_WIDTH: f32 = 120.0;
+const RESOURCE_CARD_HEIGHT: f32 = 155.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/obsidian_wraith",
@@ -6108,17 +6113,21 @@ impl EditorWorkspace {
         if !self.left_dock_open {
             return;
         }
+        let max_width = max_resizable_side_dock_width(ctx, self.inspector_open);
         egui::SidePanel::left("psxed_left_dock")
             .resizable(true)
             .default_width(280.0)
-            .min_width(220.0)
-            .max_width(LEFT_DOCK_MAX_WIDTH)
+            .min_width(RESIZABLE_DOCK_MIN_WIDTH)
+            .max_width(max_width)
             .frame(dock_frame())
             .show(ctx, |ui| {
-                ui.set_width(ui.available_width());
-                self.draw_scene_tree_panel(ui);
-                ui.add_space(6.0);
-                self.draw_filesystem_panel(ui);
+                fixed_panel_content(ui, "psxed_left_dock_fixed_content", |ui| {
+                    let content_width = ui.available_width().max(1.0);
+                    constrain_resizable_dock_content(ui, content_width);
+                    self.draw_scene_tree_panel(ui);
+                    ui.add_space(6.0);
+                    self.draw_filesystem_panel(ui);
+                });
             });
     }
 
@@ -6293,43 +6302,49 @@ impl EditorWorkspace {
         if !self.inspector_open {
             return;
         }
+        let max_width = max_resizable_side_dock_width(ctx, false);
         egui::SidePanel::right("psxed_inspector")
             .resizable(true)
             .default_width(320.0)
-            .min_width(240.0)
+            .min_width(RESIZABLE_DOCK_MIN_WIDTH)
+            .max_width(max_width)
             .frame(dock_frame())
             .show(ctx, |ui| {
-                ui.set_width(ui.available_width().max(1.0));
-                tool_panel_frame().show(ui, |ui| {
-                    ui.expand_to_include_rect(ui.max_rect());
-                    let content_width = ui.available_width().max(1.0);
-                    constrain_resizable_dock_content(ui, content_width);
-                    tool_panel_header(ui, icons::SCAN, "Inspector", |_| {});
-                    tool_panel_body(ui, |ui| {
+                fixed_panel_content(ui, "psxed_inspector_fixed_content", |ui| {
+                    ui.set_width(ui.available_width().max(1.0));
+                    tool_panel_frame().show(ui, |ui| {
                         let content_width = ui.available_width().max(1.0);
                         constrain_resizable_dock_content(ui, content_width);
-                        egui::ScrollArea::vertical()
-                            .id_salt("psxed_inspector_scroll")
-                            .max_width(content_width)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                constrain_resizable_dock_content(ui, content_width);
-                                // Selection priority: primitive (Select tool's
-                                // product -- face, edge, or vertex) → resource
-                                // (clicked in the bottom panel) → node (scene
-                                // tree row). The primitive branch wins because
-                                // it's the active edit target during paint and
-                                // height-edit workflows.
-                                if let Some(selection) = self.selected_primitive {
-                                    match selection {
-                                        Selection::Face(face) => self.draw_face_inspector(ui, face),
-                                        Selection::Edge(edge) => self.draw_edge_inspector(ui, edge),
-                                        Selection::Vertex(vertex) => {
-                                            self.draw_vertex_inspector(ui, vertex)
+                        tool_panel_header(ui, icons::SCAN, "Inspector", |_| {});
+                        tool_panel_body(ui, |ui| {
+                            let content_width = ui.available_width().max(1.0);
+                            constrain_resizable_dock_content(ui, content_width);
+                            egui::ScrollArea::both()
+                                .id_salt("psxed_inspector_scroll")
+                                .max_width(content_width)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    constrain_resizable_dock_content(ui, content_width);
+                                    // Selection priority: primitive (Select tool's
+                                    // product -- face, edge, or vertex) → resource
+                                    // (clicked in the bottom panel) → node (scene
+                                    // tree row). The primitive branch wins because
+                                    // it's the active edit target during paint and
+                                    // height-edit workflows.
+                                    if let Some(selection) = self.selected_primitive {
+                                        match selection {
+                                            Selection::Face(face) => {
+                                                self.draw_face_inspector(ui, face)
+                                            }
+                                            Selection::Edge(edge) => {
+                                                self.draw_edge_inspector(ui, edge)
+                                            }
+                                            Selection::Vertex(vertex) => {
+                                                self.draw_vertex_inspector(ui, vertex)
+                                            }
                                         }
+                                        return;
                                     }
-                                    return;
-                                }
 
                                 if let Some(resource_id) = self.selected_resource {
                                     self.draw_resource_inspector(ui, resource_id);
@@ -6547,6 +6562,7 @@ impl EditorWorkspace {
                             });
                         reserve_remaining_panel_space(ui);
                     });
+                });
                 });
             });
     }
@@ -7290,22 +7306,24 @@ impl EditorWorkspace {
         // name-keyword procedural fallback. Cheap when nothing's
         // changed -- the signature cache short-circuits per-resource.
         self.refresh_texture_thumbs(ctx);
+        let max_height = max_resizable_bottom_dock_height(ctx);
         egui::TopBottomPanel::bottom("psxed_content_browser")
             .resizable(true)
             .default_height(240.0)
-            .min_height(160.0)
-            .max_height(420.0)
+            .min_height(CONTENT_BROWSER_MIN_HEIGHT)
+            .max_height(max_height)
             .frame(dock_frame())
             .show(ctx, |ui| {
-                let content_width = ui.available_width().max(1.0);
-                ui.set_width(content_width);
-                tool_panel_frame().show(ui, |ui| {
-                    ui.expand_to_include_rect(ui.max_rect());
-                    self.draw_resource_panel_header(ui);
-                    tool_panel_body(ui, |ui| {
-                        let content_width = ui.available_width().max(1.0);
-                        ui.set_width(content_width);
-                        self.draw_resources_tab(ui);
+                fixed_panel_content(ui, "psxed_content_browser_fixed_content", |ui| {
+                    let content_width = ui.available_width().max(1.0);
+                    ui.set_width(content_width);
+                    tool_panel_frame().show(ui, |ui| {
+                        self.draw_resource_panel_header(ui);
+                        tool_panel_body(ui, |ui| {
+                            let content_width = ui.available_width().max(1.0);
+                            ui.set_width(content_width);
+                            self.draw_resources_tab(ui);
+                        });
                     });
                 });
             });
@@ -7643,35 +7661,49 @@ impl EditorWorkspace {
                     .map(|resource| resource.id)
                     .collect();
                 let cards_height = ui.available_height().max(1.0);
-                egui::ScrollArea::both()
-                    .id_salt("psxed_resource_card_pane")
+                let card_spacing = ui.spacing().item_spacing;
+                let columns = ((pane_width + card_spacing.x)
+                    / (RESOURCE_CARD_WIDTH + card_spacing.x))
+                    .floor()
+                    .max(1.0) as usize;
+                egui::ScrollArea::vertical()
+                    .id_salt("psxed_resource_card_grid")
                     .max_width(pane_width)
                     .max_height(cards_height)
-                    .min_scrolled_width(pane_width)
                     .min_scrolled_height(cards_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for id in &visible_resource_order {
-                                let Some(resource) = self.project.resource(*id) else {
-                                    continue;
-                                };
-                                let thumb = self.texture_thumb_id(resource);
-                                let response = draw_resource_card(
-                                    ui,
-                                    &self.project,
-                                    resource,
-                                    self.resource_is_selected(resource.id),
-                                    thumb,
-                                );
-                                if response.clicked() {
-                                    clicked = Some(ResourceClick {
-                                        id: resource.id,
-                                        modifiers: ui.input(|input| input.modifiers),
-                                    });
+                        ui.set_min_width(pane_width);
+                        egui::Grid::new("psxed_resource_card_grid_layout")
+                            .num_columns(columns)
+                            .spacing(card_spacing)
+                            .show(ui, |ui| {
+                                let mut column = 0usize;
+                                for id in &visible_resource_order {
+                                    let Some(resource) = self.project.resource(*id) else {
+                                        continue;
+                                    };
+                                    let thumb = self.texture_thumb_id(resource);
+                                    let response = draw_resource_card(
+                                        ui,
+                                        &self.project,
+                                        resource,
+                                        self.resource_is_selected(resource.id),
+                                        thumb,
+                                    );
+                                    if response.clicked() {
+                                        clicked = Some(ResourceClick {
+                                            id: resource.id,
+                                            modifiers: ui.input(|input| input.modifiers),
+                                        });
+                                    }
+                                    column += 1;
+                                    if column == columns {
+                                        ui.end_row();
+                                        column = 0;
+                                    }
                                 }
-                            }
-                        });
+                            });
                     });
                 if let Some(click) = clicked {
                     // Sims-style: with a face selected, clicking a
@@ -14610,6 +14642,24 @@ fn reserve_remaining_panel_space(ui: &mut egui::Ui) {
     }
 }
 
+fn fixed_panel_content<R>(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let size = ui.available_size_before_wrap();
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.expand_to_include_rect(rect);
+    child.set_clip_rect(rect);
+    add_contents(&mut child)
+}
+
 fn range_between<T: Copy + Eq>(order: &[T], a: T, b: T) -> Option<Vec<T>> {
     let ai = order.iter().position(|id| *id == a)?;
     let bi = order.iter().position(|id| *id == b)?;
@@ -14625,7 +14675,21 @@ fn constrain_resizable_dock_content(ui: &mut egui::Ui, width: f32) {
     ui.set_width(width);
     ui.set_max_width(width);
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-    ui.spacing_mut().text_edit_width = (width - 72.0).clamp(96.0, 280.0);
+    ui.spacing_mut().text_edit_width = (width - 72.0).clamp(24.0, 280.0);
+}
+
+fn max_resizable_side_dock_width(ctx: &egui::Context, reserve_opposite_dock: bool) -> f32 {
+    let opposite = if reserve_opposite_dock {
+        RESIZABLE_DOCK_MIN_WIDTH
+    } else {
+        0.0
+    };
+    (ctx.available_rect().width() - CENTRAL_WORKSPACE_MIN_WIDTH - opposite)
+        .max(RESIZABLE_DOCK_MIN_WIDTH)
+}
+
+fn max_resizable_bottom_dock_height(ctx: &egui::Context) -> f32 {
+    (ctx.available_rect().height() - CENTRAL_WORKSPACE_MIN_HEIGHT).max(CONTENT_BROWSER_MIN_HEIGHT)
 }
 
 /// Friendly label for the drag-tooltip preview.
@@ -15218,7 +15282,7 @@ fn draw_resource_card(
     selected: bool,
     thumb: Option<egui::TextureId>,
 ) -> egui::Response {
-    let size = Vec2::new(120.0, 155.0);
+    let size = Vec2::new(RESOURCE_CARD_WIDTH, RESOURCE_CARD_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let fill = if selected {
