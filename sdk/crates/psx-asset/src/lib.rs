@@ -799,14 +799,16 @@ impl<'a> Animation<'a> {
         let bytes = self
             .poses
             .get(base..base + psxed_format::animation::POSE_RECORD_SIZE)?;
-        let mut matrix = [[0i16; 3]; 3];
-        let mut off = 0;
-        for col in matrix.iter_mut() {
-            for cell in col.iter_mut() {
-                *cell = read_i16(bytes, off);
-                off += 2;
-            }
-        }
+        let matrix = [
+            [read_i16(bytes, 0), read_i16(bytes, 2), read_i16(bytes, 4)],
+            [read_i16(bytes, 6), read_i16(bytes, 8), read_i16(bytes, 10)],
+            [
+                read_i16(bytes, 12),
+                read_i16(bytes, 14),
+                read_i16(bytes, 16),
+            ],
+        ];
+        let off = 18;
         let translation = Vec3I32::new(
             read_i32(bytes, off),
             read_i32(bytes, off + 4),

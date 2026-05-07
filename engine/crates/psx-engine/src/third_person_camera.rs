@@ -12,6 +12,8 @@ use crate::{Angle, RoomCollision, RoomPoint, WorldCamera, WorldProjection, Q12};
 
 const RAY_STEPS_MAX: i32 = 8;
 const RAY_STEPS_MIN: i32 = 3;
+const RAY_NEIGHBORHOOD_CELLS: usize = 9;
+const MAX_RAY_CHECKED_CELLS: usize = RAY_STEPS_MAX as usize * RAY_NEIGHBORHOOD_CELLS;
 const MAX_CAMERA_CATCHUP_VBLANKS: u16 = 4;
 
 // Mirrors psxed_format::world::direction::* without adding a direct
@@ -346,6 +348,38 @@ struct CollisionSolve {
     pull_in: bool,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct CheckedCameraCells {
+    cells: [(i32, i32); MAX_RAY_CHECKED_CELLS],
+    len: usize,
+}
+
+impl CheckedCameraCells {
+    const EMPTY_CELL: (i32, i32) = (i32::MIN, i32::MIN);
+
+    const fn new() -> Self {
+        Self {
+            cells: [Self::EMPTY_CELL; MAX_RAY_CHECKED_CELLS],
+            len: 0,
+        }
+    }
+
+    fn visit(&mut self, x: i32, z: i32) -> bool {
+        let mut i = 0;
+        while i < self.len {
+            if self.cells[i].0 == x && self.cells[i].1 == z {
+                return false;
+            }
+            i += 1;
+        }
+        if self.len < self.cells.len() {
+            self.cells[self.len] = (x, z);
+            self.len += 1;
+        }
+        true
+    }
+}
+
 fn normalize_config(mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraConfig {
     config.min_distance = config.min_distance.max(128);
     config.max_distance = config.max_distance.max(config.min_distance);
@@ -419,6 +453,7 @@ fn probe_clear_distance(
     }
 
     let mut nearest = max_distance;
+    let mut checked_cells = CheckedCameraCells::new();
     let mut i = 1;
     while i <= steps {
         let sample = lerp_vertex(from, to, i, steps);
@@ -433,6 +468,7 @@ fn probe_clear_distance(
             to,
             max_distance,
             config.collision_margin,
+            &mut checked_cells,
         ) {
             nearest = hit.min(nearest);
             break;
@@ -468,6 +504,7 @@ fn nearest_wall_hit_around(
     to: RoomPoint,
     ray_distance: i32,
     vertical_margin: i32,
+    checked_cells: &mut CheckedCameraCells,
 ) -> Option<i32> {
     let s = room.sector_size();
     if s <= 0 || sample.x < 0 || sample.z < 0 {
@@ -483,6 +520,10 @@ fn nearest_wall_hit_around(
             let cx = sx + ox;
             let cz = sz + oz;
             if cx >= 0 && cz >= 0 && cx < room.width() as i32 && cz < room.depth() as i32 {
+                if !checked_cells.visit(cx, cz) {
+                    oz += 1;
+                    continue;
+                }
                 if let Some(sector) = room.sector(cx as u16, cz as u16) {
                     let mut i = 0;
                     while i < sector.wall_count() {
