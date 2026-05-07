@@ -31,12 +31,13 @@ use psxed_project::streaming::{
 };
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
-    snap_height, ColliderShape, GridCellBounds, GridDirection, GridHorizontalFace, GridSplit,
-    GridUvRotation, GridUvTransform, GridVerticalFace, MaterialFaceSidedness, MaterialResource,
-    NodeId, NodeKind, NodeRow, ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId,
-    WorldGrid, WorldGridBudget, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
-    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_SECTOR_SIZE,
-    MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_QUANTUM,
+    default_model_collision_radius_for_height, snap_height, ColliderShape, GridCellBounds,
+    GridDirection, GridHorizontalFace, GridSplit, GridUvRotation, GridUvTransform,
+    GridVerticalFace, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow,
+    ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, WorldGrid, WorldGridBudget,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
+    MAX_ROOM_WIDTH, MAX_WORLD_SECTOR_SIZE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
+    WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -238,6 +239,7 @@ pub struct EditorWorkspace {
     snap_units: u16,
     show_grid: bool,
     preview_fog: bool,
+    preview_backface_wireframe: bool,
     view_2d: bool,
     active_workspace: WorkspaceView,
     left_dock_open: bool,
@@ -385,6 +387,7 @@ struct ModelImportDialog {
     texture_height: i32,
     animation_fps: i32,
     world_height: i32,
+    collision_radius: i32,
     normalize_root_translation: bool,
     selected_clip: usize,
     preview_yaw_q12: i32,
@@ -406,6 +409,7 @@ impl Default for ModelImportDialog {
             texture_height: 128,
             animation_fps: 15,
             world_height: 1024,
+            collision_radius: default_model_collision_radius_for_height(1024) as i32,
             normalize_root_translation: true,
             selected_clip: 0,
             preview_yaw_q12: 340,
@@ -1508,6 +1512,7 @@ impl EditorWorkspace {
             snap_units: 16,
             show_grid: true,
             preview_fog: true,
+            preview_backface_wireframe: true,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
@@ -2789,10 +2794,28 @@ impl EditorWorkspace {
                         });
                         ui.horizontal(|ui| {
                             ui.label("World height");
-                            ui.add(
+                            let previous_height = dialog.world_height.clamp(128, 8192) as u16;
+                            let previous_default_radius =
+                                default_model_collision_radius_for_height(previous_height) as i32;
+                            let height_response = ui.add(
                                 egui::DragValue::new(&mut dialog.world_height)
                                     .range(128..=8192)
                                     .speed(16.0),
+                            );
+                            if height_response.changed()
+                                && dialog.collision_radius == previous_default_radius
+                            {
+                                dialog.collision_radius = default_model_collision_radius_for_height(
+                                    dialog.world_height.clamp(128, 8192) as u16,
+                                ) as i32;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Collision radius");
+                            ui.add(
+                                egui::DragValue::new(&mut dialog.collision_radius)
+                                    .range(1..=4096)
+                                    .speed(8.0),
                             );
                         });
                         ui.checkbox(
@@ -3105,6 +3128,15 @@ impl EditorWorkspace {
             config,
         ) {
             Ok(id) => {
+                let collision_radius = self
+                    .model_import_dialog
+                    .collision_radius
+                    .clamp(1, u16::MAX as i32) as u16;
+                if let Some(resource) = self.project.resource_mut(id) {
+                    if let ResourceData::Model(model) = &mut resource.data {
+                        model.collision_radius = collision_radius;
+                    }
+                }
                 self.replace_resource_selection(id);
                 self.clear_node_selection_state();
                 self.clear_primitive_selection_state();
@@ -3721,6 +3753,12 @@ impl EditorWorkspace {
     /// room's cooked `fog_enabled` setting.
     pub fn preview_fog_enabled(&self) -> bool {
         self.preview_fog
+    }
+
+    /// Whether the editor preview should draw passive outlines for
+    /// one-sided faces whose rendered side is currently culled.
+    pub fn preview_backface_wireframe_enabled(&self) -> bool {
+        self.preview_backface_wireframe
     }
 
     /// Currently-selected scene node. The frontend reads this so the
@@ -5451,6 +5489,7 @@ impl EditorWorkspace {
 
                 if let Some(floor) = &sector.floor {
                     let [nw, ne, se, sw] = horizontal_face_world_corners(bounds, floor.heights);
+                    let sidedness = material_sidedness(&self.project, floor.material);
                     let face = FaceRef {
                         room: room_id,
                         sx,
@@ -5461,13 +5500,14 @@ impl EditorWorkspace {
                         if floor.dropped_corner.is_some_and(|d| members.contains(&d)) {
                             continue;
                         }
-                        if let Some(t) = ray_triangle(origin, dir, a, b, c) {
+                        if let Some(t) = ray_triangle_sided(origin, dir, a, c, b, sidedness) {
                             consider(face, t);
                         }
                     }
                 }
                 if let Some(ceiling) = &sector.ceiling {
                     let [nw, ne, se, sw] = horizontal_face_world_corners(bounds, ceiling.heights);
+                    let sidedness = material_sidedness(&self.project, ceiling.material);
                     let face = FaceRef {
                         room: room_id,
                         sx,
@@ -5478,13 +5518,17 @@ impl EditorWorkspace {
                         if ceiling.dropped_corner.is_some_and(|d| members.contains(&d)) {
                             continue;
                         }
-                        if let Some(t) = ray_triangle(origin, dir, a, b, c) {
+                        if let Some(t) = ray_triangle_sided(origin, dir, a, b, c, sidedness) {
                             consider(face, t);
                         }
                     }
                 }
                 for dir_card in GridDirection::CARDINAL {
                     for (stack_idx, wall) in sector.walls.get(dir_card).iter().enumerate() {
+                        let sidedness = material_sidedness(&self.project, wall.material);
+                        if !wall_side_visible_from_camera(sidedness, bounds, dir_card, origin) {
+                            continue;
+                        }
                         let Some([bl, br, tr, tl]) =
                             wall_face_world_corners(bounds, dir_card, wall.heights)
                         else {
@@ -8121,6 +8165,11 @@ impl EditorWorkspace {
                 ui.add_enabled_ui(!self.view_2d, |ui| {
                     ui.toggle_value(&mut self.preview_fog, icons::label(icons::EYE, "Fog"))
                         .on_hover_text("Toggle authored room fog in the editor 3D preview.");
+                    ui.toggle_value(
+                        &mut self.preview_backface_wireframe,
+                        icons::label(icons::SCAN, "Backfaces"),
+                    )
+                    .on_hover_text("Toggle passive outlines for culled backfaces.");
                 });
                 ui.separator();
                 ui.add_enabled_ui(!self.view_2d, |ui| {
@@ -12078,6 +12127,16 @@ fn draw_model_resource_editor(
             let h_response = ui.add(egui::DragValue::new(&mut h).speed(8.0).range(0..=4096));
             if h_response.changed() {
                 model.world_height = h.clamp(0, u16::MAX as i32) as u16;
+                changed = true;
+            }
+
+            ui.add_space(4.0);
+            ui.label("Collision radius (engine units)");
+            let mut radius = model.collision_radius as i32;
+            let radius_response =
+                ui.add(egui::DragValue::new(&mut radius).speed(8.0).range(1..=4096));
+            if radius_response.changed() {
+                model.collision_radius = radius.clamp(1, u16::MAX as i32) as u16;
                 changed = true;
             }
 
@@ -17789,6 +17848,41 @@ fn wall_triangles(
     }
 }
 
+fn material_sidedness(
+    project: &ProjectDocument,
+    material: Option<ResourceId>,
+) -> MaterialFaceSidedness {
+    material
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Material(material) => Some(material.sidedness()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn wall_side_visible_from_camera(
+    sidedness: MaterialFaceSidedness,
+    bounds: GridCellBounds,
+    direction: GridDirection,
+    camera_position: [f32; 3],
+) -> bool {
+    let cam_x = camera_position[0];
+    let cam_z = camera_position[2];
+    let inside_distance = match direction {
+        GridDirection::North => bounds.z1 as f32 - cam_z,
+        GridDirection::East => bounds.x1 as f32 - cam_x,
+        GridDirection::South => cam_z - bounds.z0 as f32,
+        GridDirection::West => cam_x - bounds.x0 as f32,
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => return true,
+    };
+    match sidedness {
+        MaterialFaceSidedness::Both => true,
+        MaterialFaceSidedness::Back => inside_distance >= 0.0,
+        MaterialFaceSidedness::Front => inside_distance <= 0.0,
+    }
+}
+
 /// Index of the corner closest (3D distance) to `hit` among
 /// the four `corners`. Caller is responsible for the corner
 /// ordering convention -- `[NW, NE, SE, SW]` for floors /
@@ -17883,12 +17977,8 @@ const fn wall_edge_idx(idx: usize) -> WallEdge {
     }
 }
 
-/// Möller–Trumbore ray-triangle intersection. Returns the ray
-/// parameter `t` of the front-side hit, or `None` for misses /
-/// back-face hits / degenerate triangles. Front-side only because
-/// the editor draws every face once per OT slot -- picking the back
-/// of a wall would land on the *opposite* room's geometry, which
-/// reads as a bug to the user.
+/// Möller-Trumbore ray-triangle intersection. Returns the ray
+/// parameter `t`, or `None` for misses / degenerate triangles.
 fn ray_triangle(
     orig: [f32; 3],
     dir: [f32; 3],
@@ -17919,6 +18009,53 @@ fn ray_triangle(
         Some(t)
     } else {
         None
+    }
+}
+
+/// Same ray test, but applying the material side rule before the
+/// expensive barycentric checks. Horizontal grid faces use this so
+/// the Select tool passes through a face whose rendered side is
+/// currently culled.
+fn ray_triangle_sided(
+    orig: [f32; 3],
+    dir: [f32; 3],
+    v0: [f32; 3],
+    v1: [f32; 3],
+    v2: [f32; 3],
+    sidedness: MaterialFaceSidedness,
+) -> Option<f32> {
+    let edge1 = sub3(v1, v0);
+    let edge2 = sub3(v2, v0);
+    let h = cross3(dir, edge2);
+    let a = dot3(edge1, h);
+    if !ray_triangle_side_visible(sidedness, a) {
+        return None;
+    }
+    let f = 1.0 / a;
+    let s = sub3(orig, v0);
+    let u = f * dot3(s, h);
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = cross3(s, edge1);
+    let v = f * dot3(dir, q);
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = f * dot3(edge2, q);
+    if t > 1e-3 {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+fn ray_triangle_side_visible(sidedness: MaterialFaceSidedness, signed_area: f32) -> bool {
+    const EPS: f32 = 1e-6;
+    match sidedness {
+        MaterialFaceSidedness::Front => signed_area < -EPS,
+        MaterialFaceSidedness::Back => signed_area > EPS,
+        MaterialFaceSidedness::Both => signed_area.abs() >= EPS,
     }
 }
 
@@ -19488,6 +19625,83 @@ mod tests {
     }
 
     #[test]
+    fn select_pick_passes_through_culled_wall_back_side() {
+        let mut project = ProjectDocument::new("visible-pick");
+        let mut one_sided = MaterialResource::opaque(None);
+        one_sided.face_sidedness = MaterialFaceSidedness::Back;
+        one_sided.sync_legacy_sidedness();
+        let material = project.add_resource("one-sided", ResourceData::Material(one_sided));
+
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.add_wall(0, 0, GridDirection::North, 0, 1024, Some(material));
+        grid.add_wall(0, 0, GridDirection::South, 0, 1024, Some(material));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(room);
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
+        workspace.viewport_3d_free_initialized = true;
+        workspace.viewport_3d_free_position = [512, 512, 2048];
+        workspace.viewport_3d_free_yaw = 0;
+        workspace.viewport_3d_free_pitch = 0;
+
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
+        let (face, hit) = workspace
+            .pick_face_with_hit(rect, rect.center())
+            .expect("ray should pass through hidden north wall to visible south wall");
+
+        assert_eq!(
+            face.kind,
+            FaceKind::Wall {
+                dir: GridDirection::South,
+                stack: 0,
+            }
+        );
+        assert!(hit[2].abs() < 0.001, "expected south wall hit, got {hit:?}");
+    }
+
+    #[test]
+    fn select_pick_passes_through_culled_ceiling_to_visible_floor() {
+        let mut project = ProjectDocument::new("horizontal-visible-pick");
+        let mut one_sided = MaterialResource::opaque(None);
+        one_sided.face_sidedness = MaterialFaceSidedness::Front;
+        one_sided.sync_legacy_sidedness();
+        let material = project.add_resource("one-sided", ResourceData::Material(one_sided));
+
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, Some(material));
+        grid.ensure_sector(0, 0).unwrap().ceiling =
+            Some(GridHorizontalFace::flat(1024, Some(material)));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(room);
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
+        workspace.viewport_3d_free_initialized = true;
+        workspace.viewport_3d_free_position = [512, 2048, 512];
+        workspace.viewport_3d_free_yaw = 0;
+        workspace.viewport_3d_free_pitch = signed_to_q12(-64);
+
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
+        let (_, dir) = workspace
+            .camera_ray_for_pointer(rect, rect.center())
+            .unwrap();
+        assert!(dir[1] < -0.9, "expected downward ray, got {dir:?}");
+        let (face, hit) = workspace
+            .pick_face_with_hit(rect, rect.center())
+            .expect("ray should pass through hidden ceiling top to visible floor top");
+
+        assert_eq!(face.kind, FaceKind::Floor);
+        assert!(hit[1].abs() < 0.001, "expected floor hit, got {hit:?}");
+    }
+
+    #[test]
     fn command_modifier_blocks_bare_shortcuts() {
         assert!(bare_shortcuts_available(false, egui::Modifiers::NONE));
         assert!(!bare_shortcuts_available(true, egui::Modifiers::NONE));
@@ -19688,6 +19902,7 @@ mod tests {
                 default_clip: Some(0),
                 preview_clip: Some(0),
                 world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
                 scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
                 attachments: Vec::new(),
             }),
@@ -20590,6 +20805,7 @@ mod tests {
                 default_clip: None,
                 preview_clip: None,
                 world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
                 scale_q8: [MODEL_SCALE_ONE_Q8; 3],
                 attachments: Vec::new(),
             }),
