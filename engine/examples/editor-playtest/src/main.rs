@@ -525,6 +525,7 @@ fn decode_model_render_faces(
         return None;
     }
 
+    let (max_u, max_v) = model_render_uv_limits(model);
     let mut i = 0usize;
     while i < face_count {
         let face = model.face(i as u16)?;
@@ -534,12 +535,27 @@ fn decode_model_render_faces(
                 face.corners[1].vertex_index,
                 face.corners[2].vertex_index,
             ],
-            uvs: [face.corners[0].uv, face.corners[1].uv, face.corners[2].uv],
+            uvs: [
+                clamp_model_render_uv(face.corners[0].uv, max_u, max_v),
+                clamp_model_render_uv(face.corners[1].uv, max_u, max_v),
+                clamp_model_render_uv(face.corners[2].uv, max_u, max_v),
+            ],
         };
         i += 1;
     }
     *face_cursor += face_count;
     Some(face_count)
+}
+
+fn model_render_uv_limits(model: Model<'_>) -> (u8, u8) {
+    (
+        model.texture_width().saturating_sub(1).min(127) as u8,
+        model.texture_height().saturating_sub(1).min(127) as u8,
+    )
+}
+
+fn clamp_model_render_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
+    (uv.0.min(max_u), uv.1.min(max_v))
 }
 
 fn runtime_model_faces<'a>(
@@ -894,7 +910,8 @@ impl Scene for Playtest {
                         player.z.saturating_sub(active.offset_z),
                     );
                     let visibility =
-                        GridVisibility::around(visibility_anchor, ROOM_GRID_VISIBILITY_RADIUS);
+                        GridVisibility::around(visibility_anchor, ROOM_GRID_VISIBILITY_RADIUS)
+                            .with_screen_margin(0);
                     let mut cells = [GridVisibleCell::EMPTY; MAX_PRECOMPUTED_VISIBLE_CELLS];
                     let stats = if let Some(count) = fill_precomputed_visible_cells(
                         active.index,
@@ -2433,6 +2450,9 @@ impl RuntimeRoomLighting {
             self.point_lights(),
         )
         .to_tuple();
+        if !self.fog_enabled || self.fog_far <= self.fog_near {
+            return tint;
+        }
         let depth = self.camera.view_vertex(point.to_world_vertex()).z;
         apply_room_fog(
             tint,
@@ -2459,6 +2479,9 @@ impl RuntimeRoomLighting {
     }
 
     fn apply_vertex_fog(&self, rgb: [u8; 3], vertex: WorldVertex) -> (u8, u8, u8) {
+        if !self.fog_enabled || self.fog_far <= self.fog_near {
+            return rgb_tuple(rgb);
+        }
         let depth = self.camera.view_vertex(vertex).z;
         apply_room_fog(
             (rgb[0], rgb[1], rgb[2]),
@@ -2496,6 +2519,14 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
         material: WorldRenderMaterial,
     ) -> [(u8, u8, u8); 4] {
         if let Some(vertex_rgb) = sample.baked_vertex_rgb {
+            if !self.fog_enabled || self.fog_far <= self.fog_near {
+                return [
+                    rgb_tuple(vertex_rgb[0]),
+                    rgb_tuple(vertex_rgb[1]),
+                    rgb_tuple(vertex_rgb[2]),
+                    rgb_tuple(vertex_rgb[3]),
+                ];
+            }
             return [
                 self.apply_vertex_fog(vertex_rgb[0], vertices[0]),
                 self.apply_vertex_fog(vertex_rgb[1], vertices[1]),
