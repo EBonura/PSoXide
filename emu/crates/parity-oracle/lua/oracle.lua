@@ -849,13 +849,13 @@ local function run()
                         local cur_vblank = bit.band(istat_ptr[0], 0x1)
                         if cur_vblank ~= 0 and pad_prev_vblank == 0 then
                             pad_vblank_count = pad_vblank_count + 1
+                            ok, err = sync_pad_mask()
+                            if not ok then
+                                send("err run_checkpoint_pad: " .. tostring(err))
+                                break
+                            end
                         end
                         pad_prev_vblank = cur_vblank
-                        ok, err = sync_pad_mask()
-                        if not ok then
-                            send("err run_checkpoint_pad: " .. tostring(err))
-                            break
-                        end
                         if i % m == 0 then
                             local tick = tonumber(PCSX.getCPUCycles())
                             local pc = tonumber(regs.pc)
