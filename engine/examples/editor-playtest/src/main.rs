@@ -204,13 +204,10 @@ const OT_DEPTH: usize = 2048;
 const OT_DEPTH: usize = 1024;
 #[cfg(all(not(feature = "ot-2048"), not(feature = "ot-1024")))]
 const OT_DEPTH: usize = 512;
-/// Keep dynamic actors in the nearest ordering-table band so large
-/// split room quads cannot overpaint characters in the no-Z-buffer
-/// runtime. Room geometry starts after this reserved band.
-const ACTOR_BAND_BACK: usize = 63;
-const ROOM_BAND: DepthBand = DepthBand::new(ACTOR_BAND_BACK + 1, OT_DEPTH - 1);
-const SHADOW_BAND: DepthBand = DepthBand::new(ACTOR_BAND_BACK + 1, ACTOR_BAND_BACK + 1);
-const ACTOR_BAND: DepthBand = DepthBand::new(0, ACTOR_BAND_BACK);
+/// Room geometry, actors, and shadows share one depth band so walls can
+/// correctly overpaint the hidden parts of characters in the PS1
+/// painter's algorithm.
+const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
 const ROOM_GRID_VISIBILITY_RADIUS: u16 = 4;
@@ -849,15 +846,11 @@ impl Scene for Playtest {
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut triangles = unsafe { PrimitiveArena::new(&mut TEXTURED_TRIS) };
         let mut gouraud_triangles = unsafe { PrimitiveArena::new(&mut TEXTURED_GOURAUD_TRIS) };
-        // The vertical slice mixes room quads, model instances, and the
-        // player in the same playable space. Coarse bucket ordering is
-        // faster, but it produces visible doorway/wall artifacts when
-        // character triangles land in the same OT slot as room faces.
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
         if self.room.is_some() {
-            let room_options = WorldSurfaceOptions::new(ROOM_BAND, WORLD_DEPTH_RANGE);
-            let actor_options = WorldSurfaceOptions::new(ACTOR_BAND, WORLD_DEPTH_RANGE);
+            let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
+            let actor_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let mut total_instance_stats = ModelInstanceDrawStats::default();
 
             for active in self.active_rooms.iter().flatten().copied() {
@@ -2873,7 +2866,7 @@ fn draw_actor_shadow(
     let Some(projected) = camera.project_world_quad(verts) else {
         return;
     };
-    let shadow_options = WorldSurfaceOptions::new(SHADOW_BAND, WORLD_DEPTH_RANGE)
+    let shadow_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
         .with_depth_policy(DepthPolicy::Nearest)
         .with_depth_bias(SHADOW_DEPTH_BIAS.saturating_neg())
         .with_cull_mode(CullMode::None)
