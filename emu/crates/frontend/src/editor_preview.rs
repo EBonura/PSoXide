@@ -49,10 +49,9 @@ const TRI_CAP: usize = 4096;
 /// view where the front-to-back range is a small multiple of the
 /// sector size.
 const OT_DEPTH: usize = 256;
-const PREVIEW_ACTOR_BAND_BACK: usize = 63;
-const PREVIEW_SHADOW_SLOT: usize = PREVIEW_ACTOR_BAND_BACK + 1;
-const PREVIEW_ROOM_SLOT_MIN: usize = PREVIEW_SHADOW_SLOT + 1;
-const PREVIEW_ROOM_SLOT_MAX: usize = OT_DEPTH - 2;
+const PREVIEW_GEOMETRY_SLOT_MIN: usize = 1;
+const PREVIEW_GEOMETRY_SLOT_MAX: usize = OT_DEPTH - 2;
+const PREVIEW_SHADOW_DEPTH_BIAS: u32 = 128;
 const PREVIEW_SHADOW_FLOOR_LIFT: i32 = 4;
 const PREVIEW_SHADOW_RADIUS_SCALE_NUM: i32 = 5;
 const PREVIEW_SHADOW_RADIUS_SCALE_DEN: i32 = 4;
@@ -3087,7 +3086,7 @@ fn push_shadow_tex_tri(
             BlendMode::Average,
         )
         .with_raw_texture(true),
-        PREVIEW_SHADOW_SLOT,
+        shadow_depth_slot(projected_avg_sz(p)),
     )
 }
 
@@ -3157,11 +3156,19 @@ fn projected_avg_sz(p: [psx_gte::scene::Projected; 3]) -> u32 {
 }
 
 fn room_depth_slot(avg_sz: u32) -> usize {
-    ((avg_sz as usize) >> 6).clamp(PREVIEW_ROOM_SLOT_MIN, PREVIEW_ROOM_SLOT_MAX)
+    preview_geometry_depth_slot(avg_sz)
 }
 
 fn actor_depth_slot(avg_sz: u32) -> usize {
-    ((avg_sz as usize) >> 6).clamp(1, PREVIEW_ACTOR_BAND_BACK)
+    preview_geometry_depth_slot(avg_sz)
+}
+
+fn shadow_depth_slot(avg_sz: u32) -> usize {
+    preview_geometry_depth_slot(avg_sz.saturating_sub(PREVIEW_SHADOW_DEPTH_BIAS))
+}
+
+fn preview_geometry_depth_slot(avg_sz: u32) -> usize {
+    ((avg_sz as usize) >> 6).clamp(PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_GEOMETRY_SLOT_MAX)
 }
 
 #[cfg(test)]
@@ -3170,10 +3177,10 @@ mod tests {
         actor_depth_slot, face_side_visible, floor_anchored_model_origin, light_face,
         material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
         preview_player_reference, preview_shadow_radius, preview_static_model_reference,
-        push_wall_face, room_depth_slot, setup_gte_for_camera, should_draw_culled_face_outline,
-        FaceShade, MaterialSlot, PreviewFog, WallEdge, PREVIEW_ACTOR_BAND_BACK,
-        PREVIEW_ROOM_SLOT_MAX, PREVIEW_ROOM_SLOT_MIN, PREVIEW_SHADOW_RADIUS_MAX,
-        PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
+        push_wall_face, room_depth_slot, setup_gte_for_camera, shadow_depth_slot,
+        should_draw_culled_face_outline, FaceShade, MaterialSlot, PreviewFog, WallEdge,
+        PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
+        PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -3515,12 +3522,15 @@ mod tests {
     }
 
     #[test]
-    fn preview_depth_slots_keep_models_in_front_of_room_shadows() {
-        assert_eq!(actor_depth_slot(0), 1);
-        assert_eq!(actor_depth_slot(u32::MAX), PREVIEW_ACTOR_BAND_BACK);
-        assert_eq!(room_depth_slot(0), PREVIEW_ROOM_SLOT_MIN);
-        assert_eq!(room_depth_slot(u32::MAX), PREVIEW_ROOM_SLOT_MAX);
-        assert!(PREVIEW_ACTOR_BAND_BACK < PREVIEW_ROOM_SLOT_MIN);
+    fn preview_depth_slots_share_world_geometry_band() {
+        assert_eq!(actor_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
+        assert_eq!(room_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
+        assert_eq!(actor_depth_slot(u32::MAX), PREVIEW_GEOMETRY_SLOT_MAX);
+        assert_eq!(room_depth_slot(u32::MAX), PREVIEW_GEOMETRY_SLOT_MAX);
+        assert_eq!(actor_depth_slot(2048), room_depth_slot(2048));
+        assert!(shadow_depth_slot(2048) < room_depth_slot(2048));
+        assert_eq!(shadow_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
+        assert_eq!(PREVIEW_SHADOW_DEPTH_BIAS, 128);
     }
 
     #[test]
