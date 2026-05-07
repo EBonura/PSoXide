@@ -73,8 +73,8 @@ pub mod world_render;
 pub use angle::Angle;
 pub use app::{App, Config};
 pub use character_motor::{
-    CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
-    CharacterMotorInput, CharacterMotorState,
+    CharacterCollision, CharacterCollisionCylinder, CharacterMotorAction, CharacterMotorAnim,
+    CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
 };
 pub use fixed::{Q12, Q8};
 pub use frames::{Frames, Ticks};

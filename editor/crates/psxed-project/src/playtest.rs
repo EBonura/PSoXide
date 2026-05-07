@@ -1092,6 +1092,13 @@ fn register_model_for_instance(
         ));
         return None;
     }
+    if model.collision_radius == 0 {
+        report.error(format!(
+            "Model '{}' has zero collision radius; actor blockers must be at least 1 engine unit",
+            resource.name
+        ));
+        return None;
+    }
 
     let model_index = u16::try_from(models.len()).unwrap_or(u16::MAX);
     let safe = sanitise_model_dirname(&resource.name);
@@ -1341,6 +1348,7 @@ fn register_model_for_instance(
         socket_first,
         socket_count,
         world_height: model.world_height,
+        collision_radius: model.collision_radius,
     });
     model_for_resource.insert(model_resource_id, model_index);
     Some(model_index)
@@ -3212,6 +3220,10 @@ mod tests {
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
         assert_eq!(package.models.len(), 1);
+        assert_eq!(
+            package.models[0].collision_radius,
+            crate::default_model_collision_radius_for_height(package.models[0].world_height)
+        );
         assert_eq!(package.model_instances.len(), 0);
         assert!(!package.model_clips.is_empty());
         assert_eq!(package.model_mesh_asset_count(), 1);
@@ -4194,6 +4206,7 @@ mod tests {
         let (package, _) = build_package(&project, &starter_project_root());
         let src = render_manifest_source(&package.expect("cooks"));
         assert!(src.contains("LevelModelRecord"));
+        assert!(src.contains("collision_radius:"));
         assert!(src.contains("LevelModelInstanceRecord"));
         assert!(src.contains("LevelModelClipRecord"));
         assert!(src.contains("LevelModelClipBoundsRecord"));

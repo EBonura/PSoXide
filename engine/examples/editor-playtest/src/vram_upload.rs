@@ -16,6 +16,28 @@ pub(crate) fn upload_opaque_clut(rect: VramRect, bytes: &[u8]) {
     upload_clut_with_mode(rect, bytes, true);
 }
 
+/// Upload a CLUT for 8bpp model atlases. All palette entries are
+/// treated as opaque, including raw black entries. Imported model
+/// atlases often use duplicate black palette slots as intentional
+/// surface colours rather than transparency keys.
+pub(crate) fn upload_model_clut(rect: VramRect, bytes: &[u8]) {
+    let mut marked = [0u8; 512];
+    if bytes.len() > marked.len() || !bytes.len().is_multiple_of(2) {
+        return;
+    }
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let raw = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+        let pair = (raw | 0x8000).to_le_bytes();
+        marked[i] = pair[0];
+        marked[i + 1] = pair[1];
+        i += 2;
+    }
+
+    upload_bytes(rect, &marked[..bytes.len()]);
+}
+
 fn upload_clut_with_mode(rect: VramRect, bytes: &[u8], force_zero_opaque: bool) {
     let mut marked = [0u8; 512];
     if bytes.len() > marked.len() || !bytes.len().is_multiple_of(2) {
