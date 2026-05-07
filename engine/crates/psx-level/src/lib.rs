@@ -571,6 +571,9 @@ pub struct LevelModelRecord {
     /// Suggested world-space height (engine units) -- mirrors
     /// the `.psxmdl` header's `local_to_world` hint.
     pub world_height: u16,
+    /// Coarse actor collision radius (engine units). Runtime
+    /// gameplay treats placed models as vertical cylinders.
+    pub collision_radius: u16,
     /// Reserved.
     pub flags: u16,
 }
