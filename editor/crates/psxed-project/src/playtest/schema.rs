@@ -246,6 +246,9 @@ pub struct PlaytestModel {
     /// World-space height (engine units) -- propagated from the
     /// editor resource.
     pub world_height: u16,
+    /// Authored coarse collision radius (engine units) used by
+    /// the playtest actor-cylinder blocker.
+    pub collision_radius: u16,
 }
 
 /// One placed model instance. Coordinates are room-local

@@ -36,6 +36,13 @@ const ROOM_FIRST_TPAGE: u8 = 5;
 const ROOM_LAST_TPAGE: u8 = 15;
 const ROOM_CLUT_Y: u16 = 480;
 const ROOM_CLUT_HALFWORDS: u16 = 16;
+const SHADOW_TEXTURE_SIZE: usize = 64;
+const SHADOW_TPAGE_INDEX: u16 = 15;
+const SHADOW_TPAGE_X: u16 = SHADOW_TPAGE_INDEX * 64;
+const SHADOW_TPAGE_Y_BLOCK: u16 = 1;
+const SHADOW_TPAGE_Y: u16 = 256;
+const SHADOW_CLUT_X: u16 = 1008;
+const SHADOW_CLUT_Y: u16 = 479;
 
 /// Cached tpage/CLUT for one Material resource.
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +82,7 @@ pub struct EditorTextures {
     vram: Box<[u16]>,
     cache: HashMap<ResourceId, CacheEntry>,
     model_cache: HashMap<ResourceId, ModelAtlasCacheEntry>,
+    shadow_slot: MaterialSlot,
     /// Ordered material ids, texture paths, and fallback names used to
     /// populate the limited room-material VRAM band. Scene-used
     /// materials are prioritized ahead of unused library resources.
@@ -108,10 +116,15 @@ struct ModelAtlasCacheEntry {
 
 impl EditorTextures {
     pub fn new() -> Self {
-        Self {
+        let shadow_slot = MaterialSlot {
+            tpage_word: pack_tpage_word(SHADOW_TPAGE_INDEX, SHADOW_TPAGE_Y_BLOCK),
+            clut_word: pack_clut_word(SHADOW_CLUT_X, SHADOW_CLUT_Y),
+        };
+        let mut textures = Self {
             vram: vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize].into_boxed_slice(),
             cache: HashMap::new(),
             model_cache: HashMap::new(),
+            shadow_slot,
             room_signature: Vec::new(),
             // tpages 0..4 cover the framebuffer at x=0..256; the
             // editor paints into the 320×240 subrect of x=0..320,
@@ -123,7 +136,9 @@ impl EditorTextures {
             next_model_tpage_x: 0,
             // 8bpp CLUTs sit just below the 4bpp band.
             next_model_clut_y: 481,
-        }
+        };
+        textures.upload_shadow_texture();
+        textures
     }
 
     /// Borrow the VRAM array for `HwRenderer::render_frame`.
@@ -143,6 +158,12 @@ impl EditorTextures {
     /// or upload failed).
     pub fn model_atlas_slot(&self, id: ResourceId) -> Option<MaterialSlot> {
         self.model_cache.get(&id).map(|e| e.slot)
+    }
+
+    /// Dedicated 4bpp circular shadow texture used by the editor
+    /// preview's model-grounding decals.
+    pub fn shadow_slot(&self) -> MaterialSlot {
+        self.shadow_slot
     }
 
     /// Walk scene-used Materials first, then unused library Materials,
@@ -362,6 +383,29 @@ impl EditorTextures {
         }
     }
 
+    fn upload_shadow_texture(&mut self) {
+        let shadow = shadow_pattern();
+        let source_halfwords_per_row = SHADOW_TEXTURE_SIZE / 4;
+        for row in 0..SHADOW_TEXTURE_SIZE {
+            for hw in 0..source_halfwords_per_row {
+                let src = row * SHADOW_TEXTURE_SIZE + hw * 4;
+                let word = (shadow.pixels[src] as u16)
+                    | ((shadow.pixels[src + 1] as u16) << 4)
+                    | ((shadow.pixels[src + 2] as u16) << 8)
+                    | ((shadow.pixels[src + 3] as u16) << 12);
+                let vram_idx = (SHADOW_TPAGE_Y as usize + row) * VRAM_WIDTH as usize
+                    + SHADOW_TPAGE_X as usize
+                    + hw;
+                self.vram[vram_idx] = word;
+            }
+        }
+        for (i, &entry) in shadow.palette.iter().enumerate() {
+            let vram_idx =
+                (SHADOW_CLUT_Y as usize) * VRAM_WIDTH as usize + SHADOW_CLUT_X as usize + i;
+            self.vram[vram_idx] = entry;
+        }
+    }
+
     /// Walk every Model resource and ensure its atlas (if any)
     /// is uploaded into the dedicated 8bpp model atlas region.
     /// Models without `texture_path` get an empty cache entry so
@@ -435,6 +479,9 @@ impl EditorTextures {
             return None;
         }
         let aligned_tpage_x = align_up_to(self.next_model_tpage_x, HALFWORDS_PER_TPAGE);
+        if aligned_tpage_x >= SHADOW_TPAGE_X {
+            return None;
+        }
         if aligned_tpage_x as u32 + HALFWORDS_PER_TPAGE as u32 > VRAM_WIDTH {
             return None;
         }
@@ -469,7 +516,7 @@ impl EditorTextures {
         for i in 0..256 {
             let off = i * 2;
             let raw = u16::from_le_bytes([clut_bytes[off], clut_bytes[off + 1]]);
-            let marked = opaque_room_clut_entry(raw);
+            let marked = model_atlas_clut_entry(raw);
             let vram_idx = (clut_y as usize) * VRAM_WIDTH as usize + i;
             self.vram[vram_idx] = marked;
         }
@@ -794,6 +841,52 @@ fn default_pattern() -> ProceduralTexture {
     ProceduralTexture { pixels, palette }
 }
 
+fn shadow_pattern() -> ProceduralTexture {
+    let bayer: [[u8; 8]; 8] = [
+        [0, 48, 12, 60, 3, 51, 15, 63],
+        [32, 16, 44, 28, 35, 19, 47, 31],
+        [8, 56, 4, 52, 11, 59, 7, 55],
+        [40, 24, 36, 20, 43, 27, 39, 23],
+        [2, 50, 14, 62, 1, 49, 13, 61],
+        [34, 18, 46, 30, 33, 17, 45, 29],
+        [10, 58, 6, 54, 9, 57, 5, 53],
+        [42, 26, 38, 22, 41, 25, 37, 21],
+    ];
+    let mut pixels = vec![0u8; SHADOW_TEXTURE_SIZE * SHADOW_TEXTURE_SIZE];
+    let center = (SHADOW_TEXTURE_SIZE as f32 - 1.0) * 0.5;
+    let radius = 30.0f32;
+    let core_radius = 12.0f32;
+    for y in 0..SHADOW_TEXTURE_SIZE {
+        for x in 0..SHADOW_TEXTURE_SIZE {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let d = (dx * dx + dy * dy).sqrt();
+            let idx = if d >= radius {
+                0
+            } else {
+                let t = (1.0 - d / radius).max(0.0);
+                if d <= core_radius {
+                    5
+                } else {
+                    let coverage = ((t.powf(0.50) * 1.12).min(0.98) * 64.0).round() as u8;
+                    if bayer[y & 7][x & 7] >= coverage {
+                        0
+                    } else {
+                        (1.0 + t.powf(0.65) * 4.0).round().clamp(1.0, 5.0) as u8
+                    }
+                }
+            };
+            pixels[y * SHADOW_TEXTURE_SIZE + x] = idx;
+        }
+    }
+    let mut palette = [0u16; 16];
+    for (i, entry) in palette.iter_mut().enumerate().skip(1) {
+        let v = (1 + i / 4).clamp(1, 5) as u8;
+        *entry = psx_555((v << 3, v << 3, v << 3)) | 0x8000;
+    }
+    ProceduralTexture { pixels, palette }
+}
+
 /// Convert a 24-bit RGB triple to PSX 15bpp BGR555. Bit 15 (the STP
 /// flag) stays 0; semitransparency hits later via the polygon
 /// translucency bit, not the per-texel STP bit.
@@ -805,6 +898,10 @@ fn psx_555(rgb: (u8, u8, u8)) -> u16 {
 }
 
 fn opaque_room_clut_entry(raw: u16) -> u16 {
+    raw | 0x8000
+}
+
+fn model_atlas_clut_entry(raw: u16) -> u16 {
     raw | 0x8000
 }
 
@@ -853,8 +950,9 @@ fn align_up_to(value: u16, boundary: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_up_to, material_upload_plan, opaque_room_clut_entry, EditorTextures,
-        ROOM_TPAGE_HALFWORDS, ROOM_TPAGE_TEXEL_HEIGHT,
+        align_up_to, material_upload_plan, model_atlas_clut_entry, opaque_room_clut_entry,
+        EditorTextures, ROOM_TPAGE_HALFWORDS, ROOM_TPAGE_TEXEL_HEIGHT, SHADOW_CLUT_X,
+        SHADOW_CLUT_Y, SHADOW_TPAGE_X, SHADOW_TPAGE_Y,
     };
     use psx_gpu_render::VRAM_WIDTH;
     use psxed_project::{MaterialResource, NodeKind, ProjectDocument, ResourceData, WorldGrid};
@@ -920,8 +1018,29 @@ mod tests {
 
     #[test]
     fn imported_model_clut_uses_same_opaque_policy() {
-        assert_eq!(opaque_room_clut_entry(0), 0x8000);
-        assert_eq!(opaque_room_clut_entry(0x001F), 0x801F);
+        assert_eq!(model_atlas_clut_entry(0), 0x8000);
+        assert_eq!(model_atlas_clut_entry(0x0001), 0x8001);
+        assert_eq!(model_atlas_clut_entry(0x001F), 0x801F);
+        assert_eq!(model_atlas_clut_entry(0x0421), 0x8421);
+    }
+
+    #[test]
+    fn editor_shadow_texture_survives_room_material_refresh() {
+        let mut textures = EditorTextures::new();
+        let shadow_tex_idx =
+            (SHADOW_TPAGE_Y as usize + 31) * VRAM_WIDTH as usize + SHADOW_TPAGE_X as usize + 7;
+        let shadow_clut_idx = SHADOW_CLUT_Y as usize * VRAM_WIDTH as usize + SHADOW_CLUT_X as usize;
+
+        let texture_word = textures.vram[shadow_tex_idx];
+        let clut_word = textures.vram[shadow_clut_idx + 1];
+        assert_ne!(texture_word, 0);
+        assert_ne!(clut_word, 0);
+
+        let project = ProjectDocument::new("preview");
+        textures.refresh(&project, Path::new("."));
+
+        assert_eq!(textures.vram[shadow_tex_idx], texture_word);
+        assert_eq!(textures.vram[shadow_clut_idx + 1], clut_word);
     }
 
     #[test]
