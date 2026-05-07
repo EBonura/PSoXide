@@ -2655,6 +2655,11 @@ pub struct ModelResource {
     /// preview to size selection gizmos.
     #[serde(default = "default_model_world_height")]
     pub world_height: u16,
+    /// Authored coarse collision radius in engine units. The
+    /// runtime treats model actors as vertical cylinders for
+    /// PS1-scale movement/collision.
+    #[serde(default = "default_model_collision_radius")]
+    pub collision_radius: u16,
     /// Authored bake-time scale in Q8 fixed point (`256 = 1.0`).
     /// Stored as integers so project data mirrors the PS1/runtime
     /// constraint; any application to mesh data must happen during
@@ -2668,6 +2673,21 @@ pub struct ModelResource {
 
 const fn default_model_world_height() -> u16 {
     1024
+}
+
+const fn default_model_collision_radius() -> u16 {
+    default_model_collision_radius_for_height(default_model_world_height())
+}
+
+pub const fn default_model_collision_radius_for_height(world_height: u16) -> u16 {
+    let scaled = (world_height as u32 * 3) / 16;
+    if scaled < 80 {
+        80
+    } else if scaled > 384 {
+        384
+    } else {
+        scaled as u16
+    }
 }
 
 impl ModelResource {
@@ -5215,6 +5235,10 @@ mod tests {
         assert!(wraith.texture_path.is_some());
         assert!(wraith.clips.is_empty());
         assert_eq!(wraith.default_clip, Some(0));
+        assert_eq!(
+            wraith.collision_radius,
+            default_model_collision_radius_for_height(wraith.world_height)
+        );
         let resolved_clips = project.resolved_model_animation_clips(wraith_id);
         assert_eq!(resolved_clips.len(), 9);
         assert_eq!(resolved_clips[0].name, "Standalone FBX / neutral idle");
@@ -5518,6 +5542,7 @@ mod tests {
                 default_clip: Some(0),
                 preview_clip: Some(1),
                 world_height: 1280,
+                collision_radius: 240,
                 scale_q8: [
                     MODEL_SCALE_ONE_Q8,
                     MODEL_SCALE_ONE_Q8 * 2,
@@ -5541,6 +5566,7 @@ mod tests {
                 assert_eq!(m.default_clip, Some(0));
                 assert_eq!(m.preview_clip, Some(1));
                 assert_eq!(m.world_height, 1280);
+                assert_eq!(m.collision_radius, 240);
                 assert_eq!(
                     m.scale_q8,
                     [
@@ -5605,6 +5631,7 @@ mod tests {
                 default_clip: Some(0),
                 preview_clip: Some(0),
                 world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
                 scale_q8: [MODEL_SCALE_ONE_Q8; 3],
                 attachments: Vec::new(),
             }),
@@ -5824,6 +5851,7 @@ mod tests {
                 default_clip: Some(0),
                 preview_clip: Some(0),
                 world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
                 scale_q8: [MODEL_SCALE_ONE_Q8; 3],
                 attachments: Vec::new(),
             }),

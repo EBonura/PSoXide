@@ -18,6 +18,7 @@ pub struct ModelResource {
     pub default_clip: Option<u16>,
     pub preview_clip: Option<u16>,
     pub world_height: u16,
+    pub collision_radius: u16,              // actor-cylinder radius
 }
 
 pub struct ModelAnimationClip {
