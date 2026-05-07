@@ -298,10 +298,6 @@ fn clamp_model_uv_i32_component(value: i32, max: i32) -> i32 {
     }
 }
 
-fn pack_texcoord_word(u: u8, v: u8, extra: u16) -> u32 {
-    (u as u32) | ((v as u32) << 8) | ((extra as u32) << 16)
-}
-
 /// Per-joint world-to-view transform for one render frame.
 ///
 /// `submit_textured_model` fills one entry per skin joint up-front so
@@ -975,7 +971,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let uv0 = (clamp_u8(verts[0].u), clamp_u8(verts[0].v));
         let uv1 = (clamp_u8(verts[1].u), clamp_u8(verts[1].v));
         let uv2 = (clamp_u8(verts[2].u), clamp_u8(verts[2].v));
-        let Some(tri) = triangles.push(TriTextured::with_material(
+        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
             [
                 (verts[0].projected.sx, verts[0].projected.sy),
                 (verts[1].projected.sx, verts[1].projected.sy),
@@ -987,9 +983,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.primitive_overflow = true;
             return stats;
         };
-        tri.uv0_clut = pack_texcoord_word(uv0.0, uv0.1, material.clut_word());
-        tri.uv1_tpage = pack_texcoord_word(uv1.0, uv1.1, material.tpage_word());
-        tri.uv2 = pack_texcoord_word(uv2.0, uv2.1, 0);
 
         let depth = CameraDepth::new(
             options
@@ -1218,7 +1211,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let uv0 = (clamp_u8(verts[0].u), clamp_u8(verts[0].v));
         let uv1 = (clamp_u8(verts[1].u), clamp_u8(verts[1].v));
         let uv2 = (clamp_u8(verts[2].u), clamp_u8(verts[2].v));
-        let Some(tri) = triangles.push(TriTexturedGouraud::with_material(
+        let Some(tri) = triangles.push(TriTexturedGouraud::with_material_packet_texcoords(
             [
                 (verts[0].projected.sx, verts[0].projected.sy),
                 (verts[1].projected.sx, verts[1].projected.sy),
@@ -1231,9 +1224,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.primitive_overflow = true;
             return stats;
         };
-        tri.uv0_clut = pack_texcoord_word(uv0.0, uv0.1, material.clut_word());
-        tri.uv1_tpage = pack_texcoord_word(uv1.0, uv1.1, material.tpage_word());
-        tri.uv2 = pack_texcoord_word(uv2.0, uv2.1, 0);
 
         let depth = CameraDepth::new(
             options
@@ -1613,8 +1603,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.vertex_overflow = true;
         }
         stats.projected_vertices = project_count as u16;
-        let (max_u, max_v) = model_uv_limits(model);
-
         let mut part_index = 0;
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         while part_index < model.part_count() {
@@ -1695,41 +1683,38 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let mut face_index = 0usize;
             while face_index < faces.len() {
                 let face = faces[face_index];
-                faces_considered = faces_considered.saturating_add(1);
+                faces_considered = faces_considered.wrapping_add(1);
                 let ia = face.vertex_indices[0] as usize;
                 let ib = face.vertex_indices[1] as usize;
                 let ic = face.vertex_indices[2] as usize;
                 if ia >= project_count || ib >= project_count || ic >= project_count {
-                    stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
+                    stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
                     face_index += 1;
                     continue;
                 }
-                let uv0 = clamp_model_uv(face.uvs[0].0 as i32, face.uvs[0].1 as i32, max_u, max_v);
-                let uv1 = clamp_model_uv(face.uvs[1].0 as i32, face.uvs[1].1 as i32, max_u, max_v);
-                let uv2 = clamp_model_uv(face.uvs[2].0 as i32, face.uvs[2].1 as i32, max_u, max_v);
-                let a = ProjectedTexturedVertex::new(projected_vertices[ia], uv0.0, uv0.1);
-                let b = ProjectedTexturedVertex::new(projected_vertices[ib], uv1.0, uv1.1);
-                let c = ProjectedTexturedVertex::new(projected_vertices[ic], uv2.0, uv2.1);
+                let projected = [
+                    projected_vertices[ia],
+                    projected_vertices[ib],
+                    projected_vertices[ic],
+                ];
 
-                if a.projected.sz < camera.projection.near_z
-                    || b.projected.sz < camera.projection.near_z
-                    || c.projected.sz < camera.projection.near_z
+                if projected[0].sz < camera.projection.near_z
+                    || projected[1].sz < camera.projection.near_z
+                    || projected[2].sz < camera.projection.near_z
                 {
-                    stats.dropped_triangles = stats.dropped_triangles.saturating_add(1);
+                    stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
                     face_index += 1;
                     continue;
                 }
 
-                let tri_stats = self.submit_projected_model_triangle_fast(
+                if self.submit_projected_model_triangle_preclamped_fast(
                     triangles,
-                    [a, b, c],
+                    projected,
+                    face.uvs,
                     material,
                     options,
-                    max_u,
-                    max_v,
-                );
-                merge_textured_model_stats(&mut stats, tri_stats);
-                if stats.primitive_overflow || stats.command_overflow {
+                    &mut stats,
+                ) {
                     crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
                     emit_textured_model_detail_counters(
                         joint_count,
@@ -1743,6 +1728,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 face_index += 1;
             }
         } else {
+            let (max_u, max_v) = model_uv_limits(model);
             while part_index < model.part_count() {
                 let Some(part) = model.part(part_index) else {
                     break;
@@ -1835,6 +1821,53 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    fn submit_projected_model_triangle_preclamped_fast(
+        &mut self,
+        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        if projected_back_facing(verts) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return true;
+        }
+
+        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uvs,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return true;
+        };
+
+        let depth = CameraDepth::new(
+            ((verts[0].sz + verts[1].sz + verts[2].sz) / 3).saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        stats.submitted_triangles = stats.submitted_triangles.wrapping_add(1);
+        false
+    }
+
     fn submit_projected_model_triangle_fast(
         &mut self,
         triangles: &mut PrimitiveArena<'_, TriTextured>,
@@ -1903,7 +1936,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             verts[2].v as u8
         };
 
-        let Some(tri) = triangles.push(TriTextured::with_material(
+        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
             [
                 (verts[0].projected.sx, verts[0].projected.sy),
                 (verts[1].projected.sx, verts[1].projected.sy),
@@ -1917,9 +1950,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ..WorldRenderStats::default()
             };
         };
-        tri.uv0_clut = pack_texcoord_word(u0, v0, material.clut_word());
-        tri.uv1_tpage = pack_texcoord_word(u1, v1, material.tpage_word());
-        tri.uv2 = pack_texcoord_word(u2, v2, 0);
 
         let depth = CameraDepth::new(
             ((verts[0].projected.sz + verts[1].projected.sz + verts[2].projected.sz) / 3)
