@@ -31,7 +31,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use psx_level::{visibility_cell_flags, visibility_edge_flags};
+use psx_level::{sky_flags, visibility_cell_flags, visibility_edge_flags};
 use psxed_format::world as psxw;
 
 use crate::streaming::{plan_generated_chunks, StreamingChunkConfig};
@@ -271,6 +271,11 @@ pub fn build_package(
                 &mut visible_cells,
             );
 
+            let resolved_sky = scene
+                .world_sky_for_node(room_node.id)
+                .unwrap_or_default()
+                .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
+
             rooms.push(PlaytestRoom {
                 name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
                 world_asset_index,
@@ -282,6 +287,17 @@ pub fn build_package(
                 fog_rgb: chunk_grid.fog_color,
                 fog_near: chunk_grid.fog_near,
                 fog_far: chunk_grid.fog_far,
+                sky: PlaytestSky {
+                    top_rgb: resolved_sky.top_color,
+                    horizon_rgb: resolved_sky.horizon_color,
+                    bottom_rgb: resolved_sky.lower_color,
+                    horizon_percent: resolved_sky.horizon_percent,
+                    flags: if resolved_sky.enabled {
+                        sky_flags::ENABLED
+                    } else {
+                        0
+                    },
+                },
                 flags: if chunk_grid.fog_enabled {
                     psx_level::room_flags::FOG_ENABLED
                 } else {
@@ -2850,6 +2866,11 @@ mod tests {
         let package = package.expect("package returned on ok report");
         assert_eq!(package.rooms.len(), 1);
         assert_eq!(package.room_asset_count(), 1);
+        assert_eq!(
+            package.rooms[0].sky.flags & sky_flags::ENABLED,
+            sky_flags::ENABLED
+        );
+        assert_eq!(package.rooms[0].sky.horizon_percent, 58);
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
         assert!(!package.visible_cells.is_empty());
@@ -3343,6 +3364,8 @@ mod tests {
         assert!(src.contains("pub static ASSETS"));
         assert!(src.contains("pub static MATERIALS"));
         assert!(src.contains("pub static ROOMS"));
+        assert!(src.contains("LevelSkyRecord"));
+        assert!(src.contains("sky: LevelSkyRecord"));
         assert!(src.contains("pub static ROOM_VISIBILITY"));
         assert!(src.contains("pub static VISIBILITY_CELLS"));
         assert!(src.contains("pub static VISIBLE_CELLS"));
