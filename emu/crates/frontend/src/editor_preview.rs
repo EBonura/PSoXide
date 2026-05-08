@@ -3269,7 +3269,8 @@ fn push_tex_tri(
         scratch,
         p,
         uvs,
-        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint),
+        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+            .with_texture_window(slot.texture_window),
         room_depth_slot(avg_sz),
     )
 }
@@ -3807,6 +3808,7 @@ mod tests {
                 slot: MaterialSlot {
                     tpage_word: 0,
                     clut_word: 0,
+                    texture_window: psx_gpu::material::TextureWindow::NONE,
                     texture_width: 64,
                     texture_height: 64,
                 },
@@ -3826,6 +3828,7 @@ mod tests {
             slot: MaterialSlot {
                 tpage_word: 0,
                 clut_word: 0,
+                texture_window: psx_gpu::material::TextureWindow::NONE,
                 texture_width: 32,
                 texture_height: 32,
             },
@@ -3844,6 +3847,7 @@ mod tests {
             slot: MaterialSlot {
                 tpage_word: 0,
                 clut_word: 0,
+                texture_window: psx_gpu::material::TextureWindow::NONE,
                 texture_width: 32,
                 texture_height: 64,
             },
