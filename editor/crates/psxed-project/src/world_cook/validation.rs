@@ -51,7 +51,7 @@ pub(super) fn validate_grid_budget(grid: &WorldGrid) -> Result<(), WorldGridCook
             let Some(sector) = grid.sector(x, z) else {
                 continue;
             };
-            for direction in GridDirection::CARDINAL {
+            for direction in GridDirection::ALL {
                 let count = sector.walls.get(direction).len();
                 if count > MAX_WALL_STACK {
                     return Err(WorldGridCookError::WallStackExceeded {
@@ -92,9 +92,8 @@ pub(super) fn validate_no_duplicate_walls(grid: &WorldGrid) -> Result<(), WorldG
     use std::collections::HashMap;
 
     // Each entry: which (x, z, dir) was the first to claim a
-    // given physical edge. Diagonals don't share with anyone
-    // (and the cooker rejects them anyway via cook_walls), so
-    // they don't enter the map.
+    // given physical edge. Diagonals don't share a perimeter edge
+    // with neighboring cells, so they don't enter the map.
     let mut claims = HashMap::new();
     for x in 0..grid.width {
         for z in 0..grid.depth {
@@ -143,7 +142,7 @@ pub(super) fn validate_quantized_heights(grid: &WorldGrid) -> Result<(), WorldGr
             if let Some(face) = &sector.ceiling {
                 check_face_heights(x, z, WorldGridFaceKind::Ceiling, &face.heights)?;
             }
-            for direction in GridDirection::CARDINAL {
+            for direction in GridDirection::ALL {
                 for wall in sector.walls.get(direction) {
                     check_face_heights(x, z, WorldGridFaceKind::Wall(direction), &wall.heights)?;
                 }

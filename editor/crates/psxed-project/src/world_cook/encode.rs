@@ -18,8 +18,9 @@ pub(super) fn encode_cooked_world_grid_psxw(
 
     let mut sector_records = Vec::with_capacity(cooked.sectors.len() * world::SectorRecord::SIZE);
     let mut wall_records = Vec::new();
+    let mut horizontal_override_records = Vec::new();
 
-    for sector in &cooked.sectors {
+    for (sector_index, sector) in cooked.sectors.iter().enumerate() {
         let first_wall_index = wall_records.len() / world::WallRecord::SIZE;
         let first_wall = checked_u16(
             first_wall_index,
@@ -38,10 +39,23 @@ pub(super) fn encode_cooked_world_grid_psxw(
                 count: wall_end - wall_start,
             },
         )?;
+        if let Some(sector) = sector {
+            encode_sector_horizontal_overrides(
+                sector_index,
+                sector,
+                &mut horizontal_override_records,
+            )?;
+        }
         encode_sector_record(sector.as_ref(), first_wall, wall_count, &mut sector_records);
     }
 
     let wall_record_count = wall_records.len() / world::WallRecord::SIZE;
+    let horizontal_override_count = checked_u16(
+        horizontal_override_records.len() / world::HorizontalOverrideRecord::SIZE,
+        WorldGridCookError::EncodedWorldTooLarge {
+            bytes: horizontal_override_records.len(),
+        },
+    )?;
     let surface_light_records = if cooked.static_vertex_lighting {
         encode_surface_lights(cooked)
     } else {
@@ -57,6 +71,7 @@ pub(super) fn encode_cooked_world_grid_psxw(
     let payload_len = world::WorldHeader::SIZE
         + sector_records.len()
         + wall_records.len()
+        + horizontal_override_records.len()
         + surface_light_records.len();
     if payload_len > u32::MAX as usize {
         return Err(WorldGridCookError::EncodedWorldTooLarge { bytes: payload_len });
@@ -84,8 +99,11 @@ pub(super) fn encode_cooked_world_grid_psxw(
     }
     out.push(world_flags);
     out.extend_from_slice(&surface_light_count.to_le_bytes());
+    out.extend_from_slice(&horizontal_override_count.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&sector_records);
     out.extend_from_slice(&wall_records);
+    out.extend_from_slice(&horizontal_override_records);
     out.extend_from_slice(&surface_light_records);
     Ok(out)
 }
@@ -120,7 +138,7 @@ fn encode_sector_record(
             if floor.walkable {
                 flags |= world::sector_flags::FLOOR_WALKABLE;
             }
-            floor_split = split_id(floor.split);
+            floor_split = floor.split.psxw_id();
             floor_material = floor.material;
             floor_heights = floor.heights;
             floor_uvs = floor.uvs;
@@ -130,7 +148,7 @@ fn encode_sector_record(
             if ceiling.walkable {
                 flags |= world::sector_flags::CEILING_WALKABLE;
             }
-            ceiling_split = split_id(ceiling.split);
+            ceiling_split = ceiling.split.psxw_id();
             ceiling_material = ceiling.material;
             ceiling_heights = ceiling.heights;
             ceiling_uvs = ceiling.uvs;
@@ -153,6 +171,79 @@ fn encode_sector_record(
     }
     encode_uvs(floor_uvs, out);
     encode_uvs(ceiling_uvs, out);
+}
+
+fn encode_sector_horizontal_overrides(
+    sector_index: usize,
+    sector: &CookedGridSector,
+    out: &mut Vec<u8>,
+) -> Result<(), WorldGridCookError> {
+    let sector_index = checked_u16(
+        sector_index,
+        WorldGridCookError::TooManySectors {
+            count: sector_index,
+        },
+    )?;
+    if let Some(floor) = sector.floor {
+        if horizontal_face_requires_override(floor) {
+            encode_horizontal_override(sector_index, world::horizontal_surface::FLOOR, floor, out);
+        }
+    }
+    if let Some(ceiling) = sector.ceiling {
+        if horizontal_face_requires_override(ceiling) {
+            encode_horizontal_override(
+                sector_index,
+                world::horizontal_surface::CEILING,
+                ceiling,
+                out,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn horizontal_face_requires_override(face: CookedGridHorizontalFace) -> bool {
+    let [a, b] = face.triangles;
+    !a.visible
+        || !b.visible
+        || a.material != face.material
+        || b.material != face.material
+        || a.uvs != face.uvs
+        || b.uvs != face.uvs
+        || a.walkable != face.walkable
+        || b.walkable != face.walkable
+}
+
+fn encode_horizontal_override(
+    sector_index: u16,
+    surface: u8,
+    face: CookedGridHorizontalFace,
+    out: &mut Vec<u8>,
+) {
+    out.extend_from_slice(&sector_index.to_le_bytes());
+    out.push(surface);
+    out.push(horizontal_flags(face.triangles));
+    out.extend_from_slice(&face.triangles[0].material.to_le_bytes());
+    out.extend_from_slice(&face.triangles[1].material.to_le_bytes());
+    encode_uvs(face.triangles[0].uvs, out);
+    encode_uvs(face.triangles[1].uvs, out);
+}
+
+fn horizontal_flags(triangles: [CookedGridHorizontalTriangle; 2]) -> u8 {
+    let mut flags = 0u8;
+    if triangles[0].visible {
+        flags |= world::horizontal_flags::TRI_A_PRESENT;
+    }
+    if triangles[1].visible {
+        flags |= world::horizontal_flags::TRI_B_PRESENT;
+    }
+    if triangles[0].visible && triangles[0].walkable {
+        flags |= world::horizontal_flags::TRI_A_WALKABLE;
+    }
+    if triangles[1].visible && triangles[1].walkable {
+        flags |= world::horizontal_flags::TRI_B_WALKABLE;
+    }
+    flags
 }
 
 fn encode_sector_walls(
@@ -187,7 +278,7 @@ fn encode_sector_walls(
             });
             out.extend_from_slice(&0u16.to_le_bytes());
             out.extend_from_slice(&wall.material.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&wall.shape.to_le_bytes());
             for height in wall.heights {
                 out.extend_from_slice(&height.to_le_bytes());
             }
@@ -244,13 +335,6 @@ fn encode_uvs(uvs: [(u8, u8); 4], out: &mut Vec<u8>) {
 fn encode_light(vertex_rgb: [[u8; 3]; 4], out: &mut Vec<u8>) {
     for rgb in vertex_rgb {
         out.extend_from_slice(&rgb);
-    }
-}
-
-const fn split_id(split: GridSplit) -> u8 {
-    match split {
-        GridSplit::NorthWestSouthEast => world::split::NORTH_WEST_SOUTH_EAST,
-        GridSplit::NorthEastSouthWest => world::split::NORTH_EAST_SOUTH_WEST,
     }
 }
 
