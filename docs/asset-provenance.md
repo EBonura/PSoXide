@@ -67,6 +67,7 @@ via the editor's texture cooker (`make assets`).
 | `assets/textures/floor.psxt` | Cooked from `floor.jpg` | (derived) | Pexels License (inherited) |
 | `editor/projects/default/assets/textures/brick-wall.psxt` | Cooked copy of `brick-wall.jpg` for the default editor project | (derived) | Pexels License (inherited) |
 | `editor/projects/default/assets/textures/floor.psxt` | Cooked copy of `floor.jpg` for the default editor project | (derived) | Pexels License (inherited) |
+| `editor/projects/default/assets/textures/torment_*.psxt` | Cooked/downsampled from Torment Textures v1.1 true-colour PNGs (`str_stonebrk1..4`, `str_stoneflr1..4`, `str_stonegen1..6`, `str_stonewall1..4`, `str_stonerubble`, `str_rotwoodgen1..3`, `{str_grating1..3`, `str_wasteland1..6`) | Torment Textures by Bradley D. ([Strideh](https://strideh.itch.io)) | Torment Textures license: commercial/free use, modification, and open-source distribution permitted with attribution; standalone asset resale and generative AI training use prohibited |
 | `assets/models/*/*.psxt` (model textures) | See "3D Models" above | (Meshy) | User-owned per Meshy premium plan terms; distributed here under GPL-2.0-or-later |
 
 The Pexels License (https://www.pexels.com/license/) permits free

@@ -79,6 +79,15 @@ pub(crate) fn stick_axis_delta(axis: InputAxis, max_step: i16) -> i16 {
     axis.scaled_step(camera_axis_profile(), max_step)
 }
 
+pub(crate) fn scale_i16_by_vblanks(value: i16, delta_vblanks: u16) -> i16 {
+    let scaled = (value as i32).saturating_mul(delta_vblanks.max(1) as i32);
+    clamp_i16(scaled)
+}
+
+pub(crate) fn scale_i32_by_vblanks(value: i32, delta_vblanks: u16) -> i32 {
+    value.saturating_mul(delta_vblanks.max(1) as i32)
+}
+
 fn move_axis_profile() -> InputAxisProfile {
     InputAxisProfile::new(MOVE_STICK_DEADZONE, STICK_MAX)
 }

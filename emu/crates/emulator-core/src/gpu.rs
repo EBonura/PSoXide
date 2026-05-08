@@ -1286,6 +1286,7 @@ impl Gpu {
         let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
         let w = (size & 0xFFFF) as i32;
         let h = ((size >> 16) & 0xFFFF) as i32;
+        self.maybe_trace_mono_rect("var", cmd, pos, Some(size), x, y, w, h, color, mode);
         self.paint_rect(x, y, w, h, color, mode);
     }
 
@@ -1297,7 +1298,61 @@ impl Gpu {
         let pos = self.gp0_fifo[1];
         let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
         let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
+        self.maybe_trace_mono_rect("fixed", cmd, pos, None, x, y, w, h, color, mode);
         self.paint_rect(x, y, w, h, color, mode);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn maybe_trace_mono_rect(
+        &self,
+        kind: &str,
+        cmd: u32,
+        pos: u32,
+        size: Option<u32>,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        color: u16,
+        mode: BlendMode,
+    ) {
+        let Some(min_area) = trace_mono_rect_min_area() else {
+            return;
+        };
+        let left = x.max(self.draw_area_left as i32);
+        let top = y.max(self.draw_area_top as i32);
+        let right = (x + w - 1).min(self.draw_area_right as i32);
+        let bottom = (y + h - 1).min(self.draw_area_bottom as i32);
+        if left > right || top > bottom {
+            return;
+        }
+        let clipped_w = right - left + 1;
+        let clipped_h = bottom - top + 1;
+        let clipped_area = clipped_w.saturating_mul(clipped_h);
+        if clipped_area < min_area {
+            return;
+        }
+        let trace_index = trace_mono_rect_count();
+        if trace_index >= trace_mono_rect_limit() {
+            return;
+        }
+        eprintln!(
+            "[gpu-trace] mono_rect #{trace_index} kind={kind} op=0x{:02x} cmd=0x{cmd:08x} pos=0x{pos:08x} size={} xy=({x},{y}) wh={}x{} clip=({left},{top}) {}x{} area={} color=0x{color:04x} mode={mode:?} draw_area=({},{}..{}, {}) offset=({}, {})",
+            cmd >> 24,
+            size.map(|word| format!("0x{word:08x}"))
+                .unwrap_or_else(|| "-".to_string()),
+            w,
+            h,
+            clipped_w,
+            clipped_h,
+            clipped_area,
+            self.draw_area_left,
+            self.draw_area_top,
+            self.draw_area_right,
+            self.draw_area_bottom,
+            self.draw_offset_x,
+            self.draw_offset_y
+        );
     }
 
     /// Variable-size textured rect. Words: `[cmd+tint, xy, clut+uv, wh]`.
@@ -1496,6 +1551,48 @@ impl Gpu {
         let right = (x + w - 1).min(self.draw_area_right as i32);
         let bottom = (y + h - 1).min(self.draw_area_bottom as i32);
         if left > right || top > bottom {
+            return;
+        }
+        if self.pixel_owner.is_none() {
+            if mode == BlendMode::Opaque && !self.mask_check_before_draw {
+                let color = if self.mask_set_on_draw {
+                    color | 0x8000
+                } else {
+                    color
+                };
+                self.vram.fill_rect_unwrapped(
+                    left as u16,
+                    top as u16,
+                    right as u16,
+                    bottom as u16,
+                    color,
+                );
+                return;
+            }
+
+            let left = left as usize;
+            let right = right as usize;
+            let top = top as usize;
+            let bottom = bottom as usize;
+            let set_mask = self.mask_set_on_draw;
+            let check_mask = self.mask_check_before_draw;
+            for py in top..=bottom {
+                let row_start = py * VRAM_WIDTH;
+                for existing in &mut self.vram.words_mut()[row_start + left..=row_start + right] {
+                    if check_mask && *existing & 0x8000 != 0 {
+                        continue;
+                    }
+                    let mut pixel = if mode == BlendMode::Opaque {
+                        color
+                    } else {
+                        blend_pixel(*existing, color, mode)
+                    };
+                    if set_mask {
+                        pixel |= 0x8000;
+                    }
+                    *existing = pixel;
+                }
+            }
             return;
         }
         for py in top..=bottom {
@@ -3122,6 +3219,30 @@ fn sign_extend_11(v: i32) -> i32 {
     }
 }
 
+fn trace_mono_rect_min_area() -> Option<i32> {
+    static VALUE: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("PSOXIDE_TRACE_MONO_RECT_MIN_AREA")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+    })
+}
+
+fn trace_mono_rect_limit() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("PSOXIDE_TRACE_MONO_RECT_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(128)
+    })
+}
+
+fn trace_mono_rect_count() -> usize {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Convert a 24-bit RGB value (as written by the CPU in GP0 packets)
 /// into the 15-bit BGR word VRAM stores. Matches Redux / PS1
 /// hardware: the 3 high bits of each channel are discarded.
@@ -3835,6 +3956,24 @@ mod tests {
         gpu.write32(GP0_ADDR, 0xE600_0002); // check-before-draw
         gpu.plot_pixel(30, 30, 0x5678, BlendMode::Opaque);
         assert_eq!(gpu.vram.get_pixel(30, 30), 0x5678);
+    }
+
+    #[test]
+    fn paint_rect_span_path_preserves_blend_and_mask_rules() {
+        let mut gpu = Gpu::new();
+        let bg = 10 | (10 << 5) | (10 << 10);
+        let fg = 20 | (20 << 5) | (20 << 10);
+        gpu.vram.set_pixel(10, 10, bg);
+        gpu.vram.set_pixel(11, 10, 0x8000 | 0x1234);
+        gpu.write32(GP0_ADDR, 0xE600_0003); // set-on-draw + check-before-draw
+
+        gpu.paint_rect(10, 10, 2, 1, fg, BlendMode::AddQuarter);
+
+        assert_eq!(
+            gpu.vram.get_pixel(10, 10),
+            0x8000 | blend_pixel(bg, fg, BlendMode::AddQuarter)
+        );
+        assert_eq!(gpu.vram.get_pixel(11, 10), 0x8000 | 0x1234);
     }
 
     #[test]

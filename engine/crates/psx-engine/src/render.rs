@@ -293,6 +293,17 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         Self { ot }
     }
 
+    /// Continue inserting into an already-started ordering table.
+    ///
+    /// This is for bridge code that still owns legacy OT emission but
+    /// wants an engine render pass to append packets into that same
+    /// frame. Callers are responsible for clearing `ot` before the
+    /// first packet of the frame.
+    pub fn resume(ot: &'a mut OrderingTable<DEPTH>) -> Self {
+        debug_assert!(DEPTH > 0);
+        Self { ot }
+    }
+
     /// Insert a primitive at a raw OT slot.
     pub fn add<T>(&mut self, slot: usize, prim: &mut T, words: u8) {
         debug_assert!(words <= 15);

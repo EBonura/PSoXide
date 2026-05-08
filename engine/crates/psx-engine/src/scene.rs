@@ -91,8 +91,10 @@ pub trait Scene {
     #[allow(unused_variables)]
     fn init(&mut self, ctx: &mut Ctx) {}
 
-    /// Advance game state by one frame. Called before [`render`].
-    /// Read pad input from `ctx`, write your internal state.
+    /// Advance game state for the current display-time snapshot.
+    /// Called before [`render`]. Read pad input from `ctx`, use
+    /// `ctx.time.delta_vblanks()` for elapsed display ticks, and
+    /// write your internal state.
     ///
     /// [`render`]: Scene::render
     fn update(&mut self, ctx: &mut Ctx);

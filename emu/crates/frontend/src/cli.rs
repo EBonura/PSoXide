@@ -361,6 +361,18 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus.cdrom.insert_disc(Some(disc));
             eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
         }
+        "ccd" => {
+            let disc = psoxide_settings::library::load_disc_from_ccd(&game_path)?;
+            maybe_fast_boot_disc(
+                &mut bus,
+                &mut cpu,
+                &disc,
+                &game_path,
+                settings.emulator.fast_boot_disc && !args.bios_boot,
+            );
+            bus.cdrom.insert_disc(Some(disc));
+            eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
+        }
         other => {
             return Err(format!("unsupported file extension: .{other}"));
         }
@@ -531,6 +543,7 @@ fn kind_label(k: GameKind) -> &'static str {
         GameKind::DiscBin => "disc-bin",
         GameKind::DiscIso => "disc-iso",
         GameKind::DiscCue => "disc-cue",
+        GameKind::DiscCcd => "disc-ccd",
         GameKind::Exe => "homebrew",
         GameKind::Unknown => "unknown",
     }
