@@ -383,6 +383,9 @@ pub struct CookedGridHorizontalTriangle {
     pub material: u16,
     /// Runtime UVs `[NW, NE, SE, SW]` for this split triangle.
     pub uvs: [(u8, u8); 4],
+    /// Runtime triangle-local heights in this split triangle's
+    /// corner order.
+    pub heights: [i32; 3],
     /// Whether collision treats this split triangle as walkable.
     pub walkable: bool,
 }
@@ -392,6 +395,7 @@ impl CookedGridHorizontalTriangle {
         visible: false,
         material: world::NO_MATERIAL,
         uvs: world::FLOOR_UVS,
+        heights: [0; 3],
         walkable: false,
     };
 }
@@ -751,10 +755,29 @@ fn cook_horizontal_triangles(
                 face.triangle_uv(editor_index)
                     .apply_to_quad(world::FLOOR_UVS),
             ),
+            heights: runtime_horizontal_triangle_heights(face, editor_index),
             walkable: face.triangle_walkable(editor_index),
         };
     }
     Ok(triangles)
+}
+
+fn runtime_horizontal_triangle_heights(face: &GridHorizontalFace, editor_index: usize) -> [i32; 3] {
+    let runtime_split = runtime_horizontal_split(face.split);
+    let runtime_index = runtime_horizontal_triangle_index(editor_index);
+    let editor_corners = crate::horizontal_triangle_corners(face.split, editor_index);
+    let editor_heights = face.triangle_heights(editor_index);
+    let mut editor_quad = face.heights;
+    for (corner, height) in editor_corners.into_iter().zip(editor_heights) {
+        editor_quad[corner.idx()] = height;
+    }
+    let runtime_quad = runtime_horizontal_heights(editor_quad);
+    let runtime_corners = crate::horizontal_triangle_corners(runtime_split, runtime_index);
+    [
+        runtime_quad[runtime_corners[0].idx()],
+        runtime_quad[runtime_corners[1].idx()],
+        runtime_quad[runtime_corners[2].idx()],
+    ]
 }
 
 const fn runtime_horizontal_triangle_index(editor_index: usize) -> usize {
