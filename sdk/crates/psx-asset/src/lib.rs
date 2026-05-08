@@ -794,8 +794,18 @@ impl<'a> Animation<'a> {
         if frame_index >= self.frame_count || joint_index >= self.joint_count {
             return None;
         }
-        let flat = frame_index as usize * self.joint_count as usize + joint_index as usize;
-        let base = flat * psxed_format::animation::POSE_RECORD_SIZE;
+        let base = frame_index as usize
+            * self.joint_count as usize
+            * psxed_format::animation::POSE_RECORD_SIZE;
+        self.pose_at_frame_offset(base, joint_index)
+    }
+
+    fn pose_at_frame_offset(&self, frame_offset: usize, joint_index: u16) -> Option<JointPose> {
+        if joint_index >= self.joint_count {
+            return None;
+        }
+        let base = frame_offset
+            .checked_add(joint_index as usize * psxed_format::animation::POSE_RECORD_SIZE)?;
         let bytes = self
             .poses
             .get(base..base + psxed_format::animation::POSE_RECORD_SIZE)?;
@@ -854,6 +864,12 @@ impl<'a> Animation<'a> {
             animation: *self,
             base_frame,
             next_frame,
+            base_frame_offset: base_frame as usize
+                * self.joint_count as usize
+                * psxed_format::animation::POSE_RECORD_SIZE,
+            next_frame_offset: next_frame as usize
+                * self.joint_count as usize
+                * psxed_format::animation::POSE_RECORD_SIZE,
             alpha_q12: (frame_q12 & 0x0fff) as u16,
         })
     }
@@ -865,6 +881,8 @@ pub struct AnimationPoseSample<'a> {
     animation: Animation<'a>,
     base_frame: u16,
     next_frame: u16,
+    base_frame_offset: usize,
+    next_frame_offset: usize,
     alpha_q12: u16,
 }
 
@@ -872,11 +890,17 @@ impl AnimationPoseSample<'_> {
     /// Joint pose at this sample's precomputed looping phase.
     pub fn pose(&self, joint_index: u16) -> Option<JointPose> {
         if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
-            return self.animation.pose(self.base_frame, joint_index);
+            return self
+                .animation
+                .pose_at_frame_offset(self.base_frame_offset, joint_index);
         }
 
-        let a = self.animation.pose(self.base_frame, joint_index)?;
-        let b = self.animation.pose(self.next_frame, joint_index)?;
+        let a = self
+            .animation
+            .pose_at_frame_offset(self.base_frame_offset, joint_index)?;
+        let b = self
+            .animation
+            .pose_at_frame_offset(self.next_frame_offset, joint_index)?;
         Some(lerp_pose_q12(a, b, self.alpha_q12))
     }
 }

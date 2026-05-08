@@ -149,6 +149,8 @@ the shared issue instead of inventing a per-game bug.
 | 2026-05-05 | Route matrix canaries for CTR and Metal Slug X. | `commercial_route_matrix --disc CTR.cue --disc MetalSlugX.cue --steps 300000000 --report-dir target/commercial-route-matrix/canaries-20260505` | CTR remains `boot/license` at the SCEA splash (`0xbfb9bb04fb7042d8`). Metal Slug X becomes `route-progress` with generic input, reaches a loading screen (`0x36cb4b8cb6c42d59`), and still needs gameplay confirmation plus Redux parity. | `target/commercial-route-matrix/canaries-20260505/SUMMARY.md`; `target/commercial-route-matrix/canaries-20260505/matrix.csv` |
 | 2026-05-05 | Full local route matrix, 16 discovered sheets. | `commercial_route_matrix --root ~/Downloads/ps1 games --steps 300000000 --wall-timeout-secs 120 --report-dir target/commercial-route-matrix/local-300m-20260505` | No title is playable yet. Buckets: `render/gpu=4`, `fmv/mdec=4`, `unknown=3`, `boot/license=2`, `route-progress=1`, `menu-input=1`, `loader=1`. Every row includes the next `local_lockstep_sweep` parity command. | `target/commercial-route-matrix/local-300m-20260505/SUMMARY.md`; `target/commercial-route-matrix/local-300m-20260505/matrix.csv` |
 | 2026-05-05 | CTR routed parity harness smoke. | `local_lockstep_sweep --disc CTR.cue --steps 10000000 --interval 1000000 --no-visual --pad-pulses ...` followed by streaming-harness regression smokes with `--redux-timeout-secs 60 --redux-wall-timeout-secs 120`. | CTR route CPU state matches Redux through 10M routed user steps. This does not reach gameplay; it validates the route/parity plumbing before longer SCEA-splash first-break sweeps. | `target/local-lockstep/ctr-smoke-10m-20260505/SUMMARY.txt`; `target/local-lockstep/ctr-stream-wall-smoke-1m-20260505/SUMMARY.txt` |
+| 2026-05-06 | Resident Evil 2 exact route drift probe. | `probe_raw_irq_trace 266946809 RE2.cue` plus dense `local_lockstep_sweep --steps 267500000 --interval 50000 --no-visual --pad-pulses ...` | The old `(266M, 267M]` tick-only drift is fixed. The next first break is now exact: checkpoint window `(267150000, 267200000]`, exact step `267175364`, ours `tick=608965378`, Redux `tick=608965346`, same `pc=0x8008602c` and instruction. Local folded-step evidence shows a VBlank IRQ entry with `I_STAT=0x001`, `raw_isr=10362`, delta `22849`, and `2123` memory-access cycles. | `target/re2-diagnostics/re2-local-fold-after-no-dsr-timeout.trace`; `target/re2-diagnostics/re2-redux-fold.trace`; `target/re2-diagnostics/re2-local-vblank-267175364.trace`; `target/local-lockstep/re2-route-267m-single-after-sio-20260506/`; `target/local-lockstep/re2-route-267_5m-50k-after-sio-20260506/` |
+| 2026-05-06 | CTR and Metal Slug X canaries after SIO IRQ fix. | `commercial_route_matrix --disc CTR.cue --disc MetalSlugX.cue --steps 300000000 --report-dir target/commercial-route-matrix/canaries-after-sio-20260506` | No route promotion. CTR remains `boot/license` at the SCEA splash (`0xbfb9bb04fb7042d8`). Metal Slug X remains `route-progress` at the loading-screen state (`0x36cb4b8cb6c42d59`) and still needs gameplay confirmation plus Redux parity. | `target/commercial-route-matrix/canaries-after-sio-20260506/SUMMARY.md`; `target/commercial-route-matrix/canaries-after-sio-20260506/matrix.csv` |
 | 2026-05-06 | Metal Slug X target switch. | `commercial_route_matrix --disc MetalSlugX.cue --steps 530000000 --dump-visible`, `probe_fmv_path` with extended START/CROSS/DOWN pulses, and `local_lockstep_sweep` routed parity runs. | Stock route advances beyond the 300M loading-screen state to a 530M black visible frame: `render/gpu`, `display_hash=0x1100fdb97cd50325`, `pc=0x8006e5dc`, `vblank=2147`, CD data IRQs `955`, pad polls `1139`, MDEC MB `0`. Extended input changes the route after 400M and drives heavy GPU DMA, but after 500M host samples are dominated by `Gpu::paint_rect` semi-transparent monochrome rectangles. The Redux pad oracle now matches the same routed input through 100M checkpoints after moving pad-mask recomputation to VBlank edges. | `target/commercial-route-matrix/metal-slug-x-530m-after-rect-span-20260506/`; `target/metal-slug-x-500m-long-pulses.ppm`; `target/metal-slug-x-530m-after-rect-span.sample.txt`; `target/local-lockstep/metal-slug-x-route-100m-after-pad-oracle-20260506/` |
 
 Note: the 2026-05-05 sweep reports were generated before the harness
@@ -166,7 +168,7 @@ source of truth for those rows: framebuffer comparison was disabled.
 | 5 | Gran Turismo 2 | `Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-K stretch target. | No CPU or BIOS-logo visual break through 100M. | Plan a menu/race route and record its first parity break. |
 | 6 | Metal Gear Solid | `Metal Gear Solid (USA) (Disc 1) (Rev 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Milestone-G target. | No CPU or BIOS-logo visual break through 100M. | Route to first complex MDEC sequence and compare against Redux there. |
 | 7 | Metal Slug X | `Metal Slug X (USA).cue` | Route-progress/render blocked: without route input it reaches `NO METAL SLUG X DATA DETECTED. DATA LOAD CANCELED.`; with generic route input the matrix reaches a loading screen at 300M (`display_hash=0x36cb4b8cb6c42d59`) and then a black 320x240 visible frame at 530M (`display_hash=0x1100fdb97cd50325`). Routed BIOS parity now matches Redux through 100M checkpoints. | Data detection can be passed, but gameplay is not confirmed. The current local blocker is black-frame/render progress after 530M plus renderer throughput under heavy semi-transparent rectangle traffic. The next parity target is the 300M/530M route window, not oracle throughput. | Pin the 300M/530M route against Redux, add a Metal Slug X-specific gameplay guard, and inspect why the visible display start alternates between VRAM pages while the 530M visible page is black. |
-| 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Local cold-boot route reaches the first playable room at 2.2B user steps. Redux-backed route sweep is pinned to a 300M timing break before route input becomes active. | CPU/timing break in `(266M, 267M]`: ours `{tick:608542101 pc:0x8008605c state:64e648f7c3560511}`; Redux `{tick:608541699 pc:0x8008605c state:64e648f7c3560511}`. Visual skipped. | Refine the pre-input window with an exact no-pad trace, then inspect CD-ROM/DMA scheduler timing around RE2 executable startup and first MDEC stream setup. |
+| 8 | Resident Evil 2: Dual Shock Ver. | `Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue` | Swept to 100M CPU checkpoints with BIOS/Sony-logo visible framebuffer parity, `640x478`, `diff=0/611840`. Local cold-boot route reaches the first playable room at 2.2B user steps. The previously pinned `(266M, 267M]` timing drift is fixed in both exact folded-step tracing and a normal 267M routed Redux checkpoint. | Old break was SIO/controller IRQ timing during a BIOS SPU-DMA ISR. New post-fix first break is exact at step `267175364`: ours `tick=608965378`, Redux `tick=608965346`, same `pc=0x8008602c` and instruction. Local raw folded step enters VBlank IRQ with `I_STAT=0x001`, runs `10362` raw ISR instructions, and ends 32 cycles ahead of Redux. | Capture the equivalent Redux raw VBlank PC/memory trace, explain the +32-cycle delta, then extend toward the 2.2B first-room route and add a RE2-specific gameplay guard. |
 | 9 | Silent Hill | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 10 | Final Fantasy VII | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
 | 11 | Yu-Gi-Oh! Forbidden Memories | Not local | Not local. | No legal local image available for parity work. | Add only after legal local media exists. |
@@ -237,7 +239,87 @@ Subsystem hypothesis:
 Timing/scheduler drift, likely CD-ROM/DMA cadence during RE2 executable startup or first MDEC stream setup. This is not yet a renderer failure: the first pinned mismatch has identical PC and GPR/COP2 state hash.
 
 Next probe:
-Refine `(266M, 267M]` with exact instruction tracing, then correlate the first tick delta with CD-ROM IRQ counts, DMA start/finish cadence, and MDEC command submission.
+Superseded by the 2026-05-06 exact SIO fix below.
+
+### 2026-05-06 - Resident Evil 2 SIO IRQ timing drift fixed at exact step
+
+Disc:
+`/Users/ebonura/Downloads/ps1 games/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue`
+
+BIOS:
+`/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN`
+
+Redux:
+`/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux`
+
+Commands:
+`probe_raw_irq_trace 266946809 RE2.cue`
+
+`probe_redux_raw_step 266946809 RE2.cue` with the Redux C++ trace hook writing `target/re2-diagnostics/re2-redux-fold.trace`
+
+Steps / interval / visual:
+Exact folded user step after 266,946,809 completed user steps. Visual skipped.
+
+Last matching raw instruction:
+Local and Redux match instruction-for-instruction across the captured ISR window through Redux trace line 10,292.
+
+First old raw divergence:
+Before the fix, local branched on `I_STAT` bit 7 too early in the BIOS handler around `pc=0x80096ba8`, then raised extra SIO/controller interrupts while RE2 probed port 2.
+
+Fix:
+SIO scheduled events are delivered from the branch-boundary/post-op drain, and missing devices now return `0xff` without scheduling a no-device ACK/DSR IRQ. This mirrors Redux's port-2 no-controller behavior during RE2's BIOS pad poll.
+
+Post-fix exact result:
+Local finishes the folded ISR at `cycles=608395751`, delta `22909`, `pc=0x00001ea8`, `I_STAT=0x000`, matching the Redux tick that previously exposed the 402-cycle drift.
+
+Route sweep status:
+`local_lockstep_sweep --disc RE2.cue --steps 267000000 --interval 267000000 --exact-window 0 --no-visual --pad-pulses ... --redux-wall-timeout-secs 1800` matches Redux at 267M. The original `(266M, 267M]` route checkpoint break is fixed.
+
+Follow-up route status:
+`local_lockstep_sweep --disc RE2.cue --steps 270000000 --interval 10000000 --exact-window 10000 --no-visual --pad-pulses ... --redux-wall-timeout-secs 1800` reached checkpoint 27/27 and stopped on a coarse 270M mismatch. That run's exact refinement was manually stopped because the 10M interval only exact-traces the first 10k steps after 260M. A single 268M checkpoint then failed, while 267M passes. A 267.5M checkpoint failed tick-only, so the active first-break window became `(267M, 267.5M]`.
+
+267.5M mismatch:
+ours `{tick:609759007 pc:0x80086060 state:f8a29d610771d2d1}`; Redux `{tick:609754322 pc:0x80086060 state:f8a29d610771d2d1}`. This is tick-only again, with PSoXide 4,685 cycles ahead.
+
+Dense sweep:
+`local_lockstep_sweep --disc RE2.cue --steps 267500000 --interval 50000 --exact-window 50000 --no-visual --pad-pulses ... --redux-timeout-secs 1800 --redux-wall-timeout-secs 3600` narrows the first new break to checkpoint window `(267150000, 267200000]`.
+
+Exact new mismatch:
+`step 267175364`; ours `tick=608965378 pc=0x8008602c instr=0x00000000`; Redux `tick=608965346 pc=0x8008602c instr=0x00000000`. The PC and instruction still match, and the first reported delta is tick-only: PSoXide is 32 cycles ahead.
+
+Local VBlank folded-step probe:
+`probe_raw_irq_trace 267175363 RE2.cue` with the same pad pulses starts at `cycles=608942529`, `I_STAT=0x001`, `I_MASK=0x00d`, and enters the IRQ vector from `pc=0x8008602c`. Local finishes at `cycles=608965378`, `pc=0x8008605c`, `I_STAT=0x000`, with `raw_isr=10362`, delta `22849`, and `mem_access_cycles=2123`. The hot path is the BIOS `0x80096b30..0x80096bac` polling loop; top counts are 117/116 visits. Redux folded delta for the same step is `22817`, so the unexplained delta is exactly 32 cycles.
+
+268M mismatch:
+ours `{tick:610971271 pc:0x8008602c state:3826149412b538c4}`; Redux `{tick:610957346 pc:0x8008602c state:8cc64b3fdcce25ad}`. The PC still matches, but the state hash now differs, so this is a new post-SIO-fix divergence rather than the original tick-only drift.
+
+Canary status:
+CTR and Metal Slug X were rerun with `commercial_route_matrix` at 300M. CTR remains stuck on SCEA splash. Metal Slug X remains route-progress/loading-screen only.
+
+Artifacts:
+`target/re2-diagnostics/re2-local-fold-after-no-dsr-timeout.trace`
+
+`target/re2-diagnostics/re2-redux-fold.trace`
+
+`target/local-lockstep/re2-route-300m-after-sio-20260506/`
+
+`target/local-lockstep/re2-route-267m-single-after-sio-20260506/`
+
+`target/local-lockstep/re2-route-267_5m-single-after-sio-20260506/`
+
+`target/local-lockstep/re2-route-267_5m-50k-after-sio-20260506/`
+
+`target/re2-diagnostics/re2-local-vblank-267175364.trace`
+
+`target/local-lockstep/re2-route-268m-single-after-sio-20260506/`
+
+`target/commercial-route-matrix/canaries-after-sio-20260506/`
+
+Subsystem hypothesis:
+The fixed break is SIO/scheduler IRQ semantics, not CD-ROM or GPU. The next pinned RE2 break is VBlank/timer/CPU memory timing inside a long BIOS IRQ polling path; it is not currently a CD-ROM data-delivery break. The shared CTR/Metal Slug X canary blocker may still be CD-ROM/DMA/scheduler timing, but it did not move after the SIO fix.
+
+Next probe:
+Capture the equivalent Redux raw VBlank trace for cycles `608942529..608965346` and compare PC counts plus memory-cycle accounting against `target/re2-diagnostics/re2-local-vblank-267175364.trace`. Do not change CD-ROM/DMA cadence for this RE2 break until the 32-cycle VBlank delta is explained.
 
 ### 2026-05-06 - Metal Slug X route/render target
 
@@ -302,7 +384,6 @@ Next probe:
 Run the routed parity sweep to 300M, then compare the 525M-550M wait loop against Redux: if Redux keeps receiving CD sectors or exits the subtractive-rect loop, the owner is likely CD-ROM/DMA/scheduler. If Redux repeats the same loop, route input/game-specific menu state is the next suspect.
 
 ```text
-
 YYYY-MM-DD - Game title
 Disc:
 BIOS:

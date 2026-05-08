@@ -700,14 +700,14 @@ impl Bus {
     /// replaces a legacy timer with `scheduler.schedule(...)` and
     /// adds a `match` arm here.
     fn drain_scheduler_events_without_cdr_dma(&mut self) {
-        self.drain_scheduler_events_inner(false);
+        self.drain_scheduler_events_inner(false, false);
     }
 
     fn drain_scheduler_events(&mut self) {
-        self.drain_scheduler_events_inner(true);
+        self.drain_scheduler_events_inner(true, true);
     }
 
-    fn drain_scheduler_events_inner(&mut self, include_cdr_dma: bool) {
+    fn drain_scheduler_events_inner(&mut self, include_cdr_dma: bool, include_sio: bool) {
         use crate::scheduler::EventSlot;
         let now = self.cycles;
         let mut dma_edge = false;
@@ -735,31 +735,39 @@ impl Bus {
                 .schedule(EventSlot::VBlank, target, self.vblank_period);
         }
 
-        // SIO0 also fires inclusively: the legacy polling path used
-        // `deadline <= now`, so we keep that semantic to avoid an
-        // off-by-one parity drift on controller IRQ timing. Each
-        // service may set a new deadline (transfer → ack → ack-end);
-        // `service_sio0` reschedules accordingly via
-        // `reschedule_sio0_event`, so the loop drains chained
-        // transitions in one pass.
-        while self
-            .scheduler
-            .take_slot_due_inclusive(EventSlot::Sio, now)
-            .is_some()
-        {
-            self.service_sio0();
-            // If `service_sio0` chained a follow-up deadline that's
-            // also already due (e.g. transfer → ack within one
-            // dispatch), `take_slot_due_inclusive` picks it up on
-            // the next iteration. Otherwise the loop exits and the
-            // future deadline waits for its scheduled wake-up.
+        // SIO0 IRQ delivery follows Redux's interrupt queue: due SIO
+        // targets are processed at the branch-test/post-op drain, not
+        // from the per-instruction BIAS tick. Processing them from
+        // `Bus::tick` can make I_STAT bit 7 visible a few
+        // instructions early inside BIOS/game interrupt handlers
+        // (RE2's first route drift at 266,946,810).
+        if include_sio {
+            while self
+                .scheduler
+                .take_slot_due_inclusive(EventSlot::Sio, now)
+                .is_some()
+            {
+                self.service_sio0();
+                // If `service_sio0` chained a follow-up deadline
+                // that's also already due (e.g. transfer → ack
+                // within one dispatch), pick it up on the next
+                // iteration. Otherwise the future deadline waits for
+                // the next branch-test drain or an explicit SIO MMIO
+                // read/write.
+            }
         }
 
-        let cdr_dma_mask = 1 << EventSlot::CdrDma.bit();
-        while let Some((slot, target)) = if include_cdr_dma {
+        let mut exclude_mask = 0u32;
+        if !include_cdr_dma {
+            exclude_mask |= 1 << EventSlot::CdrDma.bit();
+        }
+        if !include_sio {
+            exclude_mask |= 1 << EventSlot::Sio.bit();
+        }
+        while let Some((slot, target)) = if exclude_mask == 0 {
             self.scheduler.take_due(now)
         } else {
-            self.scheduler.take_due_excluding(now, cdr_dma_mask)
+            self.scheduler.take_due_excluding(now, exclude_mask)
         } {
             match slot {
                 EventSlot::MdecInDma => {
@@ -2366,6 +2374,31 @@ mod tests {
     fn vblank_source_index_is_0() {
         // Sanity: IrqSource::VBlank is bit 0, matching Redux's setIrq(0x01).
         assert_eq!(IrqSource::VBlank as u32, 0);
+    }
+
+    #[test]
+    fn sio_irq_waits_for_branch_boundary_drain() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.sio0
+            .attach_port1(crate::pad::PortDevice::empty().with_pad(crate::pad::DigitalPad::new()));
+        bus.write16(Sio0::BASE + 0x0A, 0x1002); // JOYN_OUTPUT | ACK_IRQ_ENABLE
+        bus.write16(Sio0::BASE + 0x0E, 0x0001); // ACK after 8 cycles
+        bus.write8(Sio0::BASE, 0x01);
+
+        assert_eq!(bus.scheduler.target(EventSlot::Sio), Some(8));
+        bus.tick(9);
+        assert_eq!(
+            bus.irq.stat() & (1 << (IrqSource::Controller as u32)),
+            0,
+            "per-instruction BIAS ticks must not raise SIO IRQ early"
+        );
+
+        bus.drain_scheduler_events_post_op();
+        assert_ne!(
+            bus.irq.stat() & (1 << (IrqSource::Controller as u32)),
+            0,
+            "Redux raises the SIO IRQ from the branch-test interrupt queue"
+        );
     }
 
     #[test]
