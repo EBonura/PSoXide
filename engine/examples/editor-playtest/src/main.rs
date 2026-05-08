@@ -64,7 +64,7 @@ use psx_level::{
     ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
     WeaponHitShapeRecord,
 };
-use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
+use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
 
 mod input;
 mod overlay;
@@ -92,25 +92,24 @@ use generated::{
 // disjoint regions so a model atlas upload never overwrites a
 // room texture (and vice versa).
 //
-// Room materials: 4bpp pages starting at (640, 0), packed as 64x64
-// tiles inside each tpage. Each material carries GP0(E2)
-// texture-window state so authored UV repetition samples only its tile
-// instead of requiring physically repeated texels.
+// Room materials: 4bpp pages starting at (640, 0), packed on an
+// 8-texel grid inside each tpage. Each material carries GP0(E2)
+// texture-window state so authored UV repetition samples only its
+// allocation instead of requiring physically repeated texels.
 //
 // Model atlases: 8bpp pages starting at (384, 256), packed
 // left-to-right on 64-halfword boundaries. Each atlas gets a
 // tpage word matching its own VRAM origin, so mesh UVs stay local
 // to the atlas. One CLUT row per atlas starts at y=484 (below the
 // material CLUT band so the two never collide).
-const SHARED_TPAGE: Tpage = Tpage::new(640, 0, TexDepth::Bit4);
+const ROOM_TPAGE_BASE_X: u16 = 640;
+const SHARED_TPAGE: Tpage = Tpage::new(ROOM_TPAGE_BASE_X, 0, TexDepth::Bit4);
 const TPAGE_WORD: u16 = SHARED_TPAGE.uv_tpage_word(0);
 const ROOM_TPAGE_STRIDE_HW: u16 = 64;
 const ROOM_TPAGE_LIMIT_X: u16 = 1024;
+const ROOM_TPAGE_COUNT: usize =
+    ((ROOM_TPAGE_LIMIT_X - ROOM_TPAGE_BASE_X) / ROOM_TPAGE_STRIDE_HW) as usize;
 const ROOM_TILE_TEXELS: u16 = 64;
-const ROOM_TILE_HALFWORDS: u16 = ROOM_TILE_TEXELS / 4;
-const ROOM_TILE_ROWS: u16 = 4;
-const ROOM_TILE_COLUMNS: u16 = 4;
-const ROOM_TILES_PER_PAGE: u16 = ROOM_TILE_ROWS * ROOM_TILE_COLUMNS;
 /// CLUT strip used by room material textures. Keep it outside the
 /// 320-pixel-wide double-buffered framebuffer (`x=0..319`,
 /// `y=0..479`) so frame clears cannot overwrite palettes.
@@ -213,7 +212,7 @@ const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
 const ROOM_GRID_VISIBILITY_RADIUS: u16 = 4;
 #[cfg(feature = "world-grid-visible")]
-const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 128;
+const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
 /// Cached room cell headers shared by the active room window. Rooms
 /// that exceed this fixed budget fall back to the uncached room draw.
 const MAX_CACHED_ROOM_CELLS: usize = 2048;
@@ -240,7 +239,7 @@ const MAX_ACTIVE_ROOMS: usize = 9;
 const MAX_RESIDENT_RAM_ASSETS: usize = 128;
 /// Capacity of the residency manager's VRAM table. Holds room
 /// material atlases + model atlases.
-const MAX_RESIDENT_VRAM_ASSETS: usize = 32;
+const MAX_RESIDENT_VRAM_ASSETS: usize = 64;
 
 /// Per-frame projected-vertex scratch for the model renderer.
 /// Sized to the largest part vertex count we expect; instances
@@ -335,9 +334,11 @@ static mut VRAM_SLOTS: [Option<VramSlot>; MAX_RESIDENT_VRAM_ASSETS] =
 /// Number of VRAM slots used so far across room textures and model atlases.
 static mut VRAM_SLOT_COUNT: usize = 0;
 /// Number of room material textures uploaded. Drives the per-material
-/// tpage page and CLUT row; kept separate from `VRAM_SLOT_COUNT` so
-/// model atlas uploads cannot shift room texture addressing.
+/// CLUT row; placement is tracked by `ROOM_TEXTURE_ALLOCATOR`.
+/// Kept separate from `VRAM_SLOT_COUNT` so model atlas uploads cannot
+/// shift room texture addressing.
 static mut ROOM_TEXTURE_COUNT: usize = 0;
+static mut ROOM_TEXTURE_ALLOCATOR: TextureWindowAtlas<ROOM_TPAGE_COUNT> = TextureWindowAtlas::new();
 
 /// Tpage X cursor (in halfwords) for the model-atlas 8bpp
 /// region. Distinct cursor so room-material uploads don't shift
@@ -2195,14 +2196,14 @@ fn fill_precomputed_visible_cells(
         .find(|cell| cell.x as i32 == anchor_x && cell.z as i32 == anchor_z)?;
     let visible_first = anchor_cell.visible_first.to_usize();
     let visible_count = anchor_cell.visible_count as usize;
-    if visible_count > out.len() {
-        return None;
-    }
     let visible = VISIBLE_CELLS.get(visible_first..visible_first.checked_add(visible_count)?)?;
     let mut written = 0usize;
     for reference in visible {
         let cell = *VISIBILITY_CELLS.get(reference.cell.to_usize())?;
         if cell.room != room_index {
+            return None;
+        }
+        if written >= out.len() {
             return None;
         }
         out[written] = GridVisibleCell::new(cell.x, cell.z, cell.min_y, cell.max_y);
@@ -2650,36 +2651,50 @@ fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<Vram
         return None;
     }
 
-    // Pack room materials into 64x64 cells inside 4bpp tpages. The
-    // material's GP0(E2) texture window makes authored UV repetition
-    // wrap inside this cell.
-    let room_index = u16::try_from(room_count).ok()?;
-    let page_index = room_index / ROOM_TILES_PER_PAGE;
-    let tile_index = room_index % ROOM_TILES_PER_PAGE;
-    let tile_x = tile_index % ROOM_TILE_COLUMNS;
-    let tile_y = tile_index / ROOM_TILE_COLUMNS;
-    let tpage_x = SHARED_TPAGE
-        .x()
-        .checked_add(page_index.checked_mul(ROOM_TPAGE_STRIDE_HW)?)?;
-    let end_x = tpage_x.checked_add(ROOM_TPAGE_STRIDE_HW)?;
-    if end_x > ROOM_TPAGE_LIMIT_X {
+    let texture_width = room_texture_window_size(texture.width())?;
+    let texture_height = room_texture_window_size(texture.height())?;
+    let texture_width_halfwords = u16::from(texture_width) / 4;
+    let texture_height_rows = u16::from(texture_height);
+    if texture.halfwords_per_row() > texture_width_halfwords
+        || texture.height() > texture_height_rows
+    {
         return None;
     }
-    let tile_x_hw = tile_x.checked_mul(ROOM_TILE_HALFWORDS)?;
-    let tile_y_px = tile_y.checked_mul(ROOM_TILE_TEXELS)?;
-    let tile_origin_u = u8::try_from(tile_x.checked_mul(ROOM_TILE_TEXELS)?).ok()?;
-    let tile_origin_v = u8::try_from(tile_y.checked_mul(ROOM_TILE_TEXELS)?).ok()?;
+    let src_bytes = texture.pixel_bytes();
+    let src_len = (texture.halfwords_per_row() as usize)
+        .saturating_mul(texture.height() as usize)
+        .saturating_mul(2);
+    if src_bytes.len() != src_len {
+        return None;
+    }
+
+    let room_index = u16::try_from(room_count).ok()?;
     let clut_x = ROOM_CLUT_BASE_X.checked_add(room_index.checked_mul(ROOM_CLUT_STRIDE)?)?;
     if clut_x.checked_add(texture.clut_entries())? > 1024 {
+        return None;
+    }
+
+    // Pack room materials on the GP0(E2) 8-texel grid inside 4bpp
+    // tpages. A 32x32 texture now consumes a 32x32 window instead of
+    // burning a whole old 64x64 cell.
+    let placement = unsafe {
+        ROOM_TEXTURE_ALLOCATOR.allocate(u16::from(texture_width), u16::from(texture_height))?
+    };
+    let page_index = placement.page_index();
+    let tpage_x = ROOM_TPAGE_BASE_X.checked_add(page_index.checked_mul(ROOM_TPAGE_STRIDE_HW)?)?;
+    let end_x = tpage_x.checked_add(ROOM_TPAGE_STRIDE_HW)?;
+    if end_x > ROOM_TPAGE_LIMIT_X {
         return None;
     }
     let tpage = Tpage::new(tpage_x, SHARED_TPAGE.y(), TexDepth::Bit4);
 
     if !upload_4bpp_tile(
-        tpage_x.checked_add(tile_x_hw)?,
-        SHARED_TPAGE.y().checked_add(tile_y_px)?,
-        ROOM_TILE_HALFWORDS,
-        ROOM_TILE_TEXELS,
+        tpage_x.checked_add(u16::from(placement.origin_u()) / 4)?,
+        SHARED_TPAGE
+            .y()
+            .checked_add(u16::from(placement.origin_v()))?,
+        texture_width_halfwords,
+        texture_height_rows,
         &texture,
     ) {
         return None;
@@ -2689,15 +2704,13 @@ fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<Vram
     upload_opaque_clut(clut_rect, texture.clut_bytes());
 
     let clut = Clut::new(clut_x, ROOM_CLUT_Y);
-    let texture_width = room_texture_window_size(texture.width())?;
-    let texture_height = room_texture_window_size(texture.height())?;
     let slot = VramSlot {
         asset: asset_id,
         clut_word: clut.uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::power_of_two_tile(
-            tile_origin_u,
-            tile_origin_v,
+            placement.origin_u(),
+            placement.origin_v(),
             texture_width,
             texture_height,
         ),

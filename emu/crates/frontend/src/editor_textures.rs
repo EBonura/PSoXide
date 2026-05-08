@@ -16,9 +16,9 @@
 //!
 //! ```text
 //!   y = 0      ▶ 320×240 frame buffer (sub-rect the editor paints)
-//!   y = 0      ▶ tpages 5..15  -- 4bpp room material pages, one per
-//!                material, physically tiled from the native texture
-//!                and packed left-to-right starting at x = 320
+//!   y = 0      ▶ tpages 5..15  -- 4bpp room material atlas pages,
+//!                packed on the GP0(E2) 8-texel texture-window grid
+//!                starting at x = 320
 //!   y = 480    ▶ CLUT row, 16 halfwords per palette
 //! ```
 
@@ -26,7 +26,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use psx_asset::Texture;
+use psx_gpu::material::TextureWindow;
 use psx_gpu_render::{VRAM_HEIGHT, VRAM_WIDTH};
+use psx_vram::TextureWindowAtlas;
 use psxed_project::streaming::collect_scene_resource_use;
 use psxed_project::{MaterialResource, ProjectDocument, Resource, ResourceData, ResourceId};
 
@@ -35,6 +37,7 @@ const ROOM_TPAGE_TEXEL_HEIGHT: usize = 256;
 const ROOM_TILE_TEXELS: u16 = 64;
 const ROOM_FIRST_TPAGE: u8 = 5;
 const ROOM_LAST_TPAGE: u8 = 15;
+const ROOM_TPAGE_COUNT: usize = (ROOM_LAST_TPAGE - ROOM_FIRST_TPAGE + 1) as usize;
 const ROOM_CLUT_Y: u16 = 480;
 const ROOM_CLUT_HALFWORDS: u16 = 16;
 const SHADOW_TEXTURE_SIZE: usize = 64;
@@ -54,6 +57,9 @@ pub struct MaterialSlot {
     /// Packed `uv_clut_word` value the prim format wants in vertex
     /// 0's UV high half.
     pub clut_word: u16,
+    /// GP0(E2) texture-window state constraining UV repetition to the
+    /// allocated atlas rectangle.
+    pub texture_window: TextureWindow,
     /// Width of the material's texture window in texels.
     pub texture_width: u8,
     /// Height of the material's texture window in texels.
@@ -72,8 +78,8 @@ struct CacheEntry {
 /// VRAM regions:
 ///
 /// * `y = 0`,  tpages 0..4   -- framebuffer (editor paints x=0..320).
-/// * `y = 0`,  tpages 5..15  -- 4bpp room material textures, 64×64
-///   each, packed left-to-right.
+/// * `y = 0`,  tpages 5..15  -- 4bpp room material textures,
+///   packed on an 8-texel texture-window grid.
 /// * `y = 256`, tpage row 1   -- 8bpp model atlases, packed
 ///   left-to-right by halfwords. Disjoint from the room region.
 /// * `y = 480`                -- 4bpp CLUTs, 16 halfwords each.
@@ -92,9 +98,8 @@ pub struct EditorTextures {
     /// populate the limited room-material VRAM band. Scene-used
     /// materials are prioritized ahead of unused library resources.
     room_signature: Vec<(ResourceId, String, String)>,
-    /// Index into the tpage row, starts at 5 (after the framebuffer
-    /// at tpages 0..4) and bumps by 1 per uploaded texture.
-    next_tpage: u8,
+    /// 8-texel-grid allocator for room textures inside tpages 5..15.
+    room_allocator: TextureWindowAtlas<ROOM_TPAGE_COUNT>,
     /// Halfword X-coord of the next free 4bpp CLUT slot. Each
     /// 4bpp CLUT is 16 halfwords wide.
     next_clut_x: u16,
@@ -124,6 +129,7 @@ impl EditorTextures {
         let shadow_slot = MaterialSlot {
             tpage_word: pack_tpage_word(SHADOW_TPAGE_INDEX, SHADOW_TPAGE_Y_BLOCK),
             clut_word: pack_clut_word(SHADOW_CLUT_X, SHADOW_CLUT_Y),
+            texture_window: TextureWindow::NONE,
             texture_width: 64,
             texture_height: 64,
         };
@@ -133,10 +139,7 @@ impl EditorTextures {
             model_cache: HashMap::new(),
             shadow_slot,
             room_signature: Vec::new(),
-            // tpages 0..4 cover the framebuffer at x=0..256; the
-            // editor paints into the 320×240 subrect of x=0..320,
-            // so tpage 5 (x=320) is the first one fully clear.
-            next_tpage: ROOM_FIRST_TPAGE,
+            room_allocator: TextureWindowAtlas::new(),
             next_clut_x: 0,
             // Model atlases live at the tpage row at y=256.
             // Cursor advances by halfword stride per atlas.
@@ -186,11 +189,9 @@ impl EditorTextures {
     ///    pattern (brick / stone / wood / metal / glass / default
     ///    checker) so the preview is never blank.
     ///
-    /// The editor preview's room-material region is intentionally small:
-    /// it uses one physically tiled 4bpp tpage per Material so plain
-    /// UV wrapping matches the renderer path. Projects can contain more
-    /// Materials than that, so authored scene materials must get slots
-    /// before unused resource-library entries.
+    /// The editor preview's room-material region is intentionally small,
+    /// so authored scene materials must get slots before unused
+    /// resource-library entries.
     pub fn refresh(&mut self, project: &ProjectDocument, project_root: &Path) {
         let plan = material_upload_plan(project);
         let room_signature: Vec<(ResourceId, String, String)> = plan
@@ -209,21 +210,23 @@ impl EditorTextures {
                 // Out of slots. Don't insert a stale cache entry.
                 break;
             }
-            let slot = self
+            let Some(slot) = self
                 .upload_real_psxt(&item.signature, project_root)
-                .unwrap_or_else(|| self.upload_procedural(&item.name));
+                .or_else(|| self.upload_procedural(&item.name))
+            else {
+                break;
+            };
             self.cache.insert(item.id, CacheEntry { slot });
         }
     }
 
     fn has_room_material_slot(&self) -> bool {
-        self.next_tpage <= ROOM_LAST_TPAGE
-            && self.next_clut_x + ROOM_CLUT_HALFWORDS <= VRAM_WIDTH as u16
+        self.next_clut_x + ROOM_CLUT_HALFWORDS <= VRAM_WIDTH as u16
     }
 
     fn clear_room_materials(&mut self) {
         self.cache.clear();
-        self.next_tpage = ROOM_FIRST_TPAGE;
+        self.room_allocator.clear();
         self.next_clut_x = 0;
 
         let x0 = ROOM_FIRST_TPAGE as usize * ROOM_TPAGE_HALFWORDS;
@@ -259,20 +262,43 @@ impl EditorTextures {
         // textures rather than silently producing wrong UVs.
         u8::try_from(texture.width()).ok()?;
         u8::try_from(texture.height()).ok()?;
-        let tpage_index = self.next_tpage as u16;
-        let tpage_x = tpage_index * 64;
-        let tpage_y = 0;
-        let clut_x = self.next_clut_x;
-        let clut_y = ROOM_CLUT_Y;
-
-        // Room material autotiling expands UVs beyond the native
-        // texture rectangle. The PSX only wraps inside a texture
-        // page, so mirror the runtime upload by physically repeating
-        // the source texture across the whole 4bpp tpage.
         if texture.clut_entries() != 16 {
             return None;
         }
-        if !self.upload_tiled_4bpp_texture(tpage_x, tpage_y, &texture) {
+        let texture_width = room_texture_window_size(texture.width())?;
+        let texture_height = room_texture_window_size(texture.height())?;
+        let texture_width_halfwords = u16::from(texture_width) / 4;
+        let texture_height_rows = u16::from(texture_height);
+        if texture.halfwords_per_row() > texture_width_halfwords
+            || texture.height() > texture_height_rows
+        {
+            return None;
+        }
+        let pixel_bytes = texture.pixel_bytes();
+        let pixel_len = (texture.halfwords_per_row() as usize)
+            .saturating_mul(texture.height() as usize)
+            .saturating_mul(2);
+        if pixel_bytes.len() != pixel_len {
+            return None;
+        }
+        let clut_x = self.next_clut_x;
+        let clut_y = ROOM_CLUT_Y;
+        if clut_x + ROOM_CLUT_HALFWORDS > VRAM_WIDTH as u16 {
+            return None;
+        }
+
+        let placement = self
+            .room_allocator
+            .allocate(u16::from(texture_width), u16::from(texture_height))?;
+        let tpage_index = u16::from(ROOM_FIRST_TPAGE).checked_add(placement.page_index())?;
+        let tpage_x = tpage_index.checked_mul(64)?;
+        if !self.upload_compact_4bpp_texture(
+            tpage_x.checked_add(u16::from(placement.origin_u()) / 4)?,
+            u16::from(placement.origin_v()),
+            texture_width_halfwords,
+            texture_height_rows,
+            &texture,
+        ) {
             return None;
         }
 
@@ -301,37 +327,49 @@ impl EditorTextures {
         let slot = MaterialSlot {
             tpage_word: pack_tpage_word(tpage_index, 0),
             clut_word: pack_clut_word(clut_x, clut_y),
-            texture_width: room_texture_window_size(texture.width())?,
-            texture_height: room_texture_window_size(texture.height())?,
+            texture_window: TextureWindow::power_of_two_tile(
+                placement.origin_u(),
+                placement.origin_v(),
+                texture_width,
+                texture_height,
+            ),
+            texture_width,
+            texture_height,
         };
-        self.next_tpage += 1;
         self.next_clut_x += ROOM_CLUT_HALFWORDS;
         Some(slot)
     }
 
-    fn upload_tiled_4bpp_texture(&mut self, tpage_x: u16, tpage_y: u16, texture: &Texture) -> bool {
+    fn upload_compact_4bpp_texture(
+        &mut self,
+        texture_x: u16,
+        texture_y: u16,
+        max_width_halfwords: u16,
+        max_height: u16,
+        texture: &Texture,
+    ) -> bool {
         let halfwords_per_row = texture.halfwords_per_row() as usize;
         let height_px = texture.height() as usize;
-        if halfwords_per_row == 0
-            || halfwords_per_row > ROOM_TPAGE_HALFWORDS
+        if max_width_halfwords == 0
+            || max_height == 0
+            || halfwords_per_row == 0
+            || halfwords_per_row > max_width_halfwords as usize
             || height_px == 0
-            || height_px > ROOM_TPAGE_TEXEL_HEIGHT
+            || height_px > max_height as usize
         {
             return false;
         }
 
         let pixel_bytes = texture.pixel_bytes();
-        if pixel_bytes.len() < halfwords_per_row * height_px * 2 {
+        if pixel_bytes.len() != halfwords_per_row * height_px * 2 {
             return false;
         }
-        for row in 0..ROOM_TPAGE_TEXEL_HEIGHT {
-            let src_row = row % height_px;
-            for hw in 0..ROOM_TPAGE_HALFWORDS {
-                let src_hw = hw % halfwords_per_row;
-                let off = (src_row * halfwords_per_row + src_hw) * 2;
+        for row in 0..height_px {
+            for hw in 0..halfwords_per_row {
+                let off = (row * halfwords_per_row + hw) * 2;
                 let word = u16::from_le_bytes([pixel_bytes[off], pixel_bytes[off + 1]]);
                 let vram_idx =
-                    (tpage_y as usize + row) * VRAM_WIDTH as usize + tpage_x as usize + hw;
+                    (texture_y as usize + row) * VRAM_WIDTH as usize + texture_x as usize + hw;
                 self.vram[vram_idx] = word;
             }
         }
@@ -340,40 +378,50 @@ impl EditorTextures {
 
     /// Stamp a name-keyed procedural pattern (brick / stone / wood /
     /// metal / glass / default checker) into the next free slot.
-    /// Always returns a valid slot -- assumes the caller already
-    /// confirmed there's room.
-    fn upload_procedural(&mut self, material_name: &str) -> MaterialSlot {
+    /// Returns `None` only when the preview room texture band is full.
+    fn upload_procedural(&mut self, material_name: &str) -> Option<MaterialSlot> {
         let pattern = pattern_for_name(material_name);
-        let tpage_index = self.next_tpage as u16;
-        let tpage_x = tpage_index * 64;
-        let tpage_y = 0;
         let clut_x = self.next_clut_x;
         let clut_y = ROOM_CLUT_Y;
-        self.upload_4bpp(tpage_x, tpage_y, &pattern.pixels);
+        if clut_x + ROOM_CLUT_HALFWORDS > VRAM_WIDTH as u16 {
+            return None;
+        }
+        let placement = self
+            .room_allocator
+            .allocate(ROOM_TILE_TEXELS, ROOM_TILE_TEXELS)?;
+        let tpage_index = u16::from(ROOM_FIRST_TPAGE).checked_add(placement.page_index())?;
+        let tpage_x = tpage_index.checked_mul(64)?;
+        self.upload_4bpp(
+            tpage_x.checked_add(u16::from(placement.origin_u()) / 4)?,
+            u16::from(placement.origin_v()),
+            &pattern.pixels,
+        );
         self.upload_clut(clut_x, clut_y, &pattern.palette);
         let slot = MaterialSlot {
             tpage_word: pack_tpage_word(tpage_index, 0),
             clut_word: pack_clut_word(clut_x, clut_y),
+            texture_window: TextureWindow::power_of_two_tile(
+                placement.origin_u(),
+                placement.origin_v(),
+                64,
+                64,
+            ),
             texture_width: 64,
             texture_height: 64,
         };
-        self.next_tpage += 1;
         self.next_clut_x += ROOM_CLUT_HALFWORDS;
-        slot
+        Some(slot)
     }
 
-    /// Pack a 4bpp 64×64 pattern into a full 4bpp tpage at `(x, y)`
-    /// (halfword coords), repeating it across 256×256 texels. Each
-    /// halfword carries four 4bpp pixels (low nibble = leftmost).
-    fn upload_4bpp(&mut self, tpage_x: u16, tpage_y: u16, pixels: &[u8]) {
+    /// Pack a 4bpp 64x64 pattern at `(x, y)` (halfword coords).
+    /// Each halfword carries four 4bpp pixels (low nibble = leftmost).
+    fn upload_4bpp(&mut self, texture_x: u16, texture_y: u16, pixels: &[u8]) {
         let source_texels_per_row = 64usize;
         let source_rows = 64usize;
         let source_halfwords_per_row = source_texels_per_row / 4;
-        for row in 0..ROOM_TPAGE_TEXEL_HEIGHT {
-            let src_row = row % source_rows;
-            for hw in 0..ROOM_TPAGE_HALFWORDS {
-                let src_hw = hw % source_halfwords_per_row;
-                let src = src_row * source_texels_per_row + src_hw * 4;
+        for row in 0..source_rows {
+            for hw in 0..source_halfwords_per_row {
+                let src = row * source_texels_per_row + hw * 4;
                 let p0 = pixels[src] & 0x0F;
                 let p1 = pixels[src + 1] & 0x0F;
                 let p2 = pixels[src + 2] & 0x0F;
@@ -381,7 +429,7 @@ impl EditorTextures {
                 let word =
                     (p0 as u16) | ((p1 as u16) << 4) | ((p2 as u16) << 8) | ((p3 as u16) << 12);
                 let vram_idx =
-                    (tpage_y as usize + row) * VRAM_WIDTH as usize + tpage_x as usize + hw;
+                    (texture_y as usize + row) * VRAM_WIDTH as usize + texture_x as usize + hw;
                 self.vram[vram_idx] = word;
             }
         }
@@ -539,6 +587,7 @@ impl EditorTextures {
         let slot = MaterialSlot {
             tpage_word: pack_8bpp_tpage_word(tpage_index, 1),
             clut_word: pack_clut_word(0, clut_y),
+            texture_window: TextureWindow::NONE,
             texture_width: texture.width().min(u16::from(u8::MAX)) as u8,
             texture_height: texture.height().min(u16::from(u8::MAX)) as u8,
         };
@@ -971,9 +1020,9 @@ fn align_up_to(value: u16, boundary: u16) -> u16 {
 mod tests {
     use super::{
         align_up_to, material_upload_plan, model_atlas_clut_entry, opaque_room_clut_entry,
-        EditorTextures, ROOM_TPAGE_HALFWORDS, ROOM_TPAGE_TEXEL_HEIGHT, SHADOW_CLUT_X,
-        SHADOW_CLUT_Y, SHADOW_TPAGE_X, SHADOW_TPAGE_Y,
+        EditorTextures, SHADOW_CLUT_X, SHADOW_CLUT_Y, SHADOW_TPAGE_X, SHADOW_TPAGE_Y,
     };
+    use psx_gpu::material::TextureWindow;
     use psx_gpu_render::VRAM_WIDTH;
     use psxed_project::{MaterialResource, NodeKind, ProjectDocument, ResourceData, WorldGrid};
     use std::path::Path;
@@ -1000,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn procedural_room_texture_upload_repeats_across_full_4bpp_page() {
+    fn procedural_room_texture_upload_is_compact_and_windowed() {
         let mut pixels = vec![0u8; 64 * 64];
         for row in 0..64usize {
             for hw in 0..16usize {
@@ -1020,13 +1069,16 @@ mod tests {
         let word_at = |row: usize, hw: usize| -> u16 {
             textures.vram[row * VRAM_WIDTH as usize + tpage_x as usize + hw]
         };
-        assert_eq!(word_at(0, 0), word_at(64, 0));
-        assert_eq!(word_at(0, 0), word_at(0, 16));
-        assert_eq!(word_at(63, 15), word_at(127, 31));
-        assert_eq!(word_at(63, 15), word_at(255, 63));
-        assert_ne!(
-            word_at(ROOM_TPAGE_TEXEL_HEIGHT - 1, ROOM_TPAGE_HALFWORDS - 1),
-            0
+        assert_ne!(word_at(63, 15), 0);
+        assert_eq!(word_at(64, 0), 0);
+        assert_eq!(word_at(0, 16), 0);
+
+        let slot = textures
+            .upload_procedural("stone")
+            .expect("procedural texture fits");
+        assert_eq!(
+            slot.texture_window.word(),
+            TextureWindow::power_of_two_tile(0, 0, 64, 64).word()
         );
     }
 
@@ -1066,7 +1118,7 @@ mod tests {
     #[test]
     fn refresh_prioritizes_scene_materials_over_resource_order() {
         let mut project = ProjectDocument::new("preview");
-        let unused: Vec<_> = (0..12)
+        let unused: Vec<_> = (0..80)
             .map(|index| add_material(&mut project, format!("Unused {index}")))
             .collect();
         let used = add_material(&mut project, "Active Late Material");
@@ -1082,6 +1134,6 @@ mod tests {
         textures.refresh(&project, Path::new("."));
 
         assert!(textures.slot(used).is_some());
-        assert!(textures.slot(unused[10]).is_none());
+        assert!(textures.slot(unused[70]).is_none());
     }
 }

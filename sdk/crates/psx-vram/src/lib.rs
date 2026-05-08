@@ -183,6 +183,176 @@ impl VramRect {
 }
 
 // ======================================================================
+// Texture-window atlas allocation
+// ======================================================================
+
+/// Texture-window granularity in texels.
+///
+/// GP0(E2) stores texture-window masks and offsets in 8-texel units,
+/// so small atlas placements only need an 8-texel occupancy grid.
+pub const TEXTURE_WINDOW_UNIT_TEXELS: u16 = 8;
+
+/// Texture-page width and height in texels.
+pub const TEXTURE_PAGE_TEXELS: u16 = 256;
+
+const TEXTURE_PAGE_UNITS: usize = (TEXTURE_PAGE_TEXELS / TEXTURE_WINDOW_UNIT_TEXELS) as usize;
+
+/// Placement returned by [`TextureWindowAtlas::allocate`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TextureWindowPlacement {
+    page_index: u16,
+    origin_u: u8,
+    origin_v: u8,
+    width: u8,
+    height: u8,
+}
+
+impl TextureWindowPlacement {
+    /// Zero-based page index within the caller-owned atlas page band.
+    pub const fn page_index(self) -> u16 {
+        self.page_index
+    }
+
+    /// U origin in texels within the selected texture page.
+    pub const fn origin_u(self) -> u8 {
+        self.origin_u
+    }
+
+    /// V origin in texels within the selected texture page.
+    pub const fn origin_v(self) -> u8 {
+        self.origin_v
+    }
+
+    /// Allocated width in texels.
+    pub const fn width(self) -> u8 {
+        self.width
+    }
+
+    /// Allocated height in texels.
+    pub const fn height(self) -> u8 {
+        self.height
+    }
+}
+
+/// Tiny no-alloc atlas for PS1 texture-window-sized subtextures.
+///
+/// Each 256x256 texture page is tracked as a 32x32 bit grid where one
+/// bit represents an 8x8 texel block. Allocations are power-of-two
+/// rectangles that fit GP0(E2) texture-window constraints and are
+/// placed on their own width/height grid.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TextureWindowAtlas<const PAGE_COUNT: usize> {
+    rows: [[u32; TEXTURE_PAGE_UNITS]; PAGE_COUNT],
+}
+
+impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
+    /// Build an empty atlas.
+    pub const fn new() -> Self {
+        Self {
+            rows: [[0; TEXTURE_PAGE_UNITS]; PAGE_COUNT],
+        }
+    }
+
+    /// Clear every occupied bit.
+    pub fn clear(&mut self) {
+        for page in &mut self.rows {
+            page.fill(0);
+        }
+    }
+
+    /// Allocate a power-of-two texture-window rectangle.
+    ///
+    /// Dimensions are texels. They must be 8-texel aligned,
+    /// power-of-two, and no larger than 128 texels, matching the
+    /// hardware texture-window range.
+    pub fn allocate(&mut self, width: u16, height: u16) -> Option<TextureWindowPlacement> {
+        let width_units = texture_window_units(width)?;
+        let height_units = texture_window_units(height)?;
+        let max_y = TEXTURE_PAGE_UNITS.checked_sub(height_units)?;
+        let max_x = TEXTURE_PAGE_UNITS.checked_sub(width_units)?;
+
+        for page_index in 0..PAGE_COUNT {
+            let mut y = 0usize;
+            while y <= max_y {
+                let mut x = 0usize;
+                while x <= max_x {
+                    if texture_region_free(&self.rows[page_index], x, y, width_units, height_units)
+                    {
+                        texture_region_mark(
+                            &mut self.rows[page_index],
+                            x,
+                            y,
+                            width_units,
+                            height_units,
+                        );
+                        return Some(TextureWindowPlacement {
+                            page_index: u16::try_from(page_index).ok()?,
+                            origin_u: u8::try_from(x * TEXTURE_WINDOW_UNIT_TEXELS as usize).ok()?,
+                            origin_v: u8::try_from(y * TEXTURE_WINDOW_UNIT_TEXELS as usize).ok()?,
+                            width: u8::try_from(width).ok()?,
+                            height: u8::try_from(height).ok()?,
+                        });
+                    }
+                    x += width_units;
+                }
+                y += height_units;
+            }
+        }
+        None
+    }
+}
+
+impl<const PAGE_COUNT: usize> Default for TextureWindowAtlas<PAGE_COUNT> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn texture_window_units(size: u16) -> Option<usize> {
+    if size < TEXTURE_WINDOW_UNIT_TEXELS
+        || size > 128
+        || !size.is_power_of_two()
+        || size % TEXTURE_WINDOW_UNIT_TEXELS != 0
+    {
+        return None;
+    }
+    Some((size / TEXTURE_WINDOW_UNIT_TEXELS) as usize)
+}
+
+fn texture_region_mask(x: usize, width: usize) -> u32 {
+    ((1u32 << width) - 1) << x
+}
+
+fn texture_region_free(
+    rows: &[u32; TEXTURE_PAGE_UNITS],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> bool {
+    let mask = texture_region_mask(x, width);
+    for row in &rows[y..y + height] {
+        if row & mask != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn texture_region_mark(
+    rows: &mut [u32; TEXTURE_PAGE_UNITS],
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) {
+    let mask = texture_region_mask(x, width);
+    for row in &mut rows[y..y + height] {
+        *row |= mask;
+    }
+}
+
+// ======================================================================
 // Tpage + Clut
 // ======================================================================
 
@@ -501,6 +671,62 @@ mod tests {
     #[should_panic = "overflows VRAM width"]
     fn vram_rect_new_rejects_horizontal_overflow() {
         let _ = VramRect::new(1000, 0, 100, 10);
+    }
+
+    #[test]
+    fn texture_window_atlas_packs_32x32_textures_inside_one_page() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+
+        let first = atlas.allocate(32, 32).expect("first texture fits");
+        let second = atlas.allocate(32, 32).expect("second texture fits");
+        let eighth = {
+            let mut placement = second;
+            for _ in 2..8 {
+                placement = atlas.allocate(32, 32).expect("top row texture fits");
+            }
+            placement
+        };
+        let ninth = atlas.allocate(32, 32).expect("second row texture fits");
+
+        assert_eq!(first.page_index(), 0);
+        assert_eq!((first.origin_u(), first.origin_v()), (0, 0));
+        assert_eq!((second.origin_u(), second.origin_v()), (32, 0));
+        assert_eq!((eighth.origin_u(), eighth.origin_v()), (224, 0));
+        assert_eq!((ninth.origin_u(), ninth.origin_v()), (0, 32));
+    }
+
+    #[test]
+    fn texture_window_atlas_moves_to_next_page_when_current_page_is_full() {
+        let mut atlas = TextureWindowAtlas::<2>::new();
+
+        for _ in 0..16 {
+            atlas
+                .allocate(64, 64)
+                .expect("64x64 slot fits in first page");
+        }
+        let next = atlas.allocate(64, 64).expect("second page has space");
+
+        assert_eq!(next.page_index(), 1);
+        assert_eq!((next.origin_u(), next.origin_v()), (0, 0));
+    }
+
+    #[test]
+    fn texture_window_atlas_aligns_each_allocation_to_its_own_size() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+
+        atlas.allocate(32, 32).expect("small texture fits");
+        let large = atlas.allocate(64, 64).expect("large texture fits");
+
+        assert_eq!((large.origin_u(), large.origin_v()), (64, 0));
+    }
+
+    #[test]
+    fn texture_window_atlas_rejects_non_texture_window_dimensions() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+
+        assert!(atlas.allocate(48, 32).is_none());
+        assert!(atlas.allocate(4, 32).is_none());
+        assert!(atlas.allocate(256, 32).is_none());
     }
 
     #[test]
