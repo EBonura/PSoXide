@@ -2172,6 +2172,14 @@ fn bake_static_surface_lights(rooms: &mut [CookedRoomBakeInput], lights: &[Playt
                 (psxw::direction::EAST, sector.walls.east.as_mut_slice()),
                 (psxw::direction::SOUTH, sector.walls.south.as_mut_slice()),
                 (psxw::direction::WEST, sector.walls.west.as_mut_slice()),
+                (
+                    psxw::direction::NORTH_WEST_SOUTH_EAST,
+                    sector.walls.north_west_south_east.as_mut_slice(),
+                ),
+                (
+                    psxw::direction::NORTH_EAST_SOUTH_WEST,
+                    sector.walls.north_east_south_west.as_mut_slice(),
+                ),
             ] {
                 for wall in walls {
                     if let Some(verts) = wall_vertices(sx, sz, sector_size, direction, wall.heights)
@@ -2267,6 +2275,18 @@ fn wall_vertices(
             [x0, heights[1], z0],
             [x0, heights[2], z0],
             [x0, heights[3], z1],
+        ]),
+        psxw::direction::NORTH_WEST_SOUTH_EAST => Some([
+            [x0, heights[0], z0],
+            [x1, heights[1], z1],
+            [x1, heights[2], z1],
+            [x0, heights[3], z0],
+        ]),
+        psxw::direction::NORTH_EAST_SOUTH_WEST => Some([
+            [x1, heights[0], z0],
+            [x0, heights[1], z1],
+            [x0, heights[2], z1],
+            [x1, heights[3], z0],
         ]),
         _ => None,
     }
@@ -3861,6 +3881,86 @@ mod tests {
         assert!((0..world.surface_light_count())
             .filter_map(|index| world.surface_light(index))
             .any(|light| light.vertex_rgb().iter().any(|rgb| *rgb != [0, 0, 0])));
+    }
+
+    #[test]
+    fn diagonal_walls_bake_static_surface_lights() {
+        use crate::world_cook::{
+            CookedGridSector, CookedGridVerticalFace, CookedGridWalls, DEFAULT_BAKED_VERTEX_RGB,
+        };
+        use crate::{MaterialFaceSidedness, PsxBlendMode};
+
+        fn diagonal_wall(heights: [i32; 4]) -> CookedGridVerticalFace {
+            CookedGridVerticalFace {
+                heights,
+                material: 0,
+                shape: psxw::wall_shape::QUAD,
+                uvs: psxw::WALL_UVS,
+                baked_vertex_rgb: DEFAULT_BAKED_VERTEX_RGB,
+                solid: true,
+            }
+        }
+
+        let source = ProjectDocument::starter().resources[0].id;
+        let mut room = CookedRoomBakeInput {
+            room_index: 0,
+            world_asset_index: 0,
+            cooked: CookedWorldGrid {
+                width: 1,
+                depth: 1,
+                sector_size: 1024,
+                sectors: vec![Some(CookedGridSector {
+                    floor: None,
+                    ceiling: None,
+                    walls: CookedGridWalls {
+                        north_west_south_east: vec![diagonal_wall([0, 16, 1024, 1008])],
+                        north_east_south_west: vec![diagonal_wall([32, 48, 960, 944])],
+                        ..CookedGridWalls::default()
+                    },
+                })],
+                materials: vec![CookedWorldMaterial {
+                    slot: 0,
+                    source,
+                    texture: None,
+                    blend_mode: PsxBlendMode::Opaque,
+                    tint: [128, 128, 128],
+                    face_sidedness: MaterialFaceSidedness::Both,
+                }],
+                ambient_color: [32, 24, 16],
+                static_vertex_lighting: true,
+                fog_enabled: false,
+                fog_color: [0, 0, 0],
+                fog_near: 0,
+                fog_far: 0,
+            },
+        };
+
+        bake_static_surface_lights(std::slice::from_mut(&mut room), &[]);
+
+        let sector = room.cooked.sectors[0].as_ref().expect("sector");
+        let cases = [
+            (
+                psxw::direction::NORTH_WEST_SOUTH_EAST,
+                &sector.walls.north_west_south_east[0],
+            ),
+            (
+                psxw::direction::NORTH_EAST_SOUTH_WEST,
+                &sector.walls.north_east_south_west[0],
+            ),
+        ];
+        for (direction, wall) in cases {
+            let verts =
+                wall_vertices(0, 0, 1024, direction, wall.heights).expect("diagonal wall vertices");
+            let expected = bake_surface_vertex_rgb(
+                &room.cooked.materials,
+                room.cooked.ambient_color,
+                verts,
+                wall.material,
+                &[],
+            );
+            assert_ne!(expected, DEFAULT_BAKED_VERTEX_RGB);
+            assert_eq!(wall.baked_vertex_rgb, expected);
+        }
     }
 
     #[test]
