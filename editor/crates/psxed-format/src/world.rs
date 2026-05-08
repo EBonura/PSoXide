@@ -224,12 +224,16 @@ pub mod topology {
     pub const WHOLE_QUAD_TRIANGLE_INDEX: u8 = 2;
 
     /// Triangles for a split from corner 0 to corner 2.
-    pub const SPLIT_ZERO_TWO_TRIANGLES: SplitTriangles =
-        [[CORNER_NW, CORNER_NE, CORNER_SE], [CORNER_NW, CORNER_SE, CORNER_SW]];
+    pub const SPLIT_ZERO_TWO_TRIANGLES: SplitTriangles = [
+        [CORNER_NW, CORNER_NE, CORNER_SE],
+        [CORNER_NW, CORNER_SE, CORNER_SW],
+    ];
 
     /// Triangles for a split from corner 1 to corner 3.
-    pub const SPLIT_ONE_THREE_TRIANGLES: SplitTriangles =
-        [[CORNER_NW, CORNER_NE, CORNER_SW], [CORNER_NE, CORNER_SE, CORNER_SW]];
+    pub const SPLIT_ONE_THREE_TRIANGLES: SplitTriangles = [
+        [CORNER_NW, CORNER_NE, CORNER_SW],
+        [CORNER_NE, CORNER_SE, CORNER_SW],
+    ];
 
     /// Triangle indices for a horizontal NW-SE split.
     pub const HORIZONTAL_NW_SE_TRIANGLES: SplitTriangles = SPLIT_ZERO_TWO_TRIANGLES;
