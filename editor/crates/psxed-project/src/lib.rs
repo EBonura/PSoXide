@@ -1647,6 +1647,26 @@ const fn default_fog_color() -> [u8; 3] {
     [24, 28, 34]
 }
 
+const fn default_sky_top_color() -> [u8; 3] {
+    [7, 8, 14]
+}
+
+const fn default_sky_horizon_color() -> [u8; 3] {
+    [32, 30, 34]
+}
+
+const fn default_sky_lower_color() -> [u8; 3] {
+    [5, 7, 12]
+}
+
+const fn default_sky_horizon_percent() -> u8 {
+    58
+}
+
+const fn default_sky_match_room_fog() -> bool {
+    true
+}
+
 const fn default_fog_near() -> i32 {
     4096
 }
@@ -1657,6 +1677,103 @@ const fn default_fog_far() -> i32 {
 
 const fn default_light_color() -> [u8; 3] {
     [255, 240, 200]
+}
+
+/// World sky rendering mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkyMode {
+    /// Disable authored sky rendering. The renderer clears to
+    /// [`SkySettings::lower_color`] only.
+    Off,
+    /// Draw a screen-space vertical gradient before world geometry.
+    Gradient,
+}
+
+impl Default for SkyMode {
+    fn default() -> Self {
+        Self::Gradient
+    }
+}
+
+/// World-level sky configuration shared by descendant Rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkySettings {
+    /// Whether this World renders a sky.
+    #[serde(default)]
+    pub mode: SkyMode,
+    /// Zenith colour.
+    #[serde(default = "default_sky_top_color")]
+    pub top_color: [u8; 3],
+    /// Colour at the authored horizon line.
+    #[serde(default = "default_sky_horizon_color")]
+    pub horizon_color: [u8; 3],
+    /// Colour at the bottom of the frame.
+    #[serde(default = "default_sky_lower_color")]
+    pub lower_color: [u8; 3],
+    /// Horizon line as a percentage of screen height.
+    #[serde(default = "default_sky_horizon_percent")]
+    pub horizon_percent: u8,
+    /// Blend horizon/lower sky toward the room fog colour when
+    /// fog is enabled.
+    #[serde(default = "default_sky_match_room_fog")]
+    pub match_room_fog: bool,
+}
+
+impl SkySettings {
+    /// Resolve authored sky values against room-local fog metadata.
+    pub fn resolved_for_room(self, fog_enabled: bool, fog_color: [u8; 3]) -> ResolvedSkySettings {
+        let mut horizon_color = self.horizon_color;
+        let mut lower_color = self.lower_color;
+        if self.match_room_fog && fog_enabled {
+            horizon_color = blend_rgb(self.horizon_color, fog_color, 128);
+            lower_color = blend_rgb(self.lower_color, fog_color, 192);
+        }
+        ResolvedSkySettings {
+            enabled: self.mode == SkyMode::Gradient,
+            top_color: self.top_color,
+            horizon_color,
+            lower_color,
+            horizon_percent: self.horizon_percent.clamp(5, 95),
+        }
+    }
+}
+
+impl Default for SkySettings {
+    fn default() -> Self {
+        Self {
+            mode: SkyMode::Gradient,
+            top_color: default_sky_top_color(),
+            horizon_color: default_sky_horizon_color(),
+            lower_color: default_sky_lower_color(),
+            horizon_percent: default_sky_horizon_percent(),
+            match_room_fog: default_sky_match_room_fog(),
+        }
+    }
+}
+
+/// Sky values after room-fog matching and validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedSkySettings {
+    /// Whether the gradient should be drawn.
+    pub enabled: bool,
+    /// Zenith colour.
+    pub top_color: [u8; 3],
+    /// Colour at the horizon line.
+    pub horizon_color: [u8; 3],
+    /// Colour at the bottom of the frame / clear.
+    pub lower_color: [u8; 3],
+    /// Horizon line as a percentage of screen height.
+    pub horizon_percent: u8,
+}
+
+fn blend_rgb(a: [u8; 3], b: [u8; 3], b_weight_256: u16) -> [u8; 3] {
+    let weight = b_weight_256.min(256);
+    let inv = 256 - weight;
+    [
+        (((a[0] as u16 * inv) + (b[0] as u16 * weight)) >> 8) as u8,
+        (((a[1] as u16 * inv) + (b[1] as u16 * weight)) >> 8) as u8,
+        (((a[2] as u16 * inv) + (b[2] as u16 * weight)) >> 8) as u8,
+    ]
 }
 
 fn face_triangle_count(face: &GridHorizontalFace) -> usize {
@@ -1957,6 +2074,26 @@ impl WorldGrid {
         }
     }
 
+    /// Add a wall on the selected edge. When that edge already has
+    /// touching wall geometry, the new wall starts at the highest
+    /// existing top edge and extends by one default wall height.
+    /// Otherwise it uses the regular floor-to-ceiling placement.
+    pub fn add_wall_above_stack_or_aligned(
+        &mut self,
+        x: u16,
+        z: u16,
+        direction: GridDirection,
+        material: Option<ResourceId>,
+    ) {
+        let heights = self.wall_heights_above_stack_or_surfaces(x, z, direction);
+        if let Some(sector) = self.ensure_sector(x, z) {
+            sector
+                .walls
+                .get_mut(direction)
+                .push(GridVerticalFace::with_heights(heights, material));
+        }
+    }
+
     /// Candidate wall heights for editor placement on a cardinal
     /// edge or diagonal. The returned order is `[BL, BR, TR, TL]`.
     pub fn wall_heights_aligned_to_surfaces(
@@ -1978,6 +2115,22 @@ impl WorldGrid {
                 ]
             });
         [bottom[0], bottom[1], top[1], top[0]]
+    }
+
+    /// Candidate wall heights for placing the next wall in a stack
+    /// at an in-grid cell. Falls back to surface-aligned placement
+    /// when there is no existing wall on the touched edge.
+    pub fn wall_heights_above_stack_or_surfaces(
+        &self,
+        x: u16,
+        z: u16,
+        direction: GridDirection,
+    ) -> [i32; 4] {
+        self.wall_heights_above_stack_or_surfaces_for_world_cell(
+            self.origin[0].saturating_add(x as i32),
+            self.origin[1].saturating_add(z as i32),
+            direction,
+        )
     }
 
     /// Same as [`Self::wall_heights_aligned_to_surfaces`], but
@@ -2002,6 +2155,28 @@ impl WorldGrid {
                 ]
             });
         [bottom[0], bottom[1], top[1], top[0]]
+    }
+
+    /// Same as [`Self::wall_heights_above_stack_or_surfaces`], but
+    /// addressed by world-cell coordinates so off-grid wall previews
+    /// match auto-grown placement.
+    pub fn wall_heights_above_stack_or_surfaces_for_world_cell(
+        &self,
+        wcx: i32,
+        wcz: i32,
+        direction: GridDirection,
+    ) -> [i32; 4] {
+        if let Some(bottom) =
+            self.touching_wall_top_edge_heights_for_world_cell(wcx, wcz, direction)
+        {
+            let height = default_wall_height_for_sector_size(self.sector_size);
+            let top = [
+                bottom[0].saturating_add(height),
+                bottom[1].saturating_add(height),
+            ];
+            return [bottom[0], bottom[1], top[1], top[0]];
+        }
+        self.wall_heights_aligned_to_surfaces_for_world_cell(wcx, wcz, direction)
     }
 
     fn floor_edge_heights_for_wall(
@@ -3411,6 +3586,9 @@ pub enum NodeKind {
         /// [`WORLD_SECTOR_SIZE_QUANTUM`].
         #[serde(default = "default_world_sector_size")]
         sector_size: i32,
+        /// Background sky drawn before room geometry.
+        #[serde(default)]
+        sky: SkySettings,
     },
     /// One streamed level chunk: a sector grid plus its child
     /// entities. Cooks to a single `.psxw` blob the runtime loads
@@ -3853,8 +4031,21 @@ impl Scene {
         let mut current = Some(id);
         while let Some(node_id) = current {
             let node = self.node(node_id)?;
-            if let NodeKind::World { sector_size } = &node.kind {
+            if let NodeKind::World { sector_size, .. } = &node.kind {
                 return Some(snap_world_sector_size(*sector_size));
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Sky settings inherited by `id` from the nearest World ancestor.
+    pub fn world_sky_for_node(&self, id: NodeId) -> Option<SkySettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { sky, .. } = &node.kind {
+                return Some(*sky);
             }
             current = node.parent;
         }
@@ -4261,8 +4452,9 @@ impl ProjectDocument {
         for scene in &mut self.scenes {
             for node in &mut scene.nodes {
                 match &mut node.kind {
-                    NodeKind::World { sector_size } => {
+                    NodeKind::World { sector_size, sky } => {
                         *sector_size = snap_world_sector_size(*sector_size);
+                        sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
                     }
                     _ => {}
                 }
@@ -4271,7 +4463,7 @@ impl ProjectDocument {
                 .nodes()
                 .iter()
                 .filter_map(|node| match &node.kind {
-                    NodeKind::World { sector_size } => Some((node.id, *sector_size)),
+                    NodeKind::World { sector_size, .. } => Some((node.id, *sector_size)),
                     _ => None,
                 })
                 .collect();
@@ -4316,7 +4508,7 @@ impl ProjectDocument {
         let new_size = snap_world_sector_size(requested);
         let old_size = {
             let world = scene.node_mut(world_id)?;
-            let NodeKind::World { sector_size } = &mut world.kind else {
+            let NodeKind::World { sector_size, .. } = &mut world.kind else {
                 return None;
             };
             let old_size = snap_world_sector_size(*sector_size);
@@ -5057,7 +5249,14 @@ mod tests {
     fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
         let mut project = ProjectDocument::new("test");
         let scene = project.active_scene_mut();
-        let world = scene.add_node(scene.root, "World", NodeKind::World { sector_size: 1024 });
+        let world = scene.add_node(
+            scene.root,
+            "World",
+            NodeKind::World {
+                sector_size: 1024,
+                sky: SkySettings::default(),
+            },
+        );
         let mut grid = WorldGrid::empty(1, 1, 1024);
         grid.set_floor(0, 0, 160, None);
         grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
@@ -5126,9 +5325,7 @@ mod tests {
 
         let saved = std::fs::read_to_string(&path).unwrap();
         let expected_sector_size = project.world_sector_size_for_node(room_id);
-        assert!(saved.contains(&format!(
-            "kind: World(sector_size: {expected_sector_size}),"
-        )));
+        assert!(saved.contains(&format!("kind: World(sector_size: {expected_sector_size},")));
         assert!(saved.contains(&format!("sector_size: {expected_sector_size}")));
         assert!(!saved.contains("sector_size: 2030"));
 
@@ -5387,6 +5584,30 @@ mod tests {
             grid.wall_heights_aligned_to_surfaces_for_world_cell(1, 0, GridDirection::West);
 
         assert_eq!(heights, [384, 256, 2304, 2432]);
+    }
+
+    #[test]
+    fn wall_stack_placement_starts_above_highest_wall_top() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+
+        let heights = grid.wall_heights_above_stack_or_surfaces(0, 0, GridDirection::North);
+
+        assert_eq!(heights, [1024, 1024, 3072, 3072]);
+    }
+
+    #[test]
+    fn wall_stack_placement_preserves_sloped_top_edge() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.ensure_sector(0, 0)
+            .unwrap()
+            .walls
+            .get_mut(GridDirection::North)
+            .push(GridVerticalFace::with_heights([0, 0, 1408, 1152], None));
+
+        let heights = grid.wall_heights_above_stack_or_surfaces(0, 0, GridDirection::North);
+
+        assert_eq!(heights, [1152, 1408, 3456, 3200]);
     }
 
     #[test]
@@ -5710,13 +5931,15 @@ mod tests {
             .nodes()
             .iter()
             .find_map(|node| match &node.kind {
-                NodeKind::World { sector_size } => Some(*sector_size),
+                NodeKind::World { sector_size, .. } => Some(*sector_size),
                 _ => None,
             })
             .expect("starter world exists");
         let legacy = DEFAULT_PROJECT_RON
             .replace(
-                &format!("kind: World(sector_size: {starter_world_sector_size}),"),
+                &format!(
+                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true)),"
+                ),
                 "kind: World,",
             )
             .replacen("kind: Entity,", "kind: Actor,", 1);
@@ -5730,7 +5953,7 @@ mod tests {
             .expect("starter world exists");
         assert!(matches!(
             &world.kind,
-            NodeKind::World { sector_size } if *sector_size == DEFAULT_WORLD_SECTOR_SIZE
+            NodeKind::World { sector_size, .. } if *sector_size == DEFAULT_WORLD_SECTOR_SIZE
         ));
         let migrated = scene
             .nodes()

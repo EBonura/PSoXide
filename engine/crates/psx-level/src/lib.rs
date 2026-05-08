@@ -114,6 +114,12 @@ pub mod room_flags {
     pub const FOG_ENABLED: u16 = 1 << 0;
 }
 
+/// Sky record flags.
+pub mod sky_flags {
+    /// A sky gradient should be drawn before room geometry.
+    pub const ENABLED: u16 = 1 << 0;
+}
+
 /// Equipment record flags.
 pub mod equipment_flags {
     /// Equipment belongs to the player controller and should follow
@@ -253,6 +259,32 @@ pub struct LevelAssetRecord {
     pub flags: u16,
 }
 
+/// Resolved sky settings for one cooked room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelSkyRecord {
+    /// Zenith colour.
+    pub top_rgb: [u8; 3],
+    /// Colour at the horizon line.
+    pub horizon_rgb: [u8; 3],
+    /// Colour at the bottom of the frame.
+    pub bottom_rgb: [u8; 3],
+    /// Horizon line as a percentage of screen height.
+    pub horizon_percent: u8,
+    /// Sky flags.
+    pub flags: u16,
+}
+
+impl LevelSkyRecord {
+    /// Default dark gradient used by placeholder manifests.
+    pub const DEFAULT: Self = Self {
+        top_rgb: [7, 8, 14],
+        horizon_rgb: [32, 30, 34],
+        bottom_rgb: [5, 7, 12],
+        horizon_percent: 58,
+        flags: sky_flags::ENABLED,
+    };
+}
+
 /// One room. References its world asset by id and points into
 /// the global [`LevelMaterialRecord`] table via
 /// `material_first` / `material_count`.
@@ -281,6 +313,8 @@ pub struct LevelRoomRecord {
     pub fog_near: i32,
     /// Fog end distance in engine units.
     pub fog_far: i32,
+    /// Resolved world sky for this room.
+    pub sky: LevelSkyRecord,
     /// Reserved.
     pub flags: u16,
 }
