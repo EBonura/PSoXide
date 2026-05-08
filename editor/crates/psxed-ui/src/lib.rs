@@ -4056,19 +4056,51 @@ impl EditorWorkspace {
         self.selected_frame_bounds_3d()
     }
 
-    /// Selected floor tiles as face refs for the 3D preview overlay.
-    /// 2D tile selection stores sector cells, while the 3D preview
-    /// outline path already knows how to draw face outlines.
+    /// Selected cells expanded to every authored face they contain.
+    /// 2D tile selection stores sector cells; the 3D preview,
+    /// material tools, and drag code work on concrete face refs.
     pub fn selected_sector_faces(&self) -> Vec<FaceRef> {
-        self.selected_sectors
-            .iter()
-            .map(|(room, sx, sz)| FaceRef {
-                room: *room,
-                sx: *sx,
-                sz: *sz,
-                kind: FaceKind::Floor,
-            })
-            .collect()
+        let mut sectors: Vec<_> = self.selected_sectors.iter().copied().collect();
+        sectors.sort_by_key(|(room, sx, sz)| (room.raw(), *sx, *sz));
+        let mut faces = Vec::new();
+        for (room, sx, sz) in sectors {
+            let Some(grid) = self.room_grid_view(room) else {
+                continue;
+            };
+            let Some(sector) = grid.sector(sx, sz) else {
+                continue;
+            };
+            if sector.floor.is_some() {
+                faces.push(FaceRef {
+                    room,
+                    sx,
+                    sz,
+                    kind: FaceKind::Floor,
+                });
+            }
+            if sector.ceiling.is_some() {
+                faces.push(FaceRef {
+                    room,
+                    sx,
+                    sz,
+                    kind: FaceKind::Ceiling,
+                });
+            }
+            for dir in GridDirection::ALL {
+                for (stack, _) in sector.walls.get(dir).iter().enumerate() {
+                    let Ok(stack) = u8::try_from(stack) else {
+                        continue;
+                    };
+                    faces.push(FaceRef {
+                        room,
+                        sx,
+                        sz,
+                        kind: FaceKind::Wall { dir, stack },
+                    });
+                }
+            }
+        }
+        faces
     }
 
     /// Active selection mode (Face / Edge / Vertex). Hotkeys
@@ -4505,6 +4537,32 @@ impl EditorWorkspace {
         self.selected_sectors.contains(&sector).then_some(sector)
     }
 
+    fn select_horizontal_face_sector_area(&mut self, selection: Selection) -> bool {
+        let Selection::Face(face) = selection else {
+            return false;
+        };
+        if !matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling) {
+            return false;
+        }
+
+        if self.selected_sectors.is_empty() {
+            if let Some(Selection::Face(previous)) = self.selected_primitive {
+                if matches!(previous.kind, FaceKind::Floor | FaceKind::Ceiling) {
+                    self.selected_sectors
+                        .insert((previous.room, previous.sx, previous.sz));
+                    self.sector_selection_anchor = Some((previous.room, previous.sx, previous.sz));
+                }
+            }
+        }
+
+        self.clear_primitive_selection_state();
+        let anchor = self
+            .sector_selection_anchor
+            .unwrap_or((face.room, face.sx, face.sz));
+        self.select_sector_rect(anchor, (face.room, face.sx, face.sz), false);
+        true
+    }
+
     fn select_wall_face_span(&mut self, selection: Selection, modifiers: egui::Modifiers) -> bool {
         let Selection::Face(current) = selection else {
             return false;
@@ -4604,6 +4662,9 @@ impl EditorWorkspace {
         modifiers: egui::Modifiers,
     ) {
         let toggle = modifiers.command || modifiers.ctrl;
+        if modifiers.shift && self.select_horizontal_face_sector_area(selection) {
+            return;
+        }
         if modifiers.shift && self.select_wall_face_span(selection, modifiers) {
             return;
         }
@@ -22859,6 +22920,70 @@ mod tests {
     }
 
     #[test]
+    fn shift_selects_horizontal_face_area_and_exposes_all_sector_faces() {
+        let mut project = ProjectDocument::new("horizontal-area-selection");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        for sx in 0..=1 {
+            grid.set_floor(sx, 0, 0, None);
+            grid.ensure_sector(sx, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1024, None));
+            grid.add_wall(sx, 0, GridDirection::North, 0, 1024, None);
+        }
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("horizontal-area-selection"), project);
+        let floor_0 = Selection::Face(FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Floor,
+        });
+        let ceiling_1 = Selection::Face(FaceRef {
+            room,
+            sx: 1,
+            sz: 0,
+            kind: FaceKind::Ceiling,
+        });
+        let mut shift = egui::Modifiers::NONE;
+        shift.shift = true;
+
+        workspace.apply_primitive_selection_modifiers(floor_0, egui::Modifiers::NONE);
+        workspace.apply_primitive_selection_modifiers(ceiling_1, shift);
+
+        assert!(workspace.selected_primitives.is_empty());
+        assert!(workspace.selected_sectors.contains(&(room, 0, 0)));
+        assert!(workspace.selected_sectors.contains(&(room, 1, 0)));
+        assert_eq!(workspace.selected_sectors.len(), 2);
+        let faces = workspace.selected_sector_faces();
+        assert_eq!(faces.len(), 6);
+        for sx in 0..=1 {
+            assert!(faces.contains(&FaceRef {
+                room,
+                sx,
+                sz: 0,
+                kind: FaceKind::Floor,
+            }));
+            assert!(faces.contains(&FaceRef {
+                room,
+                sx,
+                sz: 0,
+                kind: FaceKind::Ceiling,
+            }));
+            assert!(faces.contains(&FaceRef {
+                room,
+                sx,
+                sz: 0,
+                kind: FaceKind::Wall {
+                    dir: GridDirection::North,
+                    stack: 0,
+                },
+            }));
+        }
+    }
+
+    #[test]
     fn viewport_box_select_selects_cells_inside_screen_rectangle() {
         let mut project = ProjectDocument::new("box-select");
         let mut grid = WorldGrid::empty(3, 3, 1024);
@@ -23283,7 +23408,7 @@ mod tests {
     }
 
     #[test]
-    fn material_click_assignment_updates_all_selected_floor_faces() {
+    fn material_click_assignment_updates_all_faces_in_selected_sectors() {
         let mut project = ProjectDocument::new("materials");
         let original = project.add_resource(
             "Original",
@@ -23293,13 +23418,17 @@ mod tests {
             "Target",
             ResourceData::Material(MaterialResource::opaque(None)),
         );
-        let room = project.active_scene_mut().add_node(
-            NodeId::ROOT,
-            "Room",
-            NodeKind::Room {
-                grid: WorldGrid::stone_room(2, 1, 1024, Some(original), None),
-            },
-        );
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        for sx in 0..=1 {
+            grid.set_floor(sx, 0, 0, Some(original));
+            grid.ensure_sector(sx, 0).unwrap().ceiling =
+                Some(GridHorizontalFace::flat(1024, Some(original)));
+            grid.add_wall(sx, 0, GridDirection::North, 0, 1024, Some(original));
+        }
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
         let mut ctrl = egui::Modifiers::NONE;
         ctrl.ctrl = true;
@@ -23308,8 +23437,8 @@ mod tests {
         workspace.select_sector((room, 1, 0), ctrl);
 
         let selected = workspace.selected_face_targets();
-        assert_eq!(selected.len(), 2);
-        assert_eq!(workspace.assign_selected_faces_material(Some(target)), 2);
+        assert_eq!(selected.len(), 6);
+        assert_eq!(workspace.assign_selected_faces_material(Some(target)), 6);
 
         for sx in 0..=1 {
             assert_eq!(
@@ -23318,6 +23447,27 @@ mod tests {
                     sx,
                     sz: 0,
                     kind: FaceKind::Floor,
+                }),
+                Some(target)
+            );
+            assert_eq!(
+                workspace.face_material(FaceRef {
+                    room,
+                    sx,
+                    sz: 0,
+                    kind: FaceKind::Ceiling,
+                }),
+                Some(target)
+            );
+            assert_eq!(
+                workspace.face_material(FaceRef {
+                    room,
+                    sx,
+                    sz: 0,
+                    kind: FaceKind::Wall {
+                        dir: GridDirection::North,
+                        stack: 0,
+                    },
                 }),
                 Some(target)
             );
