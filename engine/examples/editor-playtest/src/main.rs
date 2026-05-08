@@ -325,6 +325,8 @@ struct VramSlot {
     clut_word: u16,
     tpage_word: u16,
     texture_window: TextureWindow,
+    texture_width: u8,
+    texture_height: u8,
 }
 
 const VRAM_SLOT_EMPTY: Option<VramSlot> = None;
@@ -2411,11 +2413,13 @@ fn build_room_materials(
             rgb_tuple(material.tint_rgb),
         )
         .with_texture_window(slot_record.texture_window);
-        out[slot] = Some(match material.sidedness() {
+        let render_material = match material.sidedness() {
             LevelMaterialSidedness::Front => WorldRenderMaterial::front(texture),
             LevelMaterialSidedness::Back => WorldRenderMaterial::back(texture),
             LevelMaterialSidedness::Both => WorldRenderMaterial::both(texture),
-        });
+        }
+        .with_texture_size(slot_record.texture_width, slot_record.texture_height);
+        out[slot] = Some(render_material);
         if slot + 1 > max_slot {
             max_slot = slot + 1;
         }
@@ -2685,16 +2689,20 @@ fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<Vram
     upload_opaque_clut(clut_rect, texture.clut_bytes());
 
     let clut = Clut::new(clut_x, ROOM_CLUT_Y);
+    let texture_width = room_texture_window_size(texture.width())?;
+    let texture_height = room_texture_window_size(texture.height())?;
     let slot = VramSlot {
         asset: asset_id,
         clut_word: clut.uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
-        texture_window: room_texture_window(
+        texture_window: TextureWindow::power_of_two_tile(
             tile_origin_u,
             tile_origin_v,
-            texture.width(),
-            texture.height(),
-        )?,
+            texture_width,
+            texture_height,
+        ),
+        texture_width,
+        texture_height,
     };
 
     unsafe {
@@ -2708,20 +2716,6 @@ fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<Vram
     }
 
     Some(slot)
-}
-
-fn room_texture_window(
-    origin_u: u8,
-    origin_v: u8,
-    width: u16,
-    height: u16,
-) -> Option<TextureWindow> {
-    Some(TextureWindow::power_of_two_tile(
-        origin_u,
-        origin_v,
-        room_texture_window_size(width)?,
-        room_texture_window_size(height)?,
-    ))
 }
 
 fn room_texture_window_size(size: u16) -> Option<u8> {
@@ -2789,6 +2783,8 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
         clut_word: Clut::new(0, clut_y).uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::NONE,
+        texture_width: ROOM_TILE_TEXELS as u8,
+        texture_height: ROOM_TILE_TEXELS as u8,
     };
 
     unsafe {

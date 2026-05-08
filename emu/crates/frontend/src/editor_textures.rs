@@ -32,6 +32,7 @@ use psxed_project::{MaterialResource, ProjectDocument, Resource, ResourceData, R
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
 const ROOM_TPAGE_TEXEL_HEIGHT: usize = 256;
+const ROOM_TILE_TEXELS: u16 = 64;
 const ROOM_FIRST_TPAGE: u8 = 5;
 const ROOM_LAST_TPAGE: u8 = 15;
 const ROOM_CLUT_Y: u16 = 480;
@@ -53,6 +54,10 @@ pub struct MaterialSlot {
     /// Packed `uv_clut_word` value the prim format wants in vertex
     /// 0's UV high half.
     pub clut_word: u16,
+    /// Width of the material's texture window in texels.
+    pub texture_width: u8,
+    /// Height of the material's texture window in texels.
+    pub texture_height: u8,
 }
 
 /// Cache row keeping the slot assigned to a material.
@@ -119,6 +124,8 @@ impl EditorTextures {
         let shadow_slot = MaterialSlot {
             tpage_word: pack_tpage_word(SHADOW_TPAGE_INDEX, SHADOW_TPAGE_Y_BLOCK),
             clut_word: pack_clut_word(SHADOW_CLUT_X, SHADOW_CLUT_Y),
+            texture_width: 64,
+            texture_height: 64,
         };
         let mut textures = Self {
             vram: vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize].into_boxed_slice(),
@@ -294,6 +301,8 @@ impl EditorTextures {
         let slot = MaterialSlot {
             tpage_word: pack_tpage_word(tpage_index, 0),
             clut_word: pack_clut_word(clut_x, clut_y),
+            texture_width: room_texture_window_size(texture.width())?,
+            texture_height: room_texture_window_size(texture.height())?,
         };
         self.next_tpage += 1;
         self.next_clut_x += ROOM_CLUT_HALFWORDS;
@@ -345,6 +354,8 @@ impl EditorTextures {
         let slot = MaterialSlot {
             tpage_word: pack_tpage_word(tpage_index, 0),
             clut_word: pack_clut_word(clut_x, clut_y),
+            texture_width: 64,
+            texture_height: 64,
         };
         self.next_tpage += 1;
         self.next_clut_x += ROOM_CLUT_HALFWORDS;
@@ -528,6 +539,8 @@ impl EditorTextures {
         let slot = MaterialSlot {
             tpage_word: pack_8bpp_tpage_word(tpage_index, 1),
             clut_word: pack_clut_word(0, clut_y),
+            texture_width: texture.width().min(u16::from(u8::MAX)) as u8,
+            texture_height: texture.height().min(u16::from(u8::MAX)) as u8,
         };
 
         // Advance to the next aligned slot. Each atlas consumes
@@ -929,6 +942,13 @@ fn pack_clut_word(clut_x_halfwords: u16, clut_y: u16) -> u16 {
     let cx = (clut_x_halfwords / 16) & 0x3F;
     let cy = clut_y & 0x1FF;
     cx | (cy << 6)
+}
+
+fn room_texture_window_size(size: u16) -> Option<u8> {
+    if size < 8 || size > ROOM_TILE_TEXELS || !size.is_power_of_two() || size % 8 != 0 {
+        return None;
+    }
+    u8::try_from(size).ok()
 }
 
 /// Round `value` up to the next multiple of `boundary`.
