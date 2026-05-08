@@ -59,6 +59,8 @@ const MODE_IRQ_ACTIVE_LOW: u32 = 1 << 10;
 const MODE_REACHED_TARGET: u32 = 1 << 11;
 /// bit 12: "reached 0xFFFF" sticky flag.
 const MODE_REACHED_WRAP: u32 = 1 << 12;
+const MODE_TIMER2_REDUX_JITTER_MASK: u32 = 0x02FF;
+const MODE_TIMER2_REDUX_JITTER_FLAGS: u32 = (1 << 9) | MODE_IRQ_REPEAT | MODE_RESET_AT_TARGET;
 
 /// The full three-timer bank.
 #[derive(Default)]
@@ -98,7 +100,16 @@ impl Timers {
     pub fn read32(&mut self, phys: u32) -> u32 {
         let (idx, off) = decode(phys);
         match off {
-            0x0 => self.timers[idx].counter,
+            0x0 => {
+                let counter = self.timers[idx].counter;
+                if idx == 2 && timer2_redux_jitter_active(&self.timers[idx]) {
+                    // PCSX-Redux's PE2 root-counter compatibility path
+                    // halves Timer 2 reads for this mode pattern.
+                    counter / 2
+                } else {
+                    counter
+                }
+            }
             0x4 => {
                 let mode = self.timers[idx].mode;
                 // Hardware/Redux side effect: reading the mode register
@@ -338,6 +349,11 @@ fn decode(phys: u32) -> (usize, u32) {
     (idx, off)
 }
 
+fn timer2_redux_jitter_active(timer: &Timer) -> bool {
+    timer.target != 0
+        && (timer.mode & MODE_TIMER2_REDUX_JITTER_MASK) == MODE_TIMER2_REDUX_JITTER_FLAGS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +467,18 @@ mod tests {
         t.write32(0x1F80_1124, MODE_SYNC_ENABLE, 0);
         t.tick(100, 2146, 8);
         assert_eq!(t.read32(0x1F80_1120) & 0xFFFF, 100);
+    }
+
+    #[test]
+    fn timer2_redux_jitter_mode_halves_counter_reads() {
+        let mut t = Timers::new();
+        t.write32(0x1F80_1128, 0x4000, 0);
+        t.write32(0x1F80_1124, MODE_TIMER2_REDUX_JITTER_FLAGS, 0);
+
+        t.tick(0x800, 2146, 8);
+
+        assert_eq!(t.timers[2].counter, 0x100);
+        assert_eq!(t.read32(0x1F80_1120), 0x80);
     }
 
     #[test]

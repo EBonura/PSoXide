@@ -28,7 +28,9 @@ fn main() {
     if let Some(ref p) = disc_path {
         let disc = disc_support::load_disc_path(Path::new(p)).expect("disc");
         bus.cdrom.insert_disc(Some(disc));
-        bus.attach_digital_pad_port1();
+        if std::env::var_os("PSOXIDE_NO_PAD").is_none() {
+            bus.attach_digital_pad_port1();
+        }
         if std::env::var_os("PSOXIDE_NO_MEMCARD").is_none() {
             bus.attach_memcard_port1(Vec::new());
         }
