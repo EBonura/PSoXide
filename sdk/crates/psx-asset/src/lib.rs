@@ -45,6 +45,43 @@ const MESH_VERSION_U8_INDICES: u16 = 1;
 const MESH_U8_INDEX_STRIDE: usize = 3;
 const MESH_U16_INDEX_STRIDE: usize = 6;
 
+/// Shared topology helpers for cooked world quads and wall shapes.
+pub mod world_topology {
+    pub use psxed_format::world::topology::{
+        horizontal_triangle_at_local, split_triangle, split_triangles, triangle_contains_corner,
+        wall_shape_for_dropped_corner, wall_shape_triangle, wall_shape_triangle_corners,
+        SplitTriangles, TriangleCorners, HORIZONTAL_NE_SW_TRIANGLES, HORIZONTAL_NW_SE_TRIANGLES,
+        SPLIT_ONE_THREE_TRIANGLES, SPLIT_ZERO_TWO_TRIANGLES, WHOLE_QUAD_TRIANGLE_INDEX,
+    };
+}
+
+/// World split id from north-west to south-east.
+pub const WORLD_SPLIT_NORTH_WEST_SOUTH_EAST: u8 =
+    psxed_format::world::split::NORTH_WEST_SOUTH_EAST;
+
+/// World split id from north-east to south-west.
+pub const WORLD_SPLIT_NORTH_EAST_SOUTH_WEST: u8 =
+    psxed_format::world::split::NORTH_EAST_SOUTH_WEST;
+
+/// Full four-corner world-wall shape.
+pub const WORLD_WALL_SHAPE_QUAD: u16 = psxed_format::world::wall_shape::QUAD;
+
+/// World-wall shape with the bottom-left corner removed.
+pub const WORLD_WALL_SHAPE_DROP_BOTTOM_LEFT: u16 =
+    psxed_format::world::wall_shape::DROP_BOTTOM_LEFT;
+
+/// World-wall shape with the bottom-right corner removed.
+pub const WORLD_WALL_SHAPE_DROP_BOTTOM_RIGHT: u16 =
+    psxed_format::world::wall_shape::DROP_BOTTOM_RIGHT;
+
+/// World-wall shape with the top-right corner removed.
+pub const WORLD_WALL_SHAPE_DROP_TOP_RIGHT: u16 =
+    psxed_format::world::wall_shape::DROP_TOP_RIGHT;
+
+/// World-wall shape with the top-left corner removed.
+pub const WORLD_WALL_SHAPE_DROP_TOP_LEFT: u16 =
+    psxed_format::world::wall_shape::DROP_TOP_LEFT;
+
 /// Errors `Mesh::from_bytes` can return for a malformed blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
@@ -1104,6 +1141,7 @@ impl<'a> Texture<'a> {
 pub struct World<'a> {
     sectors: &'a [u8],
     walls: &'a [u8],
+    horizontal_overrides: &'a [u8],
     surface_lights: &'a [u8],
     sector_record_size: usize,
     wall_record_size: usize,
@@ -1112,6 +1150,7 @@ pub struct World<'a> {
     sector_size: i32,
     material_count: u16,
     wall_count: u16,
+    horizontal_override_count: u16,
     surface_light_count: u16,
     ambient_color: [u8; 3],
     flags: u8,
@@ -1165,11 +1204,16 @@ const WORLD_V1_SECTOR_RECORD_SIZE: usize = 44;
 const WORLD_V1_WALL_RECORD_SIZE: usize = 24;
 const WORLD_V2_SECTOR_RECORD_SIZE: usize = 60;
 const WORLD_V2_WALL_RECORD_SIZE: usize = 32;
+const WORLD_V3_HEADER_SIZE: usize = 20;
+const WORLD_V3_SECTOR_RECORD_SIZE: usize = 60;
+const WORLD_V3_WALL_RECORD_SIZE: usize = 32;
 
 impl<'a> World<'a> {
     /// Parse a cooked `.psxw` blob.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
-        use psxed_format::world::{WorldHeader, MAGIC, VERSION, VERSION_V1, VERSION_V2};
+        use psxed_format::world::{
+            WorldHeader, MAGIC, VERSION, VERSION_V1, VERSION_V2, VERSION_V3,
+        };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
             return Err(ParseError::Truncated);
@@ -1179,13 +1223,31 @@ impl<'a> World<'a> {
             return Err(ParseError::WrongMagic);
         }
         let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-        if version != VERSION && version != VERSION_V2 && version != VERSION_V1 {
+        if version != VERSION
+            && version != VERSION_V3
+            && version != VERSION_V2
+            && version != VERSION_V1
+        {
             return Err(ParseError::UnsupportedVersion(version));
         }
-        let (sector_record_size, wall_record_size) = match version {
-            VERSION_V1 => (WORLD_V1_SECTOR_RECORD_SIZE, WORLD_V1_WALL_RECORD_SIZE),
-            VERSION_V2 => (WORLD_V2_SECTOR_RECORD_SIZE, WORLD_V2_WALL_RECORD_SIZE),
+        let (world_header_size, sector_record_size, wall_record_size) = match version {
+            VERSION_V1 => (
+                WORLD_V3_HEADER_SIZE,
+                WORLD_V1_SECTOR_RECORD_SIZE,
+                WORLD_V1_WALL_RECORD_SIZE,
+            ),
+            VERSION_V2 => (
+                WORLD_V3_HEADER_SIZE,
+                WORLD_V2_SECTOR_RECORD_SIZE,
+                WORLD_V2_WALL_RECORD_SIZE,
+            ),
+            VERSION_V3 => (
+                WORLD_V3_HEADER_SIZE,
+                WORLD_V3_SECTOR_RECORD_SIZE,
+                WORLD_V3_WALL_RECORD_SIZE,
+            ),
             _ => (
+                WorldHeader::SIZE,
                 psxed_format::world::SectorRecord::SIZE,
                 psxed_format::world::WallRecord::SIZE,
             ),
@@ -1199,11 +1261,11 @@ impl<'a> World<'a> {
                 actual: actual_payload,
             });
         }
-        if actual_payload < WorldHeader::SIZE {
+        if actual_payload < world_header_size {
             return Err(ParseError::Truncated);
         }
 
-        let wh = &bytes[payload_start..payload_start + WorldHeader::SIZE];
+        let wh = &bytes[payload_start..payload_start + world_header_size];
         let width = read_u16(wh, 0);
         let depth = read_u16(wh, 2);
         let sector_size = read_i32(wh, 4);
@@ -1212,12 +1274,17 @@ impl<'a> World<'a> {
         let wall_count = read_u16(wh, 12);
         let ambient_color = [wh[14], wh[15], wh[16]];
         let flags = wh[17];
-        let surface_light_count = if version == VERSION {
+        let surface_light_count = if version == VERSION || version == VERSION_V3 {
             read_u16(wh, 18)
         } else {
             0
         };
-        let static_vertex_lighting = version == VERSION
+        let horizontal_override_count = if version == VERSION {
+            read_u16(wh, 20)
+        } else {
+            0
+        };
+        let static_vertex_lighting = (version == VERSION || version == VERSION_V3)
             && flags & psxed_format::world::world_flags::STATIC_VERTEX_LIGHTING != 0;
 
         let expected_sectors = (width as usize)
@@ -1238,7 +1305,7 @@ impl<'a> World<'a> {
             return Err(ParseError::InvalidWorldLayout);
         }
 
-        let mut off = payload_start + WorldHeader::SIZE;
+        let mut off = payload_start + world_header_size;
         let sector_bytes = (sector_count as usize)
             .checked_mul(sector_record_size)
             .ok_or(ParseError::TableOverflow)?;
@@ -1256,6 +1323,14 @@ impl<'a> World<'a> {
         }
         let walls = &bytes[off..off + wall_bytes];
         off += wall_bytes;
+        let horizontal_override_bytes = (horizontal_override_count as usize)
+            .checked_mul(psxed_format::world::HorizontalOverrideRecord::SIZE)
+            .ok_or(ParseError::TableOverflow)?;
+        if off + horizontal_override_bytes > bytes.len() {
+            return Err(ParseError::TableOverflow);
+        }
+        let horizontal_overrides = &bytes[off..off + horizontal_override_bytes];
+        off += horizontal_override_bytes;
         let surface_light_bytes = (surface_light_count as usize)
             .checked_mul(psxed_format::world::SurfaceLightRecord::SIZE)
             .ok_or(ParseError::TableOverflow)?;
@@ -1269,10 +1344,16 @@ impl<'a> World<'a> {
         }
 
         validate_sector_wall_ranges(sectors, sector_record_size, wall_count)?;
+        validate_horizontal_overrides(
+            horizontal_overrides,
+            horizontal_override_count,
+            sector_count,
+        )?;
 
         Ok(Self {
             sectors,
             walls,
+            horizontal_overrides,
             surface_lights,
             sector_record_size,
             wall_record_size,
@@ -1281,6 +1362,7 @@ impl<'a> World<'a> {
             sector_size,
             material_count,
             wall_count,
+            horizontal_override_count,
             surface_light_count,
             ambient_color,
             flags,
@@ -1316,6 +1398,12 @@ impl<'a> World<'a> {
     #[inline]
     pub fn wall_count(&self) -> u16 {
         self.wall_count
+    }
+
+    /// Number of horizontal override records in the world.
+    #[inline]
+    pub fn horizontal_override_count(&self) -> u16 {
+        self.horizontal_override_count
     }
 
     /// Number of appended static surface-light records.
@@ -1362,7 +1450,18 @@ impl<'a> World<'a> {
         let base = index.checked_mul(size)?;
         let end = base.checked_add(size)?;
         let bytes = self.sectors.get(base..end)?;
-        Some(WorldSector::decode(bytes))
+        let sector_index = if index <= u16::MAX as usize {
+            index as u16
+        } else {
+            return None;
+        };
+        let floor_override =
+            self.horizontal_override(sector_index, psxed_format::world::horizontal_surface::FLOOR);
+        let ceiling_override = self.horizontal_override(
+            sector_index,
+            psxed_format::world::horizontal_surface::CEILING,
+        );
+        Some(WorldSector::decode(bytes, floor_override, ceiling_override))
     }
 
     /// Wall record by global wall index.
@@ -1396,6 +1495,31 @@ impl<'a> World<'a> {
         let bytes = self.surface_lights.get(base..end)?;
         Some(read_world_surface_light(bytes, 0))
     }
+
+    fn horizontal_override(
+        &self,
+        sector_index: u16,
+        surface: u8,
+    ) -> Option<WorldHorizontalOverride> {
+        let size = psxed_format::world::HorizontalOverrideRecord::SIZE;
+        let mut index = 0usize;
+        while index < self.horizontal_override_count as usize {
+            let base = index.checked_mul(size)?;
+            let bytes = self.horizontal_overrides.get(base..base + size)?;
+            if read_u16(bytes, 0) == sector_index && bytes[2] == surface {
+                return Some(read_world_horizontal_override(bytes));
+            }
+            index += 1;
+        }
+        None
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct WorldHorizontalOverride {
+    flags: u8,
+    materials: [u16; 2],
+    uvs: [WorldQuadUvs; 2],
 }
 
 /// One decoded world sector record.
@@ -1406,37 +1530,84 @@ pub struct WorldSector {
     ceiling_split: u8,
     floor_material: u16,
     ceiling_material: u16,
+    floor_triangle_flags: u8,
+    ceiling_triangle_flags: u8,
+    floor_triangle_materials: [u16; 2],
+    ceiling_triangle_materials: [u16; 2],
     first_wall: u16,
     wall_count: u16,
     floor_heights: [i32; 4],
     ceiling_heights: [i32; 4],
     floor_uvs: WorldQuadUvs,
     ceiling_uvs: WorldQuadUvs,
+    floor_triangle_uvs: [WorldQuadUvs; 2],
+    ceiling_triangle_uvs: [WorldQuadUvs; 2],
 }
 
 impl WorldSector {
-    fn decode(bytes: &[u8]) -> Self {
+    fn decode(
+        bytes: &[u8],
+        floor_override: Option<WorldHorizontalOverride>,
+        ceiling_override: Option<WorldHorizontalOverride>,
+    ) -> Self {
         let has_v2_uvs = bytes.len() >= WORLD_V2_SECTOR_RECORD_SIZE;
+        let flags = bytes[0];
+        let floor_material = read_u16(bytes, 4);
+        let ceiling_material = read_u16(bytes, 6);
+        let floor_uvs = if has_v2_uvs {
+            read_world_uvs(bytes, 44)
+        } else {
+            WorldQuadUvs::new(psxed_format::world::FLOOR_UVS)
+        };
+        let ceiling_uvs = if has_v2_uvs {
+            read_world_uvs(bytes, 52)
+        } else {
+            WorldQuadUvs::new(psxed_format::world::FLOOR_UVS)
+        };
+        let floor_default_flags = default_horizontal_flags(
+            flags & psxed_format::world::sector_flags::HAS_FLOOR != 0,
+            flags & psxed_format::world::sector_flags::FLOOR_WALKABLE != 0,
+        );
+        let ceiling_default_flags = default_horizontal_flags(
+            flags & psxed_format::world::sector_flags::HAS_CEILING != 0,
+            flags & psxed_format::world::sector_flags::CEILING_WALKABLE != 0,
+        );
+        let floor_triangle_flags =
+            floor_override.map_or(floor_default_flags, |override_data| override_data.flags);
+        let ceiling_triangle_flags =
+            ceiling_override.map_or(ceiling_default_flags, |override_data| override_data.flags);
+        let floor_triangle_materials = floor_override
+            .map_or([floor_material, floor_material], |override_data| {
+                override_data.materials
+            });
+        let ceiling_triangle_materials = ceiling_override
+            .map_or([ceiling_material, ceiling_material], |override_data| {
+                override_data.materials
+            });
+        let floor_triangle_uvs =
+            floor_override.map_or([floor_uvs, floor_uvs], |override_data| override_data.uvs);
+        let ceiling_triangle_uvs = ceiling_override
+            .map_or([ceiling_uvs, ceiling_uvs], |override_data| {
+                override_data.uvs
+            });
         Self {
-            flags: bytes[0],
+            flags,
             floor_split: bytes[1],
             ceiling_split: bytes[2],
-            floor_material: read_u16(bytes, 4),
-            ceiling_material: read_u16(bytes, 6),
+            floor_material,
+            ceiling_material,
+            floor_triangle_flags,
+            ceiling_triangle_flags,
+            floor_triangle_materials,
+            ceiling_triangle_materials,
             first_wall: read_u16(bytes, 8),
             wall_count: read_u16(bytes, 10),
             floor_heights: read_i32x4(bytes, 12),
             ceiling_heights: read_i32x4(bytes, 28),
-            floor_uvs: if has_v2_uvs {
-                read_world_uvs(bytes, 44)
-            } else {
-                WorldQuadUvs::new(psxed_format::world::FLOOR_UVS)
-            },
-            ceiling_uvs: if has_v2_uvs {
-                read_world_uvs(bytes, 52)
-            } else {
-                WorldQuadUvs::new(psxed_format::world::FLOOR_UVS)
-            },
+            floor_uvs,
+            ceiling_uvs,
+            floor_triangle_uvs,
+            ceiling_triangle_uvs,
         }
     }
 
@@ -1450,18 +1621,20 @@ impl WorldSector {
     #[inline]
     pub fn has_floor(&self) -> bool {
         self.flags & psxed_format::world::sector_flags::HAS_FLOOR != 0
+            && (self.floor_triangle_present(0) || self.floor_triangle_present(1))
     }
 
     /// True if this sector has a ceiling face.
     #[inline]
     pub fn has_ceiling(&self) -> bool {
         self.flags & psxed_format::world::sector_flags::HAS_CEILING != 0
+            && (self.ceiling_triangle_present(0) || self.ceiling_triangle_present(1))
     }
 
     /// True if the floor face is walkable.
     #[inline]
     pub fn floor_walkable(&self) -> bool {
-        self.flags & psxed_format::world::sector_flags::FLOOR_WALKABLE != 0
+        self.floor_triangle_walkable(0) || self.floor_triangle_walkable(1)
     }
 
     /// Floor diagonal split id.
@@ -1473,7 +1646,9 @@ impl WorldSector {
     /// Floor material slot.
     #[inline]
     pub fn floor_material(&self) -> Option<u16> {
-        material_or_none(self.floor_material)
+        self.floor_triangle_material(0)
+            .or_else(|| self.floor_triangle_material(1))
+            .or_else(|| material_or_none(self.floor_material))
     }
 
     /// Floor corner heights `[NW, NE, SE, SW]`.
@@ -1488,6 +1663,35 @@ impl WorldSector {
         self.floor_uvs
     }
 
+    /// `true` if a floor split triangle is present.
+    #[inline]
+    pub fn floor_triangle_present(&self, index: usize) -> bool {
+        horizontal_triangle_present(self.floor_triangle_flags, index)
+    }
+
+    /// Floor split-triangle material slot.
+    #[inline]
+    pub fn floor_triangle_material(&self, index: usize) -> Option<u16> {
+        if self.floor_triangle_present(index) {
+            material_or_none(self.floor_triangle_materials[index.min(1)])
+        } else {
+            None
+        }
+    }
+
+    /// Floor split-triangle UVs in face-corner order.
+    #[inline]
+    pub fn floor_triangle_uvs(&self, index: usize) -> WorldQuadUvs {
+        self.floor_triangle_uvs[index.min(1)]
+    }
+
+    /// `true` if a floor split triangle is walkable.
+    #[inline]
+    pub fn floor_triangle_walkable(&self, index: usize) -> bool {
+        self.floor_triangle_present(index)
+            && horizontal_triangle_walkable(self.floor_triangle_flags, index)
+    }
+
     /// Ceiling diagonal split id.
     #[inline]
     pub fn ceiling_split(&self) -> u8 {
@@ -1497,7 +1701,9 @@ impl WorldSector {
     /// Ceiling material slot.
     #[inline]
     pub fn ceiling_material(&self) -> Option<u16> {
-        material_or_none(self.ceiling_material)
+        self.ceiling_triangle_material(0)
+            .or_else(|| self.ceiling_triangle_material(1))
+            .or_else(|| material_or_none(self.ceiling_material))
     }
 
     /// Ceiling corner heights `[NW, NE, SE, SW]`.
@@ -1510,6 +1716,35 @@ impl WorldSector {
     #[inline]
     pub fn ceiling_uvs(&self) -> WorldQuadUvs {
         self.ceiling_uvs
+    }
+
+    /// `true` if a ceiling split triangle is present.
+    #[inline]
+    pub fn ceiling_triangle_present(&self, index: usize) -> bool {
+        horizontal_triangle_present(self.ceiling_triangle_flags, index)
+    }
+
+    /// Ceiling split-triangle material slot.
+    #[inline]
+    pub fn ceiling_triangle_material(&self, index: usize) -> Option<u16> {
+        if self.ceiling_triangle_present(index) {
+            material_or_none(self.ceiling_triangle_materials[index.min(1)])
+        } else {
+            None
+        }
+    }
+
+    /// Ceiling split-triangle UVs in face-corner order.
+    #[inline]
+    pub fn ceiling_triangle_uvs(&self, index: usize) -> WorldQuadUvs {
+        self.ceiling_triangle_uvs[index.min(1)]
+    }
+
+    /// `true` if a ceiling split triangle is walkable.
+    #[inline]
+    pub fn ceiling_triangle_walkable(&self, index: usize) -> bool {
+        self.ceiling_triangle_present(index)
+            && horizontal_triangle_walkable(self.ceiling_triangle_flags, index)
     }
 
     /// First global wall index for this sector.
@@ -1531,6 +1766,7 @@ pub struct WorldWall {
     direction: u8,
     flags: u8,
     material: u16,
+    shape: u16,
     heights: [i32; 4],
     uvs: WorldQuadUvs,
 }
@@ -1542,6 +1778,11 @@ impl WorldWall {
             direction: bytes[0],
             flags: bytes[1],
             material: read_u16(bytes, 4),
+            shape: if has_v2_uvs {
+                read_u16(bytes, 6)
+            } else {
+                psxed_format::world::wall_shape::QUAD
+            },
             heights: read_i32x4(bytes, 8),
             uvs: if has_v2_uvs {
                 read_world_uvs(bytes, 24)
@@ -1569,6 +1810,12 @@ impl WorldWall {
         self.material
     }
 
+    /// Wall shape id, see `psxed_format::world::wall_shape`.
+    #[inline]
+    pub fn shape(&self) -> u16 {
+        self.shape
+    }
+
     /// Wall heights `[bottom-left, bottom-right, top-right, top-left]`.
     #[inline]
     pub fn heights(&self) -> [i32; 4] {
@@ -1589,6 +1836,38 @@ fn material_or_none(material: u16) -> Option<u16> {
     } else {
         Some(material)
     }
+}
+
+const fn default_horizontal_flags(present: bool, walkable: bool) -> u8 {
+    if !present {
+        0
+    } else {
+        let mut flags = psxed_format::world::horizontal_flags::TRI_A_PRESENT
+            | psxed_format::world::horizontal_flags::TRI_B_PRESENT;
+        if walkable {
+            flags |= psxed_format::world::horizontal_flags::TRI_A_WALKABLE
+                | psxed_format::world::horizontal_flags::TRI_B_WALKABLE;
+        }
+        flags
+    }
+}
+
+const fn horizontal_triangle_present(flags: u8, index: usize) -> bool {
+    let bit = if index == 0 {
+        psxed_format::world::horizontal_flags::TRI_A_PRESENT
+    } else {
+        psxed_format::world::horizontal_flags::TRI_B_PRESENT
+    };
+    flags & bit != 0
+}
+
+const fn horizontal_triangle_walkable(flags: u8, index: usize) -> bool {
+    let bit = if index == 0 {
+        psxed_format::world::horizontal_flags::TRI_A_WALKABLE
+    } else {
+        psxed_format::world::horizontal_flags::TRI_B_WALKABLE
+    };
+    flags & bit != 0
 }
 
 fn checked_table_bytes(count: u16, stride: usize) -> Result<usize, ParseError> {
@@ -1703,6 +1982,15 @@ fn read_world_uvs(bytes: &[u8], offset: usize) -> WorldQuadUvs {
 }
 
 #[inline]
+fn read_world_horizontal_override(bytes: &[u8]) -> WorldHorizontalOverride {
+    WorldHorizontalOverride {
+        flags: bytes[3],
+        materials: [read_u16(bytes, 4), read_u16(bytes, 6)],
+        uvs: [read_world_uvs(bytes, 8), read_world_uvs(bytes, 16)],
+    }
+}
+
+#[inline]
 fn read_world_surface_light(bytes: &[u8], offset: usize) -> WorldSurfaceLight {
     WorldSurfaceLight::new([
         [bytes[offset], bytes[offset + 1], bytes[offset + 2]],
@@ -1710,6 +1998,31 @@ fn read_world_surface_light(bytes: &[u8], offset: usize) -> WorldSurfaceLight {
         [bytes[offset + 6], bytes[offset + 7], bytes[offset + 8]],
         [bytes[offset + 9], bytes[offset + 10], bytes[offset + 11]],
     ])
+}
+
+fn validate_horizontal_overrides(
+    overrides: &[u8],
+    override_count: u16,
+    sector_count: u16,
+) -> Result<(), ParseError> {
+    let size = psxed_format::world::HorizontalOverrideRecord::SIZE;
+    if overrides.len() != override_count as usize * size {
+        return Err(ParseError::InvalidWorldLayout);
+    }
+    for index in 0..override_count as usize {
+        let base = index * size;
+        let sector_index = read_u16(overrides, base);
+        let surface = overrides[base + 2];
+        if sector_index >= sector_count {
+            return Err(ParseError::InvalidWorldLayout);
+        }
+        if surface != psxed_format::world::horizontal_surface::FLOOR
+            && surface != psxed_format::world::horizontal_surface::CEILING
+        {
+            return Err(ParseError::InvalidWorldLayout);
+        }
+    }
+    Ok(())
 }
 
 fn validate_sector_wall_ranges(
@@ -1770,18 +2083,18 @@ mod tests {
     }
 
     /// Pin the `.psxw` parser to the versions it intentionally
-    /// supports. v1 is legacy compatibility and v2 is current; any
-    /// newer blob must be rejected.
+    /// supports. v1-v3 are legacy compatibility and v4 is current;
+    /// any newer blob must be rejected.
     #[test]
     fn world_rejects_unknown_version() {
         let mut bad = [0u8; 12];
         bad[0..4].copy_from_slice(&psxed_format::world::MAGIC);
-        bad[4..6].copy_from_slice(&4u16.to_le_bytes());
+        bad[4..6].copy_from_slice(&5u16.to_le_bytes());
         // Payload length 0 -- won't matter; version check fires first.
         bad[8..12].copy_from_slice(&0u32.to_le_bytes());
         assert!(matches!(
             World::from_bytes(&bad),
-            Err(ParseError::UnsupportedVersion(4))
+            Err(ParseError::UnsupportedVersion(5))
         ));
     }
 
@@ -1790,8 +2103,10 @@ mod tests {
     /// pin them at the format crate's records, not the wire.
     #[test]
     fn world_record_sizes_match_contract() {
-        assert_eq!(psxed_format::world::WorldHeader::SIZE, 20);
+        assert_eq!(WORLD_V3_HEADER_SIZE, 20);
+        assert_eq!(psxed_format::world::WorldHeader::SIZE, 24);
         assert_eq!(psxed_format::world::QuadUvRecord::SIZE, 8);
+        assert_eq!(psxed_format::world::HorizontalOverrideRecord::SIZE, 24);
         assert_eq!(psxed_format::world::SurfaceLightRecord::SIZE, 12);
         assert_eq!(WORLD_V2_SECTOR_RECORD_SIZE, 60);
         assert_eq!(WORLD_V2_WALL_RECORD_SIZE, 32);
@@ -1803,10 +2118,9 @@ mod tests {
     fn world_v1_synthesizes_default_uvs() {
         use psxed_format::world;
 
-        const WORLD_V1_LEN: usize = psxed_format::AssetHeader::SIZE
-            + psxed_format::world::WorldHeader::SIZE
-            + WORLD_V1_SECTOR_RECORD_SIZE;
-        let payload_len = (world::WorldHeader::SIZE + WORLD_V1_SECTOR_RECORD_SIZE) as u32;
+        const WORLD_V1_LEN: usize =
+            psxed_format::AssetHeader::SIZE + WORLD_V3_HEADER_SIZE + WORLD_V1_SECTOR_RECORD_SIZE;
+        let payload_len = (WORLD_V3_HEADER_SIZE + WORLD_V1_SECTOR_RECORD_SIZE) as u32;
         let mut buf = [0u8; WORLD_V1_LEN];
         buf[0..4].copy_from_slice(&world::MAGIC);
         buf[4..6].copy_from_slice(&world::VERSION_V1.to_le_bytes());
@@ -1816,7 +2130,7 @@ mod tests {
         buf[16..20].copy_from_slice(&world::SECTOR_SIZE.to_le_bytes());
         buf[20..22].copy_from_slice(&1u16.to_le_bytes());
 
-        let sector = psxed_format::AssetHeader::SIZE + world::WorldHeader::SIZE;
+        let sector = psxed_format::AssetHeader::SIZE + WORLD_V3_HEADER_SIZE;
         buf[sector] = world::sector_flags::HAS_FLOOR;
         buf[sector + 4..sector + 6].copy_from_slice(&0u16.to_le_bytes());
         buf[sector + 6..sector + 8].copy_from_slice(&world::NO_MATERIAL.to_le_bytes());
@@ -2128,7 +2442,7 @@ mod tests {
     fn world_rejects_bad_sector_count() {
         use psxed_format::world;
 
-        let mut buf = [0u8; 12 + 20];
+        let mut buf = [0u8; 12 + psxed_format::world::WorldHeader::SIZE];
         buf[0..4].copy_from_slice(&world::MAGIC);
         buf[4..6].copy_from_slice(&world::VERSION.to_le_bytes());
         buf[8..12].copy_from_slice(&(world::WorldHeader::SIZE as u32).to_le_bytes());

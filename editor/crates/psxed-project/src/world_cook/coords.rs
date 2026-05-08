@@ -40,6 +40,8 @@ pub(super) const fn runtime_wall_direction(direction: GridDirection) -> GridDire
     match direction {
         GridDirection::North => GridDirection::South,
         GridDirection::South => GridDirection::North,
+        GridDirection::NorthWestSouthEast => GridDirection::NorthEastSouthWest,
+        GridDirection::NorthEastSouthWest => GridDirection::NorthWestSouthEast,
         other => other,
     }
 }
@@ -64,4 +66,22 @@ pub(super) const fn runtime_wall_uvs(uvs: [(u8, u8); 4]) -> [(u8, u8); 4] {
         uvs[world::WALL_TOP_LEFT],
         uvs[world::WALL_TOP_RIGHT],
     ]
+}
+
+pub(super) const fn runtime_wall_shape(dropped_corner: Option<WallCorner>) -> u16 {
+    match dropped_corner {
+        None => world::wall_shape::QUAD,
+        Some(WallCorner::BL) => {
+            world::topology::wall_shape_for_dropped_corner(world::WALL_BOTTOM_RIGHT)
+        }
+        Some(WallCorner::BR) => {
+            world::topology::wall_shape_for_dropped_corner(world::WALL_BOTTOM_LEFT)
+        }
+        Some(WallCorner::TR) => {
+            world::topology::wall_shape_for_dropped_corner(world::WALL_TOP_LEFT)
+        }
+        Some(WallCorner::TL) => {
+            world::topology::wall_shape_for_dropped_corner(world::WALL_TOP_RIGHT)
+        }
+    }
 }
