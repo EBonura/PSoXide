@@ -1503,10 +1503,10 @@ pub const MAX_ROOM_BYTES: usize = 64 * 1024;
 /// step so the editor can't author noise heights that the runtime
 /// quantises away anyway.
 ///
-/// 32 is `sector_size / 32` at the default 1024 -- fine enough that
-/// authored slopes look smooth, coarse enough that PS1 i16 vertex
-/// jitter never fights the snap.
-pub const HEIGHT_QUANTUM: i32 = 32;
+/// 64 is `sector_size / 16` at the default 1024 -- fine enough for
+/// authored slopes, coarse enough that PS1 i16 vertex jitter never
+/// fights the snap.
+pub const HEIGHT_QUANTUM: i32 = 64;
 /// World grid size quantum. The editor stores one sector size per
 /// World node and snaps it to this step so room/cook math stays
 /// integer and PSX-friendly.
@@ -1526,8 +1526,8 @@ pub const MODEL_SCALE_ONE_Q8: u16 = 256;
 /// Snap a vertex height to the nearest [`HEIGHT_QUANTUM`] multiple.
 ///
 /// Round-half-away-from-zero so the snap is symmetric for
-/// negative heights -- `snap_height(-15)` returns `0`,
-/// `snap_height(-16)` returns `-32`. Plain integer math; no
+/// negative heights -- `snap_height(-31)` returns `0`,
+/// `snap_height(-32)` returns `-64`. Plain integer math; no
 /// float intermediaries.
 pub fn snap_height(y: i32) -> i32 {
     let q = HEIGHT_QUANTUM;
@@ -4877,28 +4877,28 @@ mod tests {
 
     #[test]
     fn snap_height_rounds_to_nearest_quantum() {
-        assert_eq!(HEIGHT_QUANTUM, 32);
+        assert_eq!(HEIGHT_QUANTUM, 64);
         // Exact multiples are unchanged (positive + negative).
         assert_eq!(snap_height(0), 0);
-        assert_eq!(snap_height(32), 32);
+        assert_eq!(snap_height(64), 64);
         assert_eq!(snap_height(1024), 1024);
-        assert_eq!(snap_height(-32), -32);
+        assert_eq!(snap_height(-64), -64);
         assert_eq!(snap_height(-1024), -1024);
         // Below half-quantum rounds down toward zero.
-        assert_eq!(snap_height(15), 0);
-        assert_eq!(snap_height(-15), 0);
-        // At half-quantum (16), away-from-zero on both sides.
-        assert_eq!(snap_height(16), 32);
-        assert_eq!(snap_height(-16), -32);
+        assert_eq!(snap_height(31), 0);
+        assert_eq!(snap_height(-31), 0);
+        // At half-quantum (32), away-from-zero on both sides.
+        assert_eq!(snap_height(32), 64);
+        assert_eq!(snap_height(-32), -64);
         // Above half-quantum rounds up away from zero.
-        assert_eq!(snap_height(17), 32);
-        assert_eq!(snap_height(-17), -32);
+        assert_eq!(snap_height(33), 64);
+        assert_eq!(snap_height(-33), -64);
         // Past one quantum the same rule applies -- round to the
         // nearest multiple.
-        assert_eq!(snap_height(47), 32);
-        assert_eq!(snap_height(48), 64);
-        assert_eq!(snap_height(-47), -32);
-        assert_eq!(snap_height(-48), -64);
+        assert_eq!(snap_height(95), 64);
+        assert_eq!(snap_height(96), 128);
+        assert_eq!(snap_height(-95), -64);
+        assert_eq!(snap_height(-96), -128);
     }
 
     #[test]
@@ -4917,7 +4917,7 @@ mod tests {
                 panic!("expected room");
             };
             let sector = grid.ensure_sector(0, 0).unwrap();
-            sector.floor = Some(GridHorizontalFace::flat(17, None));
+            sector.floor = Some(GridHorizontalFace::flat(33, None));
             let walls = sector.walls.get_mut(GridDirection::West);
             walls.clear();
             walls.push(GridVerticalFace::with_heights([0, 0, 965, 802], None));
@@ -4930,10 +4930,10 @@ mod tests {
             panic!("expected room");
         };
         let sector = grid.sector(0, 0).unwrap();
-        assert_eq!(sector.floor.as_ref().unwrap().heights, [32, 32, 32, 32]);
+        assert_eq!(sector.floor.as_ref().unwrap().heights, [64, 64, 64, 64]);
         assert_eq!(
             sector.walls.get(GridDirection::West)[0].heights,
-            [0, 0, 960, 800]
+            [0, 0, 960, 832]
         );
     }
 
@@ -5198,12 +5198,12 @@ mod tests {
             .unwrap()
             .walls
             .get_mut(GridDirection::East)
-            .push(GridVerticalFace::with_heights([0, 0, 1600, 1504], None));
+            .push(GridVerticalFace::with_heights([0, 0, 1600, 1536], None));
 
         grid.set_ceiling_aligned_to_neighbors(1, 0, None);
 
         let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
-        assert_eq!(ceiling.heights, [1504, 2048, 2048, 1600]);
+        assert_eq!(ceiling.heights, [1536, 2048, 2048, 1600]);
     }
 
     #[test]
