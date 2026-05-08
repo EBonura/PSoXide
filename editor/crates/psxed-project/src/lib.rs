@@ -1792,6 +1792,43 @@ impl WorldGrid {
         }
     }
 
+    /// Set or replace a floor, inheriting edge heights from touching
+    /// floors. If exactly one flat edge is connected, the whole new
+    /// floor adopts that height instead of only matching the shared edge.
+    pub fn set_floor_aligned_to_neighbors(
+        &mut self,
+        x: u16,
+        z: u16,
+        height: i32,
+        material: Option<ResourceId>,
+    ) {
+        let wcx = self.origin[0] + i32::from(x);
+        let wcz = self.origin[1] + i32::from(z);
+        let heights = self.floor_heights_aligned_to_neighbors_for_world_cell(wcx, wcz, height);
+        if let Some(sector) = self.ensure_sector(x, z) {
+            let mut floor = GridHorizontalFace::flat(height, material);
+            floor.heights = heights;
+            sector.floor = Some(floor);
+        }
+    }
+
+    /// Candidate floor heights for editor placement by world-cell
+    /// coordinate. The returned order is `[NW, NE, SE, SW]`.
+    pub fn floor_heights_aligned_to_neighbors_for_world_cell(
+        &self,
+        wcx: i32,
+        wcz: i32,
+        height: i32,
+    ) -> [i32; 4] {
+        self.horizontal_heights_aligned_to_neighbor_faces_for_world_cell(
+            wcx,
+            wcz,
+            HorizontalSurface::Floor,
+            [height; 4],
+        )
+        .map(snap_height)
+    }
+
     /// Set or replace a ceiling, inheriting edge heights from
     /// touching ceilings first and touching wall tops second. Wall
     /// tops win so a newly-painted ceiling sits on the surrounding
@@ -1802,7 +1839,9 @@ impl WorldGrid {
         z: u16,
         material: Option<ResourceId>,
     ) {
-        let heights = self.ceiling_heights_aligned_to_neighbors(x, z);
+        let wcx = self.origin[0] + i32::from(x);
+        let wcz = self.origin[1] + i32::from(z);
+        let heights = self.ceiling_heights_aligned_to_neighbors_for_world_cell(wcx, wcz);
         let fallback_height = default_wall_height_for_sector_size(self.sector_size);
         if let Some(sector) = self.ensure_sector(x, z) {
             let mut ceiling = GridHorizontalFace::flat(fallback_height, material);
@@ -1814,24 +1853,70 @@ impl WorldGrid {
     /// Candidate ceiling heights for editor placement. The returned
     /// order is `[NW, NE, SE, SW]`.
     pub fn ceiling_heights_aligned_to_neighbors(&self, x: u16, z: u16) -> [i32; 4] {
-        let mut heights = self
-            .sector(x, z)
+        let wcx = self.origin[0] + i32::from(x);
+        let wcz = self.origin[1] + i32::from(z);
+        self.ceiling_heights_aligned_to_neighbors_for_world_cell(wcx, wcz)
+    }
+
+    /// Candidate ceiling heights for editor placement by world-cell
+    /// coordinate. Used by hover previews for cells that may not be
+    /// allocated until the click auto-grows the grid.
+    pub fn ceiling_heights_aligned_to_neighbors_for_world_cell(
+        &self,
+        wcx: i32,
+        wcz: i32,
+    ) -> [i32; 4] {
+        let fallback_height = default_wall_height_for_sector_size(self.sector_size);
+        let base_heights = self
+            .world_cell_to_array(wcx, wcz)
+            .and_then(|(sx, sz)| self.sector(sx, sz))
             .and_then(|sector| sector.ceiling.as_ref())
             .map(|ceiling| ceiling.heights)
-            .unwrap_or([default_wall_height_for_sector_size(self.sector_size); 4]);
+            .unwrap_or([fallback_height; 4]);
+
+        let mut heights = self.horizontal_heights_aligned_to_neighbor_faces_for_world_cell(
+            wcx,
+            wcz,
+            HorizontalSurface::Ceiling,
+            base_heights,
+        );
 
         for direction in GridDirection::CARDINAL {
-            if let Some(edge) = self.neighbor_ceiling_edge_heights(x, z, direction) {
-                set_horizontal_edge_heights(&mut heights, direction, edge);
-            }
-        }
-        for direction in GridDirection::CARDINAL {
-            if let Some(edge) = self.touching_wall_top_edge_heights(x, z, direction) {
+            if let Some(edge) =
+                self.touching_wall_top_edge_heights_for_world_cell(wcx, wcz, direction)
+            {
                 set_horizontal_edge_heights(&mut heights, direction, edge);
             }
         }
 
         heights.map(snap_height)
+    }
+
+    fn horizontal_heights_aligned_to_neighbor_faces_for_world_cell(
+        &self,
+        wcx: i32,
+        wcz: i32,
+        surface: HorizontalSurface,
+        fallback: [i32; 4],
+    ) -> [i32; 4] {
+        let mut heights = fallback;
+        let mut only_edge: Option<[i32; 2]> = None;
+        let mut edge_count = 0usize;
+
+        for direction in GridDirection::CARDINAL {
+            if let Some(edge) =
+                self.neighbor_horizontal_edge_heights_for_world_cell(wcx, wcz, direction, surface)
+            {
+                set_horizontal_edge_heights(&mut heights, direction, edge);
+                only_edge = Some(edge);
+                edge_count += 1;
+            }
+        }
+
+        match (edge_count, only_edge) {
+            (1, Some([a, b])) if a == b => [a; 4],
+            _ => heights,
+        }
     }
 
     /// Add a wall to an edge.
@@ -1937,36 +2022,43 @@ impl WorldGrid {
         self.horizontal_edge_heights_for_wall(x, z, direction, HorizontalSurface::Ceiling)
     }
 
-    fn neighbor_ceiling_edge_heights(
+    fn neighbor_horizontal_edge_heights_for_world_cell(
         &self,
-        x: u16,
-        z: u16,
+        wcx: i32,
+        wcz: i32,
         direction: GridDirection,
+        surface: HorizontalSurface,
     ) -> Option<[i32; 2]> {
-        let (nx, nz, opposite) = self.neighbor_across_cardinal_edge(x, z, direction)?;
+        let (nwcx, nwcz, opposite) =
+            Self::neighbor_world_cell_across_cardinal_edge(wcx, wcz, direction)?;
+        let (sx, sz) = self.world_cell_to_array(nwcx, nwcz)?;
         let mut heights = self
-            .sector(nx, nz)
-            .and_then(|sector| HorizontalSurface::Ceiling.edge_heights(sector, opposite))?;
+            .sector(sx, sz)
+            .and_then(|sector| surface.edge_heights(sector, opposite))?;
         heights.swap(0, 1);
         Some(heights)
     }
 
-    fn touching_wall_top_edge_heights(
+    fn touching_wall_top_edge_heights_for_world_cell(
         &self,
-        x: u16,
-        z: u16,
+        wcx: i32,
+        wcz: i32,
         direction: GridDirection,
     ) -> Option<[i32; 2]> {
-        if let Some(heights) = self
-            .sector(x, z)
-            .and_then(|sector| wall_top_edge_heights(sector.walls.get(direction)))
-        {
-            return Some(heights);
+        if let Some((sx, sz)) = self.world_cell_to_array(wcx, wcz) {
+            if let Some(heights) = self
+                .sector(sx, sz)
+                .and_then(|sector| wall_top_edge_heights(sector.walls.get(direction)))
+            {
+                return Some(heights);
+            }
         }
 
-        let (nx, nz, opposite) = self.neighbor_across_cardinal_edge(x, z, direction)?;
+        let (nwcx, nwcz, opposite) =
+            Self::neighbor_world_cell_across_cardinal_edge(wcx, wcz, direction)?;
+        let (sx, sz) = self.world_cell_to_array(nwcx, nwcz)?;
         let mut heights = self
-            .sector(nx, nz)
+            .sector(sx, sz)
             .and_then(|sector| wall_top_edge_heights(sector.walls.get(opposite)))?;
         heights.swap(0, 1);
         Some(heights)
@@ -2027,20 +2119,30 @@ impl WorldGrid {
             }
         }
 
-        let opposite = direction.opposite_cardinal()?;
-        let (nwcx, nwcz) = match direction {
-            GridDirection::North => (wcx, wcz.saturating_add(1)),
-            GridDirection::East => (wcx.saturating_add(1), wcz),
-            GridDirection::South => (wcx, wcz.saturating_sub(1)),
-            GridDirection::West => (wcx.saturating_sub(1), wcz),
-            GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => return None,
-        };
+        let (nwcx, nwcz, opposite) =
+            Self::neighbor_world_cell_across_cardinal_edge(wcx, wcz, direction)?;
         let (sx, sz) = self.world_cell_to_array(nwcx, nwcz)?;
         let mut heights = self
             .sector(sx, sz)
             .and_then(|sector| surface.edge_heights(sector, opposite))?;
         heights.swap(0, 1);
         Some(heights)
+    }
+
+    fn neighbor_world_cell_across_cardinal_edge(
+        wcx: i32,
+        wcz: i32,
+        direction: GridDirection,
+    ) -> Option<(i32, i32, GridDirection)> {
+        let opposite = direction.opposite_cardinal()?;
+        let cell = match direction {
+            GridDirection::North => (wcx, wcz.saturating_add(1)),
+            GridDirection::East => (wcx.saturating_add(1), wcz),
+            GridDirection::South => (wcx, wcz.saturating_sub(1)),
+            GridDirection::West => (wcx.saturating_sub(1), wcz),
+            GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => return None,
+        };
+        Some((cell.0, cell.1, opposite))
     }
 
     /// Number of populated sectors.
@@ -3027,8 +3129,8 @@ pub struct CharacterResource {
     /// Camera vertical offset above the character origin.
     pub camera_height: i32,
     /// Vertical offset of the camera's look-at target above
-    /// the character origin (typically slightly above the head
-    /// for a comfortable framing).
+    /// the character origin (typically around the upper torso
+    /// for comfortable third-person framing).
     pub camera_target_height: i32,
 }
 
@@ -3048,9 +3150,9 @@ impl CharacterResource {
             walk_speed: 48,
             run_speed: 96,
             turn_speed_degrees_per_second: 180,
-            camera_distance: 2048,
-            camera_height: 1024,
-            camera_target_height: 768,
+            camera_distance: 6144,
+            camera_height: 1280,
+            camera_target_height: 640,
         }
     }
 }
@@ -5189,6 +5291,61 @@ mod tests {
 
         let ceiling = grid.sector(0, 0).unwrap().ceiling.as_ref().unwrap();
         assert_eq!(ceiling.heights, [1344, 1472, 2048, 2048]);
+    }
+
+    #[test]
+    fn floor_placement_with_one_flat_neighbor_uses_that_height_for_whole_face() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 384, None);
+
+        grid.set_floor_aligned_to_neighbors(1, 0, 0, None);
+
+        let floor = grid.sector(1, 0).unwrap().floor.as_ref().unwrap();
+        assert_eq!(floor.heights, [384; 4]);
+    }
+
+    #[test]
+    fn floor_preview_for_off_grid_cell_matches_flat_neighbor_height() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 384, None);
+
+        let heights = grid.floor_heights_aligned_to_neighbors_for_world_cell(1, 0, 0);
+
+        assert_eq!(heights, [384; 4]);
+    }
+
+    #[test]
+    fn floor_placement_with_one_sloped_neighbor_keeps_only_the_shared_edge() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [128, 256, 384, 512];
+        grid.ensure_sector(0, 0).unwrap().floor = Some(floor);
+
+        grid.set_floor_aligned_to_neighbors(1, 0, 0, None);
+
+        let floor = grid.sector(1, 0).unwrap().floor.as_ref().unwrap();
+        assert_eq!(floor.heights, [256, 0, 0, 384]);
+    }
+
+    #[test]
+    fn ceiling_placement_with_one_flat_neighbor_uses_that_height_for_whole_face() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1536, None));
+
+        grid.set_ceiling_aligned_to_neighbors(1, 0, None);
+
+        let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.heights, [1536; 4]);
+    }
+
+    #[test]
+    fn ceiling_preview_for_off_grid_cell_matches_flat_neighbor_height() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1536, None));
+
+        let heights = grid.ceiling_heights_aligned_to_neighbors_for_world_cell(1, 0);
+
+        assert_eq!(heights, [1536; 4]);
     }
 
     #[test]

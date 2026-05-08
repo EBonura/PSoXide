@@ -405,6 +405,18 @@ pub trait WorldSurfaceLighting {
             self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[3]), material),
         ]
     }
+
+    /// Shade all four vertices when the caller already has camera-space
+    /// depths for fog. The default preserves the older vertex-only path.
+    fn shade_vertices_with_depths(
+        &self,
+        sample: WorldSurfaceSample,
+        vertices: [WorldVertex; 4],
+        _depths: [i32; 4],
+        material: WorldRenderMaterial,
+    ) -> [(u8, u8, u8); 4] {
+        self.shade_vertices(sample, vertices, material)
+    }
 }
 
 /// No-op surface lighting.
@@ -1213,6 +1225,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     cached_surfaces: &[CachedRoomSurface],
     projected_vertices: &mut [crate::render3d::ProjectedVertex],
     projected_valid: &mut [bool],
+    projected_depths: &mut [i32],
     room_depth: u16,
     _sector_size: i32,
     materials: &[WorldRenderMaterial],
@@ -1229,11 +1242,17 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     if depth == 0
         || projected_vertices.len() < cached_vertices.len()
         || projected_valid.len() < cached_vertices.len()
+        || projected_depths.len() < cached_vertices.len()
     {
         return stats;
     }
 
     project_world_vertices_gte(*camera, cached_vertices, projected_vertices, projected_valid);
+    let mut vertex_index = 0usize;
+    while vertex_index < cached_vertices.len() {
+        projected_depths[vertex_index] = camera.view_vertex(cached_vertices[vertex_index]).z;
+        vertex_index += 1;
+    }
 
     for visible in visible_cells {
         let cell_index = visible.x as usize * depth + visible.z as usize;
@@ -1270,6 +1289,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         cached_surfaces[i],
                         projected_vertices,
                         projected_valid,
+                        projected_depths,
                         materials,
                         lighting,
                         options,
@@ -1484,6 +1504,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
     projected_vertices: &[crate::render3d::ProjectedVertex],
     projected_valid: &[bool],
+    projected_depths: &[i32],
     materials: &[WorldRenderMaterial],
     lighting: &L,
     options: WorldSurfaceOptions,
@@ -1498,7 +1519,11 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
         return 0;
     };
-    let colors = vertex_lighting_colors(lighting, surface.sample, material, surface.vertices);
+    let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+        return 0;
+    };
+    let colors =
+        vertex_lighting_colors_with_depths(lighting, surface.sample, material, surface.vertices, depths);
     match surface.sample.kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
@@ -1597,6 +1622,18 @@ fn indexed_projected_quad(
         projected_vertices[c],
         projected_vertices[d],
     ])
+}
+
+#[inline(always)]
+fn indexed_quad_depths(depths: &[i32], ids: [u16; 4]) -> Option<[i32; 4]> {
+    let a = ids[0] as usize;
+    let b = ids[1] as usize;
+    let c = ids[2] as usize;
+    let d = ids[3] as usize;
+    if a >= depths.len() || b >= depths.len() || c >= depths.len() || d >= depths.len() {
+        return None;
+    }
+    Some([depths[a], depths[b], depths[c], depths[d]])
 }
 
 const fn cached_uv_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial {
@@ -2543,6 +2580,16 @@ fn vertex_lighting_colors<L: WorldSurfaceLighting>(
     verts: [WorldVertex; 4],
 ) -> [(u8, u8, u8); 4] {
     lighting.shade_vertices(sample, verts, material)
+}
+
+fn vertex_lighting_colors_with_depths<L: WorldSurfaceLighting>(
+    lighting: &L,
+    sample: WorldSurfaceSample,
+    material: WorldRenderMaterial,
+    verts: [WorldVertex; 4],
+    depths: [i32; 4],
+) -> [(u8, u8, u8); 4] {
+    lighting.shade_vertices_with_depths(sample, verts, depths, material)
 }
 
 /// Project + submit one textured quad along the standard
