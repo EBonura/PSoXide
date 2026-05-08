@@ -438,6 +438,7 @@ fn walk_room(
                 };
                 let emitted = push_horizontal_face(
                     scratch,
+                    camera,
                     [x0, x1, z0, z1],
                     floor.heights,
                     floor.split,
@@ -467,6 +468,7 @@ fn walk_room(
                 };
                 let emitted = push_horizontal_face(
                     scratch,
+                    camera,
                     [x0, x1, z0, z1],
                     ceiling.heights,
                     ceiling.split,
@@ -509,6 +511,7 @@ fn walk_room(
                     };
                     let emitted = push_wall_face(
                         scratch,
+                        camera,
                         [x0, x1, z0, z1],
                         edge,
                         face.heights,
@@ -682,6 +685,15 @@ fn face_depth(camera: psx_engine::WorldCamera, center: [i32; 3]) -> i32 {
             center[0], center[1], center[2],
         ))
         .z
+}
+
+fn preview_vertices_in_front(camera: psx_engine::WorldCamera, verts: &[[i32; 3]]) -> bool {
+    verts.iter().all(|v| {
+        camera
+            .view_vertex(psx_engine::WorldVertex::new(v[0], v[1], v[2]))
+            .z
+            >= camera.projection.near_z
+    })
 }
 
 /// Walk every PointLight whose enclosing room is the active grid
@@ -1011,6 +1023,7 @@ fn light_face(
 /// enforces this at the data layer).
 fn push_horizontal_face(
     scratch: &mut PreviewScratch,
+    camera: psx_engine::WorldCamera,
     bounds: [i32; 4],
     heights: [i32; 4],
     split: GridSplit,
@@ -1021,10 +1034,17 @@ fn push_horizontal_face(
 ) -> bool {
     use psxed_project::Corner;
     let [x0, x1, z0, z1] = bounds;
-    let p_nw = gte_scene::project_vertex(world_to_view([x0, heights[0], z1]));
-    let p_ne = gte_scene::project_vertex(world_to_view([x1, heights[1], z1]));
-    let p_se = gte_scene::project_vertex(world_to_view([x1, heights[2], z0]));
-    let p_sw = gte_scene::project_vertex(world_to_view([x0, heights[3], z0]));
+    let w_nw = [x0, heights[0], z1];
+    let w_ne = [x1, heights[1], z1];
+    let w_se = [x1, heights[2], z0];
+    let w_sw = [x0, heights[3], z0];
+    if !preview_vertices_in_front(camera, &[w_nw, w_ne, w_se, w_sw]) {
+        return false;
+    }
+    let p_nw = gte_scene::project_vertex(world_to_view(w_nw));
+    let p_ne = gte_scene::project_vertex(world_to_view(w_ne));
+    let p_se = gte_scene::project_vertex(world_to_view(w_se));
+    let p_sw = gte_scene::project_vertex(world_to_view(w_sw));
     let (uv_nw, uv_ne, uv_se, uv_sw) = if let FaceShade::Textured { .. } = shade {
         (
             PREVIEW_FLOOR_UVS[0],
@@ -1147,6 +1167,7 @@ fn wall_side_visible(
 /// other diagonal.
 fn push_wall_face(
     scratch: &mut PreviewScratch,
+    camera: psx_engine::WorldCamera,
     bounds: [i32; 4],
     edge: WallEdge,
     heights: [i32; 4],
@@ -1170,10 +1191,17 @@ fn push_wall_face(
         WallEdge::South => ((x1, z0), (x0, z0), (x0, z0), (x1, z0)),
         WallEdge::West => ((x0, z0), (x0, z1), (x0, z1), (x0, z0)),
     };
-    let p_bl = gte_scene::project_vertex(world_to_view([bl_xy.0, heights[0], bl_xy.1]));
-    let p_br = gte_scene::project_vertex(world_to_view([br_xy.0, heights[1], br_xy.1]));
-    let p_tr = gte_scene::project_vertex(world_to_view([tr_xy.0, heights[2], tr_xy.1]));
-    let p_tl = gte_scene::project_vertex(world_to_view([tl_xy.0, heights[3], tl_xy.1]));
+    let w_bl = [bl_xy.0, heights[0], bl_xy.1];
+    let w_br = [br_xy.0, heights[1], br_xy.1];
+    let w_tr = [tr_xy.0, heights[2], tr_xy.1];
+    let w_tl = [tl_xy.0, heights[3], tl_xy.1];
+    if !preview_vertices_in_front(camera, &[w_bl, w_br, w_tr, w_tl]) {
+        return false;
+    }
+    let p_bl = gte_scene::project_vertex(world_to_view(w_bl));
+    let p_br = gte_scene::project_vertex(world_to_view(w_br));
+    let p_tr = gte_scene::project_vertex(world_to_view(w_tr));
+    let p_tl = gte_scene::project_vertex(world_to_view(w_tl));
     let (uv_bl, uv_br, uv_tr, uv_tl) = if let FaceShade::Textured { .. } = shade {
         (
             PREVIEW_WALL_UVS[0],
@@ -1501,7 +1529,7 @@ fn walk_model_instances(
 
     let shadow_slot = textures.shadow_slot();
     for meta in &instances_meta {
-        draw_model_shadow(meta, shadow_slot, scratch);
+        draw_model_shadow(meta, shadow_slot, *camera, scratch);
     }
 
     // Gizmos first while GTE still holds the camera matrix --
@@ -1708,7 +1736,12 @@ fn draw_model_selection_gizmo(meta: &InstanceMeta, scratch: &mut PreviewScratch)
     }
 }
 
-fn draw_model_shadow(meta: &InstanceMeta, slot: MaterialSlot, scratch: &mut PreviewScratch) {
+fn draw_model_shadow(
+    meta: &InstanceMeta,
+    slot: MaterialSlot,
+    camera: psx_engine::WorldCamera,
+    scratch: &mut PreviewScratch,
+) {
     let radius = preview_shadow_radius(meta.collision_radius);
     if radius <= 0 {
         return;
@@ -1723,6 +1756,9 @@ fn draw_model_shadow(meta: &InstanceMeta, slot: MaterialSlot, scratch: &mut Prev
         [x.saturating_add(radius), y, z.saturating_add(radius)],
         [x.saturating_sub(radius), y, z.saturating_add(radius)],
     ];
+    if !preview_vertices_in_front(camera, &verts) {
+        return;
+    }
     let projected = [
         gte_scene::project_vertex(world_to_view(verts[0])),
         gte_scene::project_vertex(world_to_view(verts[1])),
@@ -3123,11 +3159,11 @@ mod tests {
     use super::{
         face_side_visible, floor_anchored_model_origin, light_face, material_texture_tint,
         node_room_local_origin, preview_lights, preview_model_reference, preview_player_reference,
-        preview_shadow_radius, preview_static_model_reference, push_wall_face, room_depth_slot,
-        setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline, FaceShade,
-        MaterialSlot, PreviewFog, WallEdge, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
-        PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
-        PREVIEW_WALL_UVS, SCRATCH,
+        preview_shadow_radius, preview_static_model_reference, preview_vertices_in_front,
+        push_wall_face, room_depth_slot, setup_gte_for_camera, shadow_depth_slot,
+        should_draw_culled_face_outline, FaceShade, MaterialSlot, PreviewFog, WallEdge,
+        PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
+        PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -3356,22 +3392,10 @@ mod tests {
     #[test]
     fn editor_cardinal_wall_backs_face_their_owning_cell() {
         let cases = [
-            (WallEdge::North, [512, 512, 512], 2048, [512, 512, 1536], 0),
-            (
-                WallEdge::East,
-                [512, 512, 512],
-                3072,
-                [1536, 512, 512],
-                1024,
-            ),
-            (WallEdge::South, [512, 512, 512], 0, [512, 512, -512], 2048),
-            (
-                WallEdge::West,
-                [512, 512, 512],
-                1024,
-                [-512, 512, 512],
-                3072,
-            ),
+            (WallEdge::North, [512, 512, 512], 128, [512, 512, 1536], 0),
+            (WallEdge::East, [512, 512, 512], 192, [1536, 512, 512], 64),
+            (WallEdge::South, [512, 512, 512], 0, [512, 512, -512], 128),
+            (WallEdge::West, [512, 512, 512], 64, [-512, 512, 512], 192),
         ];
 
         for (edge, inside_pos, inside_yaw, outside_pos, outside_yaw) in cases {
@@ -3420,7 +3444,7 @@ mod tests {
         yaw_q12: u16,
         sidedness: MaterialFaceSidedness,
     ) -> bool {
-        let _camera = setup_gte_for_camera(ViewportCameraState {
+        let camera = setup_gte_for_camera(ViewportCameraState {
             mode: ViewportCameraMode::Free,
             yaw_q12,
             pitch_q12: 0,
@@ -3436,6 +3460,7 @@ mod tests {
 
         push_wall_face(
             &mut scratch,
+            camera,
             [0, 1024, 0, 1024],
             edge,
             [0, 0, 1024, 1024],
@@ -3446,6 +3471,27 @@ mod tests {
         );
 
         scratch.used > 0 || scratch.tex_used > 0
+    }
+
+    #[test]
+    fn preview_near_guard_rejects_vertices_behind_camera() {
+        let camera = setup_gte_for_camera(ViewportCameraState {
+            mode: ViewportCameraMode::Free,
+            yaw_q12: 0,
+            pitch_q12: 0,
+            radius: 1024,
+            target: [0, 0, 0],
+            position: [0, 0, 0],
+        });
+
+        assert!(preview_vertices_in_front(
+            camera,
+            &[[0, 0, -64], [16, 0, -64]]
+        ));
+        assert!(!preview_vertices_in_front(
+            camera,
+            &[[0, 0, -64], [0, 0, 16]]
+        ));
     }
 
     #[test]
