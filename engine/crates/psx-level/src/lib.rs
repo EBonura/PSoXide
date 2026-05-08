@@ -120,6 +120,14 @@ pub mod sky_flags {
     pub const ENABLED: u16 = 1 << 0;
 }
 
+/// Far-vista record flags.
+pub mod far_vista_flags {
+    /// A far-vista ring should be drawn between sky and room geometry.
+    pub const ENABLED: u16 = 1 << 0;
+    /// The ring has one or more texture panel assets available.
+    pub const TEXTURED: u16 = 1 << 1;
+}
+
 /// Equipment record flags.
 pub mod equipment_flags {
     /// Equipment belongs to the player controller and should follow
@@ -285,6 +293,44 @@ impl LevelSkyRecord {
     };
 }
 
+/// Resolved distant scenery ring settings for one cooked room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelFarVistaRecord {
+    /// Transparent texture panel assets. Empty means no texture;
+    /// one entry repeats around the ring; multiple entries map to
+    /// ring segments in order. `AssetId(u16::MAX)` entries draw as
+    /// tinted placeholder cards.
+    pub texture_assets: &'static [AssetId],
+    /// Radius from camera/player in engine units.
+    pub radius: i32,
+    /// Ring height in engine units.
+    pub height: i32,
+    /// Bottom-edge offset from camera height in engine units.
+    pub vertical_offset: i32,
+    /// Number of cards around the cylinder.
+    pub segments: u8,
+    /// World yaw rotation in degrees.
+    pub rotation_degrees: i16,
+    /// Tint applied to placeholder and textured cards.
+    pub tint_rgb: [u8; 3],
+    /// Far-vista flags.
+    pub flags: u16,
+}
+
+impl LevelFarVistaRecord {
+    /// Disabled default used by placeholder manifests.
+    pub const DEFAULT: Self = Self {
+        texture_assets: &[],
+        radius: 18_000,
+        height: 4_096,
+        vertical_offset: -512,
+        segments: 12,
+        rotation_degrees: 0,
+        tint_rgb: [54, 58, 62],
+        flags: 0,
+    };
+}
+
 /// One room. References its world asset by id and points into
 /// the global [`LevelMaterialRecord`] table via
 /// `material_first` / `material_count`.
@@ -315,6 +361,8 @@ pub struct LevelRoomRecord {
     pub fog_far: i32,
     /// Resolved world sky for this room.
     pub sky: LevelSkyRecord,
+    /// Resolved distant scenery ring for this room.
+    pub far_vista: LevelFarVistaRecord,
     /// Reserved.
     pub flags: u16,
 }
