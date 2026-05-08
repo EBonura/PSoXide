@@ -39,6 +39,11 @@
 //!   + 9 adds on the CPU -- still cheap next to projection cost.
 //! - Per vertex: 2 MTC2 + 1 RTPS + 2 MTC2 + 1 MTC2 + 1 NCCS + 3
 //!   MFC2 ≈ 10 GTE ops, ~30-40 cycles total.
+//! - Batched projection: `project_lit_triangle` uses RTPT for three
+//!   positions, then NCCS per normal/material. This keeps per-vertex
+//!   lighting identical while replacing three RTPS ops with one RTPT.
+//!   If the three material tints match, it also uses NCCT to batch
+//!   the three NCCS lighting ops.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -385,6 +390,74 @@ fn unpack_projected(sxy: u32, sz: u16, rgb: u32) -> ProjectedLit {
     }
 }
 
+#[inline]
+fn rgbc_word(material: (u8, u8, u8)) -> u32 {
+    (material.0 as u32) | ((material.1 as u32) << 8) | ((material.2 as u32) << 16)
+}
+
+/// Project three vertices via RTPT, then compute each vertex's lit
+/// colour with NCCS.
+///
+/// This is the visual-preserving batched path for Gouraud meshes:
+/// projection work shares RTPT's setup cost, but lighting still runs
+/// once per vertex so different normals and material tints produce the
+/// same RGB values as three [`project_lit`] calls.
+///
+/// Prerequisites are the same as [`project_lit`]:
+/// rotation/translation/projection registers and the light rig must
+/// already be loaded.
+pub fn project_lit_triangle(
+    verts: [Vec3I16; 3],
+    normals: [Vec3I16; 3],
+    materials: [(u8, u8, u8); 3],
+) -> [ProjectedLit; 3] {
+    mtc2!(0, verts[0].xy_packed());
+    mtc2!(1, verts[0].z_packed());
+    mtc2!(2, verts[1].xy_packed());
+    mtc2!(3, verts[1].z_packed());
+    mtc2!(4, verts[2].xy_packed());
+    mtc2!(5, verts[2].z_packed());
+    // SAFETY: V0, V1, and V2 are loaded; scene setup is caller-supplied.
+    unsafe { ops::rtpt() };
+
+    let sxy = [mfc2!(12), mfc2!(13), mfc2!(14)];
+    let sz = [mfc2!(17) as u16, mfc2!(18) as u16, mfc2!(19) as u16];
+
+    if materials[0] == materials[1] && materials[1] == materials[2] {
+        mtc2!(0, normals[0].xy_packed());
+        mtc2!(1, normals[0].z_packed());
+        mtc2!(2, normals[1].xy_packed());
+        mtc2!(3, normals[1].z_packed());
+        mtc2!(4, normals[2].xy_packed());
+        mtc2!(5, normals[2].z_packed());
+        mtc2!(6, rgbc_word(materials[0]));
+        // SAFETY: V0, V1, V2 hold normals and RGBC is common to all
+        // three vertices. NCCT is equivalent to NCCS for V0/V1/V2.
+        unsafe { ops::ncct() };
+        let rgb = [mfc2!(20), mfc2!(21), mfc2!(22)];
+        return [
+            unpack_projected(sxy[0], sz[0], rgb[0]),
+            unpack_projected(sxy[1], sz[1], rgb[1]),
+            unpack_projected(sxy[2], sz[2], rgb[2]),
+        ];
+    }
+
+    let mut out = [ProjectedLit::default(); 3];
+    let mut i = 0;
+    while i < 3 {
+        mtc2!(0, normals[i].xy_packed());
+        mtc2!(1, normals[i].z_packed());
+        mtc2!(6, rgbc_word(materials[i]));
+        // SAFETY: V0 holds the normal, RGBC holds the material;
+        // LLM/LCM/BK were loaded by the caller's light rig.
+        unsafe { ops::nccs() };
+        out[i] = unpack_projected(sxy[i], sz[i], mfc2!(22));
+        i += 1;
+    }
+
+    out
+}
+
 /// Project a vertex AND compute its lit colour in one call.
 ///
 /// Does RTPS on `vert` + NCCS on `normal`, with a per-vertex
@@ -417,8 +490,7 @@ pub fn project_lit(vert: Vec3I16, normal: Vec3I16, material: (u8, u8, u8)) -> Pr
     // RGBC layout (data reg 6): 0x00CC_BBGG_RR -- low 8 bits R,
     // next 8 G, next 8 B, top 8 "CODE" (GPU command byte, used by
     // some prim ops; 0 for our purposes).
-    let rgbc = (material.0 as u32) | ((material.1 as u32) << 8) | ((material.2 as u32) << 16);
-    mtc2!(6, rgbc);
+    mtc2!(6, rgbc_word(material));
     // SAFETY: V0 holds the normal, RGBC holds the material;
     // LLM/LCM/BK were loaded via `LightRig::load`.
     unsafe { ops::nccs() };
@@ -433,5 +505,93 @@ pub fn project_lit(vert: Vec3I16, normal: Vec3I16, material: (u8, u8, u8)) -> Pr
         r: (lit & 0xFF) as u8,
         g: ((lit >> 8) & 0xFF) as u8,
         b: ((lit >> 16) & 0xFF) as u8,
+    }
+}
+
+#[cfg(all(test, not(target_arch = "mips")))]
+mod host_smoke {
+    use super::*;
+    use crate::host;
+    use crate::math::{Mat3I16, Vec3I16, Vec3I32};
+    use crate::scene;
+
+    fn install_scene() {
+        scene::load_rotation(&Mat3I16::IDENTITY);
+        scene::load_translation(Vec3I32::new(0, 0, 0));
+        scene::set_screen_offset(160 << 16, 120 << 16);
+        scene::set_projection_plane(280);
+        LightRig::new(
+            [
+                Light {
+                    direction: Vec3I16::new(0, 0, 0x1000),
+                    colour: (0x0C00, 0x0800, 0x0400),
+                },
+                Light {
+                    direction: Vec3I16::new(0x0800, 0, 0x0800),
+                    colour: (0x0400, 0x0800, 0x0C00),
+                },
+                Light::OFF,
+            ],
+            (0x0100, 0x0100, 0x0100),
+        )
+        .load();
+    }
+
+    #[test]
+    fn batched_lit_triangle_matches_three_project_lit_calls() {
+        let verts = [
+            Vec3I16::new(-256, -128, 1024),
+            Vec3I16::new(256, -96, 1200),
+            Vec3I16::new(0, 256, 1400),
+        ];
+        let normals = [
+            Vec3I16::new(0, 0, 0x1000),
+            Vec3I16::new(0x0400, 0, 0x0F00),
+            Vec3I16::new(-0x0300, 0x0400, 0x0E00),
+        ];
+        let materials = [(128, 96, 64), (64, 128, 96), (96, 64, 128)];
+
+        host::reset();
+        install_scene();
+        let batch = project_lit_triangle(verts, normals, materials);
+
+        host::reset();
+        install_scene();
+        let separate = [
+            project_lit(verts[0], normals[0], materials[0]),
+            project_lit(verts[1], normals[1], materials[1]),
+            project_lit(verts[2], normals[2], materials[2]),
+        ];
+
+        assert_eq!(batch, separate);
+    }
+
+    #[test]
+    fn batched_lit_triangle_shared_material_uses_same_outputs() {
+        let verts = [
+            Vec3I16::new(-192, 64, 900),
+            Vec3I16::new(64, -160, 1150),
+            Vec3I16::new(224, 192, 1500),
+        ];
+        let normals = [
+            Vec3I16::new(0, 0, 0x1000),
+            Vec3I16::new(0x0200, 0x0200, 0x0F00),
+            Vec3I16::new(-0x0200, 0x0300, 0x0F00),
+        ];
+        let materials = [(112, 144, 96); 3];
+
+        host::reset();
+        install_scene();
+        let batch = project_lit_triangle(verts, normals, materials);
+
+        host::reset();
+        install_scene();
+        let separate = [
+            project_lit(verts[0], normals[0], materials[0]),
+            project_lit(verts[1], normals[1], materials[1]),
+            project_lit(verts[2], normals[2], materials[2]),
+        ];
+
+        assert_eq!(batch, separate);
     }
 }
