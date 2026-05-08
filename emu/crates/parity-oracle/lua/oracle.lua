@@ -849,17 +849,19 @@ local function run()
                         local cur_vblank = bit.band(istat_ptr[0], 0x1)
                         if cur_vblank ~= 0 and pad_prev_vblank == 0 then
                             pad_vblank_count = pad_vblank_count + 1
+                            ok, err = sync_pad_mask()
+                            if not ok then
+                                send("err run_checkpoint_pad: " .. tostring(err))
+                                break
+                            end
                         end
                         pad_prev_vblank = cur_vblank
-                        ok, err = sync_pad_mask()
-                        if not ok then
-                            send("err run_checkpoint_pad: " .. tostring(err))
-                            break
-                        end
                         if i % m == 0 then
                             local tick = tonumber(PCSX.getCPUCycles())
                             local pc = tonumber(regs.pc)
-                            send_nowait(string.format("chk step=%d tick=%d pc=%d", i, tick, pc))
+                            send_nowait(string.format(
+                                "chk step=%d tick=%d pc=%d state=%s",
+                                i, tick, pc, cpu_state_hash_hex()))
                             emissions = emissions + 1
                             io.flush()
                         end
@@ -868,7 +870,9 @@ local function run()
                     if ok then
                         local tick = tonumber(PCSX.getCPUCycles())
                         local pc = tonumber(regs.pc)
-                        send(string.format("run_checkpoint_pad ok step=%d tick=%d pc=%d", n, tick, pc))
+                        send(string.format(
+                            "run_checkpoint_pad ok step=%d tick=%d pc=%d state=%s",
+                            n, tick, pc, cpu_state_hash_hex()))
                     end
                 end
             end
