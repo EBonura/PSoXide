@@ -52,7 +52,7 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
-    draw_line_mono, draw_quad_flat, draw_tri_flat,
+    draw_line_mono, draw_quad_flat, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::{TriTextured, TriTexturedGouraud},
@@ -137,6 +137,7 @@ const TARGET_LOCK_OUTER: i32 = 25;
 const TARGET_LOCK_INNER: i32 = 13;
 const TARGET_LOCK_TRI_HALF_WIDTH: i32 = 8;
 const TARGET_LOCK_RED: (u8, u8, u8) = (225, 18, 24);
+const TARGET_LOCK_ROTATION_FRAMES: u32 = 360;
 static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
 const SHADOW_TPAGE: Tpage = Tpage::new(576, 0, TexDepth::Bit4);
 const SHADOW_TEXEL_U: u8 = 64;
@@ -1240,7 +1241,7 @@ impl Scene for Playtest {
         }
 
         if let Some(target) = self.lock_target_indicator_position() {
-            draw_lock_target_indicator(target, camera);
+            draw_lock_target_indicator(target, camera, ctx.time.elapsed_vblanks());
         }
     }
 }
@@ -2894,22 +2895,19 @@ fn draw_actor_shadow(
         WorldVertex::new(x.saturating_add(h), y, z.saturating_add(h)),
         WorldVertex::new(x.saturating_sub(h), y, z.saturating_add(h)),
     ];
-    let Some(projected) = camera.project_world_quad(verts) else {
-        return;
-    };
     let shadow_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
         .with_depth_policy(DepthPolicy::Nearest)
         .with_depth_bias(SHADOW_DEPTH_BIAS.saturating_neg())
         .with_cull_mode(CullMode::None)
-        .with_material_layer(material)
-        .with_textured_triangle_splitting(false);
+        .with_material_layer(material);
     const UVS: [(u8, u8); 4] = [
         (SHADOW_TEXEL_U, 0),
         (SHADOW_UV_MAX, 0),
         (SHADOW_UV_MAX, 63),
         (SHADOW_TEXEL_U, 63),
     ];
-    let _ = world.submit_textured_quad(triangles, projected, UVS, material, shadow_options);
+    let _ =
+        world.submit_textured_world_quad(triangles, *camera, verts, UVS, material, shadow_options);
 }
 
 fn actor_shadow_radius(base_radius: i32) -> i32 {
@@ -3285,7 +3283,7 @@ fn draw_entity_markers(
     }
 }
 
-fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera) {
+fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_vblanks: u32) {
     let Some(center) = camera.project_world(target.to_world_vertex()) else {
         return;
     };
@@ -3293,43 +3291,49 @@ fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera) {
     let outer = TARGET_LOCK_OUTER;
     let inner = TARGET_LOCK_INNER;
     let half_width = TARGET_LOCK_TRI_HALF_WIDTH;
+    let angle = Angle::per_frames(TARGET_LOCK_ROTATION_FRAMES).mul_frame(elapsed_vblanks);
     let triangles = [
         [
-            target_screen_vertex(center, 0, -inner),
-            target_screen_vertex(center, -half_width, -outer),
-            target_screen_vertex(center, half_width, -outer),
+            target_screen_vertex(center, 0, -inner, angle),
+            target_screen_vertex(center, -half_width, -outer, angle),
+            target_screen_vertex(center, half_width, -outer, angle),
         ],
         [
-            target_screen_vertex(center, 0, inner),
-            target_screen_vertex(center, half_width, outer),
-            target_screen_vertex(center, -half_width, outer),
+            target_screen_vertex(center, 0, inner, angle),
+            target_screen_vertex(center, half_width, outer, angle),
+            target_screen_vertex(center, -half_width, outer, angle),
         ],
         [
-            target_screen_vertex(center, -inner, 0),
-            target_screen_vertex(center, -outer, half_width),
-            target_screen_vertex(center, -outer, -half_width),
+            target_screen_vertex(center, -inner, 0, angle),
+            target_screen_vertex(center, -outer, half_width, angle),
+            target_screen_vertex(center, -outer, -half_width, angle),
         ],
         [
-            target_screen_vertex(center, inner, 0),
-            target_screen_vertex(center, outer, -half_width),
-            target_screen_vertex(center, outer, half_width),
+            target_screen_vertex(center, inner, 0, angle),
+            target_screen_vertex(center, outer, -half_width, angle),
+            target_screen_vertex(center, outer, half_width, angle),
         ],
     ];
 
     for triangle in triangles {
-        draw_tri_flat(
+        draw_tri_flat_blended(
             triangle,
             TARGET_LOCK_RED.0,
             TARGET_LOCK_RED.1,
             TARGET_LOCK_RED.2,
+            BlendMode::Average,
         );
     }
 }
 
-fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32) -> (i16, i16) {
+fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle) -> (i16, i16) {
+    let sin = angle.sin_q12();
+    let cos = angle.cos_q12();
+    let rx = ((ox.saturating_mul(cos)).saturating_sub(oy.saturating_mul(sin))) >> 12;
+    let ry = ((ox.saturating_mul(sin)).saturating_add(oy.saturating_mul(cos))) >> 12;
     (
-        clamp_i16((center.sx as i32).saturating_add(ox)),
-        clamp_i16((center.sy as i32).saturating_add(oy)),
+        clamp_i16((center.sx as i32).saturating_add(rx)),
+        clamp_i16((center.sy as i32).saturating_add(ry)),
     )
 }
 
