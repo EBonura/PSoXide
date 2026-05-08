@@ -44,7 +44,8 @@ use psx_engine::{
     Q8,
 };
 use psx_engine::{
-    cache_room_vertex_lit_surfaces, draw_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit,
+    cache_room_vertex_lit_surfaces, draw_indexed_cached_room_vertex_lit_visible_cells,
+    draw_room_vertex_lit,
 };
 #[cfg(feature = "world-grid-visible")]
 use psx_engine::{
@@ -150,7 +151,7 @@ const SCREEN_CX: i16 = 160;
 const SCREEN_CY: i16 = 120;
 const FOCAL: i32 = 320;
 const NEAR_Z: i32 = 64;
-const FAR_Z: i32 = 8192;
+const FAR_Z: i32 = 16384;
 const PROJECTION: WorldProjection = WorldProjection::new(SCREEN_CX, SCREEN_CY, FOCAL, NEAR_Z);
 const SHADOW_DEPTH_BIAS: i32 = FAR_Z;
 const SHADOW_FLOOR_LIFT: i32 = 4;
@@ -186,7 +187,7 @@ const SOFT_LOCK_ENABLED: bool = false;
 
 /// Fallback follow camera params used when no PLAYER_CONTROLLER
 /// was authored -- matches the prior debug behaviour.
-const FOLLOW_RADIUS_DEFAULT: i32 = 1400;
+const FOLLOW_RADIUS_DEFAULT: i32 = 4608;
 const FOLLOW_HEIGHT_DEFAULT: i32 = 700;
 const FOLLOW_TARGET_HEIGHT_DEFAULT: i32 = 0;
 /// Quanta-per-frame turn rate when the runtime can't resolve a
@@ -216,6 +217,8 @@ const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
 /// Cached room cell headers shared by the active room window. Rooms
 /// that exceed this fixed budget fall back to the uncached room draw.
 const MAX_CACHED_ROOM_CELLS: usize = 2048;
+/// Deduplicated room vertices referenced by cached room surfaces.
+const MAX_CACHED_ROOM_VERTICES: usize = 4096;
 /// Cached floor/ceiling/wall records shared by the active room
 /// window. This mirrors the room triangle arena order of magnitude:
 /// a cached surface emits up to two textured Gouraud triangles.
@@ -291,7 +294,6 @@ const GOURAUD_TRI_ZERO: TriTexturedGouraud = TriTexturedGouraud {
     v2: 0,
     uv2: 0,
 };
-
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
 static mut TEXTURED_TRIS: [TriTextured; MAX_TEXTURED_TRIS] =
     [const { TRI_ZERO }; MAX_TEXTURED_TRIS];
@@ -301,6 +303,12 @@ static mut WORLD_COMMANDS: [WorldTriCommand; MAX_TEXTURED_TRIS] =
     [WorldTriCommand::EMPTY; MAX_TEXTURED_TRIS];
 static mut CACHED_ROOM_CELLS: [CachedRoomCell; MAX_CACHED_ROOM_CELLS] =
     [CachedRoomCell::EMPTY; MAX_CACHED_ROOM_CELLS];
+static mut CACHED_ROOM_VERTICES: [WorldVertex; MAX_CACHED_ROOM_VERTICES] =
+    [WorldVertex::ZERO; MAX_CACHED_ROOM_VERTICES];
+static mut CACHED_ROOM_PROJECTED_VERTICES: [ProjectedVertex; MAX_CACHED_ROOM_VERTICES] =
+    [ProjectedVertex::new(0, 0, 0); MAX_CACHED_ROOM_VERTICES];
+static mut CACHED_ROOM_PROJECTED_VALID: [bool; MAX_CACHED_ROOM_VERTICES] =
+    [false; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_SURFACES: [CachedRoomSurface; MAX_CACHED_ROOM_SURFACES] =
     [CachedRoomSurface::EMPTY; MAX_CACHED_ROOM_SURFACES];
 static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
@@ -580,6 +588,8 @@ fn runtime_model_faces<'a>(
 struct ActiveRoomSurfaceCache {
     cell_first: u16,
     cell_count: u16,
+    vertex_first: u16,
+    vertex_count: u16,
     surface_first: u16,
     surface_count: u16,
     ready: bool,
@@ -589,6 +599,8 @@ impl ActiveRoomSurfaceCache {
     const EMPTY: Self = Self {
         cell_first: 0,
         cell_count: 0,
+        vertex_first: 0,
+        vertex_count: 0,
         surface_first: 0,
         surface_count: 0,
         ready: false,
@@ -599,13 +611,36 @@ impl ActiveRoomSurfaceCache {
 struct ActiveRuntimeRoom {
     index: RoomIndex,
     room: RuntimeRoom<'static>,
-    materials: [Option<WorldRenderMaterial>; MAX_ROOM_MATERIALS],
+    materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
     material_count: usize,
     /// Offset from the current chunk's origin to this chunk's
     /// origin, in engine units.
     offset_x: i32,
     offset_z: i32,
     surface_cache: ActiveRoomSurfaceCache,
+}
+
+#[cfg(feature = "world-grid-visible")]
+#[derive(Copy, Clone)]
+struct ActiveVisibleCellCache {
+    room: RoomIndex,
+    anchor_x: i32,
+    anchor_z: i32,
+    count: u16,
+    ready: bool,
+    cells: [GridVisibleCell; MAX_PRECOMPUTED_VISIBLE_CELLS],
+}
+
+#[cfg(feature = "world-grid-visible")]
+impl ActiveVisibleCellCache {
+    const EMPTY: Self = Self {
+        room: RoomIndex::ZERO,
+        anchor_x: 0,
+        anchor_z: 0,
+        count: 0,
+        ready: false,
+        cells: [GridVisibleCell::EMPTY; MAX_PRECOMPUTED_VISIBLE_CELLS],
+    };
 }
 
 struct Playtest {
@@ -616,13 +651,15 @@ struct Playtest {
     /// Current generated chunk plus immediately touching chunks,
     /// all expressed relative to `room_index`.
     active_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    #[cfg(feature = "world-grid-visible")]
+    visible_cell_caches: [ActiveVisibleCellCache; MAX_ACTIVE_ROOMS],
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
     /// Active room's material table, ordered by `local_slot`.
     /// Indexed directly by the slot value the cooked `.psxw`
     /// stores per face.
-    materials: [Option<WorldRenderMaterial>; MAX_ROOM_MATERIALS],
+    materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
     /// `materials[..material_count]` is the in-use slice; rest
     /// is `None`.
     material_count: usize,
@@ -679,8 +716,10 @@ impl Playtest {
         Self {
             room: None,
             active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
+            #[cfg(feature = "world-grid-visible")]
+            visible_cell_caches: [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS],
             room_index: RoomIndex::ZERO,
-            materials: [const { None }; MAX_ROOM_MATERIALS],
+            materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
             material_count: 0,
             motor: CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO),
             character: None,
@@ -873,24 +912,11 @@ impl Scene for Playtest {
             let actor_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let mut total_instance_stats = ModelInstanceDrawStats::default();
 
-            for active in self.active_rooms.iter().flatten().copied() {
-                // Pack this chunk's material slice down to a
-                // contiguous `&[WorldRenderMaterial]` indexed by
-                // local_slot. Slots that didn't resolve become a
-                // sentinel material -- visually obvious without
-                // crashing the renderer.
-                let mut bound: [WorldRenderMaterial; MAX_ROOM_MATERIALS] =
-                    [WorldRenderMaterial::both(TextureMaterial::opaque(
-                        0,
-                        TPAGE_WORD,
-                        (0x80, 0x80, 0x80),
-                    )); MAX_ROOM_MATERIALS];
-                for i in 0..active.material_count {
-                    if let Some(m) = active.materials[i] {
-                        bound[i] = m;
-                    }
-                }
-                let materials = &bound[..active.material_count];
+            for active_slot in 0..MAX_ACTIVE_ROOMS {
+                let Some(active) = self.active_rooms[active_slot] else {
+                    continue;
+                };
+                let materials = &active.materials[..active.material_count];
                 let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                     continue;
                 };
@@ -916,35 +942,48 @@ impl Scene for Playtest {
                     let visibility =
                         GridVisibility::around(visibility_anchor, ROOM_GRID_VISIBILITY_RADIUS)
                             .with_screen_margin(0);
-                    let mut cells = [GridVisibleCell::EMPTY; MAX_PRECOMPUTED_VISIBLE_CELLS];
-                    let stats = if let Some(count) = fill_precomputed_visible_cells(
+                    let stats = if let Some(cells) = self.cached_precomputed_visible_cells(
+                        active_slot,
                         active.index,
                         active.room.render(),
                         visibility_anchor,
-                        &mut cells,
                     ) {
                         if active.surface_cache.ready {
                             let cell_first = active.surface_cache.cell_first as usize;
                             let cell_end = cell_first
                                 .saturating_add(active.surface_cache.cell_count as usize)
                                 .min(MAX_CACHED_ROOM_CELLS);
+                            let vertex_first = active.surface_cache.vertex_first as usize;
+                            let vertex_count = active.surface_cache.vertex_count as usize;
+                            let vertex_end = vertex_first
+                                .saturating_add(vertex_count)
+                                .min(MAX_CACHED_ROOM_VERTICES);
                             let surface_first = active.surface_cache.surface_first as usize;
                             let surface_end = surface_first
                                 .saturating_add(active.surface_cache.surface_count as usize)
                                 .min(MAX_CACHED_ROOM_SURFACES);
                             let cached_cells = unsafe { &CACHED_ROOM_CELLS[cell_first..cell_end] };
+                            let cached_vertices =
+                                unsafe { &CACHED_ROOM_VERTICES[vertex_first..vertex_end] };
                             let cached_surfaces =
                                 unsafe { &CACHED_ROOM_SURFACES[surface_first..surface_end] };
-                            draw_cached_room_vertex_lit_visible_cells(
+                            let projected_vertices =
+                                unsafe { &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count] };
+                            let projected_valid =
+                                unsafe { &mut CACHED_ROOM_PROJECTED_VALID[..vertex_count] };
+                            draw_indexed_cached_room_vertex_lit_visible_cells(
                                 cached_cells,
+                                cached_vertices,
                                 cached_surfaces,
+                                projected_vertices,
+                                projected_valid,
                                 active.room.render().depth(),
                                 active.room.render().sector_size(),
                                 materials,
                                 &lighting,
                                 &room_camera,
                                 room_options,
-                                &cells[..count],
+                                cells,
                                 visibility.screen_margin,
                                 &mut gouraud_triangles,
                                 &mut world,
@@ -956,7 +995,7 @@ impl Scene for Playtest {
                                 &lighting,
                                 &room_camera,
                                 room_options,
-                                &cells[..count],
+                                cells,
                                 visibility.screen_margin,
                                 &mut gouraud_triangles,
                                 &mut world,
@@ -1486,10 +1525,15 @@ impl Playtest {
 
     fn load_active_room_window(&mut self) {
         self.room = None;
-        self.materials = [const { None }; MAX_ROOM_MATERIALS];
+        self.materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
         self.material_count = 0;
         self.active_rooms = [const { None }; MAX_ACTIVE_ROOMS];
+        #[cfg(feature = "world-grid-visible")]
+        {
+            self.visible_cell_caches = [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS];
+        }
         let mut cached_cell_cursor = 0usize;
+        let mut cached_vertex_cursor = 0usize;
         let mut cached_surface_cursor = 0usize;
 
         let current_index = self.room_index;
@@ -1506,6 +1550,7 @@ impl Playtest {
             current_record,
             current_record,
             &mut cached_cell_cursor,
+            &mut cached_vertex_cursor,
             &mut cached_surface_cursor,
         ) {
             self.room = Some(active.room);
@@ -1531,6 +1576,7 @@ impl Playtest {
                 record,
                 current_record,
                 &mut cached_cell_cursor,
+                &mut cached_vertex_cursor,
                 &mut cached_surface_cursor,
             ) {
                 self.active_rooms[next_slot] = Some(active);
@@ -1820,7 +1866,7 @@ fn draw_player(
 
     telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
     let faces = runtime_model_faces(runtime_model, model_faces);
-    let stats = world.submit_textured_model_predecoded_faces(
+    let stats = world.submit_textured_model_primary_joints_predecoded_faces(
         triangles,
         runtime_model.model,
         anim,
@@ -2175,11 +2221,48 @@ fn parse_runtime_room(record: &LevelRoomRecord) -> Option<RuntimeRoom<'static>> 
     RuntimeRoom::from_bytes(asset.bytes).ok()
 }
 
+const fn room_material_fallback() -> WorldRenderMaterial {
+    WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
+}
+
+#[cfg(feature = "world-grid-visible")]
+impl Playtest {
+    fn cached_precomputed_visible_cells(
+        &mut self,
+        cache_slot: usize,
+        room_index: RoomIndex,
+        room: RoomRender<'_, '_>,
+        anchor: RoomPoint,
+    ) -> Option<&[GridVisibleCell]> {
+        let sector_size = room.sector_size().max(1);
+        let anchor_x = grid_cell_for_room(anchor.x, sector_size).clamp(0, room.width() as i32 - 1);
+        let anchor_z = grid_cell_for_room(anchor.z, sector_size).clamp(0, room.depth() as i32 - 1);
+        let cache = self.visible_cell_caches.get_mut(cache_slot)?;
+        if cache.ready
+            && cache.room == room_index
+            && cache.anchor_x == anchor_x
+            && cache.anchor_z == anchor_z
+        {
+            let count = cache.count as usize;
+            return Some(&cache.cells[..count]);
+        }
+
+        let count =
+            fill_precomputed_visible_cells(room_index, anchor_x, anchor_z, &mut cache.cells)?;
+        cache.room = room_index;
+        cache.anchor_x = anchor_x;
+        cache.anchor_z = anchor_z;
+        cache.count = count as u16;
+        cache.ready = true;
+        Some(&cache.cells[..count])
+    }
+}
+
 #[cfg(feature = "world-grid-visible")]
 fn fill_precomputed_visible_cells(
     room_index: RoomIndex,
-    room: RoomRender<'_, '_>,
-    anchor: RoomPoint,
+    anchor_x: i32,
+    anchor_z: i32,
     out: &mut [GridVisibleCell],
 ) -> Option<usize> {
     let room_visibility = ROOM_VISIBILITY
@@ -2188,9 +2271,6 @@ fn fill_precomputed_visible_cells(
     let first = room_visibility.cell_first.to_usize();
     let count = room_visibility.cell_count as usize;
     let room_cells = VISIBILITY_CELLS.get(first..first.checked_add(count)?)?;
-    let sector_size = room.sector_size().max(1);
-    let anchor_x = grid_cell_for_room(anchor.x, sector_size).clamp(0, room.width() as i32 - 1);
-    let anchor_z = grid_cell_for_room(anchor.z, sector_size).clamp(0, room.depth() as i32 - 1);
     let anchor_cell = room_cells
         .iter()
         .find(|cell| cell.x as i32 == anchor_x && cell.z as i32 == anchor_z)?;
@@ -2226,15 +2306,28 @@ fn build_active_room(
     record: &LevelRoomRecord,
     current_record: &LevelRoomRecord,
     cached_cell_cursor: &mut usize,
+    cached_vertex_cursor: &mut usize,
     cached_surface_cursor: &mut usize,
 ) -> Option<ActiveRuntimeRoom> {
     if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
         let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
     }
     let room = parse_runtime_room(record)?;
-    let mut materials = [const { None }; MAX_ROOM_MATERIALS];
-    let material_count = build_room_materials(record, &mut materials);
-    let surface_cache = cache_active_room_surfaces(room, cached_cell_cursor, cached_surface_cursor);
+    let mut resolved_materials = [const { None }; MAX_ROOM_MATERIALS];
+    let material_count = build_room_materials(record, &mut resolved_materials);
+    let mut materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
+    for i in 0..material_count {
+        if let Some(material) = resolved_materials[i] {
+            materials[i] = material;
+        }
+    }
+    let surface_cache = cache_active_room_surfaces(
+        room,
+        &materials[..material_count],
+        cached_cell_cursor,
+        cached_vertex_cursor,
+        cached_surface_cursor,
+    );
     Some(ActiveRuntimeRoom {
         index,
         room,
@@ -2248,35 +2341,47 @@ fn build_active_room(
 
 fn cache_active_room_surfaces(
     room: RuntimeRoom<'static>,
+    materials: &[WorldRenderMaterial],
     cached_cell_cursor: &mut usize,
+    cached_vertex_cursor: &mut usize,
     cached_surface_cursor: &mut usize,
 ) -> ActiveRoomSurfaceCache {
     let cell_first = *cached_cell_cursor;
+    let vertex_first = *cached_vertex_cursor;
     let surface_first = *cached_surface_cursor;
-    if cell_first >= MAX_CACHED_ROOM_CELLS || surface_first >= MAX_CACHED_ROOM_SURFACES {
+    if cell_first >= MAX_CACHED_ROOM_CELLS
+        || vertex_first >= MAX_CACHED_ROOM_VERTICES
+        || surface_first >= MAX_CACHED_ROOM_SURFACES
+    {
         return ActiveRoomSurfaceCache::EMPTY;
     }
 
     let stats = unsafe {
         cache_room_vertex_lit_surfaces(
             room.render(),
+            materials,
             &mut CACHED_ROOM_CELLS[cell_first..],
+            &mut CACHED_ROOM_VERTICES[vertex_first..],
             &mut CACHED_ROOM_SURFACES[surface_first..],
         )
     };
     if stats.overflow
         || stats.cell_count == 0
         || stats.cell_count > u16::MAX as usize
+        || stats.vertex_count > u16::MAX as usize
         || stats.surface_count > u16::MAX as usize
     {
         return ActiveRoomSurfaceCache::EMPTY;
     }
 
     *cached_cell_cursor = (*cached_cell_cursor).saturating_add(stats.cell_count);
+    *cached_vertex_cursor = (*cached_vertex_cursor).saturating_add(stats.vertex_count);
     *cached_surface_cursor = (*cached_surface_cursor).saturating_add(stats.surface_count);
     ActiveRoomSurfaceCache {
         cell_first: cell_first as u16,
         cell_count: stats.cell_count as u16,
+        vertex_first: vertex_first as u16,
+        vertex_count: stats.vertex_count as u16,
         surface_first: surface_first as u16,
         surface_count: stats.surface_count as u16,
         ready: true,
@@ -2484,13 +2589,13 @@ impl RuntimeRoomLighting {
             })
     }
 
-    fn apply_vertex_fog(&self, rgb: [u8; 3], vertex: WorldVertex) -> (u8, u8, u8) {
+    fn apply_vertex_fog(&self, rgb: (u8, u8, u8), vertex: WorldVertex) -> (u8, u8, u8) {
         if !self.fog_enabled || self.fog_far <= self.fog_near {
-            return rgb_tuple(rgb);
+            return rgb;
         }
         let depth = self.camera.view_vertex(vertex).z;
         apply_room_fog(
-            (rgb[0], rgb[1], rgb[2]),
+            rgb,
             depth,
             self.fog_enabled,
             self.fog_rgb,
@@ -2526,12 +2631,7 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
     ) -> [(u8, u8, u8); 4] {
         if let Some(vertex_rgb) = sample.baked_vertex_rgb {
             if !self.fog_enabled || self.fog_far <= self.fog_near {
-                return [
-                    rgb_tuple(vertex_rgb[0]),
-                    rgb_tuple(vertex_rgb[1]),
-                    rgb_tuple(vertex_rgb[2]),
-                    rgb_tuple(vertex_rgb[3]),
-                ];
+                return vertex_rgb;
             }
             return [
                 self.apply_vertex_fog(vertex_rgb[0], vertices[0]),
