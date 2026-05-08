@@ -119,7 +119,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for room in &package.rooms {
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -132,6 +132,17 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.fog_rgb[2],
             room.fog_near,
             room.fog_far,
+            room.sky.top_rgb[0],
+            room.sky.top_rgb[1],
+            room.sky.top_rgb[2],
+            room.sky.horizon_rgb[0],
+            room.sky.horizon_rgb[1],
+            room.sky.horizon_rgb[2],
+            room.sky.bottom_rgb[0],
+            room.sky.bottom_rgb[1],
+            room.sky.bottom_rgb[2],
+            room.sky.horizon_percent,
+            room.sky.flags,
             room.flags,
         );
     }
@@ -758,6 +769,7 @@ use psx_level::{
     LevelModelSocketRecord,
     LevelRoomRecord,
     LevelRoomVisibilityRecord,
+    LevelSkyRecord,
     LevelVisibilityCellRecord,
     LevelVisibleCellRecord,
     LevelWeaponRecord,
