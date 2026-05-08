@@ -91,7 +91,24 @@ pub struct PlaytestRoom {
     pub fog_near: i32,
     /// Fog end distance in engine units.
     pub fog_far: i32,
+    /// Resolved world sky for this cooked room.
+    pub sky: PlaytestSky,
     /// Room flags mirrored into the runtime manifest.
+    pub flags: u16,
+}
+
+/// Resolved sky values written into one runtime room record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestSky {
+    /// Zenith colour.
+    pub top_rgb: [u8; 3],
+    /// Colour at the authored horizon line.
+    pub horizon_rgb: [u8; 3],
+    /// Colour at the bottom of the frame.
+    pub bottom_rgb: [u8; 3],
+    /// Horizon line as a percentage of screen height.
+    pub horizon_percent: u8,
+    /// Runtime sky flags.
     pub flags: u16,
 }
 
