@@ -38,7 +38,7 @@ use psxed_project::{
 };
 
 use crate::editor_textures::{EditorTextures, MaterialSlot};
-use psxed_ui::ViewportCameraState;
+use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
 
 /// Maximum sectors we'll attempt to render in one preview pass.
 /// 64×64 grid would already be enormous for PSX (~16 MiB cooked); a
@@ -1220,6 +1220,7 @@ fn wall_side_visible(
     edge: WallEdge,
     camera_position: [i32; 3],
 ) -> bool {
+    let sidedness = wall_material_sidedness(sidedness);
     let [x0, x1, z0, z1] = bounds;
     let [cam_x, _, cam_z] = camera_position;
     let inside_distance = match edge {
@@ -1233,6 +1234,16 @@ fn wall_side_visible(
         psxed_project::MaterialFaceSidedness::Both => true,
         psxed_project::MaterialFaceSidedness::Back => inside_distance >= 0,
         psxed_project::MaterialFaceSidedness::Front => inside_distance <= 0,
+    }
+}
+
+fn wall_material_sidedness(
+    sidedness: psxed_project::MaterialFaceSidedness,
+) -> psxed_project::MaterialFaceSidedness {
+    match sidedness {
+        psxed_project::MaterialFaceSidedness::Front => psxed_project::MaterialFaceSidedness::Back,
+        psxed_project::MaterialFaceSidedness::Back => psxed_project::MaterialFaceSidedness::Front,
+        psxed_project::MaterialFaceSidedness::Both => psxed_project::MaterialFaceSidedness::Both,
     }
 }
 
@@ -1295,11 +1306,9 @@ fn push_wall_face(
         )
     };
     let (tri_a, tri_b) = if let Some(shape) = shape {
-        let members =
-            psxed_project::wall_shape_triangle_corners(shape).unwrap_or(psxed_project::wall_triangle_corners(
-                GridSplit::NorthWestSouthEast,
-                0,
-            ));
+        let members = psxed_project::wall_shape_triangle_corners(shape).unwrap_or(
+            psxed_project::wall_triangle_corners(GridSplit::NorthWestSouthEast, 0),
+        );
         (make_triangle(members), make_triangle(members))
     } else {
         (
@@ -1318,10 +1327,10 @@ fn push_wall_face(
         |members: [WallCorner; 3]| -> bool { dropped_corner.is_some_and(|c| members.contains(&c)) };
     // Endpoint order keeps wall UVs upright. Winding is the
     // separate concern: the authored wall back side faces the
-    // owning cell/interior, matching runtime `world_render` and
-    // the default one-sided Brick material.
+    // owning cell/interior, while wall materials swap Front/Back so
+    // authors can use front-sided materials for interior walls.
     let flip_winding = !matches!(
-        shade.sidedness(),
+        wall_material_sidedness(shade.sidedness()),
         psxed_project::MaterialFaceSidedness::Back
     );
     let emit_wall_triangle = |scratch: &mut PreviewScratch,
@@ -2616,7 +2625,7 @@ fn world_to_view(world: [i32; 3]) -> Vec3I16 {
 }
 
 /// Render the paint-target ghost outline. Cell ghosts trace the
-/// floor footprint of the would-be cell; wall ghosts use
+/// would-be cell surface; wall ghosts use
 /// `push_face_outline` with a synthetic `FaceRef` whose world cell
 /// might lie outside the current grid -- `push_face_outline`'s
 /// missing-data fallback supplies default heights for the ghost
@@ -2632,7 +2641,8 @@ fn push_paint_preview(
         psxed_ui::PaintTargetPreview::Cell {
             world_cell_x,
             world_cell_z,
-        } => push_cell_ghost_outline(grid, world_cell_x, world_cell_z, scratch),
+            kind,
+        } => push_cell_ghost_outline(grid, world_cell_x, world_cell_z, kind, scratch),
         psxed_ui::PaintTargetPreview::Wall {
             world_cell_x,
             world_cell_z,
@@ -2672,26 +2682,42 @@ fn push_paint_preview(
     }
 }
 
-/// Outline a cell at world-cell `(wcx, wcz)`. Draws four screen-
-/// space lines along the cell's edges, lifted slightly above
-/// `y = 0` so the strokes don't z-fight any existing floor at the
-/// same world position.
-fn push_cell_ghost_outline(grid: &WorldGrid, wcx: i32, wcz: i32, scratch: &mut PreviewScratch) {
+/// Outline a cell at world-cell `(wcx, wcz)`. Floor / ceiling paint
+/// previews use the same candidate heights the click path will
+/// commit; generic cell previews stay on the ground footprint.
+fn push_cell_ghost_outline(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    kind: PaintCellPreviewKind,
+    scratch: &mut PreviewScratch,
+) {
     let s = grid.sector_size;
     let x0 = wcx * s;
     let x1 = x0 + s;
     let z0 = wcz * s;
     let z1 = z0 + s;
-    let y = 4;
-    let nw = gte_scene::project_vertex(world_to_view([x0, y, z1]));
-    let ne = gte_scene::project_vertex(world_to_view([x1, y, z1]));
-    let se = gte_scene::project_vertex(world_to_view([x1, y, z0]));
-    let sw = gte_scene::project_vertex(world_to_view([x0, y, z0]));
+    let (heights, style) = match kind {
+        PaintCellPreviewKind::Ground => ([0; 4], FACE_OUTLINE_HOVER),
+        PaintCellPreviewKind::Floor => (
+            grid.floor_heights_aligned_to_neighbors_for_world_cell(wcx, wcz, 0),
+            FACE_OUTLINE_FLOOR_PAINT,
+        ),
+        PaintCellPreviewKind::Ceiling => (
+            grid.ceiling_heights_aligned_to_neighbors_for_world_cell(wcx, wcz),
+            FACE_OUTLINE_CEILING_PAINT,
+        ),
+    };
+    const LIFT: i32 = 4;
+    let nw = gte_scene::project_vertex(world_to_view([x0, heights[Corner::NW.idx()] + LIFT, z1]));
+    let ne = gte_scene::project_vertex(world_to_view([x1, heights[Corner::NE.idx()] + LIFT, z1]));
+    let se = gte_scene::project_vertex(world_to_view([x1, heights[Corner::SE.idx()] + LIFT, z0]));
+    let sw = gte_scene::project_vertex(world_to_view([x0, heights[Corner::SW.idx()] + LIFT, z0]));
     if [nw, ne, se, sw].iter().any(|p| p.sz == 0) {
         return;
     }
     for (a, b) in [(nw, ne), (ne, se), (se, sw), (sw, nw)] {
-        push_screen_line(scratch, a, b, FACE_OUTLINE_HOVER);
+        push_screen_line(scratch, a, b, style);
     }
 }
 
@@ -2763,6 +2789,14 @@ const ENTITY_BOUND_SELECTED: FaceOutlineStyle = FaceOutlineStyle {
 /// to leave the underlying face readable.
 const FACE_OUTLINE_WALL_PAINT: FaceOutlineStyle = FaceOutlineStyle {
     rgb: (0x60, 0xFF, 0x90),
+    thickness_px: EDITOR_PREVIEW_PAINT_STROKE_WIDTH,
+};
+const FACE_OUTLINE_FLOOR_PAINT: FaceOutlineStyle = FaceOutlineStyle {
+    rgb: (0x60, 0xFF, 0x90),
+    thickness_px: EDITOR_PREVIEW_PAINT_STROKE_WIDTH,
+};
+const FACE_OUTLINE_CEILING_PAINT: FaceOutlineStyle = FaceOutlineStyle {
+    rgb: (0x80, 0xC8, 0xFF),
     thickness_px: EDITOR_PREVIEW_PAINT_STROKE_WIDTH,
 };
 const STREAMING_CHUNK_BOUNDARY: FaceOutlineStyle = FaceOutlineStyle {
@@ -3611,7 +3645,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_cardinal_wall_backs_face_their_owning_cell() {
+    fn editor_cardinal_wall_front_material_renders_from_owning_cell() {
         let cases = [
             (WallEdge::North, [512, 512, 512], 128, [512, 512, 1536], 0),
             (WallEdge::East, [512, 512, 512], 192, [1536, 512, 512], 64),
@@ -3625,36 +3659,36 @@ mod tests {
                     edge,
                     inside_pos,
                     inside_yaw,
-                    MaterialFaceSidedness::Back
+                    MaterialFaceSidedness::Front
                 ),
-                "{edge:?} wall back side should render from inside the owning cell"
+                "{edge:?} wall front material should render from inside the owning cell"
             );
             assert!(
                 !wall_face_emits_from_camera(
                     edge,
                     inside_pos,
                     inside_yaw,
-                    MaterialFaceSidedness::Front
+                    MaterialFaceSidedness::Back
                 ),
-                "{edge:?} wall front side should not render from inside the owning cell"
+                "{edge:?} wall back material should not render from inside the owning cell"
             );
             assert!(
                 !wall_face_emits_from_camera(
                     edge,
                     outside_pos,
                     outside_yaw,
-                    MaterialFaceSidedness::Back
+                    MaterialFaceSidedness::Front
                 ),
-                "{edge:?} wall back side should not render from outside the owning cell"
+                "{edge:?} wall front material should not render from outside the owning cell"
             );
             assert!(
                 wall_face_emits_from_camera(
                     edge,
                     outside_pos,
                     outside_yaw,
-                    MaterialFaceSidedness::Front
+                    MaterialFaceSidedness::Back
                 ),
-                "{edge:?} wall front side should render from outside the owning cell"
+                "{edge:?} wall back material should render from outside the owning cell"
             );
         }
     }
@@ -3855,7 +3889,10 @@ mod tests {
             sidedness: psxed_project::MaterialFaceSidedness::Both,
         };
         assert_eq!(
-            material_sized_uvs(shade, [(0, 0), (128, 0), (128, GRID_TILE_UV), (0, GRID_TILE_UV)]),
+            material_sized_uvs(
+                shade,
+                [(0, 0), (128, 0), (128, GRID_TILE_UV), (0, GRID_TILE_UV)]
+            ),
             [(0, 0), (64, 0), (64, GRID_TILE_UV), (0, GRID_TILE_UV)]
         );
     }
