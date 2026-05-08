@@ -13,7 +13,7 @@ use psx_gpu::{
 };
 
 use crate::{
-    render3d::{CullMode, DepthPolicy},
+    render3d::{project_world_vertices_gte, CullMode, DepthPolicy},
     PrimitiveArena, RoomPoint, RoomRender, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
     WorldVertex,
 };
@@ -95,6 +95,15 @@ impl From<TextureMaterial> for WorldRenderMaterial {
     }
 }
 
+const fn wall_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial {
+    material.sidedness = match material.sidedness {
+        SurfaceSidedness::Front => SurfaceSidedness::Back,
+        SurfaceSidedness::Back => SurfaceSidedness::Front,
+        SurfaceSidedness::Both => SurfaceSidedness::Both,
+    };
+    material
+}
+
 /// Kind of room surface currently being emitted.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum WorldSurfaceKind {
@@ -122,8 +131,9 @@ pub struct WorldSurfaceSample {
     /// the emitted vertices.
     pub center: RoomPoint,
     /// Baked vertex RGB from `.psxw` static lighting, when the
-    /// room carries it. Corner order matches emitted quad order.
-    pub baked_vertex_rgb: Option<[[u8; 3]; 4]>,
+    /// room carries it. Corner order matches emitted quad order and
+    /// values are stored in the tuple form consumed by GPU packets.
+    pub baked_vertex_rgb: Option<[(u8, u8, u8); 4]>,
     /// Surface ordinal inside the cooked sector. Floors and
     /// ceilings are always `0`; walls use their local wall-table
     /// index so baked lighting can distinguish stacked wall
@@ -224,6 +234,10 @@ pub struct CachedRoomCell {
     pub min_y: i32,
     /// Maximum authored surface height in room-local engine units.
     pub max_y: i32,
+    /// Precomputed center used by the cached room frustum test.
+    pub visibility_center: WorldVertex,
+    /// Precomputed radius used by the cached room frustum test.
+    pub visibility_radius: i32,
     /// First surface record for this cell inside the room surface cache.
     pub surface_first: u16,
     /// Number of cached floor/ceiling/wall surfaces in this cell.
@@ -237,23 +251,30 @@ impl CachedRoomCell {
         z: 0,
         min_y: 0,
         max_y: 0,
+        visibility_center: WorldVertex::ZERO,
+        visibility_radius: 0,
         surface_first: 0,
         surface_count: 0,
     };
 
-    const fn new(
+    fn new(
         x: u16,
         z: u16,
+        sector_size: i32,
         min_y: i32,
         max_y: i32,
         surface_first: u16,
         surface_count: u16,
     ) -> Self {
+        let (visibility_center, visibility_radius) =
+            cell_visibility_bounds(x, z, sector_size, min_y, max_y);
         Self {
             x,
             z,
             min_y,
             max_y,
+            visibility_center,
+            visibility_radius,
             surface_first,
             surface_count,
         }
@@ -285,6 +306,10 @@ pub struct CachedRoomSurface {
     /// Emitted quad vertices in the same order the uncached path
     /// would submit them.
     pub vertices: [WorldVertex; 4],
+    /// Indices into the cached room vertex stream. The indexed
+    /// renderer uses these to project shared room corners once per
+    /// frame instead of once per surface.
+    pub vertex_indices: [u16; 4],
     /// Texture-page-relative UVs matching `vertices`.
     pub uvs: [(u8, u8); 4],
     /// Surface lighting/material sample.
@@ -301,6 +326,7 @@ impl CachedRoomSurface {
     pub const EMPTY: Self = Self {
         material_slot: 0,
         vertices: [WorldVertex::ZERO; 4],
+        vertex_indices: [0; 4],
         uvs: [(0, 0); 4],
         sample: WorldSurfaceSample::EMPTY,
         split: SPLIT_NW_SE,
@@ -310,6 +336,7 @@ impl CachedRoomSurface {
     const fn new(
         material_slot: u16,
         vertices: [WorldVertex; 4],
+        vertex_indices: [u16; 4],
         uvs: [(u8, u8); 4],
         sample: WorldSurfaceSample,
         split: u8,
@@ -318,6 +345,7 @@ impl CachedRoomSurface {
         Self {
             material_slot,
             vertices,
+            vertex_indices,
             uvs,
             sample,
             split,
@@ -333,6 +361,8 @@ pub struct CachedRoomSurfaceCacheStats {
     pub cell_count: usize,
     /// Number of cached surface records written.
     pub surface_count: usize,
+    /// Number of deduplicated cached world vertices written.
+    pub vertex_count: usize,
     /// `true` when the caller-provided arrays were too small.
     pub overflow: bool,
 }
@@ -455,8 +485,9 @@ const WALL_UVS: [(u8, u8); 4] = [(0, TILE_UV), (TILE_UV, TILE_UV), (TILE_UV, 0),
 ///   inward underside winding. UVs are transformed with the vertices.
 /// * **Walls** -- runtime records store `[bottom-left, bottom-right,
 ///   top-right, top-left]` for an owning cell edge. That physical corner
-///   order makes the wall back side face the owning cell/interior; use a
-///   back-sided material for the common one-sided interior wall case.
+///   order makes the wall back side face the owning cell/interior. Wall
+///   emission swaps Front/Back material intent so authors can use a
+///   front-sided material for the common one-sided interior wall case.
 ///
 /// [`SectorRender::floor_material`]: crate::SectorRender::floor_material
 /// [`SectorRender::ceiling_material`]: crate::SectorRender::ceiling_material
@@ -732,7 +763,7 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
             options,
             cell.x,
             cell.z,
-            sector_size,
+            sector_size.max(1),
             cell.min_y,
             cell.max_y,
             screen_margin,
@@ -762,7 +793,9 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
 /// should fall back to the uncached room renderer for that room.
 pub fn cache_room_vertex_lit_surfaces(
     room: RoomRender<'_, '_>,
+    materials: &[WorldRenderMaterial],
     cells_out: &mut [CachedRoomCell],
+    vertices_out: &mut [WorldVertex],
     surfaces_out: &mut [CachedRoomSurface],
 ) -> CachedRoomSurfaceCacheStats {
     let width = room.width();
@@ -772,11 +805,13 @@ pub fn cache_room_vertex_lit_surfaces(
         return CachedRoomSurfaceCacheStats {
             cell_count: 0,
             surface_count: 0,
+            vertex_count: 0,
             overflow: true,
         };
     }
 
     let sector_size = room.sector_size();
+    let mut vertex_count = 0usize;
     let mut surface_count = 0usize;
     let mut sx = 0u16;
     while sx < width {
@@ -784,7 +819,8 @@ pub fn cache_room_vertex_lit_surfaces(
         while sz < depth {
             let cell_index = sx as usize * depth as usize + sz as usize;
             let surface_first = surface_count;
-            cells_out[cell_index] = CachedRoomCell::new(sx, sz, 0, 0, surface_first as u16, 0);
+            cells_out[cell_index] =
+                CachedRoomCell::new(sx, sz, sector_size, 0, 0, surface_first as u16, 0);
 
             let Some(sector) = room.sector(sx, sz) else {
                 sz += 1;
@@ -795,12 +831,23 @@ pub fn cache_room_vertex_lit_surfaces(
                 let heights = sector.floor_heights();
                 let split = sector.floor_split();
                 if let Some((slot, uvs)) = merged_floor_surface(sector) {
+                    let vertices = horizontal_vertices(sx, sz, sector_size, heights);
+                    let Some(vertex_indices) =
+                        cache_room_vertices(vertices_out, &mut vertex_count, vertices)
+                    else {
+                        return CachedRoomSurfaceCacheStats {
+                            cell_count,
+                            surface_count,
+                            vertex_count,
+                            overflow: true,
+                        };
+                    };
                     let sample = WorldSurfaceSample {
                         kind: WorldSurfaceKind::Floor,
                         sx,
                         sz,
                         center: horizontal_face_center(sx, sz, sector_size, heights),
-                        baked_vertex_rgb: room.floor_light(sx, sz),
+                        baked_vertex_rgb: baked_vertex_rgb(room.floor_light(sx, sz)),
                         ordinal: 0,
                     };
                     if !cache_room_surface(
@@ -808,8 +855,9 @@ pub fn cache_room_vertex_lit_surfaces(
                         &mut surface_count,
                         CachedRoomSurface::new(
                             slot,
-                            horizontal_vertices(sx, sz, sector_size, heights),
-                            uvs,
+                            vertices,
+                            vertex_indices,
+                            cached_material_uvs(materials, slot, uvs),
                             sample,
                             split,
                             WHOLE_QUAD_TRIANGLE_INDEX,
@@ -818,6 +866,7 @@ pub fn cache_room_vertex_lit_surfaces(
                         return CachedRoomSurfaceCacheStats {
                             cell_count,
                             surface_count,
+                            vertex_count,
                             overflow: true,
                         };
                     }
@@ -828,6 +877,17 @@ pub fn cache_room_vertex_lit_surfaces(
                         }
                         let Some(slot) = sector.floor_triangle_material(triangle_index) else {
                             continue;
+                        };
+                        let vertices = horizontal_vertices(sx, sz, sector_size, heights);
+                        let Some(vertex_indices) =
+                            cache_room_vertices(vertices_out, &mut vertex_count, vertices)
+                        else {
+                            return CachedRoomSurfaceCacheStats {
+                                cell_count,
+                                surface_count,
+                                vertex_count,
+                                overflow: true,
+                            };
                         };
                         let sample = WorldSurfaceSample {
                             kind: WorldSurfaceKind::Floor,
@@ -841,7 +901,7 @@ pub fn cache_room_vertex_lit_surfaces(
                                 split,
                                 triangle_index,
                             ),
-                            baked_vertex_rgb: room.floor_light(sx, sz),
+                            baked_vertex_rgb: baked_vertex_rgb(room.floor_light(sx, sz)),
                             ordinal: triangle_index as u16,
                         };
                         if !cache_room_surface(
@@ -849,8 +909,13 @@ pub fn cache_room_vertex_lit_surfaces(
                             &mut surface_count,
                             CachedRoomSurface::new(
                                 slot,
-                                horizontal_vertices(sx, sz, sector_size, heights),
-                                sector.floor_triangle_uvs(triangle_index),
+                                vertices,
+                                vertex_indices,
+                                cached_material_uvs(
+                                    materials,
+                                    slot,
+                                    sector.floor_triangle_uvs(triangle_index),
+                                ),
                                 sample,
                                 split,
                                 triangle_index as u8,
@@ -859,6 +924,7 @@ pub fn cache_room_vertex_lit_surfaces(
                             return CachedRoomSurfaceCacheStats {
                                 cell_count,
                                 surface_count,
+                                vertex_count,
                                 overflow: true,
                             };
                         }
@@ -870,12 +936,23 @@ pub fn cache_room_vertex_lit_surfaces(
                 let heights = sector.ceiling_heights();
                 let split = sector.ceiling_split();
                 if let Some((slot, uvs)) = merged_ceiling_surface(sector) {
+                    let vertices = horizontal_vertices(sx, sz, sector_size, heights);
+                    let Some(vertex_indices) =
+                        cache_room_vertices(vertices_out, &mut vertex_count, vertices)
+                    else {
+                        return CachedRoomSurfaceCacheStats {
+                            cell_count,
+                            surface_count,
+                            vertex_count,
+                            overflow: true,
+                        };
+                    };
                     let sample = WorldSurfaceSample {
                         kind: WorldSurfaceKind::Ceiling,
                         sx,
                         sz,
                         center: horizontal_face_center(sx, sz, sector_size, heights),
-                        baked_vertex_rgb: room.ceiling_light(sx, sz),
+                        baked_vertex_rgb: baked_vertex_rgb(room.ceiling_light(sx, sz)),
                         ordinal: 0,
                     };
                     if !cache_room_surface(
@@ -883,8 +960,9 @@ pub fn cache_room_vertex_lit_surfaces(
                         &mut surface_count,
                         CachedRoomSurface::new(
                             slot,
-                            horizontal_vertices(sx, sz, sector_size, heights),
-                            uvs,
+                            vertices,
+                            vertex_indices,
+                            cached_material_uvs(materials, slot, uvs),
                             sample,
                             split,
                             WHOLE_QUAD_TRIANGLE_INDEX,
@@ -893,6 +971,7 @@ pub fn cache_room_vertex_lit_surfaces(
                         return CachedRoomSurfaceCacheStats {
                             cell_count,
                             surface_count,
+                            vertex_count,
                             overflow: true,
                         };
                     }
@@ -903,6 +982,17 @@ pub fn cache_room_vertex_lit_surfaces(
                         }
                         let Some(slot) = sector.ceiling_triangle_material(triangle_index) else {
                             continue;
+                        };
+                        let vertices = horizontal_vertices(sx, sz, sector_size, heights);
+                        let Some(vertex_indices) =
+                            cache_room_vertices(vertices_out, &mut vertex_count, vertices)
+                        else {
+                            return CachedRoomSurfaceCacheStats {
+                                cell_count,
+                                surface_count,
+                                vertex_count,
+                                overflow: true,
+                            };
                         };
                         let sample = WorldSurfaceSample {
                             kind: WorldSurfaceKind::Ceiling,
@@ -916,7 +1006,7 @@ pub fn cache_room_vertex_lit_surfaces(
                                 split,
                                 triangle_index,
                             ),
-                            baked_vertex_rgb: room.ceiling_light(sx, sz),
+                            baked_vertex_rgb: baked_vertex_rgb(room.ceiling_light(sx, sz)),
                             ordinal: triangle_index as u16,
                         };
                         if !cache_room_surface(
@@ -924,8 +1014,13 @@ pub fn cache_room_vertex_lit_surfaces(
                             &mut surface_count,
                             CachedRoomSurface::new(
                                 slot,
-                                horizontal_vertices(sx, sz, sector_size, heights),
-                                sector.ceiling_triangle_uvs(triangle_index),
+                                vertices,
+                                vertex_indices,
+                                cached_material_uvs(
+                                    materials,
+                                    slot,
+                                    sector.ceiling_triangle_uvs(triangle_index),
+                                ),
                                 sample,
                                 split,
                                 triangle_index as u8,
@@ -934,6 +1029,7 @@ pub fn cache_room_vertex_lit_surfaces(
                             return CachedRoomSurfaceCacheStats {
                                 cell_count,
                                 surface_count,
+                                vertex_count,
                                 overflow: true,
                             };
                         }
@@ -947,6 +1043,16 @@ pub fn cache_room_vertex_lit_surfaces(
                     if let Some(vertices) =
                         wall_vertices(sx, sz, sector_size, wall.direction(), wall.heights())
                     {
+                        let Some(vertex_indices) =
+                            cache_room_vertices(vertices_out, &mut vertex_count, vertices)
+                        else {
+                            return CachedRoomSurfaceCacheStats {
+                                cell_count,
+                                surface_count,
+                                vertex_count,
+                                overflow: true,
+                            };
+                        };
                         let (split, triangle_index) = wall_shape_triangle(wall.shape())
                             .unwrap_or((SPLIT_NW_SE, WHOLE_QUAD_TRIANGLE_INDEX));
                         let sample = WorldSurfaceSample {
@@ -956,7 +1062,7 @@ pub fn cache_room_vertex_lit_surfaces(
                             sx,
                             sz,
                             center: wall_shape_center(vertices, wall.shape()),
-                            baked_vertex_rgb: room.wall_light(sector, i),
+                            baked_vertex_rgb: baked_vertex_rgb(room.wall_light(sector, i)),
                             ordinal: i,
                         };
                         if !cache_room_surface(
@@ -965,7 +1071,8 @@ pub fn cache_room_vertex_lit_surfaces(
                             CachedRoomSurface::new(
                                 wall.material(),
                                 vertices,
-                                wall.uvs(),
+                                vertex_indices,
+                                cached_material_uvs(materials, wall.material(), wall.uvs()),
                                 sample,
                                 split,
                                 triangle_index,
@@ -974,6 +1081,7 @@ pub fn cache_room_vertex_lit_surfaces(
                             return CachedRoomSurfaceCacheStats {
                                 cell_count,
                                 surface_count,
+                                vertex_count,
                                 overflow: true,
                             };
                         }
@@ -987,6 +1095,7 @@ pub fn cache_room_vertex_lit_surfaces(
                 return CachedRoomSurfaceCacheStats {
                     cell_count,
                     surface_count,
+                    vertex_count,
                     overflow: true,
                 };
             }
@@ -995,6 +1104,7 @@ pub fn cache_room_vertex_lit_surfaces(
                 cells_out[cell_index] = CachedRoomCell::new(
                     sx,
                     sz,
+                    sector_size,
                     min_y,
                     max_y,
                     surface_first as u16,
@@ -1010,6 +1120,7 @@ pub fn cache_room_vertex_lit_surfaces(
     CachedRoomSurfaceCacheStats {
         cell_count,
         surface_count,
+        vertex_count,
         overflow: false,
     }
 }
@@ -1027,7 +1138,7 @@ pub fn draw_cached_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfac
     cached_cells: &[CachedRoomCell],
     cached_surfaces: &[CachedRoomSurface],
     room_depth: u16,
-    sector_size: i32,
+    _sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
     camera: &WorldCamera,
@@ -1053,14 +1164,11 @@ pub fn draw_cached_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfac
         }
 
         stats.cells_considered = stats.cells_considered.saturating_add(1);
-        if !cell_visible_to_camera(
+        if !cell_visibility_visible_to_camera(
             camera,
             options,
-            cell.x,
-            cell.z,
-            sector_size.max(1),
-            cell.min_y,
-            cell.max_y,
+            cell.visibility_center,
+            cell.visibility_radius,
             screen_margin,
         ) {
             stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
@@ -1092,6 +1200,88 @@ pub fn draw_cached_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfac
     stats
 }
 
+/// Draw a cached vertex-lit room using a deduplicated cached vertex
+/// stream. The projected scratch slices must be at least as long as
+/// `cached_vertices`.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
+    const OT: usize,
+    L: WorldSurfaceLighting,
+>(
+    cached_cells: &[CachedRoomCell],
+    cached_vertices: &[WorldVertex],
+    cached_surfaces: &[CachedRoomSurface],
+    projected_vertices: &mut [crate::render3d::ProjectedVertex],
+    projected_valid: &mut [bool],
+    room_depth: u16,
+    _sector_size: i32,
+    materials: &[WorldRenderMaterial],
+    lighting: &L,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    visible_cells: &[GridVisibleCell],
+    screen_margin: i32,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> GridVisibilityStats {
+    let mut stats = GridVisibilityStats::default();
+    let depth = room_depth as usize;
+    if depth == 0
+        || projected_vertices.len() < cached_vertices.len()
+        || projected_valid.len() < cached_vertices.len()
+    {
+        return stats;
+    }
+
+    project_world_vertices_gte(*camera, cached_vertices, projected_vertices, projected_valid);
+
+    for visible in visible_cells {
+        let cell_index = visible.x as usize * depth + visible.z as usize;
+        let Some(cell) = cached_cells.get(cell_index).copied() else {
+            continue;
+        };
+        if cell.surface_count == 0 || cell.x != visible.x || cell.z != visible.z {
+            continue;
+        }
+
+        stats.cells_considered = stats.cells_considered.saturating_add(1);
+        if !cell_visibility_visible_to_camera(
+            camera,
+            options,
+            cell.visibility_center,
+            cell.visibility_radius,
+            screen_margin,
+        ) {
+            stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
+            continue;
+        }
+
+        stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        let first = cell.surface_first as usize;
+        let end = first
+            .saturating_add(cell.surface_count as usize)
+            .min(cached_surfaces.len());
+        let mut i = first;
+        while i < end {
+            stats.surfaces_considered =
+                stats
+                    .surfaces_considered
+                    .saturating_add(draw_indexed_cached_room_surface(
+                        cached_surfaces[i],
+                        projected_vertices,
+                        projected_valid,
+                        materials,
+                        lighting,
+                        options,
+                        triangles,
+                        world,
+                    ));
+            i += 1;
+        }
+    }
+    stats
+}
+
 fn cache_room_surface(
     surfaces_out: &mut [CachedRoomSurface],
     surface_count: &mut usize,
@@ -1103,6 +1293,63 @@ fn cache_room_surface(
     surfaces_out[*surface_count] = surface;
     *surface_count += 1;
     true
+}
+
+fn cache_room_vertices(
+    vertices_out: &mut [WorldVertex],
+    vertex_count: &mut usize,
+    vertices: [WorldVertex; 4],
+) -> Option<[u16; 4]> {
+    Some([
+        cache_room_vertex(vertices_out, vertex_count, vertices[0])?,
+        cache_room_vertex(vertices_out, vertex_count, vertices[1])?,
+        cache_room_vertex(vertices_out, vertex_count, vertices[2])?,
+        cache_room_vertex(vertices_out, vertex_count, vertices[3])?,
+    ])
+}
+
+fn cache_room_vertex(
+    vertices_out: &mut [WorldVertex],
+    vertex_count: &mut usize,
+    vertex: WorldVertex,
+) -> Option<u16> {
+    let mut i = 0usize;
+    while i < *vertex_count {
+        if vertices_out[i] == vertex {
+            return u16::try_from(i).ok();
+        }
+        i += 1;
+    }
+
+    if *vertex_count >= vertices_out.len() || *vertex_count >= u16::MAX as usize {
+        return None;
+    }
+    let index = *vertex_count;
+    vertices_out[index] = vertex;
+    *vertex_count += 1;
+    u16::try_from(index).ok()
+}
+
+fn cached_material_uvs(
+    materials: &[WorldRenderMaterial],
+    slot: u16,
+    uvs: [(u8, u8); 4],
+) -> [(u8, u8); 4] {
+    match materials.get(slot as usize) {
+        Some(&material) => material_uvs(material, uvs),
+        None => uvs,
+    }
+}
+
+fn baked_vertex_rgb(rgb: Option<[[u8; 3]; 4]>) -> Option<[(u8, u8, u8); 4]> {
+    rgb.map(|rgb| {
+        [
+            (rgb[0][0], rgb[0][1], rgb[0][2]),
+            (rgb[1][0], rgb[1][1], rgb[1][2]),
+            (rgb[2][0], rgb[2][1], rgb[2][2]),
+            (rgb[3][0], rgb[3][1], rgb[3][2]),
+        ]
+    })
 }
 
 fn merged_floor_surface(sector: crate::SectorRender) -> Option<(u16, [(u8, u8); 4])> {
@@ -1152,6 +1399,7 @@ fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     let Some(&material) = materials.get(surface.material_slot as usize) else {
         return 0;
     };
+    let material = cached_uv_material(material);
     let colors = vertex_lighting_colors(lighting, surface.sample, material, surface.vertices);
     match surface.sample.kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
@@ -1196,6 +1444,7 @@ fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             }
         }
         WorldSurfaceKind::Wall { .. } => {
+            let material = wall_material(material);
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 submit_split_triangle_vertex_lit(
                     camera,
@@ -1230,6 +1479,133 @@ fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
+    surface: CachedRoomSurface,
+    projected_vertices: &[crate::render3d::ProjectedVertex],
+    projected_valid: &[bool],
+    materials: &[WorldRenderMaterial],
+    lighting: &L,
+    options: WorldSurfaceOptions,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> u16 {
+    let Some(&material) = materials.get(surface.material_slot as usize) else {
+        return 0;
+    };
+    let material = cached_uv_material(material);
+    let ids = surface.vertex_indices;
+    let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
+        return 0;
+    };
+    let colors = vertex_lighting_colors(lighting, surface.sample, material, surface.vertices);
+    match surface.sample.kind {
+        WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
+            if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+                submit_projected_split_triangle_vertex_lit_cached_uvs(
+                    projected,
+                    surface.uvs,
+                    colors,
+                    material,
+                    options.with_depth_policy(DepthPolicy::Farthest),
+                    CullMode::Back,
+                    surface.split,
+                    surface.triangle_index as usize,
+                    matches!(surface.sample.kind, WorldSurfaceKind::Ceiling),
+                    triangles,
+                    world,
+                )
+            } else {
+                let (projected, uvs, colors) =
+                    if matches!(surface.sample.kind, WorldSurfaceKind::Ceiling) {
+                        (
+                            reverse_quad_winding(projected),
+                            reverse_quad_winding(surface.uvs),
+                            reverse_quad_winding(colors),
+                        )
+                    } else {
+                        (projected, surface.uvs, colors)
+                    };
+                submit_sided_projected_gouraud_quad_cached_uvs(
+                    world,
+                    triangles,
+                    projected,
+                    uvs,
+                    colors,
+                    material,
+                    options.with_depth_policy(DepthPolicy::Farthest),
+                    CullMode::Back,
+                    split_triangles_runtime(surface.split),
+                );
+            }
+        }
+        WorldSurfaceKind::Wall { .. } => {
+            let material = wall_material(material);
+            if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+                submit_projected_split_triangle_vertex_lit_cached_uvs(
+                    projected,
+                    surface.uvs,
+                    colors,
+                    material,
+                    options,
+                    CullMode::Back,
+                    surface.split,
+                    surface.triangle_index as usize,
+                    false,
+                    triangles,
+                    world,
+                )
+            } else {
+                submit_sided_projected_gouraud_quad_cached_uvs(
+                    world,
+                    triangles,
+                    projected,
+                    surface.uvs,
+                    colors,
+                    material,
+                    options,
+                    CullMode::Back,
+                    SPLIT_NW_SE_TRIANGLES,
+                );
+            }
+        }
+    }
+    1
+}
+
+#[inline(always)]
+fn indexed_projected_quad(
+    projected_vertices: &[crate::render3d::ProjectedVertex],
+    projected_valid: &[bool],
+    ids: [u16; 4],
+) -> Option<[crate::render3d::ProjectedVertex; 4]> {
+    let a = ids[0] as usize;
+    let b = ids[1] as usize;
+    let c = ids[2] as usize;
+    let d = ids[3] as usize;
+    let limit = projected_vertices.len().min(projected_valid.len());
+    let max_index = a.max(b).max(c).max(d);
+    if max_index >= limit {
+        return None;
+    }
+    if !projected_valid[a] || !projected_valid[b] || !projected_valid[c] || !projected_valid[d] {
+        return None;
+    }
+    Some([
+        projected_vertices[a],
+        projected_vertices[b],
+        projected_vertices[c],
+        projected_vertices[d],
+    ])
+}
+
+const fn cached_uv_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial {
+    material.texture_width = ROOM_TEXTURE_UV_SIZE;
+    material.texture_height = ROOM_TEXTURE_UV_SIZE;
+    material
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
     room: RoomRender<'_, '_>,
     sx: u16,
@@ -1256,7 +1632,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                         sx,
                         sz,
                         center: horizontal_face_center(sx, sz, sector_size, heights),
-                        baked_vertex_rgb: room.floor_light(sx, sz),
+                        baked_vertex_rgb: baked_vertex_rgb(room.floor_light(sx, sz)),
                         ordinal: 0,
                     },
                     base_material,
@@ -1300,7 +1676,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                             split,
                             triangle_index,
                         ),
-                        baked_vertex_rgb: room.floor_light(sx, sz),
+                        baked_vertex_rgb: baked_vertex_rgb(room.floor_light(sx, sz)),
                         ordinal: triangle_index as u16,
                     },
                     base_material,
@@ -1335,7 +1711,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                         sx,
                         sz,
                         center: horizontal_face_center(sx, sz, sector_size, heights),
-                        baked_vertex_rgb: room.ceiling_light(sx, sz),
+                        baked_vertex_rgb: baked_vertex_rgb(room.ceiling_light(sx, sz)),
                         ordinal: 0,
                     },
                     base_material,
@@ -1379,7 +1755,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                             split,
                             triangle_index,
                         ),
-                        baked_vertex_rgb: room.ceiling_light(sx, sz),
+                        baked_vertex_rgb: baked_vertex_rgb(room.ceiling_light(sx, sz)),
                         ordinal: triangle_index as u16,
                     },
                     base_material,
@@ -1426,7 +1802,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                         sx,
                         sz,
                         center,
-                        baked_vertex_rgb: room.wall_light(sector, i),
+                        baked_vertex_rgb: baked_vertex_rgb(room.wall_light(sector, i)),
                         ordinal: i,
                     },
                     base_material,
@@ -1480,7 +1856,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sx,
                     sz,
                     center: horizontal_face_center(sx, sz, sector_size, heights),
-                    baked_vertex_rgb: room.floor_light(sx, sz),
+                    baked_vertex_rgb: baked_vertex_rgb(room.floor_light(sx, sz)),
                     ordinal: 0,
                 };
                 surfaces = surfaces.saturating_add(1);
@@ -1523,7 +1899,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                         split,
                         triangle_index,
                     ),
-                    baked_vertex_rgb: room.floor_light(sx, sz),
+                    baked_vertex_rgb: baked_vertex_rgb(room.floor_light(sx, sz)),
                     ordinal: triangle_index as u16,
                 };
                 surfaces = surfaces.saturating_add(1);
@@ -1557,7 +1933,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sx,
                     sz,
                     center: horizontal_face_center(sx, sz, sector_size, heights),
-                    baked_vertex_rgb: room.ceiling_light(sx, sz),
+                    baked_vertex_rgb: baked_vertex_rgb(room.ceiling_light(sx, sz)),
                     ordinal: 0,
                 };
                 surfaces = surfaces.saturating_add(1);
@@ -1600,7 +1976,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                         split,
                         triangle_index,
                     ),
-                    baked_vertex_rgb: room.ceiling_light(sx, sz),
+                    baked_vertex_rgb: baked_vertex_rgb(room.ceiling_light(sx, sz)),
                     ordinal: triangle_index as u16,
                 };
                 surfaces = surfaces.saturating_add(1);
@@ -1646,7 +2022,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sx,
                     sz,
                     center,
-                    baked_vertex_rgb: room.wall_light(sector, i),
+                    baked_vertex_rgb: baked_vertex_rgb(room.wall_light(sector, i)),
                     ordinal: i,
                 };
                 surfaces = surfaces.saturating_add(1);
@@ -1729,11 +2105,34 @@ fn cell_visible_to_camera(
     max_y: i32,
     screen_margin: i32,
 ) -> bool {
+    let (center, radius) = cell_visibility_bounds(sx, sz, sector_size, min_y, max_y);
+    cell_visibility_visible_to_camera(camera, options, center, radius, screen_margin)
+}
+
+#[inline(always)]
+fn cell_visibility_bounds(
+    sx: u16,
+    sz: u16,
+    sector_size: i32,
+    min_y: i32,
+    max_y: i32,
+) -> (WorldVertex, i32) {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
     let center = WorldVertex::new((x0 + x1) / 2, (min_y + max_y) / 2, (z0 + z1) / 2);
-    let view = camera.view_vertex(center);
     let half_height = ((max_y - min_y).abs() / 2).max(sector_size / 2);
     let radius = sector_size.saturating_add(half_height);
+    (center, radius)
+}
+
+#[inline(always)]
+fn cell_visibility_visible_to_camera(
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    center: WorldVertex,
+    radius: i32,
+    screen_margin: i32,
+) -> bool {
+    let view = camera.view_vertex(center);
     let near = camera.projection.near_z.max(1);
     let far = options.depth_range.far().max(near);
     if view.z < near.saturating_sub(radius) || view.z > far.saturating_add(radius) {
@@ -1908,6 +2307,7 @@ fn emit_wall<const OT: usize>(
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
         return;
     };
+    let material = wall_material(material);
     if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
         submit_split_triangle(
             camera,
@@ -2104,6 +2504,7 @@ fn emit_wall_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
         return;
     };
+    let material = wall_material(material);
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
         submit_split_triangle_vertex_lit(
@@ -2351,6 +2752,85 @@ fn submit_split_triangle_vertex_lit<const OT: usize>(
         [projected[a], projected[b], projected[c]],
         [uvs[a], uvs[b], uvs[c]],
         [colors[a], colors[b], colors[c]],
+        material.texture,
+        opts,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn submit_projected_split_triangle_vertex_lit_cached_uvs<const OT: usize>(
+    projected: [crate::render3d::ProjectedVertex; 4],
+    uvs: [(u8, u8); 4],
+    colors: [(u8, u8, u8); 4],
+    material: WorldRenderMaterial,
+    options: WorldSurfaceOptions,
+    cull: CullMode,
+    split: u8,
+    triangle_index: usize,
+    reverse_front: bool,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) {
+    let opts = options
+        .with_cull_mode(cull_for_sidedness(material.sidedness, cull))
+        .with_material_layer(material.texture);
+    let mut tri = split_triangles_runtime(split)[triangle_index.min(1)];
+    if reverse_front ^ (material.sidedness == SurfaceSidedness::Back) {
+        tri = (tri.0, tri.2, tri.1);
+    }
+    let (a, b, c) = tri;
+    let _ = world.submit_textured_gouraud_triangle(
+        triangles,
+        [projected[a], projected[b], projected[c]],
+        [uvs[a], uvs[b], uvs[c]],
+        [colors[a], colors[b], colors[c]],
+        material.texture,
+        opts,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
+    world: &mut WorldRenderPass<'_, '_, OT>,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    verts: [crate::render3d::ProjectedVertex; 4],
+    uvs: [(u8, u8); 4],
+    colors: [(u8, u8, u8); 4],
+    material: WorldRenderMaterial,
+    options: WorldSurfaceOptions,
+    base_cull: CullMode,
+    split_triangles: [(usize, usize, usize); 2],
+) {
+    let (verts, uvs, colors) = match material.sidedness {
+        SurfaceSidedness::Back => (
+            reverse_quad_winding(verts),
+            reverse_quad_winding(uvs),
+            reverse_quad_winding(colors),
+        ),
+        SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uvs, colors),
+    };
+    let opts = options
+        .with_cull_mode(cull_for_sidedness(material.sidedness, base_cull))
+        .with_material_layer(material.texture);
+    let [(a, b, c), (d, e, f)] = split_triangles;
+    let stats = world.submit_textured_gouraud_triangle(
+        triangles,
+        [verts[a], verts[b], verts[c]],
+        [uvs[a], uvs[b], uvs[c]],
+        [colors[a], colors[b], colors[c]],
+        material.texture,
+        opts,
+    );
+    if stats.primitive_overflow || stats.command_overflow {
+        return;
+    }
+    let _ = world.submit_textured_gouraud_triangle(
+        triangles,
+        [verts[d], verts[e], verts[f]],
+        [uvs[d], uvs[e], uvs[f]],
+        [colors[d], colors[e], colors[f]],
         material.texture,
         opts,
     );
@@ -2866,6 +3346,23 @@ mod tests {
     }
 
     #[test]
+    fn wall_material_swaps_front_and_back_only() {
+        let texture = TextureMaterial::opaque(0, 0, (128, 128, 128));
+        assert_eq!(
+            wall_material(WorldRenderMaterial::front(texture)).sidedness,
+            SurfaceSidedness::Back
+        );
+        assert_eq!(
+            wall_material(WorldRenderMaterial::back(texture)).sidedness,
+            SurfaceSidedness::Front
+        );
+        assert_eq!(
+            wall_material(WorldRenderMaterial::both(texture)).sidedness,
+            SurfaceSidedness::Both
+        );
+    }
+
+    #[test]
     fn material_texture_size_projects_default_uvs_once() {
         let material = WorldRenderMaterial::front(TextureMaterial::opaque(0, 0, (128, 128, 128)))
             .with_texture_size(32, 32);
@@ -2982,6 +3479,7 @@ mod tests {
         let surface = CachedRoomSurface::new(
             0,
             vertices,
+            [0, 1, 2, 3],
             uvs,
             WorldSurfaceSample {
                 kind: WorldSurfaceKind::Ceiling,
