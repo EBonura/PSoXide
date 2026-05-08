@@ -4,9 +4,9 @@
 //! dispatch, bounded ray work, integer math, and collision probes that
 //! read the cooked grid room through [`RoomCollision`]. It supplies the
 //! common action-camera pieces a game wants on top of [`WorldCamera`]:
-//! manual orbit cooldown, automatic re-alignment, camera lag, lock-on
-//! facing, and a spring-arm collision solve that shortens the boom
-//! without taking yaw control away from the player.
+//! manual orbit cooldown, optional automatic re-alignment, camera lag,
+//! lock-on facing, and a spring-arm collision solve that shortens the
+//! boom without taking yaw control away from the player.
 
 use crate::{Angle, RoomCollision, RoomPoint, WorldCamera, WorldProjection, Q12};
 
@@ -48,6 +48,8 @@ pub struct ThirdPersonCameraConfig {
     pub manual_cooldown_frames: u8,
     /// Maximum auto-align yaw movement per display frame.
     pub auto_align_step: Angle,
+    /// When true, ease the unlocked camera behind player yaw while moving.
+    pub auto_align_when_moving: bool,
     /// Maximum lock-on yaw movement per display frame.
     pub lock_on_align_step: Angle,
     /// Position lag strength as a power-of-two divisor.
@@ -74,6 +76,7 @@ impl ThirdPersonCameraConfig {
             pitch_max_q12: 704,
             manual_cooldown_frames: 42,
             auto_align_step: Angle::from_q12(18),
+            auto_align_when_moving: false,
             lock_on_align_step: Angle::from_q12(128),
             position_lag_shift: 2,
             focus_lag_shift: 2,
@@ -204,7 +207,9 @@ impl ThirdPersonCameraState {
         input: ThirdPersonCameraInput,
         config: ThirdPersonCameraConfig,
     ) -> ThirdPersonCameraFrame {
-        self.update_one_vblank(projection, collision, target, input, config)
+        let config = normalize_config(config);
+        self.advance_one_vblank(collision, target, input, config);
+        self.current_frame(projection)
     }
 
     /// Advance the controller by elapsed display ticks and build a render camera.
@@ -222,23 +227,22 @@ impl ThirdPersonCameraState {
         delta_vblanks: u16,
     ) -> ThirdPersonCameraFrame {
         let steps = delta_vblanks.max(1).min(MAX_CAMERA_CATCHUP_VBLANKS);
-        let mut final_frame = None;
-        for _ in 0..steps {
-            final_frame =
-                Some(self.update_one_vblank(projection, collision, target, input, config));
+        let config = normalize_config(config);
+        let mut i = 0;
+        while i < steps {
+            self.advance_one_vblank(collision, target, input, config);
+            i += 1;
         }
-        final_frame.expect("camera catch-up always runs at least one substep")
+        self.current_frame(projection)
     }
 
-    fn update_one_vblank(
+    fn advance_one_vblank(
         &mut self,
-        projection: WorldProjection,
         collision: Option<RoomCollision<'_, '_>>,
         target: ThirdPersonCameraTarget,
         input: ThirdPersonCameraInput,
         config: ThirdPersonCameraConfig,
-    ) -> ThirdPersonCameraFrame {
-        let config = normalize_config(config);
+    ) {
         if !self.initialized {
             self.snap_to_player(target, config);
         }
@@ -262,7 +266,9 @@ impl ThirdPersonCameraState {
                 yaw_to_point(target.player, lock).add(Angle::HALF),
                 config.lock_on_align_step,
             )
-        } else if input.recenter || (target.moving && self.manual_cooldown == 0) {
+        } else if input.recenter
+            || (config.auto_align_when_moving && target.moving && self.manual_cooldown == 0)
+        {
             (player_back_yaw, config.auto_align_step)
         } else {
             (self.yaw, config.auto_align_step)
@@ -312,6 +318,9 @@ impl ThirdPersonCameraState {
 
         self.last_pull_in = collision_solve.pull_in;
         self.last_rotated = false;
+    }
+
+    fn current_frame(&self, projection: WorldProjection) -> ThirdPersonCameraFrame {
         ThirdPersonCameraFrame {
             camera: camera_from_position_focus(projection, self.position, self.focus),
             focus: self.focus,
@@ -351,13 +360,27 @@ struct CollisionSolve {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct CameraRay {
+    from: RoomPoint,
+    to: RoomPoint,
+    dx: i32,
+    dy: i32,
+    dz: i32,
+    distance: i32,
+    sector_size: i32,
+    room_width: i32,
+    room_depth: i32,
+    vertical_margin: i32,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct CheckedCameraCells {
-    cells: [(i32, i32); MAX_RAY_CHECKED_CELLS],
+    cells: [u32; MAX_RAY_CHECKED_CELLS],
     len: usize,
 }
 
 impl CheckedCameraCells {
-    const EMPTY_CELL: (i32, i32) = (i32::MIN, i32::MIN);
+    const EMPTY_CELL: u32 = u32::MAX;
 
     const fn new() -> Self {
         Self {
@@ -366,16 +389,16 @@ impl CheckedCameraCells {
         }
     }
 
-    fn visit(&mut self, x: i32, z: i32) -> bool {
+    fn visit(&mut self, key: u32) -> bool {
         let mut i = 0;
         while i < self.len {
-            if self.cells[i].0 == x && self.cells[i].1 == z {
+            if self.cells[i] == key {
                 return false;
             }
             i += 1;
         }
         if self.len < self.cells.len() {
-            self.cells[self.len] = (x, z);
+            self.cells[self.len] = key;
             self.len += 1;
         }
         true
@@ -449,6 +472,18 @@ fn probe_clear_distance(
 ) -> i32 {
     let max_distance = max_distance.max(1);
     let sector = room.sector_size().max(1);
+    let ray = CameraRay {
+        from,
+        to,
+        dx: to.x.saturating_sub(from.x),
+        dy: to.y.saturating_sub(from.y),
+        dz: to.z.saturating_sub(from.z),
+        distance: max_distance,
+        sector_size: sector,
+        room_width: room.width() as i32,
+        room_depth: room.depth() as i32,
+        vertical_margin: config.collision_margin,
+    };
     let mut steps = (max_distance / (sector / 4).max(1)).clamp(RAY_STEPS_MIN, RAY_STEPS_MAX);
     if steps <= 0 {
         steps = RAY_STEPS_MIN;
@@ -459,19 +494,11 @@ fn probe_clear_distance(
     let mut i = 1;
     while i <= steps {
         let sample = lerp_vertex(from, to, i, steps);
-        if point_outside_camera_space(room, sample) {
+        if point_outside_camera_space(room, sample, sector, ray.room_width, ray.room_depth) {
             nearest = ((max_distance * i) / steps).min(nearest);
             break;
         }
-        if let Some(hit) = nearest_wall_hit_around(
-            room,
-            sample,
-            from,
-            to,
-            max_distance,
-            config.collision_margin,
-            &mut checked_cells,
-        ) {
+        if let Some(hit) = nearest_wall_hit_around(room, sample, ray, &mut checked_cells) {
             nearest = hit.min(nearest);
             break;
         }
@@ -483,14 +510,19 @@ fn probe_clear_distance(
         .clamp(config.min_distance, config.distance)
 }
 
-fn point_outside_camera_space(room: RoomCollision<'_, '_>, point: RoomPoint) -> bool {
-    let s = room.sector_size();
-    if s <= 0 || point.x < 0 || point.z < 0 {
+fn point_outside_camera_space(
+    room: RoomCollision<'_, '_>,
+    point: RoomPoint,
+    sector_size: i32,
+    room_width: i32,
+    room_depth: i32,
+) -> bool {
+    if point.x < 0 || point.z < 0 {
         return true;
     }
-    let sx = point.x / s;
-    let sz = point.z / s;
-    if sx < 0 || sz < 0 || sx >= room.width() as i32 || sz >= room.depth() as i32 {
+    let sx = point.x / sector_size;
+    let sz = point.z / sector_size;
+    if sx < 0 || sz < 0 || sx >= room_width || sz >= room_depth {
         return true;
     }
     match room.sector(sx as u16, sz as u16) {
@@ -502,18 +534,14 @@ fn point_outside_camera_space(room: RoomCollision<'_, '_>, point: RoomPoint) -> 
 fn nearest_wall_hit_around(
     room: RoomCollision<'_, '_>,
     sample: RoomPoint,
-    from: RoomPoint,
-    to: RoomPoint,
-    ray_distance: i32,
-    vertical_margin: i32,
+    ray: CameraRay,
     checked_cells: &mut CheckedCameraCells,
 ) -> Option<i32> {
-    let s = room.sector_size();
-    if s <= 0 || sample.x < 0 || sample.z < 0 {
+    if sample.x < 0 || sample.z < 0 {
         return None;
     }
-    let sx = sample.x / s;
-    let sz = sample.z / s;
+    let sx = sample.x / ray.sector_size;
+    let sz = sample.z / ray.sector_size;
     let mut nearest: Option<i32> = None;
     let mut ox = -1;
     while ox <= 1 {
@@ -521,8 +549,11 @@ fn nearest_wall_hit_around(
         while oz <= 1 {
             let cx = sx + ox;
             let cz = sz + oz;
-            if cx >= 0 && cz >= 0 && cx < room.width() as i32 && cz < room.depth() as i32 {
-                if !checked_cells.visit(cx, cz) {
+            if cx >= 0 && cz >= 0 && cx < ray.room_width && cz < ray.room_depth {
+                let key = (cx as u32)
+                    .saturating_mul(ray.room_depth as u32)
+                    .saturating_add(cz as u32);
+                if !checked_cells.visit(key) {
                     oz += 1;
                     continue;
                 }
@@ -532,15 +563,11 @@ fn nearest_wall_hit_around(
                         if let Some(wall) = room.sector_wall(sector, i) {
                             if wall.solid() {
                                 if let Some(hit) = segment_wall_hit_distance(
-                                    from,
-                                    to,
-                                    ray_distance,
+                                    ray,
                                     cx,
                                     cz,
-                                    s,
                                     wall.direction(),
                                     wall.heights(),
-                                    vertical_margin,
                                 ) {
                                     nearest = Some(match nearest {
                                         Some(prev) => prev.min(hit),
@@ -561,35 +588,34 @@ fn nearest_wall_hit_around(
 }
 
 fn segment_wall_hit_distance(
-    from: RoomPoint,
-    to: RoomPoint,
-    ray_distance: i32,
+    ray: CameraRay,
     sx: i32,
     sz: i32,
-    sector_size: i32,
     direction: u8,
     heights: [i32; 4],
-    vertical_margin: i32,
 ) -> Option<i32> {
+    if ray.distance <= 0 {
+        return None;
+    }
+    let sector_size = ray.sector_size;
     let x0 = sx.saturating_mul(sector_size);
     let x1 = x0.saturating_add(sector_size);
     let z0 = sz.saturating_mul(sector_size);
     let z1 = z0.saturating_add(sector_size);
-    let dx = to.x.saturating_sub(from.x);
-    let dz = to.z.saturating_sub(from.z);
-    if ray_distance <= 0 {
-        return None;
-    }
     let diagonal_axis_q12 = match direction {
-        DIR_NORTH_WEST_SOUTH_EAST => intersect_segment_q12(from.x, from.z, dx, dz, x0, z0, x1, z1),
-        DIR_NORTH_EAST_SOUTH_WEST => intersect_segment_q12(from.x, from.z, dx, dz, x1, z0, x0, z1),
+        DIR_NORTH_WEST_SOUTH_EAST => {
+            intersect_segment_q12(ray.from.x, ray.from.z, ray.dx, ray.dz, x0, z0, x1, z1)
+        }
+        DIR_NORTH_EAST_SOUTH_WEST => {
+            intersect_segment_q12(ray.from.x, ray.from.z, ray.dx, ray.dz, x1, z0, x0, z1)
+        }
         _ => None,
     };
     let t_q12 = match direction {
-        DIR_NORTH => intersect_horizontal_q12(from.z, dz, z0),
-        DIR_SOUTH => intersect_horizontal_q12(from.z, dz, z1),
-        DIR_EAST => intersect_vertical_q12(from.x, dx, x1),
-        DIR_WEST => intersect_vertical_q12(from.x, dx, x0),
+        DIR_NORTH => intersect_horizontal_q12(ray.from.z, ray.dz, z0),
+        DIR_SOUTH => intersect_horizontal_q12(ray.from.z, ray.dz, z1),
+        DIR_EAST => intersect_vertical_q12(ray.from.x, ray.dx, x1),
+        DIR_WEST => intersect_vertical_q12(ray.from.x, ray.dx, x0),
         DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST => diagonal_axis_q12.map(|(t, _)| t),
         _ => None,
     }?;
@@ -597,11 +623,12 @@ fn segment_wall_hit_distance(
         return None;
     }
     let t = Q12::from_raw(t_q12);
-    let x_at = from.x.saturating_add(t.mul_i32(dx));
-    let y_at = from
+    let x_at = ray.from.x.saturating_add(t.mul_i32(ray.dx));
+    let y_at = ray
+        .from
         .y
-        .saturating_add(t.mul_i32(to.y.saturating_sub(from.y)));
-    let z_at = from.z.saturating_add(t.mul_i32(dz));
+        .saturating_add(t.mul_i32(ray.dy));
+    let z_at = ray.from.z.saturating_add(t.mul_i32(ray.dz));
     let wall_axis_q12 = match direction {
         DIR_NORTH | DIR_SOUTH => {
             if x_at < x0 || x_at > x1 {
@@ -634,12 +661,12 @@ fn segment_wall_hit_distance(
         ),
         _ => return None,
     };
-    let min_y = bottom.min(top).saturating_sub(vertical_margin);
-    let max_y = bottom.max(top).saturating_add(vertical_margin);
+    let min_y = bottom.min(top).saturating_sub(ray.vertical_margin);
+    let max_y = bottom.max(top).saturating_add(ray.vertical_margin);
     if y_at < min_y || y_at > max_y {
         return None;
     }
-    Some(t.mul_i32(ray_distance))
+    Some(t.mul_i32(ray.distance))
 }
 
 fn intersect_segment_q12(
@@ -689,20 +716,30 @@ fn intersect_horizontal_q12(from_z: i32, dz: i32, wall_z: i32) -> Option<i32> {
     if dz == 0 {
         return None;
     }
-    wall_z
-        .saturating_sub(from_z)
-        .saturating_mul(Q12::SCALE)
-        .checked_div(dz)
+    let delta = wall_z.saturating_sub(from_z);
+    if !delta_within_segment(delta, dz) {
+        return None;
+    }
+    delta.saturating_mul(Q12::SCALE).checked_div(dz)
 }
 
 fn intersect_vertical_q12(from_x: i32, dx: i32, wall_x: i32) -> Option<i32> {
     if dx == 0 {
         return None;
     }
-    wall_x
-        .saturating_sub(from_x)
-        .saturating_mul(Q12::SCALE)
-        .checked_div(dx)
+    let delta = wall_x.saturating_sub(from_x);
+    if !delta_within_segment(delta, dx) {
+        return None;
+    }
+    delta.saturating_mul(Q12::SCALE).checked_div(dx)
+}
+
+fn delta_within_segment(delta: i32, axis_delta: i32) -> bool {
+    if axis_delta > 0 {
+        delta >= 0 && delta <= axis_delta
+    } else {
+        delta <= 0 && delta >= axis_delta
+    }
 }
 
 fn camera_position(focus: RoomPoint, distance: i32, yaw: Angle, pitch_q12: i16) -> RoomPoint {
@@ -889,6 +926,27 @@ fn abs_i32(value: i32) -> i32 {
 mod tests {
     use super::*;
 
+    fn test_ray(
+        from: RoomPoint,
+        to: RoomPoint,
+        distance: i32,
+        sector_size: i32,
+        vertical_margin: i32,
+    ) -> CameraRay {
+        CameraRay {
+            from,
+            to,
+            dx: to.x.saturating_sub(from.x),
+            dy: to.y.saturating_sub(from.y),
+            dz: to.z.saturating_sub(from.z),
+            distance,
+            sector_size,
+            room_width: 1,
+            room_depth: 1,
+            vertical_margin,
+        }
+    }
+
     #[test]
     fn yaw_to_point_matches_cardinal_axes() {
         let origin = RoomPoint::ZERO;
@@ -921,14 +979,12 @@ mod tests {
         let from = RoomPoint::new(512, 0, 512);
         let to = RoomPoint::new(1536, 0, 512);
         let heights = [-512, -512, 512, 512];
+        let ray = test_ray(from, to, 1024, 1024, 0);
         assert_eq!(
-            segment_wall_hit_distance(from, to, 1024, 0, 0, 1024, DIR_EAST, heights, 0),
+            segment_wall_hit_distance(ray, 0, 0, DIR_EAST, heights),
             Some(512)
         );
-        assert_eq!(
-            segment_wall_hit_distance(from, to, 1024, 0, 0, 1024, DIR_NORTH, heights, 0),
-            None
-        );
+        assert_eq!(segment_wall_hit_distance(ray, 0, 0, DIR_NORTH, heights), None);
     }
 
     #[test]
@@ -936,33 +992,14 @@ mod tests {
         let from = RoomPoint::new(512, 0, 0);
         let to = RoomPoint::new(512, 0, 1024);
         let heights = [-512, -512, 512, 512];
+        let ray = test_ray(from, to, 1024, 1024, 0);
 
         assert_eq!(
-            segment_wall_hit_distance(
-                from,
-                to,
-                1024,
-                0,
-                0,
-                1024,
-                DIR_NORTH_WEST_SOUTH_EAST,
-                heights,
-                0
-            ),
+            segment_wall_hit_distance(ray, 0, 0, DIR_NORTH_WEST_SOUTH_EAST, heights),
             Some(512)
         );
         assert_eq!(
-            segment_wall_hit_distance(
-                from,
-                to,
-                1024,
-                0,
-                0,
-                1024,
-                DIR_NORTH_EAST_SOUTH_WEST,
-                heights,
-                0
-            ),
+            segment_wall_hit_distance(ray, 0, 0, DIR_NORTH_EAST_SOUTH_WEST, heights),
             Some(512)
         );
     }
@@ -972,17 +1009,38 @@ mod tests {
         let from = RoomPoint::new(512, 900, 512);
         let to = RoomPoint::new(1536, 900, 512);
         let heights = [0, 0, 512, 512];
+        let ray = test_ray(from, to, 1024, 1024, 0);
 
-        assert_eq!(
-            segment_wall_hit_distance(from, to, 1024, 0, 0, 1024, DIR_EAST, heights, 0),
-            None
-        );
+        assert_eq!(segment_wall_hit_distance(ray, 0, 0, DIR_EAST, heights), None);
     }
 
     #[test]
-    fn manual_input_sets_cooldown_and_prevents_auto_align() {
+    fn movement_does_not_auto_align_by_default() {
         let mut camera = ThirdPersonCameraState::new(Angle::HALF);
         let config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: true,
+            lock_target: None,
+        };
+        camera.snap_to_player_with_yaw(target, config, Angle::HALF.add_signed_q12(128));
+
+        let frame = camera.update(
+            WorldProjection::new(160, 120, 320, 64),
+            None,
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
+        assert_eq!(frame.yaw, Angle::HALF.add_signed_q12(128));
+    }
+
+    #[test]
+    fn manual_input_sets_cooldown_and_prevents_configured_auto_align() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        config.auto_align_when_moving = true;
         let target = ThirdPersonCameraTarget {
             player: RoomPoint::ZERO,
             player_yaw: Angle::ZERO,
@@ -1010,6 +1068,33 @@ mod tests {
             config,
         );
         assert_eq!(frame.yaw, Angle::HALF.add_signed_q12(128));
+    }
+
+    #[test]
+    fn recenter_eases_camera_behind_player_yaw() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+        camera.snap_to_player_with_yaw(target, config, Angle::QUARTER);
+
+        let frame = camera.update(
+            WorldProjection::new(160, 120, 320, 64),
+            None,
+            target,
+            ThirdPersonCameraInput {
+                yaw_delta_q12: 0,
+                pitch_delta_q12: 0,
+                recenter: true,
+            },
+            config,
+        );
+
+        assert_eq!(frame.yaw, Angle::QUARTER.add(config.auto_align_step));
     }
 
     #[test]
@@ -1104,6 +1189,7 @@ mod tests {
         let projection = WorldProjection::new(160, 120, 320, 64);
         let mut config = ThirdPersonCameraConfig::character(1400, 700, 0);
         config.auto_align_step = Angle::from_q12(32);
+        config.auto_align_when_moving = true;
         let target = ThirdPersonCameraTarget {
             player: RoomPoint::new(1024, 0, 1024),
             player_yaw: Angle::QUARTER,
