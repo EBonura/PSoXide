@@ -187,7 +187,7 @@ const SOFT_LOCK_ENABLED: bool = false;
 
 /// Fallback follow camera params used when no PLAYER_CONTROLLER
 /// was authored -- matches the prior debug behaviour.
-const FOLLOW_RADIUS_DEFAULT: i32 = 4608;
+const FOLLOW_RADIUS_DEFAULT: i32 = 6144;
 const FOLLOW_HEIGHT_DEFAULT: i32 = 700;
 const FOLLOW_TARGET_HEIGHT_DEFAULT: i32 = 0;
 /// Quanta-per-frame turn rate when the runtime can't resolve a
@@ -309,6 +309,8 @@ static mut CACHED_ROOM_PROJECTED_VERTICES: [ProjectedVertex; MAX_CACHED_ROOM_VER
     [ProjectedVertex::new(0, 0, 0); MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_VALID: [bool; MAX_CACHED_ROOM_VERTICES] =
     [false; MAX_CACHED_ROOM_VERTICES];
+static mut CACHED_ROOM_PROJECTED_DEPTHS: [i32; MAX_CACHED_ROOM_VERTICES] =
+    [0; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_SURFACES: [CachedRoomSurface; MAX_CACHED_ROOM_SURFACES] =
     [CachedRoomSurface::EMPTY; MAX_CACHED_ROOM_SURFACES];
 static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
@@ -908,7 +910,8 @@ impl Scene for Playtest {
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
         if self.room.is_some() {
-            let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
+            let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
+                .with_textured_triangle_splitting(false);
             let actor_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let mut total_instance_stats = ModelInstanceDrawStats::default();
 
@@ -971,12 +974,15 @@ impl Scene for Playtest {
                                 unsafe { &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count] };
                             let projected_valid =
                                 unsafe { &mut CACHED_ROOM_PROJECTED_VALID[..vertex_count] };
+                            let projected_depths =
+                                unsafe { &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count] };
                             draw_indexed_cached_room_vertex_lit_visible_cells(
                                 cached_cells,
                                 cached_vertices,
                                 cached_surfaces,
                                 projected_vertices,
                                 projected_valid,
+                                projected_depths,
                                 active.room.render().depth(),
                                 active.room.render().sector_size(),
                                 materials,
@@ -2565,6 +2571,26 @@ impl RuntimeRoomLighting {
             return tint;
         }
         let depth = self.camera.view_vertex(point.to_world_vertex()).z;
+        self.apply_fog_at_depth(tint, depth)
+    }
+
+    fn shade_tint_at_depth(
+        &self,
+        point: RoomPoint,
+        base: (u8, u8, u8),
+        depth: i32,
+    ) -> (u8, u8, u8) {
+        let tint = psx_engine::shade_material_tint_with_lights(
+            MaterialTint::from_tuple(base),
+            point.to_array(),
+            self.ambient,
+            self.point_lights(),
+        )
+        .to_tuple();
+        self.apply_fog_at_depth(tint, depth)
+    }
+
+    fn apply_fog_at_depth(&self, tint: (u8, u8, u8), depth: i32) -> (u8, u8, u8) {
         apply_room_fog(
             tint,
             depth,
@@ -2594,14 +2620,14 @@ impl RuntimeRoomLighting {
             return rgb;
         }
         let depth = self.camera.view_vertex(vertex).z;
-        apply_room_fog(
-            rgb,
-            depth,
-            self.fog_enabled,
-            self.fog_rgb,
-            self.fog_near,
-            self.fog_far,
-        )
+        self.apply_fog_at_depth(rgb, depth)
+    }
+
+    fn apply_vertex_fog_depth(&self, rgb: (u8, u8, u8), depth: i32) -> (u8, u8, u8) {
+        if !self.fog_enabled || self.fog_far <= self.fog_near {
+            return rgb;
+        }
+        self.apply_fog_at_depth(rgb, depth)
     }
 }
 
@@ -2645,6 +2671,48 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
             self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[1]), material),
             self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[2]), material),
             self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[3]), material),
+        ]
+    }
+
+    fn shade_vertices_with_depths(
+        &self,
+        sample: WorldSurfaceSample,
+        vertices: [WorldVertex; 4],
+        depths: [i32; 4],
+        material: WorldRenderMaterial,
+    ) -> [(u8, u8, u8); 4] {
+        if let Some(vertex_rgb) = sample.baked_vertex_rgb {
+            if !self.fog_enabled || self.fog_far <= self.fog_near {
+                return vertex_rgb;
+            }
+            return [
+                self.apply_vertex_fog_depth(vertex_rgb[0], depths[0]),
+                self.apply_vertex_fog_depth(vertex_rgb[1], depths[1]),
+                self.apply_vertex_fog_depth(vertex_rgb[2], depths[2]),
+                self.apply_vertex_fog_depth(vertex_rgb[3], depths[3]),
+            ];
+        }
+        [
+            self.shade_tint_at_depth(
+                RoomPoint::from_world_vertex(vertices[0]),
+                material.texture.tint(),
+                depths[0],
+            ),
+            self.shade_tint_at_depth(
+                RoomPoint::from_world_vertex(vertices[1]),
+                material.texture.tint(),
+                depths[1],
+            ),
+            self.shade_tint_at_depth(
+                RoomPoint::from_world_vertex(vertices[2]),
+                material.texture.tint(),
+                depths[2],
+            ),
+            self.shade_tint_at_depth(
+                RoomPoint::from_world_vertex(vertices[3]),
+                material.texture.tint(),
+                depths[3],
+            ),
         ]
     }
 }
