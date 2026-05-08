@@ -96,12 +96,10 @@ fn main() {
         .filter(|s| !s.trim().is_empty())
         .map(|s| parse_pad_pulses(&s).expect("valid PSOXIDE_PAD1_PULSES"))
         .unwrap_or_default();
-    if trace_display_pixel.is_some()
-        || trace_vram_pixel.is_some()
-        || print_uploads
-        || print_gp0_recent
-    {
+    if trace_display_pixel.is_some() || trace_vram_pixel.is_some() {
         bus.gpu.enable_pixel_tracer();
+    } else if print_uploads || print_gp0_recent {
+        bus.gpu.enable_cmd_log();
     }
 
     if fastboot {
