@@ -31,15 +31,19 @@ use psxed_project::streaming::{
 };
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
-    snap_height, ColliderShape, GridCellBounds, GridDirection, GridHorizontalFace, GridSplit,
-    GridUvRotation, GridUvTransform, GridVerticalFace, MaterialFaceSidedness, MaterialResource,
-    NodeId, NodeKind, NodeRow, ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId,
-    WorldGrid, WorldGridBudget, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
-    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_SECTOR_SIZE,
-    MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_QUANTUM,
+    default_model_collision_radius_for_height, snap_height, ColliderShape, GridCellBounds,
+    GridDirection, GridHorizontalFace, GridSplit, GridUvRotation, GridUvTransform,
+    GridVerticalFace, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow,
+    ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, WorldGrid, WorldGridBudget,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
+    MAX_ROOM_WIDTH, MAX_WORLD_SECTOR_SIZE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
+    WORLD_SECTOR_SIZE_QUANTUM,
 };
 
-const LEFT_DOCK_MAX_WIDTH: f32 = 420.0;
+const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
+const CONTENT_BROWSER_MIN_HEIGHT: f32 = 48.0;
+const CENTRAL_WORKSPACE_MIN_WIDTH: f32 = 360.0;
+const CENTRAL_WORKSPACE_MIN_HEIGHT: f32 = 220.0;
 const LEFT_DOCK_LABEL_CHARS: usize = 34;
 const ENTITY_POSITION_STEP: f32 = 0.1;
 const EDITOR_OUTLINE_STROKE_WIDTH: f32 = 1.25;
@@ -47,6 +51,8 @@ const EDITOR_SELECTED_OUTLINE_STROKE_WIDTH: f32 = 3.0;
 const EDITOR_OUTLINE_ACCENT: Color32 = Color32::from_rgb(165, 238, 255);
 const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
+const RESOURCE_CARD_WIDTH: f32 = 120.0;
+const RESOURCE_CARD_HEIGHT: f32 = 155.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/obsidian_wraith",
@@ -233,6 +239,7 @@ pub struct EditorWorkspace {
     snap_units: u16,
     show_grid: bool,
     preview_fog: bool,
+    preview_backface_wireframe: bool,
     view_2d: bool,
     active_workspace: WorkspaceView,
     left_dock_open: bool,
@@ -380,6 +387,7 @@ struct ModelImportDialog {
     texture_height: i32,
     animation_fps: i32,
     world_height: i32,
+    collision_radius: i32,
     normalize_root_translation: bool,
     selected_clip: usize,
     preview_yaw_q12: i32,
@@ -401,6 +409,7 @@ impl Default for ModelImportDialog {
             texture_height: 128,
             animation_fps: 15,
             world_height: 1024,
+            collision_radius: default_model_collision_radius_for_height(1024) as i32,
             normalize_root_translation: true,
             selected_clip: 0,
             preview_yaw_q12: 340,
@@ -1503,6 +1512,7 @@ impl EditorWorkspace {
             snap_units: 16,
             show_grid: true,
             preview_fog: true,
+            preview_backface_wireframe: true,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
@@ -2784,10 +2794,28 @@ impl EditorWorkspace {
                         });
                         ui.horizontal(|ui| {
                             ui.label("World height");
-                            ui.add(
+                            let previous_height = dialog.world_height.clamp(128, 8192) as u16;
+                            let previous_default_radius =
+                                default_model_collision_radius_for_height(previous_height) as i32;
+                            let height_response = ui.add(
                                 egui::DragValue::new(&mut dialog.world_height)
                                     .range(128..=8192)
                                     .speed(16.0),
+                            );
+                            if height_response.changed()
+                                && dialog.collision_radius == previous_default_radius
+                            {
+                                dialog.collision_radius = default_model_collision_radius_for_height(
+                                    dialog.world_height.clamp(128, 8192) as u16,
+                                ) as i32;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Collision radius");
+                            ui.add(
+                                egui::DragValue::new(&mut dialog.collision_radius)
+                                    .range(1..=4096)
+                                    .speed(8.0),
                             );
                         });
                         ui.checkbox(
@@ -3100,6 +3128,15 @@ impl EditorWorkspace {
             config,
         ) {
             Ok(id) => {
+                let collision_radius = self
+                    .model_import_dialog
+                    .collision_radius
+                    .clamp(1, u16::MAX as i32) as u16;
+                if let Some(resource) = self.project.resource_mut(id) {
+                    if let ResourceData::Model(model) = &mut resource.data {
+                        model.collision_radius = collision_radius;
+                    }
+                }
                 self.replace_resource_selection(id);
                 self.clear_node_selection_state();
                 self.clear_primitive_selection_state();
@@ -3229,11 +3266,16 @@ impl EditorWorkspace {
         // tool -- click-and-drag floors / walls / entities into the
         // world. Camera movement lives on middle / secondary so the
         // user can reframe mid-edit without giving up the tool.
-        if response.dragged_by(egui::PointerButton::Middle)
-            || response.dragged_by(egui::PointerButton::Secondary)
+        if !dnd_active
+            && (response.dragged_by(egui::PointerButton::Middle)
+                || response.dragged_by(egui::PointerButton::Secondary))
         {
-            let delta = ui.input(|input| input.pointer.delta());
-            self.rotate_viewport_3d_camera(delta);
+            let (delta, shift) = ui.input(|input| (input.pointer.delta(), input.modifiers.shift));
+            if shift {
+                self.pan_viewport_3d_camera(delta, rect.size());
+            } else {
+                self.rotate_viewport_3d_camera(delta);
+            }
         }
 
         // Hover tracking: every frame the pointer is over the panel,
@@ -3423,23 +3465,37 @@ impl EditorWorkspace {
     }
 
     fn rotate_viewport_3d_camera(&mut self, delta: Vec2) {
-        // 0.5 px -> 1 q12-step keeps the viewport responsive without
+        // 0.25 q12-step per pixel keeps the viewport responsive without
         // making a small wrist flick spin the camera multiple turns.
-        const CAMERA_DRAG_STEP: f32 = 0.5;
+        const CAMERA_DRAG_STEP: f32 = 0.25;
         let yaw_delta = (delta.x * CAMERA_DRAG_STEP) as i16 as u16;
         let pitch_delta = (delta.y * CAMERA_DRAG_STEP) as i32;
         match self.viewport_3d_camera_mode {
             ViewportCameraMode::Orbit => {
                 self.viewport_3d_yaw = self.viewport_3d_yaw.wrapping_add(yaw_delta);
-                self.viewport_3d_pitch = self
-                    .viewport_3d_pitch
-                    .wrapping_add(pitch_delta as i16 as u16);
+                self.viewport_3d_pitch =
+                    add_q12_signed_clamped(self.viewport_3d_pitch, pitch_delta, -960, 960);
             }
             ViewportCameraMode::Free => {
                 self.viewport_3d_free_yaw = self.viewport_3d_free_yaw.wrapping_sub(yaw_delta);
                 self.viewport_3d_free_pitch =
                     add_q12_signed_clamped(self.viewport_3d_free_pitch, -pitch_delta, -960, 960);
                 self.viewport_3d_free_initialized = true;
+            }
+        }
+    }
+
+    fn pan_viewport_3d_camera(&mut self, delta: Vec2, panel_size: Vec2) {
+        let world_delta = viewport_3d_pan_delta(self.viewport_3d_camera(), panel_size, delta);
+        match self.viewport_3d_camera_mode {
+            ViewportCameraMode::Orbit => {
+                for (axis, amount) in world_delta.into_iter().enumerate() {
+                    self.viewport_3d_target[axis] =
+                        round_to_i32(self.viewport_3d_target[axis] as f32 + amount);
+                }
+            }
+            ViewportCameraMode::Free => {
+                self.move_free_camera_world(world_delta);
             }
         }
     }
@@ -3697,6 +3753,12 @@ impl EditorWorkspace {
     /// room's cooked `fog_enabled` setting.
     pub fn preview_fog_enabled(&self) -> bool {
         self.preview_fog
+    }
+
+    /// Whether the editor preview should draw passive outlines for
+    /// one-sided faces whose rendered side is currently culled.
+    pub fn preview_backface_wireframe_enabled(&self) -> bool {
+        self.preview_backface_wireframe
     }
 
     /// Currently-selected scene node. The frontend reads this so the
@@ -4998,9 +5060,7 @@ impl EditorWorkspace {
                 format!("Painted floor at {sx},{sz}")
             }
             ViewTool::PaintCeiling => {
-                if let Some(sector) = grid.ensure_sector(sx, sz) {
-                    sector.ceiling = Some(GridHorizontalFace::flat(sector_size_i, floor_mat));
-                }
+                grid.set_ceiling_aligned_to_neighbors(sx, sz, floor_mat);
                 format!("Painted ceiling at {sx},{sz}")
             }
             ViewTool::PaintWall => {
@@ -5429,6 +5489,7 @@ impl EditorWorkspace {
 
                 if let Some(floor) = &sector.floor {
                     let [nw, ne, se, sw] = horizontal_face_world_corners(bounds, floor.heights);
+                    let sidedness = material_sidedness(&self.project, floor.material);
                     let face = FaceRef {
                         room: room_id,
                         sx,
@@ -5439,13 +5500,14 @@ impl EditorWorkspace {
                         if floor.dropped_corner.is_some_and(|d| members.contains(&d)) {
                             continue;
                         }
-                        if let Some(t) = ray_triangle(origin, dir, a, b, c) {
+                        if let Some(t) = ray_triangle_sided(origin, dir, a, c, b, sidedness) {
                             consider(face, t);
                         }
                     }
                 }
                 if let Some(ceiling) = &sector.ceiling {
                     let [nw, ne, se, sw] = horizontal_face_world_corners(bounds, ceiling.heights);
+                    let sidedness = material_sidedness(&self.project, ceiling.material);
                     let face = FaceRef {
                         room: room_id,
                         sx,
@@ -5456,13 +5518,17 @@ impl EditorWorkspace {
                         if ceiling.dropped_corner.is_some_and(|d| members.contains(&d)) {
                             continue;
                         }
-                        if let Some(t) = ray_triangle(origin, dir, a, b, c) {
+                        if let Some(t) = ray_triangle_sided(origin, dir, a, b, c, sidedness) {
                             consider(face, t);
                         }
                     }
                 }
                 for dir_card in GridDirection::CARDINAL {
                     for (stack_idx, wall) in sector.walls.get(dir_card).iter().enumerate() {
+                        let sidedness = material_sidedness(&self.project, wall.material);
+                        if !wall_side_visible_from_camera(sidedness, bounds, dir_card, origin) {
+                            continue;
+                        }
                         let Some([bl, br, tr, tl]) =
                             wall_face_world_corners(bounds, dir_card, wall.heights)
                         else {
@@ -6108,17 +6174,21 @@ impl EditorWorkspace {
         if !self.left_dock_open {
             return;
         }
+        let max_width = max_resizable_side_dock_width(ctx, self.inspector_open);
         egui::SidePanel::left("psxed_left_dock")
             .resizable(true)
             .default_width(280.0)
-            .min_width(220.0)
-            .max_width(LEFT_DOCK_MAX_WIDTH)
+            .min_width(RESIZABLE_DOCK_MIN_WIDTH)
+            .max_width(max_width)
             .frame(dock_frame())
             .show(ctx, |ui| {
-                ui.set_width(ui.available_width());
-                self.draw_scene_tree_panel(ui);
-                ui.add_space(6.0);
-                self.draw_filesystem_panel(ui);
+                fixed_panel_content(ui, "psxed_left_dock_fixed_content", |ui| {
+                    let content_width = ui.available_width().max(1.0);
+                    constrain_resizable_dock_content(ui, content_width);
+                    self.draw_scene_tree_panel(ui);
+                    ui.add_space(6.0);
+                    self.draw_filesystem_panel(ui);
+                });
             });
     }
 
@@ -6293,43 +6363,49 @@ impl EditorWorkspace {
         if !self.inspector_open {
             return;
         }
+        let max_width = max_resizable_side_dock_width(ctx, false);
         egui::SidePanel::right("psxed_inspector")
             .resizable(true)
             .default_width(320.0)
-            .min_width(240.0)
+            .min_width(RESIZABLE_DOCK_MIN_WIDTH)
+            .max_width(max_width)
             .frame(dock_frame())
             .show(ctx, |ui| {
-                ui.set_width(ui.available_width().max(1.0));
-                tool_panel_frame().show(ui, |ui| {
-                    ui.expand_to_include_rect(ui.max_rect());
-                    let content_width = ui.available_width().max(1.0);
-                    constrain_resizable_dock_content(ui, content_width);
-                    tool_panel_header(ui, icons::SCAN, "Inspector", |_| {});
-                    tool_panel_body(ui, |ui| {
+                fixed_panel_content(ui, "psxed_inspector_fixed_content", |ui| {
+                    ui.set_width(ui.available_width().max(1.0));
+                    tool_panel_frame().show(ui, |ui| {
                         let content_width = ui.available_width().max(1.0);
                         constrain_resizable_dock_content(ui, content_width);
-                        egui::ScrollArea::vertical()
-                            .id_salt("psxed_inspector_scroll")
-                            .max_width(content_width)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                constrain_resizable_dock_content(ui, content_width);
-                                // Selection priority: primitive (Select tool's
-                                // product -- face, edge, or vertex) → resource
-                                // (clicked in the bottom panel) → node (scene
-                                // tree row). The primitive branch wins because
-                                // it's the active edit target during paint and
-                                // height-edit workflows.
-                                if let Some(selection) = self.selected_primitive {
-                                    match selection {
-                                        Selection::Face(face) => self.draw_face_inspector(ui, face),
-                                        Selection::Edge(edge) => self.draw_edge_inspector(ui, edge),
-                                        Selection::Vertex(vertex) => {
-                                            self.draw_vertex_inspector(ui, vertex)
+                        tool_panel_header(ui, icons::SCAN, "Inspector", |_| {});
+                        tool_panel_body(ui, |ui| {
+                            let content_width = ui.available_width().max(1.0);
+                            constrain_resizable_dock_content(ui, content_width);
+                            egui::ScrollArea::both()
+                                .id_salt("psxed_inspector_scroll")
+                                .max_width(content_width)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    constrain_resizable_dock_content(ui, content_width);
+                                    // Selection priority: primitive (Select tool's
+                                    // product -- face, edge, or vertex) → resource
+                                    // (clicked in the bottom panel) → node (scene
+                                    // tree row). The primitive branch wins because
+                                    // it's the active edit target during paint and
+                                    // height-edit workflows.
+                                    if let Some(selection) = self.selected_primitive {
+                                        match selection {
+                                            Selection::Face(face) => {
+                                                self.draw_face_inspector(ui, face)
+                                            }
+                                            Selection::Edge(edge) => {
+                                                self.draw_edge_inspector(ui, edge)
+                                            }
+                                            Selection::Vertex(vertex) => {
+                                                self.draw_vertex_inspector(ui, vertex)
+                                            }
                                         }
+                                        return;
                                     }
-                                    return;
-                                }
 
                                 if let Some(resource_id) = self.selected_resource {
                                     self.draw_resource_inspector(ui, resource_id);
@@ -6547,6 +6623,7 @@ impl EditorWorkspace {
                             });
                         reserve_remaining_panel_space(ui);
                     });
+                });
                 });
             });
     }
@@ -7290,35 +7367,43 @@ impl EditorWorkspace {
         // name-keyword procedural fallback. Cheap when nothing's
         // changed -- the signature cache short-circuits per-resource.
         self.refresh_texture_thumbs(ctx);
+        let max_height = max_resizable_bottom_dock_height(ctx);
         egui::TopBottomPanel::bottom("psxed_content_browser")
             .resizable(true)
             .default_height(240.0)
-            .min_height(160.0)
-            .max_height(420.0)
+            .min_height(CONTENT_BROWSER_MIN_HEIGHT)
+            .max_height(max_height)
             .frame(dock_frame())
             .show(ctx, |ui| {
-                let content_width = ui.available_width().max(1.0);
-                ui.set_width(content_width);
-                tool_panel_frame().show(ui, |ui| {
-                    ui.expand_to_include_rect(ui.max_rect());
-                    tool_panel_header(ui, icons::LAYERS, "Resources", |ui| {
-                        self.draw_resource_panel_actions(ui);
-                    });
-                    tool_panel_body(ui, |ui| {
-                        let content_width = ui.available_width().max(1.0);
-                        let body_height = ui.available_height().max(1.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("psxed_content_browser_body")
-                            .max_width(content_width)
-                            .max_height(body_height)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.set_width(content_width);
-                                self.draw_resources_tab(ui);
-                            });
+                fixed_panel_content(ui, "psxed_content_browser_fixed_content", |ui| {
+                    let content_width = ui.available_width().max(1.0);
+                    ui.set_width(content_width);
+                    tool_panel_frame().show(ui, |ui| {
+                        self.draw_resource_panel_header(ui);
+                        tool_panel_body(ui, |ui| {
+                            let content_width = ui.available_width().max(1.0);
+                            ui.set_width(content_width);
+                            self.draw_resources_tab(ui);
+                        });
                     });
                 });
             });
+    }
+
+    fn draw_resource_panel_header(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_HEADER)
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.set_min_height(24.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(icons::text(icons::LAYERS, 15.0).color(STUDIO_ACCENT));
+                    ui.label(RichText::new("Resources").strong().color(STUDIO_TEXT));
+                    ui.separator();
+                    self.draw_resource_panel_actions(ui);
+                });
+            });
+        ui.separator();
     }
 
     fn draw_resource_panel_actions(&mut self, ui: &mut egui::Ui) {
@@ -7587,6 +7672,7 @@ impl EditorWorkspace {
     }
 
     fn draw_resources_tab(&mut self, ui: &mut egui::Ui) {
+        let tab_height = ui.available_height().max(1.0);
         ui.horizontal(|ui| {
             section_frame().show(ui, |ui| {
                 // Frame inherits the outer `ui.horizontal` layout, so
@@ -7595,6 +7681,7 @@ impl EditorWorkspace {
                 // intended.
                 ui.vertical(|ui| {
                     ui.set_width(180.0);
+                    ui.set_min_height((tab_height - 14.0).max(1.0));
                     panel_heading(ui, icons::SCAN, "Filter");
                     ui.add_space(2.0);
                     ui.selectable_value(
@@ -7615,7 +7702,9 @@ impl EditorWorkspace {
             ui.add_space(4.0);
 
             ui.vertical(|ui| {
-                let search_width = ui.available_width().max(240.0);
+                let pane_width = ui.available_width().max(1.0);
+                ui.set_width(pane_width);
+                let search_width = pane_width;
                 ui.add(
                     egui::TextEdit::singleline(&mut self.resource_search)
                         .hint_text("Filter resources")
@@ -7632,31 +7721,50 @@ impl EditorWorkspace {
                     })
                     .map(|resource| resource.id)
                     .collect();
-                egui::ScrollArea::horizontal()
-                    .id_salt("psxed_resource_cards")
+                let cards_height = ui.available_height().max(1.0);
+                let card_spacing = ui.spacing().item_spacing;
+                let columns = ((pane_width + card_spacing.x)
+                    / (RESOURCE_CARD_WIDTH + card_spacing.x))
+                    .floor()
+                    .max(1.0) as usize;
+                egui::ScrollArea::vertical()
+                    .id_salt("psxed_resource_card_grid")
+                    .max_width(pane_width)
+                    .max_height(cards_height)
+                    .min_scrolled_height(cards_height)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for id in &visible_resource_order {
-                                let Some(resource) = self.project.resource(*id) else {
-                                    continue;
-                                };
-                                let thumb = self.texture_thumb_id(resource);
-                                let response = draw_resource_card(
-                                    ui,
-                                    &self.project,
-                                    resource,
-                                    self.resource_is_selected(resource.id),
-                                    thumb,
-                                );
-                                if response.clicked() {
-                                    clicked = Some(ResourceClick {
-                                        id: resource.id,
-                                        modifiers: ui.input(|input| input.modifiers),
-                                    });
+                        ui.set_min_width(pane_width);
+                        egui::Grid::new("psxed_resource_card_grid_layout")
+                            .num_columns(columns)
+                            .spacing(card_spacing)
+                            .show(ui, |ui| {
+                                let mut column = 0usize;
+                                for id in &visible_resource_order {
+                                    let Some(resource) = self.project.resource(*id) else {
+                                        continue;
+                                    };
+                                    let thumb = self.texture_thumb_id(resource);
+                                    let response = draw_resource_card(
+                                        ui,
+                                        &self.project,
+                                        resource,
+                                        self.resource_is_selected(resource.id),
+                                        thumb,
+                                    );
+                                    if response.clicked() {
+                                        clicked = Some(ResourceClick {
+                                            id: resource.id,
+                                            modifiers: ui.input(|input| input.modifiers),
+                                        });
+                                    }
+                                    column += 1;
+                                    if column == columns {
+                                        ui.end_row();
+                                        column = 0;
+                                    }
                                 }
-                            }
-                        });
+                            });
                     });
                 if let Some(click) = clicked {
                     // Sims-style: with a face selected, clicking a
@@ -8057,6 +8165,11 @@ impl EditorWorkspace {
                 ui.add_enabled_ui(!self.view_2d, |ui| {
                     ui.toggle_value(&mut self.preview_fog, icons::label(icons::EYE, "Fog"))
                         .on_hover_text("Toggle authored room fog in the editor 3D preview.");
+                    ui.toggle_value(
+                        &mut self.preview_backface_wireframe,
+                        icons::label(icons::SCAN, "Backfaces"),
+                    )
+                    .on_hover_text("Toggle passive outlines for culled backfaces.");
                 });
                 ui.separator();
                 ui.add_enabled_ui(!self.view_2d, |ui| {
@@ -12018,6 +12131,16 @@ fn draw_model_resource_editor(
             }
 
             ui.add_space(4.0);
+            ui.label("Collision radius (engine units)");
+            let mut radius = model.collision_radius as i32;
+            let radius_response =
+                ui.add(egui::DragValue::new(&mut radius).speed(8.0).range(1..=4096));
+            if radius_response.changed() {
+                model.collision_radius = radius.clamp(1, u16::MAX as i32) as u16;
+                changed = true;
+            }
+
+            ui.add_space(4.0);
             ui.label("Scale (Q8 fixed)");
             changed |= model_scale_axis_editor(ui, "X", &mut model.scale_q8[0]);
             changed |= model_scale_axis_editor(ui, "Y", &mut model.scale_q8[1]);
@@ -14595,6 +14718,24 @@ fn reserve_remaining_panel_space(ui: &mut egui::Ui) {
     }
 }
 
+fn fixed_panel_content<R>(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let size = ui.available_size_before_wrap();
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.expand_to_include_rect(rect);
+    child.set_clip_rect(rect);
+    add_contents(&mut child)
+}
+
 fn range_between<T: Copy + Eq>(order: &[T], a: T, b: T) -> Option<Vec<T>> {
     let ai = order.iter().position(|id| *id == a)?;
     let bi = order.iter().position(|id| *id == b)?;
@@ -14610,7 +14751,21 @@ fn constrain_resizable_dock_content(ui: &mut egui::Ui, width: f32) {
     ui.set_width(width);
     ui.set_max_width(width);
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-    ui.spacing_mut().text_edit_width = (width - 72.0).clamp(96.0, 280.0);
+    ui.spacing_mut().text_edit_width = (width - 72.0).clamp(24.0, 280.0);
+}
+
+fn max_resizable_side_dock_width(ctx: &egui::Context, reserve_opposite_dock: bool) -> f32 {
+    let opposite = if reserve_opposite_dock {
+        RESIZABLE_DOCK_MIN_WIDTH
+    } else {
+        0.0
+    };
+    (ctx.available_rect().width() - CENTRAL_WORKSPACE_MIN_WIDTH - opposite)
+        .max(RESIZABLE_DOCK_MIN_WIDTH)
+}
+
+fn max_resizable_bottom_dock_height(ctx: &egui::Context) -> f32 {
+    (ctx.available_rect().height() - CENTRAL_WORKSPACE_MIN_HEIGHT).max(CONTENT_BROWSER_MIN_HEIGHT)
 }
 
 /// Friendly label for the drag-tooltip preview.
@@ -15203,7 +15358,7 @@ fn draw_resource_card(
     selected: bool,
     thumb: Option<egui::TextureId>,
 ) -> egui::Response {
-    let size = Vec2::new(120.0, 155.0);
+    let size = Vec2::new(RESOURCE_CARD_WIDTH, RESOURCE_CARD_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let fill = if selected {
@@ -16736,6 +16891,24 @@ fn camera_forward_from_angles(yaw_q12: u16, pitch_q12: u16) -> [f32; 3] {
     normalize3([-cos_p * sin_y, sin_p, -cos_p * cos_y])
 }
 
+fn viewport_3d_pan_delta(
+    camera: ViewportCameraState,
+    panel_size: Vec2,
+    pointer_delta: Vec2,
+) -> [f32; 3] {
+    let basis = camera.basis();
+    let width = panel_size.x.max(1.0);
+    let height = panel_size.y.max(1.0);
+    let radius = (camera.radius as f32).max(1.0);
+    let right = -pointer_delta.x * radius / width;
+    let up = pointer_delta.y * radius * 0.75 / height;
+    [
+        basis.right[0] * right + basis.up[0] * up,
+        basis.right[1] * right + basis.up[1] * up,
+        basis.right[2] * right + basis.up[2] * up,
+    ]
+}
+
 fn round_to_i32(value: f32) -> i32 {
     value.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
@@ -17675,6 +17848,41 @@ fn wall_triangles(
     }
 }
 
+fn material_sidedness(
+    project: &ProjectDocument,
+    material: Option<ResourceId>,
+) -> MaterialFaceSidedness {
+    material
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Material(material) => Some(material.sidedness()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn wall_side_visible_from_camera(
+    sidedness: MaterialFaceSidedness,
+    bounds: GridCellBounds,
+    direction: GridDirection,
+    camera_position: [f32; 3],
+) -> bool {
+    let cam_x = camera_position[0];
+    let cam_z = camera_position[2];
+    let inside_distance = match direction {
+        GridDirection::North => bounds.z1 as f32 - cam_z,
+        GridDirection::East => bounds.x1 as f32 - cam_x,
+        GridDirection::South => cam_z - bounds.z0 as f32,
+        GridDirection::West => cam_x - bounds.x0 as f32,
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => return true,
+    };
+    match sidedness {
+        MaterialFaceSidedness::Both => true,
+        MaterialFaceSidedness::Back => inside_distance >= 0.0,
+        MaterialFaceSidedness::Front => inside_distance <= 0.0,
+    }
+}
+
 /// Index of the corner closest (3D distance) to `hit` among
 /// the four `corners`. Caller is responsible for the corner
 /// ordering convention -- `[NW, NE, SE, SW]` for floors /
@@ -17769,12 +17977,8 @@ const fn wall_edge_idx(idx: usize) -> WallEdge {
     }
 }
 
-/// Möller–Trumbore ray-triangle intersection. Returns the ray
-/// parameter `t` of the front-side hit, or `None` for misses /
-/// back-face hits / degenerate triangles. Front-side only because
-/// the editor draws every face once per OT slot -- picking the back
-/// of a wall would land on the *opposite* room's geometry, which
-/// reads as a bug to the user.
+/// Möller-Trumbore ray-triangle intersection. Returns the ray
+/// parameter `t`, or `None` for misses / degenerate triangles.
 fn ray_triangle(
     orig: [f32; 3],
     dir: [f32; 3],
@@ -17805,6 +18009,53 @@ fn ray_triangle(
         Some(t)
     } else {
         None
+    }
+}
+
+/// Same ray test, but applying the material side rule before the
+/// expensive barycentric checks. Horizontal grid faces use this so
+/// the Select tool passes through a face whose rendered side is
+/// currently culled.
+fn ray_triangle_sided(
+    orig: [f32; 3],
+    dir: [f32; 3],
+    v0: [f32; 3],
+    v1: [f32; 3],
+    v2: [f32; 3],
+    sidedness: MaterialFaceSidedness,
+) -> Option<f32> {
+    let edge1 = sub3(v1, v0);
+    let edge2 = sub3(v2, v0);
+    let h = cross3(dir, edge2);
+    let a = dot3(edge1, h);
+    if !ray_triangle_side_visible(sidedness, a) {
+        return None;
+    }
+    let f = 1.0 / a;
+    let s = sub3(orig, v0);
+    let u = f * dot3(s, h);
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = cross3(s, edge1);
+    let v = f * dot3(dir, q);
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = f * dot3(edge2, q);
+    if t > 1e-3 {
+        Some(t)
+    } else {
+        None
+    }
+}
+
+fn ray_triangle_side_visible(sidedness: MaterialFaceSidedness, signed_area: f32) -> bool {
+    const EPS: f32 = 1e-6;
+    match sidedness {
+        MaterialFaceSidedness::Front => signed_area < -EPS,
+        MaterialFaceSidedness::Back => signed_area > EPS,
+        MaterialFaceSidedness::Both => signed_area.abs() >= EPS,
     }
 }
 
@@ -19344,6 +19595,113 @@ mod tests {
     }
 
     #[test]
+    fn viewport_3d_pan_delta_tracks_pointer_drag_plane() {
+        let camera = ViewportCameraState {
+            mode: ViewportCameraMode::Orbit,
+            yaw_q12: 0,
+            pitch_q12: 0,
+            radius: 1000,
+            target: [0, 0, 0],
+            position: [0, 0, 0],
+        };
+
+        let delta =
+            viewport_3d_pan_delta(camera, Vec2::new(1000.0, 750.0), Vec2::new(100.0, 100.0));
+
+        assert_vec3_approx(delta, [-100.0, 100.0, 0.0]);
+    }
+
+    #[test]
+    fn orbit_camera_rotation_uses_slow_step_and_clamps_pitch() {
+        let mut workspace =
+            EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        workspace.viewport_3d_yaw = 0;
+        workspace.viewport_3d_pitch = signed_to_q12(940);
+
+        workspace.rotate_viewport_3d_camera(Vec2::new(100.0, 200.0));
+
+        assert_eq!(workspace.viewport_3d_yaw, 25);
+        assert_eq!(workspace.viewport_3d_pitch, signed_to_q12(960));
+    }
+
+    #[test]
+    fn select_pick_passes_through_culled_wall_back_side() {
+        let mut project = ProjectDocument::new("visible-pick");
+        let mut one_sided = MaterialResource::opaque(None);
+        one_sided.face_sidedness = MaterialFaceSidedness::Back;
+        one_sided.sync_legacy_sidedness();
+        let material = project.add_resource("one-sided", ResourceData::Material(one_sided));
+
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.add_wall(0, 0, GridDirection::North, 0, 1024, Some(material));
+        grid.add_wall(0, 0, GridDirection::South, 0, 1024, Some(material));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(room);
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
+        workspace.viewport_3d_free_initialized = true;
+        workspace.viewport_3d_free_position = [512, 512, 2048];
+        workspace.viewport_3d_free_yaw = 0;
+        workspace.viewport_3d_free_pitch = 0;
+
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
+        let (face, hit) = workspace
+            .pick_face_with_hit(rect, rect.center())
+            .expect("ray should pass through hidden north wall to visible south wall");
+
+        assert_eq!(
+            face.kind,
+            FaceKind::Wall {
+                dir: GridDirection::South,
+                stack: 0,
+            }
+        );
+        assert!(hit[2].abs() < 0.001, "expected south wall hit, got {hit:?}");
+    }
+
+    #[test]
+    fn select_pick_passes_through_culled_ceiling_to_visible_floor() {
+        let mut project = ProjectDocument::new("horizontal-visible-pick");
+        let mut one_sided = MaterialResource::opaque(None);
+        one_sided.face_sidedness = MaterialFaceSidedness::Front;
+        one_sided.sync_legacy_sidedness();
+        let material = project.add_resource("one-sided", ResourceData::Material(one_sided));
+
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, Some(material));
+        grid.ensure_sector(0, 0).unwrap().ceiling =
+            Some(GridHorizontalFace::flat(1024, Some(material)));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(room);
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
+        workspace.viewport_3d_free_initialized = true;
+        workspace.viewport_3d_free_position = [512, 2048, 512];
+        workspace.viewport_3d_free_yaw = 0;
+        workspace.viewport_3d_free_pitch = signed_to_q12(-64);
+
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
+        let (_, dir) = workspace
+            .camera_ray_for_pointer(rect, rect.center())
+            .unwrap();
+        assert!(dir[1] < -0.9, "expected downward ray, got {dir:?}");
+        let (face, hit) = workspace
+            .pick_face_with_hit(rect, rect.center())
+            .expect("ray should pass through hidden ceiling top to visible floor top");
+
+        assert_eq!(face.kind, FaceKind::Floor);
+        assert!(hit[1].abs() < 0.001, "expected floor hit, got {hit:?}");
+    }
+
+    #[test]
     fn command_modifier_blocks_bare_shortcuts() {
         assert!(bare_shortcuts_available(false, egui::Modifiers::NONE));
         assert!(!bare_shortcuts_available(true, egui::Modifiers::NONE));
@@ -19544,6 +19902,7 @@ mod tests {
                 default_clip: Some(0),
                 preview_clip: Some(0),
                 world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
                 scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
                 attachments: Vec::new(),
             }),
@@ -20446,6 +20805,7 @@ mod tests {
                 default_clip: None,
                 preview_clip: None,
                 world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
                 scale_q8: [MODEL_SCALE_ONE_Q8; 3],
                 attachments: Vec::new(),
             }),

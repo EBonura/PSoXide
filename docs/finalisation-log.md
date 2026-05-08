@@ -59,8 +59,12 @@ Initial target list:
 Suggested done state:
 - each title has a local legality note naming the owned disc/source used
   for testing;
+- each title gets a parity row in
+  [`docs/commercial-parity-tracker.md`](commercial-parity-tracker.md)
+  naming the first PSoXide vs PCSX-Redux divergence or the reason parity
+  could not yet be measured;
 - each title gets one ignored regression route that reaches a deterministic
-  visual state;
+  visual state after the parity break is understood;
 - each route freezes at least display hash, display area, and one
   subsystem-specific invariant such as MDEC count, CD-ROM sector count,
   GPU opcode histogram, or pad poll evidence;
@@ -99,6 +103,8 @@ missing from the top-25 target set.
 
 Extra local compatibility images outside this top 25:
 - `Celeste Classic PSX (Homebrew).cue`;
+- `Tomb Raider (USA) (Greatest Hits).ccd` with `.img.ecm` pending
+  external ECM decode;
 - `WipEout (Europe) (v1.1).cue`;
 - `WipEout 2097 (Europe).cue`;
 - `WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It).cue`.

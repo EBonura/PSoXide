@@ -537,6 +537,7 @@ mod tests {
                 default_clip: None,
                 preview_clip: None,
                 world_height: 1024,
+                collision_radius: crate::default_model_collision_radius_for_height(1024),
                 scale_q8: [crate::MODEL_SCALE_ONE_Q8; 3],
                 attachments: Vec::new(),
             }),
