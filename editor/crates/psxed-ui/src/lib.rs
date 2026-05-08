@@ -32,12 +32,12 @@ use psxed_project::streaming::{
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
     default_model_collision_radius_for_height, snap_height, ColliderShape, GridCellBounds,
-    GridDirection, GridHorizontalFace, GridSplit, GridUvRotation, GridUvTransform,
-    GridVerticalFace, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow,
-    ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, WorldGrid, WorldGridBudget,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
-    MAX_ROOM_WIDTH, MAX_WORLD_SECTOR_SIZE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
-    WORLD_SECTOR_SIZE_QUANTUM,
+    GridDirection, GridHorizontalFace, GridSplit, GridTriangleMaterialOverride, GridUvRotation,
+    GridUvTransform, GridVerticalFace, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind,
+    NodeRow, ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, WorldGrid,
+    WorldGridBudget, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH,
+    MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_SECTOR_SIZE, MIN_WORLD_SECTOR_SIZE,
+    MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -153,6 +153,12 @@ pub struct EditorWorkspace {
     /// one of its edges, or one of its corners. Hotkeys 1 / 2 / 3
     /// toggle.
     selection_mode: SelectionMode,
+    /// Whether floor/ceiling face picks address the authored quad
+    /// or one triangle half of the current split.
+    horizontal_edit_mode: HorizontalEditMode,
+    /// Whether vertex edits move every coincident face-corner, or
+    /// only the selected face's own corner data.
+    vertex_connectivity: VertexConnectivity,
     /// Primitive under the pointer while the Select tool is
     /// active. Updated every frame the panel is hovered and the
     /// tool is Select; cleared when the pointer leaves or another
@@ -204,6 +210,9 @@ pub struct EditorWorkspace {
     /// dwelling on the same edge doesn't re-stack walls. Reset
     /// to `None` whenever a new primary click starts.
     last_paint_stamp: Option<PaintStamp>,
+    /// Wall brush targeting mode. Cardinal keeps the old nearest-edge
+    /// behavior; diagonal modes stamp a wall across the cell.
+    wall_paint_shape: WallPaintShape,
     /// `Some((id, buffer))` while a scene-tree row is in rename mode.
     /// Buffer holds the in-flight string the user is typing; commit /
     /// cancel finalises against the actual node name.
@@ -544,6 +553,84 @@ pub enum FaceKind {
     Wall { dir: GridDirection, stack: u8 },
 }
 
+/// Horizontal surface type for triangle editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HorizontalSurfaceKind {
+    Floor,
+    Ceiling,
+}
+
+impl HorizontalSurfaceKind {
+    const fn face_kind(self) -> FaceKind {
+        match self {
+            Self::Floor => FaceKind::Floor,
+            Self::Ceiling => FaceKind::Ceiling,
+        }
+    }
+}
+
+/// Which half of a split floor/ceiling face is being addressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HorizontalTriangleIndex {
+    A,
+    B,
+}
+
+impl HorizontalTriangleIndex {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+        }
+    }
+
+    const fn idx(self) -> usize {
+        match self {
+            Self::A => 0,
+            Self::B => 1,
+        }
+    }
+}
+
+/// One triangle half of a floor or ceiling face. The corner list
+/// snapshots the split layout at pick time so downstream edit code
+/// can move/outline the exact triangle the user selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HorizontalTriangleRef {
+    pub room: NodeId,
+    pub sx: u16,
+    pub sz: u16,
+    pub surface: HorizontalSurfaceKind,
+    pub index: HorizontalTriangleIndex,
+    pub corners: [Corner; 3],
+}
+
+impl HorizontalTriangleRef {
+    pub const fn parent_face(self) -> FaceRef {
+        FaceRef {
+            room: self.room,
+            sx: self.sx,
+            sz: self.sz,
+            kind: self.surface.face_kind(),
+        }
+    }
+
+    pub const fn face_corner(self, corner: Corner) -> FaceCornerRef {
+        match self.surface {
+            HorizontalSurfaceKind::Floor => FaceCornerRef::Floor {
+                sx: self.sx,
+                sz: self.sz,
+                corner,
+            },
+            HorizontalSurfaceKind::Ceiling => FaceCornerRef::Ceiling {
+                sx: self.sx,
+                sz: self.sz,
+                corner,
+            },
+        }
+    }
+}
+
 /// A face inside the active Room, fully qualified by Room id +
 /// sector + face kind. Used by the Select tool's hover / selected
 /// state and the per-face inspector that follows.
@@ -682,6 +769,7 @@ pub enum EdgeAnchor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
     Face(FaceRef),
+    Triangle(HorizontalTriangleRef),
     Edge(EdgeRef),
     Vertex(VertexRef),
 }
@@ -691,6 +779,7 @@ impl Selection {
     pub const fn room(&self) -> NodeId {
         match self {
             Self::Face(f) => f.room,
+            Self::Triangle(t) => t.room,
             Self::Edge(e) => e.room,
             Self::Vertex(v) => v.room,
         }
@@ -702,9 +791,16 @@ impl Selection {
     pub const fn as_face(&self) -> Option<FaceRef> {
         match self {
             Self::Face(f) => Some(*f),
+            Self::Triangle(t) => Some(t.parent_face()),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaterialTarget {
+    Face(FaceRef),
+    Triangle(HorizontalTriangleRef),
 }
 
 fn grid_rect_for_validation_issue(
@@ -1054,6 +1150,43 @@ impl SelectionMode {
     }
 }
 
+/// Floor/ceiling edit granularity for Select mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum HorizontalEditMode {
+    #[default]
+    Quad,
+    Triangle,
+}
+
+impl HorizontalEditMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Quad => "Quad",
+            Self::Triangle => "Tri",
+        }
+    }
+}
+
+/// Vertex propagation behavior for primitive height edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum VertexConnectivity {
+    /// Move every face-corner currently sharing the same physical
+    /// vertex. Existing project behavior.
+    #[default]
+    Welded,
+    /// Move only the selected face/edge/vertex corner records.
+    Detached,
+}
+
+impl VertexConnectivity {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Welded => "Welded",
+            Self::Detached => "Detached",
+        }
+    }
+}
+
 /// In-flight drag-translate stroke. Captured at drag-start
 /// over a primitive in Select mode and applied every frame the
 /// pointer moves until release.
@@ -1284,6 +1417,31 @@ enum ViewTool {
     Place,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WallPaintShape {
+    Cardinal,
+    NorthWestSouthEast,
+    NorthEastSouthWest,
+}
+
+impl WallPaintShape {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Cardinal => "Cardinal",
+            Self::NorthWestSouthEast => "NW-SE",
+            Self::NorthEastSouthWest => "NE-SW",
+        }
+    }
+
+    fn direction(self, dx: f32, dz: f32) -> GridDirection {
+        match self {
+            Self::Cardinal => edge_from_world_offset(dx, dz),
+            Self::NorthWestSouthEast => GridDirection::NorthWestSouthEast,
+            Self::NorthEastSouthWest => GridDirection::NorthEastSouthWest,
+        }
+    }
+}
+
 /// Variants of the `Place` tool. Maps directly onto the
 /// `NodeKind` produced by a Place click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1490,6 +1648,8 @@ impl EditorWorkspace {
             sector_selection_anchor: None,
             tile_box_select_anchor: None,
             selection_mode: SelectionMode::default(),
+            horizontal_edit_mode: HorizontalEditMode::default(),
+            vertex_connectivity: VertexConnectivity::default(),
             hovered_primitive: None,
             selected_primitive: None,
             selected_primitives: Vec::new(),
@@ -1500,6 +1660,7 @@ impl EditorWorkspace {
             node_drag: None,
             paint_target_preview: None,
             last_paint_stamp: None,
+            wall_paint_shape: WallPaintShape::Cardinal,
             renaming: None,
             pending_rename_focus: false,
             collapsed_scene_nodes: HashSet::new(),
@@ -3930,8 +4091,9 @@ impl EditorWorkspace {
             let s = grid.sector_size as f32;
             let cell_center_x = (world_cell_x as f32 + 0.5) * s;
             let cell_center_z = (world_cell_z as f32 + 0.5) * s;
-            let dir =
-                edge_from_world_offset(hit_world[0] - cell_center_x, hit_world[2] - cell_center_z);
+            let dir = self
+                .wall_paint_shape
+                .direction(hit_world[0] - cell_center_x, hit_world[2] - cell_center_z);
             // Stack index points just past any existing walls on
             // that edge -- `add_wall` will append there.
             let stack = grid
@@ -3981,11 +4143,10 @@ impl EditorWorkspace {
         if targets.is_empty() {
             return;
         }
-        // Resolve the physical vertices the drag will translate
-        // and snapshot their pre-drag Ys. The universal-coincidence
-        // resolver fans each seed out to all face-corners that share
-        // the world point, so the drag itself only walks this small
-        // list even for multi-selection.
+        // Resolve the vertices the drag will translate and snapshot
+        // their pre-drag Ys. Welded mode fans each seed out to all
+        // coincident face-corners; detached mode keeps just the
+        // selected face's corner records.
         let vertices = self.drag_vertices_for_targets(&targets);
         if vertices.is_empty() {
             return;
@@ -4102,7 +4263,7 @@ impl EditorWorkspace {
                 continue;
             };
             for seed in seeds {
-                let Some(vertex) = physical_vertex(grid, seed) else {
+                let Some(vertex) = vertex_for_seed(grid, seed, self.vertex_connectivity) else {
                     continue;
                 };
                 if vertices
@@ -4815,8 +4976,9 @@ impl EditorWorkspace {
                         .room_grid_view(room_id)
                         .map(|grid| grid.cell_center_world(sx, sz))
                         .unwrap_or([0.0, 0.0]);
-                    let dir =
-                        edge_from_world_offset(hit_world[0] - center[0], hit_world[2] - center[1]);
+                    let dir = self
+                        .wall_paint_shape
+                        .direction(hit_world[0] - center[0], hit_world[2] - center[1]);
                     (Some(dir), None)
                 }
             }
@@ -5066,6 +5228,7 @@ impl EditorWorkspace {
         // Snapshot for undo BEFORE mutating. Each non-Place tool
         // shares the same snapshot point.
         self.push_undo();
+        let wall_paint_shape = self.wall_paint_shape;
         let scene = self.project.active_scene_mut();
         let Some(room) = scene.node_mut(room_id) else {
             return;
@@ -5113,10 +5276,8 @@ impl EditorWorkspace {
                         format!("Cell {sx},{sz} no longer has a sector")
                     }
                 } else {
-                    let dir = edge_from_world_offset(
-                        hit_world[0] - cell_center[0],
-                        hit_world[2] - cell_center[1],
-                    );
+                    let dir = wall_paint_shape
+                        .direction(hit_world[0] - cell_center[0], hit_world[2] - cell_center[1]);
                     grid.add_wall_aligned_to_surfaces(sx, sz, dir, wall_mat);
                     format!("Added {} wall at {sx},{sz}", direction_label(dir))
                 }
@@ -5172,6 +5333,28 @@ impl EditorWorkspace {
         }
     }
 
+    fn triangle_material(&self, triangle: HorizontalTriangleRef) -> Option<ResourceId> {
+        let face = triangle.parent_face();
+        let scene = self.project.active_scene();
+        let node = scene.node(face.room)?;
+        let NodeKind::Room { grid } = &node.kind else {
+            return None;
+        };
+        let sector = grid.sector(face.sx, face.sz)?;
+        let index = triangle.index.idx();
+        match triangle.surface {
+            HorizontalSurfaceKind::Floor => sector.floor.as_ref()?.triangle_material(index),
+            HorizontalSurfaceKind::Ceiling => sector.ceiling.as_ref()?.triangle_material(index),
+        }
+    }
+
+    fn material_target_value(&self, target: MaterialTarget) -> Option<ResourceId> {
+        match target {
+            MaterialTarget::Face(face) => self.face_material(face),
+            MaterialTarget::Triangle(triangle) => self.triangle_material(triangle),
+        }
+    }
+
     /// Reassign `face`'s material in-place. Marks the project
     /// dirty if the field actually moved. Used by drag/drop flows
     /// and by the resource-card click path for single-face edits.
@@ -5191,20 +5374,20 @@ impl EditorWorkspace {
     /// vertices are intentionally ignored here: materials bind to
     /// actual face surfaces, while those modes edit topology/height.
     fn assign_selected_faces_material(&mut self, material: Option<ResourceId>) -> usize {
-        let faces = self.selected_face_targets();
-        if faces.is_empty() {
+        let targets = self.selected_material_targets();
+        if targets.is_empty() {
             return 0;
         }
-        let needs_update = faces
+        let needs_update = targets
             .iter()
-            .any(|face| self.face_material(*face) != material);
+            .any(|target| self.material_target_value(*target) != material);
         if !needs_update {
             return 0;
         }
         self.push_undo();
         let mut updated = 0usize;
-        for face in faces {
-            if self.assign_face_material_no_undo(face, material) {
+        for target in targets {
+            if self.assign_material_target_no_undo(target, material) {
                 updated += 1;
             }
         }
@@ -5214,6 +5397,26 @@ impl EditorWorkspace {
         updated
     }
 
+    fn selected_material_targets(&self) -> Vec<MaterialTarget> {
+        let mut targets = Vec::new();
+        for face in self.selected_sector_faces() {
+            push_unique_material_target(&mut targets, MaterialTarget::Face(face));
+        }
+        for selection in self.selected_primitive_targets() {
+            match selection {
+                Selection::Face(face) => {
+                    push_unique_material_target(&mut targets, MaterialTarget::Face(face));
+                }
+                Selection::Triangle(triangle) => {
+                    push_unique_material_target(&mut targets, MaterialTarget::Triangle(triangle));
+                }
+                Selection::Edge(_) | Selection::Vertex(_) => {}
+            }
+        }
+        targets
+    }
+
+    #[cfg(test)]
     fn selected_face_targets(&self) -> Vec<FaceRef> {
         let mut faces = Vec::new();
         for face in self.selected_sector_faces() {
@@ -5222,8 +5425,10 @@ impl EditorWorkspace {
             }
         }
         for selection in self.selected_primitive_targets() {
-            let Selection::Face(face) = selection else {
-                continue;
+            let face = match selection {
+                Selection::Face(face) => face,
+                Selection::Triangle(triangle) => triangle.parent_face(),
+                Selection::Edge(_) | Selection::Vertex(_) => continue,
             };
             if !faces.contains(&face) {
                 faces.push(face);
@@ -5268,6 +5473,58 @@ impl EditorWorkspace {
                 .map(|w| w.material = material)
                 .is_some(),
         }
+    }
+
+    fn assign_material_target_no_undo(
+        &mut self,
+        target: MaterialTarget,
+        material: Option<ResourceId>,
+    ) -> bool {
+        match target {
+            MaterialTarget::Face(face) => self.assign_face_material_no_undo(face, material),
+            MaterialTarget::Triangle(triangle) => {
+                self.assign_triangle_material_no_undo(triangle, material)
+            }
+        }
+    }
+
+    fn assign_triangle_material_no_undo(
+        &mut self,
+        triangle: HorizontalTriangleRef,
+        material: Option<ResourceId>,
+    ) -> bool {
+        if self.triangle_material(triangle) == material {
+            return false;
+        }
+        let scene = self.project.active_scene_mut();
+        let Some(node) = scene.node_mut(triangle.room) else {
+            return false;
+        };
+        let NodeKind::Room { grid } = &mut node.kind else {
+            return false;
+        };
+        let Some(sector) = grid.sector_mut(triangle.sx, triangle.sz) else {
+            return false;
+        };
+        let face = match triangle.surface {
+            HorizontalSurfaceKind::Floor => sector.floor.as_mut(),
+            HorizontalSurfaceKind::Ceiling => sector.ceiling.as_mut(),
+        };
+        let Some(face) = face else {
+            return false;
+        };
+        let parent_material = face.material;
+        let override_material = if material == parent_material {
+            None
+        } else {
+            Some(GridTriangleMaterialOverride::from_material(material))
+        };
+        let target = face.triangle_override_mut(triangle.index.idx());
+        if target.material == override_material {
+            return false;
+        }
+        target.material = override_material;
+        true
     }
 
     /// Build the camera ray in world units for the given pointer
@@ -5359,16 +5616,103 @@ impl EditorWorkspace {
     /// happens here; the picker's heavy lifting (ray vs every
     /// face) was already paid above.
     fn pick_primitive_from_hit(&self, face: FaceRef, hit: [f32; 3]) -> Selection {
+        let triangle = if matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle) {
+            self.horizontal_triangle_ref_at_hit(face, hit)
+        } else {
+            None
+        };
         match self.selection_mode {
-            SelectionMode::Face => Selection::Face(face),
-            SelectionMode::Edge => self
-                .face_edge_at_hit(face, hit)
+            SelectionMode::Face => triangle
+                .map(Selection::Triangle)
+                .unwrap_or(Selection::Face(face)),
+            SelectionMode::Edge => triangle
+                .and_then(|triangle| self.triangle_edge_at_hit(triangle, hit))
+                .or_else(|| self.face_edge_at_hit(face, hit))
                 .map(Selection::Edge)
                 .unwrap_or(Selection::Face(face)),
-            SelectionMode::Vertex => self
-                .face_vertex_at_hit(face, hit)
+            SelectionMode::Vertex => triangle
+                .and_then(|triangle| self.triangle_vertex_at_hit(triangle, hit))
+                .or_else(|| self.face_vertex_at_hit(face, hit))
                 .map(Selection::Vertex)
                 .unwrap_or(Selection::Face(face)),
+        }
+    }
+
+    fn horizontal_triangle_ref_at_hit(
+        &self,
+        face: FaceRef,
+        hit: [f32; 3],
+    ) -> Option<HorizontalTriangleRef> {
+        let (split, dropped) = self.horizontal_face_split_and_drop(face)?;
+        let scene = self.project.active_scene();
+        let room = scene.node(face.room)?;
+        let NodeKind::Room { grid } = &room.kind else {
+            return None;
+        };
+        let bounds = grid.cell_bounds_world(face.sx, face.sz);
+        let local_x = hit[0] - bounds.x0 as f32;
+        let local_z = hit[2] - bounds.z0 as f32;
+        let mut index =
+            horizontal_triangle_index_at_local(local_x, local_z, grid.sector_size, split);
+        let mut corners = horizontal_triangle_corners(split, index);
+        if dropped.is_some_and(|corner| corners.contains(&corner)) {
+            index = horizontal_triangle_other(index);
+            corners = horizontal_triangle_corners(split, index);
+        }
+        let surface = match face.kind {
+            FaceKind::Floor => HorizontalSurfaceKind::Floor,
+            FaceKind::Ceiling => HorizontalSurfaceKind::Ceiling,
+            FaceKind::Wall { .. } => return None,
+        };
+        Some(HorizontalTriangleRef {
+            room: face.room,
+            sx: face.sx,
+            sz: face.sz,
+            surface,
+            index,
+            corners,
+        })
+    }
+
+    fn horizontal_triangle_refs_for_face(&self, face: FaceRef) -> Vec<HorizontalTriangleRef> {
+        let Some((split, dropped)) = self.horizontal_face_split_and_drop(face) else {
+            return Vec::new();
+        };
+        let surface = match face.kind {
+            FaceKind::Floor => HorizontalSurfaceKind::Floor,
+            FaceKind::Ceiling => HorizontalSurfaceKind::Ceiling,
+            FaceKind::Wall { .. } => return Vec::new(),
+        };
+        [HorizontalTriangleIndex::A, HorizontalTriangleIndex::B]
+            .into_iter()
+            .filter_map(|index| {
+                let corners = horizontal_triangle_corners(split, index);
+                if dropped.is_some_and(|corner| corners.contains(&corner)) {
+                    return None;
+                }
+                Some(HorizontalTriangleRef {
+                    room: face.room,
+                    sx: face.sx,
+                    sz: face.sz,
+                    surface,
+                    index,
+                    corners,
+                })
+            })
+            .collect()
+    }
+
+    fn horizontal_face_split_and_drop(&self, face: FaceRef) -> Option<(GridSplit, Option<Corner>)> {
+        let scene = self.project.active_scene();
+        let room = scene.node(face.room)?;
+        let NodeKind::Room { grid } = &room.kind else {
+            return None;
+        };
+        let sector = grid.sector(face.sx, face.sz)?;
+        match face.kind {
+            FaceKind::Floor => sector.floor.as_ref().map(|f| (f.split, f.dropped_corner)),
+            FaceKind::Ceiling => sector.ceiling.as_ref().map(|c| (c.split, c.dropped_corner)),
+            FaceKind::Wall { .. } => None,
         }
     }
 
@@ -5404,6 +5748,34 @@ impl EditorWorkspace {
         })
     }
 
+    fn triangle_edge_at_hit(
+        &self,
+        triangle: HorizontalTriangleRef,
+        hit: [f32; 3],
+    ) -> Option<EdgeRef> {
+        let corners = self.triangle_world_corners(triangle)?;
+        let edge_idx = closest_edge_idx(&corners, hit);
+        let a = triangle.corners[edge_idx];
+        let b = triangle.corners[(edge_idx + 1) % 3];
+        let dir = horizontal_edge_dir_from_corners(a, b)?;
+        let anchor = match triangle.surface {
+            HorizontalSurfaceKind::Floor => EdgeAnchor::Floor {
+                sx: triangle.sx,
+                sz: triangle.sz,
+                dir,
+            },
+            HorizontalSurfaceKind::Ceiling => EdgeAnchor::Ceiling {
+                sx: triangle.sx,
+                sz: triangle.sz,
+                dir,
+            },
+        };
+        Some(EdgeRef {
+            room: triangle.room,
+            anchor,
+        })
+    }
+
     /// Closest corner of `face` to the world-space hit. Distance
     /// computed in world space against the four corner points.
     fn face_vertex_at_hit(&self, face: FaceRef, hit: [f32; 3]) -> Option<VertexRef> {
@@ -5432,6 +5804,41 @@ impl EditorWorkspace {
             room: face.room,
             anchor,
         })
+    }
+
+    fn triangle_vertex_at_hit(
+        &self,
+        triangle: HorizontalTriangleRef,
+        hit: [f32; 3],
+    ) -> Option<VertexRef> {
+        let corners = self.triangle_world_corners(triangle)?;
+        let corner_idx = closest_corner_idx(&corners, hit);
+        let corner = triangle.corners[corner_idx];
+        let anchor = match triangle.surface {
+            HorizontalSurfaceKind::Floor => VertexAnchor::Floor {
+                sx: triangle.sx,
+                sz: triangle.sz,
+                corner,
+            },
+            HorizontalSurfaceKind::Ceiling => VertexAnchor::Ceiling {
+                sx: triangle.sx,
+                sz: triangle.sz,
+                corner,
+            },
+        };
+        Some(VertexRef {
+            room: triangle.room,
+            anchor,
+        })
+    }
+
+    fn triangle_world_corners(&self, triangle: HorizontalTriangleRef) -> Option<[[f32; 3]; 3]> {
+        let corners = self.face_world_corners(triangle.parent_face())?;
+        Some([
+            corners[triangle.corners[0].idx()],
+            corners[triangle.corners[1].idx()],
+            corners[triangle.corners[2].idx()],
+        ])
     }
 
     /// Four world-space corners of `face` in canonical
@@ -5542,7 +5949,7 @@ impl EditorWorkspace {
                         }
                     }
                 }
-                for dir_card in GridDirection::CARDINAL {
+                for dir_card in GridDirection::ALL {
                     for (stack_idx, wall) in sector.walls.get(dir_card).iter().enumerate() {
                         let sidedness = material_sidedness(&self.project, wall.material);
                         if !wall_side_visible_from_camera(sidedness, bounds, dir_card, origin) {
@@ -5742,6 +6149,50 @@ impl EditorWorkspace {
         self.status = format!("Selection mode: {}", mode.label());
     }
 
+    fn set_horizontal_edit_mode(&mut self, mode: HorizontalEditMode) {
+        if self.horizontal_edit_mode == mode {
+            return;
+        }
+        self.horizontal_edit_mode = mode;
+        let active = self
+            .selected_primitive
+            .and_then(|selection| self.selection_as_horizontal_mode(selection, mode));
+        let mut converted = Vec::new();
+        for selection in self.selected_primitive_targets() {
+            let Some(selection) = self.selection_as_horizontal_mode(selection, mode) else {
+                continue;
+            };
+            if !converted.contains(&selection) {
+                converted.push(selection);
+            }
+        }
+        self.selected_primitives = converted;
+        self.selected_primitive = active.or_else(|| self.selected_primitives.first().copied());
+        self.hovered_primitive = None;
+        self.status = format!("Surface edit: {}", mode.label());
+    }
+
+    fn selection_as_horizontal_mode(
+        &self,
+        selection: Selection,
+        mode: HorizontalEditMode,
+    ) -> Option<Selection> {
+        match (selection, mode) {
+            (Selection::Triangle(triangle), HorizontalEditMode::Quad) => {
+                Some(Selection::Face(triangle.parent_face()))
+            }
+            (Selection::Face(face), HorizontalEditMode::Triangle)
+                if matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling) =>
+            {
+                self.horizontal_triangle_refs_for_face(face)
+                    .first()
+                    .copied()
+                    .map(Selection::Triangle)
+            }
+            (selection, _) => Some(selection),
+        }
+    }
+
     fn selection_as_mode(selection: Selection, mode: SelectionMode) -> Option<Selection> {
         match (selection, mode) {
             (Selection::Face(face), SelectionMode::Face) => Some(Selection::Face(face)),
@@ -5750,6 +6201,15 @@ impl EditorWorkspace {
             }
             (Selection::Face(face), SelectionMode::Vertex) => {
                 Some(Selection::Vertex(face_first_vertex(face)))
+            }
+            (Selection::Triangle(triangle), SelectionMode::Face) => {
+                Some(Selection::Triangle(triangle))
+            }
+            (Selection::Triangle(triangle), SelectionMode::Edge) => {
+                Some(Selection::Edge(triangle_first_edge(triangle)))
+            }
+            (Selection::Triangle(triangle), SelectionMode::Vertex) => {
+                Some(Selection::Vertex(triangle_first_vertex(triangle)))
             }
             (Selection::Edge(edge), SelectionMode::Face) => {
                 edge_owning_face_ref(edge).map(Selection::Face)
@@ -5772,6 +6232,7 @@ impl EditorWorkspace {
         matches!(
             (selection, mode),
             (Selection::Face(_), SelectionMode::Face)
+                | (Selection::Triangle(_), SelectionMode::Face)
                 | (Selection::Edge(_), SelectionMode::Edge)
                 | (Selection::Vertex(_), SelectionMode::Vertex)
         )
@@ -6450,6 +6911,9 @@ impl EditorWorkspace {
                                             Selection::Face(face) => {
                                                 self.draw_face_inspector(ui, face)
                                             }
+                                            Selection::Triangle(triangle) => {
+                                                self.draw_triangle_inspector(ui, triangle)
+                                            }
                                             Selection::Edge(edge) => {
                                                 self.draw_edge_inspector(ui, edge)
                                             }
@@ -6721,17 +7185,194 @@ impl EditorWorkspace {
     /// Select tool. Surfaces material picker, height fields, and a
     /// preview thumbnail of the linked texture so the user can
     /// retarget materials without opening the resources panel.
-    /// Edge inspector -- height of both endpoint vertices, with
-    /// a "Both" toggle for paired drag. Each endpoint resolves
-    /// through `physical_vertex` so a height edit propagates to
-    /// every face-corner sharing that physical point.
+    fn draw_triangle_inspector(&mut self, ui: &mut egui::Ui, triangle: HorizontalTriangleRef) {
+        let mut nav_target: Option<ResourceId> = None;
+        let material_options = self.project.material_options();
+        let Some((parent_material, parent_uv, parent_walkable)) =
+            self.triangle_parent_values(triangle)
+        else {
+            ui.weak("Triangle target is gone");
+            return;
+        };
+        let current_material = self.triangle_material(triangle);
+        let preview_thumb = current_material
+            .and_then(|id| self.project.resource(id))
+            .and_then(|resource| self.texture_thumb_entry(resource))
+            .map(|entry| (entry.handle.id(), entry.stats));
+        let mut crumbs = vec![
+            BreadcrumbCrumb {
+                label: format!("Triangle: {}", describe_triangle(triangle)),
+                nav: None,
+            },
+            BreadcrumbCrumb {
+                label: format!("Face: {}", describe_face(triangle.parent_face())),
+                nav: None,
+            },
+        ];
+        if let Some(material_id) = current_material {
+            if let Some(material_resource) = self.project.resource(material_id) {
+                crumbs.push(BreadcrumbCrumb {
+                    label: format!("Material: {}", material_resource.name),
+                    nav: Some(material_id),
+                });
+            }
+        }
+
+        ui.horizontal(|ui| {
+            draw_inline_icon(ui, icons::GRID, STUDIO_ACCENT);
+            ui.strong(describe_triangle(triangle));
+        });
+        draw_breadcrumb(ui, &crumbs, &mut nav_target);
+        ui.separator();
+        draw_psxt_preview_block(ui, preview_thumb);
+
+        let mut changed = false;
+        {
+            let scene = self.project.active_scene_mut();
+            let Some(room) = scene.node_mut(triangle.room) else {
+                ui.weak("Selected triangle's Room is gone");
+                return;
+            };
+            let NodeKind::Room { grid } = &mut room.kind else {
+                ui.weak("Selected triangle's Room kind changed");
+                return;
+            };
+            let Some(sector) = grid.sector_mut(triangle.sx, triangle.sz) else {
+                ui.weak("Cell out of grid bounds");
+                return;
+            };
+            let face_data = match triangle.surface {
+                HorizontalSurfaceKind::Floor => sector.floor.as_mut(),
+                HorizontalSurfaceKind::Ceiling => sector.ceiling.as_mut(),
+            };
+            let Some(face_data) = face_data else {
+                ui.weak("Triangle's parent face was removed");
+                return;
+            };
+            let override_data = face_data.triangle_override_mut(triangle.index.idx());
+
+            egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("    Parent");
+                        ui.weak(material_option_label(parent_material, &material_options));
+                    });
+                    let mut enabled = override_data.material.is_some();
+                    if ui.checkbox(&mut enabled, "    Override").changed() {
+                        override_data.material = enabled
+                            .then(|| GridTriangleMaterialOverride::from_material(parent_material));
+                        changed = true;
+                    }
+                    if enabled {
+                        let mut material = override_data.material.and_then(|m| m.material());
+                        if material_picker(
+                            ui,
+                            "    Material",
+                            &mut material,
+                            &material_options,
+                            &mut nav_target,
+                        ) {
+                            override_data.material =
+                                Some(GridTriangleMaterialOverride::from_material(material));
+                            changed = true;
+                        }
+                    }
+                });
+
+            egui::CollapsingHeader::new(icons::label(icons::GRID, "UV"))
+                .default_open(false)
+                .show(ui, |ui| {
+                    let mut enabled = override_data.uv.is_some();
+                    if ui.checkbox(&mut enabled, "    Override").changed() {
+                        override_data.uv = enabled.then_some(parent_uv);
+                        changed = true;
+                    }
+                    if let Some(uv) = override_data.uv.as_mut() {
+                        changed |= uv_transform_controls(uv, ui);
+                    }
+                });
+
+            egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Collision"))
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("    Parent");
+                        ui.weak(if parent_walkable {
+                            "Walkable"
+                        } else {
+                            "Blocked"
+                        });
+                    });
+                    let mut enabled = override_data.walkable.is_some();
+                    if ui.checkbox(&mut enabled, "    Override").changed() {
+                        override_data.walkable = enabled.then_some(parent_walkable);
+                        changed = true;
+                    }
+                    if let Some(walkable) = override_data.walkable.as_mut() {
+                        if ui.checkbox(walkable, "    Walkable").changed() {
+                            changed = true;
+                        }
+                    }
+                });
+
+            if ui
+                .button("Clear triangle overrides")
+                .on_hover_text(
+                    "Return this triangle to the parent face material, UV, and walkability.",
+                )
+                .clicked()
+            {
+                override_data.material = None;
+                override_data.uv = None;
+                override_data.walkable = None;
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.mark_dirty();
+        }
+        if let Some(target) = nav_target {
+            self.clear_primitive_selection_state();
+            self.replace_resource_selection(target);
+            self.clear_node_selection_state();
+            self.clear_sector_selection();
+        }
+    }
+
+    fn triangle_parent_values(
+        &self,
+        triangle: HorizontalTriangleRef,
+    ) -> Option<(Option<ResourceId>, GridUvTransform, bool)> {
+        let scene = self.project.active_scene();
+        let room = scene.node(triangle.room)?;
+        let NodeKind::Room { grid } = &room.kind else {
+            return None;
+        };
+        let sector = grid.sector(triangle.sx, triangle.sz)?;
+        match triangle.surface {
+            HorizontalSurfaceKind::Floor => {
+                let face = sector.floor.as_ref()?;
+                Some((face.material, face.uv, face.walkable))
+            }
+            HorizontalSurfaceKind::Ceiling => {
+                let face = sector.ceiling.as_ref()?;
+                Some((face.material, face.uv, face.walkable))
+            }
+        }
+    }
+
+    /// Edge inspector -- height of both endpoint vertices. In
+    /// Welded mode each endpoint resolves through `physical_vertex`;
+    /// in Detached mode it resolves to only the edge's own corner.
     fn draw_edge_inspector(&mut self, ui: &mut egui::Ui, edge: EdgeRef) {
         // Resolve both endpoints up front while the project is
         // borrowed immutably. Keeps the edit phase below clear
         // of cross-borrow tangles.
         let (mut endpoint_a, mut endpoint_b) = match self
             .room_grid_view(edge.room)
-            .and_then(|grid| edge_endpoints(grid, edge))
+            .and_then(|grid| edge_endpoints_with_connectivity(grid, edge, self.vertex_connectivity))
         {
             Some(pair) => pair,
             None => {
@@ -6801,15 +7442,20 @@ impl EditorWorkspace {
         self.mark_dirty();
     }
 
-    /// Vertex inspector -- one Y handle for the whole
-    /// physical-vertex group. Lists every member so the user
-    /// sees what will move; a `Break` button raises the seed
-    /// alone by `HEIGHT_QUANTUM` so the user can split a shared
-    /// vertex into two.
+    /// Vertex inspector -- one Y handle for the resolved vertex
+    /// group. Lists every member so the user sees what will move;
+    /// a `Break` button raises the seed alone by `HEIGHT_QUANTUM`
+    /// so the user can split a shared vertex into two.
     fn draw_vertex_inspector(&mut self, ui: &mut egui::Ui, vertex: VertexRef) {
         let mut physical = match self
             .room_grid_view(vertex.room)
-            .and_then(|grid| physical_vertex(grid, vertex.anchor.as_face_corner()))
+            .and_then(|grid| {
+                vertex_for_seed(
+                    grid,
+                    vertex.anchor.as_face_corner(),
+                    self.vertex_connectivity,
+                )
+            })
         {
             Some(pv) => pv,
             None => {
@@ -6841,7 +7487,10 @@ impl EditorWorkspace {
         });
 
         let break_clicked = ui
-            .button("Break")
+            .add_enabled(
+                matches!(self.vertex_connectivity, VertexConnectivity::Welded),
+                egui::Button::new("Break"),
+            )
             .on_hover_text(
                 "Move this corner alone by one quantum, splitting it from the shared group.",
             )
@@ -6977,6 +7626,7 @@ impl EditorWorkspace {
                     .default_open(true)
                     .show(ui, |ui| {
                         changed |= height_row("Height", &mut face_data.heights, ui);
+                        changed |= split_row("Split", &mut face_data.split, ui);
                     });
                 egui::CollapsingHeader::new(icons::label(icons::GRID, "UV"))
                     .default_open(false)
@@ -7004,6 +7654,7 @@ impl EditorWorkspace {
                     .default_open(true)
                     .show(ui, |ui| {
                         changed |= height_row("Height", &mut face_data.heights, ui);
+                        changed |= split_row("Split", &mut face_data.split, ui);
                     });
                 egui::CollapsingHeader::new(icons::label(icons::GRID, "UV"))
                     .default_open(false)
@@ -7832,29 +8483,31 @@ impl EditorWorkspace {
                     );
                     let plain_click =
                         !click.modifiers.shift && !click.modifiers.ctrl && !click.modifiers.command;
-                    let selected_faces = if is_material && plain_click {
-                        self.selected_face_targets()
+                    let selected_targets = if is_material && plain_click {
+                        self.selected_material_targets()
                     } else {
                         Vec::new()
                     };
-                    if !selected_faces.is_empty() {
+                    if !selected_targets.is_empty() {
                         let updated = self.assign_selected_faces_material(Some(id));
-                        match (selected_faces.as_slice(), updated) {
+                        match (selected_targets.as_slice(), updated) {
                             (_, 0) => {
                                 self.status =
-                                    "Material already assigned to selected faces".to_string();
+                                    "Material already assigned to selected surfaces".to_string();
                             }
-                            ([face], 1) => {
-                                self.status =
-                                    format!("Assigned material to {}", describe_face(*face));
+                            ([target], 1) => {
+                                self.status = format!(
+                                    "Assigned material to {}",
+                                    describe_material_target(*target)
+                                );
                             }
-                            (_, n) if n == selected_faces.len() => {
-                                self.status = format!("Assigned material to {n} selected faces");
+                            (_, n) if n == selected_targets.len() => {
+                                self.status = format!("Assigned material to {n} selected surfaces");
                             }
                             (_, n) => {
                                 self.status = format!(
-                                    "Assigned material to {n}/{} selected faces",
-                                    selected_faces.len()
+                                    "Assigned material to {n}/{} selected surfaces",
+                                    selected_targets.len()
                                 );
                             }
                         }
@@ -8198,8 +8851,16 @@ impl EditorWorkspace {
                 ui.separator();
                 if matches!(self.active_tool, ViewTool::Select) {
                     self.draw_selection_mode_picker(ui);
+                    ui.separator();
+                    self.draw_horizontal_edit_mode_picker(ui);
+                    ui.separator();
+                    self.draw_vertex_connectivity_picker(ui);
                 } else if matches!(self.active_tool, ViewTool::Place) {
                     self.draw_place_kind_picker(ui);
+                } else if matches!(self.active_tool, ViewTool::PaintWall) {
+                    self.draw_wall_paint_shape_picker(ui);
+                    ui.separator();
+                    self.draw_brush_material_picker(ui);
                 } else {
                     self.draw_brush_material_picker(ui);
                 }
@@ -8304,6 +8965,53 @@ impl EditorWorkspace {
             {
                 self.set_selection_mode(mode);
             }
+        }
+    }
+
+    fn draw_horizontal_edit_mode_picker(&mut self, ui: &mut egui::Ui) {
+        ui.label(icons::label(icons::GRID, "Surface"));
+        for mode in [HorizontalEditMode::Quad, HorizontalEditMode::Triangle] {
+            if ui
+                .selectable_label(self.horizontal_edit_mode == mode, mode.label())
+                .on_hover_text(match mode {
+                    HorizontalEditMode::Quad => "Pick floor and ceiling quads.",
+                    HorizontalEditMode::Triangle => "Pick one triangle half of a floor or ceiling.",
+                })
+                .clicked()
+            {
+                self.set_horizontal_edit_mode(mode);
+            }
+        }
+    }
+
+    fn draw_vertex_connectivity_picker(&mut self, ui: &mut egui::Ui) {
+        ui.label(icons::label(icons::WAYPOINT, "Verts"));
+        for mode in [VertexConnectivity::Welded, VertexConnectivity::Detached] {
+            if ui
+                .selectable_label(self.vertex_connectivity == mode, mode.label())
+                .on_hover_text(match mode {
+                    VertexConnectivity::Welded => {
+                        "Move every face-corner sharing the selected physical vertex."
+                    }
+                    VertexConnectivity::Detached => {
+                        "Move only the selected face, edge, or vertex corner records."
+                    }
+                })
+                .clicked()
+            {
+                self.vertex_connectivity = mode;
+            }
+        }
+    }
+
+    fn draw_wall_paint_shape_picker(&mut self, ui: &mut egui::Ui) {
+        ui.label(icons::label(icons::BRICK_WALL, "Wall"));
+        for shape in [
+            WallPaintShape::Cardinal,
+            WallPaintShape::NorthWestSouthEast,
+            WallPaintShape::NorthEastSouthWest,
+        ] {
+            ui.selectable_value(&mut self.wall_paint_shape, shape, shape.label());
         }
     }
 
@@ -8816,16 +9524,44 @@ impl EditorWorkspace {
         for face in self.all_faces_in_room(room) {
             match mode {
                 SelectionMode::Face => {
-                    push_unique_selection(&mut selections, Selection::Face(face))
+                    if matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle)
+                        && matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling)
+                    {
+                        for triangle in self.horizontal_triangle_refs_for_face(face) {
+                            push_unique_selection(&mut selections, Selection::Triangle(triangle));
+                        }
+                    } else {
+                        push_unique_selection(&mut selections, Selection::Face(face));
+                    }
                 }
                 SelectionMode::Edge => {
-                    for edge in face_edges(face) {
-                        push_unique_selection(&mut selections, Selection::Edge(edge));
+                    if matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle)
+                        && matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling)
+                    {
+                        for triangle in self.horizontal_triangle_refs_for_face(face) {
+                            for edge in triangle_edges(triangle) {
+                                push_unique_selection(&mut selections, Selection::Edge(edge));
+                            }
+                        }
+                    } else {
+                        for edge in face_edges(face) {
+                            push_unique_selection(&mut selections, Selection::Edge(edge));
+                        }
                     }
                 }
                 SelectionMode::Vertex => {
-                    for vertex in face_vertices(face) {
-                        push_unique_selection(&mut selections, Selection::Vertex(vertex));
+                    if matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle)
+                        && matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling)
+                    {
+                        for triangle in self.horizontal_triangle_refs_for_face(face) {
+                            for vertex in triangle_vertices(triangle) {
+                                push_unique_selection(&mut selections, Selection::Vertex(vertex));
+                            }
+                        }
+                    } else {
+                        for vertex in face_vertices(face) {
+                            push_unique_selection(&mut selections, Selection::Vertex(vertex));
+                        }
                     }
                 }
             }
@@ -8864,7 +9600,7 @@ impl EditorWorkspace {
                         kind: FaceKind::Ceiling,
                     });
                 }
-                for dir in GridDirection::CARDINAL {
+                for dir in GridDirection::ALL {
                     for (stack, _) in sector.walls.get(dir).iter().enumerate() {
                         let Ok(stack) = u8::try_from(stack) else {
                             continue;
@@ -8904,11 +9640,14 @@ impl EditorWorkspace {
 
     fn update_primitive_resource_selection(&mut self) {
         if self.selected_primitives.len() == 1 {
-            if let Selection::Face(face) = self.selected_primitives[0] {
-                if let Some(id) = self.face_material(face) {
-                    self.replace_resource_selection(id);
-                    return;
-                }
+            let face = match self.selected_primitives[0] {
+                Selection::Face(face) => Some(face),
+                Selection::Triangle(triangle) => Some(triangle.parent_face()),
+                Selection::Edge(_) | Selection::Vertex(_) => None,
+            };
+            if let Some(id) = face.and_then(|face| self.face_material(face)) {
+                self.replace_resource_selection(id);
+                return;
             }
         }
         self.clear_resource_selection_state();
@@ -9532,7 +10271,9 @@ impl EditorWorkspace {
             // → append path.
             let face = if matches!(tool, ViewTool::PaintWall) {
                 let centre = grid.cell_center_world(sx, sz);
-                let dir = edge_from_world_offset(hit[0] - centre[0], hit[2] - centre[1]);
+                let dir = self
+                    .wall_paint_shape
+                    .direction(hit[0] - centre[0], hit[2] - centre[1]);
                 grid.sector(sx, sz).and_then(|sector| {
                     let walls = sector.walls.get(dir);
                     let stack = walls.len().checked_sub(1)?;
@@ -9937,10 +10678,52 @@ impl EditorWorkspace {
     fn delete_primitive_no_undo(&mut self, selection: Selection) -> DeleteOutcome {
         match selection {
             Selection::Face(face) => self.remove_face_no_undo(face),
+            Selection::Triangle(triangle) => self.remove_triangle_no_undo(triangle),
             Selection::Edge(edge) => edge_owning_face_ref(edge)
                 .map(|face| self.remove_face_no_undo(face))
                 .unwrap_or(DeleteOutcome::Missing),
             Selection::Vertex(vertex) => self.drop_vertex_no_undo(vertex),
+        }
+    }
+
+    fn remove_triangle_no_undo(&mut self, triangle: HorizontalTriangleRef) -> DeleteOutcome {
+        let scene = self.project.active_scene_mut();
+        let Some(node) = scene.node_mut(triangle.room) else {
+            return DeleteOutcome::Missing;
+        };
+        let NodeKind::Room { grid } = &mut node.kind else {
+            return DeleteOutcome::Missing;
+        };
+        let Some(sector) = grid.sector_mut(triangle.sx, triangle.sz) else {
+            return DeleteOutcome::Missing;
+        };
+        match triangle.surface {
+            HorizontalSurfaceKind::Floor => {
+                let Some(face) = sector.floor.as_mut() else {
+                    return DeleteOutcome::Missing;
+                };
+                if face.dropped_corner.is_some() {
+                    sector.floor = None;
+                    DeleteOutcome::Removed("floor")
+                } else {
+                    let corner = horizontal_triangle_delete_corner(face.split, triangle.index);
+                    face.drop_corner(corner);
+                    DeleteOutcome::Triangulated("floor triangle")
+                }
+            }
+            HorizontalSurfaceKind::Ceiling => {
+                let Some(face) = sector.ceiling.as_mut() else {
+                    return DeleteOutcome::Missing;
+                };
+                if face.dropped_corner.is_some() {
+                    sector.ceiling = None;
+                    DeleteOutcome::Removed("ceiling")
+                } else {
+                    let corner = horizontal_triangle_delete_corner(face.split, triangle.index);
+                    face.drop_corner(corner);
+                    DeleteOutcome::Triangulated("ceiling triangle")
+                }
+            }
         }
     }
 
@@ -16331,7 +17114,15 @@ fn draw_room(
             }
             if let Some(floor) = &sector.floor {
                 let floor_color = material_color(project, floor.material, SurfaceRole::Floor);
-                draw_floor_tile(painter, screen_rect, floor_color, x as i32, z as i32);
+                draw_floor_tile(
+                    painter,
+                    screen_rect,
+                    floor_color,
+                    x as i32,
+                    z as i32,
+                    floor.split,
+                    floor.dropped_corner,
+                );
             }
             if selected_sectors.contains(&(node.id, x, z)) {
                 painter.rect_filled(
@@ -16563,7 +17354,15 @@ fn wall_band_center_half(
     }
 }
 
-fn draw_floor_tile(painter: &egui::Painter, rect: Rect, base: Color32, ix: i32, iz: i32) {
+fn draw_floor_tile(
+    painter: &egui::Painter,
+    rect: Rect,
+    base: Color32,
+    ix: i32,
+    iz: i32,
+    split: GridSplit,
+    dropped_corner: Option<Corner>,
+) {
     let tint = if (ix + iz) % 2 == 0 {
         lighten(base, 8)
     } else {
@@ -16607,6 +17406,32 @@ fn draw_floor_tile(painter: &egui::Painter, rect: Rect, base: Color32, ix: i32, 
             Pos2::new(rect.right() - 5.0, mid_y),
         ],
         crack,
+    );
+    draw_horizontal_split_line(painter, rect, split, dropped_corner);
+}
+
+fn draw_horizontal_split_line(
+    painter: &egui::Painter,
+    rect: Rect,
+    split: GridSplit,
+    dropped_corner: Option<Corner>,
+) {
+    if rect.width() < 20.0 || rect.height() < 20.0 {
+        return;
+    }
+    let inset = 4.0;
+    let nw = Pos2::new(rect.left() + inset, rect.top() + inset);
+    let ne = Pos2::new(rect.right() - inset, rect.top() + inset);
+    let se = Pos2::new(rect.right() - inset, rect.bottom() - inset);
+    let sw = Pos2::new(rect.left() + inset, rect.bottom() - inset);
+    let (a, b) = match split {
+        GridSplit::NorthWestSouthEast => (nw, se),
+        GridSplit::NorthEastSouthWest => (ne, sw),
+    };
+    let alpha = if dropped_corner.is_some() { 160 } else { 96 };
+    painter.line_segment(
+        [a, b],
+        Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 238, 150, alpha)),
     );
 }
 
@@ -17195,8 +18020,29 @@ fn describe_face(face: FaceRef) -> String {
 pub fn describe_selection(selection: Selection) -> String {
     match selection {
         Selection::Face(face) => describe_face(face),
+        Selection::Triangle(triangle) => describe_triangle(triangle),
         Selection::Edge(edge) => describe_edge(edge),
         Selection::Vertex(vertex) => describe_vertex(vertex),
+    }
+}
+
+fn describe_triangle(triangle: HorizontalTriangleRef) -> String {
+    let surface = match triangle.surface {
+        HorizontalSurfaceKind::Floor => "Floor",
+        HorizontalSurfaceKind::Ceiling => "Ceiling",
+    };
+    format!(
+        "{surface} triangle {} at {},{}",
+        triangle.index.label(),
+        triangle.sx,
+        triangle.sz
+    )
+}
+
+fn describe_material_target(target: MaterialTarget) -> String {
+    match target {
+        MaterialTarget::Face(face) => describe_face(face),
+        MaterialTarget::Triangle(triangle) => describe_triangle(triangle),
     }
 }
 
@@ -17232,6 +18078,7 @@ fn wall_span_bounds(
 fn selection_sector(selection: Selection) -> (NodeId, u16, u16) {
     match selection {
         Selection::Face(face) => (face.room, face.sx, face.sz),
+        Selection::Triangle(triangle) => (triangle.room, triangle.sx, triangle.sz),
         Selection::Edge(edge) => match edge.anchor {
             EdgeAnchor::Floor { sx, sz, .. }
             | EdgeAnchor::Ceiling { sx, sz, .. }
@@ -17295,6 +18142,12 @@ fn push_unique_selection(selections: &mut Vec<Selection>, selection: Selection) 
     }
 }
 
+fn push_unique_material_target(targets: &mut Vec<MaterialTarget>, target: MaterialTarget) {
+    if !targets.contains(&target) {
+        targets.push(target);
+    }
+}
+
 fn face_edges(face: FaceRef) -> Vec<EdgeRef> {
     match face.kind {
         FaceKind::Floor => floor_edges(face.room, face.sx, face.sz, false),
@@ -17318,6 +18171,34 @@ fn face_edges(face: FaceRef) -> Vec<EdgeRef> {
         })
         .collect(),
     }
+}
+
+fn triangle_edges(triangle: HorizontalTriangleRef) -> Vec<EdgeRef> {
+    let mut edges = Vec::new();
+    for idx in 0..3 {
+        let a = triangle.corners[idx];
+        let b = triangle.corners[(idx + 1) % 3];
+        let Some(dir) = horizontal_edge_dir_from_corners(a, b) else {
+            continue;
+        };
+        let anchor = match triangle.surface {
+            HorizontalSurfaceKind::Floor => EdgeAnchor::Floor {
+                sx: triangle.sx,
+                sz: triangle.sz,
+                dir,
+            },
+            HorizontalSurfaceKind::Ceiling => EdgeAnchor::Ceiling {
+                sx: triangle.sx,
+                sz: triangle.sz,
+                dir,
+            },
+        };
+        edges.push(EdgeRef {
+            room: triangle.room,
+            anchor,
+        });
+    }
+    edges
 }
 
 fn floor_edges(room: NodeId, sx: u16, sz: u16, ceiling: bool) -> Vec<EdgeRef> {
@@ -17364,6 +18245,31 @@ fn face_vertices(face: FaceRef) -> Vec<VertexRef> {
     }
 }
 
+fn triangle_vertices(triangle: HorizontalTriangleRef) -> Vec<VertexRef> {
+    triangle
+        .corners
+        .into_iter()
+        .map(|corner| {
+            let anchor = match triangle.surface {
+                HorizontalSurfaceKind::Floor => VertexAnchor::Floor {
+                    sx: triangle.sx,
+                    sz: triangle.sz,
+                    corner,
+                },
+                HorizontalSurfaceKind::Ceiling => VertexAnchor::Ceiling {
+                    sx: triangle.sx,
+                    sz: triangle.sz,
+                    corner,
+                },
+            };
+            VertexRef {
+                room: triangle.room,
+                anchor,
+            }
+        })
+        .collect()
+}
+
 fn floor_vertices(room: NodeId, sx: u16, sz: u16, ceiling: bool) -> Vec<VertexRef> {
     [Corner::NW, Corner::NE, Corner::SE, Corner::SW]
         .into_iter()
@@ -17407,6 +18313,13 @@ fn face_first_edge(face: FaceRef) -> EdgeRef {
     }
 }
 
+fn triangle_first_edge(triangle: HorizontalTriangleRef) -> EdgeRef {
+    triangle_edges(triangle)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| face_first_edge(triangle.parent_face()))
+}
+
 /// Adapter: face → its first vertex (NW for floor / ceiling,
 /// BL for walls).
 fn face_first_vertex(face: FaceRef) -> VertexRef {
@@ -17433,6 +18346,13 @@ fn face_first_vertex(face: FaceRef) -> VertexRef {
         room: face.room,
         anchor,
     }
+}
+
+fn triangle_first_vertex(triangle: HorizontalTriangleRef) -> VertexRef {
+    triangle_vertices(triangle)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| face_first_vertex(triangle.parent_face()))
 }
 
 /// Adapter: edge → the face that owns it. Used when the user
@@ -17500,10 +18420,8 @@ const fn edge_first_floor_corner(dir: GridDirection) -> Corner {
         GridDirection::East => Corner::NE,
         GridDirection::South => Corner::SE,
         GridDirection::West => Corner::SW,
-        // Diagonals shouldn't reach this code path (cooker
-        // rejects them); pick NW arbitrarily so the function
-        // stays total.
-        _ => Corner::NW,
+        GridDirection::NorthWestSouthEast => Corner::NW,
+        GridDirection::NorthEastSouthWest => Corner::NE,
     }
 }
 
@@ -17621,7 +18539,8 @@ fn direction_label(dir: GridDirection) -> &'static str {
         GridDirection::East => "East",
         GridDirection::South => "South",
         GridDirection::West => "West",
-        _ => "Diag",
+        GridDirection::NorthWestSouthEast => "NW-SE",
+        GridDirection::NorthEastSouthWest => "NE-SW",
     }
 }
 
@@ -17770,7 +18689,7 @@ pub fn physical_vertex(grid: &WorldGrid, seed: FaceCornerRef) -> Option<Physical
                     }
                 }
             }
-            for dir in GridDirection::CARDINAL {
+            for dir in GridDirection::ALL {
                 for (stack_idx, _) in sector.walls.get(dir).iter().enumerate() {
                     for c in [
                         WallCorner::BL,
@@ -17796,9 +18715,27 @@ pub fn physical_vertex(grid: &WorldGrid, seed: FaceCornerRef) -> Option<Physical
     Some(PhysicalVertex { world, members })
 }
 
+fn detached_vertex(grid: &WorldGrid, seed: FaceCornerRef) -> Option<PhysicalVertex> {
+    Some(PhysicalVertex {
+        world: face_corner_world(grid, seed)?,
+        members: vec![seed],
+    })
+}
+
+fn vertex_for_seed(
+    grid: &WorldGrid,
+    seed: FaceCornerRef,
+    connectivity: VertexConnectivity,
+) -> Option<PhysicalVertex> {
+    match connectivity {
+        VertexConnectivity::Welded => physical_vertex(grid, seed),
+        VertexConnectivity::Detached => detached_vertex(grid, seed),
+    }
+}
+
 /// Face-corner seeds for a drag-translate stroke. The drag
-/// engine resolves each seed through `physical_vertex` so all
-/// coincident face-corners follow.
+/// engine resolves each seed through the active vertex
+/// connectivity mode before applying height edits.
 ///
 /// - Face: 4 corners of the face (preserves slope; same Δ on
 ///   each).
@@ -17839,6 +18776,11 @@ fn drag_corner_seeds(selection: Selection) -> Option<Vec<FaceCornerRef>> {
             })
             .collect(),
         },
+        Selection::Triangle(triangle) => triangle
+            .corners
+            .into_iter()
+            .map(|corner| triangle.face_corner(corner))
+            .collect(),
         Selection::Edge(edge) => {
             let (a, b) = edge_endpoint_corners(edge);
             vec![a, b]
@@ -17851,9 +18793,17 @@ fn drag_corner_seeds(selection: Selection) -> Option<Vec<FaceCornerRef>> {
 /// if either endpoint can't be resolved (face removed, cell
 /// out of bounds).
 pub fn edge_endpoints(grid: &WorldGrid, edge: EdgeRef) -> Option<(PhysicalVertex, PhysicalVertex)> {
+    edge_endpoints_with_connectivity(grid, edge, VertexConnectivity::Welded)
+}
+
+fn edge_endpoints_with_connectivity(
+    grid: &WorldGrid,
+    edge: EdgeRef,
+    connectivity: VertexConnectivity,
+) -> Option<(PhysicalVertex, PhysicalVertex)> {
     let (a, b) = edge_endpoint_corners(edge);
-    let pa = physical_vertex(grid, a)?;
-    let pb = physical_vertex(grid, b)?;
+    let pa = vertex_for_seed(grid, a, connectivity)?;
+    let pb = vertex_for_seed(grid, b, connectivity)?;
     Some((pa, pb))
 }
 
@@ -17910,11 +18860,24 @@ const fn floor_edge_endpoints(dir: GridDirection) -> (Corner, Corner) {
         GridDirection::East => (Corner::NE, Corner::SE),
         GridDirection::South => (Corner::SE, Corner::SW),
         GridDirection::West => (Corner::SW, Corner::NW),
-        // Diagonals -- pick the two corners on the diagonal so
-        // the inspector can at least show something. Picker
-        // doesn't produce these because the cooker rejects
-        // diagonal walls.
-        _ => (Corner::NW, Corner::SE),
+        GridDirection::NorthWestSouthEast => (Corner::NW, Corner::SE),
+        GridDirection::NorthEastSouthWest => (Corner::NE, Corner::SW),
+    }
+}
+
+fn horizontal_edge_dir_from_corners(a: Corner, b: Corner) -> Option<GridDirection> {
+    match (a, b) {
+        (Corner::NW, Corner::NE) | (Corner::NE, Corner::NW) => Some(GridDirection::North),
+        (Corner::NE, Corner::SE) | (Corner::SE, Corner::NE) => Some(GridDirection::East),
+        (Corner::SE, Corner::SW) | (Corner::SW, Corner::SE) => Some(GridDirection::South),
+        (Corner::SW, Corner::NW) | (Corner::NW, Corner::SW) => Some(GridDirection::West),
+        (Corner::NW, Corner::SE) | (Corner::SE, Corner::NW) => {
+            Some(GridDirection::NorthWestSouthEast)
+        }
+        (Corner::NE, Corner::SW) | (Corner::SW, Corner::NE) => {
+            Some(GridDirection::NorthEastSouthWest)
+        }
+        _ => None,
     }
 }
 
@@ -17990,6 +18953,64 @@ fn write_face_corner_height(grid: &mut WorldGrid, corner: FaceCornerRef, new_y: 
                 }
             }
         }
+    }
+}
+
+fn horizontal_triangle_index_at_local(
+    local_x: f32,
+    local_z: f32,
+    sector_size: i32,
+    split: GridSplit,
+) -> HorizontalTriangleIndex {
+    let size = sector_size.max(1) as f32;
+    match split {
+        GridSplit::NorthWestSouthEast => {
+            if local_x + local_z >= size {
+                HorizontalTriangleIndex::A
+            } else {
+                HorizontalTriangleIndex::B
+            }
+        }
+        GridSplit::NorthEastSouthWest => {
+            if local_z >= local_x {
+                HorizontalTriangleIndex::A
+            } else {
+                HorizontalTriangleIndex::B
+            }
+        }
+    }
+}
+
+const fn horizontal_triangle_other(index: HorizontalTriangleIndex) -> HorizontalTriangleIndex {
+    match index {
+        HorizontalTriangleIndex::A => HorizontalTriangleIndex::B,
+        HorizontalTriangleIndex::B => HorizontalTriangleIndex::A,
+    }
+}
+
+const fn horizontal_triangle_corners(
+    split: GridSplit,
+    index: HorizontalTriangleIndex,
+) -> [Corner; 3] {
+    psxed_project::horizontal_triangle_corners(split, horizontal_triangle_index_usize(index))
+}
+
+const fn horizontal_triangle_index_usize(index: HorizontalTriangleIndex) -> usize {
+    match index {
+        HorizontalTriangleIndex::A => 0,
+        HorizontalTriangleIndex::B => 1,
+    }
+}
+
+const fn horizontal_triangle_delete_corner(
+    split: GridSplit,
+    index: HorizontalTriangleIndex,
+) -> Corner {
+    match (split, index) {
+        (GridSplit::NorthWestSouthEast, HorizontalTriangleIndex::A) => Corner::NE,
+        (GridSplit::NorthWestSouthEast, HorizontalTriangleIndex::B) => Corner::SW,
+        (GridSplit::NorthEastSouthWest, HorizontalTriangleIndex::A) => Corner::NW,
+        (GridSplit::NorthEastSouthWest, HorizontalTriangleIndex::B) => Corner::SE,
     }
 }
 
@@ -18078,10 +19099,10 @@ fn wall_side_visible_from_camera(
 }
 
 /// Index of the corner closest (3D distance) to `hit` among
-/// the four `corners`. Caller is responsible for the corner
-/// ordering convention -- `[NW, NE, SE, SW]` for floors /
-/// ceilings, `[BL, BR, TR, TL]` for walls.
-fn closest_corner_idx(corners: &[[f32; 3]; 4], hit: [f32; 3]) -> usize {
+/// `corners`. Caller is responsible for the corner ordering
+/// convention -- `[NW, NE, SE, SW]` for floors / ceilings,
+/// `[BL, BR, TR, TL]` for walls, or triangle perimeter order.
+fn closest_corner_idx<const N: usize>(corners: &[[f32; 3]; N], hit: [f32; 3]) -> usize {
     let mut best = 0usize;
     let mut best_d2 = f32::INFINITY;
     for (i, c) in corners.iter().enumerate() {
@@ -18094,14 +19115,14 @@ fn closest_corner_idx(corners: &[[f32; 3]; 4], hit: [f32; 3]) -> usize {
     best
 }
 
-/// Index of the edge (perimeter walk: 0..3) closest to `hit`.
-/// Edge `i` runs `corners[i] → corners[(i+1) % 4]`.
-fn closest_edge_idx(corners: &[[f32; 3]; 4], hit: [f32; 3]) -> usize {
+/// Index of the edge closest to `hit`. Edge `i` runs
+/// `corners[i] → corners[(i+1) % N]`.
+fn closest_edge_idx<const N: usize>(corners: &[[f32; 3]; N], hit: [f32; 3]) -> usize {
     let mut best = 0usize;
     let mut best_d2 = f32::INFINITY;
-    for i in 0..4 {
+    for i in 0..N {
         let a = corners[i];
-        let b = corners[(i + 1) % 4];
+        let b = corners[(i + 1) % N];
         let d2 = point_segment_dist2(hit, a, b);
         if d2 < best_d2 {
             best = i;
@@ -19376,6 +20397,7 @@ fn draw_sector_inspector(
             });
             if let Some(floor) = sector.floor.as_mut() {
                 changed |= height_row("    Height", &mut floor.heights, ui);
+                changed |= split_row("    Split", &mut floor.split, ui);
                 changed |= material_picker(
                     ui,
                     "    Material",
@@ -19401,6 +20423,7 @@ fn draw_sector_inspector(
             });
             if let Some(ceiling) = sector.ceiling.as_mut() {
                 changed |= height_row("    Height", &mut ceiling.heights, ui);
+                changed |= split_row("    Split", &mut ceiling.split, ui);
                 changed |= material_picker(
                     ui,
                     "    Material",
@@ -19417,6 +20440,8 @@ fn draw_sector_inspector(
                 ("East", GridDirection::East),
                 ("South", GridDirection::South),
                 ("West", GridDirection::West),
+                ("NW-SE", GridDirection::NorthWestSouthEast),
+                ("NE-SW", GridDirection::NorthEastSouthWest),
             ] {
                 changed |= wall_stack_row(
                     label,
@@ -19643,6 +20668,16 @@ fn height_row(label: &str, heights: &mut [i32; 4], ui: &mut egui::Ui) -> bool {
     changed
 }
 
+fn split_row(label: &str, split: &mut GridSplit, ui: &mut egui::Ui) -> bool {
+    let before = *split;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.selectable_value(split, GridSplit::NorthWestSouthEast, "NW-SE");
+        ui.selectable_value(split, GridSplit::NorthEastSouthWest, "NE-SW");
+    });
+    *split != before
+}
+
 /// Material picker used by the sector / face inspector.
 ///
 /// `jump_to` is an out-param: clicking the `→` button writes
@@ -19692,6 +20727,17 @@ fn material_picker(
         }
     });
     changed
+}
+
+fn material_option_label(material: Option<ResourceId>, options: &[(ResourceId, String)]) -> String {
+    material
+        .and_then(|id| {
+            options
+                .iter()
+                .find(|(rid, _)| *rid == id)
+                .map(|(_, name)| name.clone())
+        })
+        .unwrap_or_else(|| "(none)".to_string())
 }
 
 #[cfg(test)]
@@ -21141,6 +22187,169 @@ mod tests {
     }
 
     #[test]
+    fn material_assignment_updates_selected_triangle_override() {
+        let mut project = ProjectDocument::new("triangle-materials");
+        let original = project.add_resource(
+            "Original",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, Some(original));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let triangle = HorizontalTriangleRef {
+            room,
+            sx: 0,
+            sz: 0,
+            surface: HorizontalSurfaceKind::Floor,
+            index: HorizontalTriangleIndex::A,
+            corners: [Corner::NW, Corner::NE, Corner::SE],
+        };
+        workspace.selected_primitive = Some(Selection::Triangle(triangle));
+
+        assert_eq!(workspace.assign_selected_faces_material(Some(target)), 1);
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let floor = grid.sector(0, 0).unwrap().floor.as_ref().unwrap();
+        assert_eq!(floor.material, Some(original));
+        assert_eq!(floor.triangle_material(0), Some(target));
+        assert_eq!(floor.triangle_material(1), Some(original));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn wall_paint_shape_stamps_diagonal_wall() {
+        let mut project = ProjectDocument::new("diagonal-wall-paint");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+        workspace.wall_paint_shape = WallPaintShape::NorthEastSouthWest;
+        workspace.run_paint_action(ViewTool::PaintWall, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let sector = grid.sector(0, 0).unwrap();
+        assert!(sector.walls.get(GridDirection::North).is_empty());
+        assert_eq!(sector.walls.get(GridDirection::NorthEastSouthWest).len(), 1);
+    }
+
+    #[test]
+    fn horizontal_edit_mode_picks_triangle_face_halves() {
+        let mut project = ProjectDocument::new("triangle-face-pick");
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let face = FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Floor,
+        };
+
+        workspace.horizontal_edit_mode = HorizontalEditMode::Triangle;
+        workspace.selection_mode = SelectionMode::Face;
+        let picked = workspace.pick_primitive_from_hit(face, [900.0, 0.0, 900.0]);
+        assert_eq!(
+            picked,
+            Selection::Triangle(HorizontalTriangleRef {
+                room,
+                sx: 0,
+                sz: 0,
+                surface: HorizontalSurfaceKind::Floor,
+                index: HorizontalTriangleIndex::A,
+                corners: [Corner::NW, Corner::NE, Corner::SE],
+            })
+        );
+
+        workspace.horizontal_edit_mode = HorizontalEditMode::Quad;
+        assert_eq!(
+            workspace.pick_primitive_from_hit(face, [900.0, 0.0, 900.0]),
+            Selection::Face(face)
+        );
+    }
+
+    #[test]
+    fn triangle_edit_edge_mode_can_pick_split_diagonal() {
+        let mut project = ProjectDocument::new("triangle-edge-pick");
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let face = FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Floor,
+        };
+
+        workspace.horizontal_edit_mode = HorizontalEditMode::Triangle;
+        workspace.selection_mode = SelectionMode::Edge;
+        let picked = workspace.pick_primitive_from_hit(face, [512.0, 0.0, 512.0]);
+
+        assert_eq!(
+            picked,
+            Selection::Edge(EdgeRef {
+                room,
+                anchor: EdgeAnchor::Floor {
+                    sx: 0,
+                    sz: 0,
+                    dir: GridDirection::NorthWestSouthEast,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn dragging_triangle_face_moves_only_its_three_corners() {
+        let mut project = ProjectDocument::new("triangle-drag");
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let triangle = HorizontalTriangleRef {
+            room,
+            sx: 0,
+            sz: 0,
+            surface: HorizontalSurfaceKind::Floor,
+            index: HorizontalTriangleIndex::A,
+            corners: [Corner::NW, Corner::NE, Corner::SE],
+        };
+
+        workspace.hovered_primitive = Some(Selection::Triangle(triangle));
+        workspace.begin_primitive_drag(egui::Modifiers::NONE);
+        workspace.update_primitive_drag(-8.0);
+        workspace.end_primitive_drag();
+
+        let after = floor_heights(&workspace, room, 0, 0);
+        assert_eq!(after[Corner::NW.idx()], HEIGHT_QUANTUM);
+        assert_eq!(after[Corner::NE.idx()], HEIGHT_QUANTUM);
+        assert_eq!(after[Corner::SE.idx()], HEIGHT_QUANTUM);
+        assert_eq!(after[Corner::SW.idx()], 0);
+    }
+
+    #[test]
     fn selected_room_bounds_follow_authored_tiles() {
         let mut project = ProjectDocument::new("bounds");
         let mut grid = WorldGrid::empty(6, 6, 1024);
@@ -21208,6 +22417,68 @@ mod tests {
         );
         assert_eq!(after[Corner::SE.idx()], before[Corner::SE.idx()]);
         assert_eq!(after[Corner::SW.idx()], before[Corner::SW.idx()]);
+    }
+
+    #[test]
+    fn welded_vertex_drag_moves_coincident_grid_corners() {
+        let (mut workspace, room) = workspace_with_populated_grid("welded-vertex-drag", 2, 2);
+        let target = Selection::Vertex(VertexRef {
+            room,
+            anchor: VertexAnchor::Floor {
+                sx: 0,
+                sz: 0,
+                corner: Corner::NE,
+            },
+        });
+
+        workspace.hovered_primitive = Some(target);
+        workspace.begin_primitive_drag(egui::Modifiers::NONE);
+        workspace.update_primitive_drag(-8.0);
+        workspace.end_primitive_drag();
+
+        assert_eq!(
+            floor_heights(&workspace, room, 0, 0)[Corner::NE.idx()],
+            HEIGHT_QUANTUM
+        );
+        assert_eq!(
+            floor_heights(&workspace, room, 1, 0)[Corner::NW.idx()],
+            HEIGHT_QUANTUM
+        );
+        assert_eq!(
+            floor_heights(&workspace, room, 0, 1)[Corner::SE.idx()],
+            HEIGHT_QUANTUM
+        );
+        assert_eq!(
+            floor_heights(&workspace, room, 1, 1)[Corner::SW.idx()],
+            HEIGHT_QUANTUM
+        );
+    }
+
+    #[test]
+    fn detached_vertex_drag_moves_only_seed_corner() {
+        let (mut workspace, room) = workspace_with_populated_grid("detached-vertex-drag", 2, 2);
+        workspace.vertex_connectivity = VertexConnectivity::Detached;
+        let target = Selection::Vertex(VertexRef {
+            room,
+            anchor: VertexAnchor::Floor {
+                sx: 0,
+                sz: 0,
+                corner: Corner::NE,
+            },
+        });
+
+        workspace.hovered_primitive = Some(target);
+        workspace.begin_primitive_drag(egui::Modifiers::NONE);
+        workspace.update_primitive_drag(-8.0);
+        workspace.end_primitive_drag();
+
+        assert_eq!(
+            floor_heights(&workspace, room, 0, 0)[Corner::NE.idx()],
+            HEIGHT_QUANTUM
+        );
+        assert_eq!(floor_heights(&workspace, room, 1, 0)[Corner::NW.idx()], 0);
+        assert_eq!(floor_heights(&workspace, room, 0, 1)[Corner::SE.idx()], 0);
+        assert_eq!(floor_heights(&workspace, room, 1, 1)[Corner::SW.idx()], 0);
     }
 
     #[test]
@@ -21892,6 +23163,25 @@ mod tests {
             }
         }
         grid
+    }
+
+    fn workspace_with_populated_grid(
+        label: &str,
+        width: u16,
+        depth: u16,
+    ) -> (EditorWorkspace, NodeId) {
+        let mut project = ProjectDocument::new(label);
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: populated_grid(width, depth),
+            },
+        );
+        (
+            EditorWorkspace::with_project(test_temp_dir(label), project),
+            room,
+        )
     }
 
     #[test]

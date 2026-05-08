@@ -706,9 +706,29 @@ impl SectorRender {
         self.0.floor_material()
     }
 
+    /// Floor split-triangle material slot, if present.
+    pub fn floor_triangle_material(self, index: usize) -> Option<u16> {
+        self.0.floor_triangle_material(index)
+    }
+
+    /// `true` if the floor split triangle is present.
+    pub fn floor_triangle_present(self, index: usize) -> bool {
+        self.0.floor_triangle_present(index)
+    }
+
     /// Ceiling material slot, if any.
     pub fn ceiling_material(self) -> Option<u16> {
         self.0.ceiling_material()
+    }
+
+    /// Ceiling split-triangle material slot, if present.
+    pub fn ceiling_triangle_material(self, index: usize) -> Option<u16> {
+        self.0.ceiling_triangle_material(index)
+    }
+
+    /// `true` if the ceiling split triangle is present.
+    pub fn ceiling_triangle_present(self, index: usize) -> bool {
+        self.0.ceiling_triangle_present(index)
     }
 
     /// Floor corner heights `[NW, NE, SE, SW]` for vertex emission.
@@ -721,6 +741,11 @@ impl SectorRender {
         self.0.floor_uvs().corners()
     }
 
+    /// Floor split-triangle UVs `[NW, NE, SE, SW]`.
+    pub fn floor_triangle_uvs(self, index: usize) -> [(u8, u8); 4] {
+        self.0.floor_triangle_uvs(index).corners()
+    }
+
     /// Ceiling corner heights `[NW, NE, SE, SW]` for vertex emission.
     pub fn ceiling_heights(self) -> [i32; 4] {
         self.0.ceiling_heights()
@@ -729,6 +754,11 @@ impl SectorRender {
     /// Ceiling UVs `[NW, NE, SE, SW]` for textured vertex emission.
     pub fn ceiling_uvs(self) -> [(u8, u8); 4] {
         self.0.ceiling_uvs().corners()
+    }
+
+    /// Ceiling split-triangle UVs `[NW, NE, SE, SW]`.
+    pub fn ceiling_triangle_uvs(self, index: usize) -> [(u8, u8); 4] {
+        self.0.ceiling_triangle_uvs(index).corners()
     }
 
     /// First global wall index for this sector.
@@ -760,6 +790,11 @@ impl SectorCollision {
     /// `true` if the floor face is walkable.
     pub fn floor_walkable(self) -> bool {
         self.0.floor_walkable()
+    }
+
+    /// `true` if the floor split triangle is present and walkable.
+    pub fn floor_triangle_walkable(self, index: usize) -> bool {
+        self.0.floor_triangle_walkable(index)
     }
 
     /// Floor diagonal split id (decides the triangulation used
@@ -809,6 +844,11 @@ impl WallRender {
         self.0.material()
     }
 
+    /// Wall shape id, see `psxed_format::world::wall_shape`.
+    pub fn shape(self) -> u16 {
+        self.0.shape()
+    }
+
     /// Wall heights `[bottom-left, bottom-right, top-right, top-left]`.
     pub fn heights(self) -> [i32; 4] {
         self.0.heights()
@@ -837,6 +877,11 @@ impl WallCollision {
     /// `true` when this wall blocks character movement.
     pub fn solid(self) -> bool {
         self.0.solid()
+    }
+
+    /// Wall shape id, see `psxed_format::world::wall_shape`.
+    pub fn shape(self) -> u16 {
+        self.0.shape()
     }
 
     /// Wall heights `[bottom-left, bottom-right, top-right, top-left]`

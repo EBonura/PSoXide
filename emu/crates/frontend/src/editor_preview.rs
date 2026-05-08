@@ -33,8 +33,8 @@ use psx_gte::scene as gte_scene;
 use psxed_project::playtest::playtest_streaming_chunk_config;
 use psxed_project::streaming::plan_generated_chunks;
 use psxed_project::{
-    spatial, GridDirection, GridSplit, GridUvTransform, NodeId, NodeKind, ProjectDocument,
-    ResourceData, ResourceId, Scene, SceneNode, Transform3, WorldGrid,
+    spatial, Corner, GridDirection, GridSplit, GridUvTransform, NodeId, NodeKind, ProjectDocument,
+    ResourceData, ResourceId, Scene, SceneNode, Transform3, WallCorner, WorldGrid,
 };
 
 use crate::editor_textures::{EditorTextures, MaterialSlot};
@@ -438,13 +438,30 @@ fn walk_room(
 
             if let Some(floor) = sector.floor.as_ref() {
                 let center = horizontal_face_center([x0, x1, z0, z1], floor.heights);
-                let shade = light_face(
-                    face_shade(project, floor.material, FALLBACK_FLOOR, textures),
+                let shade_a = light_face(
+                    face_shade(
+                        project,
+                        floor.triangle_material(0),
+                        FALLBACK_FLOOR,
+                        textures,
+                    ),
                     center,
                     &lights,
                     ambient,
                 );
-                let shade = fog.apply_shade(shade, face_depth(camera, center));
+                let shade_b = light_face(
+                    face_shade(
+                        project,
+                        floor.triangle_material(1),
+                        FALLBACK_FLOOR,
+                        textures,
+                    ),
+                    center,
+                    &lights,
+                    ambient,
+                );
+                let shade_a = fog.apply_shade(shade_a, face_depth(camera, center));
+                let shade_b = fog.apply_shade(shade_b, face_depth(camera, center));
                 let face_ref = psxed_ui::FaceRef {
                     room: room_id,
                     sx: x,
@@ -458,23 +475,43 @@ fn walk_room(
                     floor.heights,
                     floor.split,
                     floor.dropped_corner,
-                    floor.uv,
-                    shade,
+                    floor.triangle_uv(0),
+                    shade_a,
+                    floor.triangle_uv(1),
+                    shade_b,
                     /* flip_winding */ false,
                 );
-                if !emitted && should_draw_culled_face_outline(preview_backface_wireframe, shade) {
-                    push_culled_face_outline(grid, face_ref, shade, scratch);
+                if !emitted && should_draw_culled_face_outline(preview_backface_wireframe, shade_a)
+                {
+                    push_culled_face_outline(grid, face_ref, shade_a, scratch);
                 }
             }
             if let Some(ceiling) = sector.ceiling.as_ref() {
                 let center = horizontal_face_center([x0, x1, z0, z1], ceiling.heights);
-                let shade = light_face(
-                    face_shade(project, ceiling.material, FALLBACK_CEILING, textures),
+                let shade_a = light_face(
+                    face_shade(
+                        project,
+                        ceiling.triangle_material(0),
+                        FALLBACK_CEILING,
+                        textures,
+                    ),
                     center,
                     &lights,
                     ambient,
                 );
-                let shade = fog.apply_shade(shade, face_depth(camera, center));
+                let shade_b = light_face(
+                    face_shade(
+                        project,
+                        ceiling.triangle_material(1),
+                        FALLBACK_CEILING,
+                        textures,
+                    ),
+                    center,
+                    &lights,
+                    ambient,
+                );
+                let shade_a = fog.apply_shade(shade_a, face_depth(camera, center));
+                let shade_b = fog.apply_shade(shade_b, face_depth(camera, center));
                 let face_ref = psxed_ui::FaceRef {
                     room: room_id,
                     sx: x,
@@ -488,24 +525,23 @@ fn walk_room(
                     ceiling.heights,
                     ceiling.split,
                     ceiling.dropped_corner,
-                    ceiling.uv,
-                    shade,
+                    ceiling.triangle_uv(0),
+                    shade_a,
+                    ceiling.triangle_uv(1),
+                    shade_b,
                     // Ceiling normal points down; flipping the winding
                     // keeps backface-cullers happy and pins the inside
                     // surface as the visible side once we add culling.
                     /* flip_winding */
                     true,
                 );
-                if !emitted && should_draw_culled_face_outline(preview_backface_wireframe, shade) {
-                    push_culled_face_outline(grid, face_ref, shade, scratch);
+                if !emitted && should_draw_culled_face_outline(preview_backface_wireframe, shade_a)
+                {
+                    push_culled_face_outline(grid, face_ref, shade_a, scratch);
                 }
             }
-            for &(direction, edge) in &[
-                (GridDirection::North, WallEdge::North),
-                (GridDirection::East, WallEdge::East),
-                (GridDirection::South, WallEdge::South),
-                (GridDirection::West, WallEdge::West),
-            ] {
+            for direction in GridDirection::ALL {
+                let edge = WallEdge::from_direction(direction);
                 for (stack_idx, face) in sector.walls.get(direction).iter().enumerate() {
                     let center = wall_face_center([x0, x1, z0, z1], edge, face.heights);
                     let shade = light_face(
@@ -997,7 +1033,7 @@ fn horizontal_face_center(bounds: [i32; 4], heights: [i32; 4]) -> [i32; 3] {
 
 /// Centre of a wall face -- midpoint of the wall's bottom edge
 /// in X/Z, midpoint of the four corner heights for Y. Wall
-/// edges run along one of the cell's four cardinal sides; the
+/// edges run along one of the cell's cardinal or diagonal edges; the
 /// `WallEdge` picks which.
 fn wall_face_center(bounds: [i32; 4], edge: WallEdge, heights: [i32; 4]) -> [i32; 3] {
     let [x0, x1, z0, z1] = bounds;
@@ -1006,6 +1042,9 @@ fn wall_face_center(bounds: [i32; 4], edge: WallEdge, heights: [i32; 4]) -> [i32
         WallEdge::East => (x1, (z0 + z1) / 2),
         WallEdge::South => ((x0 + x1) / 2, z0),
         WallEdge::West => (x0, (z0 + z1) / 2),
+        WallEdge::NorthWestSouthEast | WallEdge::NorthEastSouthWest => {
+            ((x0 + x1) / 2, (z0 + z1) / 2)
+        }
     };
     let cy = (heights[0] as i64 + heights[1] as i64 + heights[2] as i64 + heights[3] as i64) / 4;
     [cx, cy as i32, cz]
@@ -1070,11 +1109,12 @@ fn push_horizontal_face(
     heights: [i32; 4],
     split: GridSplit,
     dropped_corner: Option<psxed_project::Corner>,
-    uv_transform: GridUvTransform,
-    shade: FaceShade,
+    uv_transform_a: GridUvTransform,
+    shade_a: FaceShade,
+    uv_transform_b: GridUvTransform,
+    shade_b: FaceShade,
     flip_winding: bool,
 ) -> bool {
-    use psxed_project::Corner;
     let [x0, x1, z0, z1] = bounds;
     let w_nw = [x0, heights[0], z1];
     let w_ne = [x1, heights[1], z1];
@@ -1087,56 +1127,35 @@ fn push_horizontal_face(
     let p_ne = gte_scene::project_vertex(world_to_view(w_ne));
     let p_se = gte_scene::project_vertex(world_to_view(w_se));
     let p_sw = gte_scene::project_vertex(world_to_view(w_sw));
-    let (uv_nw, uv_ne, uv_se, uv_sw) = if let FaceShade::Textured { .. } = shade {
-        (
-            PREVIEW_FLOOR_UVS[0],
-            PREVIEW_FLOOR_UVS[1],
-            PREVIEW_FLOOR_UVS[2],
-            PREVIEW_FLOOR_UVS[3],
-        )
-    } else {
-        ((0, 0), (0, 0), (0, 0), (0, 0))
-    };
-    let [uv_nw, uv_ne, uv_se, uv_sw] = uv_transform.apply_to_quad([uv_nw, uv_ne, uv_se, uv_sw]);
+    let a_uvs = material_sized_uvs(
+        shade_a,
+        uv_transform_a.apply_to_quad(textured_base_uvs(shade_a, PREVIEW_FLOOR_UVS)),
+    );
+    let b_uvs = material_sized_uvs(
+        shade_b,
+        uv_transform_b.apply_to_quad(textured_base_uvs(shade_b, PREVIEW_FLOOR_UVS)),
+    );
 
-    // Per split, pick the two triangles. Triangle A is the
-    // perimeter walk's "first" half, B the "second" -- under
-    // each split the dropped corner exists in exactly one of
-    // them so we can skip cleanly.
-    let (tri_a, tri_b) = match split {
-        GridSplit::NorthWestSouthEast => (
-            // (NW, NE, SE) and (NW, SE, SW) -- diagonal NW–SE.
-            (
-                [p_nw, p_ne, p_se],
-                [uv_nw, uv_ne, uv_se],
-                [Corner::NW, Corner::NE, Corner::SE],
-            ),
-            (
-                [p_nw, p_se, p_sw],
-                [uv_nw, uv_se, uv_sw],
-                [Corner::NW, Corner::SE, Corner::SW],
-            ),
-        ),
-        GridSplit::NorthEastSouthWest => (
-            // (NW, NE, SW) and (NE, SE, SW) -- diagonal NE–SW.
-            (
-                [p_nw, p_ne, p_sw],
-                [uv_nw, uv_ne, uv_sw],
-                [Corner::NW, Corner::NE, Corner::SW],
-            ),
-            (
-                [p_ne, p_se, p_sw],
-                [uv_ne, uv_se, uv_sw],
-                [Corner::NE, Corner::SE, Corner::SW],
-            ),
-        ),
-    };
+    let projected = [p_nw, p_ne, p_se, p_sw];
+    let tri_a_corners = psxed_project::horizontal_triangle_corners(split, 0);
+    let tri_b_corners = psxed_project::horizontal_triangle_corners(split, 1);
+    let tri_a = (
+        select_projected_corners(projected, tri_a_corners),
+        select_uv_corners(a_uvs, tri_a_corners),
+        tri_a_corners,
+    );
+    let tri_b = (
+        select_projected_corners(projected, tri_b_corners),
+        select_uv_corners(b_uvs, tri_b_corners),
+        tri_b_corners,
+    );
 
     let triangle_contains =
         |members: [Corner; 3], target: Corner| -> bool { members.contains(&target) };
     let emit_triangle = |scratch: &mut PreviewScratch,
                          verts: [psx_gte::scene::Projected; 3],
-                         uvs: [(u8, u8); 3]| {
+                         uvs: [(u8, u8); 3],
+                         shade: FaceShade| {
         if flip_winding {
             // Ceilings: forward `[0, 1, 2]` walk (CW from above
             // = CCW from below) so the inward normal points down.
@@ -1161,10 +1180,10 @@ fn push_horizontal_face(
         .unwrap_or(false);
     let mut emitted = false;
     if !skip_a {
-        emitted |= emit_triangle(scratch, tri_a.0, tri_a.1);
+        emitted |= emit_triangle(scratch, tri_a.0, tri_a.1, shade_a);
     }
     if !skip_b {
-        emitted |= emit_triangle(scratch, tri_b.0, tri_b.1);
+        emitted |= emit_triangle(scratch, tri_b.0, tri_b.1, shade_b);
     }
     emitted
 }
@@ -1178,6 +1197,21 @@ enum WallEdge {
     East,
     South,
     West,
+    NorthWestSouthEast,
+    NorthEastSouthWest,
+}
+
+impl WallEdge {
+    const fn from_direction(direction: GridDirection) -> Self {
+        match direction {
+            GridDirection::North => Self::North,
+            GridDirection::East => Self::East,
+            GridDirection::South => Self::South,
+            GridDirection::West => Self::West,
+            GridDirection::NorthWestSouthEast => Self::NorthWestSouthEast,
+            GridDirection::NorthEastSouthWest => Self::NorthEastSouthWest,
+        }
+    }
 }
 
 fn wall_side_visible(
@@ -1193,6 +1227,7 @@ fn wall_side_visible(
         WallEdge::East => x1.saturating_sub(cam_x),
         WallEdge::South => cam_z.saturating_sub(z0),
         WallEdge::West => cam_x.saturating_sub(x0),
+        WallEdge::NorthWestSouthEast | WallEdge::NorthEastSouthWest => return true,
     };
     match sidedness {
         psxed_project::MaterialFaceSidedness::Both => true,
@@ -1218,20 +1253,20 @@ fn push_wall_face(
     shade: FaceShade,
     camera_position: [i32; 3],
 ) -> bool {
-    use psxed_project::WallCorner;
     if !wall_side_visible(shade.sidedness(), bounds, edge, camera_position) {
         return false;
     }
     let render_shade = shade.with_sidedness(psxed_project::MaterialFaceSidedness::Both);
     let [x0, x1, z0, z1] = bounds;
-    // For each cardinal edge, "left" and "right" are picked so an
-    // observer standing inside the sector sees the wall the right
-    // way up.
+    // For each edge, "left" and "right" are picked so an observer
+    // standing inside the sector sees the wall the right way up.
     let (bl_xy, br_xy, tr_xy, tl_xy) = match edge {
         WallEdge::North => ((x0, z1), (x1, z1), (x1, z1), (x0, z1)),
         WallEdge::East => ((x1, z1), (x1, z0), (x1, z0), (x1, z1)),
         WallEdge::South => ((x1, z0), (x0, z0), (x0, z0), (x1, z0)),
         WallEdge::West => ((x0, z0), (x0, z1), (x0, z1), (x0, z0)),
+        WallEdge::NorthWestSouthEast => ((x0, z1), (x1, z0), (x1, z0), (x0, z1)),
+        WallEdge::NorthEastSouthWest => ((x1, z1), (x0, z0), (x0, z0), (x1, z1)),
     };
     let w_bl = [bl_xy.0, heights[0], bl_xy.1];
     let w_br = [br_xy.0, heights[1], br_xy.1];
@@ -1244,51 +1279,38 @@ fn push_wall_face(
     let p_br = gte_scene::project_vertex(world_to_view(w_br));
     let p_tr = gte_scene::project_vertex(world_to_view(w_tr));
     let p_tl = gte_scene::project_vertex(world_to_view(w_tl));
-    let (uv_bl, uv_br, uv_tr, uv_tl) = if let FaceShade::Textured { .. } = shade {
-        (
-            PREVIEW_WALL_UVS[0],
-            PREVIEW_WALL_UVS[1],
-            PREVIEW_WALL_UVS[2],
-            PREVIEW_WALL_UVS[3],
-        )
-    } else {
-        ((0, 0), (0, 0), (0, 0), (0, 0))
-    };
-    let [uv_bl, uv_br, uv_tr, uv_tl] = uv_transform.apply_to_quad([uv_bl, uv_br, uv_tr, uv_tl]);
+    let uvs = material_sized_uvs(
+        shade,
+        uv_transform.apply_to_quad(textured_base_uvs(shade, PREVIEW_WALL_UVS)),
+    );
 
-    // Two diagonals to choose between. `BlTr` is the renderer's
-    // legacy split; switch to `BrTl` only when BL or TR is the
-    // dropped corner so a triangle survives.
-    let use_br_tl = matches!(dropped_corner, Some(WallCorner::BL) | Some(WallCorner::TR));
-    let (tri_a, tri_b) = if use_br_tl {
+    let projected = [p_bl, p_br, p_tr, p_tl];
+    let shape = dropped_corner.map(psxed_project::wall_shape_for_dropped_corner);
+    let make_triangle = |members: [WallCorner; 3]| {
+        let members = [members[0], members[2], members[1]];
         (
-            // (BL, TL, BR) and (BR, TL, TR) -- diagonal BR-TL,
-            // wound so the owning-cell side is the front.
-            (
-                [p_bl, p_tl, p_br],
-                [uv_bl, uv_tl, uv_br],
-                [WallCorner::BL, WallCorner::TL, WallCorner::BR],
-            ),
-            (
-                [p_br, p_tl, p_tr],
-                [uv_br, uv_tl, uv_tr],
-                [WallCorner::BR, WallCorner::TL, WallCorner::TR],
-            ),
+            select_projected_wall_corners(projected, members),
+            select_uv_wall_corners(uvs, members),
+            members,
         )
+    };
+    let (tri_a, tri_b) = if let Some(shape) = shape {
+        let members =
+            psxed_project::wall_shape_triangle_corners(shape).unwrap_or(psxed_project::wall_triangle_corners(
+                GridSplit::NorthWestSouthEast,
+                0,
+            ));
+        (make_triangle(members), make_triangle(members))
     } else {
         (
-            // (BL, TL, TR) and (BL, TR, BR) -- diagonal BL-TR,
-            // wound so the owning-cell side is the front.
-            (
-                [p_bl, p_tl, p_tr],
-                [uv_bl, uv_tl, uv_tr],
-                [WallCorner::BL, WallCorner::TL, WallCorner::TR],
-            ),
-            (
-                [p_bl, p_tr, p_br],
-                [uv_bl, uv_tr, uv_br],
-                [WallCorner::BL, WallCorner::TR, WallCorner::BR],
-            ),
+            make_triangle(psxed_project::wall_triangle_corners(
+                GridSplit::NorthWestSouthEast,
+                0,
+            )),
+            make_triangle(psxed_project::wall_triangle_corners(
+                GridSplit::NorthWestSouthEast,
+                1,
+            )),
         )
     };
 
@@ -1317,13 +1339,87 @@ fn push_wall_face(
         }
     };
     let mut emitted = false;
-    if !skip(tri_a.2) {
+    if shape.is_some() || !skip(tri_a.2) {
         emitted |= emit_wall_triangle(scratch, tri_a.0, tri_a.1);
     }
-    if !skip(tri_b.2) {
+    if shape.is_none() && !skip(tri_b.2) {
         emitted |= emit_wall_triangle(scratch, tri_b.0, tri_b.1);
     }
     emitted
+}
+
+fn textured_base_uvs(shade: FaceShade, textured_uvs: [(u8, u8); 4]) -> [(u8, u8); 4] {
+    if matches!(shade, FaceShade::Textured { .. }) {
+        textured_uvs
+    } else {
+        [(0, 0); 4]
+    }
+}
+
+fn material_sized_uvs(shade: FaceShade, uvs: [(u8, u8); 4]) -> [(u8, u8); 4] {
+    match shade {
+        FaceShade::Textured { slot, .. } => [
+            material_sized_uv(slot, uvs[0]),
+            material_sized_uv(slot, uvs[1]),
+            material_sized_uv(slot, uvs[2]),
+            material_sized_uv(slot, uvs[3]),
+        ],
+        FaceShade::Flat { .. } => uvs,
+    }
+}
+
+fn material_sized_uv(slot: MaterialSlot, (u, v): (u8, u8)) -> (u8, u8) {
+    (
+        material_sized_uv_component(u, slot.texture_width),
+        material_sized_uv_component(v, slot.texture_height),
+    )
+}
+
+fn material_sized_uv_component(value: u8, size: u8) -> u8 {
+    let size = if size == 0 || size > GRID_TILE_UV {
+        GRID_TILE_UV
+    } else {
+        size
+    };
+    ((u16::from(value) * u16::from(size)) / u16::from(GRID_TILE_UV)).min(u16::from(u8::MAX)) as u8
+}
+
+fn select_projected_corners(
+    projected: [psx_gte::scene::Projected; 4],
+    corners: [Corner; 3],
+) -> [psx_gte::scene::Projected; 3] {
+    [
+        projected[corners[0].idx()],
+        projected[corners[1].idx()],
+        projected[corners[2].idx()],
+    ]
+}
+
+fn select_uv_corners(uvs: [(u8, u8); 4], corners: [Corner; 3]) -> [(u8, u8); 3] {
+    [
+        uvs[corners[0].idx()],
+        uvs[corners[1].idx()],
+        uvs[corners[2].idx()],
+    ]
+}
+
+fn select_projected_wall_corners(
+    projected: [psx_gte::scene::Projected; 4],
+    corners: [WallCorner; 3],
+) -> [psx_gte::scene::Projected; 3] {
+    [
+        projected[corners[0].idx()],
+        projected[corners[1].idx()],
+        projected[corners[2].idx()],
+    ]
+}
+
+fn select_uv_wall_corners(uvs: [(u8, u8); 4], corners: [WallCorner; 3]) -> [(u8, u8); 3] {
+    [
+        uvs[corners[0].idx()],
+        uvs[corners[1].idx()],
+        uvs[corners[2].idx()],
+    ]
 }
 
 /// Walk every placeable child node and stamp a small screen-space
@@ -2714,12 +2810,44 @@ fn push_selection_outline(
         psxed_ui::Selection::Face(face) => {
             push_face_outline(grid, face, role.face_style(), scratch);
         }
+        psxed_ui::Selection::Triangle(triangle) => {
+            push_triangle_outline(grid, triangle, role.face_style(), scratch);
+        }
         psxed_ui::Selection::Edge(edge) => {
             push_edge_outline(grid, edge, role.face_style(), scratch);
         }
         psxed_ui::Selection::Vertex(vertex) => {
             push_vertex_outline(grid, vertex, role.face_style(), scratch);
         }
+    }
+}
+
+fn push_triangle_outline(
+    grid: &WorldGrid,
+    triangle: psxed_ui::HorizontalTriangleRef,
+    style: FaceOutlineStyle,
+    scratch: &mut PreviewScratch,
+) {
+    let [c0, c1, c2] = triangle.corners;
+    let Some(w0) = psxed_ui::face_corner_world(grid, triangle.face_corner(c0)) else {
+        return;
+    };
+    let Some(w1) = psxed_ui::face_corner_world(grid, triangle.face_corner(c1)) else {
+        return;
+    };
+    let Some(w2) = psxed_ui::face_corner_world(grid, triangle.face_corner(c2)) else {
+        return;
+    };
+    let projected = [
+        gte_scene::project_vertex(world_to_view(w0)),
+        gte_scene::project_vertex(world_to_view(w1)),
+        gte_scene::project_vertex(world_to_view(w2)),
+    ];
+    if projected.iter().any(|p| p.sz == 0) {
+        return;
+    }
+    for i in 0..3 {
+        push_screen_line(scratch, projected[i], projected[(i + 1) % 3], style);
     }
 }
 
@@ -2883,7 +3011,8 @@ const fn floor_edge_a(dir: GridDirection) -> psxed_ui::Corner {
         GridDirection::East => psxed_ui::Corner::NE,
         GridDirection::South => psxed_ui::Corner::SE,
         GridDirection::West => psxed_ui::Corner::SW,
-        _ => psxed_ui::Corner::NW,
+        GridDirection::NorthWestSouthEast => psxed_ui::Corner::NW,
+        GridDirection::NorthEastSouthWest => psxed_ui::Corner::NE,
     }
 }
 
@@ -2893,7 +3022,8 @@ const fn floor_edge_b(dir: GridDirection) -> psxed_ui::Corner {
         GridDirection::East => psxed_ui::Corner::SE,
         GridDirection::South => psxed_ui::Corner::SW,
         GridDirection::West => psxed_ui::Corner::NW,
-        _ => psxed_ui::Corner::SE,
+        GridDirection::NorthWestSouthEast => psxed_ui::Corner::SE,
+        GridDirection::NorthEastSouthWest => psxed_ui::Corner::SW,
     }
 }
 
@@ -2992,6 +3122,20 @@ fn push_face_outline(
     for i in 0..4 {
         let a = projected[i];
         let b = projected[(i + 1) % 4];
+        push_screen_line(scratch, a, b, style);
+    }
+    let split = match face.kind {
+        psxed_ui::FaceKind::Floor => sector.and_then(|s| s.floor.as_ref()).map(|face| face.split),
+        psxed_ui::FaceKind::Ceiling => sector
+            .and_then(|s| s.ceiling.as_ref())
+            .map(|face| face.split),
+        psxed_ui::FaceKind::Wall { .. } => None,
+    };
+    if let Some(split) = split {
+        let (a, b) = match split {
+            GridSplit::NorthWestSouthEast => (projected[0], projected[2]),
+            GridSplit::NorthEastSouthWest => (projected[1], projected[3]),
+        };
         push_screen_line(scratch, a, b, style);
     }
 }
@@ -3231,13 +3375,14 @@ fn preview_geometry_depth_slot(avg_sz: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        face_side_visible, floor_anchored_model_origin, light_face, material_texture_tint,
-        node_room_local_origin, preview_lights, preview_model_reference, preview_player_reference,
-        preview_shadow_radius, preview_static_model_reference, preview_vertices_in_front,
-        push_wall_face, room_depth_slot, setup_gte_for_camera, shadow_depth_slot,
-        should_draw_culled_face_outline, FaceShade, MaterialSlot, PreviewFog, WallEdge,
-        PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
-        PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
+        face_side_visible, floor_anchored_model_origin, light_face, material_sized_uvs,
+        material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
+        preview_player_reference, preview_shadow_radius, preview_static_model_reference,
+        preview_vertices_in_front, push_wall_face, room_depth_slot, setup_gte_for_camera,
+        shadow_depth_slot, should_draw_culled_face_outline, FaceShade, MaterialSlot, PreviewFog,
+        WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
+        PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
+        PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -3662,6 +3807,8 @@ mod tests {
                 slot: MaterialSlot {
                     tpage_word: 0,
                     clut_word: 0,
+                    texture_width: 64,
+                    texture_height: 64,
                 },
                 tint: (128, 64, 32),
                 sidedness: psxed_project::MaterialFaceSidedness::Front,
@@ -3671,6 +3818,42 @@ mod tests {
 
         assert_eq!(unpack(flat), (64, 32, 16));
         assert_eq!(unpack(textured), (64, 32, 16));
+    }
+
+    #[test]
+    fn material_sized_uvs_stretch_32px_texture_once_by_default() {
+        let shade = FaceShade::Textured {
+            slot: MaterialSlot {
+                tpage_word: 0,
+                clut_word: 0,
+                texture_width: 32,
+                texture_height: 32,
+            },
+            tint: (128, 128, 128),
+            sidedness: psxed_project::MaterialFaceSidedness::Both,
+        };
+        assert_eq!(
+            material_sized_uvs(shade, PREVIEW_FLOOR_UVS),
+            [(0, 0), (32, 0), (32, 32), (0, 32)]
+        );
+    }
+
+    #[test]
+    fn material_sized_uvs_preserve_authored_repeat_count() {
+        let shade = FaceShade::Textured {
+            slot: MaterialSlot {
+                tpage_word: 0,
+                clut_word: 0,
+                texture_width: 32,
+                texture_height: 64,
+            },
+            tint: (128, 128, 128),
+            sidedness: psxed_project::MaterialFaceSidedness::Both,
+        };
+        assert_eq!(
+            material_sized_uvs(shade, [(0, 0), (128, 0), (128, GRID_TILE_UV), (0, GRID_TILE_UV)]),
+            [(0, 0), (64, 0), (64, GRID_TILE_UV), (0, GRID_TILE_UV)]
+        );
     }
 
     #[test]
