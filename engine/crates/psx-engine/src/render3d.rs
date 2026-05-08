@@ -2145,7 +2145,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             WorldCommandOrdering::LinkedSorted => self.insert_command_in_slot(command_index),
             WorldCommandOrdering::DeferredSorted => {}
             WorldCommandOrdering::DeferredSlotSorted => self.append_command_in_slot(command_index),
-            WorldCommandOrdering::Bucketed => self.append_command_in_slot(command_index),
+            WorldCommandOrdering::Bucketed => {}
         }
     }
 
@@ -2198,23 +2198,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 return;
             }
             prev = next as usize;
-        }
-    }
-
-    fn reverse_bucket_links(&mut self) {
-        let mut slot = 0;
-        while slot < OT_DEPTH {
-            let mut previous = WORLD_COMMAND_NONE;
-            let mut current = self.slot_heads[slot];
-            self.slot_tails[slot] = current;
-            while current != WORLD_COMMAND_NONE {
-                let next = self.commands[current as usize].next;
-                self.commands[current as usize].next = previous;
-                previous = current;
-                current = next;
-            }
-            self.slot_heads[slot] = previous;
-            slot += 1;
         }
     }
 
@@ -2321,14 +2304,29 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             return;
         }
 
+        if self.ordering == WorldCommandOrdering::Bucketed {
+            // OrderingTable::insert prepends packets. Walking submitted
+            // commands backwards preserves same-slot submission order without
+            // building/reversing per-slot linked lists.
+            let mut command_index = self.command_len;
+            while command_index != 0 {
+                command_index -= 1;
+                let command = self.commands[command_index];
+                if !command.packet_ptr.is_null() {
+                    // SAFETY: Commands are created only from primitive
+                    // arenas borrowed by submit methods. Those packets live
+                    // until after this pass flushes and the frame submits.
+                    unsafe {
+                        self.ot
+                            .add_raw_slot(command.slot, command.packet_ptr, command.words)
+                    };
+                }
+            }
+            return;
+        }
+
         if self.ordering == WorldCommandOrdering::DeferredSlotSorted {
             self.sort_slot_links();
-        } else if self.ordering == WorldCommandOrdering::Bucketed {
-            // OrderingTable::insert prepends packets. Bucketed mode appends
-            // submissions so reversing each bucket once here makes the final
-            // GPU DMA walk preserve same-slot submission order without doing
-            // a per-triangle sorted insertion.
-            self.reverse_bucket_links();
         }
 
         let mut slot = 0;
@@ -3554,7 +3552,7 @@ mod tests {
     }
 
     #[test]
-    fn bucketed_world_pass_reverses_flush_order_for_ot_prepend() {
+    fn bucketed_world_pass_keeps_commands_for_reverse_flush() {
         let mut ot_storage = OrderingTable::<8>::new();
         let mut ot = OtFrame::begin(&mut ot_storage);
         let mut commands = [WorldTriCommand::EMPTY; 3];
@@ -3582,17 +3580,11 @@ mod tests {
             0,
         );
 
-        assert_eq!(pass.slot_heads[4], 0);
-        assert_eq!(pass.commands[0].next, 1);
-        assert_eq!(pass.commands[1].next, 2);
-        assert_eq!(pass.commands[2].next, WORLD_COMMAND_NONE);
-
-        pass.reverse_bucket_links();
-
-        assert_eq!(pass.slot_heads[4], 2);
-        assert_eq!(pass.commands[2].next, 1);
-        assert_eq!(pass.commands[1].next, 0);
+        assert_eq!(pass.command_len, 3);
+        assert_eq!(pass.slot_heads[4], WORLD_COMMAND_NONE);
         assert_eq!(pass.commands[0].next, WORLD_COMMAND_NONE);
+        assert_eq!(pass.commands[1].next, WORLD_COMMAND_NONE);
+        assert_eq!(pass.commands[2].next, WORLD_COMMAND_NONE);
     }
 
     /// The canonical quad split must always share the `0`–`2`

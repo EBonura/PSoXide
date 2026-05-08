@@ -3,12 +3,12 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCharacterRecord, LevelMaterialRecord,
-    LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
-    LevelModelInstanceRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
-    LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord, LevelVisibleCellRecord,
-    LevelWeaponRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
-    RoomResidencyRecord, WeaponHitboxRecord,
+    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCharacterRecord, LevelFarVistaRecord,
+    LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
+    LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelRoomRecord, LevelRoomVisibilityRecord, LevelSkyRecord,
+    LevelVisibilityCellRecord, LevelVisibleCellRecord, LevelWeaponRecord, PlayerControllerRecord,
+    PlayerSpawnRecord, PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
 };
 
 pub static ASSETS: &[LevelAssetRecord] = &[];
