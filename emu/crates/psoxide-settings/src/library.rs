@@ -2,7 +2,7 @@
 //! on-disk cache.
 //!
 //! The scanner walks a configured root directory and classifies
-//! each file as either a disc image (`.bin`, `.cue`, `.iso`) or a
+//! each file as either a disc image (`.bin`, `.cue`, `.ccd`, `.iso`) or a
 //! side-loadable homebrew (`.exe`). For each hit it extracts
 //! cheap-to-read metadata so the UI can show a useful label
 //! without running the emulator:
@@ -51,6 +51,10 @@ pub enum GameKind {
     DiscIso,
     /// A `.cue` playlist pointing at one or more BIN files.
     DiscCue,
+    /// A CloneCD control sheet pointing at a raw `.img` image, with
+    /// optional `.sub` subchannel sidecar. `.img.ecm` sidecars can
+    /// be decoded at launch through an external converter.
+    DiscCcd,
     /// A PSX-EXE homebrew binary (our SDK's output + many demos).
     Exe,
     /// Didn't match any known format, or parsing failed. The
@@ -365,6 +369,7 @@ fn classify(path: &Path) -> Option<GameKind> {
         "bin" => Some(GameKind::DiscBin),
         "iso" => Some(GameKind::DiscIso),
         "cue" => Some(GameKind::DiscCue),
+        "ccd" => Some(GameKind::DiscCcd),
         "exe" => Some(GameKind::Exe),
         _ => None,
     }
@@ -447,6 +452,7 @@ fn parse_entry(path: &Path, kind: GameKind, size: u64, mtime: u64) -> LibraryEnt
             diagnostic: Some("ISO sector-size parsing not yet implemented".into()),
         },
         GameKind::DiscCue => parse_cue(path, size, mtime, &fallback_title),
+        GameKind::DiscCcd => parse_ccd(path, size, mtime, &fallback_title),
         GameKind::Exe => LibraryEntry {
             id: exe_fingerprint(path, &fallback_title),
             path: path.to_path_buf(),
@@ -561,6 +567,55 @@ fn parse_cue(path: &Path, size: u64, mtime: u64, fallback_title: &str) -> Librar
     entry
 }
 
+fn parse_ccd(path: &Path, size: u64, mtime: u64, fallback_title: &str) -> LibraryEntry {
+    let decoded_img = ccd_decoded_img_path(path);
+    if decoded_img.exists() {
+        let mut entry = parse_bin(&decoded_img, size, mtime, fallback_title);
+        entry.id = fingerprint(&[entry.id.as_bytes(), b"ccd"]);
+        entry.path = path.to_path_buf();
+        entry.kind = GameKind::DiscCcd;
+        entry.title = fallback_title.to_string();
+        entry.size = size;
+        entry.mtime = mtime;
+        entry.diagnostic = None;
+        return entry;
+    }
+
+    let ecm_img = ecm_sidecar_path(&decoded_img);
+    let diagnostic = if ecm_img.exists() {
+        Some("ECM-compressed CloneCD image; launch will decode via external unecm/ecm-uncompress if available".into())
+    } else {
+        Some(format!(
+            "missing CloneCD image sidecar {}",
+            decoded_img
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<image>.img")
+        ))
+    };
+
+    LibraryEntry {
+        id: fingerprint(&[fallback_title.as_bytes(), b"ccd"]),
+        path: path.to_path_buf(),
+        kind: GameKind::DiscCcd,
+        title: fallback_title.to_string(),
+        region: Region::Unknown,
+        size,
+        mtime,
+        diagnostic,
+    }
+}
+
+fn ccd_decoded_img_path(ccd_path: &Path) -> PathBuf {
+    ccd_path.with_extension("img")
+}
+
+fn ecm_sidecar_path(decoded_img_path: &Path) -> PathBuf {
+    let mut path = decoded_img_path.as_os_str().to_os_string();
+    path.push(".ecm");
+    PathBuf::from(path)
+}
+
 /// Cheap region heuristic -- look for any of the three canonical
 /// license strings anywhere in LBA 4's user data. The BIOS checks
 /// for these too; if none match, we say `Unknown` rather than
@@ -619,6 +674,26 @@ struct CueTrackSpec {
     file_pregap: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CcdToc {
+    tracks: Vec<CcdTrackSpec>,
+    leadout_lba: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CcdTrackSpec {
+    number: u8,
+    track_type: psx_iso::TrackType,
+    start_lba: u32,
+}
+
+#[derive(Default)]
+struct CcdEntry {
+    point: Option<i32>,
+    control: Option<i32>,
+    plba: Option<i32>,
+}
+
 fn starts_with_keyword(line: &str, keyword: &str) -> bool {
     let bytes = line.as_bytes();
     bytes.len() >= keyword.len() && bytes[..keyword.len()].eq_ignore_ascii_case(keyword.as_bytes())
@@ -651,6 +726,91 @@ fn parse_cue_msf(s: &str) -> u32 {
         return 0;
     }
     m * 60 * 75 + s * 75 + f
+}
+
+fn parse_ccd_int(s: &str) -> Option<i32> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        i32::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse().ok()
+    }
+}
+
+fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
+    let contents =
+        fs::read_to_string(ccd_path).map_err(|e| format!("{}: {e}", ccd_path.display()))?;
+    let mut tracks = Vec::new();
+    let mut leadout_lba = None;
+    let mut current: Option<CcdEntry> = None;
+
+    let flush_entry =
+        |entry: CcdEntry, tracks: &mut Vec<CcdTrackSpec>, leadout_lba: &mut Option<u32>| {
+            let Some(point) = entry.point else { return };
+            let Some(plba) = entry.plba else { return };
+            if point == 0xA2 {
+                if plba >= 0 {
+                    *leadout_lba = Some(plba as u32);
+                }
+                return;
+            }
+            let track_number = if (0x01..=0x99).contains(&point) {
+                psx_iso::bcd_to_bin(point as u8)
+            } else {
+                0xFF
+            };
+            if track_number == 0xFF || track_number == 0 || plba < 0 {
+                return;
+            }
+            let control = entry.control.unwrap_or(0);
+            let track_type = if control & 0x04 != 0 {
+                psx_iso::TrackType::Data
+            } else {
+                psx_iso::TrackType::Audio
+            };
+            tracks.push(CcdTrackSpec {
+                number: track_number,
+                track_type,
+                start_lba: plba as u32,
+            });
+        };
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[Entry ") {
+            if let Some(entry) = current.take() {
+                flush_entry(entry, &mut tracks, &mut leadout_lba);
+            }
+            current = Some(CcdEntry::default());
+            continue;
+        }
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "point" => entry.point = parse_ccd_int(value),
+            "control" => entry.control = parse_ccd_int(value),
+            "plba" => entry.plba = parse_ccd_int(value),
+            _ => {}
+        }
+    }
+    if let Some(entry) = current {
+        flush_entry(entry, &mut tracks, &mut leadout_lba);
+    }
+
+    tracks.sort_by_key(|track| track.number);
+    tracks.dedup_by_key(|track| track.number);
+    if tracks.is_empty() {
+        Err(format!("{} contains no track entries", ccd_path.display()))
+    } else {
+        Ok(CcdToc {
+            tracks,
+            leadout_lba,
+        })
+    }
 }
 
 fn detect_track1_embedded_pregap(bytes: &[u8]) -> u32 {
@@ -779,6 +939,127 @@ pub fn load_disc_from_cue(cue_path: &Path) -> Result<psx_iso::Disc, String> {
     Ok(psx_iso::Disc::from_tracks(tracks))
 }
 
+/// Load a full disc model from a CloneCD `.ccd` sheet and sibling
+/// `.img` image. If the decoded `.img` is absent but `.img.ecm`
+/// exists, this tries an external decoder (`PSOXIDE_UNECM`, `unecm`,
+/// then `ecm-uncompress`) and then loads the decoded image.
+pub fn load_disc_from_ccd(ccd_path: &Path) -> Result<psx_iso::Disc, String> {
+    let candidates = ecm_decoder_candidates();
+    load_disc_from_ccd_with_decoders(ccd_path, &candidates)
+}
+
+fn load_disc_from_ccd_with_decoders(
+    ccd_path: &Path,
+    decoder_candidates: &[PathBuf],
+) -> Result<psx_iso::Disc, String> {
+    let toc = parse_ccd_toc(ccd_path)?;
+    let img_path = resolve_ccd_img_for_load(ccd_path, decoder_candidates)?;
+    let image = fs::read(&img_path).map_err(|e| format!("{}: {e}", img_path.display()))?;
+    let image_sectors = image.len() / psx_iso::SECTOR_BYTES;
+    if image_sectors == 0 {
+        return Err(format!(
+            "{} is too small to contain a raw PS1 sector",
+            img_path.display()
+        ));
+    }
+    if image.len() % psx_iso::SECTOR_BYTES != 0 {
+        return Err(format!(
+            "{} is not a whole number of raw 2352-byte sectors",
+            img_path.display()
+        ));
+    }
+
+    let mut tracks = Vec::with_capacity(toc.tracks.len());
+    for (idx, spec) in toc.tracks.iter().enumerate() {
+        let start = spec.start_lba as usize;
+        let next_lba = toc
+            .tracks
+            .get(idx + 1)
+            .map(|track| track.start_lba)
+            .or(toc.leadout_lba)
+            .unwrap_or(image_sectors as u32);
+        let end = (next_lba as usize).min(image_sectors);
+        if start >= image_sectors || end <= start {
+            return Err(format!(
+                "{} track {} points outside {} sectors",
+                ccd_path.display(),
+                spec.number,
+                image_sectors
+            ));
+        }
+        let byte_start = start * psx_iso::SECTOR_BYTES;
+        let byte_end = end * psx_iso::SECTOR_BYTES;
+        tracks.push(psx_iso::Track {
+            number: spec.number,
+            track_type: spec.track_type,
+            start_lba: spec.start_lba,
+            sector_count: (end - start) as u32,
+            pregap: 0,
+            file_pregap: 0,
+            bytes: image[byte_start..byte_end].to_vec(),
+        });
+    }
+
+    Ok(psx_iso::Disc::from_tracks(tracks))
+}
+
+fn resolve_ccd_img_for_load(
+    ccd_path: &Path,
+    decoder_candidates: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let decoded_img = ccd_decoded_img_path(ccd_path);
+    if decoded_img.exists() {
+        return Ok(decoded_img);
+    }
+    let ecm_img = ecm_sidecar_path(&decoded_img);
+    if !ecm_img.exists() {
+        return Err(format!(
+            "{} needs sibling {} or {}",
+            ccd_path.display(),
+            decoded_img.display(),
+            ecm_img.display()
+        ));
+    }
+    decode_ecm_external(&ecm_img, &decoded_img, decoder_candidates)?;
+    Ok(decoded_img)
+}
+
+fn ecm_decoder_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = std::env::var("PSOXIDE_UNECM") {
+        if !path.trim().is_empty() {
+            candidates.push(PathBuf::from(path));
+        }
+    }
+    candidates.push(PathBuf::from("unecm"));
+    candidates.push(PathBuf::from("ecm-uncompress"));
+    candidates
+}
+
+fn decode_ecm_external(
+    ecm_path: &Path,
+    decoded_img_path: &Path,
+    decoder_candidates: &[PathBuf],
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for decoder in decoder_candidates {
+        match std::process::Command::new(decoder)
+            .arg(ecm_path)
+            .arg(decoded_img_path)
+            .status()
+        {
+            Ok(status) if status.success() && decoded_img_path.exists() => return Ok(()),
+            Ok(status) => failures.push(format!("{} exited with {status}", decoder.display())),
+            Err(e) => failures.push(format!("{}: {e}", decoder.display())),
+        }
+    }
+    Err(format!(
+        "{} is ECM-compressed and no external decoder succeeded; install unecm/ecm-uncompress or set PSOXIDE_UNECM. Tried: {}",
+        ecm_path.display(),
+        failures.join("; ")
+    ))
+}
+
 /// Parse a CUE sheet to find the path of its first data track's BIN.
 /// Used to collapse CUE + BIN pairs in the UI and to inherit region
 /// metadata from the bootable track during library scans.
@@ -788,6 +1069,17 @@ pub fn primary_bin_from_cue(cue_path: &Path) -> Option<PathBuf> {
         .into_iter()
         .find(|track| track.track_type == psx_iso::TrackType::Data)
         .map(|track| track.path)
+}
+
+/// Return the decoded `.img` sidecar for a `.ccd` sheet, or the
+/// `.img.ecm` sidecar when the decoded image has not been created yet.
+pub fn primary_image_from_ccd(ccd_path: &Path) -> Option<PathBuf> {
+    let decoded_img = ccd_decoded_img_path(ccd_path);
+    if decoded_img.exists() {
+        return Some(decoded_img);
+    }
+    let ecm_img = ecm_sidecar_path(&decoded_img);
+    ecm_img.exists().then_some(ecm_img)
 }
 
 /// FNV-1a-64 over any number of input slices, rendered as a
@@ -884,6 +1176,7 @@ mod tests {
         assert_eq!(classify(Path::new("G.BIN")), Some(GameKind::DiscBin));
         assert_eq!(classify(Path::new("g.iso")), Some(GameKind::DiscIso));
         assert_eq!(classify(Path::new("g.cue")), Some(GameKind::DiscCue));
+        assert_eq!(classify(Path::new("g.ccd")), Some(GameKind::DiscCcd));
         assert_eq!(classify(Path::new("hello.exe")), Some(GameKind::Exe));
         assert_eq!(classify(Path::new("notes.txt")), None);
         assert_eq!(classify(Path::new("NOEXT")), None);
@@ -1127,6 +1420,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_entry_disc_ccd_uses_decoded_img_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let ccd_path = tmp.path().join("Tomb Test.ccd");
+        let img_path = tmp.path().join("Tomb Test.img");
+        write_test_disc(
+            &img_path,
+            "TOMB_TEST",
+            b"    Licensed  by   Sony Computer Entertainment America",
+        );
+        std::fs::write(
+            &ccd_path,
+            concat!(
+                "[Entry 0]\n",
+                "Point=0x01\n",
+                "Control=0x04\n",
+                "PLBA=0\n",
+                "[Entry 1]\n",
+                "Point=0xa2\n",
+                "Control=0x00\n",
+                "PLBA=20\n",
+            ),
+        )
+        .unwrap();
+
+        let entry = parse_entry(&ccd_path, GameKind::DiscCcd, 1234, 5678);
+        assert_eq!(entry.kind, GameKind::DiscCcd);
+        assert_eq!(entry.title, "Tomb Test");
+        assert_eq!(entry.region, Region::NtscU);
+        assert_eq!(entry.path, ccd_path);
+        assert_eq!(entry.size, 1234);
+        assert_eq!(entry.mtime, 5678);
+        assert_eq!(entry.diagnostic, None);
+    }
+
+    #[test]
+    fn parse_entry_disc_ccd_reports_ecm_sidecar() {
+        let tmp = TempDir::new().unwrap();
+        let ccd_path = tmp.path().join("Compressed.ccd");
+        std::fs::write(tmp.path().join("Compressed.img.ecm"), b"ecm").unwrap();
+        std::fs::write(&ccd_path, "[Entry 0]\nPoint=0x01\nControl=0x04\nPLBA=0\n").unwrap();
+
+        let entry = parse_entry(&ccd_path, GameKind::DiscCcd, 1234, 5678);
+        assert_eq!(entry.kind, GameKind::DiscCcd);
+        assert_eq!(entry.title, "Compressed");
+        assert_eq!(entry.region, Region::Unknown);
+        assert!(entry
+            .diagnostic
+            .as_deref()
+            .is_some_and(|msg| msg.contains("ECM-compressed")));
+    }
+
+    #[test]
     fn load_disc_from_cue_positions_later_track_after_pregap() {
         let tmp = TempDir::new().unwrap();
         let cue_path = tmp.path().join("disc.cue");
@@ -1161,6 +1506,83 @@ mod tests {
         assert_eq!(pos.relative_msf, (0, 0, 1));
         assert!(disc.read_sector_raw(10).is_none());
         assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xAB);
+    }
+
+    #[test]
+    fn load_disc_from_ccd_slices_single_img_by_toc() {
+        let tmp = TempDir::new().unwrap();
+        let ccd_path = tmp.path().join("disc.ccd");
+        let img_path = tmp.path().join("disc.img");
+        let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 14];
+        image[9 * psx_iso::SECTOR_BYTES] = 0x11;
+        image[10 * psx_iso::SECTOR_BYTES] = 0xAB;
+        std::fs::write(&img_path, image).unwrap();
+        std::fs::write(
+            &ccd_path,
+            concat!(
+                "[Entry 0]\n",
+                "Point=0x01\n",
+                "Control=0x04\n",
+                "PLBA=0\n",
+                "[Entry 1]\n",
+                "Point=0x02\n",
+                "Control=0x00\n",
+                "PLBA=10\n",
+                "[Entry 2]\n",
+                "Point=0xa2\n",
+                "Control=0x00\n",
+                "PLBA=14\n",
+            ),
+        )
+        .unwrap();
+
+        let disc = load_disc_from_ccd(&ccd_path).unwrap();
+        assert_eq!(disc.track_count(), 2);
+        assert_eq!(disc.track(1).unwrap().track_type, psx_iso::TrackType::Data);
+        assert_eq!(disc.track(2).unwrap().track_type, psx_iso::TrackType::Audio);
+        assert_eq!(disc.read_sector_raw(9).unwrap()[0], 0x11);
+        assert_eq!(disc.read_sector_raw(10).unwrap()[0], 0xAB);
+        let pos = disc.track_position_for_lba(10).unwrap();
+        assert_eq!(pos.track_number, 2);
+        assert_eq!(pos.index_number, 1);
+    }
+
+    #[test]
+    fn parse_ccd_toc_decodes_bcd_track_numbers() {
+        let tmp = TempDir::new().unwrap();
+        let ccd_path = tmp.path().join("many.ccd");
+        std::fs::write(&ccd_path, "[Entry 0]\nPoint=0x10\nControl=0x00\nPLBA=123\n").unwrap();
+
+        let toc = parse_ccd_toc(&ccd_path).unwrap();
+        assert_eq!(toc.tracks.len(), 1);
+        assert_eq!(toc.tracks[0].number, 10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_disc_from_ccd_can_use_external_ecm_decoder() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let ccd_path = tmp.path().join("disc.ccd");
+        let ecm_path = tmp.path().join("disc.img.ecm");
+        let decoder_path = tmp.path().join("fake-unecm.sh");
+        let mut image = vec![0u8; psx_iso::SECTOR_BYTES * 2];
+        image[0] = 0xCD;
+        std::fs::write(&ecm_path, image).unwrap();
+        std::fs::write(
+            &ccd_path,
+            "[Entry 0]\nPoint=0x01\nControl=0x04\nPLBA=0\n[Entry 1]\nPoint=0xa2\nPLBA=2\n",
+        )
+        .unwrap();
+        std::fs::write(&decoder_path, "#!/bin/sh\ncp \"$1\" \"$2\"\n").unwrap();
+        let mut perms = std::fs::metadata(&decoder_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&decoder_path, perms).unwrap();
+
+        let disc = load_disc_from_ccd_with_decoders(&ccd_path, &[decoder_path]).unwrap();
+        assert_eq!(disc.read_sector_raw(0).unwrap()[0], 0xCD);
+        assert!(tmp.path().join("disc.img").exists());
     }
 
     #[test]
