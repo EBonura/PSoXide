@@ -359,7 +359,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelModelRecord {{ name: {:?}, mesh_asset: AssetId({}), texture_asset: {texture}, clip_first: ModelClipTableIndex({}), clip_count: {}, default_clip: ModelClipIndex({}), socket_first: ModelSocketIndex({}), socket_count: {}, world_height: {}, flags: 0 }},",
+            "    LevelModelRecord {{ name: {:?}, mesh_asset: AssetId({}), texture_asset: {texture}, clip_first: ModelClipTableIndex({}), clip_count: {}, default_clip: ModelClipIndex({}), socket_first: ModelSocketIndex({}), socket_count: {}, world_height: {}, collision_radius: {}, flags: 0 }},",
             model.name,
             model.mesh_asset_index,
             model.clip_first,
@@ -368,6 +368,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             model.socket_first,
             model.socket_count,
             model.world_height,
+            model.collision_radius,
         );
     }
     out.push_str("];\n\n");

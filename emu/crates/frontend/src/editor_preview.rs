@@ -22,6 +22,7 @@
 use std::sync::Mutex;
 
 use emulator_core::gpu::GpuCmdLogEntry;
+use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::TriFlat;
 use psx_gpu::prim::TriTextured;
@@ -43,11 +44,33 @@ use psxed_ui::ViewportCameraState;
 /// 4096-cap caps the per-frame primitive count at a comfortable
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
+/// Model scratch mirrors editor-playtest's runtime model caps so the
+/// editor preview exercises the same overflow behavior.
+const PREVIEW_MODEL_VERTEX_CAP: usize = 1024;
+const PREVIEW_MODEL_COMMAND_CAP: usize = TRI_CAP;
+/// Cap on placed model-rendering nodes the editor preview will
+/// render in one frame. Excess instances skip silently (the
+/// manifest hasn't filtered them) -- keeps a runaway scene from
+/// busting the per-frame budget.
+const MAX_PREVIEW_MODEL_INSTANCES: usize = 8;
+/// Cap on joints any one previewed model can carry. Matches
+/// the runtime `JOINT_CAP` so a model that renders in
+/// editor-playtest also renders here.
+const PREVIEW_JOINT_CAP: usize = 32;
 /// Ordering-table depth -- tradeoff between Z resolution and the
 /// per-frame chain-walk cost. 256 slots is plenty for an orbit-camera
 /// view where the front-to-back range is a small multiple of the
 /// sector size.
 const OT_DEPTH: usize = 256;
+const PREVIEW_GEOMETRY_SLOT_MIN: usize = 1;
+const PREVIEW_GEOMETRY_SLOT_MAX: usize = OT_DEPTH - 2;
+const PREVIEW_SHADOW_DEPTH_BIAS: u32 = 128;
+const PREVIEW_SHADOW_FLOOR_LIFT: i32 = 4;
+const PREVIEW_SHADOW_RADIUS_SCALE_NUM: i32 = 5;
+const PREVIEW_SHADOW_RADIUS_SCALE_DEN: i32 = 4;
+const PREVIEW_SHADOW_RADIUS_MIN: i32 = 160;
+const PREVIEW_SHADOW_RADIUS_MAX: i32 = 320;
+const PREVIEW_SHADOW_UV_MAX: u8 = 63;
 
 /// Default screen geometry -- matches the PSX 320×240 framebuffer the
 /// editor's HwRenderer is sized to display.
@@ -57,8 +80,6 @@ const SCREEN_CX: i32 = SCREEN_W / 2;
 const SCREEN_CY: i32 = SCREEN_H / 2;
 /// Projection-plane distance (focal length). Bigger = narrower FOV.
 const PROJ_H: i32 = 320;
-const PREVIEW_PROJECTION: psx_engine::WorldProjection =
-    psx_engine::WorldProjection::new(SCREEN_CX as i16, SCREEN_CY as i16, PROJ_H, 1);
 const GRID_TILE_UV: u8 = 64;
 const PREVIEW_FLOOR_UVS: [(u8, u8); 4] = [
     (0, 0),
@@ -89,6 +110,8 @@ struct PreviewScratch {
     ot: OrderingTable<OT_DEPTH>,
     tris: [TriFlat; TRI_CAP],
     tex_tris: [TriTextured; TRI_CAP],
+    model_vertices: [psx_engine::ProjectedVertex; PREVIEW_MODEL_VERTEX_CAP],
+    model_joint_transforms: [psx_engine::JointViewTransform; PREVIEW_JOINT_CAP],
     /// `0` = next free slot in `tris` (flat-shaded);
     /// `tex_used` = next free slot in `tex_tris`.
     used: usize,
@@ -120,6 +143,8 @@ static SCRATCH: Mutex<PreviewScratch> = Mutex::new(PreviewScratch {
     ot: OrderingTable::new(),
     tris: [EMPTY_TRI; TRI_CAP],
     tex_tris: [EMPTY_TEX_TRI; TRI_CAP],
+    model_vertices: [psx_engine::ProjectedVertex::new(0, 0, 0); PREVIEW_MODEL_VERTEX_CAP],
+    model_joint_transforms: [psx_engine::JointViewTransform::ZERO; PREVIEW_JOINT_CAP],
     used: 0,
     tex_used: 0,
     overlay_lines: Vec::new(),
@@ -145,6 +170,7 @@ pub fn build_phase1_frame(
     project: &ProjectDocument,
     camera: ViewportCameraState,
     preview_fog: bool,
+    preview_backface_wireframe: bool,
     selected: psxed_project::NodeId,
     hovered_primitive: Option<psxed_ui::Selection>,
     selected_primitive: Option<psxed_ui::Selection>,
@@ -181,6 +207,7 @@ pub fn build_phase1_frame(
         textures,
         world_camera,
         fog,
+        preview_backface_wireframe,
         &mut scratch,
     );
     push_streaming_chunk_boundaries(grid, &mut scratch);
@@ -217,11 +244,13 @@ pub fn build_phase1_frame(
 
     walk_model_instances(
         project,
+        room_id,
         grid,
         textures,
         assets,
         selected,
         &world_camera,
+        fog,
         &mut scratch,
     );
 
@@ -315,8 +344,8 @@ fn setup_gte_for_camera(camera: ViewportCameraState) -> psx_engine::WorldCamera 
     gte_scene::set_projection_plane(PROJ_H as u16);
 
     // Build a `WorldCamera` matching the same basis so the
-    // model preview path can compose joint transforms with
-    // `psx_engine::compute_joint_view_transform`.
+    // engine model pass composes joint transforms against the
+    // same view matrix the editor geometry just loaded.
     psx_engine::WorldCamera::from_basis(
         psx_engine::WorldProjection::new(SCREEN_CX as i16, SCREEN_CY as i16, PROJ_H, 32),
         psx_engine::WorldVertex::new(cam_x, cam_y, cam_z),
@@ -372,6 +401,7 @@ fn walk_room(
     textures: &EditorTextures,
     camera: psx_engine::WorldCamera,
     fog: PreviewFog,
+    preview_backface_wireframe: bool,
     scratch: &mut PreviewScratch,
 ) {
     let s = grid.sector_size;
@@ -400,7 +430,13 @@ fn walk_room(
                     ambient,
                 );
                 let shade = fog.apply_shade(shade, face_depth(camera, center));
-                push_horizontal_face(
+                let face_ref = psxed_ui::FaceRef {
+                    room: room_id,
+                    sx: x,
+                    sz: z,
+                    kind: psxed_ui::FaceKind::Floor,
+                };
+                let emitted = push_horizontal_face(
                     scratch,
                     [x0, x1, z0, z1],
                     floor.heights,
@@ -410,6 +446,9 @@ fn walk_room(
                     shade,
                     /* flip_winding */ false,
                 );
+                if !emitted && should_draw_culled_face_outline(preview_backface_wireframe, shade) {
+                    push_culled_face_outline(grid, face_ref, shade, scratch);
+                }
             }
             if let Some(ceiling) = sector.ceiling.as_ref() {
                 let center = horizontal_face_center([x0, x1, z0, z1], ceiling.heights);
@@ -420,7 +459,13 @@ fn walk_room(
                     ambient,
                 );
                 let shade = fog.apply_shade(shade, face_depth(camera, center));
-                push_horizontal_face(
+                let face_ref = psxed_ui::FaceRef {
+                    room: room_id,
+                    sx: x,
+                    sz: z,
+                    kind: psxed_ui::FaceKind::Ceiling,
+                };
+                let emitted = push_horizontal_face(
                     scratch,
                     [x0, x1, z0, z1],
                     ceiling.heights,
@@ -434,6 +479,9 @@ fn walk_room(
                     /* flip_winding */
                     true,
                 );
+                if !emitted && should_draw_culled_face_outline(preview_backface_wireframe, shade) {
+                    push_culled_face_outline(grid, face_ref, shade, scratch);
+                }
             }
             for &(direction, edge) in &[
                 (GridDirection::North, WallEdge::North),
@@ -441,7 +489,7 @@ fn walk_room(
                 (GridDirection::South, WallEdge::South),
                 (GridDirection::West, WallEdge::West),
             ] {
-                for face in sector.walls.get(direction) {
+                for (stack_idx, face) in sector.walls.get(direction).iter().enumerate() {
                     let center = wall_face_center([x0, x1, z0, z1], edge, face.heights);
                     let shade = light_face(
                         face_shade(project, face.material, FALLBACK_WALL, textures),
@@ -450,7 +498,16 @@ fn walk_room(
                         ambient,
                     );
                     let shade = fog.apply_shade(shade, face_depth(camera, center));
-                    push_wall_face(
+                    let face_ref = psxed_ui::FaceRef {
+                        room: room_id,
+                        sx: x,
+                        sz: z,
+                        kind: psxed_ui::FaceKind::Wall {
+                            dir: direction,
+                            stack: stack_idx as u8,
+                        },
+                    };
+                    let emitted = push_wall_face(
                         scratch,
                         [x0, x1, z0, z1],
                         edge,
@@ -460,6 +517,11 @@ fn walk_room(
                         shade,
                         [camera.position.x, camera.position.y, camera.position.z],
                     );
+                    if !emitted
+                        && should_draw_culled_face_outline(preview_backface_wireframe, shade)
+                    {
+                        push_culled_face_outline(grid, face_ref, shade, scratch);
+                    }
                 }
             }
 
@@ -526,6 +588,26 @@ fn face_shade(
         rgb: tint,
         sidedness,
     }
+}
+
+fn push_culled_face_outline(
+    grid: &WorldGrid,
+    face: psxed_ui::FaceRef,
+    shade: FaceShade,
+    scratch: &mut PreviewScratch,
+) {
+    if !should_draw_culled_face_outline(true, shade) {
+        return;
+    }
+    push_face_outline(grid, face, FACE_OUTLINE_CULLED, scratch);
+}
+
+fn should_draw_culled_face_outline(preview_backface_wireframe: bool, shade: FaceShade) -> bool {
+    preview_backface_wireframe
+        && !matches!(
+            shade.sidedness(),
+            psxed_project::MaterialFaceSidedness::Both
+        )
 }
 
 fn material_texture_tint(project: &ProjectDocument, material: ResourceId) -> (u8, u8, u8) {
@@ -936,7 +1018,7 @@ fn push_horizontal_face(
     uv_transform: GridUvTransform,
     shade: FaceShade,
     flip_winding: bool,
-) {
+) -> bool {
     use psxed_project::Corner;
     let [x0, x1, z0, z1] = bounds;
     let p_nw = gte_scene::project_vertex(world_to_view([x0, heights[0], z1]));
@@ -996,7 +1078,7 @@ fn push_horizontal_face(
         if flip_winding {
             // Ceilings: forward `[0, 1, 2]` walk (CW from above
             // = CCW from below) so the inward normal points down.
-            emit_face_tri(scratch, verts, uvs, shade);
+            emit_face_tri(scratch, verts, uvs, shade)
         } else {
             // Floors: reverse to `[0, 2, 1]` (CCW from above),
             // matching the legacy non-flip winding.
@@ -1005,7 +1087,7 @@ fn push_horizontal_face(
                 [verts[0], verts[2], verts[1]],
                 [uvs[0], uvs[2], uvs[1]],
                 shade,
-            );
+            )
         }
     };
 
@@ -1015,12 +1097,14 @@ fn push_horizontal_face(
     let skip_b = dropped_corner
         .map(|c| triangle_contains(tri_b.2, c))
         .unwrap_or(false);
+    let mut emitted = false;
     if !skip_a {
-        emit_triangle(scratch, tri_a.0, tri_a.1);
+        emitted |= emit_triangle(scratch, tri_a.0, tri_a.1);
     }
     if !skip_b {
-        emit_triangle(scratch, tri_b.0, tri_b.1);
+        emitted |= emit_triangle(scratch, tri_b.0, tri_b.1);
     }
+    emitted
 }
 
 /// Which edge of the sector this wall sits on. The renderer needs
@@ -1070,10 +1154,10 @@ fn push_wall_face(
     uv_transform: GridUvTransform,
     shade: FaceShade,
     camera_position: [i32; 3],
-) {
+) -> bool {
     use psxed_project::WallCorner;
     if !wall_side_visible(shade.sidedness(), bounds, edge, camera_position) {
-        return;
+        return false;
     }
     let render_shade = shade.with_sidedness(psxed_project::MaterialFaceSidedness::Both);
     let [x0, x1, z0, z1] = bounds;
@@ -1157,17 +1241,19 @@ fn push_wall_face(
                 [verts[0], verts[2], verts[1]],
                 [uvs[0], uvs[2], uvs[1]],
                 render_shade,
-            );
+            )
         } else {
-            emit_face_tri(scratch, verts, uvs, render_shade);
+            emit_face_tri(scratch, verts, uvs, render_shade)
         }
     };
+    let mut emitted = false;
     if !skip(tri_a.2) {
-        emit_wall_triangle(scratch, tri_a.0, tri_a.1);
+        emitted |= emit_wall_triangle(scratch, tri_a.0, tri_a.1);
     }
     if !skip(tri_b.2) {
-        emit_wall_triangle(scratch, tri_b.0, tri_b.1);
+        emitted |= emit_wall_triangle(scratch, tri_b.0, tri_b.1);
     }
+    emitted
 }
 
 /// Walk every placeable child node and stamp a small screen-space
@@ -1246,16 +1332,6 @@ fn walk_entities(
     }
 }
 
-/// Cap on placed model-rendering nodes the editor preview will
-/// render in one frame. Excess instances skip silently (the
-/// manifest hasn't filtered them) -- keeps a runaway scene from
-/// busting the per-frame budget.
-const MAX_PREVIEW_MODEL_INSTANCES: usize = 8;
-/// Cap on joints any one previewed model can carry. Matches
-/// the runtime `JOINT_CAP` so a model that renders in
-/// editor-playtest also renders here.
-const PREVIEW_JOINT_CAP: usize = 32;
-
 /// Per-frame tick used to advance animation phase for the
 /// editor's looping model preview. Bumped once per
 /// `build_phase1_frame` call. PSX angle / phase math needs
@@ -1282,26 +1358,30 @@ struct PreviewModelInstance<'a> {
     origin: psx_engine::WorldVertex,
     /// Y-axis rotation matrix derived from the node's yaw.
     instance_rotation: Mat3I16,
+    /// Lit and fogged model texture tint, matching editor-playtest's
+    /// single-material actor lighting path.
+    tint: (u8, u8, u8),
 }
 
 /// Render every Model-backed legacy `MeshInstance` or component
 /// `Entity` in the scene as a real textured animated model.
 /// Mirrors the runtime path in `editor-playtest`: parse `.psxmdl`
 /// + `.psxt` + `.psxanim`, upload atlas (lazily -- done by
-/// `EditorTextures::refresh_models`), compose joint transforms via
-/// `compute_joint_view_transform`, project per-vertex, emit textured
-/// triangles into the OT.
+/// `EditorTextures::refresh_models`), then submit the model through
+/// `psx-engine`'s canonical model render pass.
 ///
 /// Models with bad/missing data are skipped silently -- the
 /// editor inspector + cook validation surface those errors
 /// elsewhere; the preview just keeps drawing what it can.
 fn walk_model_instances(
     project: &ProjectDocument,
+    room_id: psxed_project::NodeId,
     grid: &WorldGrid,
     textures: &EditorTextures,
     assets: &crate::editor_assets::EditorAssets,
     selected: psxed_project::NodeId,
     camera: &psx_engine::WorldCamera,
+    fog: PreviewFog,
     scratch: &mut PreviewScratch,
 ) {
     // Bump the global preview tick once per frame so the
@@ -1315,6 +1395,8 @@ fn walk_model_instances(
     // active, where it lives in the world) lives in
     // `instances_meta`.
     let scene = project.active_scene();
+    let lights = collect_preview_lights(project, room_id, grid);
+    let ambient = grid.ambient_color;
     let mut instances_meta: Vec<InstanceMeta> = Vec::new();
 
     for node in scene.nodes() {
@@ -1375,6 +1457,7 @@ fn walk_model_instances(
                 reference.animator_node,
             ),
             yaw_q12,
+            collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
         });
     }
@@ -1405,17 +1488,24 @@ fn walk_model_instances(
         let Ok(animation) = psx_asset::Animation::from_bytes(anim_bytes) else {
             continue;
         };
+        let origin = floor_anchored_model_origin(meta.origin, meta.world_height);
         instances.push(PreviewModelInstance {
             model,
             animation,
             atlas: meta.atlas,
-            origin: floor_anchored_model_origin(meta.origin, meta.world_height),
+            origin,
             instance_rotation: meta.instance_rotation,
+            tint: shade_model_tint(origin, *camera, fog, &lights, ambient),
         });
     }
 
+    let shadow_slot = textures.shadow_slot();
+    for meta in &instances_meta {
+        draw_model_shadow(meta, shadow_slot, scratch);
+    }
+
     // Gizmos first while GTE still holds the camera matrix --
-    // `draw_preview_model_instance` overrides rotation/translation
+    // the engine model pass overrides rotation/translation
     // per joint so any project_vertex after a model render uses
     // joint-space, not world-space.
     for meta in &instances_meta {
@@ -1423,9 +1513,7 @@ fn walk_model_instances(
             draw_model_selection_gizmo(meta, scratch);
         }
     }
-    for instance in instances {
-        draw_preview_model_instance(camera, tick, &instance, scratch);
-    }
+    draw_preview_model_instances(camera, tick, &instances, scratch);
 }
 
 /// For every legacy Player Spawn or component player controller,
@@ -1519,6 +1607,7 @@ fn walk_player_spawn_preview(
                 None,
             ),
             yaw_q12,
+            collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
         });
     }
@@ -1560,7 +1649,7 @@ fn floor_anchored_node_room_local_origin(
 /// draws underneath the gizmo via the OT depth slot system.
 ///
 /// Restores the camera GTE rotation/translation before
-/// projecting because `draw_preview_model_instance` left the
+/// projecting because the engine model pass left the
 /// GTE primed with the *last part's* joint transform.
 fn draw_model_selection_gizmo(meta: &InstanceMeta, scratch: &mut PreviewScratch) {
     // Re-prime the GTE with the camera transform -- model
@@ -1619,6 +1708,59 @@ fn draw_model_selection_gizmo(meta: &InstanceMeta, scratch: &mut PreviewScratch)
     }
 }
 
+fn draw_model_shadow(meta: &InstanceMeta, slot: MaterialSlot, scratch: &mut PreviewScratch) {
+    let radius = preview_shadow_radius(meta.collision_radius);
+    if radius <= 0 {
+        return;
+    }
+
+    let x = meta.origin.x;
+    let y = meta.origin.y.saturating_add(PREVIEW_SHADOW_FLOOR_LIFT);
+    let z = meta.origin.z;
+    let verts = [
+        [x.saturating_sub(radius), y, z.saturating_sub(radius)],
+        [x.saturating_add(radius), y, z.saturating_sub(radius)],
+        [x.saturating_add(radius), y, z.saturating_add(radius)],
+        [x.saturating_sub(radius), y, z.saturating_add(radius)],
+    ];
+    let projected = [
+        gte_scene::project_vertex(world_to_view(verts[0])),
+        gte_scene::project_vertex(world_to_view(verts[1])),
+        gte_scene::project_vertex(world_to_view(verts[2])),
+        gte_scene::project_vertex(world_to_view(verts[3])),
+    ];
+    if projected.iter().any(|p| p.sz == 0) {
+        return;
+    }
+
+    const UVS: [(u8, u8); 4] = [
+        (0, 0),
+        (PREVIEW_SHADOW_UV_MAX, 0),
+        (PREVIEW_SHADOW_UV_MAX, PREVIEW_SHADOW_UV_MAX),
+        (0, PREVIEW_SHADOW_UV_MAX),
+    ];
+    push_shadow_tex_tri(
+        scratch,
+        [projected[0], projected[1], projected[2]],
+        [UVS[0], UVS[1], UVS[2]],
+        slot,
+    );
+    push_shadow_tex_tri(
+        scratch,
+        [projected[0], projected[2], projected[3]],
+        [UVS[0], UVS[2], UVS[3]],
+        slot,
+    );
+}
+
+fn preview_shadow_radius(base_radius: i32) -> i32 {
+    base_radius
+        .saturating_mul(PREVIEW_SHADOW_RADIUS_SCALE_NUM)
+        .checked_div(PREVIEW_SHADOW_RADIUS_SCALE_DEN)
+        .unwrap_or(base_radius)
+        .clamp(PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_SHADOW_RADIUS_MAX)
+}
+
 struct InstanceMeta {
     mesh_id: ResourceId,
     /// Clip index inside the model's clip list. Two instances
@@ -1635,6 +1777,8 @@ struct InstanceMeta {
     is_selected: bool,
     /// Yaw in PSX angle units, retained for the facing arrow.
     yaw_q12: u16,
+    /// Ground-contact radius used for the editor shadow decal.
+    collision_radius: i32,
     /// Approximate world-space height for the facing arrow's
     /// vertical extent. Lifted from `ModelResource::world_height`.
     world_height: i32,
@@ -1679,130 +1823,113 @@ fn yaw_rotation_q12(yaw_q12: u16) -> Mat3I16 {
     }
 }
 
-/// Per-instance projection + face emit. Loops every part,
-/// composes the joint view transform via the engine helper,
-/// reloads the GTE per-part, projects vertices, emits one
-/// textured triangle per face.
+/// Submit all preview models through the same engine model pass used
+/// by editor-playtest. The editor keeps its own entry point and OT
+/// lifetime, but model projection, culling, UV handling, and packet
+/// emission now live behind `psx-engine`.
 ///
 /// IMPORTANT: this clobbers the GTE rotation/translation
 /// registers, so any caller relying on the camera-target
-/// transform set by `setup_gte_for_camera` must restore it
-/// before projecting non-model geometry. Today
-/// `walk_model_instances` runs after every overlay (room +
-/// entities + selection / hover / paint previews), so nothing
-/// post-model depends on the camera transform.
-fn draw_preview_model_instance(
+/// transform set by `setup_gte_for_camera` must restore it before
+/// projecting non-model geometry.
+fn draw_preview_model_instances(
+    camera: &psx_engine::WorldCamera,
+    tick: u32,
+    instances: &[PreviewModelInstance<'_>],
+    scratch: &mut PreviewScratch,
+) {
+    if instances.is_empty() || scratch.tex_used >= TRI_CAP {
+        return;
+    }
+
+    let tex_start = scratch.tex_used;
+    let mut triangles = psx_engine::PrimitiveArena::new(&mut scratch.tex_tris[tex_start..]);
+    let mut model_commands = [psx_engine::WorldTriCommand::EMPTY; PREVIEW_MODEL_COMMAND_CAP];
+    let mut ot = psx_engine::OtFrame::resume(&mut scratch.ot);
+    let mut world = psx_engine::WorldRenderPass::new_deferred_sorted(&mut ot, &mut model_commands);
+
+    for instance in instances {
+        if submit_preview_model_instance(
+            &mut world,
+            &mut triangles,
+            camera,
+            tick,
+            instance,
+            &mut scratch.model_vertices,
+            &mut scratch.model_joint_transforms,
+        ) {
+            break;
+        }
+    }
+
+    world.flush();
+    scratch.tex_used = tex_start.saturating_add(triangles.len()).min(TRI_CAP);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_preview_model_instance(
+    world: &mut psx_engine::WorldRenderPass<'_, '_, OT_DEPTH>,
+    triangles: &mut psx_engine::PrimitiveArena<'_, TriTextured>,
     camera: &psx_engine::WorldCamera,
     tick: u32,
     instance: &PreviewModelInstance<'_>,
-    scratch: &mut PreviewScratch,
-) {
-    let local_to_world =
-        psx_engine::LocalToWorldScale::from_q12(instance.model.local_to_world_q12());
+    projected_vertices: &mut [psx_engine::ProjectedVertex],
+    joint_view_transforms: &mut [psx_engine::JointViewTransform],
+) -> bool {
     let frame_q12 = instance.animation.phase_at_tick_q12(tick, 60);
+    let material = TextureMaterial::opaque(
+        instance.atlas.clut_word,
+        instance.atlas.tpage_word,
+        instance.tint,
+    );
+    let options = preview_model_surface_options(material);
 
-    // Joint view transforms -- one per joint, capped.
-    let joint_count = (instance.model.joint_count() as usize).min(PREVIEW_JOINT_CAP);
-    let mut joint_view_transforms: [psx_engine::JointViewTransform; PREVIEW_JOINT_CAP] =
-        [psx_engine::JointViewTransform::ZERO; PREVIEW_JOINT_CAP];
-    for (joint, joint_view_transform) in joint_view_transforms
-        .iter_mut()
-        .enumerate()
-        .take(joint_count)
-    {
-        if let Some(pose) = instance.animation.pose_looped_q12(frame_q12, joint as u16) {
-            let (rotation, translation) = psx_engine::compute_joint_view_transform(
-                *camera,
-                pose,
-                instance.instance_rotation,
-                local_to_world,
-                instance.origin,
-            );
-            *joint_view_transform = psx_engine::JointViewTransform {
-                rotation,
-                translation,
-            };
-        }
-    }
+    let stats = world.submit_textured_model(
+        triangles,
+        instance.model,
+        instance.animation,
+        frame_q12,
+        *camera,
+        instance.origin,
+        instance.instance_rotation,
+        projected_vertices,
+        joint_view_transforms,
+        material,
+        options,
+    );
 
-    // Per-part projection + face emit. This mirrors the runtime
-    // compact-model path: project each skinned point once, then draw
-    // face-corner UVs against those projected positions.
-    let mut projected =
-        vec![psx_gte::scene::Projected::default(); instance.model.vertex_count() as usize];
-    for part_index in 0..instance.model.part_count() {
-        let Some(part) = instance.model.part(part_index) else {
-            break;
-        };
-        let primary_joint = part.joint_index() as usize;
-        if primary_joint >= joint_count {
-            continue;
-        }
-        let primary = joint_view_transforms[primary_joint];
-
-        gte_scene::load_rotation(&primary.rotation);
-        gte_scene::load_translation(primary.translation);
-
-        let first_vertex = part.first_vertex();
-        for local in 0..part.vertex_count() as usize {
-            let global = first_vertex.saturating_add(local as u16);
-            let Some(v) = instance.model.vertex(global) else {
-                break;
-            };
-            if let Some(slot) = projected.get_mut(global as usize) {
-                *slot =
-                    projected_from_engine(psx_engine::project_model_vertex_with_joint_transforms(
-                        v,
-                        primary,
-                        &joint_view_transforms,
-                        joint_count,
-                        PREVIEW_PROJECTION,
-                    ));
-            }
-        }
-    }
-
-    for part_index in 0..instance.model.part_count() {
-        let Some(part) = instance.model.part(part_index) else {
-            break;
-        };
-        // Per-face triangle emit. UV pairs live on face corners so
-        // compacted skinned vertices can be shared across UV seams.
-        let first_face = part.first_face();
-        let face_count = part.face_count();
-        for face in 0..face_count {
-            let Some(face) = instance.model.face(first_face + face) else {
-                break;
-            };
-            let indices = [
-                face.corners[0].vertex_index as usize,
-                face.corners[1].vertex_index as usize,
-                face.corners[2].vertex_index as usize,
-            ];
-            if indices.iter().any(|&i| i >= projected.len()) {
-                continue;
-            }
-            let p = [
-                projected[indices[0]],
-                projected[indices[1]],
-                projected[indices[2]],
-            ];
-            // Skip near-plane / behind-camera triangles.
-            if p[0].sz == 0 || p[1].sz == 0 || p[2].sz == 0 {
-                continue;
-            }
-            let uvs = [face.corners[0].uv, face.corners[1].uv, face.corners[2].uv];
-            push_tex_tri(scratch, p, uvs, instance.atlas, (0x80, 0x80, 0x80));
-        }
-    }
+    stats.primitive_overflow || stats.command_overflow
 }
 
-fn projected_from_engine(projected: psx_engine::ProjectedVertex) -> psx_gte::scene::Projected {
-    psx_gte::scene::Projected {
-        sx: projected.sx,
-        sy: projected.sy,
-        sz: projected.sz.clamp(0, u16::MAX as i32) as u16,
-    }
+fn preview_model_surface_options(material: TextureMaterial) -> psx_engine::WorldSurfaceOptions {
+    psx_engine::WorldSurfaceOptions::new(
+        psx_engine::DepthBand::new(PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_GEOMETRY_SLOT_MAX),
+        psx_engine::DepthRange::new(
+            (PREVIEW_GEOMETRY_SLOT_MIN as i32) << 6,
+            (PREVIEW_GEOMETRY_SLOT_MAX as i32) << 6,
+        ),
+    )
+    .with_depth_policy(psx_engine::DepthPolicy::Average)
+    .with_cull_mode(psx_engine::CullMode::Back)
+    .with_material_layer(material)
+    .with_textured_triangle_splitting(false)
+}
+
+fn shade_model_tint(
+    origin: psx_engine::WorldVertex,
+    camera: psx_engine::WorldCamera,
+    fog: PreviewFog,
+    lights: &[psx_engine::PointLightSample],
+    ambient: [u8; 3],
+) -> (u8, u8, u8) {
+    let lit = psx_engine::shade_material_tint_with_lights(
+        psx_engine::MaterialTint::from_tuple((0x80, 0x80, 0x80)),
+        [origin.x, origin.y, origin.z],
+        psx_engine::Rgb8::from_array(ambient),
+        lights.iter().copied(),
+    )
+    .to_tuple();
+    fog.apply_rgb(lit, camera.view_vertex(origin).z)
 }
 
 /// Draw a horizontal radius ring plus a bulb icon for every
@@ -2413,6 +2540,10 @@ const FACE_OUTLINE_ERROR: FaceOutlineStyle = FaceOutlineStyle {
     rgb: (0xFF, 0x40, 0x40),
     thickness_px: 4.0,
 };
+const FACE_OUTLINE_CULLED: FaceOutlineStyle = FaceOutlineStyle {
+    rgb: (0x88, 0xA0, 0xAE),
+    thickness_px: 1.0,
+};
 const ENTITY_BOUND_HOVER: FaceOutlineStyle = FaceOutlineStyle {
     rgb: (0xFF, 0xE0, 0x60),
     thickness_px: EDITOR_PREVIEW_HOVER_STROKE_WIDTH,
@@ -2833,9 +2964,9 @@ fn emit_face_tri(
     p: [psx_gte::scene::Projected; 3],
     uvs: [(u8, u8); 3],
     shade: FaceShade,
-) {
+) -> bool {
     if !face_side_visible(shade.sidedness(), p) {
-        return;
+        return false;
     }
     match shade {
         FaceShade::Flat { rgb, .. } => push_tri(scratch, p, rgb),
@@ -2878,20 +3009,54 @@ fn push_tex_tri(
     uvs: [(u8, u8); 3],
     slot: MaterialSlot,
     tint: (u8, u8, u8),
-) {
+) -> bool {
+    let avg_sz = projected_avg_sz(p);
+    push_textured_material_tri(
+        scratch,
+        p,
+        uvs,
+        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint),
+        room_depth_slot(avg_sz),
+    )
+}
+
+fn push_shadow_tex_tri(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    uvs: [(u8, u8); 3],
+    slot: MaterialSlot,
+) -> bool {
+    push_textured_material_tri(
+        scratch,
+        p,
+        uvs,
+        TextureMaterial::blended(
+            slot.clut_word,
+            slot.tpage_word,
+            (0x80, 0x80, 0x80),
+            BlendMode::Average,
+        )
+        .with_raw_texture(true),
+        shadow_depth_slot(projected_avg_sz(p)),
+    )
+}
+
+fn push_textured_material_tri(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    uvs: [(u8, u8); 3],
+    material: TextureMaterial,
+    slot_idx: usize,
+) -> bool {
     if scratch.tex_used >= TRI_CAP {
-        return;
+        return false;
     }
     let idx = scratch.tex_used;
-    scratch.tex_tris[idx] = TriTextured::new(
+    scratch.tex_tris[idx] = TriTextured::with_material(
         [(p[0].sx, p[0].sy), (p[1].sx, p[1].sy), (p[2].sx, p[2].sy)],
         uvs,
-        slot.clut_word,
-        slot.tpage_word,
-        tint,
+        material,
     );
-    let avg_sz = (p[0].sz as u32 + p[1].sz as u32 + p[2].sz as u32) / 3;
-    let slot_idx = ((avg_sz as usize) >> 6).clamp(1, OT_DEPTH - 2);
     let packet_ptr: *mut TriTextured = &mut scratch.tex_tris[idx];
     unsafe {
         scratch
@@ -2899,14 +3064,19 @@ fn push_tex_tri(
             .insert(slot_idx, packet_ptr.cast::<u32>(), TriTextured::WORDS);
     }
     scratch.tex_used = idx + 1;
+    true
 }
 
 /// Compose a [`TriFlat`] from three projected vertices, store it in
 /// the next slot of the static `tris` array, and link it into the
 /// OT keyed on average screen-space depth.
-fn push_tri(scratch: &mut PreviewScratch, p: [psx_gte::scene::Projected; 3], rgb: (u8, u8, u8)) {
+fn push_tri(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    rgb: (u8, u8, u8),
+) -> bool {
     if scratch.used >= TRI_CAP {
-        return;
+        return false;
     }
     let idx = scratch.used;
     scratch.tris[idx] = TriFlat::new(
@@ -2916,20 +3086,36 @@ fn push_tri(scratch: &mut PreviewScratch, p: [psx_gte::scene::Projected; 3], rgb
         rgb.2,
     );
     scratch.used = idx + 1;
-    let avg_sz = (p[0].sz as u32 + p[1].sz as u32 + p[2].sz as u32) / 3;
     // Map sz (Q0, range up to ~32K for our scenes) into the OT
     // depth band. Smaller sz = closer = drawn last, so map to a
     // lower OT slot index. We reserve slot OT_DEPTH-1 for the
     // per-frame fill-rect clear and slot 0 for the hover overlay
     // (drawn last so it tops everything), so geometry rides the
     // 1..OT_DEPTH-1 band exclusively.
-    let slot = ((avg_sz as usize) >> 6).clamp(1, OT_DEPTH - 2);
+    let slot = room_depth_slot(projected_avg_sz(p));
     let packet_ptr: *mut TriFlat = &mut scratch.tris[idx];
     unsafe {
         scratch
             .ot
             .insert(slot, packet_ptr.cast::<u32>(), TriFlat::WORDS);
     }
+    true
+}
+
+fn projected_avg_sz(p: [psx_gte::scene::Projected; 3]) -> u32 {
+    (p[0].sz as u32 + p[1].sz as u32 + p[2].sz as u32) / 3
+}
+
+fn room_depth_slot(avg_sz: u32) -> usize {
+    preview_geometry_depth_slot(avg_sz)
+}
+
+fn shadow_depth_slot(avg_sz: u32) -> usize {
+    preview_geometry_depth_slot(avg_sz.saturating_sub(PREVIEW_SHADOW_DEPTH_BIAS))
+}
+
+fn preview_geometry_depth_slot(avg_sz: u32) -> usize {
+    ((avg_sz as usize) >> 6).clamp(PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_GEOMETRY_SLOT_MAX)
 }
 
 #[cfg(test)]
@@ -2937,8 +3123,11 @@ mod tests {
     use super::{
         face_side_visible, floor_anchored_model_origin, light_face, material_texture_tint,
         node_room_local_origin, preview_lights, preview_model_reference, preview_player_reference,
-        preview_static_model_reference, push_wall_face, setup_gte_for_camera, FaceShade,
-        MaterialSlot, PreviewFog, WallEdge, PREVIEW_WALL_UVS, SCRATCH,
+        preview_shadow_radius, preview_static_model_reference, push_wall_face, room_depth_slot,
+        setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline, FaceShade,
+        MaterialSlot, PreviewFog, WallEdge, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
+        PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
+        PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -3257,6 +3446,42 @@ mod tests {
         );
 
         scratch.used > 0 || scratch.tex_used > 0
+    }
+
+    #[test]
+    fn culled_room_face_outline_respects_preview_toggle() {
+        assert!(should_draw_culled_face_outline(
+            true,
+            flat_sided(128, 128, 128, MaterialFaceSidedness::Front)
+        ));
+        assert!(should_draw_culled_face_outline(
+            true,
+            flat_sided(128, 128, 128, MaterialFaceSidedness::Back)
+        ));
+        assert!(!should_draw_culled_face_outline(
+            false,
+            flat_sided(128, 128, 128, MaterialFaceSidedness::Back)
+        ));
+        assert!(!should_draw_culled_face_outline(
+            true,
+            flat_sided(128, 128, 128, MaterialFaceSidedness::Both)
+        ));
+    }
+
+    #[test]
+    fn preview_depth_slots_share_world_geometry_band() {
+        assert_eq!(room_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
+        assert_eq!(room_depth_slot(u32::MAX), PREVIEW_GEOMETRY_SLOT_MAX);
+        assert!(shadow_depth_slot(2048) < room_depth_slot(2048));
+        assert_eq!(shadow_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
+        assert_eq!(PREVIEW_SHADOW_DEPTH_BIAS, 128);
+    }
+
+    #[test]
+    fn preview_shadow_radius_matches_runtime_scale() {
+        assert_eq!(preview_shadow_radius(1), PREVIEW_SHADOW_RADIUS_MIN);
+        assert_eq!(preview_shadow_radius(2048), PREVIEW_SHADOW_RADIUS_MAX);
+        assert_eq!(preview_shadow_radius(200), 250);
     }
 
     #[test]

@@ -403,8 +403,12 @@ impl AppState {
                 let mc_bytes = std::fs::read(&mc_path).unwrap_or_default();
                 bus.attach_memcard_port1(mc_bytes);
             }
-            GameKind::DiscCue => {
-                let disc = psoxide_settings::library::load_disc_from_cue(&entry.path)?;
+            GameKind::DiscCue | GameKind::DiscCcd => {
+                let disc = match entry.kind {
+                    GameKind::DiscCue => psoxide_settings::library::load_disc_from_cue(&entry.path),
+                    GameKind::DiscCcd => psoxide_settings::library::load_disc_from_ccd(&entry.path),
+                    _ => unreachable!(),
+                }?;
                 boot_mode = maybe_fast_boot_disc(
                     &mut bus,
                     &mut cpu,
@@ -625,8 +629,10 @@ impl AppState {
 
             match e.kind {
                 // CUEs are never shown directly -- their BIN is.
+                // CCDs are shown directly because their `.img`
+                // sidecar is not a separate library entry.
                 GameKind::DiscCue => continue,
-                GameKind::DiscBin | GameKind::DiscIso => {
+                GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd => {
                     // If a CUE owns this BIN, use the CUE's
                     // friendly title + stable ID. Also dedup: the
                     // *first* BIN of a CUE wins; subsequent BINs
@@ -1236,10 +1242,10 @@ fn format_subtitle(e: &LibraryEntry) -> String {
     };
     let size_mib = e.size / (1024 * 1024);
     match (region.is_empty(), e.kind) {
-        (false, GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCue) => {
+        (false, GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCue | GameKind::DiscCcd) => {
             format!("{region} · {size_mib} MiB")
         }
-        (true, GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCue) => {
+        (true, GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCue | GameKind::DiscCcd) => {
             format!("{size_mib} MiB")
         }
         (_, GameKind::Exe) => {
