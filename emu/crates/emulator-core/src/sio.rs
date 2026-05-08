@@ -93,8 +93,9 @@ pub struct Sio0 {
     /// Whether the current byte will be followed by a delayed SIO
     /// event.
     pending_ack: bool,
-    /// Whether the current byte should raise the SIO IRQ via the
-    /// no-device DSR timeout path instead of a visible ACK pulse.
+    /// Whether the current byte should raise an IRQ without a visible
+    /// ACK pulse. Kept for the legacy delayed-byte path; Redux-style
+    /// missing devices leave this false.
     pending_dsr_timeout: bool,
     /// Legacy shifter state for the older delayed-byte path.
     transfer_busy: bool,
@@ -371,7 +372,10 @@ impl Sio0 {
                         self.ack_input = true;
                         self.ack_end_deadline = Some(deadline.saturating_add(ACK_PULSE_TICKS));
                     }
-                    if (ack_pulse || dsr_timeout) && self.ctrl & ctrl_bit::ACK_IRQ_ENABLE != 0 {
+                    if (ack_pulse || dsr_timeout)
+                        && self.ctrl & ctrl_bit::ACK_IRQ_ENABLE != 0
+                        && !self.irq_latched
+                    {
                         self.irq_latched = true;
                         self.pending_irq = true;
                     }
@@ -441,7 +445,8 @@ impl Sio0 {
             self.ack_input = false;
             self.ack_end_deadline = None;
         }
-        let (rx, ack, device_present, ack_delay_ticks) = if self.ctrl & ctrl_bit::JOYN_OUTPUT != 0 {
+        let (rx, ack, _device_present, ack_delay_ticks) = if self.ctrl & ctrl_bit::JOYN_OUTPUT != 0
+        {
             let port = self.active_port();
             let result = port.exchange_detailed(value);
             let ack_delay_ticks = if port.selected_is_memcard() {
@@ -458,7 +463,11 @@ impl Sio0 {
         } else {
             (0xFF, false, true, PAD_ACK_DELAY_TICKS)
         };
-        let dsr_timeout = !ack && !device_present;
+        // Redux returns 0xff for a missing device but does not schedule
+        // an ACK/DSR IRQ for that byte. RE2 polls port 2 during the BIOS
+        // pad handler; raising a timeout IRQ there invents extra IRQ7
+        // passes inside the same folded ISR.
+        let dsr_timeout = false;
         self.pending_rx = rx;
         self.pending_ack = ack;
         self.pending_dsr_timeout = dsr_timeout;
@@ -827,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn no_device_dsr_timeout_raises_irq_without_ack_input() {
+    fn missing_device_returns_ff_without_dsr_timeout_irq() {
         use crate::pad::PortDevice;
 
         let mut sio = Sio0::new();
@@ -839,25 +848,20 @@ mod tests {
         sio.write16(Sio0::BASE + 0xE, 0x0088);
 
         sio.write8_at(Sio0::BASE, 0x01, 10);
-        assert_eq!(sio.debug_ack_deadline(), Some(10 + 0x88 * 8));
+        assert_eq!(sio.pop_rx(), 0xFF);
+        assert_eq!(sio.debug_ack_deadline(), None);
         assert_eq!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::ACK_INPUT,
             0,
             "empty slots must not expose a visible ACK pulse"
         );
 
-        sio.tick(10 + 0x88 * 8 - 1);
+        sio.tick(10 + 0x88 * 8);
         assert_eq!(
             sio.read32(Sio0::BASE + 0x4).unwrap() & stat_bit::IRQ,
             0,
-            "DSR timeout IRQ must wait for the baud-clocked deadline"
+            "Redux does not schedule ACK/DSR IRQs for missing devices"
         );
-
-        sio.tick(10 + 0x88 * 8);
-        let stat = sio.read32(Sio0::BASE + 0x4).unwrap();
-        assert_eq!(stat & stat_bit::ACK_INPUT, 0);
-        assert_ne!(stat & stat_bit::IRQ, 0);
-        assert!(sio.take_pending_irq());
         assert!(!sio.take_pending_irq());
     }
 
@@ -898,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn successive_controller_acks_raise_successive_bus_irqs_without_ctrl_ack() {
+    fn successive_controller_acks_wait_for_ctrl_ack_before_reinterrupt() {
         use crate::pad::{DigitalPad, PortDevice};
 
         let mut sio = Sio0::new();
@@ -916,8 +920,19 @@ mod tests {
         sio.write8_at(Sio0::BASE, 0x42, second_start);
         sio.tick(second_start + DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS);
         assert!(
+            !sio.take_pending_irq(),
+            "Redux does not schedule another SIO IRQ while STAT.IRQ is still latched"
+        );
+
+        sio.write16(
+            Sio0::BASE + 0xA,
+            ctrl_bit::JOYN_OUTPUT | ctrl_bit::ACK_IRQ_ENABLE | ctrl_bit::ACK,
+        );
+        sio.write8_at(Sio0::BASE, 0x00, second_start + DEFAULT_TRANSFER_TICKS + 1);
+        sio.tick(second_start + 2 * DEFAULT_TRANSFER_TICKS + PAD_ACK_DELAY_TICKS + 1);
+        assert!(
             sio.take_pending_irq(),
-            "second ACK should still raise an IRQ edge even if CTRL.ACK was never written"
+            "after CTRL.ACK clears STAT.IRQ, a later ACK can raise the next edge"
         );
     }
 
