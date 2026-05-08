@@ -53,17 +53,18 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
-    draw_line_mono, draw_quad_flat, draw_tri_flat_blended, draw_tri_gouraud,
+    draw_line_mono, draw_quad_flat, draw_quad_textured_material, draw_tri_flat_blended,
+    draw_tri_gouraud,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::{TriTextured, TriTexturedGouraud},
 };
 use psx_level::{
-    equipment_flags, find_asset_of_kind, room_flags, sky_flags, AssetId, AssetKind, EntityRecord,
-    LevelCharacterRecord, LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord,
-    LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex,
-    ModelClipTableIndex, ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager,
-    RoomIndex, WeaponHitShapeRecord,
+    equipment_flags, far_vista_flags, find_asset_of_kind, room_flags, sky_flags, AssetId,
+    AssetKind, EntityRecord, LevelCharacterRecord, LevelFarVistaRecord, LevelMaterialRecord,
+    LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord,
+    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
+    ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
 
@@ -911,6 +912,7 @@ impl Scene for Playtest {
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
             draw_sky_gradient(room_record.sky);
+            draw_far_vista_ring(camera, room_record.far_vista);
         }
 
         if self.room.is_some() {
@@ -2249,6 +2251,102 @@ fn draw_sky_gradient_quad(y0: i16, y1: i16, top_rgb: [u8; 3], bottom_rgb: [u8; 3
     );
 }
 
+fn draw_far_vista_ring(camera: WorldCamera, vista: LevelFarVistaRecord) {
+    if vista.flags & far_vista_flags::ENABLED == 0 {
+        return;
+    }
+    let segments = vista.segments.clamp(3, 16);
+    let radius = vista.radius.max(1_024);
+    let y0 = camera.position.y.saturating_add(vista.vertical_offset);
+    let y1 = y0.saturating_add(vista.height.max(128));
+    let step = 0x1_0000_u32 / segments as u32;
+    let base = angle_from_signed_degrees(vista.rotation_degrees);
+
+    for segment in 0..segments {
+        let a0 = base.add(Angle::from_raw_q16(segment as u16 * step as u16));
+        let a1 = base.add(Angle::from_raw_q16(
+            (segment as u16).wrapping_add(1).wrapping_mul(step as u16),
+        ));
+        let x0 = camera.position.x.saturating_add(a0.sin().mul_i32(radius));
+        let z0 = camera.position.z.saturating_add(a0.cos().mul_i32(radius));
+        let x1 = camera.position.x.saturating_add(a1.sin().mul_i32(radius));
+        let z1 = camera.position.z.saturating_add(a1.cos().mul_i32(radius));
+        let Some(p0) = camera.project_world(WorldVertex::new(x0, y1, z0)) else {
+            continue;
+        };
+        let Some(p1) = camera.project_world(WorldVertex::new(x1, y1, z1)) else {
+            continue;
+        };
+        let Some(p2) = camera.project_world(WorldVertex::new(x0, y0, z0)) else {
+            continue;
+        };
+        let Some(p3) = camera.project_world(WorldVertex::new(x1, y0, z1)) else {
+            continue;
+        };
+        let verts = [(p0.sx, p0.sy), (p1.sx, p1.sy), (p2.sx, p2.sy), (p3.sx, p3.sy)];
+        let material =
+            far_vista_texture_material(far_vista_panel_asset(vista, segment, segments), vista.tint_rgb);
+        if let Some((material, texture_width, texture_height)) = material {
+            draw_quad_textured_material(
+                verts,
+                [
+                    (0, 0),
+                    (texture_width.saturating_sub(1), 0),
+                    (0, texture_height.saturating_sub(1)),
+                    (
+                        texture_width.saturating_sub(1),
+                        texture_height.saturating_sub(1),
+                    ),
+                ],
+                material,
+            );
+        } else {
+            draw_quad_flat(
+                verts,
+                vista.tint_rgb[0],
+                vista.tint_rgb[1],
+                vista.tint_rgb[2],
+            );
+        }
+    }
+}
+
+fn angle_from_signed_degrees(degrees: i16) -> Angle {
+    Angle::from_degrees((degrees as i32).rem_euclid(360) as u32)
+}
+
+fn far_vista_panel_asset(
+    vista: LevelFarVistaRecord,
+    segment: u8,
+    segments: u8,
+) -> Option<AssetId> {
+    if vista.flags & far_vista_flags::TEXTURED == 0 || vista.texture_assets.is_empty() {
+        return None;
+    }
+    let panel_count = vista.texture_assets.len();
+    let panel_index = if panel_count == 1 {
+        0
+    } else {
+        ((segment as usize) * panel_count / (segments as usize).max(1)).min(panel_count - 1)
+    };
+    let asset = vista.texture_assets[panel_index];
+    (asset.0 != u16::MAX).then_some(asset)
+}
+
+fn far_vista_texture_material(
+    asset_id: Option<AssetId>,
+    tint_rgb: [u8; 3],
+) -> Option<(TextureMaterial, u8, u8)> {
+    let asset = find_asset_of_kind(ASSETS, asset_id?, AssetKind::Texture)?;
+    let slot = ensure_texture_uploaded_with_clut_mode(asset.id, asset.bytes, false)?;
+    Some((
+        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb_tuple(tint_rgb))
+            .with_texture_window(slot.texture_window),
+        slot.texture_width,
+        slot.texture_height,
+    ))
+}
+
 fn parse_runtime_room(record: &LevelRoomRecord) -> Option<RuntimeRoom<'static>> {
     let asset = find_asset_of_kind(ASSETS, record.world_asset, AssetKind::RoomWorld)?;
     RuntimeRoom::from_bytes(asset.bytes).ok()
@@ -2605,7 +2703,7 @@ impl RuntimeRoomLighting {
         &self,
         point: RoomPoint,
         base: (u8, u8, u8),
-        depth: i32,
+        fog_weight: i32,
     ) -> (u8, u8, u8) {
         let tint = psx_engine::shade_material_tint_with_lights(
             MaterialTint::from_tuple(base),
@@ -2614,15 +2712,21 @@ impl RuntimeRoomLighting {
             self.point_lights(),
         )
         .to_tuple();
-        self.apply_fog_at_depth(tint, depth)
+        self.apply_fog_weight(tint, fog_weight)
     }
 
     fn apply_fog_at_depth(&self, tint: (u8, u8, u8), depth: i32) -> (u8, u8, u8) {
-        apply_room_fog(
-            tint,
+        self.apply_fog_weight(tint, self.fog_weight_at_depth(depth))
+    }
+
+    fn apply_fog_weight(&self, tint: (u8, u8, u8), weight: i32) -> (u8, u8, u8) {
+        apply_room_fog_weight(tint, self.fog_rgb, weight)
+    }
+
+    fn fog_weight_at_depth(&self, depth: i32) -> i32 {
+        room_fog_weight(
             depth,
             self.fog_enabled,
-            self.fog_rgb,
             self.fog_near,
             self.fog_far,
         )
@@ -2650,11 +2754,8 @@ impl RuntimeRoomLighting {
         self.apply_fog_at_depth(rgb, depth)
     }
 
-    fn apply_vertex_fog_depth(&self, rgb: (u8, u8, u8), depth: i32) -> (u8, u8, u8) {
-        if !self.fog_enabled || self.fog_far <= self.fog_near {
-            return rgb;
-        }
-        self.apply_fog_at_depth(rgb, depth)
+    fn apply_vertex_fog_weight(&self, rgb: (u8, u8, u8), weight: i32) -> (u8, u8, u8) {
+        self.apply_fog_weight(rgb, weight)
     }
 }
 
@@ -2713,10 +2814,10 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
                 return vertex_rgb;
             }
             return [
-                self.apply_vertex_fog_depth(vertex_rgb[0], depths[0]),
-                self.apply_vertex_fog_depth(vertex_rgb[1], depths[1]),
-                self.apply_vertex_fog_depth(vertex_rgb[2], depths[2]),
-                self.apply_vertex_fog_depth(vertex_rgb[3], depths[3]),
+                self.apply_vertex_fog_weight(vertex_rgb[0], depths[0]),
+                self.apply_vertex_fog_weight(vertex_rgb[1], depths[1]),
+                self.apply_vertex_fog_weight(vertex_rgb[2], depths[2]),
+                self.apply_vertex_fog_weight(vertex_rgb[3], depths[3]),
             ];
         }
         [
@@ -2746,20 +2847,23 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
     fn uses_vertex_depths(&self) -> bool {
         self.fog_enabled && self.fog_far > self.fog_near
     }
+
+    fn prepare_vertex_depth(&self, depth: i32) -> i32 {
+        self.fog_weight_at_depth(depth)
+    }
 }
 
-fn apply_room_fog(
-    tint: (u8, u8, u8),
-    depth: i32,
-    enabled: bool,
-    fog_rgb: Rgb8,
-    fog_near: i32,
-    fog_far: i32,
-) -> (u8, u8, u8) {
+fn room_fog_weight(depth: i32, enabled: bool, fog_near: i32, fog_far: i32) -> i32 {
     if !enabled || fog_far <= fog_near || depth <= fog_near {
+        return 0;
+    }
+    (((depth - fog_near).saturating_mul(256)) / (fog_far - fog_near)).clamp(0, 256)
+}
+
+fn apply_room_fog_weight(tint: (u8, u8, u8), fog_rgb: Rgb8, weight: i32) -> (u8, u8, u8) {
+    if weight <= 0 {
         return tint;
     }
-    let weight = (((depth - fog_near).saturating_mul(256)) / (fog_far - fog_near)).clamp(0, 256);
     let keep = 256 - weight;
     (
         blend_channel(tint.0, fog_rgb.r, keep, weight),
@@ -2825,6 +2929,14 @@ fn find_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
 }
 
 fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<VramSlot> {
+    ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, true)
+}
+
+fn ensure_texture_uploaded_with_clut_mode(
+    asset_id: AssetId,
+    asset_bytes: &[u8],
+    force_zero_opaque: bool,
+) -> Option<VramSlot> {
     // VRAM_SLOTS is the source of truth for "have we actually
     // uploaded this asset". `RESIDENCY` is the *contract* -- it's
     // pre-marked by `ensure_room_resident` before any upload runs,
@@ -2900,7 +3012,11 @@ fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<Vram
     }
 
     let clut_rect = VramRect::new(clut_x, ROOM_CLUT_Y, texture.clut_entries(), 1);
-    upload_opaque_clut(clut_rect, texture.clut_bytes());
+    if force_zero_opaque {
+        upload_opaque_clut(clut_rect, texture.clut_bytes());
+    } else {
+        upload_clut(clut_rect, texture.clut_bytes());
+    }
 
     let clut = Clut::new(clut_x, ROOM_CLUT_Y);
     let slot = VramSlot {
