@@ -116,12 +116,13 @@ pub use world::{
     SectorCollision, SectorRender, WallCollision, WallRender, WorldMaterialId, GRID_SECTOR_SIZE,
 };
 pub use world_render::{
-    cache_room_vertex_lit_surfaces, draw_cached_room_vertex_lit_visible_cells, draw_room,
-    draw_room_lit, draw_room_lit_grid_visible, draw_room_vertex_lit,
-    draw_room_vertex_lit_grid_visible, draw_room_vertex_lit_visible_cells, CachedRoomCell,
-    CachedRoomSurface, CachedRoomSurfaceCacheStats, GridVisibility, GridVisibilityStats,
-    GridVisibleCell, NoWorldSurfaceLighting, SurfaceSidedness, WorldRenderMaterial,
-    WorldSurfaceKind, WorldSurfaceLighting, WorldSurfaceSample,
+    cache_room_vertex_lit_surfaces, draw_cached_room_vertex_lit_visible_cells,
+    draw_indexed_cached_room_vertex_lit_visible_cells, draw_room, draw_room_lit,
+    draw_room_lit_grid_visible, draw_room_vertex_lit, draw_room_vertex_lit_grid_visible,
+    draw_room_vertex_lit_visible_cells, CachedRoomCell, CachedRoomSurface,
+    CachedRoomSurfaceCacheStats, GridVisibility, GridVisibilityStats, GridVisibleCell,
+    NoWorldSurfaceLighting, SurfaceSidedness, WorldRenderMaterial, WorldSurfaceKind,
+    WorldSurfaceLighting, WorldSurfaceSample,
 };
 
 /// Button-mask constants (UP, DOWN, CROSS, START, …) re-exported

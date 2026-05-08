@@ -192,6 +192,20 @@ pub fn average_z_triangle() -> u16 {
     mfc2!(7) as u16
 }
 
+/// Run NCLIP for three already-projected screen-space vertices.
+///
+/// This is useful when a renderer cached/projected vertices first and
+/// later wants the GTE's signed screen-space area test for arbitrary
+/// indexed faces.
+pub fn screen_triangle_back_facing(vertices: [(i16, i16); 3]) -> bool {
+    mtc2!(12, pack_xy(vertices[0].0, vertices[0].1));
+    mtc2!(13, pack_xy(vertices[1].0, vertices[1].1));
+    mtc2!(14, pack_xy(vertices[2].0, vertices[2].1));
+    // SAFETY: SXY0..SXY2 have just been loaded.
+    unsafe { ops::nclip() };
+    (mfc2!(24) as i32) <= 0
+}
+
 /// Read the GTE FLAG register. Non-zero indicates at least one error
 /// bit fired during the last op (overflow, saturation, divide
 /// overflow). Useful for debug prints on a frame that looks wrong.

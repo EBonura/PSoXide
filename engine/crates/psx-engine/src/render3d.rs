@@ -538,6 +538,44 @@ impl WorldCamera {
     }
 }
 
+pub(crate) fn project_world_vertices_gte(
+    camera: WorldCamera,
+    vertices: &[WorldVertex],
+    projected_vertices: &mut [ProjectedVertex],
+    projected_valid: &mut [bool],
+) {
+    load_world_camera_gte(camera);
+    let near_z = camera.projection.near_z;
+    let count = vertices
+        .len()
+        .min(projected_vertices.len())
+        .min(projected_valid.len());
+    let mut i = 0usize;
+    while i + 2 < count {
+        let a = world_vertex_gte_input(vertices[i]);
+        let b = world_vertex_gte_input(vertices[i + 1]);
+        let c = world_vertex_gte_input(vertices[i + 2]);
+        if let (Some(a), Some(b), Some(c)) = (a, b, c) {
+            let projected = scene::project_triangle(a, b, c);
+            projected_vertices[i] = projected_from_gte(projected[0]);
+            projected_vertices[i + 1] = projected_from_gte(projected[1]);
+            projected_vertices[i + 2] = projected_from_gte(projected[2]);
+            projected_valid[i] = (projected[0].sz as i32) >= near_z;
+            projected_valid[i + 1] = (projected[1].sz as i32) >= near_z;
+            projected_valid[i + 2] = (projected[2].sz as i32) >= near_z;
+        } else {
+            project_world_vertex_cpu(camera, vertices, projected_vertices, projected_valid, i);
+            project_world_vertex_cpu(camera, vertices, projected_vertices, projected_valid, i + 1);
+            project_world_vertex_cpu(camera, vertices, projected_vertices, projected_valid, i + 2);
+        }
+        i += 3;
+    }
+    while i < count {
+        project_world_vertex_cpu(camera, vertices, projected_vertices, projected_valid, i);
+        i += 1;
+    }
+}
+
 /// Coarse render layer for world surfaces inside one ordering table.
 ///
 /// PS1 ordering tables are still depth-first. This layer only resolves
@@ -1102,6 +1140,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 colors[2],
             ),
         ];
+        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+            merge_world_stats(
+                &mut stats,
+                self.submit_textured_gouraud_triangle_leaf(triangles, textured, material, options),
+            );
+            return stats;
+        }
         merge_world_stats(
             &mut stats,
             self.submit_textured_gouraud_triangle_split(triangles, textured, material, options, 0),
@@ -1847,7 +1892,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
     ) -> bool {
-        if projected_back_facing(verts) {
+        if projected_back_facing_gte(verts) {
             stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
             return false;
         }
@@ -2723,6 +2768,46 @@ fn load_world_projection_gte(projection: WorldProjection) {
     scene::set_projection_plane(clamp_u16_i32(projection.focal_length));
 }
 
+fn load_world_camera_gte(camera: WorldCamera) {
+    load_world_projection_gte(camera.projection);
+    let view = camera_gte_view_matrix(camera);
+    let delta = WorldVertex::new(
+        0i32.saturating_sub(camera.position.x),
+        0i32.saturating_sub(camera.position.y),
+        0i32.saturating_sub(camera.position.z),
+    );
+    let translation = Vec3I32::new(
+        dot_world_q12(view.m[0], delta),
+        dot_world_q12(view.m[1], delta),
+        dot_world_q12(view.m[2], delta),
+    );
+    scene::load_rotation(&view);
+    scene::load_translation(translation);
+}
+
+fn world_vertex_gte_input(vertex: WorldVertex) -> Option<Vec3I16> {
+    Some(Vec3I16::new(
+        i16::try_from(vertex.x).ok()?,
+        i16::try_from(vertex.y).ok()?,
+        i16::try_from(vertex.z).ok()?,
+    ))
+}
+
+fn project_world_vertex_cpu(
+    camera: WorldCamera,
+    vertices: &[WorldVertex],
+    projected_vertices: &mut [ProjectedVertex],
+    projected_valid: &mut [bool],
+    index: usize,
+) {
+    if let Some(projected) = camera.project_world(vertices[index]) {
+        projected_vertices[index] = projected;
+        projected_valid[index] = true;
+    } else {
+        projected_valid[index] = false;
+    }
+}
+
 /// Compose the GTE transform for one joint of a placed model
 /// instance: `view × instance × pose_model_to_world`. The
 /// returned matrix loads into GTE rotation; the returned vector
@@ -3043,6 +3128,14 @@ fn projected_back_facing(verts: [ProjectedVertex; 3]) -> bool {
     (ax * by - ay * bx) <= 0
 }
 
+fn projected_back_facing_gte(verts: [ProjectedVertex; 3]) -> bool {
+    scene::screen_triangle_back_facing([
+        (verts[0].sx, verts[0].sy),
+        (verts[1].sx, verts[1].sy),
+        (verts[2].sx, verts[2].sy),
+    ])
+}
+
 fn clamp_projected_textured_vertex(vertex: ProjectedTexturedVertex) -> ProjectedTexturedVertex {
     ProjectedTexturedVertex::new(
         ProjectedVertex::new(
@@ -3082,6 +3175,19 @@ fn projected_textured_gouraud_exceeds_hw_extent(
     projected_edge_exceeds_hw_extent(verts[0].textured(), verts[1].textured())
         || projected_edge_exceeds_hw_extent(verts[1].textured(), verts[2].textured())
         || projected_edge_exceeds_hw_extent(verts[2].textured(), verts[0].textured())
+}
+
+fn projected_triangle_hw_safe(verts: [ProjectedVertex; 3]) -> bool {
+    let min_x = verts[0].sx.min(verts[1].sx).min(verts[2].sx);
+    let max_x = verts[0].sx.max(verts[1].sx).max(verts[2].sx);
+    let min_y = verts[0].sy.min(verts[1].sy).min(verts[2].sy);
+    let max_y = verts[0].sy.max(verts[1].sy).max(verts[2].sy);
+    min_x >= PSX_VERTEX_MIN
+        && max_x <= PSX_VERTEX_MAX
+        && min_y >= PSX_VERTEX_MIN
+        && max_y <= PSX_VERTEX_MAX
+        && ((max_x as i32) - (min_x as i32)) <= PSX_TRI_MAX_DX
+        && ((max_y as i32) - (min_y as i32)) <= PSX_TRI_MAX_DY
 }
 
 fn projected_edge_exceeds_hw_extent(
