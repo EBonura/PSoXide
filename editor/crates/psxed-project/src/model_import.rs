@@ -21,8 +21,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    AnimationClipResource, AnimationRole, AnimationSetResource, ModelAnimationClip, ModelResource,
-    ProjectDocument, ResourceData, ResourceId, SkeletonResource,
+    default_model_collision_radius_for_height, AnimationClipResource, AnimationRole,
+    AnimationSetResource, ModelAnimationClip, ModelResource, ProjectDocument, ResourceData,
+    ResourceId, SkeletonResource,
 };
 
 pub use psxed_format::texture::Depth as TextureDepth;
@@ -483,6 +484,7 @@ pub fn register_cooked_model_bundle(
         default_clip,
         preview_clip: default_clip,
         world_height: 1024,
+        collision_radius: default_model_collision_radius_for_height(1024),
         scale_q8: [crate::MODEL_SCALE_ONE_Q8; 3],
         attachments: Vec::new(),
     };
@@ -581,7 +583,15 @@ pub fn import_model_with_animation_sources(
         })?;
     }
 
-    register_cooked_model_bundle(project, &bundle_dir, output_name, Some(project_root))
+    let model_id =
+        register_cooked_model_bundle(project, &bundle_dir, output_name, Some(project_root))?;
+    if let Some(resource) = project.resource_mut(model_id) {
+        if let ResourceData::Model(model) = &mut resource.data {
+            model.world_height = config.world_height;
+            model.collision_radius = default_model_collision_radius_for_height(config.world_height);
+        }
+    }
+    Ok(model_id)
 }
 
 /// Convert a GLB/glTF/FBX into the cooked model package without

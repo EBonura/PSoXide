@@ -11,6 +11,10 @@
 use crate::material::TextureMaterial;
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 
+const fn pack_packet_texcoord(u: u8, v: u8, extra: u16) -> u32 {
+    (u as u32) | ((v as u32) << 8) | ((extra as u32) << 16)
+}
+
 /// Flat-shaded triangle. 5 words (tag + 4 data).
 #[repr(C, align(4))]
 pub struct TriFlat {
@@ -282,16 +286,47 @@ impl TriTextured {
         uvs: [(u8, u8); 3],
         material: TextureMaterial,
     ) -> Self {
+        let (u0, v0) = uvs[0];
+        let (u1, v1) = uvs[1];
+        let (u2, v2) = uvs[2];
+        let clut = material.clut_word();
+        let tpage = material.tpage_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),
             color_cmd: material.flat_textured_polygon_header(false),
             v0: pack_vertex(verts[0].0, verts[0].1),
-            uv0_clut: pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()),
+            uv0_clut: pack_texcoord(u0, v0, clut),
             v1: pack_vertex(verts[1].0, verts[1].1),
-            uv1_tpage: pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()),
+            uv1_tpage: pack_texcoord(u1, v1, tpage),
             v2: pack_vertex(verts[2].0, verts[2].1),
-            uv2: pack_texcoord(uvs[2].0, uvs[2].1, 0),
+            uv2: pack_texcoord(u2, v2, 0),
+        }
+    }
+
+    /// Build a textured triangle using the packet word layout stored in
+    /// [`TriTextured`]. This avoids repacking UV words after construction
+    /// when callers already need DMA/OT packet ordering.
+    pub const fn with_material_packet_texcoords(
+        verts: [(i16, i16); 3],
+        uvs: [(u8, u8); 3],
+        material: TextureMaterial,
+    ) -> Self {
+        let (u0, v0) = uvs[0];
+        let (u1, v1) = uvs[1];
+        let (u2, v2) = uvs[2];
+        let clut = material.clut_word();
+        let tpage = material.tpage_word();
+        Self {
+            tag: 0,
+            tex_window: material.texture_window_word(),
+            color_cmd: material.flat_textured_polygon_header(false),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: pack_packet_texcoord(u0, v0, clut),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: pack_packet_texcoord(u1, v1, tpage),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: pack_packet_texcoord(u2, v2, 0),
         }
     }
 }
@@ -360,18 +395,54 @@ impl TriTexturedGouraud {
         let (r0, g0, b0) = colors[0];
         let (r1, g1, b1) = colors[1];
         let (r2, g2, b2) = colors[2];
+        let (u0, v0) = uvs[0];
+        let (u1, v1) = uvs[1];
+        let (u2, v2) = uvs[2];
+        let clut = material.clut_word();
+        let tpage = material.tpage_word();
         Self {
             tag: 0,
             tex_window: material.texture_window_word(),
             color0_cmd: material.textured_polygon_command(true, false) | pack_color(r0, g0, b0),
             v0: pack_vertex(verts[0].0, verts[0].1),
-            uv0_clut: pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()),
+            uv0_clut: pack_texcoord(u0, v0, clut),
             color1: pack_color(r1, g1, b1),
             v1: pack_vertex(verts[1].0, verts[1].1),
-            uv1_tpage: pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()),
+            uv1_tpage: pack_texcoord(u1, v1, tpage),
             color2: pack_color(r2, g2, b2),
             v2: pack_vertex(verts[2].0, verts[2].1),
-            uv2: pack_texcoord(uvs[2].0, uvs[2].1, 0),
+            uv2: pack_texcoord(u2, v2, 0),
+        }
+    }
+
+    /// Build a textured Gouraud triangle using the packet word layout
+    /// stored in [`TriTexturedGouraud`].
+    pub const fn with_material_packet_texcoords(
+        verts: [(i16, i16); 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+    ) -> Self {
+        let (r0, g0, b0) = colors[0];
+        let (r1, g1, b1) = colors[1];
+        let (r2, g2, b2) = colors[2];
+        let (u0, v0) = uvs[0];
+        let (u1, v1) = uvs[1];
+        let (u2, v2) = uvs[2];
+        let clut = material.clut_word();
+        let tpage = material.tpage_word();
+        Self {
+            tag: 0,
+            tex_window: material.texture_window_word(),
+            color0_cmd: material.textured_polygon_command(true, false) | pack_color(r0, g0, b0),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: pack_packet_texcoord(u0, v0, clut),
+            color1: pack_color(r1, g1, b1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: pack_packet_texcoord(u1, v1, tpage),
+            color2: pack_color(r2, g2, b2),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: pack_packet_texcoord(u2, v2, 0),
         }
     }
 }
@@ -425,17 +496,23 @@ impl QuadTextured {
         uvs: [(u8, u8); 4],
         material: TextureMaterial,
     ) -> Self {
+        let (u0, v0) = uvs[0];
+        let (u1, v1) = uvs[1];
+        let (u2, v2) = uvs[2];
+        let (u3, v3) = uvs[3];
+        let clut = material.clut_word();
+        let tpage = material.tpage_word();
         Self {
             tag: 0,
             color_cmd: material.flat_textured_polygon_header(true),
             v0: pack_vertex(verts[0].0, verts[0].1),
-            uv0_clut: pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()),
+            uv0_clut: pack_texcoord(u0, v0, clut),
             v1: pack_vertex(verts[1].0, verts[1].1),
-            uv1_tpage: pack_texcoord(uvs[1].0, uvs[1].1, material.tpage_word()),
+            uv1_tpage: pack_texcoord(u1, v1, tpage),
             v2: pack_vertex(verts[2].0, verts[2].1),
-            uv2: pack_texcoord(uvs[2].0, uvs[2].1, 0),
+            uv2: pack_texcoord(u2, v2, 0),
             v3: pack_vertex(verts[3].0, verts[3].1),
-            uv3: pack_texcoord(uvs[3].0, uvs[3].1, 0),
+            uv3: pack_texcoord(u3, v3, 0),
         }
     }
 }
