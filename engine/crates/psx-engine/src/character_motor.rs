@@ -976,11 +976,15 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
         return None;
     }
     let sector = room.sector(sx as u16, sz as u16)?;
-    if !sector.has_floor() || !sector.floor_walkable() {
+    if !sector.has_floor() {
         return None;
     }
     let local_x = (x - sx * s).clamp(0, s);
     let local_z = (z - sz * s).clamp(0, s);
+    let triangle = triangle_index_at_local(sector.floor_split(), local_x, local_z, s);
+    if !sector.floor_triangle_walkable(triangle) {
+        return None;
+    }
     Some(height_at_local(
         sector.floor_heights(),
         sector.floor_split(),
@@ -988,6 +992,10 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
         local_z,
         s,
     ))
+}
+
+fn triangle_index_at_local(split: u8, local_x: i32, local_z: i32, sector: i32) -> usize {
+    psx_asset::world_topology::horizontal_triangle_at_local(split, local_x, local_z, sector)
 }
 
 fn body_hits_solid_wall(
@@ -1380,6 +1388,37 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(512, 0, 800));
         assert!(!frame.moved);
         assert!(frame.blocked);
+    }
+
+    #[test]
+    fn diagonal_wall_segment_blocks_cylinder_overlap() {
+        assert!(circle_overlaps_wall_segment(
+            512,
+            512,
+            64,
+            0,
+            0,
+            1024,
+            DIR_NORTH_WEST_SOUTH_EAST
+        ));
+        assert!(circle_overlaps_wall_segment(
+            512,
+            512,
+            64,
+            0,
+            0,
+            1024,
+            DIR_NORTH_EAST_SOUTH_WEST
+        ));
+        assert!(!circle_overlaps_wall_segment(
+            512,
+            700,
+            64,
+            0,
+            0,
+            1024,
+            DIR_NORTH_WEST_SOUTH_EAST
+        ));
     }
 
     #[test]
