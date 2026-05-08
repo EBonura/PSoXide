@@ -505,6 +505,50 @@ local function run()
                 end
             end
 
+        elseif cmd == "raw_trace_until" then
+            -- Trace raw debugger stepIn instructions without the
+            -- runExecute() folding pass. This is intentionally a
+            -- diagnostic-only path for parity breaks where the normal
+            -- user-side oracle hides an IRQ handler behind one step.
+            local stop_str, cap_str = line:match("^raw_trace_until%s+(%S+)%s*(%d*)$")
+            local stop_pc = tonumber(stop_str)
+            local cap = tonumber(cap_str) or 10000
+            if stop_pc == nil then
+                send("err raw_trace_until: bad stop pc")
+            else
+                local pc_before = tonumber(regs.pc)
+                local instr_before = read_instruction(pc_before)
+                send(string.format(
+                    "raw_trace_until begin pc=%d instr=%d stop=%d tick=%d",
+                    pc_before, instr_before, stop_pc, tonumber(PCSX.getCPUCycles())))
+                local reached = false
+                for i = 1, cap do
+                    local pc = tonumber(regs.pc)
+                    local instr = read_instruction(pc)
+                    local tick = tonumber(PCSX.getCPUCycles())
+                    send_nowait(string.format(
+                        "raw i=%d pc=%d code=%d tick=%d",
+                        i, pc, instr, tick))
+                    PCSX.stepIn()
+                    if i % 256 == 0 then io.flush() end
+                    if tonumber(regs.pc) == stop_pc then
+                        reached = true
+                        send(string.format(
+                            "raw_trace_until reached i=%d tick=%d",
+                            i, tonumber(PCSX.getCPUCycles())))
+                        break
+                    end
+                end
+                io.flush()
+                if reached then
+                    send("raw_trace_until ok")
+                else
+                    send(string.format(
+                        "err raw_trace_until: cap hit pc=%d tick=%d",
+                        tonumber(regs.pc), tonumber(PCSX.getCPUCycles())))
+                end
+            end
+
         elseif cmd == "run" then
             -- Like `step N` but WITHOUT emitting per-instruction
             -- records. Used by milestone tests that only want final
