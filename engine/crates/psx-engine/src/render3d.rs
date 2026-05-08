@@ -298,6 +298,11 @@ fn clamp_model_uv_i32_component(value: i32, max: i32) -> i32 {
     }
 }
 
+#[inline]
+fn pack_model_texcoord_word(u: u8, v: u8, extra: u16) -> u32 {
+    (u as u32) | ((v as u32) << 8) | ((extra as u32) << 16)
+}
+
 /// Per-joint world-to-view transform for one render frame.
 ///
 /// `submit_textured_model` fills one entry per skin joint up-front so
@@ -1603,6 +1608,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.vertex_overflow = true;
         }
         stats.projected_vertices = project_count as u16;
+        let near_z = camera.projection.near_z;
+        let mut all_projected_vertices_in_front = true;
         let mut part_index = 0;
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         while part_index < model.part_count() {
@@ -1611,6 +1618,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             };
             let primary_joint = part.joint_index() as usize;
             if primary_joint >= joint_count {
+                all_projected_vertices_in_front = false;
                 part_index += 1;
                 continue;
             }
@@ -1625,16 +1633,20 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 .min(project_count);
             while global_index < part_end {
                 let Some(vertex) = model.vertex(global_index as u16) else {
+                    all_projected_vertices_in_front = false;
                     break;
                 };
                 if blend_vertices && model_vertex_uses_cpu_blend(vertex, joint_count) {
-                    projected_vertices[global_index] = project_textured_model_vertex(
+                    let projected = project_textured_model_vertex(
                         vertex,
                         primary,
                         joint_view_transforms,
                         joint_count,
                         camera.projection,
                     );
+                    all_projected_vertices_in_front &=
+                        projected_model_vertex_in_front(projected, near_z);
+                    projected_vertices[global_index] = projected;
                     global_index += 1;
                     continue;
                 }
@@ -1643,6 +1655,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 let mut batch_count = 1usize;
                 while batch_count < 3 && global_index + batch_count < part_end {
                     let Some(next) = model.vertex((global_index + batch_count) as u16) else {
+                        all_projected_vertices_in_front = false;
                         break;
                     };
                     if blend_vertices && model_vertex_uses_cpu_blend(next, joint_count) {
@@ -1658,14 +1671,22 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         batch[1].position,
                         batch[2].position,
                     );
-                    projected_vertices[global_index] = projected_from_gte(projected[0]);
-                    projected_vertices[global_index + 1] = projected_from_gte(projected[1]);
-                    projected_vertices[global_index + 2] = projected_from_gte(projected[2]);
+                    let a = projected_from_gte(projected[0]);
+                    let b = projected_from_gte(projected[1]);
+                    let c = projected_from_gte(projected[2]);
+                    all_projected_vertices_in_front &= projected_model_vertex_in_front(a, near_z)
+                        && projected_model_vertex_in_front(b, near_z)
+                        && projected_model_vertex_in_front(c, near_z);
+                    projected_vertices[global_index] = a;
+                    projected_vertices[global_index + 1] = b;
+                    projected_vertices[global_index + 2] = c;
                 } else {
                     let mut batch_index = 0usize;
                     while batch_index < batch_count {
-                        projected_vertices[global_index + batch_index] =
-                            project_gte_model_vertex(batch[batch_index]);
+                        let projected = project_gte_model_vertex(batch[batch_index]);
+                        all_projected_vertices_in_front &=
+                            projected_model_vertex_in_front(projected, near_z);
+                        projected_vertices[global_index + batch_index] = projected;
                         batch_index += 1;
                     }
                 }
@@ -1698,9 +1719,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices[ic],
                 ];
 
-                if projected[0].sz < camera.projection.near_z
-                    || projected[1].sz < camera.projection.near_z
-                    || projected[2].sz < camera.projection.near_z
+                if !all_projected_vertices_in_front
+                    && projected_model_face_crosses_near(projected, near_z)
                 {
                     stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
                     face_index += 1;
@@ -1708,12 +1728,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 }
 
                 if self.submit_projected_model_triangle_preclamped_fast(
-                    triangles,
-                    projected,
-                    face.uvs,
-                    material,
-                    options,
-                    &mut stats,
+                    triangles, projected, face.uvs, material, options, &mut stats,
                 ) {
                     crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
                     emit_textured_model_detail_counters(
@@ -1775,9 +1790,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         continue;
                     };
 
-                    if a.projected.sz < camera.projection.near_z
-                        || b.projected.sz < camera.projection.near_z
-                        || c.projected.sz < camera.projection.near_z
+                    if !all_projected_vertices_in_front
+                        && projected_model_face_crosses_near(
+                            [a.projected, b.projected, c.projected],
+                            near_z,
+                        )
                     {
                         stats.dropped_triangles = stats.dropped_triangles.saturating_add(1);
                         face_index += 1;
@@ -1839,18 +1856,24 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             return true;
         }
 
-        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
+        let (uv0, uv1, uv2) = (uvs[0], uvs[1], uvs[2]);
+        let Some(tri) = triangles.push(TriTextured::with_material(
             [
                 (verts[0].sx, verts[0].sy),
                 (verts[1].sx, verts[1].sy),
                 (verts[2].sx, verts[2].sy),
             ],
-            uvs,
+            [uv0, uv1, uv2],
             material,
         )) else {
             stats.primitive_overflow = true;
             return true;
         };
+        // Keep model UV packet words explicit; emulator traces caught
+        // stale low bytes here when relying solely on aggregate construction.
+        tri.uv0_clut = pack_model_texcoord_word(uv0.0, uv0.1, material.clut_word());
+        tri.uv1_tpage = pack_model_texcoord_word(uv1.0, uv1.1, material.tpage_word());
+        tri.uv2 = pack_model_texcoord_word(uv2.0, uv2.1, 0);
 
         let depth = CameraDepth::new(
             ((verts[0].sz + verts[1].sz + verts[2].sz) / 3).saturating_add(options.depth_bias),
@@ -1936,7 +1959,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             verts[2].v as u8
         };
 
-        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
+        let Some(tri) = triangles.push(TriTextured::with_material(
             [
                 (verts[0].projected.sx, verts[0].projected.sy),
                 (verts[1].projected.sx, verts[1].projected.sy),
@@ -1950,6 +1973,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ..WorldRenderStats::default()
             };
         };
+        // Keep model UV packet words explicit; emulator traces caught
+        // stale low bytes here when relying solely on aggregate construction.
+        tri.uv0_clut = pack_model_texcoord_word(u0, v0, material.clut_word());
+        tri.uv1_tpage = pack_model_texcoord_word(u1, v1, material.tpage_word());
+        tri.uv2 = pack_model_texcoord_word(u2, v2, 0);
 
         let depth = CameraDepth::new(
             ((verts[0].projected.sz + verts[1].projected.sz + verts[2].projected.sz) / 3)
@@ -2921,6 +2949,16 @@ fn project_gte_model_vertex(vertex: ModelVertex) -> ProjectedVertex {
 #[inline]
 fn projected_from_gte(projected: scene::Projected) -> ProjectedVertex {
     ProjectedVertex::new(projected.sx, projected.sy, projected.sz as i32)
+}
+
+#[inline]
+fn projected_model_vertex_in_front(vertex: ProjectedVertex, near_z: i32) -> bool {
+    vertex.sz >= near_z
+}
+
+#[inline]
+fn projected_model_face_crosses_near(verts: [ProjectedVertex; 3], near_z: i32) -> bool {
+    verts[0].sz < near_z || verts[1].sz < near_z || verts[2].sz < near_z
 }
 
 /// CPU projection that matches the GTE RTPS convention used by the
