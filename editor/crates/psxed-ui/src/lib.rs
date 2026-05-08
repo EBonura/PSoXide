@@ -19,7 +19,7 @@ use crate::history::UndoStack;
 use crate::model_animation_viewer::ModelAnimationViewerState;
 use crate::style::*;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use egui::{
@@ -35,9 +35,10 @@ use psxed_project::{
     GridDirection, GridHorizontalFace, GridSector, GridSplit, GridTriangleMaterialOverride,
     GridUvRotation, GridUvTransform, GridVerticalFace, MaterialFaceSidedness, MaterialResource,
     NodeId, NodeKind, NodeRow, ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId,
-    WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
-    HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
-    MAX_WORLD_SECTOR_SIZE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_QUANTUM,
+    SkyMode, SkySettings, WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
+    MAX_ROOM_WIDTH, MAX_WORLD_SECTOR_SIZE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
+    WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -515,7 +516,7 @@ struct PackageSummary {
 
 /// Per-stamp paint dedupe key. Two paint events with equal stamps
 /// are considered redundant during a single drag -- typically the
-/// second is dropped. Edge / stack components let PaintWall stamp
+/// second is dropped. The edge component lets PaintWall stamp
 /// multiple edges of the same cell without dwelling on one
 /// re-firing the same wall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,10 +544,10 @@ pub enum PaintTargetPreview {
         world_cell_z: i32,
         kind: PaintCellPreviewKind,
     },
-    /// PaintWall -- outlines the wall on the targeted edge of the
-    /// cell. `stack` is the next-free wall slot index for that
-    /// edge, used by the renderer to position the ghost above any
-    /// existing walls.
+    /// PaintWall -- outlines the wall that would be added on the
+    /// targeted edge. `stack` is the next-free wall slot index for
+    /// that edge, used by the renderer to position the ghost above
+    /// any existing walls.
     Wall {
         world_cell_x: i32,
         world_cell_z: i32,
@@ -4239,19 +4240,23 @@ impl EditorWorkspace {
         let face_hit = self.face_hit_for_paint_tool(face_hit);
 
         // Cursor over an existing wall while PaintWall is active --
-        // the click would replace that exact wall, so preview it
-        // directly with its array-derived world cell.
+        // the click adds the next stack entry on that same edge, so
+        // preview the next-free stack at its array-derived world cell.
         if is_paint_wall {
             if let Some((
                 FaceRef {
                     sx,
                     sz,
-                    kind: FaceKind::Wall { dir, stack },
+                    kind: FaceKind::Wall { dir, .. },
                     ..
                 },
                 _,
             )) = face_hit
             {
+                let stack = grid
+                    .sector(sx, sz)
+                    .map(|sector| sector.walls.get(dir).len() as u8)
+                    .unwrap_or(0);
                 return Some(PaintTargetPreview::Wall {
                     world_cell_x: grid.origin[0] + sx as i32,
                     world_cell_z: grid.origin[1] + sz as i32,
@@ -4908,6 +4913,115 @@ impl EditorWorkspace {
         selections
     }
 
+    fn select_edge_path(&mut self, selection: Selection, modifiers: egui::Modifiers) -> bool {
+        let Selection::Edge(current) = selection else {
+            return false;
+        };
+        let Some(anchor) = self.edge_selection_anchor() else {
+            return false;
+        };
+        let Some(path) = self.edge_path_between(anchor, current) else {
+            return false;
+        };
+        if path.is_empty() {
+            return false;
+        }
+
+        let additive = modifiers.command || modifiers.ctrl;
+        self.clear_sector_selection();
+        self.clear_node_selection_state();
+        if !additive {
+            self.selected_primitives.clear();
+        }
+        for edge in path {
+            self.push_selected_primitive_unique(Selection::Edge(edge));
+        }
+        self.selected_primitive = Some(selection);
+        self.update_primitive_resource_selection();
+        self.status = match self.selected_primitives.len() {
+            0 => "Cleared primitive selection".to_string(),
+            1 => format!("Selected {}", describe_selection(selection)),
+            count => format!("Selected {count} edges"),
+        };
+        true
+    }
+
+    fn edge_selection_anchor(&self) -> Option<EdgeRef> {
+        self.selected_primitives
+            .iter()
+            .copied()
+            .find_map(selection_edge)
+            .or_else(|| self.selected_primitive.and_then(selection_edge))
+    }
+
+    fn edge_path_between(&self, anchor: EdgeRef, current: EdgeRef) -> Option<Vec<EdgeRef>> {
+        if anchor.room != current.room {
+            return None;
+        }
+        let kind = edge_path_kind(anchor);
+        if edge_path_kind(current) != kind {
+            return None;
+        }
+        let grid = self.room_grid_view(anchor.room)?;
+        let mut candidates = Vec::new();
+        for selection in self.all_primitive_selections_in_room(anchor.room, SelectionMode::Edge) {
+            let Some(edge) = selection_edge(selection) else {
+                continue;
+            };
+            if edge_path_kind(edge) != kind {
+                continue;
+            }
+            let Some(segment) = edge_world_segment(grid, edge) else {
+                continue;
+            };
+            candidates.push((edge, segment));
+        }
+
+        let start = candidates.iter().position(|(edge, _)| *edge == anchor)?;
+        let end = candidates.iter().position(|(edge, _)| *edge == current)?;
+        if start == end {
+            return Some(vec![current]);
+        }
+
+        let mut visited = vec![false; candidates.len()];
+        let mut previous: Vec<Option<usize>> = vec![None; candidates.len()];
+        let mut queue = VecDeque::new();
+        visited[start] = true;
+        queue.push_back(start);
+
+        while let Some(index) = queue.pop_front() {
+            if index == end {
+                break;
+            }
+            for next in 0..candidates.len() {
+                if visited[next] {
+                    continue;
+                }
+                if !edge_segments_touch(candidates[index].1, candidates[next].1) {
+                    continue;
+                }
+                visited[next] = true;
+                previous[next] = Some(index);
+                queue.push_back(next);
+            }
+        }
+
+        if !visited[end] {
+            return None;
+        }
+        let mut path = Vec::new();
+        let mut index = end;
+        loop {
+            path.push(candidates[index].0);
+            if index == start {
+                break;
+            }
+            index = previous[index]?;
+        }
+        path.reverse();
+        Some(path)
+    }
+
     fn apply_primitive_selection_modifiers(
         &mut self,
         selection: Selection,
@@ -4915,6 +5029,9 @@ impl EditorWorkspace {
     ) {
         let toggle = modifiers.command || modifiers.ctrl;
         if modifiers.shift && self.select_wall_face_span(selection, modifiers) {
+            return;
+        }
+        if modifiers.shift && self.select_edge_path(selection, modifiers) {
             return;
         }
 
@@ -5309,9 +5426,10 @@ impl EditorWorkspace {
     }
 
     /// Build the dedupe key for the next paint dispatch. PaintWall
-    /// records the targeted edge + stack so dragging across edges
-    /// of the same cell stamps each one (different stamps), but
-    /// dwelling on the same edge during drag dedupes (same stamp).
+    /// records the targeted edge so dragging across edges of the
+    /// same cell stamps each one (different stamps), but dwelling
+    /// on the same edge during drag dedupes even though each commit
+    /// creates a new stack index.
     /// Other tools key on cell + tool only -- drag-restamping a
     /// floor with the same material is a no-op anyway.
     fn paint_stamp_for(
@@ -5322,15 +5440,15 @@ impl EditorWorkspace {
         face_hit: Option<(FaceRef, [f32; 3])>,
         hit_world: [f32; 3],
     ) -> PaintStamp {
-        let (edge, stack) = if matches!(self.active_tool, ViewTool::PaintWall) {
+        let edge = if matches!(self.active_tool, ViewTool::PaintWall) {
             match face_hit {
                 Some((
                     FaceRef {
-                        kind: FaceKind::Wall { dir, stack },
+                        kind: FaceKind::Wall { dir, .. },
                         ..
                     },
                     _,
-                )) => (Some(dir), Some(stack)),
+                )) => Some(dir),
                 _ => {
                     let center = self
                         .room_grid_view(room_id)
@@ -5339,11 +5457,11 @@ impl EditorWorkspace {
                     let dir = self
                         .wall_paint_shape
                         .direction(hit_world[0] - center[0], hit_world[2] - center[1]);
-                    (Some(dir), None)
+                    Some(dir)
                 }
             }
         } else {
-            (None, None)
+            None
         };
         PaintStamp {
             room: room_id,
@@ -5351,7 +5469,7 @@ impl EditorWorkspace {
             sz,
             tool: self.active_tool,
             edge,
-            stack,
+            stack: None,
         }
     }
 
@@ -5606,40 +5724,31 @@ impl EditorWorkspace {
                 format!("Painted ceiling at {sx},{sz}")
             }
             ViewTool::PaintWall => {
-                // When the ray hit an existing wall: REPLACE its
-                // material instead of stacking another wall on top
-                // of it (the previous behaviour silently appended,
-                // which the user spotted as the click-and-nothing-
-                // happens-but-walls-pile-up bug). When the ray hit
-                // a floor / ceiling / nothing: infer the edge from
-                // the click position relative to the cell centre
-                // and append a new wall on that edge.
-                if let Some(FaceRef {
-                    kind: FaceKind::Wall { dir, stack },
+                // A wall pick supplies the exact edge to stack on.
+                // Floor / ceiling / empty picks infer the edge from
+                // the click position relative to the cell centre.
+                let dir = if let Some(FaceRef {
+                    kind: FaceKind::Wall { dir, .. },
                     ..
                 }) = picked_face
                 {
-                    if let Some(sector) = grid.sector_mut(sx, sz) {
-                        if let Some(wall) = sector.walls.get_mut(dir).get_mut(stack as usize) {
-                            wall.material = wall_mat;
-                            format!(
-                                "Repainted {} wall #{stack} at {sx},{sz}",
-                                direction_label(dir)
-                            )
-                        } else {
-                            format!(
-                                "Wall #{stack} on {} edge of {sx},{sz} is gone",
-                                direction_label(dir)
-                            )
-                        }
-                    } else {
-                        format!("Cell {sx},{sz} no longer has a sector")
-                    }
+                    dir
                 } else {
-                    let dir = wall_paint_shape
-                        .direction(hit_world[0] - cell_center[0], hit_world[2] - cell_center[1]);
-                    grid.add_wall_aligned_to_surfaces(sx, sz, dir, wall_mat);
+                    wall_paint_shape
+                        .direction(hit_world[0] - cell_center[0], hit_world[2] - cell_center[1])
+                };
+                let stack = grid
+                    .sector(sx, sz)
+                    .map(|sector| sector.walls.get(dir).len())
+                    .unwrap_or(0);
+                grid.add_wall_above_stack_or_aligned(sx, sz, dir, wall_mat);
+                if stack == 0 {
                     format!("Added {} wall at {sx},{sz}", direction_label(dir))
+                } else {
+                    format!(
+                        "Added {} wall #{stack} on top at {sx},{sz}",
+                        direction_label(dir)
+                    )
                 }
             }
             ViewTool::Erase => {
@@ -10983,7 +11092,8 @@ impl EditorWorkspace {
     /// origin awareness, no wall replacement, no `PlaceKind`
     /// dispatch). Now: lift the click into editor coords, pre-
     /// compute a `picked_face` for PaintWall when the inferred
-    /// edge already has a wall stack, and hand off.
+    /// edge already has a wall stack, and hand off. PaintWall uses
+    /// that face's direction to add the next stack entry.
     fn apply_paint(&mut self, tool: ViewTool, room_id: NodeId, sx: u16, sz: u16, world: [f32; 2]) {
         // 2D `world` is already in editor sector-units (the 2D
         // viewport's native space, room-centre-relative around
@@ -11005,9 +11115,9 @@ impl EditorWorkspace {
 
             // For PaintWall: if the inferred edge already has at
             // least one wall, hand `run_paint_action` a `FaceRef`
-            // pointing at the top of the stack so it replaces
-            // material instead of appending. Empty edge → None
-            // → append path.
+            // pointing at the top of the stack so the new wall uses
+            // that edge instead of re-inferring from the cell center.
+            // Empty edge -> None -> normal append path.
             let face = if matches!(tool, ViewTool::PaintWall) {
                 let centre = grid.cell_center_world(sx, sz);
                 let dir = self
@@ -12802,8 +12912,8 @@ fn draw_transform_policy_editor(
     world_sector_size_change: &mut Option<i32>,
 ) -> bool {
     match &mut node.kind {
-        NodeKind::World { sector_size } => {
-            draw_world_grid_settings(ui, *sector_size, world_sector_size_change)
+        NodeKind::World { sector_size, sky } => {
+            draw_world_grid_settings(ui, *sector_size, sky, world_sector_size_change)
         }
         NodeKind::Room { .. } => {
             let mut changed = false;
@@ -12853,6 +12963,7 @@ fn draw_transform_policy_editor(
 fn draw_world_grid_settings(
     ui: &mut egui::Ui,
     sector_size: i32,
+    sky: &mut SkySettings,
     world_sector_size_change: &mut Option<i32>,
 ) -> bool {
     let mut changed = false;
@@ -12875,6 +12986,38 @@ fn draw_world_grid_settings(
                 }
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
             });
+        });
+    egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Mode").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .selectable_value(&mut sky.mode, SkyMode::Gradient, "Gradient")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut sky.mode, SkyMode::Off, "Off")
+                    .changed();
+            });
+            if sky.mode == SkyMode::Gradient {
+                changed |= color_editor(ui, "Top", &mut sky.top_color);
+                changed |= color_editor(ui, "Horizon", &mut sky.horizon_color);
+                changed |= color_editor(ui, "Lower", &mut sky.lower_color);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Horizon").color(STUDIO_TEXT_WEAK));
+                    let mut horizon = sky.horizon_percent.clamp(5, 95);
+                    if ui
+                        .add(egui::Slider::new(&mut horizon, 5..=95).suffix("%"))
+                        .changed()
+                    {
+                        sky.horizon_percent = horizon;
+                        changed = true;
+                    }
+                });
+                changed |= ui
+                    .checkbox(&mut sky.match_room_fog, "Match room fog")
+                    .changed();
+            }
         });
     changed
 }
@@ -13103,7 +13246,7 @@ fn draw_node_kind_editor(
             ui.weak("Entity host. Add component children for rendering, collision, interaction, lighting, or logic.");
         }
         NodeKind::World { .. } => {
-            ui.weak("Streamed-region group; holds Room children.");
+            ui.weak("Streamed-region group; holds Room children and sky settings.");
         }
         NodeKind::Room { grid } => {
             ui.horizontal(|ui| {
@@ -17026,6 +17169,7 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
             "World",
             NodeKind::World {
                 sector_size: DEFAULT_WORLD_SECTOR_SIZE,
+                sky: SkySettings::default(),
             },
         ),
         (
@@ -19367,6 +19511,13 @@ fn selection_wall_face(selection: Selection) -> Option<FaceRef> {
     matches!(face.kind, FaceKind::Wall { .. }).then_some(face)
 }
 
+fn selection_edge(selection: Selection) -> Option<EdgeRef> {
+    let Selection::Edge(edge) = selection else {
+        return None;
+    };
+    Some(edge)
+}
+
 fn wall_span_bounds(
     anchor: FaceRef,
     current: FaceRef,
@@ -20108,6 +20259,30 @@ fn drag_corner_seeds(selection: Selection) -> Option<Vec<FaceCornerRef>> {
 /// out of bounds).
 pub fn edge_endpoints(grid: &WorldGrid, edge: EdgeRef) -> Option<(PhysicalVertex, PhysicalVertex)> {
     edge_endpoints_with_connectivity(grid, edge, VertexConnectivity::Welded)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgePathKind {
+    Floor,
+    Ceiling,
+    Wall { stack: u8, edge: WallEdge },
+}
+
+fn edge_path_kind(edge: EdgeRef) -> EdgePathKind {
+    match edge.anchor {
+        EdgeAnchor::Floor { .. } => EdgePathKind::Floor,
+        EdgeAnchor::Ceiling { .. } => EdgePathKind::Ceiling,
+        EdgeAnchor::Wall { stack, edge, .. } => EdgePathKind::Wall { stack, edge },
+    }
+}
+
+fn edge_world_segment(grid: &WorldGrid, edge: EdgeRef) -> Option<([i32; 3], [i32; 3])> {
+    let (a, b) = edge_endpoint_corners(edge);
+    Some((face_corner_world(grid, a)?, face_corner_world(grid, b)?))
+}
+
+fn edge_segments_touch(a: ([i32; 3], [i32; 3]), b: ([i32; 3], [i32; 3])) -> bool {
+    a.0 == b.0 || a.0 == b.1 || a.1 == b.0 || a.1 == b.1
 }
 
 fn edge_endpoints_with_connectivity(
@@ -24258,6 +24433,78 @@ mod tests {
     }
 
     #[test]
+    fn shift_selects_wall_top_edge_path_from_anchor() {
+        let mut project = ProjectDocument::new("wall-edge-path");
+        let mut grid = WorldGrid::empty(4, 1, 1024);
+        for sx in 0..4 {
+            grid.add_wall(sx, 0, GridDirection::North, 0, 1024, None);
+        }
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let edge_at = |sx| {
+            Selection::Edge(EdgeRef {
+                room,
+                anchor: EdgeAnchor::Wall {
+                    sx,
+                    sz: 0,
+                    dir: GridDirection::North,
+                    stack: 0,
+                    edge: WallEdge::Top,
+                },
+            })
+        };
+
+        let mut shift = egui::Modifiers::NONE;
+        shift.shift = true;
+        workspace.apply_primitive_selection_modifiers(edge_at(0), egui::Modifiers::NONE);
+        workspace.apply_primitive_selection_modifiers(edge_at(3), shift);
+
+        assert_eq!(workspace.selected_primitives.len(), 4);
+        for sx in 0..4 {
+            assert!(workspace.selected_primitives.contains(&edge_at(sx)));
+        }
+        assert_eq!(workspace.selected_primitive, Some(edge_at(3)));
+    }
+
+    #[test]
+    fn shift_selects_floor_edge_path_from_anchor() {
+        let mut project = ProjectDocument::new("floor-edge-path");
+        let mut grid = WorldGrid::empty(4, 1, 1024);
+        for sx in 0..4 {
+            grid.set_floor(sx, 0, 0, None);
+        }
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let edge_at = |sx| {
+            Selection::Edge(EdgeRef {
+                room,
+                anchor: EdgeAnchor::Floor {
+                    sx,
+                    sz: 0,
+                    dir: GridDirection::North,
+                },
+            })
+        };
+
+        let mut shift = egui::Modifiers::NONE;
+        shift.shift = true;
+        workspace.apply_primitive_selection_modifiers(edge_at(0), egui::Modifiers::NONE);
+        workspace.apply_primitive_selection_modifiers(edge_at(3), shift);
+
+        assert_eq!(workspace.selected_primitives.len(), 4);
+        for sx in 0..4 {
+            assert!(workspace.selected_primitives.contains(&edge_at(sx)));
+        }
+        assert_eq!(workspace.selected_primitive, Some(edge_at(3)));
+    }
+
+    #[test]
     fn modified_primitive_selection_can_mix_floor_ceiling_and_wall_faces() {
         let mut project = ProjectDocument::new("mixed-face-selection");
         let mut grid = WorldGrid::empty(1, 1, 1024);
@@ -24592,6 +24839,82 @@ mod tests {
         let sector = grid.sector(0, 0).unwrap();
         assert!(sector.walls.get(GridDirection::North).is_empty());
         assert_eq!(sector.walls.get(GridDirection::NorthEastSouthWest).len(), 1);
+    }
+
+    #[test]
+    fn paint_wall_on_existing_wall_adds_next_stack_entry() {
+        let mut project = ProjectDocument::new("stacked-wall-paint");
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let picked = FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Wall {
+                dir: GridDirection::North,
+                stack: 0,
+            },
+        };
+
+        workspace.run_paint_action(
+            ViewTool::PaintWall,
+            room,
+            0,
+            0,
+            Some(picked),
+            [512.0, 512.0, 1024.0],
+        );
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let walls = grid.sector(0, 0).unwrap().walls.get(GridDirection::North);
+        assert_eq!(walls.len(), 2);
+        assert_eq!(walls[1].heights, [1024, 1024, 3072, 3072]);
+    }
+
+    #[test]
+    fn paint_wall_stamp_ignores_stack_to_prevent_drag_restacking() {
+        let mut project = ProjectDocument::new("wall-stamp-stack-dedupe");
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+        grid.add_wall(0, 0, GridDirection::North, 1024, 2048, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::PaintWall;
+        let face = |stack| FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Wall {
+                dir: GridDirection::North,
+                stack,
+            },
+        };
+
+        let first = workspace.paint_stamp_for(
+            room,
+            0,
+            0,
+            Some((face(0), [512.0, 512.0, 1024.0])),
+            [512.0, 512.0, 1024.0],
+        );
+        let second = workspace.paint_stamp_for(
+            room,
+            0,
+            0,
+            Some((face(1), [512.0, 1536.0, 1024.0])),
+            [512.0, 1536.0, 1024.0],
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(first.stack, None);
     }
 
     #[test]
@@ -25208,7 +25531,10 @@ mod tests {
         let world = project.active_scene_mut().add_node(
             NodeId::ROOT,
             "World",
-            NodeKind::World { sector_size: 1536 },
+            NodeKind::World {
+                sector_size: 1536,
+                sky: SkySettings::default(),
+            },
         );
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
         workspace.replace_node_selection(world);
