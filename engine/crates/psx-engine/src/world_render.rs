@@ -36,6 +36,10 @@ pub struct WorldRenderMaterial {
     pub texture: TextureMaterial,
     /// Face-sidedness policy.
     pub sidedness: SurfaceSidedness,
+    /// Texture-window width that maps the authored 64-texel face UV domain.
+    pub texture_width: u8,
+    /// Texture-window height that maps the authored 64-texel face UV domain.
+    pub texture_height: u8,
 }
 
 impl WorldRenderMaterial {
@@ -44,6 +48,8 @@ impl WorldRenderMaterial {
         Self {
             texture,
             sidedness: SurfaceSidedness::Front,
+            texture_width: ROOM_TEXTURE_UV_SIZE,
+            texture_height: ROOM_TEXTURE_UV_SIZE,
         }
     }
 
@@ -52,6 +58,8 @@ impl WorldRenderMaterial {
         Self {
             texture,
             sidedness: SurfaceSidedness::Back,
+            texture_width: ROOM_TEXTURE_UV_SIZE,
+            texture_height: ROOM_TEXTURE_UV_SIZE,
         }
     }
 
@@ -60,6 +68,8 @@ impl WorldRenderMaterial {
         Self {
             texture,
             sidedness: SurfaceSidedness::Both,
+            texture_width: ROOM_TEXTURE_UV_SIZE,
+            texture_height: ROOM_TEXTURE_UV_SIZE,
         }
     }
 
@@ -67,6 +77,14 @@ impl WorldRenderMaterial {
     /// a different flat RGB tint.
     pub const fn with_tint(mut self, tint: (u8, u8, u8)) -> Self {
         self.texture = self.texture.with_tint(tint);
+        self
+    }
+
+    /// Return a copy whose authored 64x64 face UVs are projected into
+    /// the material's actual texture-window size.
+    pub const fn with_texture_size(mut self, width: u8, height: u8) -> Self {
+        self.texture_width = normalize_room_texture_uv_size(width);
+        self.texture_height = normalize_room_texture_uv_size(height);
         self
     }
 }
@@ -273,6 +291,9 @@ pub struct CachedRoomSurface {
     pub sample: WorldSurfaceSample,
     /// Authored diagonal split id for floors/ceilings.
     pub split: u8,
+    /// Split-triangle index for floor/ceiling records, or `2`
+    /// for a full quad surface such as a wall.
+    pub triangle_index: u8,
 }
 
 impl CachedRoomSurface {
@@ -283,6 +304,7 @@ impl CachedRoomSurface {
         uvs: [(0, 0); 4],
         sample: WorldSurfaceSample::EMPTY,
         split: SPLIT_NW_SE,
+        triangle_index: WHOLE_QUAD_TRIANGLE_INDEX,
     };
 
     const fn new(
@@ -291,6 +313,7 @@ impl CachedRoomSurface {
         uvs: [(u8, u8); 4],
         sample: WorldSurfaceSample,
         split: u8,
+        triangle_index: u8,
     ) -> Self {
         Self {
             material_slot,
@@ -298,6 +321,7 @@ impl CachedRoomSurface {
             uvs,
             sample,
             split,
+            triangle_index,
         }
     }
 }
@@ -373,10 +397,12 @@ impl WorldSurfaceLighting for NoWorldSurfaceLighting {
 /// Used by tests to spell the split id explicitly; runtime
 /// emission falls through to this case for any non-`SPLIT_NE_SW`
 /// id.
-const SPLIT_NW_SE: u8 = 0;
+const SPLIT_NW_SE: u8 = psx_asset::WORLD_SPLIT_NORTH_WEST_SOUTH_EAST;
 /// Alternate split id (NE→SW diagonal). Mirrors
 /// `psxed_format::world::split::NORTH_EAST_SOUTH_WEST`.
-const SPLIT_NE_SW: u8 = 1;
+const SPLIT_NE_SW: u8 = psx_asset::WORLD_SPLIT_NORTH_EAST_SOUTH_WEST;
+const WHOLE_QUAD_TRIANGLE_INDEX: u8 = psx_asset::world_topology::WHOLE_QUAD_TRIANGLE_INDEX;
+const ROOM_TEXTURE_UV_SIZE: u8 = 64;
 
 /// Texture-page-relative tile size used by legacy v1 helper tests.
 #[cfg(test)]
@@ -392,6 +418,8 @@ const DIR_NORTH: u8 = 0;
 const DIR_EAST: u8 = 1;
 const DIR_SOUTH: u8 = 2;
 const DIR_WEST: u8 = 3;
+const DIR_NORTH_WEST_SOUTH_EAST: u8 = 4;
+const DIR_NORTH_EAST_SOUTH_WEST: u8 = 5;
 
 #[cfg(test)]
 const WALL_UVS: [(u8, u8); 4] = [(0, TILE_UV), (TILE_UV, TILE_UV), (TILE_UV, 0), (0, 0)];
@@ -764,15 +792,29 @@ pub fn cache_room_vertex_lit_surfaces(
             };
 
             if sector.has_floor() {
-                if let Some(slot) = sector.floor_material() {
-                    let heights = sector.floor_heights();
+                let heights = sector.floor_heights();
+                let split = sector.floor_split();
+                for triangle_index in 0..2 {
+                    if !sector.floor_triangle_present(triangle_index) {
+                        continue;
+                    }
+                    let Some(slot) = sector.floor_triangle_material(triangle_index) else {
+                        continue;
+                    };
                     let sample = WorldSurfaceSample {
                         kind: WorldSurfaceKind::Floor,
                         sx,
                         sz,
-                        center: horizontal_face_center(sx, sz, sector_size, heights),
+                        center: horizontal_triangle_center(
+                            sx,
+                            sz,
+                            sector_size,
+                            heights,
+                            split,
+                            triangle_index,
+                        ),
                         baked_vertex_rgb: room.floor_light(sx, sz),
-                        ordinal: 0,
+                        ordinal: triangle_index as u16,
                     };
                     if !cache_room_surface(
                         surfaces_out,
@@ -780,9 +822,10 @@ pub fn cache_room_vertex_lit_surfaces(
                         CachedRoomSurface::new(
                             slot,
                             horizontal_vertices(sx, sz, sector_size, heights),
-                            sector.floor_uvs(),
+                            sector.floor_triangle_uvs(triangle_index),
                             sample,
-                            sector.floor_split(),
+                            split,
+                            triangle_index as u8,
                         ),
                     ) {
                         return CachedRoomSurfaceCacheStats {
@@ -795,25 +838,40 @@ pub fn cache_room_vertex_lit_surfaces(
             }
 
             if sector.has_ceiling() {
-                if let Some(slot) = sector.ceiling_material() {
-                    let heights = sector.ceiling_heights();
+                let heights = sector.ceiling_heights();
+                let split = sector.ceiling_split();
+                for triangle_index in 0..2 {
+                    if !sector.ceiling_triangle_present(triangle_index) {
+                        continue;
+                    }
+                    let Some(slot) = sector.ceiling_triangle_material(triangle_index) else {
+                        continue;
+                    };
                     let sample = WorldSurfaceSample {
                         kind: WorldSurfaceKind::Ceiling,
                         sx,
                         sz,
-                        center: horizontal_face_center(sx, sz, sector_size, heights),
+                        center: horizontal_triangle_center(
+                            sx,
+                            sz,
+                            sector_size,
+                            heights,
+                            split,
+                            triangle_index,
+                        ),
                         baked_vertex_rgb: room.ceiling_light(sx, sz),
-                        ordinal: 0,
+                        ordinal: triangle_index as u16,
                     };
                     if !cache_room_surface(
                         surfaces_out,
                         &mut surface_count,
                         CachedRoomSurface::new(
                             slot,
-                            reverse_quad_winding(horizontal_vertices(sx, sz, sector_size, heights)),
-                            reverse_quad_winding(sector.ceiling_uvs()),
+                            horizontal_vertices(sx, sz, sector_size, heights),
+                            sector.ceiling_triangle_uvs(triangle_index),
                             sample,
-                            sector.ceiling_split(),
+                            split,
+                            triangle_index as u8,
                         ),
                     ) {
                         return CachedRoomSurfaceCacheStats {
@@ -831,32 +889,18 @@ pub fn cache_room_vertex_lit_surfaces(
                     if let Some(vertices) =
                         wall_vertices(sx, sz, sector_size, wall.direction(), wall.heights())
                     {
+                        let (split, triangle_index) =
+                            wall_shape_triangle(wall.shape()).unwrap_or((
+                                SPLIT_NW_SE,
+                                WHOLE_QUAD_TRIANGLE_INDEX,
+                            ));
                         let sample = WorldSurfaceSample {
                             kind: WorldSurfaceKind::Wall {
                                 direction: wall.direction(),
                             },
                             sx,
                             sz,
-                            center: RoomPoint::new(
-                                average4_i32(
-                                    vertices[0].x,
-                                    vertices[1].x,
-                                    vertices[2].x,
-                                    vertices[3].x,
-                                ),
-                                average4_i32(
-                                    vertices[0].y,
-                                    vertices[1].y,
-                                    vertices[2].y,
-                                    vertices[3].y,
-                                ),
-                                average4_i32(
-                                    vertices[0].z,
-                                    vertices[1].z,
-                                    vertices[2].z,
-                                    vertices[3].z,
-                                ),
-                            ),
+                            center: wall_shape_center(vertices, wall.shape()),
                             baked_vertex_rgb: room.wall_light(sector, i),
                             ordinal: i,
                         };
@@ -868,7 +912,8 @@ pub fn cache_room_vertex_lit_surfaces(
                                 vertices,
                                 wall.uvs(),
                                 sample,
-                                SPLIT_NW_SE,
+                                split,
+                                triangle_index,
                             ),
                         ) {
                             return CachedRoomSurfaceCacheStats {
@@ -1020,29 +1065,67 @@ fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     };
     let colors = vertex_lighting_colors(lighting, surface.sample, material, surface.vertices);
     match surface.sample.kind {
-        WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => submit_split_quad_vertex_lit(
-            camera,
-            options.with_depth_policy(DepthPolicy::Farthest),
-            CullMode::Back,
-            material,
-            surface.vertices,
-            surface.uvs,
-            colors,
-            surface.split,
-            triangles,
-            world,
-        ),
-        WorldSurfaceKind::Wall { .. } => submit_quad_vertex_lit(
-            camera,
-            options,
-            CullMode::Back,
-            material,
-            surface.vertices,
-            surface.uvs,
-            colors,
-            triangles,
-            world,
-        ),
+        WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
+            if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+                submit_split_triangle_vertex_lit(
+                    camera,
+                    options.with_depth_policy(DepthPolicy::Farthest),
+                    CullMode::Back,
+                    material,
+                    surface.vertices,
+                    surface.uvs,
+                    colors,
+                    surface.split,
+                    surface.triangle_index as usize,
+                    matches!(surface.sample.kind, WorldSurfaceKind::Ceiling),
+                    triangles,
+                    world,
+                )
+            } else {
+                submit_split_quad_vertex_lit(
+                    camera,
+                    options.with_depth_policy(DepthPolicy::Farthest),
+                    CullMode::Back,
+                    material,
+                    surface.vertices,
+                    surface.uvs,
+                    colors,
+                    surface.split,
+                    triangles,
+                    world,
+                )
+            }
+        }
+        WorldSurfaceKind::Wall { .. } => {
+            if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+                submit_split_triangle_vertex_lit(
+                    camera,
+                    options,
+                    CullMode::Back,
+                    material,
+                    surface.vertices,
+                    surface.uvs,
+                    colors,
+                    surface.split,
+                    surface.triangle_index as usize,
+                    false,
+                    triangles,
+                    world,
+                )
+            } else {
+                submit_quad_vertex_lit(
+                    camera,
+                    options,
+                    CullMode::Back,
+                    material,
+                    surface.vertices,
+                    surface.uvs,
+                    colors,
+                    triangles,
+                    world,
+                )
+            }
+        }
     }
     1
 }
@@ -1064,71 +1147,100 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
     let mut surfaces = 0u16;
 
     if sector.has_floor() {
-        if let Some(slot) = sector.floor_material() {
-            if let Some(&base_material) = materials.get(slot as usize) {
-                let material = lighting.shade(
-                    WorldSurfaceSample {
-                        kind: WorldSurfaceKind::Floor,
-                        sx,
-                        sz,
-                        center: horizontal_face_center(sx, sz, sector_size, sector.floor_heights()),
-                        baked_vertex_rgb: room.floor_light(sx, sz),
-                        ordinal: 0,
-                    },
-                    base_material,
-                );
-                surfaces = surfaces.saturating_add(1);
-                emit_floor(
+        for triangle_index in 0..2 {
+            if !sector.floor_triangle_present(triangle_index) {
+                continue;
+            }
+            let Some(slot) = sector.floor_triangle_material(triangle_index) else {
+                continue;
+            };
+            let Some(&base_material) = materials.get(slot as usize) else {
+                continue;
+            };
+            let heights = sector.floor_heights();
+            let split = sector.floor_split();
+            let material = lighting.shade(
+                WorldSurfaceSample {
+                    kind: WorldSurfaceKind::Floor,
                     sx,
                     sz,
-                    sector_size,
-                    sector.floor_heights(),
-                    sector.floor_split(),
-                    sector.floor_uvs(),
-                    material,
-                    camera,
-                    options,
-                    triangles,
-                    world,
-                );
-            }
+                    center: horizontal_triangle_center(
+                        sx,
+                        sz,
+                        sector_size,
+                        heights,
+                        split,
+                        triangle_index,
+                    ),
+                    baked_vertex_rgb: room.floor_light(sx, sz),
+                    ordinal: triangle_index as u16,
+                },
+                base_material,
+            );
+            surfaces = surfaces.saturating_add(1);
+            emit_floor_triangle(
+                sx,
+                sz,
+                sector_size,
+                heights,
+                split,
+                triangle_index,
+                sector.floor_triangle_uvs(triangle_index),
+                material,
+                camera,
+                options,
+                triangles,
+                world,
+            );
         }
     }
 
     if sector.has_ceiling() {
-        if let Some(slot) = sector.ceiling_material() {
-            if let Some(&base_material) = materials.get(slot as usize) {
-                let material = lighting.shade(
-                    WorldSurfaceSample {
-                        kind: WorldSurfaceKind::Ceiling,
-                        sx,
-                        sz,
-                        center: horizontal_face_center(
-                            sx,
-                            sz,
-                            sector_size,
-                            sector.ceiling_heights(),
-                        ),
-                        baked_vertex_rgb: room.ceiling_light(sx, sz),
-                        ordinal: 0,
-                    },
-                    base_material,
-                );
-                surfaces = surfaces.saturating_add(1);
-                emit_ceiling(
+        for triangle_index in 0..2 {
+            if !sector.ceiling_triangle_present(triangle_index) {
+                continue;
+            }
+            let Some(slot) = sector.ceiling_triangle_material(triangle_index) else {
+                continue;
+            };
+            let Some(&base_material) = materials.get(slot as usize) else {
+                continue;
+            };
+            let heights = sector.ceiling_heights();
+            let split = sector.ceiling_split();
+            let material = lighting.shade(
+                WorldSurfaceSample {
+                    kind: WorldSurfaceKind::Ceiling,
                     sx,
                     sz,
-                    sector_size,
-                    sector.ceiling_heights(),
-                    sector.ceiling_split(),
-                    sector.ceiling_uvs(),
-                    material,
-                    camera,
-                    options,
-                    triangles,
-                    world,
-                );
-            }
+                    center: horizontal_triangle_center(
+                        sx,
+                        sz,
+                        sector_size,
+                        heights,
+                        split,
+                        triangle_index,
+                    ),
+                    baked_vertex_rgb: room.ceiling_light(sx, sz),
+                    ordinal: triangle_index as u16,
+                },
+                base_material,
+            );
+            surfaces = surfaces.saturating_add(1);
+            emit_ceiling_triangle(
+                sx,
+                sz,
+                sector_size,
+                heights,
+                split,
+                triangle_index,
+                sector.ceiling_triangle_uvs(triangle_index),
+                material,
+                camera,
+                options,
+                triangles,
+                world,
+            );
         }
     }
 
@@ -1137,7 +1249,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
         if let Some(wall) = room.sector_wall(sector, i) {
             if let Some(&base_material) = materials.get(wall.material() as usize) {
                 let Some(center) =
-                    wall_face_center(sx, sz, sector_size, wall.direction(), wall.heights())
+                    wall_face_center(sx, sz, sector_size, wall.direction(), wall.heights(), wall.shape())
                 else {
                     i += 1;
                     continue;
@@ -1161,6 +1273,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sz,
                     sector_size,
                     wall.direction(),
+                    wall.shape(),
                     wall.heights(),
                     wall.uvs(),
                     material,
@@ -1194,64 +1307,98 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let mut surfaces = 0u16;
 
     if sector.has_floor() {
-        if let Some(slot) = sector.floor_material() {
-            if let Some(&material) = materials.get(slot as usize) {
-                let sample = WorldSurfaceSample {
-                    kind: WorldSurfaceKind::Floor,
-                    sx,
-                    sz,
-                    center: horizontal_face_center(sx, sz, sector_size, sector.floor_heights()),
-                    baked_vertex_rgb: room.floor_light(sx, sz),
-                    ordinal: 0,
-                };
-                surfaces = surfaces.saturating_add(1);
-                emit_floor_vertex_lit(
+        for triangle_index in 0..2 {
+            if !sector.floor_triangle_present(triangle_index) {
+                continue;
+            }
+            let Some(slot) = sector.floor_triangle_material(triangle_index) else {
+                continue;
+            };
+            let Some(&material) = materials.get(slot as usize) else {
+                continue;
+            };
+            let heights = sector.floor_heights();
+            let split = sector.floor_split();
+            let sample = WorldSurfaceSample {
+                kind: WorldSurfaceKind::Floor,
+                sx,
+                sz,
+                center: horizontal_triangle_center(
                     sx,
                     sz,
                     sector_size,
-                    sector.floor_heights(),
-                    sector.floor_split(),
-                    sector.floor_uvs(),
-                    material,
-                    sample,
-                    lighting,
-                    camera,
-                    options,
-                    triangles,
-                    world,
-                );
-            }
+                    heights,
+                    split,
+                    triangle_index,
+                ),
+                baked_vertex_rgb: room.floor_light(sx, sz),
+                ordinal: triangle_index as u16,
+            };
+            surfaces = surfaces.saturating_add(1);
+            emit_floor_triangle_vertex_lit(
+                sx,
+                sz,
+                sector_size,
+                heights,
+                split,
+                triangle_index,
+                sector.floor_triangle_uvs(triangle_index),
+                material,
+                sample,
+                lighting,
+                camera,
+                options,
+                triangles,
+                world,
+            );
         }
     }
 
     if sector.has_ceiling() {
-        if let Some(slot) = sector.ceiling_material() {
-            if let Some(&material) = materials.get(slot as usize) {
-                let sample = WorldSurfaceSample {
-                    kind: WorldSurfaceKind::Ceiling,
-                    sx,
-                    sz,
-                    center: horizontal_face_center(sx, sz, sector_size, sector.ceiling_heights()),
-                    baked_vertex_rgb: room.ceiling_light(sx, sz),
-                    ordinal: 0,
-                };
-                surfaces = surfaces.saturating_add(1);
-                emit_ceiling_vertex_lit(
+        for triangle_index in 0..2 {
+            if !sector.ceiling_triangle_present(triangle_index) {
+                continue;
+            }
+            let Some(slot) = sector.ceiling_triangle_material(triangle_index) else {
+                continue;
+            };
+            let Some(&material) = materials.get(slot as usize) else {
+                continue;
+            };
+            let heights = sector.ceiling_heights();
+            let split = sector.ceiling_split();
+            let sample = WorldSurfaceSample {
+                kind: WorldSurfaceKind::Ceiling,
+                sx,
+                sz,
+                center: horizontal_triangle_center(
                     sx,
                     sz,
                     sector_size,
-                    sector.ceiling_heights(),
-                    sector.ceiling_split(),
-                    sector.ceiling_uvs(),
-                    material,
-                    sample,
-                    lighting,
-                    camera,
-                    options,
-                    triangles,
-                    world,
-                );
-            }
+                    heights,
+                    split,
+                    triangle_index,
+                ),
+                baked_vertex_rgb: room.ceiling_light(sx, sz),
+                ordinal: triangle_index as u16,
+            };
+            surfaces = surfaces.saturating_add(1);
+            emit_ceiling_triangle_vertex_lit(
+                sx,
+                sz,
+                sector_size,
+                heights,
+                split,
+                triangle_index,
+                sector.ceiling_triangle_uvs(triangle_index),
+                material,
+                sample,
+                lighting,
+                camera,
+                options,
+                triangles,
+                world,
+            );
         }
     }
 
@@ -1260,7 +1407,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
         if let Some(wall) = room.sector_wall(sector, i) {
             if let Some(&material) = materials.get(wall.material() as usize) {
                 let Some(center) =
-                    wall_face_center(sx, sz, sector_size, wall.direction(), wall.heights())
+                    wall_face_center(sx, sz, sector_size, wall.direction(), wall.heights(), wall.shape())
                 else {
                     i += 1;
                     continue;
@@ -1281,6 +1428,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sz,
                     sector_size,
                     wall.direction(),
+                    wall.shape(),
                     wall.heights(),
                     wall.uvs(),
                     material,
@@ -1381,6 +1529,7 @@ fn cell_visible_to_camera(
 /// Emit one floor quad. Cooked corners are `[NW, NE, SE, SW]`,
 /// which already faces upward into playable space.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn emit_floor<const OT: usize>(
     sx: u16,
     sz: u16,
@@ -1418,6 +1567,7 @@ fn emit_floor<const OT: usize>(
 /// runtime flips them so front-sided ceilings face the room
 /// interior/underside.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn emit_ceiling<const OT: usize>(
     sx: u16,
     sz: u16,
@@ -1451,16 +1601,75 @@ fn emit_ceiling<const OT: usize>(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_floor_triangle<const OT: usize>(
+    sx: u16,
+    sz: u16,
+    sector_size: i32,
+    heights: [i32; 4],
+    split: u8,
+    triangle_index: usize,
+    uvs: [(u8, u8); 4],
+    material: WorldRenderMaterial,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) {
+    submit_split_triangle(
+        camera,
+        options.with_depth_policy(DepthPolicy::Farthest),
+        CullMode::Back,
+        material,
+        horizontal_vertices(sx, sz, sector_size, heights),
+        uvs,
+        split,
+        triangle_index,
+        false,
+        triangles,
+        world,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_ceiling_triangle<const OT: usize>(
+    sx: u16,
+    sz: u16,
+    sector_size: i32,
+    heights: [i32; 4],
+    split: u8,
+    triangle_index: usize,
+    uvs: [(u8, u8); 4],
+    material: WorldRenderMaterial,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) {
+    submit_split_triangle(
+        camera,
+        options.with_depth_policy(DepthPolicy::Farthest),
+        CullMode::Back,
+        material,
+        horizontal_vertices(sx, sz, sector_size, heights),
+        uvs,
+        split,
+        triangle_index,
+        true,
+        triangles,
+        world,
+    );
+}
+
 /// Emit one wall quad. Wall heights `[BL, BR, TR, TL]` map onto
-/// the cell's edge endpoints by direction. Diagonal directions
-/// (4 / 5) silently drop -- the cooker rejects them, so they
-/// shouldn't appear, but skipping is cheaper than panicking.
+/// the cell's edge endpoints by direction.
 #[allow(clippy::too_many_arguments)]
 fn emit_wall<const OT: usize>(
     sx: u16,
     sz: u16,
     sector_size: i32,
     direction: u8,
+    shape: u16,
     heights: [i32; 4],
     uvs: [(u8, u8); 4],
     material: WorldRenderMaterial,
@@ -1472,6 +1681,22 @@ fn emit_wall<const OT: usize>(
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
         return;
     };
+    if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
+        submit_split_triangle(
+            camera,
+            options,
+            CullMode::Back,
+            material,
+            verts,
+            uvs,
+            split,
+            triangle_index as usize,
+            false,
+            triangles,
+            world,
+        );
+        return;
+    }
     submit_quad(
         camera,
         options,
@@ -1485,6 +1710,7 @@ fn emit_wall<const OT: usize>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn emit_floor_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
     sz: u16,
@@ -1523,6 +1749,7 @@ fn emit_floor_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn emit_ceiling_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
     sz: u16,
@@ -1561,11 +1788,82 @@ fn emit_ceiling_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn emit_floor_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
+    sx: u16,
+    sz: u16,
+    sector_size: i32,
+    heights: [i32; 4],
+    split: u8,
+    triangle_index: usize,
+    uvs: [(u8, u8); 4],
+    material: WorldRenderMaterial,
+    sample: WorldSurfaceSample,
+    lighting: &L,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) {
+    let verts = horizontal_vertices(sx, sz, sector_size, heights);
+    let colors = vertex_lighting_colors(lighting, sample, material, verts);
+    submit_split_triangle_vertex_lit(
+        camera,
+        options.with_depth_policy(DepthPolicy::Farthest),
+        CullMode::Back,
+        material,
+        verts,
+        uvs,
+        colors,
+        split,
+        triangle_index,
+        false,
+        triangles,
+        world,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_ceiling_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
+    sx: u16,
+    sz: u16,
+    sector_size: i32,
+    heights: [i32; 4],
+    split: u8,
+    triangle_index: usize,
+    uvs: [(u8, u8); 4],
+    material: WorldRenderMaterial,
+    sample: WorldSurfaceSample,
+    lighting: &L,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) {
+    let verts = horizontal_vertices(sx, sz, sector_size, heights);
+    let colors = vertex_lighting_colors(lighting, sample, material, verts);
+    submit_split_triangle_vertex_lit(
+        camera,
+        options.with_depth_policy(DepthPolicy::Farthest),
+        CullMode::Back,
+        material,
+        verts,
+        uvs,
+        colors,
+        split,
+        triangle_index,
+        true,
+        triangles,
+        world,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_wall_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
     sz: u16,
     sector_size: i32,
     direction: u8,
+    shape: u16,
     heights: [i32; 4],
     uvs: [(u8, u8); 4],
     material: WorldRenderMaterial,
@@ -1580,6 +1878,23 @@ fn emit_wall_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
         return;
     };
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
+    if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
+        submit_split_triangle_vertex_lit(
+            camera,
+            options,
+            CullMode::Back,
+            material,
+            verts,
+            uvs,
+            colors,
+            split,
+            triangle_index as usize,
+            false,
+            triangles,
+            world,
+        );
+        return;
+    }
     submit_quad_vertex_lit(
         camera,
         options,
@@ -1603,9 +1918,7 @@ fn vertex_lighting_colors<L: WorldSurfaceLighting>(
 }
 
 /// Project + submit one textured quad along the standard
-/// `submit_textured_quad` 0–2 diagonal. Walls always use this
-/// path because their geometry is rectangular and carries no
-/// authored split metadata.
+/// `submit_textured_quad` 0–2 diagonal.
 #[allow(clippy::too_many_arguments)]
 fn submit_quad<const OT: usize>(
     camera: &WorldCamera,
@@ -1630,6 +1943,7 @@ fn submit_quad<const OT: usize>(
 /// doesn't change with the diagonal -- only the triangulation
 /// boundary moves.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn submit_split_quad<const OT: usize>(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -1657,6 +1971,7 @@ fn submit_split_quad<const OT: usize>(
         projected = reverse_quad_winding(projected);
         uvs = reverse_quad_winding(uvs);
     }
+    uvs = material_uvs(material, uvs);
     let opts = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, cull))
         .with_material_layer(material.texture);
@@ -1675,6 +1990,41 @@ fn submit_split_quad<const OT: usize>(
         triangles,
         [projected[d], projected[e], projected[f]],
         [uvs[d], uvs[e], uvs[f]],
+        material.texture,
+        opts,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_split_triangle<const OT: usize>(
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    cull: CullMode,
+    material: WorldRenderMaterial,
+    verts: [WorldVertex; 4],
+    uvs: [(u8, u8); 4],
+    split: u8,
+    triangle_index: usize,
+    reverse_front: bool,
+    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) {
+    let Some(projected) = camera.project_world_quad(verts) else {
+        return;
+    };
+    let opts = options
+        .with_cull_mode(cull_for_sidedness(material.sidedness, cull))
+        .with_material_layer(material.texture);
+    let uvs = material_uvs(material, uvs);
+    let mut tri = split_triangles_runtime(split)[triangle_index.min(1)];
+    if reverse_front ^ (material.sidedness == SurfaceSidedness::Back) {
+        tri = (tri.0, tri.2, tri.1);
+    }
+    let (a, b, c) = tri;
+    let _ = world.submit_textured_triangle(
+        triangles,
+        [projected[a], projected[b], projected[c]],
+        [uvs[a], uvs[b], uvs[c]],
         material.texture,
         opts,
     );
@@ -1743,6 +2093,43 @@ fn submit_split_quad_vertex_lit<const OT: usize>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn submit_split_triangle_vertex_lit<const OT: usize>(
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    cull: CullMode,
+    material: WorldRenderMaterial,
+    verts: [WorldVertex; 4],
+    uvs: [(u8, u8); 4],
+    colors: [(u8, u8, u8); 4],
+    split: u8,
+    triangle_index: usize,
+    reverse_front: bool,
+    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) {
+    let Some(projected) = camera.project_world_quad(verts) else {
+        return;
+    };
+    let opts = options
+        .with_cull_mode(cull_for_sidedness(material.sidedness, cull))
+        .with_material_layer(material.texture);
+    let uvs = material_uvs(material, uvs);
+    let mut tri = split_triangles_runtime(split)[triangle_index.min(1)];
+    if reverse_front ^ (material.sidedness == SurfaceSidedness::Back) {
+        tri = (tri.0, tri.2, tri.1);
+    }
+    let (a, b, c) = tri;
+    let _ = world.submit_textured_gouraud_triangle(
+        triangles,
+        [projected[a], projected[b], projected[c]],
+        [uvs[a], uvs[b], uvs[c]],
+        [colors[a], colors[b], colors[c]],
+        material.texture,
+        opts,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn submit_sided_projected_gouraud_quad<const OT: usize>(
     world: &mut WorldRenderPass<'_, '_, OT>,
     triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
@@ -1762,6 +2149,7 @@ fn submit_sided_projected_gouraud_quad<const OT: usize>(
         ),
         SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uvs, colors),
     };
+    let uvs = material_uvs(material, uvs);
     let opts = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, base_cull))
         .with_material_layer(material.texture);
@@ -1800,6 +2188,7 @@ fn submit_sided_projected_quad<const OT: usize>(
         SurfaceSidedness::Back => (reverse_quad_winding(verts), reverse_quad_winding(uvs)),
         SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uvs),
     };
+    let uvs = material_uvs(material, uvs);
     let opts = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, base_cull))
         .with_material_layer(material.texture);
@@ -1813,33 +2202,73 @@ const fn cull_for_sidedness(sidedness: SurfaceSidedness, base: CullMode) -> Cull
     }
 }
 
+const fn normalize_room_texture_uv_size(size: u8) -> u8 {
+    if size == 0 || size > ROOM_TEXTURE_UV_SIZE {
+        ROOM_TEXTURE_UV_SIZE
+    } else {
+        size
+    }
+}
+
+fn material_uvs(material: WorldRenderMaterial, uvs: [(u8, u8); 4]) -> [(u8, u8); 4] {
+    let width = normalize_room_texture_uv_size(material.texture_width);
+    let height = normalize_room_texture_uv_size(material.texture_height);
+    if width == ROOM_TEXTURE_UV_SIZE && height == ROOM_TEXTURE_UV_SIZE {
+        return uvs;
+    }
+    [
+        scale_material_uv(uvs[0], width, height),
+        scale_material_uv(uvs[1], width, height),
+        scale_material_uv(uvs[2], width, height),
+        scale_material_uv(uvs[3], width, height),
+    ]
+}
+
+fn scale_material_uv((u, v): (u8, u8), width: u8, height: u8) -> (u8, u8) {
+    (
+        scale_material_uv_component(u, width),
+        scale_material_uv_component(v, height),
+    )
+}
+
+fn scale_material_uv_component(value: u8, size: u8) -> u8 {
+    let scaled = (u16::from(value) * u16::from(size)) / u16::from(ROOM_TEXTURE_UV_SIZE);
+    scaled.min(u16::from(u8::MAX)) as u8
+}
+
 /// Triangle index pairs used when a sector authors the
-/// alternate (NE→SW) diagonal. Corner indexing matches the
-/// `[NW=0, NE=1, SE=2, SW=3]` convention every
-/// `[i32; 4]` heights array uses.
-///
-/// Each entry is `(a, b, c)` -- three corner indices producing
-/// one of the two emitted triangles. Picking the boundary
-/// `1`/`3` (NE/SW) instead of `0`/`2` (NW/SE) splits the quad
-/// along the alternate diagonal.
-const SPLIT_NE_SW_TRIANGLES: [(usize, usize, usize); 2] = [(0, 1, 3), (1, 2, 3)];
+/// alternate (NE→SW) diagonal. The source topology lives in the
+/// cooked world contract; this tuple form just matches the local
+/// renderer call sites.
+const SPLIT_NE_SW_TRIANGLES: [(usize, usize, usize); 2] =
+    tuple_triangles(psx_asset::world_topology::HORIZONTAL_NE_SW_TRIANGLES);
 
 /// Triangle index pairs used by the standard NW→SE diagonal.
-/// Public for tests + parity assertions; runtime emission goes
-/// through `submit_textured_quad`'s internal indices, which the
-/// `split_triangles_match_psx_engine` test pins to this table.
-const SPLIT_NW_SE_TRIANGLES: [(usize, usize, usize); 2] = [(0, 1, 2), (0, 2, 3)];
+const SPLIT_NW_SE_TRIANGLES: [(usize, usize, usize); 2] =
+    tuple_triangles(psx_asset::world_topology::HORIZONTAL_NW_SE_TRIANGLES);
+
+const fn tuple_triangles(triangles: [[usize; 3]; 2]) -> [(usize, usize, usize); 2] {
+    [
+        (triangles[0][0], triangles[0][1], triangles[0][2]),
+        (triangles[1][0], triangles[1][1], triangles[1][2]),
+    ]
+}
 
 /// Resolve the per-split triangulation. Default split (0) and
 /// every unrecognised id fall back to the NW-SE diagonal so a
 /// future split id never silently empties the room.
-#[cfg(test)]
-const fn split_triangles(split: u8) -> [(usize, usize, usize); 2] {
+const fn split_triangles_runtime(split: u8) -> [(usize, usize, usize); 2] {
     if split == SPLIT_NE_SW {
         SPLIT_NE_SW_TRIANGLES
     } else {
         SPLIT_NW_SE_TRIANGLES
     }
+}
+
+/// Test-facing alias for the runtime triangulation table.
+#[cfg(test)]
+const fn split_triangles(split: u8) -> [(usize, usize, usize); 2] {
+    split_triangles_runtime(split)
 }
 
 /// World-space bounds of a sector cell rooted at world `(0, 0)`.
@@ -1863,10 +2292,28 @@ fn horizontal_vertices(sx: u16, sz: u16, sector_size: i32, heights: [i32; 4]) ->
     ]
 }
 
+#[allow(dead_code)]
 fn horizontal_face_center(sx: u16, sz: u16, sector_size: i32, heights: [i32; 4]) -> RoomPoint {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
     let cy = average4_i32(heights[0], heights[1], heights[2], heights[3]);
     RoomPoint::new((x0 + x1) / 2, cy, (z0 + z1) / 2)
+}
+
+fn horizontal_triangle_center(
+    sx: u16,
+    sz: u16,
+    sector_size: i32,
+    heights: [i32; 4],
+    split: u8,
+    triangle_index: usize,
+) -> RoomPoint {
+    let verts = horizontal_vertices(sx, sz, sector_size, heights);
+    let (a, b, c) = split_triangles_runtime(split)[triangle_index.min(1)];
+    RoomPoint::new(
+        (verts[a].x + verts[b].x + verts[c].x) / 3,
+        (verts[a].y + verts[b].y + verts[c].y) / 3,
+        (verts[a].z + verts[b].z + verts[c].z) / 3,
+    )
 }
 
 fn wall_face_center(
@@ -1875,17 +2322,37 @@ fn wall_face_center(
     sector_size: i32,
     direction: u8,
     heights: [i32; 4],
+    shape: u16,
 ) -> Option<RoomPoint> {
     let verts = wall_vertices(sx, sz, sector_size, direction, heights)?;
-    Some(RoomPoint::new(
+    Some(wall_shape_center(verts, shape))
+}
+
+fn wall_shape_center(verts: [WorldVertex; 4], shape: u16) -> RoomPoint {
+    if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
+        let (a, b, c) = split_triangles_runtime(split)[triangle_index as usize];
+        return RoomPoint::new(
+            (verts[a].x + verts[b].x + verts[c].x) / 3,
+            (verts[a].y + verts[b].y + verts[c].y) / 3,
+            (verts[a].z + verts[b].z + verts[c].z) / 3,
+        );
+    }
+    RoomPoint::new(
         average4_i32(verts[0].x, verts[1].x, verts[2].x, verts[3].x),
         average4_i32(verts[0].y, verts[1].y, verts[2].y, verts[3].y),
         average4_i32(verts[0].z, verts[1].z, verts[2].z, verts[3].z),
-    ))
+    )
 }
 
 fn average4_i32(a: i32, b: i32, c: i32, d: i32) -> i32 {
     a.saturating_add(b).saturating_add(c).saturating_add(d) / 4
+}
+
+const fn wall_shape_triangle(shape: u16) -> Option<(u8, u8)> {
+    match psx_asset::world_topology::wall_shape_triangle(shape) {
+        Some((split, triangle_index)) => Some((split, triangle_index)),
+        None => None,
+    }
 }
 
 fn wall_vertices(
@@ -1920,6 +2387,18 @@ fn wall_vertices(
             WorldVertex::new(x0, heights[1], z0),
             WorldVertex::new(x0, heights[2], z0),
             WorldVertex::new(x0, heights[3], z1),
+        ],
+        DIR_NORTH_WEST_SOUTH_EAST => [
+            WorldVertex::new(x0, heights[0], z0),
+            WorldVertex::new(x1, heights[1], z1),
+            WorldVertex::new(x1, heights[2], z1),
+            WorldVertex::new(x0, heights[3], z0),
+        ],
+        DIR_NORTH_EAST_SOUTH_WEST => [
+            WorldVertex::new(x1, heights[0], z0),
+            WorldVertex::new(x0, heights[1], z1),
+            WorldVertex::new(x0, heights[2], z1),
+            WorldVertex::new(x1, heights[3], z0),
         ],
         _ => return None,
     };
@@ -2078,6 +2557,23 @@ mod tests {
     }
 
     #[test]
+    fn diagonal_wall_vertices_use_runtime_corner_convention() {
+        let nw_se = wall_vertices(0, 0, 1024, DIR_NORTH_WEST_SOUTH_EAST, [10, 20, 30, 40])
+            .expect("nw-se diagonal wall");
+        assert_eq!(nw_se[0], WorldVertex::new(0, 10, 0));
+        assert_eq!(nw_se[1], WorldVertex::new(1024, 20, 1024));
+        assert_eq!(nw_se[2], WorldVertex::new(1024, 30, 1024));
+        assert_eq!(nw_se[3], WorldVertex::new(0, 40, 0));
+
+        let ne_sw = wall_vertices(0, 0, 1024, DIR_NORTH_EAST_SOUTH_WEST, [50, 60, 70, 80])
+            .expect("ne-sw diagonal wall");
+        assert_eq!(ne_sw[0], WorldVertex::new(1024, 50, 0));
+        assert_eq!(ne_sw[1], WorldVertex::new(0, 60, 1024));
+        assert_eq!(ne_sw[2], WorldVertex::new(0, 70, 1024));
+        assert_eq!(ne_sw[3], WorldVertex::new(1024, 80, 0));
+    }
+
+    #[test]
     fn floors_face_playable_interior() {
         let projection = WorldProjection::new(160, 120, 200, 16);
         let camera = WorldCamera::orbit_yaw(
@@ -2111,6 +2607,29 @@ mod tests {
         assert_eq!(
             wall_uvs(),
             [(0, TILE_UV), (TILE_UV, TILE_UV), (TILE_UV, 0), (0, 0)]
+        );
+    }
+
+    #[test]
+    fn material_texture_size_projects_default_uvs_once() {
+        let material = WorldRenderMaterial::front(TextureMaterial::opaque(0, 0, (128, 128, 128)))
+            .with_texture_size(32, 32);
+        assert_eq!(
+            material_uvs(
+                material,
+                [(0, 0), (TILE_UV, 0), (TILE_UV, TILE_UV), (0, TILE_UV)]
+            ),
+            [(0, 0), (32, 0), (32, 32), (0, 32)]
+        );
+    }
+
+    #[test]
+    fn material_texture_size_preserves_authored_repeat_count() {
+        let material = WorldRenderMaterial::front(TextureMaterial::opaque(0, 0, (128, 128, 128)))
+            .with_texture_size(32, 64);
+        assert_eq!(
+            material_uvs(material, [(0, 0), (128, 0), (128, TILE_UV), (0, TILE_UV)]),
+            [(0, 0), (64, 0), (64, TILE_UV), (0, TILE_UV)]
         );
     }
 
@@ -2187,12 +2706,37 @@ mod tests {
     #[test]
     fn wall_face_center_uses_emitted_runtime_wall_geometry() {
         assert_eq!(
-            wall_face_center(0, 0, 1024, DIR_EAST, [0, 0, 1024, 1024]),
+            wall_face_center(
+                0,
+                0,
+                1024,
+                DIR_EAST,
+                [0, 0, 1024, 1024],
+                psx_asset::WORLD_WALL_SHAPE_QUAD
+            ),
             Some(RoomPoint::new(1024, 512, 512))
         );
         assert_eq!(
-            wall_face_center(0, 0, 1024, DIR_NORTH, [0, 0, 1024, 1024]),
+            wall_face_center(
+                0,
+                0,
+                1024,
+                DIR_NORTH,
+                [0, 0, 1024, 1024],
+                psx_asset::WORLD_WALL_SHAPE_QUAD
+            ),
             Some(RoomPoint::new(512, 512, 0))
+        );
+        assert_eq!(
+            wall_face_center(
+                0,
+                0,
+                1024,
+                DIR_NORTH,
+                [0, 0, 1024, 1024],
+                psx_asset::WORLD_WALL_SHAPE_DROP_TOP_RIGHT
+            ),
+            Some(RoomPoint::new(341, 341, 0))
         );
     }
 

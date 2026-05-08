@@ -22,6 +22,8 @@ const DIR_NORTH: u8 = 0;
 const DIR_EAST: u8 = 1;
 const DIR_SOUTH: u8 = 2;
 const DIR_WEST: u8 = 3;
+const DIR_NORTH_WEST_SOUTH_EAST: u8 = 4;
+const DIR_NORTH_EAST_SOUTH_WEST: u8 = 5;
 
 /// Tunables for [`ThirdPersonCameraState`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -578,11 +580,17 @@ fn segment_wall_hit_distance(
     if ray_distance <= 0 {
         return None;
     }
+    let diagonal_axis_q12 = match direction {
+        DIR_NORTH_WEST_SOUTH_EAST => intersect_segment_q12(from.x, from.z, dx, dz, x0, z0, x1, z1),
+        DIR_NORTH_EAST_SOUTH_WEST => intersect_segment_q12(from.x, from.z, dx, dz, x1, z0, x0, z1),
+        _ => None,
+    };
     let t_q12 = match direction {
         DIR_NORTH => intersect_horizontal_q12(from.z, dz, z0),
         DIR_SOUTH => intersect_horizontal_q12(from.z, dz, z1),
         DIR_EAST => intersect_vertical_q12(from.x, dx, x1),
         DIR_WEST => intersect_vertical_q12(from.x, dx, x0),
+        DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST => diagonal_axis_q12.map(|(t, _)| t),
         _ => None,
     }?;
     if !(0..=Q12::SCALE).contains(&t_q12) {
@@ -611,11 +619,12 @@ fn segment_wall_hit_distance(
                 .saturating_mul(Q12::SCALE)
                 .checked_div(sector_size.max(1))?
         }
+        DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST => diagonal_axis_q12?.1,
         _ => return None,
     };
     let axis = Q12::from_raw(wall_axis_q12.clamp(0, Q12::SCALE));
     let (bottom, top) = match direction {
-        DIR_NORTH | DIR_EAST => (
+        DIR_NORTH | DIR_EAST | DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST => (
             lerp_i32(heights[0], heights[1], axis),
             lerp_i32(heights[3], heights[2], axis),
         ),
@@ -631,6 +640,49 @@ fn segment_wall_hit_distance(
         return None;
     }
     Some(t.mul_i32(ray_distance))
+}
+
+fn intersect_segment_q12(
+    from_x: i32,
+    from_z: i32,
+    dx: i32,
+    dz: i32,
+    ax: i32,
+    az: i32,
+    bx: i32,
+    bz: i32,
+) -> Option<(i32, i32)> {
+    let sx = bx.saturating_sub(ax);
+    let sz = bz.saturating_sub(az);
+    let qx = ax.saturating_sub(from_x);
+    let qz = az.saturating_sub(from_z);
+    let denom = cross_i64(dx, dz, sx, sz);
+    if denom == 0 {
+        return None;
+    }
+    let t_num = cross_i64(qx, qz, sx, sz);
+    let u_num = cross_i64(qx, qz, dx, dz);
+    let t_q12 = div_q12_signed(t_num, denom)?;
+    let u_q12 = div_q12_signed(u_num, denom)?;
+    if !(0..=Q12::SCALE).contains(&t_q12) || !(0..=Q12::SCALE).contains(&u_q12) {
+        return None;
+    }
+    Some((t_q12, u_q12))
+}
+
+fn cross_i64(ax: i32, az: i32, bx: i32, bz: i32) -> i64 {
+    (ax as i64)
+        .saturating_mul(bz as i64)
+        .saturating_sub((az as i64).saturating_mul(bx as i64))
+}
+
+fn div_q12_signed(num: i64, denom: i64) -> Option<i32> {
+    if denom == 0 {
+        return None;
+    }
+    num.saturating_mul(Q12::SCALE as i64)
+        .checked_div(denom)
+        .and_then(|v| i32::try_from(v).ok())
 }
 
 fn intersect_horizontal_q12(from_z: i32, dz: i32, wall_z: i32) -> Option<i32> {
@@ -876,6 +928,42 @@ mod tests {
         assert_eq!(
             segment_wall_hit_distance(from, to, 1024, 0, 0, 1024, DIR_NORTH, heights, 0),
             None
+        );
+    }
+
+    #[test]
+    fn segment_wall_hit_finds_diagonal_crossing() {
+        let from = RoomPoint::new(512, 0, 0);
+        let to = RoomPoint::new(512, 0, 1024);
+        let heights = [-512, -512, 512, 512];
+
+        assert_eq!(
+            segment_wall_hit_distance(
+                from,
+                to,
+                1024,
+                0,
+                0,
+                1024,
+                DIR_NORTH_WEST_SOUTH_EAST,
+                heights,
+                0
+            ),
+            Some(512)
+        );
+        assert_eq!(
+            segment_wall_hit_distance(
+                from,
+                to,
+                1024,
+                0,
+                0,
+                1024,
+                DIR_NORTH_EAST_SOUTH_WEST,
+                heights,
+                0
+            ),
+            Some(512)
         );
     }
 
