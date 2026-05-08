@@ -20,7 +20,7 @@ use psx_gpu::{
     prim::{TriGouraud, TriTextured, TriTexturedGouraud},
 };
 use psx_gte::{
-    lighting::{project_lit, ProjectedLit},
+    lighting::{project_lit, project_lit_triangle, ProjectedLit},
     math::{Mat3I16, Vec3I16, Vec3I32},
     scene,
 };
@@ -2489,7 +2489,33 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
         stats.vertex_overflow = mesh_verts > project_count;
         stats.projected_vertices = project_count as u16;
 
-        let mut vi = 0;
+        let mut vi = 0usize;
+        while vi + 2 < project_count {
+            let vert = vi as u16;
+            let projected = project_lit_triangle(
+                [
+                    mesh.vertex(vert),
+                    mesh.vertex(vert + 1),
+                    mesh.vertex(vert + 2),
+                ],
+                [
+                    mesh.vertex_normal(vert).unwrap_or(options.default_normal),
+                    mesh.vertex_normal(vert + 1)
+                        .unwrap_or(options.default_normal),
+                    mesh.vertex_normal(vert + 2)
+                        .unwrap_or(options.default_normal),
+                ],
+                [
+                    vertex_material(mesh, vert, options.default_material),
+                    vertex_material(mesh, vert + 1, options.default_material),
+                    vertex_material(mesh, vert + 2, options.default_material),
+                ],
+            );
+            projected_vertices[vi] = offset_projected_lit(projected[0], options.screen_offset);
+            projected_vertices[vi + 1] = offset_projected_lit(projected[1], options.screen_offset);
+            projected_vertices[vi + 2] = offset_projected_lit(projected[2], options.screen_offset);
+            vi += 3;
+        }
         while vi < project_count {
             let vert = vi as u16;
             let p = project_lit(
@@ -2497,14 +2523,7 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
                 mesh.vertex_normal(vert).unwrap_or(options.default_normal),
                 vertex_material(mesh, vert, options.default_material),
             );
-            projected_vertices[vi] = ProjectedLit {
-                sx: p.sx.saturating_add(options.screen_offset.0),
-                sy: p.sy.saturating_add(options.screen_offset.1),
-                sz: p.sz,
-                r: p.r,
-                g: p.g,
-                b: p.b,
-            };
+            projected_vertices[vi] = offset_projected_lit(p, options.screen_offset);
             vi += 1;
         }
 
@@ -2651,6 +2670,17 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
             }
             slot += 1;
         }
+    }
+}
+
+fn offset_projected_lit(p: ProjectedLit, screen_offset: (i16, i16)) -> ProjectedLit {
+    ProjectedLit {
+        sx: p.sx.saturating_add(screen_offset.0),
+        sy: p.sy.saturating_add(screen_offset.1),
+        sz: p.sz,
+        r: p.r,
+        g: p.g,
+        b: p.b,
     }
 }
 
