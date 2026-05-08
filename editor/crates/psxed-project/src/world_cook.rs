@@ -940,13 +940,13 @@ mod tests {
             .sector_mut(0, 0)
             .and_then(|sector| sector.floor.as_mut())
             .expect("floor exists");
-        floor.heights = [32, 64, 96, 128];
+        floor.heights = [64, 128, 192, 256];
         floor.split = GridSplit::NorthWestSouthEast;
 
         let cooked = cook_world_grid(&project, &grid).unwrap();
         let cooked_floor = cooked.sectors[0].as_ref().unwrap().floor.unwrap();
 
-        assert_eq!(cooked_floor.heights, [128, 96, 64, 32]);
+        assert_eq!(cooked_floor.heights, [256, 192, 128, 64]);
         assert_eq!(cooked_floor.split, GridSplit::NorthEastSouthWest);
     }
 
@@ -1000,13 +1000,13 @@ mod tests {
             .sector_mut(0, 0)
             .and_then(|sector| sector.walls.get_mut(GridDirection::North).first_mut())
             .expect("north wall exists");
-        wall.heights = [32, 64, 96, 128];
+        wall.heights = [64, 128, 192, 256];
 
         let cooked = cook_world_grid(&project, &grid).unwrap();
         let cooked_walls = &cooked.sectors[0].as_ref().unwrap().walls;
 
         assert!(cooked_walls.north.is_empty());
-        assert_eq!(cooked_walls.south[0].heights, [64, 32, 128, 96]);
+        assert_eq!(cooked_walls.south[0].heights, [128, 64, 256, 192]);
     }
 
     #[test]
@@ -1390,7 +1390,7 @@ mod tests {
         let mut grid = WorldGrid::stone_room(1, 1, world::SECTOR_SIZE, None, None);
         if let Some(sector) = grid.sector_mut(0, 0) {
             if let Some(floor) = sector.floor.as_mut() {
-                floor.heights[0] = 17; // Not a multiple of 32.
+                floor.heights[0] = 17; // Not a multiple of HEIGHT_QUANTUM.
             }
         }
         match cook_world_grid(&project, &grid) {
@@ -1543,7 +1543,7 @@ mod tests {
                     .first_mut()
             })
             .expect("diagonal wall exists");
-        wall.heights = [32, 64, 96, 128];
+        wall.heights = [64, 128, 192, 256];
 
         let cooked = cook_world_grid(&project, &grid).unwrap();
         let cooked_walls = &cooked.sectors[0].as_ref().unwrap().walls;
@@ -1551,7 +1551,7 @@ mod tests {
         assert!(cooked_walls.north_west_south_east.is_empty());
         assert_eq!(
             cooked_walls.north_east_south_west[0].heights,
-            [64, 32, 128, 96]
+            [128, 64, 256, 192]
         );
     }
 
