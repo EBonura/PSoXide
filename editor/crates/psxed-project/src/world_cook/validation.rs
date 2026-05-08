@@ -138,9 +138,11 @@ pub(super) fn validate_quantized_heights(grid: &WorldGrid) -> Result<(), WorldGr
             };
             if let Some(face) = &sector.floor {
                 check_face_heights(x, z, WorldGridFaceKind::Floor, &face.heights)?;
+                check_triangle_override_heights(x, z, WorldGridFaceKind::Floor, face)?;
             }
             if let Some(face) = &sector.ceiling {
                 check_face_heights(x, z, WorldGridFaceKind::Ceiling, &face.heights)?;
+                check_triangle_override_heights(x, z, WorldGridFaceKind::Ceiling, face)?;
             }
             for direction in GridDirection::ALL {
                 for wall in sector.walls.get(direction) {
@@ -152,11 +154,45 @@ pub(super) fn validate_quantized_heights(grid: &WorldGrid) -> Result<(), WorldGr
     Ok(())
 }
 
+fn check_triangle_override_heights(
+    x: u16,
+    z: u16,
+    face: WorldGridFaceKind,
+    horizontal: &GridHorizontalFace,
+) -> Result<(), WorldGridCookError> {
+    for idx in 0..2 {
+        if let Some(heights) = horizontal.triangle_override(idx).heights {
+            check_triangle_heights(x, z, face, &heights)?;
+        }
+    }
+    Ok(())
+}
+
 fn check_face_heights(
     x: u16,
     z: u16,
     face: WorldGridFaceKind,
     heights: &[i32; 4],
+) -> Result<(), WorldGridCookError> {
+    for &h in heights {
+        if h % HEIGHT_QUANTUM != 0 {
+            return Err(WorldGridCookError::HeightNotQuantized {
+                x,
+                z,
+                face,
+                value: h,
+                quantum: HEIGHT_QUANTUM,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_triangle_heights(
+    x: u16,
+    z: u16,
+    face: WorldGridFaceKind,
+    heights: &[i32; 3],
 ) -> Result<(), WorldGridCookError> {
     for &h in heights {
         if h % HEIGHT_QUANTUM != 0 {

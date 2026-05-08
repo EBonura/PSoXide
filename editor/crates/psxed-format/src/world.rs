@@ -2,10 +2,10 @@
 //!
 //! Each `.psxw` blob is a fixed-size grid room: a world header, one
 //! sector record per grid cell, then a compact wall table referenced
-//! by sectors. Only `VERSION = 4` is emitted by the cooker; v1/v2/v3
+//! by sectors. Only `VERSION = 5` is emitted by the cooker; v1-v4
 //! are legacy parser compatibility only.
 //!
-//! # Active format (VERSION = 4)
+//! # Active format (VERSION = 5)
 //!
 //! - `[i32; 4]` heights per face -- 16 B per height set
 //! - `QuadUvRecord` per floor / ceiling / wall -- 8 B per face
@@ -15,7 +15,7 @@
 //!   vertical faces without changing the record size.
 //! - Optional `HorizontalOverrideRecord` side table for floor /
 //!   ceiling faces whose two split triangles have different material,
-//!   UV, walkability, or visibility.
+//!   UV, walkability, visibility, or triangle-local heights.
 //! - Optional appended `SurfaceLightRecord` table when
 //!   [`world_flags::STATIC_VERTEX_LIGHTING`] is set. The table is
 //!   direct-indexed as `sector_count * 2` floor/ceiling slots,
@@ -23,6 +23,12 @@
 //! - No embedded material table; slot ids resolve via an external
 //!   bank that the caller (engine / playtest manifest) supplies
 //! - No sector logic stream, no portal records
+//!
+//! # Legacy format (VERSION = 4)
+//!
+//! - Active v3 header plus horizontal override side table for
+//!   material, UV, walkability, and visibility, but no split
+//!   triangle-local heights.
 //!
 //! # Legacy format (VERSION = 3)
 //!
@@ -63,8 +69,12 @@ pub const VERSION_V2: u16 = 2;
 /// embedded static vertex lighting.
 pub const VERSION_V3: u16 = 3;
 
+/// Legacy world format revision with horizontal override records
+/// for material, UV, walkability, and visibility.
+pub const VERSION_V4: u16 = 4;
+
 /// Current world format revision.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 /// Canonical/default engine units per grid sector.
 pub const SECTOR_SIZE: i32 = 1024;
@@ -426,6 +436,10 @@ pub struct HorizontalOverrideRecord {
     pub uvs_a: QuadUvRecord,
     /// Triangle B UVs in `[NW, NE, SE, SW]` corner order.
     pub uvs_b: QuadUvRecord,
+    /// Triangle A heights in its split-corner order.
+    pub heights_a: [i32; 3],
+    /// Triangle B heights in its split-corner order.
+    pub heights_b: [i32; 3],
 }
 
 impl HorizontalOverrideRecord {

@@ -985,8 +985,14 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
     if !sector.floor_triangle_walkable(triangle) {
         return None;
     }
-    Some(height_at_local(
+    let heights = triangle_heights_to_quad(
         sector.floor_heights(),
+        sector.floor_split(),
+        triangle,
+        sector.floor_triangle_heights(triangle),
+    );
+    Some(height_at_local(
+        heights,
         sector.floor_split(),
         local_x,
         local_z,
@@ -996,6 +1002,19 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
 
 fn triangle_index_at_local(split: u8, local_x: i32, local_z: i32, sector: i32) -> usize {
     psx_asset::world_topology::horizontal_triangle_at_local(split, local_x, local_z, sector)
+}
+
+fn triangle_heights_to_quad(
+    mut fallback: [i32; 4],
+    split: u8,
+    triangle: usize,
+    heights: [i32; 3],
+) -> [i32; 4] {
+    let corners = psx_asset::world_topology::split_triangles(split)[triangle.min(1)];
+    fallback[corners[0]] = heights[0];
+    fallback[corners[1]] = heights[1];
+    fallback[corners[2]] = heights[2];
+    fallback
 }
 
 fn body_hits_solid_wall(
