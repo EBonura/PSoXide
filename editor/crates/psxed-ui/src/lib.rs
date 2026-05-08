@@ -109,6 +109,8 @@ enum TreeAction {
         kind: NodeKind,
         name: &'static str,
     },
+    ToggleExpanded(NodeId),
+    ToggleVisibility(NodeId),
     /// Move `source` so it becomes a child of `target_parent` at
     /// `position` in that parent's child list. Caller has already
     /// proven the move is non-cyclic; `Scene::move_node` re-checks.
@@ -209,6 +211,8 @@ pub struct EditorWorkspace {
     /// One-shot flag set when entering rename mode so the next frame
     /// requests focus + selects the text inside the rename TextEdit.
     pending_rename_focus: bool,
+    collapsed_scene_nodes: HashSet<NodeId>,
+    hidden_scene_nodes: HashSet<NodeId>,
     history: UndoStack,
     scene_filter: String,
     file_filter: String,
@@ -1498,6 +1502,8 @@ impl EditorWorkspace {
             last_paint_stamp: None,
             renaming: None,
             pending_rename_focus: false,
+            collapsed_scene_nodes: HashSet::new(),
+            hidden_scene_nodes: HashSet::new(),
             history: UndoStack::default(),
             scene_filter: String::new(),
             file_filter: String::new(),
@@ -3287,14 +3293,20 @@ impl EditorWorkspace {
         let hover_world = response
             .hover_pos()
             .and_then(|pointer| self.pick_3d_world(rect, pointer));
-        let hover_room = self.active_room_id().or_else(|| {
-            self.project
-                .active_scene()
-                .nodes()
-                .iter()
-                .find(|n| matches!(n.kind, NodeKind::Room { .. }))
-                .map(|n| n.id)
-        });
+        let hover_room = self
+            .active_room_id()
+            .filter(|id| !self.scene_node_effectively_hidden(*id))
+            .or_else(|| {
+                self.project
+                    .active_scene()
+                    .nodes()
+                    .iter()
+                    .find(|n| {
+                        matches!(n.kind, NodeKind::Room { .. })
+                            && !self.scene_node_effectively_hidden(n.id)
+                    })
+                    .map(|n| n.id)
+            });
         let paint_tool = matches!(
             self.active_tool,
             ViewTool::PaintFloor
@@ -3765,6 +3777,13 @@ impl EditorWorkspace {
     /// 3D preview can highlight the selected entity.
     pub fn selected_node_id(&self) -> NodeId {
         self.selected_node
+    }
+
+    /// Editor-local hidden scene nodes from the Scene tree eye toggles.
+    /// The frontend preview uses this to keep 2D, picking, and 3D
+    /// visibility consistent without serialising temporary editor state.
+    pub fn hidden_scene_nodes(&self) -> &HashSet<NodeId> {
+        &self.hidden_scene_nodes
     }
 
     /// Primitive under the 3D pointer when the Select tool is
@@ -5462,10 +5481,10 @@ impl EditorWorkspace {
     ) -> Option<(FaceRef, [f32; 3])> {
         let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
         let scene = self.project.active_scene();
-        let room = scene
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.kind, NodeKind::Room { .. }))?;
+        let room = scene.nodes().iter().find(|node| {
+            matches!(node.kind, NodeKind::Room { .. })
+                && !self.scene_node_effectively_hidden(node.id)
+        })?;
         let NodeKind::Room { grid } = &room.kind else {
             return None;
         };
@@ -5576,10 +5595,10 @@ impl EditorWorkspace {
     fn pick_3d_world(&self, rect: egui::Rect, pointer: egui::Pos2) -> Option<[f32; 2]> {
         let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
         let scene = self.project.active_scene();
-        let room = scene
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.kind, NodeKind::Room { .. }))?;
+        let room = scene.nodes().iter().find(|node| {
+            matches!(node.kind, NodeKind::Room { .. })
+                && !self.scene_node_effectively_hidden(node.id)
+        })?;
         let NodeKind::Room { grid } = &room.kind else {
             return None;
         };
@@ -5855,6 +5874,47 @@ impl EditorWorkspace {
             TreeAction::AddChild { parent, kind, name } => {
                 self.replace_node_selection(parent);
                 self.add_child(kind, name);
+            }
+            TreeAction::ToggleExpanded(id) => {
+                if self.collapsed_scene_nodes.remove(&id) {
+                    self.status = self
+                        .project
+                        .active_scene()
+                        .node(id)
+                        .map(|node| format!("Expanded {}", node.name))
+                        .unwrap_or_else(|| "Expanded node".to_string());
+                } else {
+                    self.collapsed_scene_nodes.insert(id);
+                    self.status = self
+                        .project
+                        .active_scene()
+                        .node(id)
+                        .map(|node| format!("Collapsed {}", node.name))
+                        .unwrap_or_else(|| "Collapsed node".to_string());
+                }
+                self.renaming = None;
+            }
+            TreeAction::ToggleVisibility(id) => {
+                if self.hidden_scene_nodes.remove(&id) {
+                    self.status = self
+                        .project
+                        .active_scene()
+                        .node(id)
+                        .map(|node| format!("Showing {}", node.name))
+                        .unwrap_or_else(|| "Showing node".to_string());
+                } else {
+                    self.hidden_scene_nodes.insert(id);
+                    self.status = self
+                        .project
+                        .active_scene()
+                        .node(id)
+                        .map(|node| format!("Hiding {}", node.name))
+                        .unwrap_or_else(|| "Hiding node".to_string());
+                }
+                if self.hovered_entity_node == Some(id) {
+                    self.hovered_entity_node = None;
+                }
+                self.renaming = None;
             }
             TreeAction::Reparent {
                 source,
@@ -6220,18 +6280,14 @@ impl EditorWorkspace {
 
         let rows = self.project.active_scene().hierarchy_rows();
         let filter = self.scene_filter.to_ascii_lowercase();
-        let visible_node_order: Vec<NodeId> = rows
-            .iter()
-            .filter(|row| {
-                filter.is_empty()
-                    || row.name.to_ascii_lowercase().contains(&filter)
-                    || row.kind.to_ascii_lowercase().contains(&filter)
-            })
-            .map(|row| row.id)
-            .collect();
+        let display_rows = scene_tree_display_rows(&rows, &filter, &self.collapsed_scene_nodes);
+        let visible_node_order: Vec<NodeId> = display_rows.iter().map(|row| row.id).collect();
         let mut actions: Vec<TreeAction> = Vec::new();
         let selected_node = self.selected_node;
         let selected_nodes = self.selected_nodes.clone();
+        let collapsed_scene_nodes = self.collapsed_scene_nodes.clone();
+        let hidden_scene_nodes = self.hidden_scene_nodes.clone();
+        let scene = self.project.active_scene();
         let renaming = &mut self.renaming;
         let pending_focus = &mut self.pending_rename_focus;
         let tree_scroll_height = ui.available_height().clamp(180.0, 420.0);
@@ -6240,18 +6296,15 @@ impl EditorWorkspace {
             .auto_shrink([false, false])
             .max_height(tree_scroll_height)
             .show(ui, |ui| {
-                for row in &rows {
-                    if !filter.is_empty()
-                        && !row.name.to_ascii_lowercase().contains(&filter)
-                        && !row.kind.to_ascii_lowercase().contains(&filter)
-                    {
-                        continue;
-                    }
+                for row in display_rows {
                     draw_scene_node_row(
                         ui,
                         row,
                         selected_nodes.contains(&row.id)
                             || (selected_nodes.is_empty() && selected_node == row.id),
+                        collapsed_scene_nodes.contains(&row.id),
+                        hidden_scene_nodes.contains(&row.id),
+                        scene_node_hidden(scene, &hidden_scene_nodes, row.id),
                         renaming,
                         pending_focus,
                         &mut actions,
@@ -7961,6 +8014,7 @@ impl EditorWorkspace {
                             &painter,
                             transform,
                             &self.project,
+                            &self.hidden_scene_nodes,
                             self.selected_node,
                             &self.selected_nodes,
                             &self.selected_sectors,
@@ -8423,6 +8477,9 @@ impl EditorWorkspace {
             if node.id == scene.root {
                 continue;
             }
+            if self.scene_node_effectively_hidden(node.id) {
+                continue;
+            }
             // Find this node's enclosing Room.
             let enclosing_room = enclosing_room_id(scene, node.id);
             if let (Some(want), Some(actual)) = (room_filter, enclosing_room) {
@@ -8516,12 +8573,17 @@ impl EditorWorkspace {
     /// just picked, which clears `selected_node` to ROOT).
     pub fn active_room_id(&self) -> Option<NodeId> {
         if let Some(selection) = self.selected_primitive {
-            return Some(selection.room());
+            let room = selection.room();
+            if !self.scene_node_effectively_hidden(room) {
+                return Some(room);
+            }
         }
         let scene = self.project.active_scene();
         let mut current = self.selected_node;
         while let Some(node) = scene.node(current) {
-            if matches!(node.kind, NodeKind::Room { .. }) {
+            if matches!(node.kind, NodeKind::Room { .. })
+                && !self.scene_node_effectively_hidden(current)
+            {
                 return Some(current);
             }
             let Some(parent) = node.parent else { break };
@@ -8530,7 +8592,10 @@ impl EditorWorkspace {
         scene
             .nodes()
             .iter()
-            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .find(|node| {
+                matches!(node.kind, NodeKind::Room { .. })
+                    && !self.scene_node_effectively_hidden(node.id)
+            })
             .map(|node| node.id)
     }
 
@@ -9196,6 +9261,10 @@ impl EditorWorkspace {
             .collect()
     }
 
+    fn scene_node_effectively_hidden(&self, id: NodeId) -> bool {
+        scene_node_hidden(self.project.active_scene(), &self.hidden_scene_nodes, id)
+    }
+
     fn selected_node_ids_in_hierarchy(&self) -> Vec<NodeId> {
         let mut selected = self.selected_nodes.clone();
         if self.selected_node != NodeId::ROOT {
@@ -9211,6 +9280,9 @@ impl EditorWorkspace {
     }
 
     fn node_frame_bounds_3d(&self, id: NodeId) -> Option<([f32; 3], [f32; 3])> {
+        if self.scene_node_effectively_hidden(id) {
+            return None;
+        }
         let scene = self.project.active_scene();
         let node = scene.node(id)?;
         if matches!(node.kind, NodeKind::Room { .. }) {
@@ -9229,6 +9301,9 @@ impl EditorWorkspace {
     }
 
     fn node_frame_bounds_2d(&self, id: NodeId) -> Option<([f32; 2], [f32; 2])> {
+        if self.scene_node_effectively_hidden(id) {
+            return None;
+        }
         let scene = self.project.active_scene();
         let node = scene.node(id)?;
         match &node.kind {
@@ -9253,6 +9328,10 @@ impl EditorWorkspace {
             .map(|node| node.id)
             .collect();
         self.selected_nodes.retain(|id| valid_nodes.contains(id));
+        self.collapsed_scene_nodes
+            .retain(|id| valid_nodes.contains(id));
+        self.hidden_scene_nodes
+            .retain(|id| valid_nodes.contains(id));
         if self
             .node_selection_anchor
             .is_some_and(|id| !valid_nodes.contains(&id))
@@ -9306,7 +9385,9 @@ impl EditorWorkspace {
 
     fn pick_sector_at_world(&self, world: [f32; 2]) -> Option<SectorSelection> {
         self.project.active_scene().nodes().iter().find_map(|node| {
-            if matches!(node.kind, NodeKind::Room { .. }) {
+            if matches!(node.kind, NodeKind::Room { .. })
+                && !self.scene_node_effectively_hidden(node.id)
+            {
                 self.world_to_sector(node.id, world)
                     .map(|(sx, sz)| (node.id, sx, sz))
             } else {
@@ -14412,6 +14493,9 @@ fn draw_scene_node_row(
     ui: &mut egui::Ui,
     row: &NodeRow,
     selected: bool,
+    collapsed: bool,
+    directly_hidden: bool,
+    effectively_hidden: bool,
     renaming: &mut Option<(NodeId, String)>,
     pending_focus: &mut bool,
     actions: &mut Vec<TreeAction>,
@@ -14477,13 +14561,32 @@ fn draw_scene_node_row(
         Pos2::new(content_left, rect.center().y - 5.0),
         Vec2::splat(10.0),
     );
+    let chevron_response = if row.child_count > 0 {
+        ui.interact(
+            chevron_rect.expand(4.0),
+            ui.id().with(("scene_tree_expand", row.id)),
+            Sense::click(),
+        )
+        .on_hover_text(if collapsed { "Expand" } else { "Collapse" })
+    } else {
+        response.clone()
+    };
     if row.child_count > 0 {
         painter.text(
             chevron_rect.center(),
             Align2::CENTER_CENTER,
-            icons::CHEVRON_DOWN.to_string(),
+            if collapsed {
+                icons::CHEVRON_RIGHT
+            } else {
+                icons::CHEVRON_DOWN
+            }
+            .to_string(),
             icons::font(12.0),
-            Color32::from_rgb(160, 174, 188),
+            if chevron_response.hovered() {
+                Color32::WHITE
+            } else {
+                Color32::from_rgb(160, 174, 188)
+            },
         );
     }
 
@@ -14499,7 +14602,9 @@ fn draw_scene_node_row(
         node_lucide_color(row.kind, row.id == NodeId::ROOT, selected),
     );
 
-    let text_color = if selected {
+    let text_color = if effectively_hidden {
+        Color32::from_rgb(96, 110, 124)
+    } else if selected {
         Color32::WHITE
     } else {
         STUDIO_TEXT
@@ -14573,7 +14678,9 @@ fn draw_scene_node_row(
             Align2::LEFT_CENTER,
             row.kind,
             FontId::proportional(11.0),
-            if selected {
+            if effectively_hidden {
+                Color32::from_rgb(84, 96, 108)
+            } else if selected {
                 Color32::from_rgb(204, 229, 236)
             } else {
                 STUDIO_TEXT_WEAK
@@ -14600,12 +14707,32 @@ fn draw_scene_node_row(
         Pos2::new(rect.right() - 22.0, rect.center().y - 6.0),
         Vec2::new(14.0, 12.0),
     );
+    let eye_response = ui
+        .interact(
+            eye_rect.expand2(Vec2::new(5.0, 4.0)),
+            ui.id().with(("scene_tree_visibility", row.id)),
+            Sense::click(),
+        )
+        .on_hover_text(if directly_hidden {
+            "Show node"
+        } else {
+            "Hide node"
+        });
     painter.text(
         eye_rect.center(),
         Align2::CENTER_CENTER,
-        icons::EYE.to_string(),
+        if effectively_hidden {
+            icons::EYE_OFF
+        } else {
+            icons::EYE
+        }
+        .to_string(),
         icons::font(12.0),
-        if selected || hovered {
+        if eye_response.hovered() {
+            Color32::WHITE
+        } else if effectively_hidden {
+            Color32::from_rgb(82, 92, 102)
+        } else if selected || hovered {
             Color32::from_rgb(184, 205, 218)
         } else {
             Color32::from_rgb(88, 102, 116)
@@ -14615,6 +14742,15 @@ fn draw_scene_node_row(
     if in_rename {
         return;
     }
+
+    if chevron_response.clicked() && row.child_count > 0 {
+        actions.push(TreeAction::ToggleExpanded(row.id));
+    }
+    if eye_response.clicked() {
+        actions.push(TreeAction::ToggleVisibility(row.id));
+    }
+    let icon_clicked =
+        (row.child_count > 0 && chevron_response.clicked()) || eye_response.clicked();
 
     // Drag source: only descendants of root can be dragged.
     if row.id != NodeId::ROOT && response.dragged() {
@@ -14653,14 +14789,14 @@ fn draw_scene_node_row(
         });
     }
 
-    if response.clicked() {
+    if response.clicked() && !icon_clicked {
         let modifiers = ui.input(|input| input.modifiers);
         actions.push(TreeAction::Select {
             id: row.id,
             modifiers,
         });
     }
-    if response.double_clicked() && row.id != NodeId::ROOT {
+    if response.double_clicked() && !icon_clicked && row.id != NodeId::ROOT {
         actions.push(TreeAction::BeginRename(row.id));
     }
 
@@ -14741,6 +14877,57 @@ fn range_between<T: Copy + Eq>(order: &[T], a: T, b: T) -> Option<Vec<T>> {
     let bi = order.iter().position(|id| *id == b)?;
     let (start, end) = if ai <= bi { (ai, bi) } else { (bi, ai) };
     Some(order[start..=end].to_vec())
+}
+
+fn scene_node_hidden(
+    scene: &psxed_project::Scene,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    id: NodeId,
+) -> bool {
+    let mut current = Some(id);
+    while let Some(node_id) = current {
+        if hidden_scene_nodes.contains(&node_id) {
+            return true;
+        }
+        current = scene.node(node_id).and_then(|node| node.parent);
+    }
+    false
+}
+
+fn scene_tree_row_matches_filter(row: &NodeRow, filter: &str) -> bool {
+    filter.is_empty()
+        || row.name.to_ascii_lowercase().contains(filter)
+        || row.kind.to_ascii_lowercase().contains(filter)
+}
+
+fn scene_tree_display_rows<'a>(
+    rows: &'a [NodeRow],
+    filter: &str,
+    collapsed_scene_nodes: &HashSet<NodeId>,
+) -> Vec<&'a NodeRow> {
+    if !filter.is_empty() {
+        return rows
+            .iter()
+            .filter(|row| scene_tree_row_matches_filter(row, filter))
+            .collect();
+    }
+
+    let mut collapsed_depth = None;
+    let mut display_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(depth) = collapsed_depth {
+            if row.depth > depth {
+                continue;
+            }
+            collapsed_depth = None;
+        }
+
+        display_rows.push(row);
+        if row.child_count > 0 && collapsed_scene_nodes.contains(&row.id) {
+            collapsed_depth = Some(row.depth);
+        }
+    }
+    display_rows
 }
 
 fn first_in_order<T: Copy + Eq + std::hash::Hash>(order: &[T], selected: &HashSet<T>) -> Option<T> {
@@ -15970,6 +16157,7 @@ fn draw_scene_viewport(
     painter: &egui::Painter,
     transform: ViewportTransform,
     project: &ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
     selected: NodeId,
     selected_nodes: &HashSet<NodeId>,
     selected_sectors: &HashSet<SectorSelection>,
@@ -15980,6 +16168,9 @@ fn draw_scene_viewport(
     let mut hits = Vec::new();
 
     for node in scene.nodes() {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id) {
+            continue;
+        }
         if matches!(node.kind, NodeKind::Room { .. }) {
             draw_room(
                 painter,
@@ -15997,6 +16188,9 @@ fn draw_scene_viewport(
     }
 
     for node in scene.nodes() {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id) {
+            continue;
+        }
         match &node.kind {
             NodeKind::MeshInstance { .. } => {
                 draw_mesh_marker(
@@ -20472,6 +20666,78 @@ mod tests {
             assert!(workspace.selected_nodes.contains(id));
         }
         assert_eq!(workspace.selected_nodes.len(), 3);
+    }
+
+    #[test]
+    fn scene_tree_toggle_expanded_hides_descendants_from_display_rows() {
+        let mut project = ProjectDocument::new("tree-collapse");
+        let parent = project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Parent", NodeKind::Node);
+        let child = project
+            .active_scene_mut()
+            .add_node(parent, "Child", NodeKind::Node3D);
+        let grandchild = project
+            .active_scene_mut()
+            .add_node(child, "Grandchild", NodeKind::Entity);
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("tree-collapse"), project);
+
+        workspace.apply_tree_action(TreeAction::ToggleExpanded(parent), &[]);
+
+        let rows = workspace.project.active_scene().hierarchy_rows();
+        let visible = scene_tree_display_rows(&rows, "", &workspace.collapsed_scene_nodes)
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert!(visible.contains(&parent));
+        assert!(!visible.contains(&child));
+        assert!(!visible.contains(&grandchild));
+
+        workspace.apply_tree_action(TreeAction::ToggleExpanded(parent), &[]);
+        let rows = workspace.project.active_scene().hierarchy_rows();
+        let visible = scene_tree_display_rows(&rows, "", &workspace.collapsed_scene_nodes)
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert!(visible.contains(&child));
+        assert!(visible.contains(&grandchild));
+    }
+
+    #[test]
+    fn scene_tree_toggle_visibility_hides_entity_bounds() {
+        let mut project = ProjectDocument::new("tree-visibility");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::stone_room(1, 1, 1024, None, None),
+            },
+        );
+        let actor = project
+            .active_scene_mut()
+            .add_node(room, "Actor", NodeKind::Entity);
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("tree-visibility"), project);
+
+        assert!(workspace
+            .collect_entity_bounds(Some(room))
+            .iter()
+            .any(|bound| bound.node == actor));
+
+        workspace.apply_tree_action(TreeAction::ToggleVisibility(actor), &[]);
+
+        assert!(workspace.hidden_scene_nodes.contains(&actor));
+        assert!(!workspace
+            .collect_entity_bounds(Some(room))
+            .iter()
+            .any(|bound| bound.node == actor));
+
+        workspace.apply_tree_action(TreeAction::ToggleVisibility(actor), &[]);
+        assert!(!workspace.hidden_scene_nodes.contains(&actor));
+        assert!(workspace
+            .collect_entity_bounds(Some(room))
+            .iter()
+            .any(|bound| bound.node == actor));
     }
 
     #[test]
