@@ -418,6 +418,13 @@ pub trait WorldSurfaceLighting {
         self.shade_vertices(sample, vertices, material)
     }
 
+    /// Convert a projected camera-space depth into the value cached
+    /// for [`Self::shade_vertices_with_depths`]. The default keeps
+    /// raw depth; fog implementations can precompute a blend factor.
+    fn prepare_vertex_depth(&self, depth: i32) -> i32 {
+        depth
+    }
+
     /// Whether this lighting pass needs the cached camera-space
     /// depth values supplied to [`Self::shade_vertices_with_depths`].
     fn uses_vertex_depths(&self) -> bool {
@@ -896,7 +903,16 @@ pub fn cache_room_vertex_lit_surfaces(
                         let Some(slot) = sector.floor_triangle_material(triangle_index) else {
                             continue;
                         };
-                        let vertices = horizontal_vertices(sx, sz, sector_size, heights);
+                        let triangle_heights = sector.floor_triangle_heights(triangle_index);
+                        let vertices = horizontal_triangle_vertices(
+                            sx,
+                            sz,
+                            sector_size,
+                            split,
+                            triangle_index,
+                            triangle_heights,
+                            heights,
+                        );
                         let Some(vertex_indices) =
                             cache_room_vertices(vertices_out, &mut vertex_count, vertices)
                         else {
@@ -915,7 +931,12 @@ pub fn cache_room_vertex_lit_surfaces(
                                 sx,
                                 sz,
                                 sector_size,
-                                heights,
+                                triangle_heights_to_quad(
+                                    heights,
+                                    split,
+                                    triangle_index,
+                                    triangle_heights,
+                                ),
                                 split,
                                 triangle_index,
                             ),
@@ -1001,7 +1022,16 @@ pub fn cache_room_vertex_lit_surfaces(
                         let Some(slot) = sector.ceiling_triangle_material(triangle_index) else {
                             continue;
                         };
-                        let vertices = horizontal_vertices(sx, sz, sector_size, heights);
+                        let triangle_heights = sector.ceiling_triangle_heights(triangle_index);
+                        let vertices = horizontal_triangle_vertices(
+                            sx,
+                            sz,
+                            sector_size,
+                            split,
+                            triangle_index,
+                            triangle_heights,
+                            heights,
+                        );
                         let Some(vertex_indices) =
                             cache_room_vertices(vertices_out, &mut vertex_count, vertices)
                         else {
@@ -1020,7 +1050,12 @@ pub fn cache_room_vertex_lit_surfaces(
                                 sx,
                                 sz,
                                 sector_size,
-                                heights,
+                                triangle_heights_to_quad(
+                                    heights,
+                                    split,
+                                    triangle_index,
+                                    triangle_heights,
+                                ),
                                 split,
                                 triangle_index,
                             ),
@@ -1253,12 +1288,18 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         return stats;
     }
 
-    project_world_vertices_gte(*camera, cached_vertices, projected_vertices, projected_valid);
+    project_world_vertices_gte(
+        *camera,
+        cached_vertices,
+        projected_vertices,
+        projected_valid,
+    );
     let use_vertex_depths = lighting.uses_vertex_depths();
     if use_vertex_depths {
         let mut vertex_index = 0usize;
         while vertex_index < cached_vertices.len() {
-            projected_depths[vertex_index] = camera.view_vertex(cached_vertices[vertex_index]).z;
+            projected_depths[vertex_index] =
+                lighting.prepare_vertex_depth(projected_vertices[vertex_index].sz);
             vertex_index += 1;
         }
     }
@@ -1388,6 +1429,12 @@ fn merged_floor_surface(sector: crate::SectorRender) -> Option<(u16, [(u8, u8); 
             sector.floor_triangle_material(1),
         ],
         [sector.floor_triangle_uvs(0), sector.floor_triangle_uvs(1)],
+        [
+            sector.floor_triangle_heights(0),
+            sector.floor_triangle_heights(1),
+        ],
+        sector.floor_heights(),
+        sector.floor_split(),
     )
 }
 
@@ -1401,18 +1448,49 @@ fn merged_ceiling_surface(sector: crate::SectorRender) -> Option<(u16, [(u8, u8)
             sector.ceiling_triangle_uvs(0),
             sector.ceiling_triangle_uvs(1),
         ],
+        [
+            sector.ceiling_triangle_heights(0),
+            sector.ceiling_triangle_heights(1),
+        ],
+        sector.ceiling_heights(),
+        sector.ceiling_split(),
     )
 }
 
 fn merge_horizontal_triangle_surface(
     materials: [Option<u16>; 2],
     uvs: [[(u8, u8); 4]; 2],
+    heights: [[i32; 3]; 2],
+    face_heights: [i32; 4],
+    split: u8,
 ) -> Option<(u16, [(u8, u8); 4])> {
     let slot = materials[0]?;
-    if materials[1]? != slot || uvs[0] != uvs[1] {
+    if materials[1]? != slot
+        || uvs[0] != uvs[1]
+        || heights[0] != triangle_heights_from_quad(face_heights, split, 0)
+        || heights[1] != triangle_heights_from_quad(face_heights, split, 1)
+    {
         return None;
     }
     Some((slot, uvs[0]))
+}
+
+fn triangle_heights_from_quad(heights: [i32; 4], split: u8, triangle_index: usize) -> [i32; 3] {
+    let (a, b, c) = split_triangles_runtime(split)[triangle_index.min(1)];
+    [heights[a], heights[b], heights[c]]
+}
+
+fn triangle_heights_to_quad(
+    mut fallback: [i32; 4],
+    split: u8,
+    triangle_index: usize,
+    heights: [i32; 3],
+) -> [i32; 4] {
+    let (a, b, c) = split_triangles_runtime(split)[triangle_index.min(1)];
+    fallback[a] = heights[0];
+    fallback[b] = heights[1];
+    fallback[c] = heights[2];
+    fallback
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1843,6 +1921,9 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                 let Some(&base_material) = materials.get(slot as usize) else {
                     continue;
                 };
+                let triangle_heights = sector.floor_triangle_heights(triangle_index);
+                let triangle_quad_heights =
+                    triangle_heights_to_quad(heights, split, triangle_index, triangle_heights);
                 let material = lighting.shade(
                     WorldSurfaceSample {
                         kind: WorldSurfaceKind::Floor,
@@ -1852,7 +1933,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                             sx,
                             sz,
                             sector_size,
-                            heights,
+                            triangle_quad_heights,
                             split,
                             triangle_index,
                         ),
@@ -1866,7 +1947,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sx,
                     sz,
                     sector_size,
-                    heights,
+                    triangle_heights,
                     split,
                     triangle_index,
                     sector.floor_triangle_uvs(triangle_index),
@@ -1922,6 +2003,9 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                 let Some(&base_material) = materials.get(slot as usize) else {
                     continue;
                 };
+                let triangle_heights = sector.ceiling_triangle_heights(triangle_index);
+                let triangle_quad_heights =
+                    triangle_heights_to_quad(heights, split, triangle_index, triangle_heights);
                 let material = lighting.shade(
                     WorldSurfaceSample {
                         kind: WorldSurfaceKind::Ceiling,
@@ -1931,7 +2015,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                             sx,
                             sz,
                             sector_size,
-                            heights,
+                            triangle_quad_heights,
                             split,
                             triangle_index,
                         ),
@@ -1945,7 +2029,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sx,
                     sz,
                     sector_size,
-                    heights,
+                    triangle_heights,
                     split,
                     triangle_index,
                     sector.ceiling_triangle_uvs(triangle_index),
@@ -2067,6 +2151,9 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                 let Some(&material) = materials.get(slot as usize) else {
                     continue;
                 };
+                let triangle_heights = sector.floor_triangle_heights(triangle_index);
+                let triangle_quad_heights =
+                    triangle_heights_to_quad(heights, split, triangle_index, triangle_heights);
                 let sample = WorldSurfaceSample {
                     kind: WorldSurfaceKind::Floor,
                     sx,
@@ -2075,7 +2162,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                         sx,
                         sz,
                         sector_size,
-                        heights,
+                        triangle_quad_heights,
                         split,
                         triangle_index,
                     ),
@@ -2087,7 +2174,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sx,
                     sz,
                     sector_size,
-                    heights,
+                    triangle_heights,
                     split,
                     triangle_index,
                     sector.floor_triangle_uvs(triangle_index),
@@ -2144,6 +2231,9 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                 let Some(&material) = materials.get(slot as usize) else {
                     continue;
                 };
+                let triangle_heights = sector.ceiling_triangle_heights(triangle_index);
+                let triangle_quad_heights =
+                    triangle_heights_to_quad(heights, split, triangle_index, triangle_heights);
                 let sample = WorldSurfaceSample {
                     kind: WorldSurfaceKind::Ceiling,
                     sx,
@@ -2152,7 +2242,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                         sx,
                         sz,
                         sector_size,
-                        heights,
+                        triangle_quad_heights,
                         split,
                         triangle_index,
                     ),
@@ -2164,7 +2254,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     sx,
                     sz,
                     sector_size,
-                    heights,
+                    triangle_heights,
                     split,
                     triangle_index,
                     sector.ceiling_triangle_uvs(triangle_index),
@@ -2412,7 +2502,7 @@ fn emit_floor_triangle<const OT: usize>(
     sx: u16,
     sz: u16,
     sector_size: i32,
-    heights: [i32; 4],
+    heights: [i32; 3],
     split: u8,
     triangle_index: usize,
     uvs: [(u8, u8); 4],
@@ -2427,7 +2517,7 @@ fn emit_floor_triangle<const OT: usize>(
         options.with_depth_policy(DepthPolicy::Farthest),
         CullMode::Back,
         material,
-        horizontal_vertices(sx, sz, sector_size, heights),
+        horizontal_triangle_vertices(sx, sz, sector_size, split, triangle_index, heights, [0; 4]),
         uvs,
         split,
         triangle_index,
@@ -2442,7 +2532,7 @@ fn emit_ceiling_triangle<const OT: usize>(
     sx: u16,
     sz: u16,
     sector_size: i32,
-    heights: [i32; 4],
+    heights: [i32; 3],
     split: u8,
     triangle_index: usize,
     uvs: [(u8, u8); 4],
@@ -2457,7 +2547,7 @@ fn emit_ceiling_triangle<const OT: usize>(
         options.with_depth_policy(DepthPolicy::Farthest),
         CullMode::Back,
         material,
-        horizontal_vertices(sx, sz, sector_size, heights),
+        horizontal_triangle_vertices(sx, sz, sector_size, split, triangle_index, heights, [0; 4]),
         uvs,
         split,
         triangle_index,
@@ -2599,7 +2689,7 @@ fn emit_floor_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
     sz: u16,
     sector_size: i32,
-    heights: [i32; 4],
+    heights: [i32; 3],
     split: u8,
     triangle_index: usize,
     uvs: [(u8, u8); 4],
@@ -2611,7 +2701,8 @@ fn emit_floor_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
-    let verts = horizontal_vertices(sx, sz, sector_size, heights);
+    let verts =
+        horizontal_triangle_vertices(sx, sz, sector_size, split, triangle_index, heights, [0; 4]);
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_triangle_vertex_lit(
         camera,
@@ -2634,7 +2725,7 @@ fn emit_ceiling_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     sx: u16,
     sz: u16,
     sector_size: i32,
-    heights: [i32; 4],
+    heights: [i32; 3],
     split: u8,
     triangle_index: usize,
     uvs: [(u8, u8); 4],
@@ -2646,7 +2737,8 @@ fn emit_ceiling_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
-    let verts = horizontal_vertices(sx, sz, sector_size, heights);
+    let verts =
+        horizontal_triangle_vertices(sx, sz, sector_size, split, triangle_index, heights, [0; 4]);
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_triangle_vertex_lit(
         camera,
@@ -3189,6 +3281,23 @@ fn horizontal_vertices(sx: u16, sz: u16, sector_size: i32, heights: [i32; 4]) ->
     ]
 }
 
+fn horizontal_triangle_vertices(
+    sx: u16,
+    sz: u16,
+    sector_size: i32,
+    split: u8,
+    triangle_index: usize,
+    triangle_heights: [i32; 3],
+    face_heights: [i32; 4],
+) -> [WorldVertex; 4] {
+    horizontal_vertices(
+        sx,
+        sz,
+        sector_size,
+        triangle_heights_to_quad(face_heights, split, triangle_index, triangle_heights),
+    )
+}
+
 #[allow(dead_code)]
 fn horizontal_face_center(sx: u16, sz: u16, sector_size: i32, heights: [i32; 4]) -> RoomPoint {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
@@ -3374,8 +3483,19 @@ mod tests {
     #[test]
     fn merge_horizontal_triangle_surface_combines_matching_triangles() {
         let uvs = [(0, 0), (TILE_UV, 0), (TILE_UV, TILE_UV), (0, TILE_UV)];
+        let face_heights = [0, 0, 0, 0];
+        let heights = [
+            triangle_heights_from_quad(face_heights, SPLIT_NW_SE, 0),
+            triangle_heights_from_quad(face_heights, SPLIT_NW_SE, 1),
+        ];
         assert_eq!(
-            merge_horizontal_triangle_surface([Some(3), Some(3)], [uvs, uvs]),
+            merge_horizontal_triangle_surface(
+                [Some(3), Some(3)],
+                [uvs, uvs],
+                heights,
+                face_heights,
+                SPLIT_NW_SE,
+            ),
             Some((3, uvs))
         );
     }
@@ -3384,17 +3504,40 @@ mod tests {
     fn merge_horizontal_triangle_surface_preserves_real_splits() {
         let uvs = [(0, 0), (TILE_UV, 0), (TILE_UV, TILE_UV), (0, TILE_UV)];
         let shifted_uvs = [(0, 0), (32, 0), (32, TILE_UV), (0, TILE_UV)];
+        let face_heights = [0, 0, 0, 0];
+        let heights = [
+            triangle_heights_from_quad(face_heights, SPLIT_NW_SE, 0),
+            triangle_heights_from_quad(face_heights, SPLIT_NW_SE, 1),
+        ];
 
         assert_eq!(
-            merge_horizontal_triangle_surface([Some(3), Some(4)], [uvs, uvs]),
+            merge_horizontal_triangle_surface(
+                [Some(3), Some(4)],
+                [uvs, uvs],
+                heights,
+                face_heights,
+                SPLIT_NW_SE,
+            ),
             None
         );
         assert_eq!(
-            merge_horizontal_triangle_surface([Some(3), Some(3)], [uvs, shifted_uvs]),
+            merge_horizontal_triangle_surface(
+                [Some(3), Some(3)],
+                [uvs, shifted_uvs],
+                heights,
+                face_heights,
+                SPLIT_NW_SE,
+            ),
             None
         );
         assert_eq!(
-            merge_horizontal_triangle_surface([Some(3), None], [uvs, uvs]),
+            merge_horizontal_triangle_surface(
+                [Some(3), None],
+                [uvs, uvs],
+                heights,
+                face_heights,
+                SPLIT_NW_SE,
+            ),
             None
         );
     }

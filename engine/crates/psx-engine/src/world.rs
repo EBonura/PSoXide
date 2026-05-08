@@ -668,10 +668,43 @@ impl<'a, 'b> RoomCollision<'a, 'b> {
         self.room.sector(x, z).map(SectorCollision)
     }
 
+    /// Sector at `(x, z)` without applying render-side horizontal
+    /// override records. Camera wall probes use this cheaper path
+    /// because they only need floor presence and wall ranges.
+    pub fn sector_without_horizontal_overrides(self, x: u16, z: u16) -> Option<SectorCollision> {
+        self.room
+            .world()
+            .sector_without_horizontal_overrides(x, z)
+            .map(SectorCollision)
+    }
+
+    /// Minimal sector header for camera wall probes.
+    pub fn sector_probe(self, x: u16, z: u16) -> Option<SectorCollisionProbe> {
+        self.room
+            .world()
+            .sector_collision_probe(x, z)
+            .map(SectorCollisionProbe)
+    }
+
     /// Wall record by sector-local index, collision view.
     pub fn sector_wall(self, sector: SectorCollision, local_index: u16) -> Option<WallCollision> {
         self.room
             .sector_wall(sector.0, local_index)
+            .map(WallCollision)
+    }
+
+    /// Wall record by sector-local index for a minimal probe sector.
+    pub fn sector_probe_wall(
+        self,
+        sector: SectorCollisionProbe,
+        local_index: u16,
+    ) -> Option<WallCollision> {
+        if local_index >= sector.wall_count() {
+            return None;
+        }
+        self.room
+            .world()
+            .wall(sector.first_wall().checked_add(local_index)?)
             .map(WallCollision)
     }
 }
@@ -746,6 +779,11 @@ impl SectorRender {
         self.0.floor_triangle_uvs(index).corners()
     }
 
+    /// Floor split-triangle heights in that triangle's corner order.
+    pub fn floor_triangle_heights(self, index: usize) -> [i32; 3] {
+        self.0.floor_triangle_heights(index)
+    }
+
     /// Ceiling corner heights `[NW, NE, SE, SW]` for vertex emission.
     pub fn ceiling_heights(self) -> [i32; 4] {
         self.0.ceiling_heights()
@@ -759,6 +797,11 @@ impl SectorRender {
     /// Ceiling split-triangle UVs `[NW, NE, SE, SW]`.
     pub fn ceiling_triangle_uvs(self, index: usize) -> [(u8, u8); 4] {
         self.0.ceiling_triangle_uvs(index).corners()
+    }
+
+    /// Ceiling split-triangle heights in that triangle's corner order.
+    pub fn ceiling_triangle_heights(self, index: usize) -> [i32; 3] {
+        self.0.ceiling_triangle_heights(index)
     }
 
     /// First global wall index for this sector.
@@ -813,9 +856,40 @@ impl SectorCollision {
         self.0.floor_heights()
     }
 
+    /// Floor split-triangle heights in that triangle's corner order.
+    pub fn floor_triangle_heights(self, index: usize) -> [i32; 3] {
+        self.0.floor_triangle_heights(index)
+    }
+
     /// Ceiling corner heights `[NW, NE, SE, SW]`.
     pub fn ceiling_heights(self) -> [i32; 4] {
         self.0.ceiling_heights()
+    }
+
+    /// Ceiling split-triangle heights in that triangle's corner order.
+    pub fn ceiling_triangle_heights(self, index: usize) -> [i32; 3] {
+        self.0.ceiling_triangle_heights(index)
+    }
+
+    /// First global wall index for this sector.
+    pub fn first_wall(self) -> u16 {
+        self.0.first_wall()
+    }
+
+    /// Number of walls belonging to this sector.
+    pub fn wall_count(self) -> u16 {
+        self.0.wall_count()
+    }
+}
+
+/// Collision probe projection of one decoded sector header.
+#[derive(Copy, Clone, Debug)]
+pub struct SectorCollisionProbe(psx_asset::WorldSectorCollisionProbe);
+
+impl SectorCollisionProbe {
+    /// `true` if this sector has a floor surface to sample.
+    pub fn has_floor(self) -> bool {
+        self.0.has_floor()
     }
 
     /// First global wall index for this sector.

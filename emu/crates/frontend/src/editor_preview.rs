@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use emulator_core::gpu::GpuCmdLogEntry;
 use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gpu::ot::OrderingTable;
+use psx_gpu::prim::QuadFlat;
 use psx_gpu::prim::QuadGouraud;
 use psx_gpu::prim::TriFlat;
 use psx_gpu::prim::TriTextured;
@@ -47,6 +48,7 @@ use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
 const SKY_QUAD_CAP: usize = 2;
+const FAR_VISTA_QUAD_CAP: usize = 16;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
 /// editor preview exercises the same overflow behavior.
 const PREVIEW_MODEL_VERTEX_CAP: usize = 1024;
@@ -66,7 +68,10 @@ const PREVIEW_JOINT_CAP: usize = 32;
 /// sector size.
 const OT_DEPTH: usize = 256;
 const PREVIEW_GEOMETRY_SLOT_MIN: usize = 1;
-const PREVIEW_GEOMETRY_SLOT_MAX: usize = OT_DEPTH - 3;
+const PREVIEW_CLEAR_SLOT: usize = OT_DEPTH - 1;
+const PREVIEW_SKY_SLOT: usize = OT_DEPTH - 2;
+const PREVIEW_FAR_VISTA_SLOT: usize = OT_DEPTH - 3;
+const PREVIEW_GEOMETRY_SLOT_MAX: usize = OT_DEPTH - 4;
 const PREVIEW_SHADOW_DEPTH_BIAS: u32 = 128;
 const PREVIEW_SHADOW_FLOOR_LIFT: i32 = 4;
 const PREVIEW_SHADOW_RADIUS_SCALE_NUM: i32 = 5;
@@ -112,6 +117,7 @@ const EDITOR_PREVIEW_PAINT_STROKE_WIDTH: f32 = 2.0;
 struct PreviewScratch {
     ot: OrderingTable<OT_DEPTH>,
     sky_quads: [QuadGouraud; SKY_QUAD_CAP],
+    far_vista_quads: [QuadFlat; FAR_VISTA_QUAD_CAP],
     tris: [TriFlat; TRI_CAP],
     tex_tris: [TriTextured; TRI_CAP],
     model_vertices: [psx_engine::ProjectedVertex; PREVIEW_MODEL_VERTEX_CAP],
@@ -120,6 +126,7 @@ struct PreviewScratch {
     /// `tex_used` = next free slot in `tex_tris`.
     used: usize,
     sky_used: usize,
+    far_vista_used: usize,
     tex_used: usize,
     /// Host-drawn overlay lines for editor affordances. These stay
     /// outside the GP0 command log so the UI can draw fractional,
@@ -136,6 +143,8 @@ struct PreviewScratch {
 }
 
 const EMPTY_TRI: TriFlat = TriFlat::new([(0, 0), (0, 0), (0, 0)], 0, 0, 0);
+const EMPTY_FAR_VISTA_QUAD: QuadFlat =
+    QuadFlat::new([(0, 0), (0, 0), (0, 0), (0, 0)], 0, 0, 0);
 const EMPTY_SKY_QUAD: QuadGouraud = QuadGouraud::new(
     [(0, 0), (0, 0), (0, 0), (0, 0)],
     [(0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
@@ -151,12 +160,14 @@ const EMPTY_TEX_TRI: TriTextured = TriTextured::new(
 static SCRATCH: Mutex<PreviewScratch> = Mutex::new(PreviewScratch {
     ot: OrderingTable::new(),
     sky_quads: [EMPTY_SKY_QUAD; SKY_QUAD_CAP],
+    far_vista_quads: [EMPTY_FAR_VISTA_QUAD; FAR_VISTA_QUAD_CAP],
     tris: [EMPTY_TRI; TRI_CAP],
     tex_tris: [EMPTY_TEX_TRI; TRI_CAP],
     model_vertices: [psx_engine::ProjectedVertex::new(0, 0, 0); PREVIEW_MODEL_VERTEX_CAP],
     model_joint_transforms: [psx_engine::JointViewTransform::ZERO; PREVIEW_JOINT_CAP],
     used: 0,
     sky_used: 0,
+    far_vista_used: 0,
     tex_used: 0,
     overlay_lines: Vec::new(),
     clear_packet: [0; 4],
@@ -206,6 +217,7 @@ pub fn build_phase1_frame(
     let mut scratch = SCRATCH.lock().expect("editor preview scratch mutex");
     scratch.used = 0;
     scratch.sky_used = 0;
+    scratch.far_vista_used = 0;
     scratch.tex_used = 0;
     scratch.overlay_lines.clear();
     scratch.ot.clear();
@@ -218,6 +230,12 @@ pub fn build_phase1_frame(
     push_clear(&mut scratch, resolved_sky.lower_color);
     push_sky_gradient(&mut scratch, resolved_sky);
     let world_camera = setup_gte_for_camera(camera);
+    let resolved_far_vista = project
+        .active_scene()
+        .world_far_vista_for_node(room_id)
+        .unwrap_or_default()
+        .resolved_for_room(grid.fog_enabled && preview_fog, grid.fog_color);
+    push_far_vista_ring(&mut scratch, camera, resolved_far_vista);
     let fog = PreviewFog::from_grid(grid, preview_fog);
     walk_room(
         project,
@@ -3260,7 +3278,7 @@ fn push_clear(scratch: &mut PreviewScratch, color: [u8; 3]) {
     scratch.clear_packet[3] = wh_word;
     let ptr: *mut u32 = scratch.clear_packet.as_mut_ptr();
     unsafe {
-        scratch.ot.insert(OT_DEPTH - 1, ptr, 3);
+        scratch.ot.insert(PREVIEW_CLEAR_SLOT, ptr, 3);
     }
 }
 
@@ -3308,11 +3326,72 @@ fn push_sky_quad(
     scratch.sky_used += 1;
     let ptr: *mut QuadGouraud = &mut scratch.sky_quads[idx];
     unsafe {
-        scratch.ot.insert(
-            OT_DEPTH.saturating_sub(2),
-            ptr.cast::<u32>(),
-            QuadGouraud::WORDS,
+        scratch
+            .ot
+            .insert(PREVIEW_SKY_SLOT, ptr.cast::<u32>(), QuadGouraud::WORDS);
+    }
+}
+
+fn push_far_vista_ring(
+    scratch: &mut PreviewScratch,
+    camera: ViewportCameraState,
+    vista: psxed_project::ResolvedFarVistaSettings,
+) {
+    if !vista.enabled {
+        return;
+    }
+    let [cam_x, cam_y, cam_z] = camera.position_i32();
+    let segments = vista.segments.clamp(3, FAR_VISTA_QUAD_CAP as u8);
+    let radius = vista.radius as f32;
+    let base = (vista.rotation_degrees as f32).to_radians();
+    let step = std::f32::consts::TAU / segments as f32;
+    let y0 = cam_y.saturating_add(vista.vertical_offset);
+    let y1 = y0.saturating_add(vista.height);
+    for segment in 0..segments {
+        let a0 = base + step * segment as f32;
+        let a1 = base + step * (segment as f32 + 1.0);
+        let x0 = cam_x.saturating_add((a0.sin() * radius).round() as i32);
+        let z0 = cam_z.saturating_add((a0.cos() * radius).round() as i32);
+        let x1 = cam_x.saturating_add((a1.sin() * radius).round() as i32);
+        let z1 = cam_z.saturating_add((a1.cos() * radius).round() as i32);
+        let projected = [
+            gte_scene::project_vertex(world_to_view([x0, y1, z0])),
+            gte_scene::project_vertex(world_to_view([x1, y1, z1])),
+            gte_scene::project_vertex(world_to_view([x0, y0, z0])),
+            gte_scene::project_vertex(world_to_view([x1, y0, z1])),
+        ];
+        if projected.iter().any(|point| point.sz == 0) {
+            continue;
+        }
+        push_far_vista_quad(
+            scratch,
+            [
+                (projected[0].sx, projected[0].sy),
+                (projected[1].sx, projected[1].sy),
+                (projected[2].sx, projected[2].sy),
+                (projected[3].sx, projected[3].sy),
+            ],
+            vista.tint,
         );
+    }
+}
+
+fn push_far_vista_quad(
+    scratch: &mut PreviewScratch,
+    verts: [(i16, i16); 4],
+    color: [u8; 3],
+) {
+    if scratch.far_vista_used >= scratch.far_vista_quads.len() {
+        return;
+    }
+    let idx = scratch.far_vista_used;
+    scratch.far_vista_quads[idx] = QuadFlat::new(verts, color[0], color[1], color[2]);
+    scratch.far_vista_used += 1;
+    let ptr: *mut QuadFlat = &mut scratch.far_vista_quads[idx];
+    unsafe {
+        scratch
+            .ot
+            .insert(PREVIEW_FAR_VISTA_SLOT, ptr.cast::<u32>(), QuadFlat::WORDS);
     }
 }
 

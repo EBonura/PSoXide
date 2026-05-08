@@ -31,7 +31,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use psx_level::{sky_flags, visibility_cell_flags, visibility_edge_flags};
+use psx_level::{far_vista_flags, sky_flags, visibility_cell_flags, visibility_edge_flags};
 use psxed_format::world as psxw;
 
 use crate::streaming::{plan_generated_chunks, StreamingChunkConfig};
@@ -275,6 +275,62 @@ pub fn build_package(
                 .world_sky_for_node(room_node.id)
                 .unwrap_or_default()
                 .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
+            let resolved_far_vista = scene
+                .world_far_vista_for_node(room_node.id)
+                .unwrap_or_default()
+                .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
+            let far_vista_texture_asset_indices = if resolved_far_vista.enabled {
+                let assigned_panels = resolved_far_vista
+                    .texture_panels
+                    .iter()
+                    .any(Option::is_some);
+                if assigned_panels {
+                    resolved_far_vista
+                        .texture_panels
+                        .iter()
+                        .enumerate()
+                        .map(|(panel_index, texture_id)| {
+                            texture_id.and_then(|texture_id| {
+                                let context = format!(
+                                    "Room '{}' far vista panel {}",
+                                    room_node.name,
+                                    panel_index + 1
+                                );
+                                cook_far_vista_texture_asset(
+                                    project,
+                                    project_root,
+                                    texture_id,
+                                    &context,
+                                    &mut texture_asset_for_resource,
+                                    &mut assets,
+                                    &mut report,
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    resolved_far_vista
+                        .texture
+                        .and_then(|texture_id| {
+                            let context = format!("Room '{}' far vista", room_node.name);
+                            cook_far_vista_texture_asset(
+                                project,
+                                project_root,
+                                texture_id,
+                                &context,
+                                &mut texture_asset_for_resource,
+                                &mut assets,
+                                &mut report,
+                            )
+                        })
+                        .into_iter()
+                        .map(Some)
+                        .collect::<Vec<_>>()
+                }
+            } else {
+                Vec::new()
+            };
+            let far_vista_has_texture = far_vista_texture_asset_indices.iter().any(Option::is_some);
 
             rooms.push(PlaytestRoom {
                 name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
@@ -294,6 +350,25 @@ pub fn build_package(
                     horizon_percent: resolved_sky.horizon_percent,
                     flags: if resolved_sky.enabled {
                         sky_flags::ENABLED
+                    } else {
+                        0
+                    },
+                },
+                far_vista: PlaytestFarVista {
+                    texture_asset_indices: far_vista_texture_asset_indices,
+                    radius: resolved_far_vista.radius,
+                    height: resolved_far_vista.height,
+                    vertical_offset: resolved_far_vista.vertical_offset,
+                    segments: resolved_far_vista.segments,
+                    rotation_degrees: resolved_far_vista.rotation_degrees,
+                    tint_rgb: resolved_far_vista.tint,
+                    flags: if resolved_far_vista.enabled {
+                        far_vista_flags::ENABLED
+                            | if far_vista_has_texture {
+                                far_vista_flags::TEXTURED
+                            } else {
+                                0
+                            }
                     } else {
                         0
                     },
@@ -812,6 +887,49 @@ pub fn build_package(
         }),
         report,
     )
+}
+
+fn cook_far_vista_texture_asset(
+    project: &ProjectDocument,
+    project_root: &Path,
+    texture_id: ResourceId,
+    context: &str,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<usize> {
+    if let Some(existing) = texture_asset_for_resource.get(&texture_id).copied() {
+        return Some(existing);
+    }
+    let Some(texture_resource) = find_resource(project, texture_id) else {
+        report.warn(format!(
+            "{context}: texture resource #{} is missing; using placeholder",
+            texture_id.raw()
+        ));
+        return None;
+    };
+    let bytes = match load_texture_bytes(texture_resource, project_root) {
+        Ok(bytes) => bytes,
+        Err(msg) => {
+            report.warn(format!("{context}: {msg}; using placeholder"));
+            return None;
+        }
+    };
+    if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
+        report.warn(format!("{context}: {msg}; using placeholder"));
+        return None;
+    }
+
+    let texture_index = texture_asset_for_resource.len();
+    let new_index = assets.len();
+    assets.push(PlaytestAsset {
+        kind: PlaytestAssetKind::Texture,
+        bytes,
+        filename: format!("texture_{texture_index:03}.psxt"),
+        source_label: texture_resource.name.clone(),
+    });
+    texture_asset_for_resource.insert(texture_id, new_index);
+    Some(new_index)
 }
 
 /// Cook one Character resource into a [`PlaytestCharacter`],
@@ -2871,6 +2989,11 @@ mod tests {
             sky_flags::ENABLED
         );
         assert_eq!(package.rooms[0].sky.horizon_percent, 58);
+        assert_eq!(
+            package.rooms[0].far_vista.flags & far_vista_flags::ENABLED,
+            far_vista_flags::ENABLED
+        );
+        assert_eq!(package.rooms[0].far_vista.segments, 12);
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
         assert!(!package.visible_cells.is_empty());
@@ -3366,6 +3489,8 @@ mod tests {
         assert!(src.contains("pub static ROOMS"));
         assert!(src.contains("LevelSkyRecord"));
         assert!(src.contains("sky: LevelSkyRecord"));
+        assert!(src.contains("LevelFarVistaRecord"));
+        assert!(src.contains("far_vista: LevelFarVistaRecord"));
         assert!(src.contains("pub static ROOM_VISIBILITY"));
         assert!(src.contains("pub static VISIBILITY_CELLS"));
         assert!(src.contains("pub static VISIBLE_CELLS"));
