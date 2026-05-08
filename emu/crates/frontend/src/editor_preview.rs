@@ -1340,12 +1340,6 @@ fn walk_entities(
 /// frames", not real-time. Good enough for inspector preview.
 static PREVIEW_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum PreviewModelRenderPath {
-    FullBlend,
-    PrimaryJoint,
-}
-
 /// One placed model the preview pass should render. Resolved
 /// once per call to `walk_model_instances` so the per-instance
 /// loop only does projection + emit work.
@@ -1367,8 +1361,6 @@ struct PreviewModelInstance<'a> {
     /// Lit and fogged model texture tint, matching editor-playtest's
     /// single-material actor lighting path.
     tint: (u8, u8, u8),
-    /// Runtime model path this preview instance should exercise.
-    render_path: PreviewModelRenderPath,
 }
 
 /// Render every Model-backed legacy `MeshInstance` or component
@@ -1467,7 +1459,6 @@ fn walk_model_instances(
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
-            render_path: PreviewModelRenderPath::PrimaryJoint,
         });
     }
 
@@ -1505,7 +1496,6 @@ fn walk_model_instances(
             origin,
             instance_rotation: meta.instance_rotation,
             tint: shade_model_tint(origin, *camera, fog, &lights, ambient),
-            render_path: meta.render_path,
         });
     }
 
@@ -1619,7 +1609,6 @@ fn walk_player_spawn_preview(
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
-            render_path: PreviewModelRenderPath::FullBlend,
         });
     }
 }
@@ -1793,7 +1782,6 @@ struct InstanceMeta {
     /// Approximate world-space height for the facing arrow's
     /// vertical extent. Lifted from `ModelResource::world_height`.
     world_height: i32,
-    render_path: PreviewModelRenderPath,
 }
 
 fn floor_anchored_model_origin(
@@ -1896,34 +1884,19 @@ fn submit_preview_model_instance(
     );
     let options = preview_model_surface_options(material);
 
-    let stats = match instance.render_path {
-        PreviewModelRenderPath::FullBlend => world.submit_textured_model(
-            triangles,
-            instance.model,
-            instance.animation,
-            frame_q12,
-            *camera,
-            instance.origin,
-            instance.instance_rotation,
-            projected_vertices,
-            joint_view_transforms,
-            material,
-            options,
-        ),
-        PreviewModelRenderPath::PrimaryJoint => world.submit_textured_model_primary_joints(
-            triangles,
-            instance.model,
-            instance.animation,
-            frame_q12,
-            *camera,
-            instance.origin,
-            instance.instance_rotation,
-            projected_vertices,
-            joint_view_transforms,
-            material,
-            options,
-        ),
-    };
+    let stats = world.submit_textured_model(
+        triangles,
+        instance.model,
+        instance.animation,
+        frame_q12,
+        *camera,
+        instance.origin,
+        instance.instance_rotation,
+        projected_vertices,
+        joint_view_transforms,
+        material,
+        options,
+    );
 
     stats.primitive_overflow || stats.command_overflow
 }
