@@ -114,12 +114,45 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    out.push_str("/// Rooms with material-slice metadata.\n");
-    out.push_str("pub static ROOMS: &[LevelRoomRecord] = &[\n");
-    for room in &package.rooms {
+    for (room_index, room) in package.rooms.iter().enumerate() {
+        if room.far_vista.texture_asset_indices.is_empty() {
+            continue;
+        }
+        let assets = room
+            .far_vista
+            .texture_asset_indices
+            .iter()
+            .map(|index| {
+                index
+                    .map(|index| format!("AssetId({index})"))
+                    .unwrap_or_else(|| "AssetId(u16::MAX)".to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {} }}, flags: {} }},",
+            "static FAR_VISTA_TEXTURES_{room_index}: &[AssetId] = &[{assets}];"
+        );
+    }
+    if package
+        .rooms
+        .iter()
+        .any(|room| !room.far_vista.texture_asset_indices.is_empty())
+    {
+        out.push('\n');
+    }
+
+    out.push_str("/// Rooms with material-slice metadata.\n");
+    out.push_str("pub static ROOMS: &[LevelRoomRecord] = &[\n");
+    for (room_index, room) in package.rooms.iter().enumerate() {
+        let far_vista_texture_assets = if room.far_vista.texture_asset_indices.is_empty() {
+            "&[]".to_string()
+        } else {
+            format!("FAR_VISTA_TEXTURES_{room_index}")
+        };
+        let _ = writeln!(
+            out,
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -143,6 +176,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.sky.bottom_rgb[2],
             room.sky.horizon_percent,
             room.sky.flags,
+            far_vista_texture_assets,
+            room.far_vista.radius,
+            room.far_vista.height,
+            room.far_vista.vertical_offset,
+            room.far_vista.segments,
+            room.far_vista.rotation_degrees,
+            room.far_vista.tint_rgb[0],
+            room.far_vista.tint_rgb[1],
+            room.far_vista.tint_rgb[2],
+            room.far_vista.flags,
             room.flags,
         );
     }
@@ -194,7 +237,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     // asset + every model mesh + every animation clip
     // referenced by an instance OR by the player character in
     // this room; required VRAM = every distinct texture asset
-    // (room materials + model atlases) referenced by this room.
+    // (room materials + far-vista panels + model atlases)
+    // referenced by this room.
     for (i, room) in package.rooms.iter().enumerate() {
         let first = room.material_first as usize;
         let count = room.material_count as usize;
@@ -202,6 +246,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         for material in &package.materials[first..first + count] {
             if !required_vram.contains(&material.texture_asset_index) {
                 required_vram.push(material.texture_asset_index);
+            }
+        }
+        for asset_index in room.far_vista.texture_asset_indices.iter().flatten() {
+            if !required_vram.contains(asset_index) {
+                required_vram.push(*asset_index);
             }
         }
         let mut required_ram: Vec<usize> = vec![room.world_asset_index];
@@ -760,6 +809,7 @@ use psx_level::{
     EquipmentRecord,
     LevelAssetRecord,
     LevelCharacterRecord,
+    LevelFarVistaRecord,
     LevelMaterialRecord,
     LevelModelClipBoundsRecord,
     LevelModelClipRecord,
