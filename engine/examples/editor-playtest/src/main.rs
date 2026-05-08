@@ -53,17 +53,17 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
-    draw_line_mono, draw_quad_flat, draw_tri_flat_blended,
+    draw_line_mono, draw_quad_flat, draw_tri_flat_blended, draw_tri_gouraud,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::{TriTextured, TriTexturedGouraud},
 };
 use psx_level::{
-    equipment_flags, find_asset_of_kind, room_flags, AssetId, AssetKind, EntityRecord,
+    equipment_flags, find_asset_of_kind, room_flags, sky_flags, AssetId, AssetKind, EntityRecord,
     LevelCharacterRecord, LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord,
-    LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
-    WeaponHitShapeRecord,
+    LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex,
+    ModelClipTableIndex, ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager,
+    RoomIndex, WeaponHitShapeRecord,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
 
@@ -908,6 +908,10 @@ impl Scene for Playtest {
         let mut triangles = unsafe { PrimitiveArena::new(&mut TEXTURED_TRIS) };
         let mut gouraud_triangles = unsafe { PrimitiveArena::new(&mut TEXTURED_GOURAUD_TRIS) };
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
+
+        if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
+            draw_sky_gradient(room_record.sky);
+        }
 
         if self.room.is_some() {
             let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
@@ -2222,6 +2226,29 @@ fn emit_model_counters(
     }
 }
 
+fn draw_sky_gradient(sky: LevelSkyRecord) {
+    if sky.flags & sky_flags::ENABLED == 0 {
+        return;
+    }
+    let horizon_y = ((SCREEN_H as i32 * sky.horizon_percent.clamp(5, 95) as i32) / 100) as i16;
+    let horizon_y = horizon_y.clamp(1, SCREEN_H - 1);
+    draw_sky_gradient_quad(0, horizon_y, sky.top_rgb, sky.horizon_rgb);
+    draw_sky_gradient_quad(horizon_y, SCREEN_H, sky.horizon_rgb, sky.bottom_rgb);
+}
+
+fn draw_sky_gradient_quad(y0: i16, y1: i16, top_rgb: [u8; 3], bottom_rgb: [u8; 3]) {
+    if y1 <= y0 {
+        return;
+    }
+    let top = (top_rgb[0], top_rgb[1], top_rgb[2]);
+    let bottom = (bottom_rgb[0], bottom_rgb[1], bottom_rgb[2]);
+    draw_tri_gouraud([(0, y0), (SCREEN_W, y0), (0, y1)], [top, top, bottom]);
+    draw_tri_gouraud(
+        [(SCREEN_W, y0), (0, y1), (SCREEN_W, y1)],
+        [top, bottom, bottom],
+    );
+}
+
 fn parse_runtime_room(record: &LevelRoomRecord) -> Option<RuntimeRoom<'static>> {
     let asset = find_asset_of_kind(ASSETS, record.world_asset, AssetKind::RoomWorld)?;
     RuntimeRoom::from_bytes(asset.bytes).ok()
@@ -2714,6 +2741,10 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
                 depths[3],
             ),
         ]
+    }
+
+    fn uses_vertex_depths(&self) -> bool {
+        self.fog_enabled && self.fog_far > self.fog_near
     }
 }
 
