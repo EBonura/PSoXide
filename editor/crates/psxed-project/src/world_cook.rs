@@ -11,7 +11,7 @@ use psxed_format::world;
 use crate::{
     snap_world_sector_size, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridVerticalFace, GridWalls, MaterialFaceSidedness, MaterialResource, ProjectDocument,
-    PsxBlendMode, ResourceData, ResourceId, WorldGrid, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
+    PsxBlendMode, ResourceData, ResourceId, WallCorner, WorldGrid, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WALL_STACK, WORLD_SECTOR_SIZE_QUANTUM,
 };
 
@@ -27,7 +27,7 @@ pub const DEFAULT_BAKED_VERTEX_RGB: [[u8; 3]; 4] = [[255, 255, 255]; 4];
 
 use coords::{
     runtime_horizontal_heights, runtime_horizontal_split, runtime_horizontal_uvs,
-    runtime_wall_direction, runtime_wall_heights, runtime_wall_uvs,
+    runtime_wall_direction, runtime_wall_heights, runtime_wall_shape, runtime_wall_uvs,
 };
 use encode::encode_cooked_world_grid_psxw;
 use materials::material_slot;
@@ -132,10 +132,9 @@ pub enum WorldGridCookError {
         heights: [i32; 4],
     },
     /// Diagonal walls (`NorthWestSouthEast` / `NorthEastSouthWest`)
-    /// aren't supported by the v1 cooker / runtime. The data model
-    /// has the slots so authoring can land later, but render +
-    /// picking + collision aren't consistent yet -- better to fail
-    /// loud than ship half-working diagonals.
+    /// are unsupported by old cooked runtimes. Current `.psxw`
+    /// writers keep this variant only for stale diagnostics and
+    /// external callers that may still match it.
     UnsupportedDiagonalWall {
         /// Sector X coordinate.
         x: u16,
@@ -377,6 +376,28 @@ impl CookedWorldMaterial {
 
 /// Cooked horizontal face with resolved runtime material slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CookedGridHorizontalTriangle {
+    /// `true` when this split triangle is emitted.
+    pub visible: bool,
+    /// Runtime material slot or [`world::NO_MATERIAL`] when hidden.
+    pub material: u16,
+    /// Runtime UVs `[NW, NE, SE, SW]` for this split triangle.
+    pub uvs: [(u8, u8); 4],
+    /// Whether collision treats this split triangle as walkable.
+    pub walkable: bool,
+}
+
+impl CookedGridHorizontalTriangle {
+    const HIDDEN: Self = Self {
+        visible: false,
+        material: world::NO_MATERIAL,
+        uvs: world::FLOOR_UVS,
+        walkable: false,
+    };
+}
+
+/// Cooked horizontal face with resolved runtime material slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CookedGridHorizontalFace {
     /// Corner heights `[NW, NE, SE, SW]`.
     pub heights: [i32; 4],
@@ -390,6 +411,9 @@ pub struct CookedGridHorizontalFace {
     pub baked_vertex_rgb: [[u8; 3]; 4],
     /// Whether collision treats this face as walkable.
     pub walkable: bool,
+    /// Per-split-triangle render/collision overrides in runtime
+    /// triangle order.
+    pub triangles: [CookedGridHorizontalTriangle; 2],
 }
 
 /// Cooked vertical wall with resolved runtime material slot.
@@ -399,6 +423,8 @@ pub struct CookedGridVerticalFace {
     pub heights: [i32; 4],
     /// Runtime material slot.
     pub material: u16,
+    /// Runtime wall shape id, see [`psxed_format::world::wall_shape`].
+    pub shape: u16,
     /// Runtime UVs `[bottom-left, bottom-right, top-right, top-left]`.
     pub uvs: [(u8, u8); 4],
     /// Baked RGB tint for the wall's four vertices.
@@ -656,25 +682,94 @@ fn cook_horizontal_face(
     materials: &mut Vec<CookedWorldMaterial>,
     material_slots: &mut HashMap<ResourceId, u16>,
 ) -> Result<CookedGridHorizontalFace, WorldGridCookError> {
-    if face.is_triangle() {
-        return Err(WorldGridCookError::TriangleFaceNotSupported { x, z, face: kind });
-    }
+    let split = runtime_horizontal_split(face.split);
+    let triangles =
+        cook_horizontal_triangles(project, face, x, z, kind, materials, material_slots)?;
+    let fallback = triangles
+        .iter()
+        .copied()
+        .find(|triangle| triangle.visible)
+        .unwrap_or(CookedGridHorizontalTriangle::HIDDEN);
     Ok(CookedGridHorizontalFace {
         heights: runtime_horizontal_heights(face.heights),
-        split: runtime_horizontal_split(face.split),
-        material: material_slot(
+        split,
+        material: fallback.material,
+        uvs: fallback.uvs,
+        baked_vertex_rgb: DEFAULT_BAKED_VERTEX_RGB,
+        walkable: triangles
+            .iter()
+            .any(|triangle| triangle.visible && triangle.walkable),
+        triangles,
+    })
+}
+
+fn cook_horizontal_triangles(
+    project: &ProjectDocument,
+    face: &GridHorizontalFace,
+    x: u16,
+    z: u16,
+    kind: WorldGridFaceKind,
+    materials: &mut Vec<CookedWorldMaterial>,
+    material_slots: &mut HashMap<ResourceId, u16>,
+) -> Result<[CookedGridHorizontalTriangle; 2], WorldGridCookError> {
+    let mut triangles = [CookedGridHorizontalTriangle::HIDDEN; 2];
+    if let Some(parent_material) = face.material {
+        let parent_is_visible = (0..2).any(|editor_index| {
+            editor_horizontal_triangle_visible(face, editor_index)
+                && face.triangle_material(editor_index) == Some(parent_material)
+        });
+        if parent_is_visible {
+            let _ = material_slot(
+                project,
+                Some(parent_material),
+                x,
+                z,
+                kind,
+                materials,
+                material_slots,
+            )?;
+        }
+    }
+    for editor_index in 0..2 {
+        if !editor_horizontal_triangle_visible(face, editor_index) {
+            continue;
+        }
+        let runtime_index = runtime_horizontal_triangle_index(editor_index);
+        let material = material_slot(
             project,
-            face.material,
+            face.triangle_material(editor_index),
             x,
             z,
             kind,
             materials,
             material_slots,
-        )?,
-        uvs: runtime_horizontal_uvs(face.uv.apply_to_quad(world::FLOOR_UVS)),
-        baked_vertex_rgb: DEFAULT_BAKED_VERTEX_RGB,
-        walkable: face.walkable,
-    })
+        )?;
+        triangles[runtime_index] = CookedGridHorizontalTriangle {
+            visible: true,
+            material,
+            uvs: runtime_horizontal_uvs(
+                face.triangle_uv(editor_index)
+                    .apply_to_quad(world::FLOOR_UVS),
+            ),
+            walkable: face.triangle_walkable(editor_index),
+        };
+    }
+    Ok(triangles)
+}
+
+const fn runtime_horizontal_triangle_index(editor_index: usize) -> usize {
+    if editor_index == 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn editor_horizontal_triangle_visible(face: &GridHorizontalFace, index: usize) -> bool {
+    let Some(dropped) = face.dropped_corner else {
+        return true;
+    };
+    !crate::horizontal_triangle_contains_corner(face.split, index, dropped)
 }
 
 fn cook_walls(
@@ -687,29 +782,13 @@ fn cook_walls(
     material_slots: &mut HashMap<ResourceId, u16>,
 ) -> Result<CookedGridWalls, WorldGridCookError> {
     let mut cooked = CookedGridWalls::default();
-    // Diagonal walls fail loud: the data model has the slots
-    // (so authoring + serialization works), but render / pick /
-    // collision aren't consistent yet -- better to refuse to
-    // cook than ship half-supported geometry.
-    for direction in GridDirection::DIAGONAL {
-        if !walls.get(direction).is_empty() {
-            return Err(WorldGridCookError::UnsupportedDiagonalWall { x, z, direction });
-        }
-    }
-    // Cardinal walls only. Duplicate physical walls (east of
+    // Duplicate physical walls (east of
     // (x,z) and west of (x+1,z) describe the same face) are
     // already rejected upstream by `validate_no_duplicate_walls`
     // -- by the time we reach this loop the grid is guaranteed
     // to claim each physical edge from at most one side.
-    for direction in GridDirection::CARDINAL {
+    for direction in GridDirection::ALL {
         for wall in walls.get(direction) {
-            if wall.is_triangle() {
-                return Err(WorldGridCookError::TriangleFaceNotSupported {
-                    x,
-                    z,
-                    face: WorldGridFaceKind::Wall(direction),
-                });
-            }
             validate_wall_heights(wall, x, z, direction)?;
             let material = material_slot(
                 project,
@@ -733,6 +812,7 @@ fn cook_walls(
                     .push(CookedGridVerticalFace {
                         heights: runtime_wall_heights(segment.heights),
                         material,
+                        shape: runtime_wall_shape(segment.dropped_corner),
                         uvs: runtime_wall_uvs(segment.uv.apply_to_quad(world::WALL_UVS)),
                         baked_vertex_rgb: DEFAULT_BAKED_VERTEX_RGB,
                         solid: segment.solid,
@@ -746,7 +826,10 @@ fn cook_walls(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Corner, GridUvRotation, GridUvTransform, NodeKind, ResourceData, WallCorner};
+    use crate::{
+        Corner, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, NodeKind,
+        ResourceData, WallCorner,
+    };
 
     fn starter_grid(project: &ProjectDocument) -> WorldGrid {
         project
@@ -1328,74 +1411,148 @@ mod tests {
     }
 
     #[test]
-    fn rejects_triangle_floor() {
-        // Drop a corner on the starter floor and confirm the
-        // cooker refuses it: .psxw doesn't carry triangles.
+    fn cooks_triangle_floor_as_single_runtime_triangle() {
+        // Dropped floor corners cook through the v4 horizontal
+        // override table: the sector still has a floor, but only
+        // the surviving split triangle is visible at runtime.
         let project = ProjectDocument::starter();
-        let mut grid = WorldGrid::stone_room(1, 1, world::SECTOR_SIZE, None, None);
+        let material = first_floor_material(&starter_grid(&project));
+        let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
+        grid.set_floor(0, 0, 0, Some(material));
         if let Some(sector) = grid.sector_mut(0, 0) {
             if let Some(floor) = sector.floor.as_mut() {
                 floor.drop_corner(Corner::NW);
             }
         }
-        match cook_world_grid(&project, &grid) {
-            Err(WorldGridCookError::TriangleFaceNotSupported { x, z, face }) => {
-                assert_eq!((x, z), (0, 0));
-                assert_eq!(face, WorldGridFaceKind::Floor);
-            }
-            other => panic!("expected TriangleFaceNotSupported, got {other:?}"),
-        }
+
+        let cooked = cook_world_grid(&project, &grid).unwrap();
+        let floor = cooked.sectors[0].as_ref().unwrap().floor.unwrap();
+        assert_eq!(
+            floor
+                .triangles
+                .iter()
+                .filter(|triangle| triangle.visible)
+                .count(),
+            1
+        );
+
+        let bytes = encode_world_grid_psxw(&project, &grid).unwrap();
+        let parsed_world = psx_asset::World::from_bytes(&bytes).expect("psxw parses");
+        let sector = parsed_world.sector(0, 0).unwrap();
+        assert_eq!(parsed_world.horizontal_override_count(), 1);
+        assert!(sector.has_floor());
+        assert!(sector.floor_triangle_present(0));
+        assert!(!sector.floor_triangle_present(1));
     }
 
     #[test]
-    fn rejects_triangle_wall() {
-        // Wall-only grid (no floor) so the cooker's first stop is
-        // the wall validator; otherwise UnassignedMaterial on the
-        // floor fires before we reach the wall path.
-        let project = ProjectDocument::starter();
+    fn cooks_horizontal_triangle_material_uv_and_walkable_overrides() {
+        let mut project = ProjectDocument::starter();
+        let base = first_floor_material(&starter_grid(&project));
+        let floor_texture = texture_named(&project, "floor.psxt");
+        let override_material = material_for_texture(&mut project, "Triangle Slot", floor_texture);
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
-        grid.add_wall(0, 0, GridDirection::North, 0, world::SECTOR_SIZE, None);
+        grid.set_floor(0, 0, 0, Some(base));
+        let uv = GridUvTransform {
+            offset: [7, -3],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg90,
+            flip_u: true,
+            flip_v: false,
+        };
+        let floor = grid
+            .sector_mut(0, 0)
+            .and_then(|sector| sector.floor.as_mut())
+            .expect("floor exists");
+        let triangle = floor.triangle_override_mut(0);
+        triangle.material = Some(GridTriangleMaterialOverride::Resource(override_material));
+        triangle.uv = Some(uv);
+        triangle.walkable = Some(false);
+
+        let cooked = cook_world_grid(&project, &grid).unwrap();
+        assert_eq!(cooked.materials.len(), 2);
+
+        let bytes = encode_world_grid_psxw(&project, &grid).unwrap();
+        let parsed_world = psx_asset::World::from_bytes(&bytes).expect("psxw parses");
+        let sector = parsed_world.sector(0, 0).unwrap();
+        assert_eq!(parsed_world.horizontal_override_count(), 1);
+        assert_eq!(sector.floor_triangle_material(0), Some(0));
+        assert_eq!(sector.floor_triangle_material(1), Some(1));
+        assert!(sector.floor_triangle_walkable(0));
+        assert!(!sector.floor_triangle_walkable(1));
+        assert_eq!(
+            sector.floor_triangle_uvs(1).corners(),
+            runtime_horizontal_uvs(uv.apply_to_quad(world::FLOOR_UVS))
+        );
+    }
+
+    #[test]
+    fn cooks_triangle_wall_shape() {
+        let project = ProjectDocument::starter();
+        let material = first_floor_material(&starter_grid(&project));
+        let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
+        grid.add_wall(
+            0,
+            0,
+            GridDirection::North,
+            0,
+            world::SECTOR_SIZE,
+            Some(material),
+        );
         if let Some(sector) = grid.sector_mut(0, 0) {
             let walls = sector.walls.get_mut(GridDirection::North);
             if let Some(wall) = walls.first_mut() {
                 wall.drop_corner(WallCorner::TL);
             }
         }
-        match cook_world_grid(&project, &grid) {
-            Err(WorldGridCookError::TriangleFaceNotSupported { x, z, face }) => {
-                assert_eq!((x, z), (0, 0));
-                assert_eq!(face, WorldGridFaceKind::Wall(GridDirection::North));
-            }
-            other => panic!("expected TriangleFaceNotSupported, got {other:?}"),
-        }
+
+        let cooked = cook_world_grid(&project, &grid).unwrap();
+        let cooked_walls = &cooked.sectors[0].as_ref().unwrap().walls;
+        assert!(cooked_walls.north.is_empty());
+        assert_eq!(
+            cooked_walls.south[0].shape,
+            world::wall_shape::DROP_TOP_RIGHT
+        );
+
+        let bytes = encode_world_grid_psxw(&project, &grid).unwrap();
+        let parsed_world = psx_asset::World::from_bytes(&bytes).expect("psxw parses");
+        let sector = parsed_world.sector(0, 0).unwrap();
+        let wall = parsed_world.sector_wall(sector, 0).unwrap();
+        assert_eq!(wall.shape(), world::wall_shape::DROP_TOP_RIGHT);
     }
 
     #[test]
-    fn rejects_diagonal_walls() {
-        // Author a NW-SE diagonal wall and confirm the cooker
-        // refuses it. Render / pick / collision aren't consistent
-        // for diagonals yet; failing loud at cook time beats
-        // shipping half-supported geometry.
+    fn cook_flips_diagonal_walls_to_runtime_convention() {
         let project = ProjectDocument::starter();
+        let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
-        // No floor -- the diagonal-wall check has to fire before
-        // any material validation in the rest of the sector.
         grid.add_wall(
             0,
             0,
             GridDirection::NorthWestSouthEast,
             0,
             world::SECTOR_SIZE,
-            None,
+            Some(material),
         );
+        let wall = grid
+            .sector_mut(0, 0)
+            .and_then(|sector| {
+                sector
+                    .walls
+                    .get_mut(GridDirection::NorthWestSouthEast)
+                    .first_mut()
+            })
+            .expect("diagonal wall exists");
+        wall.heights = [32, 64, 96, 128];
 
-        match cook_world_grid(&project, &grid) {
-            Err(WorldGridCookError::UnsupportedDiagonalWall { x, z, direction }) => {
-                assert_eq!((x, z), (0, 0));
-                assert_eq!(direction, GridDirection::NorthWestSouthEast);
-            }
-            other => panic!("expected UnsupportedDiagonalWall, got {other:?}"),
-        }
+        let cooked = cook_world_grid(&project, &grid).unwrap();
+        let cooked_walls = &cooked.sectors[0].as_ref().unwrap().walls;
+
+        assert!(cooked_walls.north_west_south_east.is_empty());
+        assert_eq!(
+            cooked_walls.north_east_south_west[0].heights,
+            [64, 32, 128, 96]
+        );
     }
 
     #[test]

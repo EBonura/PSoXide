@@ -172,6 +172,34 @@ impl ResourceId {
     }
 }
 
+/// Explicit material assignment for one floor/ceiling triangle.
+/// Missing override means "inherit the parent face material"; this
+/// enum represents the two explicit states a triangle can choose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GridTriangleMaterialOverride {
+    /// The triangle is intentionally unassigned even if the parent
+    /// face has a material.
+    Unassigned,
+    /// The triangle uses this material instead of the parent face.
+    Resource(ResourceId),
+}
+
+impl GridTriangleMaterialOverride {
+    pub const fn from_material(material: Option<ResourceId>) -> Self {
+        match material {
+            Some(id) => Self::Resource(id),
+            None => Self::Unassigned,
+        }
+    }
+
+    pub const fn material(self) -> Option<ResourceId> {
+        match self {
+            Self::Unassigned => None,
+            Self::Resource(id) => Some(id),
+        }
+    }
+}
+
 /// Basic 3D transform used by authored nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Transform3 {
@@ -322,6 +350,16 @@ pub enum GridSplit {
     NorthWestSouthEast,
     /// Split from north-east to south-west.
     NorthEastSouthWest,
+}
+
+impl GridSplit {
+    /// Stored `.psxw` split id for this logical diagonal.
+    pub const fn psxw_id(self) -> u8 {
+        match self {
+            Self::NorthWestSouthEast => psxed_format::world::split::NORTH_WEST_SOUTH_EAST,
+            Self::NorthEastSouthWest => psxed_format::world::split::NORTH_EAST_SOUTH_WEST,
+        }
+    }
 }
 
 /// Quarter-turn texture rotation for authored grid faces.
@@ -514,6 +552,67 @@ const fn is_default_uv_span(span: &[u16; 2]) -> bool {
     span[0] == 0 && span[1] == 0
 }
 
+/// Optional authored overrides for one half of a split floor or
+/// ceiling face. Every field inherits from the parent face when
+/// `None`, keeping old projects compact and behavior-compatible.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridHorizontalTriangleOverride {
+    /// Optional material override. `None` inherits the parent face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<GridTriangleMaterialOverride>,
+    /// Optional UV override. `None` inherits the parent face UV.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv: Option<GridUvTransform>,
+    /// Optional walkability override. `None` inherits the parent face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walkable: Option<bool>,
+}
+
+impl GridHorizontalTriangleOverride {
+    pub const fn is_empty(&self) -> bool {
+        self.material.is_none() && self.uv.is_none() && self.walkable.is_none()
+    }
+}
+
+/// Optional overrides for the two triangles emitted by a
+/// floor/ceiling split. `a` and `b` match the triangle order used by
+/// the editor/runtime split tables.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridHorizontalTriangleOverrides {
+    #[serde(
+        default,
+        skip_serializing_if = "GridHorizontalTriangleOverride::is_empty"
+    )]
+    pub a: GridHorizontalTriangleOverride,
+    #[serde(
+        default,
+        skip_serializing_if = "GridHorizontalTriangleOverride::is_empty"
+    )]
+    pub b: GridHorizontalTriangleOverride,
+}
+
+impl GridHorizontalTriangleOverrides {
+    pub const fn is_empty(&self) -> bool {
+        self.a.is_empty() && self.b.is_empty()
+    }
+
+    pub const fn get(&self, index: usize) -> &GridHorizontalTriangleOverride {
+        if index == 0 {
+            &self.a
+        } else {
+            &self.b
+        }
+    }
+
+    pub const fn get_mut(&mut self, index: usize) -> &mut GridHorizontalTriangleOverride {
+        if index == 0 {
+            &mut self.a
+        } else {
+            &mut self.b
+        }
+    }
+}
+
 /// Floor / ceiling corner index. Maps directly to the
 /// `[NW, NE, SE, SW]` order every height array uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,6 +631,17 @@ impl Corner {
             Self::NE => 1,
             Self::SE => 2,
             Self::SW => 3,
+        }
+    }
+
+    /// Convert a `[NW, NE, SE, SW]` index to a corner. Unknown
+    /// indices fall back to `NW`.
+    pub const fn from_idx(index: usize) -> Self {
+        match index {
+            1 => Self::NE,
+            2 => Self::SE,
+            3 => Self::SW,
+            _ => Self::NW,
         }
     }
 
@@ -581,9 +691,71 @@ impl WallCorner {
         }
     }
 
+    /// Convert a `[BL, BR, TR, TL]` index to a wall corner. Unknown
+    /// indices fall back to `BL`.
+    pub const fn from_idx(index: usize) -> Self {
+        match index {
+            1 => Self::BR,
+            2 => Self::TR,
+            3 => Self::TL,
+            _ => Self::BL,
+        }
+    }
+
     /// `true` when this corner sits at the wall's bottom.
     pub const fn is_bottom(self) -> bool {
         matches!(self, Self::BL | Self::BR)
+    }
+}
+
+/// Corner members for one authored horizontal split triangle.
+pub const fn horizontal_triangle_corners(split: GridSplit, triangle_index: usize) -> [Corner; 3] {
+    let corners = psxed_format::world::topology::split_triangle(split.psxw_id(), triangle_index);
+    [
+        Corner::from_idx(corners[0]),
+        Corner::from_idx(corners[1]),
+        Corner::from_idx(corners[2]),
+    ]
+}
+
+/// `true` when an authored horizontal split triangle contains
+/// `corner`.
+pub const fn horizontal_triangle_contains_corner(
+    split: GridSplit,
+    triangle_index: usize,
+    corner: Corner,
+) -> bool {
+    psxed_format::world::topology::triangle_contains_corner(
+        psxed_format::world::topology::split_triangle(split.psxw_id(), triangle_index),
+        corner.idx(),
+    )
+}
+
+/// Wall-corner members for one authored wall split triangle. The
+/// corner order is `[BL, BR, TR, TL]`.
+pub const fn wall_triangle_corners(split: GridSplit, triangle_index: usize) -> [WallCorner; 3] {
+    let corners = psxed_format::world::topology::split_triangle(split.psxw_id(), triangle_index);
+    [
+        WallCorner::from_idx(corners[0]),
+        WallCorner::from_idx(corners[1]),
+        WallCorner::from_idx(corners[2]),
+    ]
+}
+
+/// Shape id produced by dropping an authored wall corner.
+pub const fn wall_shape_for_dropped_corner(corner: WallCorner) -> u16 {
+    psxed_format::world::topology::wall_shape_for_dropped_corner(corner.idx())
+}
+
+/// Wall-corner members for the single triangle surviving a wall shape.
+pub const fn wall_shape_triangle_corners(shape: u16) -> Option<[WallCorner; 3]> {
+    match psxed_format::world::topology::wall_shape_triangle_corners(shape) {
+        Some(corners) => Some([
+            WallCorner::from_idx(corners[0]),
+            WallCorner::from_idx(corners[1]),
+            WallCorner::from_idx(corners[2]),
+        ]),
+        None => None,
     }
 }
 
@@ -714,7 +886,8 @@ impl GridCellBounds {
             GridDirection::East => Some(([self.x1, self.z1], [self.x1, self.z0])),
             GridDirection::South => Some(([self.x1, self.z0], [self.x0, self.z0])),
             GridDirection::West => Some(([self.x0, self.z0], [self.x0, self.z1])),
-            GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+            GridDirection::NorthWestSouthEast => Some(([self.x0, self.z1], [self.x1, self.z0])),
+            GridDirection::NorthEastSouthWest => Some(([self.x1, self.z1], [self.x0, self.z0])),
         }
     }
 }
@@ -733,6 +906,14 @@ pub struct GridHorizontalFace {
     pub uv: GridUvTransform,
     /// Whether character collision treats this face as walkable.
     pub walkable: bool,
+    /// Optional per-triangle material / UV / walkability overrides.
+    /// Empty by default, so old projects keep one surface record per
+    /// floor/ceiling face until the user edits a specific triangle.
+    #[serde(
+        default,
+        skip_serializing_if = "GridHorizontalTriangleOverrides::is_empty"
+    )]
+    pub triangle_overrides: GridHorizontalTriangleOverrides,
     /// `Some(corner)` when one corner has been deleted, turning
     /// the face into a triangle. The renderer skips the half
     /// containing the missing corner; `split` is forced to the
@@ -751,7 +932,51 @@ impl GridHorizontalFace {
             material,
             uv: GridUvTransform::IDENTITY,
             walkable: true,
+            triangle_overrides: GridHorizontalTriangleOverrides {
+                a: GridHorizontalTriangleOverride {
+                    material: None,
+                    uv: None,
+                    walkable: None,
+                },
+                b: GridHorizontalTriangleOverride {
+                    material: None,
+                    uv: None,
+                    walkable: None,
+                },
+            },
             dropped_corner: None,
+        }
+    }
+
+    pub const fn triangle_override(&self, index: usize) -> &GridHorizontalTriangleOverride {
+        self.triangle_overrides.get(index)
+    }
+
+    pub const fn triangle_override_mut(
+        &mut self,
+        index: usize,
+    ) -> &mut GridHorizontalTriangleOverride {
+        self.triangle_overrides.get_mut(index)
+    }
+
+    pub const fn triangle_material(&self, index: usize) -> Option<ResourceId> {
+        match self.triangle_override(index).material {
+            Some(override_material) => override_material.material(),
+            None => self.material,
+        }
+    }
+
+    pub const fn triangle_uv(&self, index: usize) -> GridUvTransform {
+        match self.triangle_override(index).uv {
+            Some(uv) => uv,
+            None => self.uv,
+        }
+    }
+
+    pub const fn triangle_walkable(&self, index: usize) -> bool {
+        match self.triangle_override(index).walkable {
+            Some(walkable) => walkable,
+            None => self.walkable,
         }
     }
 
@@ -1204,7 +1429,12 @@ fn horizontal_edge_heights_for_wall(
         GridDirection::East => Some([heights[Corner::NE.idx()], heights[Corner::SE.idx()]]),
         GridDirection::South => Some([heights[Corner::SE.idx()], heights[Corner::SW.idx()]]),
         GridDirection::West => Some([heights[Corner::SW.idx()], heights[Corner::NW.idx()]]),
-        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+        GridDirection::NorthWestSouthEast => {
+            Some([heights[Corner::NW.idx()], heights[Corner::SE.idx()]])
+        }
+        GridDirection::NorthEastSouthWest => {
+            Some([heights[Corner::NE.idx()], heights[Corner::SW.idx()]])
+        }
     }
 }
 
@@ -1226,7 +1456,14 @@ fn set_horizontal_edge_heights(heights: &mut [i32; 4], direction: GridDirection,
             heights[Corner::SW.idx()] = edge[0];
             heights[Corner::NW.idx()] = edge[1];
         }
-        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => {}
+        GridDirection::NorthWestSouthEast => {
+            heights[Corner::NW.idx()] = edge[0];
+            heights[Corner::SE.idx()] = edge[1];
+        }
+        GridDirection::NorthEastSouthWest => {
+            heights[Corner::NE.idx()] = edge[0];
+            heights[Corner::SW.idx()] = edge[1];
+        }
     }
 }
 
@@ -1353,6 +1590,7 @@ pub struct WorldGridBudget {
     pub floors: usize,
     pub ceilings: usize,
     pub walls: usize,
+    pub horizontal_overrides: usize,
     pub triangles: usize,
     /// Current `.psxw` geometry wire size. The format stores a
     /// sector record for **every** cell, so this uses `total_cells`,
@@ -1393,9 +1631,10 @@ impl WorldGridBudget {
 }
 
 const ASSET_HEADER_BYTES: usize = 12;
-const WORLD_HEADER_BYTES: usize = 20;
+const WORLD_HEADER_BYTES: usize = psxed_format::world::WorldHeader::SIZE;
 const PSXW_SECTOR_BYTES: usize = psxed_format::world::SectorRecord::SIZE;
 const PSXW_WALL_BYTES: usize = psxed_format::world::WallRecord::SIZE;
+const PSXW_HORIZONTAL_OVERRIDE_BYTES: usize = psxed_format::world::HorizontalOverrideRecord::SIZE;
 const PSXW_SURFACE_LIGHT_BYTES: usize = psxed_format::world::SurfaceLightRecord::SIZE;
 const FUTURE_COMPACT_SECTOR_BYTES: usize = 28;
 const FUTURE_COMPACT_WALL_BYTES: usize = 12;
@@ -1418,6 +1657,18 @@ const fn default_fog_far() -> i32 {
 
 const fn default_light_color() -> [u8; 3] {
     [255, 240, 200]
+}
+
+fn face_triangle_count(face: &GridHorizontalFace) -> usize {
+    if face.is_triangle() {
+        1
+    } else {
+        2
+    }
+}
+
+fn horizontal_face_needs_runtime_override(face: &GridHorizontalFace) -> bool {
+    face.is_triangle() || !face.triangle_overrides.is_empty()
 }
 
 /// Engine-style grid world authored by a scene node.
@@ -1622,7 +1873,7 @@ impl WorldGrid {
     }
 
     /// Candidate wall heights for editor placement on a cardinal
-    /// edge. The returned order is `[BL, BR, TR, TL]`.
+    /// edge or diagonal. The returned order is `[BL, BR, TR, TL]`.
     pub fn wall_heights_aligned_to_surfaces(
         &self,
         x: u16,
@@ -1886,21 +2137,28 @@ impl WorldGrid {
                 b.populated_cells += 1;
                 if sector.floor.is_some() {
                     b.floors += 1;
-                    b.triangles += 2;
+                    if let Some(face) = sector.floor.as_ref() {
+                        b.triangles += face_triangle_count(face);
+                        if horizontal_face_needs_runtime_override(face) {
+                            b.horizontal_overrides += 1;
+                        }
+                    }
                 }
                 if sector.ceiling.is_some() {
                     b.ceilings += 1;
-                    b.triangles += 2;
+                    if let Some(face) = sector.ceiling.as_ref() {
+                        b.triangles += face_triangle_count(face);
+                        if horizontal_face_needs_runtime_override(face) {
+                            b.horizontal_overrides += 1;
+                        }
+                    }
                 }
                 for direction in GridDirection::ALL {
-                    let count = sector
-                        .walls
-                        .get(direction)
-                        .iter()
-                        .map(|wall| wall.autotile_segment_count(self.sector_size))
-                        .sum::<usize>();
-                    b.walls += count;
-                    b.triangles += count * 2;
+                    for wall in sector.walls.get(direction) {
+                        let count = wall.autotile_segment_count(self.sector_size);
+                        b.walls += count;
+                        b.triangles += if wall.is_triangle() { 1 } else { count * 2 };
+                    }
                 }
             }
         }
@@ -1916,7 +2174,8 @@ impl WorldGrid {
         b.psxw_bytes = ASSET_HEADER_BYTES
             + WORLD_HEADER_BYTES
             + b.total_cells * PSXW_SECTOR_BYTES
-            + b.walls * PSXW_WALL_BYTES;
+            + b.walls * PSXW_WALL_BYTES
+            + b.horizontal_overrides * PSXW_HORIZONTAL_OVERRIDE_BYTES;
         if b.populated_cells > 0 {
             b.static_light_table_bytes = (b.total_cells * 2 + b.walls) * PSXW_SURFACE_LIGHT_BYTES;
         }
@@ -4836,6 +5095,14 @@ mod tests {
             bounds.wall_endpoints_xz(GridDirection::South),
             Some(([2048, 1024], [1024, 1024]))
         );
+        assert_eq!(
+            bounds.wall_endpoints_xz(GridDirection::NorthWestSouthEast),
+            Some(([1024, 2048], [2048, 1024]))
+        );
+        assert_eq!(
+            bounds.wall_endpoints_xz(GridDirection::NorthEastSouthWest),
+            Some(([2048, 2048], [1024, 1024]))
+        );
     }
 
     #[test]
@@ -4878,6 +5145,35 @@ mod tests {
             .first()
             .unwrap();
         assert_eq!(wall.heights, [256, 384, 1100, 1000]);
+    }
+
+    #[test]
+    fn diagonal_wall_placement_aligns_to_horizontal_diagonal_vertices() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [128, 256, 384, 512];
+        let mut ceiling = GridHorizontalFace::flat(1024, None);
+        ceiling.heights = [900, 1000, 1100, 1200];
+        let sector = grid.ensure_sector(0, 0).unwrap();
+        sector.floor = Some(floor);
+        sector.ceiling = Some(ceiling);
+
+        grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::NorthWestSouthEast, None);
+        grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::NorthEastSouthWest, None);
+
+        let sector = grid.sector(0, 0).unwrap();
+        let nw_se = sector
+            .walls
+            .get(GridDirection::NorthWestSouthEast)
+            .first()
+            .unwrap();
+        let ne_sw = sector
+            .walls
+            .get(GridDirection::NorthEastSouthWest)
+            .first()
+            .unwrap();
+        assert_eq!(nw_se.heights, [128, 384, 1100, 900]);
+        assert_eq!(ne_sw.heights, [256, 512, 1200, 1000]);
     }
 
     #[test]
@@ -5102,15 +5398,19 @@ mod tests {
         assert_eq!(b.ceilings, 0);
         assert_eq!(b.walls, 0);
         assert_eq!(b.triangles, 0);
-        // AssetHeader (12) + WorldHeader (20) + 9 sector records.
+        // AssetHeader + active WorldHeader + 9 sector records.
         // `.psxw` stores a record per cell whether populated or not.
         assert_eq!(
             b.psxw_bytes,
-            12 + 20 + 9 * psxed_format::world::SectorRecord::SIZE
+            12 + psxed_format::world::WorldHeader::SIZE
+                + 9 * psxed_format::world::SectorRecord::SIZE
         );
         assert_eq!(b.static_light_table_bytes, 0);
         assert_eq!(b.psxw_static_lit_bytes, b.psxw_bytes);
-        assert_eq!(b.future_compact_estimated_bytes, 12 + 20 + 9 * 28);
+        assert_eq!(
+            b.future_compact_estimated_bytes,
+            12 + psxed_format::world::WorldHeader::SIZE + 9 * 28
+        );
         assert!(!b.over_budget());
         assert!(!b.static_lit_over_budget());
     }
@@ -6117,6 +6417,36 @@ mod tests {
         face.restore_corner();
         assert!(!face.is_triangle());
         assert_eq!(face.dropped_corner, None);
+    }
+
+    #[test]
+    fn horizontal_triangle_overrides_inherit_until_set() {
+        let parent = ResourceId(11);
+        let triangle = ResourceId(12);
+        let mut face = GridHorizontalFace::flat(0, Some(parent));
+        face.uv.offset = [3, 4];
+        face.walkable = true;
+
+        assert_eq!(face.triangle_material(0), Some(parent));
+        assert_eq!(face.triangle_uv(0), face.uv);
+        assert!(face.triangle_walkable(0));
+
+        let override_a = face.triangle_override_mut(0);
+        override_a.material = Some(GridTriangleMaterialOverride::Resource(triangle));
+        override_a.uv = Some(GridUvTransform {
+            offset: [9, 10],
+            span: [64, 32],
+            rotation: GridUvRotation::Deg90,
+            flip_u: true,
+            flip_v: false,
+        });
+        override_a.walkable = Some(false);
+
+        assert_eq!(face.triangle_material(0), Some(triangle));
+        assert_eq!(face.triangle_material(1), Some(parent));
+        assert_eq!(face.triangle_uv(0).offset, [9, 10]);
+        assert!(!face.triangle_walkable(0));
+        assert!(face.triangle_walkable(1));
     }
 
     #[test]
