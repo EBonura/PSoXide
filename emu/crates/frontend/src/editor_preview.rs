@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use emulator_core::gpu::GpuCmdLogEntry;
 use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gpu::ot::OrderingTable;
+use psx_gpu::prim::QuadGouraud;
 use psx_gpu::prim::TriFlat;
 use psx_gpu::prim::TriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
@@ -45,6 +46,7 @@ use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
 /// 4096-cap caps the per-frame primitive count at a comfortable
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
+const SKY_QUAD_CAP: usize = 2;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
 /// editor preview exercises the same overflow behavior.
 const PREVIEW_MODEL_VERTEX_CAP: usize = 1024;
@@ -64,7 +66,7 @@ const PREVIEW_JOINT_CAP: usize = 32;
 /// sector size.
 const OT_DEPTH: usize = 256;
 const PREVIEW_GEOMETRY_SLOT_MIN: usize = 1;
-const PREVIEW_GEOMETRY_SLOT_MAX: usize = OT_DEPTH - 2;
+const PREVIEW_GEOMETRY_SLOT_MAX: usize = OT_DEPTH - 3;
 const PREVIEW_SHADOW_DEPTH_BIAS: u32 = 128;
 const PREVIEW_SHADOW_FLOOR_LIFT: i32 = 4;
 const PREVIEW_SHADOW_RADIUS_SCALE_NUM: i32 = 5;
@@ -109,6 +111,7 @@ const EDITOR_PREVIEW_PAINT_STROKE_WIDTH: f32 = 2.0;
 /// that and matches PS1's flat 2 MB main RAM layout.
 struct PreviewScratch {
     ot: OrderingTable<OT_DEPTH>,
+    sky_quads: [QuadGouraud; SKY_QUAD_CAP],
     tris: [TriFlat; TRI_CAP],
     tex_tris: [TriTextured; TRI_CAP],
     model_vertices: [psx_engine::ProjectedVertex; PREVIEW_MODEL_VERTEX_CAP],
@@ -116,6 +119,7 @@ struct PreviewScratch {
     /// `0` = next free slot in `tris` (flat-shaded);
     /// `tex_used` = next free slot in `tex_tris`.
     used: usize,
+    sky_used: usize,
     tex_used: usize,
     /// Host-drawn overlay lines for editor affordances. These stay
     /// outside the GP0 command log so the UI can draw fractional,
@@ -132,6 +136,10 @@ struct PreviewScratch {
 }
 
 const EMPTY_TRI: TriFlat = TriFlat::new([(0, 0), (0, 0), (0, 0)], 0, 0, 0);
+const EMPTY_SKY_QUAD: QuadGouraud = QuadGouraud::new(
+    [(0, 0), (0, 0), (0, 0), (0, 0)],
+    [(0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
+);
 const EMPTY_TEX_TRI: TriTextured = TriTextured::new(
     [(0, 0), (0, 0), (0, 0)],
     [(0, 0), (0, 0), (0, 0)],
@@ -142,11 +150,13 @@ const EMPTY_TEX_TRI: TriTextured = TriTextured::new(
 
 static SCRATCH: Mutex<PreviewScratch> = Mutex::new(PreviewScratch {
     ot: OrderingTable::new(),
+    sky_quads: [EMPTY_SKY_QUAD; SKY_QUAD_CAP],
     tris: [EMPTY_TRI; TRI_CAP],
     tex_tris: [EMPTY_TEX_TRI; TRI_CAP],
     model_vertices: [psx_engine::ProjectedVertex::new(0, 0, 0); PREVIEW_MODEL_VERTEX_CAP],
     model_joint_transforms: [psx_engine::JointViewTransform::ZERO; PREVIEW_JOINT_CAP],
     used: 0,
+    sky_used: 0,
     tex_used: 0,
     overlay_lines: Vec::new(),
     clear_packet: [0; 4],
@@ -195,11 +205,18 @@ pub fn build_phase1_frame(
 
     let mut scratch = SCRATCH.lock().expect("editor preview scratch mutex");
     scratch.used = 0;
+    scratch.sky_used = 0;
     scratch.tex_used = 0;
     scratch.overlay_lines.clear();
     scratch.ot.clear();
 
-    push_clear(&mut scratch);
+    let resolved_sky = project
+        .active_scene()
+        .world_sky_for_node(room_id)
+        .unwrap_or_default()
+        .resolved_for_room(grid.fog_enabled && preview_fog, grid.fog_color);
+    push_clear(&mut scratch, resolved_sky.lower_color);
+    push_sky_gradient(&mut scratch, resolved_sky);
     let world_camera = setup_gte_for_camera(camera);
     let fog = PreviewFog::from_grid(grid, preview_fog);
     walk_room(
@@ -2627,11 +2644,9 @@ fn world_to_view(world: [i32; 3]) -> Vec3I16 {
 /// Render the paint-target ghost outline. Cell ghosts trace the
 /// would-be cell surface; wall ghosts use
 /// `push_face_outline` with a synthetic `FaceRef` whose world cell
-/// might lie outside the current grid -- `push_face_outline`'s
-/// missing-data fallback supplies default heights for the ghost
-/// case. World-cell coords let both work for cells the grid
-/// hasn't allocated yet; the outline appears exactly where the
-/// auto-grow would create the cell on click.
+/// might lie outside the current grid. Missing wall-stack previews
+/// project explicit candidate heights so the outline appears where
+/// the auto-grow or next-stack click will create the wall.
 fn push_paint_preview(
     grid: &WorldGrid,
     preview: psxed_ui::PaintTargetPreview,
@@ -2649,11 +2664,9 @@ fn push_paint_preview(
             dir,
             stack,
         } => {
-            // Translate world cell → array (when in bounds) so
-            // existing wall data is read for the outline; for
-            // off-grid ghosts we pass a synthetic array index that
-            // can't collide with any real wall and let
-            // `push_face_outline` fall back to default heights.
+            // Translate world cell -> array when in bounds so an
+            // existing wall stack can still use the regular face
+            // outline path.
             let (sx, sz) = grid
                 .world_cell_to_array(world_cell_x, world_cell_z)
                 .unwrap_or((u16::MAX, u16::MAX));
@@ -2665,11 +2678,16 @@ fn push_paint_preview(
                 sz,
                 kind: psxed_ui::FaceKind::Wall { dir, stack },
             };
-            // For off-grid wall ghosts we have to project the
-            // outline ourselves -- `push_face_outline` short-
-            // circuits when sx/sz are out of grid bounds.
-            if sx == u16::MAX || sz == u16::MAX {
-                let heights = grid.wall_heights_aligned_to_surfaces_for_world_cell(
+            // For off-grid or next-stack wall ghosts we have to
+            // project the outline ourselves. `push_face_outline`
+            // either short-circuits when sx/sz are out of grid
+            // bounds or falls back to floor-to-ceiling placement
+            // for missing stack indices.
+            let existing_stack = grid
+                .sector(sx, sz)
+                .is_some_and(|sector| (stack as usize) < sector.walls.get(dir).len());
+            if sx == u16::MAX || sz == u16::MAX || !existing_stack {
+                let heights = grid.wall_heights_above_stack_or_surfaces_for_world_cell(
                     world_cell_x,
                     world_cell_z,
                     dir,
@@ -3228,10 +3246,11 @@ fn bright_overlay_color(rgb: (u8, u8, u8)) -> egui::Color32 {
 /// "clear" the framebuffer at the start of every frame, since the
 /// HwRenderer (faithfully) preserves VRAM across frames the way real
 /// hardware does.
-fn push_clear(scratch: &mut PreviewScratch) {
+fn push_clear(scratch: &mut PreviewScratch, color: [u8; 3]) {
     // PSX VRAM coords; the editor's HwRenderer renders the same
     // 320×240 sub-rect that the runtime frame-buffer would land in.
-    let color_word = 0x0200_0000_u32; // opcode 0x02, RGB = 0 (black)
+    let color_word =
+        0x0200_0000_u32 | color[0] as u32 | ((color[1] as u32) << 8) | ((color[2] as u32) << 16);
     let xy_word = 0u32; // top-left at (0, 0)
     let wh_word = ((240u32) << 16) | 320u32; // pack_xy(320, 240)
                                              // word[0] is rewritten by `OrderingTable::insert` with the
@@ -3242,6 +3261,58 @@ fn push_clear(scratch: &mut PreviewScratch) {
     let ptr: *mut u32 = scratch.clear_packet.as_mut_ptr();
     unsafe {
         scratch.ot.insert(OT_DEPTH - 1, ptr, 3);
+    }
+}
+
+fn push_sky_gradient(scratch: &mut PreviewScratch, sky: psxed_project::ResolvedSkySettings) {
+    if !sky.enabled {
+        return;
+    }
+    let horizon_y = ((SCREEN_H * sky.horizon_percent as i32) / 100).clamp(1, SCREEN_H - 1) as i16;
+    push_sky_quad(scratch, 0, horizon_y, sky.top_color, sky.horizon_color);
+    push_sky_quad(
+        scratch,
+        horizon_y,
+        SCREEN_H as i16,
+        sky.horizon_color,
+        sky.lower_color,
+    );
+}
+
+fn push_sky_quad(
+    scratch: &mut PreviewScratch,
+    y0: i16,
+    y1: i16,
+    top_color: [u8; 3],
+    bottom_color: [u8; 3],
+) {
+    if y1 <= y0 || scratch.sky_used >= scratch.sky_quads.len() {
+        return;
+    }
+    let quad = QuadGouraud::new(
+        [
+            (0, y0),
+            (SCREEN_W as i16, y0),
+            (0, y1),
+            (SCREEN_W as i16, y1),
+        ],
+        [
+            (top_color[0], top_color[1], top_color[2]),
+            (top_color[0], top_color[1], top_color[2]),
+            (bottom_color[0], bottom_color[1], bottom_color[2]),
+            (bottom_color[0], bottom_color[1], bottom_color[2]),
+        ],
+    );
+    let idx = scratch.sky_used;
+    scratch.sky_quads[idx] = quad;
+    scratch.sky_used += 1;
+    let ptr: *mut QuadGouraud = &mut scratch.sky_quads[idx];
+    unsafe {
+        scratch.ot.insert(
+            OT_DEPTH.saturating_sub(2),
+            ptr.cast::<u32>(),
+            QuadGouraud::WORDS,
+        );
     }
 }
 

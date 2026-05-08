@@ -6,7 +6,7 @@ use psx_level::{
     EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCharacterRecord, LevelMaterialRecord,
     LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
     LevelModelInstanceRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
-    LevelRoomVisibilityRecord, LevelVisibilityCellRecord, LevelVisibleCellRecord,
+    LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord, LevelVisibleCellRecord,
     LevelWeaponRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
     RoomResidencyRecord, WeaponHitboxRecord,
 };

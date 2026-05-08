@@ -13,7 +13,7 @@ use psx_gpu::{
 };
 
 use crate::{
-    render3d::{project_world_vertices_gte, CullMode, DepthPolicy},
+    render3d::{project_world_vertices_gte, CullMode, DepthPolicy, ProjectedVertex},
     PrimitiveArena, RoomPoint, RoomRender, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
     WorldVertex,
 };
@@ -416,6 +416,12 @@ pub trait WorldSurfaceLighting {
         material: WorldRenderMaterial,
     ) -> [(u8, u8, u8); 4] {
         self.shade_vertices(sample, vertices, material)
+    }
+
+    /// Whether this lighting pass needs the cached camera-space
+    /// depth values supplied to [`Self::shade_vertices_with_depths`].
+    fn uses_vertex_depths(&self) -> bool {
+        true
     }
 }
 
@@ -1248,10 +1254,13 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     }
 
     project_world_vertices_gte(*camera, cached_vertices, projected_vertices, projected_valid);
-    let mut vertex_index = 0usize;
-    while vertex_index < cached_vertices.len() {
-        projected_depths[vertex_index] = camera.view_vertex(cached_vertices[vertex_index]).z;
-        vertex_index += 1;
+    let use_vertex_depths = lighting.uses_vertex_depths();
+    if use_vertex_depths {
+        let mut vertex_index = 0usize;
+        while vertex_index < cached_vertices.len() {
+            projected_depths[vertex_index] = camera.view_vertex(cached_vertices[vertex_index]).z;
+            vertex_index += 1;
+        }
     }
 
     for visible in visible_cells {
@@ -1502,7 +1511,7 @@ fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
 #[inline(always)]
 fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
-    projected_vertices: &[crate::render3d::ProjectedVertex],
+    projected_vertices: &[ProjectedVertex],
     projected_valid: &[bool],
     projected_depths: &[i32],
     materials: &[WorldRenderMaterial],
@@ -1519,14 +1528,29 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
         return 0;
     };
-    let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
-        return 0;
-    };
-    let colors =
-        vertex_lighting_colors_with_depths(lighting, surface.sample, material, surface.vertices, depths);
     match surface.sample.kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+                if projected_split_triangle_backface_culled(
+                    projected,
+                    material,
+                    CullMode::Back,
+                    surface.split,
+                    surface.triangle_index as usize,
+                    matches!(surface.sample.kind, WorldSurfaceKind::Ceiling),
+                ) {
+                    return 1;
+                }
+                let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+                    return 0;
+                };
+                let colors = vertex_lighting_colors_with_depths(
+                    lighting,
+                    surface.sample,
+                    material,
+                    surface.vertices,
+                    depths,
+                );
                 submit_projected_split_triangle_vertex_lit_cached_uvs(
                     projected,
                     surface.uvs,
@@ -1541,6 +1565,30 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     world,
                 )
             } else {
+                let projected_for_cull = if matches!(surface.sample.kind, WorldSurfaceKind::Ceiling)
+                {
+                    reverse_quad_winding(projected)
+                } else {
+                    projected
+                };
+                if projected_quad_backface_culled(
+                    projected_for_cull,
+                    material,
+                    CullMode::Back,
+                    split_triangles_runtime(surface.split),
+                ) {
+                    return 1;
+                }
+                let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+                    return 0;
+                };
+                let colors = vertex_lighting_colors_with_depths(
+                    lighting,
+                    surface.sample,
+                    material,
+                    surface.vertices,
+                    depths,
+                );
                 let (projected, uvs, colors) =
                     if matches!(surface.sample.kind, WorldSurfaceKind::Ceiling) {
                         (
@@ -1565,13 +1613,33 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             }
         }
         WorldSurfaceKind::Wall { .. } => {
-            let material = wall_material(material);
+            let wall_material = wall_material(material);
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+                if projected_split_triangle_backface_culled(
+                    projected,
+                    wall_material,
+                    CullMode::Back,
+                    surface.split,
+                    surface.triangle_index as usize,
+                    false,
+                ) {
+                    return 1;
+                }
+                let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+                    return 0;
+                };
+                let colors = vertex_lighting_colors_with_depths(
+                    lighting,
+                    surface.sample,
+                    material,
+                    surface.vertices,
+                    depths,
+                );
                 submit_projected_split_triangle_vertex_lit_cached_uvs(
                     projected,
                     surface.uvs,
                     colors,
-                    material,
+                    wall_material,
                     options,
                     CullMode::Back,
                     surface.split,
@@ -1581,13 +1649,31 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     world,
                 )
             } else {
+                if projected_quad_backface_culled(
+                    projected,
+                    wall_material,
+                    CullMode::Back,
+                    SPLIT_NW_SE_TRIANGLES,
+                ) {
+                    return 1;
+                }
+                let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+                    return 0;
+                };
+                let colors = vertex_lighting_colors_with_depths(
+                    lighting,
+                    surface.sample,
+                    material,
+                    surface.vertices,
+                    depths,
+                );
                 submit_sided_projected_gouraud_quad_cached_uvs(
                     world,
                     triangles,
                     projected,
                     surface.uvs,
                     colors,
-                    material,
+                    wall_material,
                     options,
                     CullMode::Back,
                     SPLIT_NW_SE_TRIANGLES,
@@ -1600,10 +1686,10 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
 
 #[inline(always)]
 fn indexed_projected_quad(
-    projected_vertices: &[crate::render3d::ProjectedVertex],
+    projected_vertices: &[ProjectedVertex],
     projected_valid: &[bool],
     ids: [u16; 4],
-) -> Option<[crate::render3d::ProjectedVertex; 4]> {
+) -> Option<[ProjectedVertex; 4]> {
     let a = ids[0] as usize;
     let b = ids[1] as usize;
     let c = ids[2] as usize;
@@ -1634,6 +1720,63 @@ fn indexed_quad_depths(depths: &[i32], ids: [u16; 4]) -> Option<[i32; 4]> {
         return None;
     }
     Some([depths[a], depths[b], depths[c], depths[d]])
+}
+
+#[inline(always)]
+fn projected_split_triangle_backface_culled(
+    projected: [ProjectedVertex; 4],
+    material: WorldRenderMaterial,
+    base_cull: CullMode,
+    split: u8,
+    triangle_index: usize,
+    reverse_front: bool,
+) -> bool {
+    if cull_for_sidedness(material.sidedness, base_cull) != CullMode::Back {
+        return false;
+    }
+    let mut tri = split_triangles_runtime(split)[triangle_index.min(1)];
+    if reverse_front ^ (material.sidedness == SurfaceSidedness::Back) {
+        tri = (tri.0, tri.2, tri.1);
+    }
+    projected_quad_triangle_back_facing(projected, tri)
+}
+
+#[inline(always)]
+fn projected_quad_backface_culled(
+    projected: [ProjectedVertex; 4],
+    material: WorldRenderMaterial,
+    base_cull: CullMode,
+    split_triangles: [(usize, usize, usize); 2],
+) -> bool {
+    if cull_for_sidedness(material.sidedness, base_cull) != CullMode::Back {
+        return false;
+    }
+    let projected = if material.sidedness == SurfaceSidedness::Back {
+        reverse_quad_winding(projected)
+    } else {
+        projected
+    };
+    let [(a, b, c), (d, e, f)] = split_triangles;
+    projected_quad_triangle_back_facing(projected, (a, b, c))
+        && projected_quad_triangle_back_facing(projected, (d, e, f))
+}
+
+#[inline(always)]
+fn projected_quad_triangle_back_facing(
+    projected: [ProjectedVertex; 4],
+    tri: (usize, usize, usize),
+) -> bool {
+    let (a, b, c) = tri;
+    projected_triangle_back_facing([projected[a], projected[b], projected[c]])
+}
+
+#[inline(always)]
+fn projected_triangle_back_facing(verts: [ProjectedVertex; 3]) -> bool {
+    let ax = (verts[1].sx as i32) - (verts[0].sx as i32);
+    let ay = (verts[1].sy as i32) - (verts[0].sy as i32);
+    let bx = (verts[2].sx as i32) - (verts[0].sx as i32);
+    let by = (verts[2].sy as i32) - (verts[0].sy as i32);
+    (ax * by - ay * bx) <= 0
 }
 
 const fn cached_uv_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial {
