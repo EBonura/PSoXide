@@ -41,7 +41,7 @@ pub mod material;
 pub mod ot;
 pub mod prim;
 
-use crate::material::TextureMaterial;
+use crate::material::{BlendMode, TextureMaterial};
 use psx_hw::gpu::pack_texcoord;
 use psx_hw::gpu::{gp0, gp1, pack_color, pack_vertex, pack_xy, GpuStat};
 use psx_io::dma::{self, Channel};
@@ -195,6 +195,20 @@ pub fn fill_rect(x: u16, y: u16, w: u16, h: u16, r: u8, g: u8, b: u8) {
 pub fn draw_tri_flat(verts: [(i16, i16); 3], r: u8, g: u8, b: u8) {
     wait_cmd_ready();
     write_gp0(gp0::polygon_opcode(false, false, false, false, false) | pack_color(r, g, b));
+    write_gp0(pack_vertex(verts[0].0, verts[0].1));
+    write_gp0(pack_vertex(verts[1].0, verts[1].1));
+    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+}
+
+/// Draw a semi-transparent flat-shaded triangle.
+pub fn draw_tri_flat_blended(verts: [(i16, i16); 3], r: u8, g: u8, b: u8, blend_mode: BlendMode) {
+    if !blend_mode.is_translucent() {
+        draw_tri_flat(verts, r, g, b);
+        return;
+    }
+    TextureMaterial::blended(0, 0, (r, g, b), blend_mode).apply_draw_mode();
+    wait_cmd_ready();
+    write_gp0(gp0::polygon_opcode(false, false, false, true, false) | pack_color(r, g, b));
     write_gp0(pack_vertex(verts[0].0, verts[0].1));
     write_gp0(pack_vertex(verts[1].0, verts[1].1));
     write_gp0(pack_vertex(verts[2].0, verts[2].1));
