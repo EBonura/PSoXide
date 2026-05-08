@@ -2894,22 +2894,19 @@ fn draw_actor_shadow(
         WorldVertex::new(x.saturating_add(h), y, z.saturating_add(h)),
         WorldVertex::new(x.saturating_sub(h), y, z.saturating_add(h)),
     ];
-    let Some(projected) = camera.project_world_quad(verts) else {
-        return;
-    };
     let shadow_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
         .with_depth_policy(DepthPolicy::Nearest)
         .with_depth_bias(SHADOW_DEPTH_BIAS.saturating_neg())
         .with_cull_mode(CullMode::None)
-        .with_material_layer(material)
-        .with_textured_triangle_splitting(false);
+        .with_material_layer(material);
     const UVS: [(u8, u8); 4] = [
         (SHADOW_TEXEL_U, 0),
         (SHADOW_UV_MAX, 0),
         (SHADOW_UV_MAX, 63),
         (SHADOW_TEXEL_U, 63),
     ];
-    let _ = world.submit_textured_quad(triangles, projected, UVS, material, shadow_options);
+    let _ =
+        world.submit_textured_world_quad(triangles, *camera, verts, UVS, material, shadow_options);
 }
 
 fn actor_shadow_radius(base_radius: i32) -> i32 {
