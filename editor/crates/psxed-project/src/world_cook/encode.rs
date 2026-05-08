@@ -204,12 +204,18 @@ fn encode_sector_horizontal_overrides(
 
 fn horizontal_face_requires_override(face: CookedGridHorizontalFace) -> bool {
     let [a, b] = face.triangles;
+    let default_heights = [
+        triangle_heights_from_quad(face.heights, face.split, 0),
+        triangle_heights_from_quad(face.heights, face.split, 1),
+    ];
     !a.visible
         || !b.visible
         || a.material != face.material
         || b.material != face.material
         || a.uvs != face.uvs
         || b.uvs != face.uvs
+        || a.heights != default_heights[0]
+        || b.heights != default_heights[1]
         || a.walkable != face.walkable
         || b.walkable != face.walkable
 }
@@ -227,6 +233,21 @@ fn encode_horizontal_override(
     out.extend_from_slice(&face.triangles[1].material.to_le_bytes());
     encode_uvs(face.triangles[0].uvs, out);
     encode_uvs(face.triangles[1].uvs, out);
+    for height in face.triangles[0].heights {
+        out.extend_from_slice(&height.to_le_bytes());
+    }
+    for height in face.triangles[1].heights {
+        out.extend_from_slice(&height.to_le_bytes());
+    }
+}
+
+fn triangle_heights_from_quad(heights: [i32; 4], split: GridSplit, index: usize) -> [i32; 3] {
+    let corners = crate::horizontal_triangle_corners(split, index);
+    [
+        heights[corners[0].idx()],
+        heights[corners[1].idx()],
+        heights[corners[2].idx()],
+    ]
 }
 
 fn horizontal_flags(triangles: [CookedGridHorizontalTriangle; 2]) -> u8 {

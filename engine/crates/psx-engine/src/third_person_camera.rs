@@ -14,6 +14,8 @@ const RAY_STEPS_MAX: i32 = 8;
 const RAY_STEPS_MIN: i32 = 3;
 const RAY_NEIGHBORHOOD_CELLS: usize = 9;
 const MAX_RAY_CHECKED_CELLS: usize = RAY_STEPS_MAX as usize * RAY_NEIGHBORHOOD_CELLS;
+const CHECKED_CAMERA_CELL_BITS: usize = 512;
+const CHECKED_CAMERA_CELL_WORDS: usize = CHECKED_CAMERA_CELL_BITS / 32;
 const MAX_CAMERA_CATCHUP_VBLANKS: u16 = 4;
 
 // Mirrors psxed_format::world::direction::* without adding a direct
@@ -375,6 +377,7 @@ struct CameraRay {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct CheckedCameraCells {
+    bitset: [u32; CHECKED_CAMERA_CELL_WORDS],
     cells: [u32; MAX_RAY_CHECKED_CELLS],
     len: usize,
 }
@@ -384,12 +387,23 @@ impl CheckedCameraCells {
 
     const fn new() -> Self {
         Self {
+            bitset: [0; CHECKED_CAMERA_CELL_WORDS],
             cells: [Self::EMPTY_CELL; MAX_RAY_CHECKED_CELLS],
             len: 0,
         }
     }
 
     fn visit(&mut self, key: u32) -> bool {
+        let word = (key / 32) as usize;
+        if word < self.bitset.len() {
+            let mask = 1u32 << (key & 31);
+            if self.bitset[word] & mask != 0 {
+                return false;
+            }
+            self.bitset[word] |= mask;
+            return true;
+        }
+
         let mut i = 0;
         while i < self.len {
             if self.cells[i] == key {
@@ -525,7 +539,7 @@ fn point_outside_camera_space(
     if sx < 0 || sz < 0 || sx >= room_width || sz >= room_depth {
         return true;
     }
-    match room.sector(sx as u16, sz as u16) {
+    match room.sector_probe(sx as u16, sz as u16) {
         Some(sector) => !sector.has_floor(),
         None => true,
     }
@@ -557,10 +571,10 @@ fn nearest_wall_hit_around(
                     oz += 1;
                     continue;
                 }
-                if let Some(sector) = room.sector(cx as u16, cz as u16) {
+                if let Some(sector) = room.sector_probe(cx as u16, cz as u16) {
                     let mut i = 0;
                     while i < sector.wall_count() {
-                        if let Some(wall) = room.sector_wall(sector, i) {
+                        if let Some(wall) = room.sector_probe_wall(sector, i) {
                             if wall.solid() {
                                 if let Some(hit) = segment_wall_hit_distance(
                                     ray,
@@ -624,10 +638,7 @@ fn segment_wall_hit_distance(
     }
     let t = Q12::from_raw(t_q12);
     let x_at = ray.from.x.saturating_add(t.mul_i32(ray.dx));
-    let y_at = ray
-        .from
-        .y
-        .saturating_add(t.mul_i32(ray.dy));
+    let y_at = ray.from.y.saturating_add(t.mul_i32(ray.dy));
     let z_at = ray.from.z.saturating_add(t.mul_i32(ray.dz));
     let wall_axis_q12 = match direction {
         DIR_NORTH | DIR_SOUTH => {
@@ -984,7 +995,10 @@ mod tests {
             segment_wall_hit_distance(ray, 0, 0, DIR_EAST, heights),
             Some(512)
         );
-        assert_eq!(segment_wall_hit_distance(ray, 0, 0, DIR_NORTH, heights), None);
+        assert_eq!(
+            segment_wall_hit_distance(ray, 0, 0, DIR_NORTH, heights),
+            None
+        );
     }
 
     #[test]
@@ -1011,7 +1025,10 @@ mod tests {
         let heights = [0, 0, 512, 512];
         let ray = test_ray(from, to, 1024, 1024, 0);
 
-        assert_eq!(segment_wall_hit_distance(ray, 0, 0, DIR_EAST, heights), None);
+        assert_eq!(
+            segment_wall_hit_distance(ray, 0, 0, DIR_EAST, heights),
+            None
+        );
     }
 
     #[test]

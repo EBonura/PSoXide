@@ -56,12 +56,10 @@ pub mod world_topology {
 }
 
 /// World split id from north-west to south-east.
-pub const WORLD_SPLIT_NORTH_WEST_SOUTH_EAST: u8 =
-    psxed_format::world::split::NORTH_WEST_SOUTH_EAST;
+pub const WORLD_SPLIT_NORTH_WEST_SOUTH_EAST: u8 = psxed_format::world::split::NORTH_WEST_SOUTH_EAST;
 
 /// World split id from north-east to south-west.
-pub const WORLD_SPLIT_NORTH_EAST_SOUTH_WEST: u8 =
-    psxed_format::world::split::NORTH_EAST_SOUTH_WEST;
+pub const WORLD_SPLIT_NORTH_EAST_SOUTH_WEST: u8 = psxed_format::world::split::NORTH_EAST_SOUTH_WEST;
 
 /// Full four-corner world-wall shape.
 pub const WORLD_WALL_SHAPE_QUAD: u16 = psxed_format::world::wall_shape::QUAD;
@@ -75,12 +73,10 @@ pub const WORLD_WALL_SHAPE_DROP_BOTTOM_RIGHT: u16 =
     psxed_format::world::wall_shape::DROP_BOTTOM_RIGHT;
 
 /// World-wall shape with the top-right corner removed.
-pub const WORLD_WALL_SHAPE_DROP_TOP_RIGHT: u16 =
-    psxed_format::world::wall_shape::DROP_TOP_RIGHT;
+pub const WORLD_WALL_SHAPE_DROP_TOP_RIGHT: u16 = psxed_format::world::wall_shape::DROP_TOP_RIGHT;
 
 /// World-wall shape with the top-left corner removed.
-pub const WORLD_WALL_SHAPE_DROP_TOP_LEFT: u16 =
-    psxed_format::world::wall_shape::DROP_TOP_LEFT;
+pub const WORLD_WALL_SHAPE_DROP_TOP_LEFT: u16 = psxed_format::world::wall_shape::DROP_TOP_LEFT;
 
 /// Errors `Mesh::from_bytes` can return for a malformed blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1145,6 +1141,7 @@ pub struct World<'a> {
     surface_lights: &'a [u8],
     sector_record_size: usize,
     wall_record_size: usize,
+    horizontal_override_record_size: usize,
     width: u16,
     depth: u16,
     sector_size: i32,
@@ -1207,12 +1204,13 @@ const WORLD_V2_WALL_RECORD_SIZE: usize = 32;
 const WORLD_V3_HEADER_SIZE: usize = 20;
 const WORLD_V3_SECTOR_RECORD_SIZE: usize = 60;
 const WORLD_V3_WALL_RECORD_SIZE: usize = 32;
+const WORLD_V4_HORIZONTAL_OVERRIDE_RECORD_SIZE: usize = 24;
 
 impl<'a> World<'a> {
     /// Parse a cooked `.psxw` blob.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
         use psxed_format::world::{
-            WorldHeader, MAGIC, VERSION, VERSION_V1, VERSION_V2, VERSION_V3,
+            WorldHeader, MAGIC, VERSION, VERSION_V1, VERSION_V2, VERSION_V3, VERSION_V4,
         };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
@@ -1225,6 +1223,7 @@ impl<'a> World<'a> {
         let version = u16::from_le_bytes([bytes[4], bytes[5]]);
         if version != VERSION
             && version != VERSION_V3
+            && version != VERSION_V4
             && version != VERSION_V2
             && version != VERSION_V1
         {
@@ -1245,6 +1244,11 @@ impl<'a> World<'a> {
                 WORLD_V3_HEADER_SIZE,
                 WORLD_V3_SECTOR_RECORD_SIZE,
                 WORLD_V3_WALL_RECORD_SIZE,
+            ),
+            VERSION_V4 => (
+                WorldHeader::SIZE,
+                psxed_format::world::SectorRecord::SIZE,
+                psxed_format::world::WallRecord::SIZE,
             ),
             _ => (
                 WorldHeader::SIZE,
@@ -1274,18 +1278,20 @@ impl<'a> World<'a> {
         let wall_count = read_u16(wh, 12);
         let ambient_color = [wh[14], wh[15], wh[16]];
         let flags = wh[17];
-        let surface_light_count = if version == VERSION || version == VERSION_V3 {
-            read_u16(wh, 18)
-        } else {
-            0
-        };
-        let horizontal_override_count = if version == VERSION {
+        let surface_light_count =
+            if version == VERSION || version == VERSION_V4 || version == VERSION_V3 {
+                read_u16(wh, 18)
+            } else {
+                0
+            };
+        let horizontal_override_count = if version == VERSION || version == VERSION_V4 {
             read_u16(wh, 20)
         } else {
             0
         };
-        let static_vertex_lighting = (version == VERSION || version == VERSION_V3)
-            && flags & psxed_format::world::world_flags::STATIC_VERTEX_LIGHTING != 0;
+        let static_vertex_lighting =
+            (version == VERSION || version == VERSION_V4 || version == VERSION_V3)
+                && flags & psxed_format::world::world_flags::STATIC_VERTEX_LIGHTING != 0;
 
         let expected_sectors = (width as usize)
             .checked_mul(depth as usize)
@@ -1323,8 +1329,13 @@ impl<'a> World<'a> {
         }
         let walls = &bytes[off..off + wall_bytes];
         off += wall_bytes;
+        let horizontal_override_record_size = if version == VERSION_V4 {
+            WORLD_V4_HORIZONTAL_OVERRIDE_RECORD_SIZE
+        } else {
+            psxed_format::world::HorizontalOverrideRecord::SIZE
+        };
         let horizontal_override_bytes = (horizontal_override_count as usize)
-            .checked_mul(psxed_format::world::HorizontalOverrideRecord::SIZE)
+            .checked_mul(horizontal_override_record_size)
             .ok_or(ParseError::TableOverflow)?;
         if off + horizontal_override_bytes > bytes.len() {
             return Err(ParseError::TableOverflow);
@@ -1348,6 +1359,7 @@ impl<'a> World<'a> {
             horizontal_overrides,
             horizontal_override_count,
             sector_count,
+            horizontal_override_record_size,
         )?;
 
         Ok(Self {
@@ -1357,6 +1369,7 @@ impl<'a> World<'a> {
             surface_lights,
             sector_record_size,
             wall_record_size,
+            horizontal_override_record_size,
             width,
             depth,
             sector_size,
@@ -1444,6 +1457,38 @@ impl<'a> World<'a> {
         }
     }
 
+    /// Sector at a coordinate without applying horizontal override
+    /// side-table records. Collision and wall-only queries use this
+    /// to avoid scanning render-only per-triangle override data.
+    pub fn sector_without_horizontal_overrides(&self, x: u16, z: u16) -> Option<WorldSector> {
+        if x >= self.width || z >= self.depth {
+            return None;
+        }
+        let index = x as usize * self.depth as usize + z as usize;
+        let sector = self.sector_record_without_horizontal_overrides(index)?;
+        if sector.has_geometry() {
+            Some(sector)
+        } else {
+            None
+        }
+    }
+
+    /// Minimal collision-probe sector header at a coordinate. This
+    /// skips horizontal override decoding and only exposes floor
+    /// presence plus the wall range.
+    pub fn sector_collision_probe(&self, x: u16, z: u16) -> Option<WorldSectorCollisionProbe> {
+        if x >= self.width || z >= self.depth {
+            return None;
+        }
+        let index = x as usize * self.depth as usize + z as usize;
+        let sector = self.sector_collision_probe_record(index)?;
+        if sector.has_geometry() {
+            Some(sector)
+        } else {
+            None
+        }
+    }
+
     /// Sector record by flat `[x * depth + z]` index, including empty cells.
     pub fn sector_record(&self, index: usize) -> Option<WorldSector> {
         let size = self.sector_record_size;
@@ -1462,6 +1507,32 @@ impl<'a> World<'a> {
             psxed_format::world::horizontal_surface::CEILING,
         );
         Some(WorldSector::decode(bytes, floor_override, ceiling_override))
+    }
+
+    fn sector_record_without_horizontal_overrides(&self, index: usize) -> Option<WorldSector> {
+        let size = self.sector_record_size;
+        let base = index.checked_mul(size)?;
+        let end = base.checked_add(size)?;
+        let bytes = self.sectors.get(base..end)?;
+        if index > u16::MAX as usize {
+            return None;
+        }
+        Some(WorldSector::decode(bytes, None, None))
+    }
+
+    fn sector_collision_probe_record(&self, index: usize) -> Option<WorldSectorCollisionProbe> {
+        let size = self.sector_record_size;
+        let base = index.checked_mul(size)?;
+        let end = base.checked_add(size)?;
+        let bytes = self.sectors.get(base..end)?;
+        if index > u16::MAX as usize {
+            return None;
+        }
+        Some(WorldSectorCollisionProbe {
+            flags: bytes[0],
+            first_wall: read_u16(bytes, 8),
+            wall_count: read_u16(bytes, 10),
+        })
     }
 
     /// Wall record by global wall index.
@@ -1501,7 +1572,7 @@ impl<'a> World<'a> {
         sector_index: u16,
         surface: u8,
     ) -> Option<WorldHorizontalOverride> {
-        let size = psxed_format::world::HorizontalOverrideRecord::SIZE;
+        let size = self.horizontal_override_record_size;
         let mut index = 0usize;
         while index < self.horizontal_override_count as usize {
             let base = index.checked_mul(size)?;
@@ -1520,6 +1591,47 @@ struct WorldHorizontalOverride {
     flags: u8,
     materials: [u16; 2],
     uvs: [WorldQuadUvs; 2],
+    heights: Option<[[i32; 3]; 2]>,
+}
+
+/// Minimal sector data for camera/wall collision probes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WorldSectorCollisionProbe {
+    flags: u8,
+    first_wall: u16,
+    wall_count: u16,
+}
+
+impl WorldSectorCollisionProbe {
+    /// True if this sector contains any floor, ceiling, or wall data.
+    #[inline]
+    pub fn has_geometry(self) -> bool {
+        self.has_floor() || self.has_ceiling() || self.wall_count != 0
+    }
+
+    /// True if this sector has a floor surface.
+    #[inline]
+    pub fn has_floor(self) -> bool {
+        self.flags & psxed_format::world::sector_flags::HAS_FLOOR != 0
+    }
+
+    /// True if this sector has a ceiling surface.
+    #[inline]
+    pub fn has_ceiling(self) -> bool {
+        self.flags & psxed_format::world::sector_flags::HAS_CEILING != 0
+    }
+
+    /// First global wall index for this sector.
+    #[inline]
+    pub fn first_wall(self) -> u16 {
+        self.first_wall
+    }
+
+    /// Number of walls belonging to this sector.
+    #[inline]
+    pub fn wall_count(self) -> u16 {
+        self.wall_count
+    }
 }
 
 /// One decoded world sector record.
@@ -1534,6 +1646,8 @@ pub struct WorldSector {
     ceiling_triangle_flags: u8,
     floor_triangle_materials: [u16; 2],
     ceiling_triangle_materials: [u16; 2],
+    floor_triangle_heights: [[i32; 3]; 2],
+    ceiling_triangle_heights: [[i32; 3]; 2],
     first_wall: u16,
     wall_count: u16,
     floor_heights: [i32; 4],
@@ -1554,6 +1668,8 @@ impl WorldSector {
         let flags = bytes[0];
         let floor_material = read_u16(bytes, 4);
         let ceiling_material = read_u16(bytes, 6);
+        let floor_heights = read_i32x4(bytes, 12);
+        let ceiling_heights = read_i32x4(bytes, 28);
         let floor_uvs = if has_v2_uvs {
             read_world_uvs(bytes, 44)
         } else {
@@ -1590,6 +1706,22 @@ impl WorldSector {
             .map_or([ceiling_uvs, ceiling_uvs], |override_data| {
                 override_data.uvs
             });
+        let floor_triangle_heights = floor_override
+            .and_then(|override_data| override_data.heights)
+            .unwrap_or_else(|| {
+                [
+                    horizontal_triangle_heights(floor_heights, bytes[1], 0),
+                    horizontal_triangle_heights(floor_heights, bytes[1], 1),
+                ]
+            });
+        let ceiling_triangle_heights = ceiling_override
+            .and_then(|override_data| override_data.heights)
+            .unwrap_or_else(|| {
+                [
+                    horizontal_triangle_heights(ceiling_heights, bytes[2], 0),
+                    horizontal_triangle_heights(ceiling_heights, bytes[2], 1),
+                ]
+            });
         Self {
             flags,
             floor_split: bytes[1],
@@ -1600,10 +1732,12 @@ impl WorldSector {
             ceiling_triangle_flags,
             floor_triangle_materials,
             ceiling_triangle_materials,
+            floor_triangle_heights,
+            ceiling_triangle_heights,
             first_wall: read_u16(bytes, 8),
             wall_count: read_u16(bytes, 10),
-            floor_heights: read_i32x4(bytes, 12),
-            ceiling_heights: read_i32x4(bytes, 28),
+            floor_heights,
+            ceiling_heights,
             floor_uvs,
             ceiling_uvs,
             floor_triangle_uvs,
@@ -1685,6 +1819,12 @@ impl WorldSector {
         self.floor_triangle_uvs[index.min(1)]
     }
 
+    /// Floor split-triangle heights in that triangle's corner order.
+    #[inline]
+    pub fn floor_triangle_heights(&self, index: usize) -> [i32; 3] {
+        self.floor_triangle_heights[index.min(1)]
+    }
+
     /// `true` if a floor split triangle is walkable.
     #[inline]
     pub fn floor_triangle_walkable(&self, index: usize) -> bool {
@@ -1738,6 +1878,12 @@ impl WorldSector {
     #[inline]
     pub fn ceiling_triangle_uvs(&self, index: usize) -> WorldQuadUvs {
         self.ceiling_triangle_uvs[index.min(1)]
+    }
+
+    /// Ceiling split-triangle heights in that triangle's corner order.
+    #[inline]
+    pub fn ceiling_triangle_heights(&self, index: usize) -> [i32; 3] {
+        self.ceiling_triangle_heights[index.min(1)]
     }
 
     /// `true` if a ceiling split triangle is walkable.
@@ -1870,6 +2016,15 @@ const fn horizontal_triangle_walkable(flags: u8, index: usize) -> bool {
     flags & bit != 0
 }
 
+fn horizontal_triangle_heights(heights: [i32; 4], split: u8, index: usize) -> [i32; 3] {
+    let corners = psxed_format::world::topology::split_triangle(split, index);
+    [
+        heights[corners[0]],
+        heights[corners[1]],
+        heights[corners[2]],
+    ]
+}
+
 fn checked_table_bytes(count: u16, stride: usize) -> Result<usize, ParseError> {
     (count as usize)
         .checked_mul(stride)
@@ -1987,6 +2142,20 @@ fn read_world_horizontal_override(bytes: &[u8]) -> WorldHorizontalOverride {
         flags: bytes[3],
         materials: [read_u16(bytes, 4), read_u16(bytes, 6)],
         uvs: [read_world_uvs(bytes, 8), read_world_uvs(bytes, 16)],
+        heights: (bytes.len() >= psxed_format::world::HorizontalOverrideRecord::SIZE).then(|| {
+            [
+                [
+                    read_i32(bytes, 24),
+                    read_i32(bytes, 28),
+                    read_i32(bytes, 32),
+                ],
+                [
+                    read_i32(bytes, 36),
+                    read_i32(bytes, 40),
+                    read_i32(bytes, 44),
+                ],
+            ]
+        }),
     }
 }
 
@@ -2004,8 +2173,9 @@ fn validate_horizontal_overrides(
     overrides: &[u8],
     override_count: u16,
     sector_count: u16,
+    record_size: usize,
 ) -> Result<(), ParseError> {
-    let size = psxed_format::world::HorizontalOverrideRecord::SIZE;
+    let size = record_size;
     if overrides.len() != override_count as usize * size {
         return Err(ParseError::InvalidWorldLayout);
     }
@@ -2083,18 +2253,20 @@ mod tests {
     }
 
     /// Pin the `.psxw` parser to the versions it intentionally
-    /// supports. v1-v3 are legacy compatibility and v4 is current;
+    /// supports. Older revisions are legacy compatibility and the
+    /// format crate's VERSION is current;
     /// any newer blob must be rejected.
     #[test]
     fn world_rejects_unknown_version() {
         let mut bad = [0u8; 12];
         bad[0..4].copy_from_slice(&psxed_format::world::MAGIC);
-        bad[4..6].copy_from_slice(&5u16.to_le_bytes());
+        let unknown = psxed_format::world::VERSION + 1;
+        bad[4..6].copy_from_slice(&unknown.to_le_bytes());
         // Payload length 0 -- won't matter; version check fires first.
         bad[8..12].copy_from_slice(&0u32.to_le_bytes());
         assert!(matches!(
             World::from_bytes(&bad),
-            Err(ParseError::UnsupportedVersion(5))
+            Err(ParseError::UnsupportedVersion(version)) if version == unknown
         ));
     }
 
@@ -2106,7 +2278,8 @@ mod tests {
         assert_eq!(WORLD_V3_HEADER_SIZE, 20);
         assert_eq!(psxed_format::world::WorldHeader::SIZE, 24);
         assert_eq!(psxed_format::world::QuadUvRecord::SIZE, 8);
-        assert_eq!(psxed_format::world::HorizontalOverrideRecord::SIZE, 24);
+        assert_eq!(WORLD_V4_HORIZONTAL_OVERRIDE_RECORD_SIZE, 24);
+        assert_eq!(psxed_format::world::HorizontalOverrideRecord::SIZE, 48);
         assert_eq!(psxed_format::world::SurfaceLightRecord::SIZE, 12);
         assert_eq!(WORLD_V2_SECTOR_RECORD_SIZE, 60);
         assert_eq!(WORLD_V2_WALL_RECORD_SIZE, 32);

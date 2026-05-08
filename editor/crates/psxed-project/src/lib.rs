@@ -566,11 +566,20 @@ pub struct GridHorizontalTriangleOverride {
     /// Optional walkability override. `None` inherits the parent face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub walkable: Option<bool>,
+    /// Optional triangle-local heights in that triangle's corner
+    /// order. `None` inherits the parent face corner heights. This
+    /// keeps the common quad case compact while allowing rare
+    /// split-height triangles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heights: Option<[i32; 3]>,
 }
 
 impl GridHorizontalTriangleOverride {
     pub const fn is_empty(&self) -> bool {
-        self.material.is_none() && self.uv.is_none() && self.walkable.is_none()
+        self.material.is_none()
+            && self.uv.is_none()
+            && self.walkable.is_none()
+            && self.heights.is_none()
     }
 }
 
@@ -937,11 +946,13 @@ impl GridHorizontalFace {
                     material: None,
                     uv: None,
                     walkable: None,
+                    heights: None,
                 },
                 b: GridHorizontalTriangleOverride {
                     material: None,
                     uv: None,
                     walkable: None,
+                    heights: None,
                 },
             },
             dropped_corner: None,
@@ -980,6 +991,28 @@ impl GridHorizontalFace {
         }
     }
 
+    /// Triangle-local heights in the same corner order returned by
+    /// [`horizontal_triangle_corners`].
+    pub fn triangle_heights(&self, index: usize) -> [i32; 3] {
+        if let Some(heights) = self.triangle_override(index).heights {
+            return heights;
+        }
+        let corners = horizontal_triangle_corners(self.split, index);
+        [
+            self.heights[corners[0].idx()],
+            self.heights[corners[1].idx()],
+            self.heights[corners[2].idx()],
+        ]
+    }
+
+    /// Materialize a triangle-local height override from the current
+    /// parent face heights. Returns the mutable override array.
+    pub fn triangle_heights_mut(&mut self, index: usize) -> &mut [i32; 3] {
+        let inherited = self.triangle_heights(index);
+        let target = self.triangle_override_mut(index);
+        target.heights.get_or_insert(inherited)
+    }
+
     /// Drop one corner -- the face becomes a visible triangle.
     /// Forces `split` to the diagonal that keeps a triangle
     /// alive (drop NE / SW → NW-SE; drop NW / SE → NE-SW). The
@@ -1009,6 +1042,30 @@ impl GridHorizontalFace {
             GridSplit::NorthWestSouthEast => GridSplit::NorthEastSouthWest,
             GridSplit::NorthEastSouthWest => GridSplit::NorthWestSouthEast,
         };
+        let editor_index =
+            horizontal_triangle_index_at_local(self.split, local_x, local_z, sector_size);
+        if self.triangle_override(editor_index).heights.is_some() {
+            let runtime_index = if editor_index == 0 { 1 } else { 0 };
+            let runtime_triangle_heights = runtime_horizontal_triangle_heights(
+                self,
+                editor_index,
+                runtime_split,
+                runtime_index,
+            );
+            let heights = quad_heights_for_triangle(
+                runtime_split,
+                runtime_index,
+                runtime_triangle_heights,
+                runtime_heights,
+            );
+            return height_at_local_for_split(
+                heights,
+                runtime_split,
+                local_x,
+                local_z,
+                sector_size,
+            );
+        }
         height_at_local_for_split(
             runtime_heights,
             runtime_split,
@@ -1022,6 +1079,72 @@ impl GridHorizontalFace {
     pub const fn is_triangle(&self) -> bool {
         self.dropped_corner.is_some()
     }
+}
+
+fn horizontal_triangle_index_at_local(
+    split: GridSplit,
+    local_x: i32,
+    local_z: i32,
+    sector_size: i32,
+) -> usize {
+    let sector_size = sector_size.max(1);
+    let u = local_x.clamp(0, sector_size);
+    let v = local_z.clamp(0, sector_size);
+    match split {
+        GridSplit::NorthWestSouthEast => {
+            if u + v >= sector_size {
+                0
+            } else {
+                1
+            }
+        }
+        GridSplit::NorthEastSouthWest => {
+            if v >= u {
+                0
+            } else {
+                1
+            }
+        }
+    }
+}
+
+fn runtime_horizontal_triangle_heights(
+    face: &GridHorizontalFace,
+    editor_index: usize,
+    runtime_split: GridSplit,
+    runtime_index: usize,
+) -> [i32; 3] {
+    let editor_corners = horizontal_triangle_corners(face.split, editor_index);
+    let editor_heights = face.triangle_heights(editor_index);
+    let mut editor_quad = face.heights;
+    for (corner, height) in editor_corners.into_iter().zip(editor_heights) {
+        editor_quad[corner.idx()] = height;
+    }
+    let runtime_quad = [
+        editor_quad[Corner::SW.idx()],
+        editor_quad[Corner::SE.idx()],
+        editor_quad[Corner::NE.idx()],
+        editor_quad[Corner::NW.idx()],
+    ];
+    let runtime_corners = horizontal_triangle_corners(runtime_split, runtime_index);
+    [
+        runtime_quad[runtime_corners[0].idx()],
+        runtime_quad[runtime_corners[1].idx()],
+        runtime_quad[runtime_corners[2].idx()],
+    ]
+}
+
+fn quad_heights_for_triangle(
+    split: GridSplit,
+    index: usize,
+    triangle_heights: [i32; 3],
+    mut fallback: [i32; 4],
+) -> [i32; 4] {
+    let corners = horizontal_triangle_corners(split, index);
+    for (corner, height) in corners.into_iter().zip(triangle_heights) {
+        fallback[corner.idx()] = height;
+    }
+    fallback
 }
 
 fn height_at_local_for_split(
@@ -1667,6 +1790,37 @@ const fn default_sky_match_room_fog() -> bool {
     true
 }
 
+const fn default_far_vista_radius() -> i32 {
+    18_000
+}
+
+const fn default_far_vista_height() -> i32 {
+    4_096
+}
+
+const fn default_far_vista_vertical_offset() -> i32 {
+    -512
+}
+
+const fn default_far_vista_segments() -> u8 {
+    12
+}
+
+const fn default_far_vista_tint() -> [u8; 3] {
+    [54, 58, 62]
+}
+
+const fn default_far_vista_match_room_fog() -> bool {
+    true
+}
+
+/// Maximum number of individually textured cards in a far-vista ring.
+pub const FAR_VISTA_TEXTURE_PANEL_COUNT: usize = 16;
+
+const fn default_far_vista_texture_panels() -> [Option<ResourceId>; FAR_VISTA_TEXTURE_PANEL_COUNT] {
+    [None; FAR_VISTA_TEXTURE_PANEL_COUNT]
+}
+
 const fn default_fog_near() -> i32 {
     4096
 }
@@ -1774,6 +1928,109 @@ fn blend_rgb(a: [u8; 3], b: [u8; 3], b_weight_256: u16) -> [u8; 3] {
         (((a[1] as u16 * inv) + (b[1] as u16 * weight)) >> 8) as u8,
         (((a[2] as u16 * inv) + (b[2] as u16 * weight)) >> 8) as u8,
     ]
+}
+
+/// Distant scenery ring configuration inherited by descendant Rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FarVistaSettings {
+    /// Whether the far vista ring should be drawn.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional transparent 4bpp texture slice repeated around the
+    /// ring. When missing, renderers draw a tinted placeholder band.
+    #[serde(default)]
+    pub texture: Option<ResourceId>,
+    /// Optional per-card transparent 4bpp textures. Non-empty panel
+    /// assignments take precedence over [`Self::texture`].
+    #[serde(default = "default_far_vista_texture_panels")]
+    pub texture_panels: [Option<ResourceId>; FAR_VISTA_TEXTURE_PANEL_COUNT],
+    /// Radius from the active camera/player in engine units.
+    #[serde(default = "default_far_vista_radius")]
+    pub radius: i32,
+    /// Ring height in engine units.
+    #[serde(default = "default_far_vista_height")]
+    pub height: i32,
+    /// Bottom-edge offset from the camera height in engine units.
+    #[serde(default = "default_far_vista_vertical_offset")]
+    pub vertical_offset: i32,
+    /// Number of cards around the cylinder.
+    #[serde(default = "default_far_vista_segments")]
+    pub segments: u8,
+    /// World yaw rotation in degrees.
+    #[serde(default)]
+    pub rotation_degrees: i16,
+    /// Flat tint used for placeholder cards and textured modulation.
+    #[serde(default = "default_far_vista_tint")]
+    pub tint: [u8; 3],
+    /// Blend tint toward the room fog colour when fog is enabled.
+    #[serde(default = "default_far_vista_match_room_fog")]
+    pub match_room_fog: bool,
+}
+
+impl FarVistaSettings {
+    /// Resolve authored far-vista values against room-local fog metadata.
+    pub fn resolved_for_room(
+        self,
+        fog_enabled: bool,
+        fog_color: [u8; 3],
+    ) -> ResolvedFarVistaSettings {
+        let tint = if self.match_room_fog && fog_enabled {
+            blend_rgb(self.tint, fog_color, 128)
+        } else {
+            self.tint
+        };
+        ResolvedFarVistaSettings {
+            enabled: self.enabled,
+            texture: self.texture,
+            texture_panels: self.texture_panels,
+            radius: self.radius.clamp(1_024, 65_535),
+            height: self.height.clamp(128, 32_768),
+            vertical_offset: self.vertical_offset.clamp(-32_768, 32_768),
+            segments: self.segments.clamp(3, 16),
+            rotation_degrees: self.rotation_degrees,
+            tint,
+        }
+    }
+}
+
+impl Default for FarVistaSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            texture: None,
+            texture_panels: default_far_vista_texture_panels(),
+            radius: default_far_vista_radius(),
+            height: default_far_vista_height(),
+            vertical_offset: default_far_vista_vertical_offset(),
+            segments: default_far_vista_segments(),
+            rotation_degrees: 0,
+            tint: default_far_vista_tint(),
+            match_room_fog: default_far_vista_match_room_fog(),
+        }
+    }
+}
+
+/// Far-vista values after room-fog matching and validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedFarVistaSettings {
+    /// Whether the ring should be drawn.
+    pub enabled: bool,
+    /// Optional transparent texture slice.
+    pub texture: Option<ResourceId>,
+    /// Optional per-card transparent texture slices.
+    pub texture_panels: [Option<ResourceId>; FAR_VISTA_TEXTURE_PANEL_COUNT],
+    /// Radius from camera/player in engine units.
+    pub radius: i32,
+    /// Ring height in engine units.
+    pub height: i32,
+    /// Bottom-edge offset from camera height in engine units.
+    pub vertical_offset: i32,
+    /// Number of cards around the cylinder.
+    pub segments: u8,
+    /// World yaw rotation in degrees.
+    pub rotation_degrees: i16,
+    /// Resolved tint.
+    pub tint: [u8; 3],
 }
 
 fn face_triangle_count(face: &GridHorizontalFace) -> usize {
@@ -2704,10 +2961,24 @@ impl WorldGrid {
                 for h in &mut face.heights {
                     *h = snap_height(scale_i32_ratio(*h, old_sector_size, new_sector_size));
                 }
+                for idx in 0..2 {
+                    if let Some(heights) = face.triangle_override_mut(idx).heights.as_mut() {
+                        for h in heights {
+                            *h = snap_height(scale_i32_ratio(*h, old_sector_size, new_sector_size));
+                        }
+                    }
+                }
             }
             if let Some(face) = &mut sector.ceiling {
                 for h in &mut face.heights {
                     *h = snap_height(scale_i32_ratio(*h, old_sector_size, new_sector_size));
+                }
+                for idx in 0..2 {
+                    if let Some(heights) = face.triangle_override_mut(idx).heights.as_mut() {
+                        for h in heights {
+                            *h = snap_height(scale_i32_ratio(*h, old_sector_size, new_sector_size));
+                        }
+                    }
                 }
             }
             for direction in GridDirection::ALL {
@@ -2734,10 +3005,24 @@ impl WorldGrid {
                 for h in &mut face.heights {
                     *h = snap_height(*h);
                 }
+                for idx in 0..2 {
+                    if let Some(heights) = face.triangle_override_mut(idx).heights.as_mut() {
+                        for h in heights {
+                            *h = snap_height(*h);
+                        }
+                    }
+                }
             }
             if let Some(face) = &mut sector.ceiling {
                 for h in &mut face.heights {
                     *h = snap_height(*h);
+                }
+                for idx in 0..2 {
+                    if let Some(heights) = face.triangle_override_mut(idx).heights.as_mut() {
+                        for h in heights {
+                            *h = snap_height(*h);
+                        }
+                    }
                 }
             }
             for direction in GridDirection::ALL {
@@ -3589,6 +3874,9 @@ pub enum NodeKind {
         /// Background sky drawn before room geometry.
         #[serde(default)]
         sky: SkySettings,
+        /// Distant scenery ring drawn between sky and room geometry.
+        #[serde(default)]
+        far_vista: FarVistaSettings,
     },
     /// One streamed level chunk: a sector grid plus its child
     /// entities. Cooks to a single `.psxw` blob the runtime loads
@@ -4052,6 +4340,19 @@ impl Scene {
         None
     }
 
+    /// Far-vista settings inherited by `id` from the nearest World ancestor.
+    pub fn world_far_vista_for_node(&self, id: NodeId) -> Option<FarVistaSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { far_vista, .. } = &node.kind {
+                return Some(*far_vista);
+            }
+            current = node.parent;
+        }
+        None
+    }
+
     /// Rows in root-first depth-first order.
     pub fn hierarchy_rows(&self) -> Vec<NodeRow> {
         let mut rows = Vec::new();
@@ -4452,9 +4753,18 @@ impl ProjectDocument {
         for scene in &mut self.scenes {
             for node in &mut scene.nodes {
                 match &mut node.kind {
-                    NodeKind::World { sector_size, sky } => {
+                    NodeKind::World {
+                        sector_size,
+                        sky,
+                        far_vista,
+                    } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
+                        far_vista.radius = far_vista.radius.clamp(1_024, 65_535);
+                        far_vista.height = far_vista.height.clamp(128, 32_768);
+                        far_vista.vertical_offset =
+                            far_vista.vertical_offset.clamp(-32_768, 32_768);
+                        far_vista.segments = far_vista.segments.clamp(3, 16);
                     }
                     _ => {}
                 }
@@ -4607,10 +4917,10 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
         NodeKind::Equipment { weapon, .. } => option_resource_reference_count(*weapon, id),
         NodeKind::SpawnPoint { character, .. } => option_resource_reference_count(*character, id),
         NodeKind::AudioSource { sound, .. } => option_resource_reference_count(*sound, id),
+        NodeKind::World { far_vista, .. } => far_vista_resource_reference_count(far_vista, id),
         NodeKind::Node
         | NodeKind::Node3D
         | NodeKind::Entity
-        | NodeKind::World { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::Interactable { .. }
@@ -4620,6 +4930,23 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
         | NodeKind::Trigger { .. }
         | NodeKind::Portal { .. } => 0,
     }
+}
+
+fn far_vista_resource_reference_count(far_vista: &FarVistaSettings, id: ResourceId) -> usize {
+    option_resource_reference_count(far_vista.texture, id)
+        + far_vista
+            .texture_panels
+            .iter()
+            .filter(|panel| **panel == Some(id))
+            .count()
+}
+
+fn clear_far_vista_resource_references(far_vista: &mut FarVistaSettings, id: ResourceId) -> usize {
+    let mut cleared = clear_option_resource(&mut far_vista.texture, id);
+    for panel in &mut far_vista.texture_panels {
+        cleared += clear_option_resource(panel, id);
+    }
+    cleared
 }
 
 fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
@@ -4635,10 +4962,10 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
         NodeKind::Equipment { weapon, .. } => clear_option_resource(weapon, id),
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
         NodeKind::AudioSource { sound, .. } => clear_option_resource(sound, id),
+        NodeKind::World { far_vista, .. } => clear_far_vista_resource_references(far_vista, id),
         NodeKind::Node
         | NodeKind::Node3D
         | NodeKind::Entity
-        | NodeKind::World { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::Interactable { .. }
@@ -5255,6 +5582,7 @@ mod tests {
             NodeKind::World {
                 sector_size: 1024,
                 sky: SkySettings::default(),
+                far_vista: FarVistaSettings::default(),
             },
         );
         let mut grid = WorldGrid::empty(1, 1, 1024);
@@ -5938,7 +6266,7 @@ mod tests {
         let legacy = DEFAULT_PROJECT_RON
             .replace(
                 &format!(
-                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true)),"
+                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: true, texture: None, radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true)),"
                 ),
                 "kind: World,",
             )
