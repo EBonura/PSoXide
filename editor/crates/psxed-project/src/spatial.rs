@@ -173,7 +173,7 @@ pub fn editor_wall_outline_corners(
     lift: i32,
 ) -> Option<[RoomPoint; 4]> {
     let (bl, br) = bounds.wall_endpoints_xz(direction)?;
-    let [nx, nz] = editor_wall_inward_normal(direction)?;
+    let [nx, nz] = editor_wall_inward_normal(direction).unwrap_or([0, 0]);
     Some([
         [bl[0] + lift * nx, heights[0], bl[1] + lift * nz],
         [br[0] + lift * nx, heights[1], br[1] + lift * nz],
