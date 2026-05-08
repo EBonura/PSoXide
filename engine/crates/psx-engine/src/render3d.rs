@@ -298,11 +298,6 @@ fn clamp_model_uv_i32_component(value: i32, max: i32) -> i32 {
     }
 }
 
-#[inline]
-fn pack_model_texcoord_word(u: u8, v: u8, extra: u16) -> u32 {
-    (u as u32) | ((v as u32) << 8) | ((extra as u32) << 16)
-}
-
 /// Per-joint world-to-view transform for one render frame.
 ///
 /// `submit_textured_model` fills one entry per skin joint up-front so
@@ -1902,7 +1897,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         }
 
         let (uv0, uv1, uv2) = (uvs[0], uvs[1], uvs[2]);
-        let Some(tri) = triangles.push(TriTextured::with_material(
+        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
             [
                 (verts[0].sx, verts[0].sy),
                 (verts[1].sx, verts[1].sy),
@@ -1914,11 +1909,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.primitive_overflow = true;
             return true;
         };
-        // Keep model UV packet words explicit; emulator traces caught
-        // stale low bytes here when relying solely on aggregate construction.
-        tri.uv0_clut = pack_model_texcoord_word(uv0.0, uv0.1, material.clut_word());
-        tri.uv1_tpage = pack_model_texcoord_word(uv1.0, uv1.1, material.tpage_word());
-        tri.uv2 = pack_model_texcoord_word(uv2.0, uv2.1, 0);
 
         let depth = CameraDepth::new(
             ((verts[0].sz + verts[1].sz + verts[2].sz) / 3).saturating_add(options.depth_bias),
@@ -2004,7 +1994,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             verts[2].v as u8
         };
 
-        let Some(tri) = triangles.push(TriTextured::with_material(
+        let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
             [
                 (verts[0].projected.sx, verts[0].projected.sy),
                 (verts[1].projected.sx, verts[1].projected.sy),
@@ -2018,11 +2008,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ..WorldRenderStats::default()
             };
         };
-        // Keep model UV packet words explicit; emulator traces caught
-        // stale low bytes here when relying solely on aggregate construction.
-        tri.uv0_clut = pack_model_texcoord_word(u0, v0, material.clut_word());
-        tri.uv1_tpage = pack_model_texcoord_word(u1, v1, material.tpage_word());
-        tri.uv2 = pack_model_texcoord_word(u2, v2, 0);
 
         let depth = CameraDepth::new(
             ((verts[0].projected.sz + verts[1].projected.sz + verts[2].projected.sz) / 3)
