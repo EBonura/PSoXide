@@ -26,6 +26,7 @@ const DIR_SOUTH: u8 = 2;
 const DIR_WEST: u8 = 3;
 const DIR_NORTH_WEST_SOUTH_EAST: u8 = 4;
 const DIR_NORTH_EAST_SOUTH_WEST: u8 = 5;
+const SPLIT_NE_SW: u8 = psx_asset::WORLD_SPLIT_NORTH_EAST_SOUTH_WEST;
 
 /// Tunables for [`ThirdPersonCameraState`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub struct ThirdPersonCameraConfig {
     pub height: i32,
     /// Vertical look-at offset above the player origin.
     pub target_height: i32,
+    /// Minimum camera origin height above the sampled floor.
+    pub min_floor_clearance: i32,
     /// Extra clearance kept between the camera ray and blocking geometry.
     pub collision_margin: i32,
     /// Lowest manual pitch, in signed Q0.12 turn units.
@@ -73,6 +76,7 @@ impl ThirdPersonCameraConfig {
             max_distance: distance,
             height,
             target_height,
+            min_floor_clearance: 0,
             collision_margin: 160,
             pitch_min_q12: -192,
             pitch_max_q12: 704,
@@ -310,13 +314,18 @@ impl ThirdPersonCameraState {
             );
         }
 
-        let desired_position = camera_position(self.focus, self.distance, self.yaw, self.pitch_q12);
+        let desired_position = clamp_camera_to_floor(
+            collision,
+            camera_position(self.focus, self.distance, self.yaw, self.pitch_q12),
+            config.min_floor_clearance,
+        );
         if collision_solve.pull_in {
             self.position = desired_position;
         } else {
             self.position =
                 approach_vertex_shift(self.position, desired_position, config.position_lag_shift);
         }
+        self.position = clamp_camera_to_floor(collision, self.position, config.min_floor_clearance);
 
         self.last_pull_in = collision_solve.pull_in;
         self.last_rotated = false;
@@ -426,6 +435,7 @@ fn normalize_config(mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraCon
         .distance
         .clamp(config.min_distance, config.max_distance);
     config.collision_margin = config.collision_margin.max(0);
+    config.min_floor_clearance = config.min_floor_clearance.max(0);
     if config.pitch_min_q12 > config.pitch_max_q12 {
         let pitch = config.pitch_min_q12;
         config.pitch_min_q12 = config.pitch_max_q12;
@@ -452,6 +462,119 @@ fn camera_focus_goal(
     config: ThirdPersonCameraConfig,
 ) -> RoomPoint {
     player_focus(target.player, config.target_height)
+}
+
+fn clamp_camera_to_floor(
+    collision: Option<RoomCollision<'_, '_>>,
+    position: RoomPoint,
+    min_floor_clearance: i32,
+) -> RoomPoint {
+    let Some(room) = collision else {
+        return position;
+    };
+    if min_floor_clearance <= 0 {
+        return position;
+    }
+    let Some(floor_y) = floor_height_at(room, position.x, position.z) else {
+        return position;
+    };
+    let min_y = floor_y.saturating_add(min_floor_clearance);
+    if position.y < min_y {
+        RoomPoint::new(position.x, min_y, position.z)
+    } else {
+        position
+    }
+}
+
+fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
+    let s = room.sector_size();
+    if s <= 0 || x < 0 || z < 0 {
+        return None;
+    }
+    let sx = x / s;
+    let sz = z / s;
+    if sx < 0 || sz < 0 || sx >= room.width() as i32 || sz >= room.depth() as i32 {
+        return None;
+    }
+    let sector = room.sector(sx as u16, sz as u16)?;
+    if !sector.has_floor() {
+        return None;
+    }
+    let local_x = (x - sx * s).clamp(0, s);
+    let local_z = (z - sz * s).clamp(0, s);
+    let triangle = psx_asset::world_topology::horizontal_triangle_at_local(
+        sector.floor_split(),
+        local_x,
+        local_z,
+        s,
+    );
+    if !sector.floor_triangle_present(triangle) {
+        return None;
+    }
+    let heights = triangle_heights_to_quad(
+        sector.floor_heights(),
+        sector.floor_split(),
+        triangle,
+        sector.floor_triangle_heights(triangle),
+    );
+    Some(height_at_local(
+        heights,
+        sector.floor_split(),
+        local_x,
+        local_z,
+        s,
+    ))
+}
+
+fn triangle_heights_to_quad(
+    mut fallback: [i32; 4],
+    split: u8,
+    triangle: usize,
+    heights: [i32; 3],
+) -> [i32; 4] {
+    let corners = psx_asset::world_topology::split_triangles(split)[triangle.min(1)];
+    fallback[corners[0]] = heights[0];
+    fallback[corners[1]] = heights[1];
+    fallback[corners[2]] = heights[2];
+    fallback
+}
+
+fn height_at_local(heights: [i32; 4], split: u8, local_x: i32, local_z: i32, sector: i32) -> i32 {
+    let u = local_x.clamp(0, sector);
+    let v = local_z.clamp(0, sector);
+    let [nw, ne, se, sw] = heights;
+    if split == SPLIT_NE_SW {
+        if u + v <= sector {
+            nw.saturating_add(mul_sector(ne.saturating_sub(nw), u, sector))
+                .saturating_add(mul_sector(sw.saturating_sub(nw), v, sector))
+        } else {
+            sw.saturating_add(mul_sector(se.saturating_sub(sw), u, sector))
+                .saturating_add(mul_sector(ne.saturating_sub(se), sector - v, sector))
+        }
+    } else if v <= u {
+        nw.saturating_add(mul_sector(ne.saturating_sub(nw), u - v, sector))
+            .saturating_add(mul_sector(se.saturating_sub(nw), v, sector))
+    } else {
+        nw.saturating_add(mul_sector(se.saturating_sub(sw), u, sector))
+            .saturating_add(mul_sector(sw.saturating_sub(nw), v, sector))
+    }
+}
+
+fn mul_sector(delta: i32, amount: i32, sector: i32) -> i32 {
+    if sector <= 0 {
+        0
+    } else {
+        let num = (delta as i64).saturating_mul(amount as i64);
+        num.checked_div(sector as i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or_else(|| {
+                if num.is_negative() {
+                    i32::MIN
+                } else {
+                    i32::MAX
+                }
+            })
+    }
 }
 
 fn solve_camera_collision(
@@ -936,6 +1059,7 @@ fn abs_i32(value: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RuntimeRoom;
 
     fn test_ray(
         from: RoomPoint,
@@ -956,6 +1080,27 @@ mod tests {
             room_depth: 1,
             vertical_margin,
         }
+    }
+
+    fn flat_floor_world() -> [u8; 92] {
+        const ASSET_HEADER: usize = 12;
+        const WORLD_HEADER: usize = 20;
+        const SECTOR_RECORD: usize = 60;
+        const SECTOR0: usize = ASSET_HEADER + WORLD_HEADER;
+        let payload_len = (WORLD_HEADER + SECTOR_RECORD) as u32;
+        let mut buf = [0u8; 92];
+        buf[0..4].copy_from_slice(b"PSXW");
+        buf[4..6].copy_from_slice(&3u16.to_le_bytes());
+        buf[8..12].copy_from_slice(&payload_len.to_le_bytes());
+        buf[12..14].copy_from_slice(&1u16.to_le_bytes());
+        buf[14..16].copy_from_slice(&1u16.to_le_bytes());
+        buf[16..20].copy_from_slice(&1024i32.to_le_bytes());
+        buf[20..22].copy_from_slice(&1u16.to_le_bytes());
+        buf[22..24].copy_from_slice(&1u16.to_le_bytes());
+
+        buf[SECTOR0] = 1 | 4;
+        buf[SECTOR0 + 4..SECTOR0 + 6].copy_from_slice(&0u16.to_le_bytes());
+        buf
     }
 
     #[test]
@@ -1130,6 +1275,33 @@ mod tests {
         assert_eq!(camera.focus.y, target.player.y + config.target_height);
         assert!(camera.position.y > camera.focus.y);
         assert_eq!(camera.pitch_q12, default_pitch_q12(config));
+    }
+
+    #[test]
+    fn camera_floor_clearance_lifts_low_camera_position() {
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
+        let mut camera = ThirdPersonCameraState::new(Angle::ZERO);
+        let mut config = ThirdPersonCameraConfig::character(384, 0, 0);
+        config.min_floor_clearance = 64;
+        config.pitch_min_q12 = 0;
+        config.pitch_max_q12 = 0;
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::new(512, 0, 640),
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+
+        let frame = camera.update(
+            WorldProjection::new(160, 120, 320, 64),
+            Some(room.collision()),
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
+
+        assert_eq!(frame.camera.position.y, 64);
     }
 
     #[test]
