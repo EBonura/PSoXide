@@ -53,17 +53,17 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
-    draw_line_mono, draw_quad_flat, draw_quad_textured_material, draw_tri_flat_blended,
-    draw_tri_gouraud,
+    draw_line_mono, draw_tri_flat_blended, draw_tri_gouraud,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::{TriTextured, TriTexturedGouraud},
 };
 use psx_level::{
     equipment_flags, far_vista_flags, find_asset_of_kind, room_flags, sky_flags, AssetId,
-    AssetKind, EntityRecord, LevelCharacterRecord, LevelFarVistaRecord, LevelMaterialRecord,
-    LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord,
-    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
+    AssetKind, EntityRecord, LevelCameraRecord, LevelCharacterRecord, LevelFarVistaRecord,
+    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
+    ModelIndex,
     ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
@@ -186,11 +186,6 @@ const SOFT_LOCK_BREAK_RANGE: i32 = 3840;
 const CAMERA_COLLISION_ENABLED: bool = true;
 const SOFT_LOCK_ENABLED: bool = false;
 
-/// Fallback follow camera params used when no PLAYER_CONTROLLER
-/// was authored -- matches the prior debug behaviour.
-const FOLLOW_RADIUS_DEFAULT: i32 = 6144;
-const FOLLOW_HEIGHT_DEFAULT: i32 = 700;
-const FOLLOW_TARGET_HEIGHT_DEFAULT: i32 = 0;
 /// Quanta-per-frame turn rate when the runtime can't resolve a
 /// Character (no PLAYER_CONTROLLER). Mirrors the pre-character
 /// debug value.
@@ -394,9 +389,6 @@ struct RuntimeCharacter {
     /// Yaw rate translated from degrees/second to PSX angle
     /// units / 60 Hz frame at init time.
     yaw_step: Angle,
-    camera_distance: i32,
-    camera_height: i32,
-    camera_target_height: i32,
 }
 
 impl RuntimeCharacter {
@@ -422,9 +414,6 @@ impl RuntimeCharacter {
             walk_speed: scaled_player_speed(c.walk_speed),
             run_speed: scaled_player_speed(c.run_speed),
             yaw_step: Angle::from_q12(yaw_step_q12),
-            camera_distance: c.camera_distance,
-            camera_height: c.camera_height,
-            camera_target_height: c.camera_target_height,
         }
     }
 
@@ -912,7 +901,7 @@ impl Scene for Playtest {
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
             draw_sky_gradient(room_record.sky);
-            draw_far_vista_ring(camera, room_record.far_vista);
+            draw_far_vista_ring(camera, room_record.far_vista, &mut triangles, &mut world);
         }
 
         if self.room.is_some() {
@@ -1453,18 +1442,12 @@ impl Playtest {
     }
 
     fn camera_config(&self) -> ThirdPersonCameraConfig {
-        let mut config = match self.character {
-            Some(c) => ThirdPersonCameraConfig::character(
-                c.camera_distance,
-                c.camera_height,
-                c.camera_target_height,
-            ),
-            None => ThirdPersonCameraConfig::character(
-                FOLLOW_RADIUS_DEFAULT,
-                FOLLOW_HEIGHT_DEFAULT,
-                FOLLOW_TARGET_HEIGHT_DEFAULT,
-            ),
-        };
+        let camera = ROOMS
+            .get(self.room_index.to_usize())
+            .map(|room| room.camera)
+            .unwrap_or(LevelCameraRecord::DEFAULT);
+        let mut config =
+            ThirdPersonCameraConfig::character(camera.distance, camera.height, camera.target_height);
         config.height = config.height.max(256);
         config
     }
@@ -2251,7 +2234,12 @@ fn draw_sky_gradient_quad(y0: i16, y1: i16, top_rgb: [u8; 3], bottom_rgb: [u8; 3
     );
 }
 
-fn draw_far_vista_ring(camera: WorldCamera, vista: LevelFarVistaRecord) {
+fn draw_far_vista_ring(
+    camera: WorldCamera,
+    vista: LevelFarVistaRecord,
+    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) {
     if vista.flags & far_vista_flags::ENABLED == 0 {
         return;
     }
@@ -2271,41 +2259,35 @@ fn draw_far_vista_ring(camera: WorldCamera, vista: LevelFarVistaRecord) {
         let z0 = camera.position.z.saturating_add(a0.cos().mul_i32(radius));
         let x1 = camera.position.x.saturating_add(a1.sin().mul_i32(radius));
         let z1 = camera.position.z.saturating_add(a1.cos().mul_i32(radius));
-        let Some(p0) = camera.project_world(WorldVertex::new(x0, y1, z0)) else {
-            continue;
-        };
-        let Some(p1) = camera.project_world(WorldVertex::new(x1, y1, z1)) else {
-            continue;
-        };
-        let Some(p2) = camera.project_world(WorldVertex::new(x0, y0, z0)) else {
-            continue;
-        };
-        let Some(p3) = camera.project_world(WorldVertex::new(x1, y0, z1)) else {
-            continue;
-        };
-        let verts = [(p0.sx, p0.sy), (p1.sx, p1.sy), (p2.sx, p2.sy), (p3.sx, p3.sy)];
-        let material =
-            far_vista_texture_material(far_vista_panel_asset(vista, segment, segments), vista.tint_rgb);
+        let material = far_vista_texture_material(
+            far_vista_panel_asset(vista, segment, segments),
+            vista.tint_rgb,
+        );
         if let Some((material, texture_width, texture_height)) = material {
-            draw_quad_textured_material(
-                verts,
+            let options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
+                .with_depth_policy(DepthPolicy::Farthest)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(material);
+            let _ = world.submit_textured_world_quad(
+                triangles,
+                camera,
+                [
+                    WorldVertex::new(x0, y1, z0),
+                    WorldVertex::new(x1, y1, z1),
+                    WorldVertex::new(x1, y0, z1),
+                    WorldVertex::new(x0, y0, z0),
+                ],
                 [
                     (0, 0),
                     (texture_width.saturating_sub(1), 0),
-                    (0, texture_height.saturating_sub(1)),
                     (
                         texture_width.saturating_sub(1),
                         texture_height.saturating_sub(1),
                     ),
+                    (0, texture_height.saturating_sub(1)),
                 ],
                 material,
-            );
-        } else {
-            draw_quad_flat(
-                verts,
-                vista.tint_rgb[0],
-                vista.tint_rgb[1],
-                vista.tint_rgb[2],
+                options,
             );
         }
     }
@@ -2315,11 +2297,7 @@ fn angle_from_signed_degrees(degrees: i16) -> Angle {
     Angle::from_degrees((degrees as i32).rem_euclid(360) as u32)
 }
 
-fn far_vista_panel_asset(
-    vista: LevelFarVistaRecord,
-    segment: u8,
-    segments: u8,
-) -> Option<AssetId> {
+fn far_vista_panel_asset(vista: LevelFarVistaRecord, segment: u8, segments: u8) -> Option<AssetId> {
     if vista.flags & far_vista_flags::TEXTURED == 0 || vista.texture_assets.is_empty() {
         return None;
     }
@@ -2724,12 +2702,7 @@ impl RuntimeRoomLighting {
     }
 
     fn fog_weight_at_depth(&self, depth: i32) -> i32 {
-        room_fog_weight(
-            depth,
-            self.fog_enabled,
-            self.fog_near,
-            self.fog_far,
-        )
+        room_fog_weight(depth, self.fog_enabled, self.fog_near, self.fog_far)
     }
 
     fn point_lights(&self) -> impl Iterator<Item = PointLightSample> + '_ {

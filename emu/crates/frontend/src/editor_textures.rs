@@ -30,7 +30,9 @@ use psx_gpu::material::TextureWindow;
 use psx_gpu_render::{VRAM_HEIGHT, VRAM_WIDTH};
 use psx_vram::TextureWindowAtlas;
 use psxed_project::streaming::collect_scene_resource_use;
-use psxed_project::{MaterialResource, ProjectDocument, Resource, ResourceData, ResourceId};
+use psxed_project::{
+    MaterialResource, NodeKind, ProjectDocument, Resource, ResourceData, ResourceId,
+};
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
 const ROOM_TPAGE_TEXEL_HEIGHT: usize = 256;
@@ -97,7 +99,7 @@ pub struct EditorTextures {
     /// Ordered material ids, texture paths, and fallback names used to
     /// populate the limited room-material VRAM band. Scene-used
     /// materials are prioritized ahead of unused library resources.
-    room_signature: Vec<(ResourceId, String, String)>,
+    room_signature: Vec<(ResourceId, String, String, bool, bool)>,
     /// 8-texel-grid allocator for room textures inside tpages 5..15.
     room_allocator: TextureWindowAtlas<ROOM_TPAGE_COUNT>,
     /// Halfword X-coord of the next free 4bpp CLUT slot. Each
@@ -193,10 +195,18 @@ impl EditorTextures {
     /// so authored scene materials must get slots before unused
     /// resource-library entries.
     pub fn refresh(&mut self, project: &ProjectDocument, project_root: &Path) {
-        let plan = material_upload_plan(project);
-        let room_signature: Vec<(ResourceId, String, String)> = plan
+        let plan = preview_texture_upload_plan(project);
+        let room_signature: Vec<(ResourceId, String, String, bool, bool)> = plan
             .iter()
-            .map(|item| (item.id, item.signature.clone(), item.name.clone()))
+            .map(|item| {
+                (
+                    item.id,
+                    item.signature.clone(),
+                    item.name.clone(),
+                    item.force_zero_opaque,
+                    item.allow_procedural_fallback,
+                )
+            })
             .collect();
         if self.room_signature == room_signature {
             return;
@@ -210,10 +220,18 @@ impl EditorTextures {
                 // Out of slots. Don't insert a stale cache entry.
                 break;
             }
-            let Some(slot) = self
-                .upload_real_psxt(&item.signature, project_root)
-                .or_else(|| self.upload_procedural(&item.name))
-            else {
+            let slot = self
+                .upload_real_psxt_with_clut_mode(
+                    &item.signature,
+                    project_root,
+                    item.force_zero_opaque,
+                )
+                .or_else(|| {
+                    item.allow_procedural_fallback
+                        .then(|| self.upload_procedural(&item.name))
+                        .flatten()
+                });
+            let Some(slot) = slot else {
                 break;
             };
             self.cache.insert(item.id, CacheEntry { slot });
@@ -246,7 +264,12 @@ impl EditorTextures {
     /// is unsupported by the editor preview path (only 4bpp + 8bpp
     /// indexed for now -- the runtime supports 15bpp but editor's
     /// procedural fallback covers any holes).
-    fn upload_real_psxt(&mut self, path: &str, project_root: &Path) -> Option<MaterialSlot> {
+    fn upload_real_psxt_with_clut_mode(
+        &mut self,
+        path: &str,
+        project_root: &Path,
+        force_zero_opaque: bool,
+    ) -> Option<MaterialSlot> {
         if path.is_empty() {
             return None;
         }
@@ -318,7 +341,11 @@ impl EditorTextures {
                 // Room materials are opaque until materials carry
                 // explicit alpha, so index 0 must not become a
                 // preview-only hole in imported textures.
-                let marked = opaque_room_clut_entry(raw);
+                let marked = if force_zero_opaque {
+                    opaque_room_clut_entry(raw)
+                } else {
+                    raw
+                };
                 let vram_idx = (clut_y as usize) * VRAM_WIDTH as usize + clut_x as usize + i;
                 self.vram[vram_idx] = marked;
             }
@@ -604,13 +631,15 @@ impl EditorTextures {
 }
 
 #[derive(Debug, Clone)]
-struct MaterialUploadPlan {
+struct PreviewTextureUploadPlan {
     id: ResourceId,
     name: String,
     signature: String,
+    force_zero_opaque: bool,
+    allow_procedural_fallback: bool,
 }
 
-fn material_upload_plan(project: &ProjectDocument) -> Vec<MaterialUploadPlan> {
+fn preview_texture_upload_plan(project: &ProjectDocument) -> Vec<PreviewTextureUploadPlan> {
     let mut ids = collect_scene_resource_use(project).materials;
     for resource in &project.resources {
         if matches!(&resource.data, ResourceData::Material(_)) {
@@ -618,19 +647,70 @@ fn material_upload_plan(project: &ProjectDocument) -> Vec<MaterialUploadPlan> {
         }
     }
 
-    ids.into_iter()
+    let mut plan = ids
+        .into_iter()
         .filter_map(|id| {
             let resource = project.resource(id)?;
             let ResourceData::Material(material) = &resource.data else {
                 return None;
             };
-            Some(MaterialUploadPlan {
+            Some(PreviewTextureUploadPlan {
                 id,
                 name: resource.name.clone(),
                 signature: texture_path(project, material).unwrap_or_default(),
+                force_zero_opaque: true,
+                allow_procedural_fallback: true,
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    push_far_vista_texture_uploads(project, &mut plan);
+    plan
+}
+
+fn push_far_vista_texture_uploads(
+    project: &ProjectDocument,
+    plan: &mut Vec<PreviewTextureUploadPlan>,
+) {
+    for node in project.active_scene().nodes() {
+        let NodeKind::World { far_vista, .. } = &node.kind else {
+            continue;
+        };
+        if !far_vista.enabled {
+            continue;
+        }
+        let assigned_panels = far_vista.texture_panels.iter().any(Option::is_some);
+        if assigned_panels {
+            for texture_id in far_vista.texture_panels.iter().flatten() {
+                push_texture_resource_upload(project, *texture_id, plan);
+            }
+        } else if let Some(texture_id) = far_vista.texture {
+            push_texture_resource_upload(project, texture_id, plan);
+        }
+    }
+}
+
+fn push_texture_resource_upload(
+    project: &ProjectDocument,
+    id: ResourceId,
+    plan: &mut Vec<PreviewTextureUploadPlan>,
+) {
+    if plan.iter().any(|item| item.id == id) {
+        return;
+    }
+    let Some(resource) = project.resource(id) else {
+        return;
+    };
+    let ResourceData::Texture { psxt_path } = &resource.data else {
+        return;
+    };
+    plan.push(PreviewTextureUploadPlan {
+        id,
+        name: resource.name.clone(),
+        signature: psxt_path.clone(),
+        force_zero_opaque: false,
+        allow_procedural_fallback: false,
+    });
 }
 
 fn push_unique_resource_id(ids: &mut Vec<ResourceId>, id: ResourceId) {
@@ -1019,12 +1099,14 @@ fn align_up_to(value: u16, boundary: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_up_to, material_upload_plan, model_atlas_clut_entry, opaque_room_clut_entry,
+        align_up_to, model_atlas_clut_entry, opaque_room_clut_entry, preview_texture_upload_plan,
         EditorTextures, SHADOW_CLUT_X, SHADOW_CLUT_Y, SHADOW_TPAGE_X, SHADOW_TPAGE_Y,
     };
     use psx_gpu::material::TextureWindow;
     use psx_gpu_render::VRAM_WIDTH;
-    use psxed_project::{MaterialResource, NodeKind, ProjectDocument, ResourceData, WorldGrid};
+    use psxed_project::{
+        FarVistaSettings, MaterialResource, NodeKind, ProjectDocument, ResourceData, WorldGrid,
+    };
     use std::path::Path;
 
     fn add_material(
@@ -1127,7 +1209,7 @@ mod tests {
         let scene = project.active_scene_mut();
         scene.add_node(scene.root, "Room", NodeKind::Room { grid });
 
-        let plan = material_upload_plan(&project);
+        let plan = preview_texture_upload_plan(&project);
         assert_eq!(plan.first().map(|item| item.id), Some(used));
 
         let mut textures = EditorTextures::new();
@@ -1135,5 +1217,42 @@ mod tests {
 
         assert!(textures.slot(used).is_some());
         assert!(textures.slot(unused[70]).is_none());
+    }
+
+    #[test]
+    fn upload_plan_includes_far_vista_panel_textures() {
+        let mut project = ProjectDocument::new("preview");
+        let panel = project.add_resource(
+            "Vista Panel",
+            ResourceData::Texture {
+                psxt_path: "vista.psxt".to_string(),
+            },
+        );
+        let mut far_vista = FarVistaSettings {
+            enabled: true,
+            ..FarVistaSettings::default()
+        };
+        far_vista.texture_panels[0] = Some(panel);
+
+        let scene = project.active_scene_mut();
+        scene.add_node(
+            scene.root,
+            "World",
+            NodeKind::World {
+                sector_size: 1024,
+                sky: Default::default(),
+                far_vista,
+                camera: Default::default(),
+            },
+        );
+
+        let plan = preview_texture_upload_plan(&project);
+        let item = plan
+            .iter()
+            .find(|item| item.id == panel)
+            .expect("far-vista panel texture is uploaded for preview");
+        assert_eq!(item.signature, "vista.psxt");
+        assert!(!item.force_zero_opaque);
+        assert!(!item.allow_procedural_fallback);
     }
 }

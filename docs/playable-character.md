@@ -68,16 +68,18 @@ pub struct CharacterResource {
     pub run_speed: i32,
     pub turn_speed_degrees_per_second: u16,
 
-    pub camera_distance: i32,
-    pub camera_height: i32,
-    pub camera_target_height: i32,
+    pub camera_distance: i32,       // legacy fallback
+    pub camera_height: i32,         // legacy fallback
+    pub camera_target_height: i32,  // legacy fallback
 }
 ```
 
 The `model` field can stay `None` while authoring; cook
 validation rejects a player whose Character resolves to a
 missing model. Capsule + speed + camera fields have sensible
-defaults via `CharacterResource::defaults()`.
+defaults via `CharacterResource::defaults()`. Runtime follow
+camera tuning is authored on the World node and emitted per
+room; the Character camera fields remain for compatibility.
 
 ## Wire format (psx-level)
 
