@@ -195,6 +195,29 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Cooked runtime chunk metadata.\n");
+    out.push_str("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n");
+    for chunk in &package.chunks {
+        let [north, east, south, west] = chunk.neighbours;
+        let _ = writeln!(
+            out,
+            "    LevelChunkRecord {{ room: RoomIndex({}), authored_room: {}, chunk_index: {}, origin_x: {}, origin_z: {}, width: {}, depth: {}, neighbours: LevelChunkNeighbours {{ north: {}, east: {}, south: {}, west: {} }}, flags: {} }},",
+            chunk.room,
+            chunk.authored_room,
+            chunk.chunk_index,
+            chunk.origin_x,
+            chunk.origin_z,
+            chunk.width,
+            chunk.depth,
+            room_index_or_none(north),
+            room_index_or_none(east),
+            room_index_or_none(south),
+            room_index_or_none(west),
+            chunk.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Per-room visibility slices.\n");
     out.push_str("pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[\n");
     for visibility in &package.room_visibility {
@@ -211,7 +234,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for cell in &package.visibility_cells {
         let _ = writeln!(
             out,
-            "    LevelVisibilityCellRecord {{ room: RoomIndex({}), x: {}, z: {}, min_y: {}, max_y: {}, portal_mask: {}, blocker_mask: {}, visible_first: VisibleCellIndex({}), visible_count: {}, flags: {} }},",
+            "    LevelVisibilityCellRecord {{ room: RoomIndex({}), x: {}, z: {}, min_y: {}, max_y: {}, portal_mask: {}, blocker_mask: {}, flags: {} }},",
             cell.room,
             cell.x,
             cell.z,
@@ -219,20 +242,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             cell.max_y,
             cell.portal_mask,
             cell.blocker_mask,
-            cell.visible_first,
-            cell.visible_count,
             cell.flags,
-        );
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("/// Flattened per-anchor potentially visible cell references.\n");
-    out.push_str("pub static VISIBLE_CELLS: &[LevelVisibleCellRecord] = &[\n");
-    for cell in &package.visible_cells {
-        let _ = writeln!(
-            out,
-            "    LevelVisibleCellRecord {{ cell: VisibilityCellIndex({}) }},",
-            cell.cell,
         );
     }
     out.push_str("];\n\n");
@@ -242,73 +252,23 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     // referenced by an instance OR by the player character in
     // this room; required VRAM = every distinct texture asset
     // (room materials + far-vista panels + model atlases)
-    // referenced by this room.
-    for (i, room) in package.rooms.iter().enumerate() {
-        let first = room.material_first as usize;
-        let count = room.material_count as usize;
-        let mut required_vram: Vec<usize> = Vec::with_capacity(count);
-        for material in &package.materials[first..first + count] {
-            if !required_vram.contains(&material.texture_asset_index) {
-                required_vram.push(material.texture_asset_index);
-            }
-        }
-        for asset_index in room.far_vista.texture_asset_indices.iter().flatten() {
-            if !required_vram.contains(asset_index) {
-                required_vram.push(*asset_index);
-            }
-        }
-        let mut required_ram: Vec<usize> = vec![room.world_asset_index];
+    // referenced by this room. Warm lists mirror touching chunks
+    // so the runtime can preload neighbours without owning their
+    // shared assets twice.
+    let residency_requirements: Vec<(Vec<usize>, Vec<usize>)> = package
+        .rooms
+        .iter()
+        .enumerate()
+        .map(|(i, room)| room_required_assets(package, i, room))
+        .collect();
+    let warm_requirements: Vec<(Vec<usize>, Vec<usize>)> = package
+        .rooms
+        .iter()
+        .enumerate()
+        .map(|(i, _room)| warm_assets_for_room(package, &residency_requirements, i))
+        .collect();
 
-        // Models the room references -- placed MeshInstance
-        // bindings *plus* the player controller's character
-        // when its spawn lives in this room. The player's
-        // model is residency-required even when it's never
-        // placed as a regular MeshInstance; otherwise the
-        // runtime would render the player from un-resident
-        // bytes the moment the room loads.
-        let i_u16 = i as u16;
-        let mut seen_models: Vec<u16> = Vec::new();
-        for inst in &package.model_instances {
-            if inst.room != i_u16 || seen_models.contains(&inst.model) {
-                continue;
-            }
-            seen_models.push(inst.model);
-            include_model_in_residency(package, inst.model, &mut required_ram, &mut required_vram);
-        }
-        if let Some(pc) = package.player_controller {
-            if pc.spawn.room == i_u16 {
-                let model = package.characters[pc.character as usize].model;
-                if !seen_models.contains(&model) {
-                    seen_models.push(model);
-                    include_model_in_residency(
-                        package,
-                        model,
-                        &mut required_ram,
-                        &mut required_vram,
-                    );
-                }
-            }
-        }
-        for equipment in &package.equipment {
-            if equipment.room != i_u16 {
-                continue;
-            }
-            let Some(weapon) = package.weapons.get(equipment.weapon as usize) else {
-                continue;
-            };
-            if let Some(model) = weapon.model {
-                if !seen_models.contains(&model) {
-                    seen_models.push(model);
-                    include_model_in_residency(
-                        package,
-                        model,
-                        &mut required_ram,
-                        &mut required_vram,
-                    );
-                }
-            }
-        }
-
+    for (i, (required_ram, required_vram)) in residency_requirements.iter().enumerate() {
         let _ = writeln!(out, "/// Room {i} required RAM assets.");
         out.push_str(&format!(
             "pub static ROOM_{i}_REQUIRED_RAM: &[AssetId] = &["
@@ -331,6 +291,25 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             let _ = write!(out, "AssetId({idx})");
         }
         out.push_str("];\n");
+        let (warm_ram, warm_vram) = &warm_requirements[i];
+        let _ = writeln!(out, "/// Room {i} warm RAM assets.");
+        out.push_str(&format!("pub static ROOM_{i}_WARM_RAM: &[AssetId] = &["));
+        for (j, idx) in warm_ram.iter().enumerate() {
+            if j > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "AssetId({idx})");
+        }
+        out.push_str("];\n");
+        let _ = writeln!(out, "/// Room {i} warm VRAM assets.");
+        out.push_str(&format!("pub static ROOM_{i}_WARM_VRAM: &[AssetId] = &["));
+        for (j, idx) in warm_vram.iter().enumerate() {
+            if j > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "AssetId({idx})");
+        }
+        out.push_str("];\n");
     }
     out.push('\n');
 
@@ -339,7 +318,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for (i, _room) in package.rooms.iter().enumerate() {
         let _ = writeln!(
             out,
-            "    RoomResidencyRecord {{ room: RoomIndex({i}), required_ram: ROOM_{i}_REQUIRED_RAM, required_vram: ROOM_{i}_REQUIRED_VRAM, warm_ram: &[], warm_vram: &[] }},",
+            "    RoomResidencyRecord {{ room: RoomIndex({i}), required_ram: ROOM_{i}_REQUIRED_RAM, required_vram: ROOM_{i}_REQUIRED_VRAM, warm_ram: ROOM_{i}_WARM_RAM, warm_vram: ROOM_{i}_WARM_VRAM }},",
         );
     }
     out.push_str("];\n\n");
@@ -609,6 +588,12 @@ fn texture_vram_bytes(asset: &PlaytestAsset) -> Option<usize> {
     Some(texture.pixel_bytes().len() + texture.clut_bytes().len())
 }
 
+fn room_index_or_none(index: Option<u16>) -> String {
+    index
+        .map(|index| format!("RoomIndex({index})"))
+        .unwrap_or_else(|| "LevelChunkNeighbours::NONE".to_string())
+}
+
 fn render_weapon_hit_shape(shape: PlaytestWeaponHitShape) -> String {
     match shape {
         PlaytestWeaponHitShape::Box {
@@ -670,6 +655,126 @@ pub fn cook_to_dir(
         write_package(&package, generated_dir)?;
     }
     Ok(report)
+}
+
+fn room_required_assets(
+    package: &PlaytestPackage,
+    room_index: usize,
+    room: &PlaytestRoom,
+) -> (Vec<usize>, Vec<usize>) {
+    let first = room.material_first as usize;
+    let count = room.material_count as usize;
+    let mut required_vram: Vec<usize> = Vec::with_capacity(count);
+    for material in &package.materials[first..first + count] {
+        push_unique(&mut required_vram, material.texture_asset_index);
+    }
+    for asset_index in room.far_vista.texture_asset_indices.iter().flatten() {
+        push_unique(&mut required_vram, *asset_index);
+    }
+    let mut required_ram: Vec<usize> = vec![room.world_asset_index];
+
+    // Models the room references -- placed MeshInstance bindings
+    // plus the player controller's character when its spawn lives
+    // in this room.
+    let room_index = room_index as u16;
+    let mut seen_models: Vec<u16> = Vec::new();
+    for inst in &package.model_instances {
+        if inst.room != room_index || seen_models.contains(&inst.model) {
+            continue;
+        }
+        seen_models.push(inst.model);
+        include_model_in_residency(package, inst.model, &mut required_ram, &mut required_vram);
+    }
+    if let Some(pc) = package.player_controller {
+        if pc.spawn.room == room_index {
+            let model = package.characters[pc.character as usize].model;
+            if !seen_models.contains(&model) {
+                seen_models.push(model);
+                include_model_in_residency(package, model, &mut required_ram, &mut required_vram);
+            }
+        }
+    }
+    for equipment in &package.equipment {
+        if equipment.room != room_index {
+            continue;
+        }
+        let Some(weapon) = package.weapons.get(equipment.weapon as usize) else {
+            continue;
+        };
+        if let Some(model) = weapon.model {
+            if !seen_models.contains(&model) {
+                seen_models.push(model);
+                include_model_in_residency(package, model, &mut required_ram, &mut required_vram);
+            }
+        }
+    }
+
+    (required_ram, required_vram)
+}
+
+fn warm_assets_for_room(
+    package: &PlaytestPackage,
+    residency_requirements: &[(Vec<usize>, Vec<usize>)],
+    room_index: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut warm_ram = Vec::new();
+    let mut warm_vram = Vec::new();
+    let Some((required_ram, required_vram)) = residency_requirements.get(room_index) else {
+        return (warm_ram, warm_vram);
+    };
+    for neighbour_index in 0..package.rooms.len() {
+        if neighbour_index == room_index
+            || !package_rooms_touch(package, room_index, neighbour_index)
+        {
+            continue;
+        }
+        let Some((neighbour_ram, neighbour_vram)) = residency_requirements.get(neighbour_index)
+        else {
+            continue;
+        };
+        for asset in neighbour_ram {
+            if !required_ram.contains(asset) {
+                push_unique(&mut warm_ram, *asset);
+            }
+        }
+        for asset in neighbour_vram {
+            if !required_vram.contains(asset) {
+                push_unique(&mut warm_vram, *asset);
+            }
+        }
+    }
+    (warm_ram, warm_vram)
+}
+
+fn package_rooms_touch(package: &PlaytestPackage, a: usize, b: usize) -> bool {
+    let Some((ax0, ax1, az0, az1)) = package_room_bounds(package, a) else {
+        return false;
+    };
+    let Some((bx0, bx1, bz0, bz1)) = package_room_bounds(package, b) else {
+        return false;
+    };
+    bx0 <= ax1 && bx1 >= ax0 && bz0 <= az1 && bz1 >= az0
+}
+
+fn package_room_bounds(
+    package: &PlaytestPackage,
+    room_index: usize,
+) -> Option<(i32, i32, i32, i32)> {
+    let room = package.rooms.get(room_index)?;
+    let asset = package.assets.get(room.world_asset_index)?;
+    let world = psx_asset::World::from_bytes(&asset.bytes).ok()?;
+    let sector_size = room.sector_size;
+    let x0 = room.origin_x.saturating_mul(sector_size);
+    let z0 = room.origin_z.saturating_mul(sector_size);
+    let x1 = x0.saturating_add((world.width() as i32).saturating_mul(sector_size));
+    let z1 = z0.saturating_add((world.depth() as i32).saturating_mul(sector_size));
+    Some((x0, x1, z0, z1))
+}
+
+fn push_unique(values: &mut Vec<usize>, value: usize) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
 }
 
 /// Add `model_index`'s mesh + atlas + every clip to a room's
@@ -814,6 +919,8 @@ use psx_level::{
     LevelAssetRecord,
     LevelCameraRecord,
     LevelCharacterRecord,
+    LevelChunkNeighbours,
+    LevelChunkRecord,
     LevelFarVistaRecord,
     LevelMaterialRecord,
     LevelModelClipBoundsRecord,
@@ -826,7 +933,6 @@ use psx_level::{
     LevelRoomVisibilityRecord,
     LevelSkyRecord,
     LevelVisibilityCellRecord,
-    LevelVisibleCellRecord,
     LevelWeaponRecord,
     MaterialIndex,
     MaterialSlot,
@@ -844,7 +950,6 @@ use psx_level::{
     RoomIndex,
     RoomResidencyRecord,
     VisibilityCellIndex,
-    VisibleCellIndex,
     WeaponHitboxIndex,
     WeaponHitboxRecord,
     WeaponHitShapeRecord,
