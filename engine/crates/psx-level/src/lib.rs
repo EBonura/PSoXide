@@ -331,6 +331,26 @@ impl LevelFarVistaRecord {
     };
 }
 
+/// Resolved third-person camera settings for one cooked room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCameraRecord {
+    /// Preferred trailing distance from focus to camera.
+    pub distance: i32,
+    /// Camera origin height above the player origin.
+    pub height: i32,
+    /// Look-at height above the player origin.
+    pub target_height: i32,
+}
+
+impl LevelCameraRecord {
+    /// Default camera used by placeholder manifests.
+    pub const DEFAULT: Self = Self {
+        distance: 2_700,
+        height: 1_280,
+        target_height: 640,
+    };
+}
+
 /// One room. References its world asset by id and points into
 /// the global [`LevelMaterialRecord`] table via
 /// `material_first` / `material_count`.
@@ -363,6 +383,8 @@ pub struct LevelRoomRecord {
     pub sky: LevelSkyRecord,
     /// Resolved distant scenery ring for this room.
     pub far_vista: LevelFarVistaRecord,
+    /// Resolved third-person camera for this room.
+    pub camera: LevelCameraRecord,
     /// Reserved.
     pub flags: u16,
 }

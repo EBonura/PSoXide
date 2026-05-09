@@ -1,6 +1,7 @@
 //! Debug/status overlays for editor-playtest.
 
 use super::*;
+use psx_gpu::draw_quad_flat;
 
 pub(crate) fn draw_analog_required_prompt(font: &FontAtlas) {
     const BOX_X0: i16 = 32;

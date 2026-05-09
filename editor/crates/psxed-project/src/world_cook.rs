@@ -898,6 +898,18 @@ mod tests {
         )
     }
 
+    fn minimal_material_project() -> (ProjectDocument, ResourceId) {
+        let mut project = ProjectDocument::new("world-cook-test");
+        let texture = project.add_resource(
+            "test texture",
+            ResourceData::Texture {
+                psxt_path: "test.psxt".into(),
+            },
+        );
+        let material = material_for_texture(&mut project, "test material", texture);
+        (project, material)
+    }
+
     fn first_populated_cooked_sector(cooked: &CookedWorldGrid) -> &CookedGridSector {
         cooked
             .sectors
@@ -1507,6 +1519,32 @@ mod tests {
             sector.floor_triangle_uvs(1).corners(),
             runtime_horizontal_uvs(uv.apply_to_quad(world::FLOOR_UVS))
         );
+    }
+
+    #[test]
+    fn cooks_horizontal_triangle_height_overrides() {
+        let (project, material) = minimal_material_project();
+        let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
+        grid.set_floor(0, 0, 0, Some(material));
+        let floor = grid
+            .sector_mut(0, 0)
+            .and_then(|sector| sector.floor.as_mut())
+            .expect("floor exists");
+        floor.heights = [0, 0, 0, 0];
+        floor.split = GridSplit::NorthWestSouthEast;
+        floor.triangle_override_mut(0).heights = Some([64, 128, 192]);
+
+        let cooked = cook_world_grid(&project, &grid).unwrap();
+        let cooked_floor = cooked.sectors[0].as_ref().unwrap().floor.unwrap();
+        assert_eq!(cooked_floor.triangles[1].heights, [192, 128, 64]);
+        assert_eq!(cooked_floor.triangles[0].heights, [0, 0, 0]);
+
+        let bytes = encode_world_grid_psxw(&project, &grid).unwrap();
+        let parsed_world = psx_asset::World::from_bytes(&bytes).expect("psxw parses");
+        let sector = parsed_world.sector(0, 0).unwrap();
+        assert_eq!(parsed_world.horizontal_override_count(), 1);
+        assert_eq!(sector.floor_triangle_heights(1), [192, 128, 64]);
+        assert_eq!(sector.floor_triangle_heights(0), [0, 0, 0]);
     }
 
     #[test]

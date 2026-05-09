@@ -279,6 +279,10 @@ pub fn build_package(
                 .world_far_vista_for_node(room_node.id)
                 .unwrap_or_default()
                 .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
+            let resolved_camera = scene
+                .world_camera_for_node(room_node.id)
+                .unwrap_or_default()
+                .normalized();
             let far_vista_texture_asset_indices = if resolved_far_vista.enabled {
                 let assigned_panels = resolved_far_vista
                     .texture_panels
@@ -372,6 +376,11 @@ pub fn build_package(
                     } else {
                         0
                     },
+                },
+                camera: PlaytestCamera {
+                    distance: resolved_camera.distance,
+                    height: resolved_camera.height,
+                    target_height: resolved_camera.target_height,
                 },
                 flags: if chunk_grid.fog_enabled {
                     psx_level::room_flags::FOG_ENABLED
@@ -2777,7 +2786,10 @@ fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NodeKind, ProjectDocument};
+    use crate::{
+        NodeKind, ProjectDocument, DEFAULT_WORLD_CAMERA_DISTANCE, DEFAULT_WORLD_CAMERA_HEIGHT,
+        DEFAULT_WORLD_CAMERA_TARGET_HEIGHT,
+    };
 
     fn starter_project_root() -> PathBuf {
         crate::default_project_dir()
@@ -3013,7 +3025,21 @@ mod tests {
             package.rooms[0].far_vista.flags & far_vista_flags::ENABLED,
             far_vista_flags::ENABLED
         );
-        assert_eq!(package.rooms[0].far_vista.segments, 12);
+        assert_eq!(
+            package.rooms[0].far_vista.flags & far_vista_flags::TEXTURED,
+            far_vista_flags::TEXTURED
+        );
+        assert_eq!(package.rooms[0].far_vista.segments, 16);
+        assert_eq!(package.rooms[0].far_vista.texture_asset_indices.len(), 16);
+        assert_eq!(
+            package.rooms[0].camera.distance,
+            DEFAULT_WORLD_CAMERA_DISTANCE
+        );
+        assert_eq!(package.rooms[0].camera.height, DEFAULT_WORLD_CAMERA_HEIGHT);
+        assert_eq!(
+            package.rooms[0].camera.target_height,
+            DEFAULT_WORLD_CAMERA_TARGET_HEIGHT
+        );
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
         assert!(!package.visible_cells.is_empty());
@@ -3370,12 +3396,12 @@ mod tests {
 
     #[test]
     fn starter_project_emits_expected_texture_assets() {
-        // Starter currently cooks three room textures plus the
-        // obsidian wraith atlas.
+        // Starter currently cooks three room textures, sixteen
+        // far-vista panels, and the obsidian wraith atlas.
         let project = project_with_one_room();
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
-        assert_eq!(package.texture_asset_count(), 4);
+        assert_eq!(package.texture_asset_count(), 20);
     }
 
     #[test]
@@ -3511,6 +3537,10 @@ mod tests {
         assert!(src.contains("sky: LevelSkyRecord"));
         assert!(src.contains("LevelFarVistaRecord"));
         assert!(src.contains("far_vista: LevelFarVistaRecord"));
+        assert!(src.contains("LevelCameraRecord"));
+        assert!(src.contains("camera: LevelCameraRecord"));
+        assert!(src.contains("static FAR_VISTA_TEXTURES_0"));
+        assert!(src.contains("texture_assets: FAR_VISTA_TEXTURES_0"));
         assert!(src.contains("pub static ROOM_VISIBILITY"));
         assert!(src.contains("pub static VISIBILITY_CELLS"));
         assert!(src.contains("pub static VISIBLE_CELLS"));

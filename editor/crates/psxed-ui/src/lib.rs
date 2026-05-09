@@ -35,10 +35,12 @@ use psxed_project::{
     GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
-    PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldGrid,
-    WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM,
-    MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_SECTOR_SIZE,
-    MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_QUANTUM,
+    PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
+    WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
+    HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
+    MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_SECTOR_SIZE,
+    MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
+    WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -53,7 +55,7 @@ const EDITOR_OUTLINE_ACCENT: Color32 = Color32::from_rgb(165, 238, 255);
 const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
 const RESOURCE_CARD_WIDTH: f32 = 120.0;
-const RESOURCE_CARD_HEIGHT: f32 = 155.0;
+const RESOURCE_CARD_HEIGHT: f32 = 128.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/obsidian_wraith",
@@ -9175,163 +9177,185 @@ impl EditorWorkspace {
     fn draw_resource_panel_header(&mut self, ui: &mut egui::Ui) {
         egui::Frame::new()
             .fill(STUDIO_PANEL_HEADER)
-            .inner_margin(egui::Margin::symmetric(8, 5))
+            .inner_margin(panel_header_margin())
             .show(ui, |ui| {
-                ui.set_min_height(24.0);
-                ui.horizontal_wrapped(|ui| {
+                ui.set_min_height(PANEL_HEADER_MIN_HEIGHT);
+                ui.horizontal(|ui| {
                     ui.label(icons::text(icons::LAYERS, 15.0).color(STUDIO_ACCENT));
                     ui.label(RichText::new("Resources").strong().color(STUDIO_TEXT));
-                    ui.separator();
-                    self.draw_resource_panel_actions(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.draw_resource_panel_actions(ui);
+                    });
                 });
             });
         ui.separator();
     }
 
     fn draw_resource_panel_actions(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .button(icons::label(icons::PLUS, "Weapon"))
-            .on_hover_text("Add a Weapon resource with a grip and hitbox.")
-            .clicked()
-        {
-            let id = self.project.add_resource(
-                "New Weapon",
-                ResourceData::Weapon(psxed_project::WeaponResource::default()),
-            );
-            self.replace_resource_selection(id);
-            self.clear_node_selection_state();
-            self.clear_primitive_selection_state();
-            self.clear_sector_selection();
-            self.status = "Added weapon".to_string();
-            self.mark_dirty();
-        }
-        if ui
-            .button(icons::label(icons::PLUS, "Character Profile"))
-            .on_hover_text(
-                "Add reusable movement, animation-role, capsule, and camera defaults for character entities.",
-            )
-            .clicked()
-        {
-            let id = self.project.add_resource(
-                "New Character Profile",
-                ResourceData::Character(psxed_project::CharacterResource::default()),
-            );
-            self.replace_resource_selection(id);
-            self.clear_node_selection_state();
-            self.clear_primitive_selection_state();
-            self.clear_sector_selection();
-            self.status = "Added character profile".to_string();
-            self.mark_dirty();
-        }
-        if ui
-            .button(icons::label(icons::PLUS, "Clip Role Map"))
-            .on_hover_text(
-                "Add a reusable idle/walk/run/turn mapping for compatible animation clips.",
-            )
-            .clicked()
-        {
-            let id = self.project.add_resource(
-                "New Clip Role Map",
-                ResourceData::AnimationSet(psxed_project::AnimationSetResource::default()),
-            );
-            self.replace_resource_selection(id);
-            self.clear_node_selection_state();
-            self.clear_primitive_selection_state();
-            self.clear_sector_selection();
-            self.status = "Added clip role map".to_string();
-            self.mark_dirty();
-        }
-        if ui
-            .button(icons::label(icons::SCAN, "Catalogue Animations"))
-            .on_hover_text(
-                "Build Skeleton, Animation Clip, and Clip Role Map resources from existing Model clip lists.",
-            )
-            .clicked()
-        {
-            match catalogue_animation_library(&mut self.project, &self.project_dir) {
-                Ok(report) => {
-                    self.status = format!(
-                        "Catalogued animations: {} skeleton(s), {} clip(s), {} set(s), {} updated",
-                        report.skeletons_added,
-                        report.clips_added,
-                        report.sets_added,
-                        report.sets_updated + report.models_updated + report.characters_updated
-                    );
-                    if report.changed() {
-                        self.mark_dirty();
+        ui.menu_button(icons::text(icons::PLUS, 14.0), |ui| {
+            ui.set_min_width(220.0);
+
+            if ui
+                .button(icons::label(icons::WAYPOINT, "Weapon"))
+                .on_hover_text("Add a Weapon resource with a grip and hitbox.")
+                .clicked()
+            {
+                let id = self.project.add_resource(
+                    "New Weapon",
+                    ResourceData::Weapon(psxed_project::WeaponResource::default()),
+                );
+                self.replace_resource_selection(id);
+                self.clear_node_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = "Added weapon".to_string();
+                self.mark_dirty();
+                ui.close_menu();
+            }
+            if ui
+                .button(icons::label(icons::MAP_PIN, "Character Profile"))
+                .on_hover_text(
+                    "Add reusable movement, animation-role, capsule, and camera defaults for character entities.",
+                )
+                .clicked()
+            {
+                let id = self.project.add_resource(
+                    "New Character Profile",
+                    ResourceData::Character(psxed_project::CharacterResource::default()),
+                );
+                self.replace_resource_selection(id);
+                self.clear_node_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = "Added character profile".to_string();
+                self.mark_dirty();
+                ui.close_menu();
+            }
+            if ui
+                .button(icons::label(icons::PLAY, "Clip Role Map"))
+                .on_hover_text(
+                    "Add a reusable idle/walk/run/turn mapping for compatible animation clips.",
+                )
+                .clicked()
+            {
+                let id = self.project.add_resource(
+                    "New Clip Role Map",
+                    ResourceData::AnimationSet(psxed_project::AnimationSetResource::default()),
+                );
+                self.replace_resource_selection(id);
+                self.clear_node_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = "Added clip role map".to_string();
+                self.mark_dirty();
+                ui.close_menu();
+            }
+            if ui
+                .button(icons::label(icons::BLEND, "Material"))
+                .on_hover_text("Add a new Material resource.")
+                .clicked()
+            {
+                let id = self.project.add_resource(
+                    "New Material",
+                    ResourceData::Material(MaterialResource::opaque(None)),
+                );
+                self.replace_resource_selection(id);
+                self.clear_node_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = "Added material".to_string();
+                self.mark_dirty();
+                ui.close_menu();
+            }
+
+            ui.separator();
+
+            if ui
+                .button(icons::label(icons::FILE_PLUS, "Import Model"))
+                .on_hover_text(
+                    "Open the GLB/glTF/FBX model import preview with atlas, clip, and root-centering controls.",
+                )
+                .clicked()
+            {
+                self.open_model_import_dialog();
+                ui.close_menu();
+            }
+            if ui
+                .button(icons::label(icons::FILE_PLUS, "Import Texture"))
+                .on_hover_text("Open the PNG/JPG/BMP texture import preview with PSXT cook settings.")
+                .clicked()
+            {
+                self.open_texture_import_dialog();
+                ui.close_menu();
+            }
+
+            ui.separator();
+
+            if ui
+                .button(icons::label(icons::SCAN, "Catalogue Animations"))
+                .on_hover_text(
+                    "Build Skeleton, Animation Clip, and Clip Role Map resources from existing Model clip lists.",
+                )
+                .clicked()
+            {
+                match catalogue_animation_library(&mut self.project, &self.project_dir) {
+                    Ok(report) => {
+                        self.status = format!(
+                            "Catalogued animations: {} skeleton(s), {} clip(s), {} set(s), {} updated",
+                            report.skeletons_added,
+                            report.clips_added,
+                            report.sets_added,
+                            report.sets_updated + report.models_updated + report.characters_updated
+                        );
+                        if report.changed() {
+                            self.mark_dirty();
+                        }
+                    }
+                    Err(error) => {
+                        self.status = format!("Animation catalogue failed: {error}");
                     }
                 }
-                Err(error) => {
-                    self.status = format!("Animation catalogue failed: {error}");
-                }
+                ui.close_menu();
             }
-        }
-        if ui
-            .button(icons::label(icons::PLAY, "Animation Viewer"))
-            .on_hover_text("Open the central model and animation playback workspace.")
-            .clicked()
-        {
-            self.open_animation_viewer_for_current_selection();
-        }
-        if ui
-            .button(icons::label(icons::MAP_PIN, "Starter Characters"))
-            .on_hover_text(
-                "Sync the built-in player/enemy models, clip role maps, and character profiles into this project.",
-            )
-            .clicked()
-        {
-            self.push_undo();
-            match sync_starter_character_catalogue(&mut self.project, &self.project_dir) {
-                Ok(report) => {
-                    self.status = format!(
-                        "Synced starter characters: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
-                        report.resources_added,
-                        report.resources_updated,
-                        report.resources_removed,
-                        report.files_copied,
-                        report.files_removed
-                    );
-                    if report.changed() {
-                        self.mark_dirty();
+            if ui
+                .button(icons::label(icons::PLAY, "Animation Viewer"))
+                .on_hover_text("Open the central model and animation playback workspace.")
+                .clicked()
+            {
+                self.open_animation_viewer_for_current_selection();
+                ui.close_menu();
+            }
+            if ui
+                .button(icons::label(icons::MAP_PIN, "Starter Characters"))
+                .on_hover_text(
+                    "Sync the built-in player/enemy models, clip role maps, and character profiles into this project.",
+                )
+                .clicked()
+            {
+                self.push_undo();
+                match sync_starter_character_catalogue(&mut self.project, &self.project_dir) {
+                    Ok(report) => {
+                        self.status = format!(
+                            "Synced starter characters: {} added, {} updated, {} removed, {} file(s) copied, {} file(s) removed",
+                            report.resources_added,
+                            report.resources_updated,
+                            report.resources_removed,
+                            report.files_copied,
+                            report.files_removed
+                        );
+                        if report.changed() {
+                            self.mark_dirty();
+                        }
+                    }
+                    Err(error) => {
+                        self.status = format!("Starter character sync failed: {error}");
                     }
                 }
-                Err(error) => {
-                    self.status = format!("Starter character sync failed: {error}");
-                }
+                ui.close_menu();
             }
-        }
-        if ui
-            .button(icons::label(icons::FILE_PLUS, "Import Model"))
-            .on_hover_text(
-                "Open the GLB/glTF/FBX model import preview with atlas, clip, and root-centering controls.",
-            )
-            .clicked()
-        {
-            self.open_model_import_dialog();
-        }
-        if ui
-            .button(icons::label(icons::FILE_PLUS, "Import Texture"))
-            .on_hover_text("Open the PNG/JPG/BMP texture import preview with PSXT cook settings.")
-            .clicked()
-        {
-            self.open_texture_import_dialog();
-        }
-        if ui
-            .button(icons::label(icons::PLUS, "Material"))
-            .on_hover_text("Add a new Material resource.")
-            .clicked()
-        {
-            let id = self.project.add_resource(
-                "New Material",
-                ResourceData::Material(MaterialResource::opaque(None)),
-            );
-            self.replace_resource_selection(id);
-            self.clear_node_selection_state();
-            self.clear_primitive_selection_state();
-            self.clear_sector_selection();
-            self.status = "Added material".to_string();
-            self.mark_dirty();
-        }
+        })
+        .response
+        .on_hover_text("Add, import, or sync resources");
     }
 
     /// Walk every Texture resource and ensure its `.psxt` blob has
@@ -9873,9 +9897,9 @@ impl EditorWorkspace {
         let title = format!("{room_label}.room");
         egui::Frame::new()
             .fill(STUDIO_PANEL_HEADER)
-            .inner_margin(egui::Margin::symmetric(8, 5))
+            .inner_margin(panel_header_margin())
             .show(ui, |ui| {
-                ui.set_min_height(24.0);
+                ui.set_min_height(PANEL_HEADER_MIN_HEIGHT);
                 ui.horizontal(|ui| {
                     for (view, label) in [
                         (WorkspaceView::Room, title.as_str()),
@@ -13453,11 +13477,13 @@ fn draw_transform_policy_editor(
             sector_size,
             sky,
             far_vista,
+            camera,
         } => draw_world_grid_settings(
             ui,
             *sector_size,
             sky,
             far_vista,
+            camera,
             texture_options,
             nav_target,
             world_sector_size_change,
@@ -13512,6 +13538,7 @@ fn draw_world_grid_settings(
     sector_size: i32,
     sky: &mut SkySettings,
     far_vista: &mut FarVistaSettings,
+    camera: &mut WorldCameraSettings,
     texture_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
     world_sector_size_change: &mut Option<i32>,
@@ -13568,6 +13595,40 @@ fn draw_world_grid_settings(
                     .checkbox(&mut sky.match_room_fog, "Match room fog")
                     .changed();
             }
+        });
+    egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Camera"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Distance").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.distance)
+                            .speed(128.0)
+                            .range(MIN_WORLD_CAMERA_DISTANCE..=MAX_WORLD_CAMERA_DISTANCE),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Height").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.height)
+                            .speed(64.0)
+                            .range(0..=MAX_WORLD_CAMERA_HEIGHT),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Target Height").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.target_height)
+                            .speed(64.0)
+                            .range(0..=MAX_WORLD_CAMERA_HEIGHT),
+                    )
+                    .changed();
+            });
         });
     egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Far Vista"))
         .default_open(true)
@@ -13878,7 +13939,9 @@ fn draw_node_kind_editor(
             ui.weak("Entity host. Add component children for rendering, collision, interaction, lighting, or logic.");
         }
         NodeKind::World { .. } => {
-            ui.weak("Streamed-region group; holds Room children, sky, and far vista settings.");
+            ui.weak(
+                "Streamed-region group; holds Room children, camera, sky, and far vista settings.",
+            );
         }
         NodeKind::Room { grid } => {
             ui.horizontal(|ui| {
@@ -17848,6 +17911,7 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
                 sector_size: DEFAULT_WORLD_SECTOR_SIZE,
                 sky: SkySettings::default(),
                 far_vista: FarVistaSettings::default(),
+                camera: WorldCameraSettings::default(),
             },
         ),
         (
@@ -18444,7 +18508,7 @@ fn draw_resource_card(
         StrokeKind::Inside,
     );
 
-    let preview = Rect::from_min_size(rect.min + Vec2::new(12.0, 12.0), Vec2::new(96.0, 76.0));
+    let preview = Rect::from_min_size(rect.min + Vec2::new(8.0, 8.0), Vec2::new(104.0, 72.0));
     draw_resource_preview(&painter, preview, project, resource, thumb);
     painter.rect_stroke(
         preview,
@@ -18462,15 +18526,15 @@ fn draw_resource_card(
         resource_lucide_color(&resource.data, selected),
     );
     painter.text(
-        rect.center_top() + Vec2::new(0.0, 98.0),
+        rect.center_top() + Vec2::new(0.0, 88.0),
         Align2::CENTER_TOP,
-        &resource.name,
+        compact_middle(&resource.name, 16),
         FontId::monospace(12.0),
         Color32::from_rgb(225, 231, 240),
     );
     painter.text(
-        rect.center_bottom() + Vec2::new(0.0, -18.0),
-        Align2::CENTER_BOTTOM,
+        rect.center_top() + Vec2::new(0.0, 110.0),
+        Align2::CENTER_TOP,
         resource_detail(resource),
         FontId::monospace(10.0),
         STUDIO_TEXT_WEAK,
@@ -25509,6 +25573,53 @@ mod tests {
     }
 
     #[test]
+    fn primitive_gizmo_y_moves_selected_triangle_by_height_quantum() {
+        let mut project = ProjectDocument::new("primitive-gizmo-triangle-y");
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-triangle-y"), project);
+        set_gizmo_test_camera(&mut workspace);
+        let triangle = Selection::Triangle(HorizontalTriangleRef {
+            room,
+            sx: 0,
+            sz: 0,
+            surface: HorizontalSurfaceKind::Floor,
+            index: HorizontalTriangleIndex::A,
+            corners: [Corner::NW, Corner::NE, Corner::SE],
+        });
+        workspace.replace_primitive_selection(triangle);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let y_axis = projected_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
+        let unit = (y_axis.end - y_axis.start).normalized();
+        assert!(workspace.begin_primitive_gizmo_drag(
+            PrimitiveGizmoAxis::Y,
+            viewport,
+            y_axis.start
+        ));
+        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 8.0);
+        workspace.end_primitive_gizmo_drag();
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let floor = grid.sector(0, 0).unwrap().floor.as_ref().unwrap();
+        assert_eq!(floor.heights, [0; 4]);
+        assert_eq!(
+            floor.triangle_heights(HorizontalTriangleIndex::A.idx()),
+            [HEIGHT_QUANTUM; 3]
+        );
+        assert_eq!(
+            floor.triangle_heights(HorizontalTriangleIndex::B.idx()),
+            [0; 3]
+        );
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
     fn primitive_gizmo_x_moves_selected_face_one_cell() {
         let mut project = ProjectDocument::new("primitive-gizmo-x");
         let mut grid = WorldGrid::empty(1, 1, 1024);
@@ -26502,6 +26613,7 @@ mod tests {
                 sector_size: 1536,
                 sky: SkySettings::default(),
                 far_vista: FarVistaSettings::default(),
+                camera: WorldCameraSettings::default(),
             },
         );
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
