@@ -625,6 +625,8 @@ struct ActiveVisibleCellCache {
     room: RoomIndex,
     anchor_x: i32,
     anchor_z: i32,
+    view_sin_key: i16,
+    view_cos_key: i16,
     rejected_global: u16,
     first: u16,
     count: u16,
@@ -637,6 +639,8 @@ impl ActiveVisibleCellCache {
         room: RoomIndex::ZERO,
         anchor_x: 0,
         anchor_z: 0,
+        view_sin_key: 0,
+        view_cos_key: 0,
         rejected_global: 0,
         first: 0,
         count: 0,
@@ -661,6 +665,8 @@ struct Playtest {
     active_room_candidates: u16,
     active_room_cache_skips: u16,
     active_room_anchor: RoomPoint,
+    active_room_view_sin_key: i16,
+    active_room_view_cos_key: i16,
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
@@ -733,6 +739,8 @@ impl Playtest {
             active_room_candidates: 0,
             active_room_cache_skips: 0,
             active_room_anchor: RoomPoint::ZERO,
+            active_room_view_sin_key: 0,
+            active_room_view_cos_key: 0,
             room_index: RoomIndex::ZERO,
             materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
             material_count: 0,
@@ -854,6 +862,7 @@ impl Scene for Playtest {
             if ctx.is_held(button::DOWN) {
                 self.orbit_radius = (self.orbit_radius + button_radius_step).min(CAMERA_RADIUS_MAX);
             }
+            self.refresh_active_room_window_if_needed();
             return;
         }
 
@@ -976,7 +985,12 @@ impl Scene for Playtest {
             #[cfg(feature = "world-grid-visible")]
             let mut room_stats_total = GridVisibilityStats::default();
 
-            for active_slot in 0..MAX_ACTIVE_ROOMS {
+            let active_draw_order = active_room_draw_order(&self.active_rooms, camera);
+            for &active_slot in &active_draw_order {
+                if active_slot == INVALID_ACTIVE_ROOM_SLOT {
+                    continue;
+                }
+                let active_slot = active_slot as usize;
                 let Some(active) = self.active_rooms[active_slot] else {
                     continue;
                 };
@@ -1026,6 +1040,7 @@ impl Scene for Playtest {
                             active.offset_x,
                             active.offset_z,
                             global_visibility_anchor,
+                            room_camera,
                         ) {
                         room_range_culled_cells =
                             room_range_culled_cells.saturating_add(range_culled as u32);
@@ -1282,7 +1297,13 @@ impl Scene for Playtest {
 
             if self.character.is_some() {
                 let player = self.motor.position();
-                for active in self.active_rooms.iter().flatten().copied() {
+                for &active_slot in &active_draw_order {
+                    if active_slot == INVALID_ACTIVE_ROOM_SLOT {
+                        continue;
+                    }
+                    let Some(active) = self.active_rooms[active_slot as usize] else {
+                        continue;
+                    };
                     let room_camera = camera_for_room(camera, active);
                     let Some(player_depth) = player_actor_depth_for_room(
                         active,
@@ -1685,6 +1706,24 @@ impl Playtest {
             .any(|room| room.index != self.room_index)
     }
 
+    fn active_room_selection_view(&self) -> ActiveRoomView {
+        if self.free_orbit {
+            let yaw = self.orbit_yaw;
+            let position = RoomPoint::new(
+                self.spawn
+                    .x
+                    .saturating_add(yaw.sin().mul_i32(self.orbit_radius)),
+                self.spawn.y,
+                self.spawn
+                    .z
+                    .saturating_add(yaw.cos().mul_i32(self.orbit_radius)),
+            );
+            ActiveRoomView::new(position, yaw)
+        } else {
+            ActiveRoomView::new(self.camera.position(), self.camera.yaw())
+        }
+    }
+
     fn load_active_room_window(&mut self) {
         telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
         telemetry::counter(telemetry::counter::ROOM_WINDOW_REBUILDS, 1);
@@ -1709,6 +1748,9 @@ impl Playtest {
             return;
         };
         let player = self.motor.position();
+        let view = self.active_room_selection_view();
+        self.active_room_view_sin_key = view.sin_key;
+        self.active_room_view_cos_key = view.cos_key;
 
         let mut next_slot = 0usize;
         if let Some(active) = build_active_room(current_index, current_record, current_record) {
@@ -1722,7 +1764,7 @@ impl Playtest {
 
         if !ROOM_CHUNKS.is_empty() {
             self.active_room_candidates =
-                count_spatial_chunk_candidates(current_index, current_record, player);
+                count_spatial_chunk_candidates(current_index, current_record, player, view);
             let mut skipped_rooms = [INVALID_ROOM_INDEX; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES];
             let mut skipped_count = 0usize;
             while next_slot < MAX_ACTIVE_ROOMS {
@@ -1730,6 +1772,7 @@ impl Playtest {
                     current_index,
                     current_record,
                     player,
+                    view,
                     &self.active_rooms,
                     &skipped_rooms[..skipped_count],
                 ) else {
@@ -1819,13 +1862,19 @@ impl Playtest {
         let sector_size = record.sector_size.max(1);
         let threshold = sector_size.saturating_mul(ACTIVE_ROOM_REFRESH_SECTORS.max(1));
         let player = self.motor.position();
-        if point_xz_distance_sq(player, self.active_room_anchor)
-            < (threshold as u64).saturating_mul(threshold as u64)
+        let view = self.active_room_selection_view();
+        let view_changed = self.active_room_view_sin_key != view.sin_key
+            || self.active_room_view_cos_key != view.cos_key;
+        if !view_changed
+            && point_xz_distance_sq(player, self.active_room_anchor)
+                < (threshold as u64).saturating_mul(threshold as u64)
         {
             return;
         }
-        if self.active_room_window_matches_selection(self.room_index, record, player) {
+        if self.active_room_window_matches_selection(self.room_index, record, player, view) {
             self.active_room_anchor = player;
+            self.active_room_view_sin_key = view.sin_key;
+            self.active_room_view_cos_key = view.cos_key;
         } else {
             self.load_active_room_window();
         }
@@ -1836,6 +1885,7 @@ impl Playtest {
         current_index: RoomIndex,
         current_record: &LevelRoomRecord,
         player: RoomPoint,
+        view: ActiveRoomView,
     ) -> bool {
         if ROOM_CHUNKS.is_empty() || self.active_rooms[0].is_none() {
             return false;
@@ -1849,6 +1899,7 @@ impl Playtest {
                 current_index,
                 current_record,
                 player,
+                view,
                 &selected[..selected_count],
             ) else {
                 break;
@@ -2653,15 +2704,19 @@ impl Playtest {
         room_offset_x: i32,
         room_offset_z: i32,
         global_anchor: RoomPoint,
+        camera: WorldCamera,
     ) -> Option<(&[GridVisibleCell], u16)> {
         let sector_size = room.sector_size().max(1);
         let anchor_x = grid_cell_for_room(anchor.x, sector_size).clamp(0, room.width() as i32 - 1);
         let anchor_z = grid_cell_for_room(anchor.z, sector_size).clamp(0, room.depth() as i32 - 1);
+        let (view_sin_key, view_cos_key) = visible_cell_view_keys(camera);
         let cache = *self.visible_cell_caches.get(active_slot)?;
         if cache.ready
             && cache.room == room_index
             && cache.anchor_x == anchor_x
             && cache.anchor_z == anchor_z
+            && cache.view_sin_key == view_sin_key
+            && cache.view_cos_key == view_cos_key
         {
             let first = cache.first as usize;
             let count = cache.count as usize;
@@ -2687,6 +2742,7 @@ impl Playtest {
                 room_offset_z,
                 sector_size,
                 global_anchor,
+                camera,
                 cells,
             )
         }?;
@@ -2704,6 +2760,7 @@ impl Playtest {
                     room_offset_z,
                     sector_size,
                     global_anchor,
+                    camera,
                     cells,
                 )
             }?;
@@ -2716,6 +2773,8 @@ impl Playtest {
             room: room_index,
             anchor_x,
             anchor_z,
+            view_sin_key,
+            view_cos_key,
             rejected_global,
             first: first as u16,
             count: count as u16,
@@ -2737,6 +2796,7 @@ fn fill_precomputed_visible_cells(
     room_offset_z: i32,
     sector_size: i32,
     global_anchor: RoomPoint,
+    camera: WorldCamera,
     out: &mut [GridVisibleCell],
 ) -> Option<(usize, u16)> {
     let room_visibility = ROOM_VISIBILITY
@@ -2766,28 +2826,11 @@ fn fill_precomputed_visible_cells(
     visited[anchor_index] = true;
     queue[0] = anchor_index;
 
-    let mut written = 0usize;
-    let mut rejected_global = 0u16;
     while read < queued {
         let cell_index = queue[read];
         let distance = distances[read];
-        read += 1;
         let cell = room_cells[cell_index];
-        if !visibility_cell_in_global_range(
-            cell.x,
-            cell.z,
-            sector_size,
-            room_offset_x,
-            room_offset_z,
-            global_anchor,
-        ) {
-            rejected_global = rejected_global.saturating_add(1);
-            selected[cell_index] = true;
-        } else {
-            out[written] = GridVisibleCell::new(cell.x, cell.z, cell.min_y, cell.max_y);
-            written += 1;
-            selected[cell_index] = true;
-        }
+        read += 1;
         if distance >= ROOM_GRID_VISIBILITY_RADIUS {
             continue;
         }
@@ -2816,12 +2859,21 @@ fn fill_precomputed_visible_cells(
         }
     }
 
+    for queue_slot in 0..queued {
+        let cell_index = queue[queue_slot];
+        selected[cell_index] = true;
+    }
+
     // Visibility traversal walks through open cell edges only, but cooked
     // walls can be owned by the cell on the closed side of an edge. Emit a
-    // one-cell non-traversing shell around the visited set so boundary walls
-    // are present without opening the traversal through occluders.
-    for cell_index in 0..queued {
-        let cell = room_cells[queue[cell_index]];
+    // one-cell non-traversing shell in the same reverse-BFS pass so boundary
+    // walls are present without opening traversal through occluders.
+    let mut written = 0usize;
+    let mut rejected_global = 0u16;
+    let mut queue_slot = queued;
+    while queue_slot != 0 {
+        queue_slot -= 1;
+        let cell = room_cells[queue[queue_slot]];
         for edge in RUNTIME_VISIBILITY_EDGES {
             let Some(neighbour_index) = runtime_visibility_neighbour(
                 &lookup,
@@ -2834,29 +2886,111 @@ fn fill_precomputed_visible_cells(
             ) else {
                 continue;
             };
-            if selected[neighbour_index] || written >= count {
+            if selected[neighbour_index] {
                 continue;
             }
-            let neighbour = room_cells[neighbour_index];
-            if !visibility_cell_in_global_range(
-                neighbour.x,
-                neighbour.z,
+            selected[neighbour_index] = true;
+            write_visible_cell_candidate(
+                room_cells[neighbour_index],
                 sector_size,
                 room_offset_x,
                 room_offset_z,
                 global_anchor,
-            ) {
-                rejected_global = rejected_global.saturating_add(1);
-                selected[neighbour_index] = true;
-                continue;
-            }
-            out[written] =
-                GridVisibleCell::new(neighbour.x, neighbour.z, neighbour.min_y, neighbour.max_y);
-            written += 1;
-            selected[neighbour_index] = true;
+                out,
+                &mut written,
+                &mut rejected_global,
+            );
         }
+        write_visible_cell_candidate(
+            cell,
+            sector_size,
+            room_offset_x,
+            room_offset_z,
+            global_anchor,
+            out,
+            &mut written,
+            &mut rejected_global,
+        );
     }
+    sort_visible_cells_for_camera(&mut out[..written], camera, sector_size);
     Some((written, rejected_global))
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn visible_cell_view_keys(camera: WorldCamera) -> (i16, i16) {
+    (
+        (camera.sin_yaw.raw() / 256) as i16,
+        (camera.cos_yaw.raw() / 256) as i16,
+    )
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn sort_visible_cells_for_camera(
+    cells: &mut [GridVisibleCell],
+    camera: WorldCamera,
+    sector_size: i32,
+) {
+    let mut gap = cells.len() / 2;
+    while gap > 0 {
+        let mut i = gap;
+        while i < cells.len() {
+            let cell = cells[i];
+            let depth = visible_cell_camera_depth(cell, camera, sector_size);
+            let mut j = i;
+            while j >= gap && visible_cell_camera_depth(cells[j - gap], camera, sector_size) < depth
+            {
+                cells[j] = cells[j - gap];
+                j -= gap;
+            }
+            cells[j] = cell;
+            i += 1;
+        }
+        gap /= 2;
+    }
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn visible_cell_camera_depth(cell: GridVisibleCell, camera: WorldCamera, sector_size: i32) -> i32 {
+    let half = sector_size / 2;
+    let center = WorldVertex::new(
+        (cell.x as i32)
+            .saturating_mul(sector_size)
+            .saturating_add(half),
+        cell.min_y.saturating_add(cell.max_y) / 2,
+        (cell.z as i32)
+            .saturating_mul(sector_size)
+            .saturating_add(half),
+    );
+    camera.view_vertex(center).z
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn write_visible_cell_candidate(
+    cell: psx_level::LevelVisibilityCellRecord,
+    sector_size: i32,
+    room_offset_x: i32,
+    room_offset_z: i32,
+    global_anchor: RoomPoint,
+    out: &mut [GridVisibleCell],
+    written: &mut usize,
+    rejected_global: &mut u16,
+) {
+    if !visibility_cell_in_global_range(
+        cell.x,
+        cell.z,
+        sector_size,
+        room_offset_x,
+        room_offset_z,
+        global_anchor,
+    ) {
+        *rejected_global = rejected_global.saturating_add(1);
+        return;
+    }
+    if *written >= out.len() {
+        return;
+    }
+    out[*written] = GridVisibleCell::new(cell.x, cell.z, cell.min_y, cell.max_y);
+    *written += 1;
 }
 
 #[cfg(feature = "world-grid-visible")]
@@ -2911,6 +3045,48 @@ const RUNTIME_VISIBILITY_EDGES: [RuntimeVisibilityEdge; 4] = [
         dz: 0,
     },
 ];
+
+const INVALID_ACTIVE_ROOM_SLOT: u8 = u8::MAX;
+
+fn active_room_draw_order(
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    camera: WorldCamera,
+) -> [u8; MAX_ACTIVE_ROOMS] {
+    let mut order = [INVALID_ACTIVE_ROOM_SLOT; MAX_ACTIVE_ROOMS];
+    let mut depths = [i32::MIN; MAX_ACTIVE_ROOMS];
+    let mut count = 0usize;
+    let mut slot = 0usize;
+    while slot < MAX_ACTIVE_ROOMS {
+        if let Some(active) = active_rooms[slot] {
+            let depth = active_room_sort_depth(active, camera);
+            let mut insert = count;
+            while insert > 0 && depth > depths[insert - 1] {
+                depths[insert] = depths[insert - 1];
+                order[insert] = order[insert - 1];
+                insert -= 1;
+            }
+            depths[insert] = depth;
+            order[insert] = slot as u8;
+            count += 1;
+        }
+        slot += 1;
+    }
+    order
+}
+
+fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32 {
+    let room = active.room.render();
+    let sector_size = room.sector_size().max(1);
+    let center_x = active
+        .offset_x
+        .saturating_add((room.width() as i32).saturating_mul(sector_size) / 2);
+    let center_z = active
+        .offset_z
+        .saturating_add((room.depth() as i32).saturating_mul(sector_size) / 2);
+    camera
+        .view_vertex(WorldVertex::new(center_x, 0, center_z))
+        .z
+}
 
 #[cfg(feature = "world-grid-visible")]
 fn runtime_visibility_neighbour(
@@ -3189,15 +3365,39 @@ fn room_origin_z(record: &LevelRoomRecord) -> i32 {
     record.origin_z.saturating_mul(record.sector_size)
 }
 
+#[derive(Copy, Clone)]
+struct ActiveRoomView {
+    position: RoomPoint,
+    sin_yaw: i32,
+    cos_yaw: i32,
+    sin_key: i16,
+    cos_key: i16,
+}
+
+impl ActiveRoomView {
+    fn new(position: RoomPoint, yaw: Angle) -> Self {
+        let sin_yaw = yaw.sin().raw();
+        let cos_yaw = yaw.cos().raw();
+        Self {
+            position,
+            sin_yaw,
+            cos_yaw,
+            sin_key: (sin_yaw / 512) as i16,
+            cos_key: (cos_yaw / 512) as i16,
+        }
+    }
+}
+
 fn count_spatial_chunk_candidates(
     current_index: RoomIndex,
     current_record: &LevelRoomRecord,
     player: RoomPoint,
+    view: ActiveRoomView,
 ) -> u16 {
     let mut count = 0u16;
     for chunk in ROOM_CHUNKS {
         if chunk.room == current_index
-            || chunk_activation_score(*chunk, current_index, current_record, player).is_none()
+            || chunk_activation_score(*chunk, current_index, current_record, player, view).is_none()
         {
             continue;
         }
@@ -3210,6 +3410,7 @@ fn best_spatial_chunk_candidate(
     current_index: RoomIndex,
     current_record: &LevelRoomRecord,
     player: RoomPoint,
+    view: ActiveRoomView,
     active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
     skipped_rooms: &[RoomIndex],
 ) -> Option<RoomIndex> {
@@ -3222,7 +3423,8 @@ fn best_spatial_chunk_candidate(
         {
             continue;
         }
-        let Some(score) = chunk_activation_score(*chunk, current_index, current_record, player)
+        let Some(score) =
+            chunk_activation_score(*chunk, current_index, current_record, player, view)
         else {
             continue;
         };
@@ -3238,6 +3440,7 @@ fn best_spatial_chunk_candidate_from_indices(
     current_index: RoomIndex,
     current_record: &LevelRoomRecord,
     player: RoomPoint,
+    view: ActiveRoomView,
     selected_rooms: &[RoomIndex],
 ) -> Option<RoomIndex> {
     let mut best = None;
@@ -3246,7 +3449,8 @@ fn best_spatial_chunk_candidate_from_indices(
         if chunk.room == current_index || selected_rooms.contains(&chunk.room) {
             continue;
         }
-        let Some(score) = chunk_activation_score(*chunk, current_index, current_record, player)
+        let Some(score) =
+            chunk_activation_score(*chunk, current_index, current_record, player, view)
         else {
             continue;
         };
@@ -3261,17 +3465,27 @@ fn best_spatial_chunk_candidate_from_indices(
 #[derive(Copy, Clone)]
 struct ChunkActivationScore {
     tier: u8,
+    view_tier: u8,
+    ray_distance: u64,
     distance: u64,
 }
 
 impl ChunkActivationScore {
     const WORST: Self = Self {
         tier: u8::MAX,
+        view_tier: u8::MAX,
+        ray_distance: u64::MAX,
         distance: u64::MAX,
     };
 
     fn better_than(self, other: Self) -> bool {
-        self.tier < other.tier || (self.tier == other.tier && self.distance < other.distance)
+        self.tier < other.tier
+            || (self.tier == other.tier
+                && (self.view_tier < other.view_tier
+                    || (self.view_tier == other.view_tier
+                        && (self.ray_distance < other.ray_distance
+                            || (self.ray_distance == other.ray_distance
+                                && self.distance < other.distance)))))
     }
 }
 
@@ -3280,6 +3494,7 @@ fn chunk_activation_score(
     current_index: RoomIndex,
     current_record: &LevelRoomRecord,
     player: RoomPoint,
+    view: ActiveRoomView,
 ) -> Option<ChunkActivationScore> {
     if !chunk_within_activation_range(chunk, current_record, player) {
         return None;
@@ -3296,10 +3511,60 @@ fn chunk_activation_score(
         return None;
     }
     let distance = chunk_distance_sq_current_space(chunk, current_record, player);
+    let (view_tier, ray_distance) = chunk_view_score_current_space(chunk, current_record, view);
     Some(ChunkActivationScore {
         tier: if same_authored { 0 } else { 1 },
+        view_tier,
+        ray_distance,
         distance,
     })
+}
+
+fn chunk_view_score_current_space(
+    chunk: LevelChunkRecord,
+    current_record: &LevelRoomRecord,
+    view: ActiveRoomView,
+) -> (u8, u64) {
+    let (x0, x1, z0, z1) = chunk_bounds_current_space(chunk, current_record);
+    let center_x = x0.saturating_add((x1.saturating_sub(x0)) / 2);
+    let center_z = z0.saturating_add((z1.saturating_sub(z0)) / 2);
+    let radius = (x1.saturating_sub(x0).abs()).max(z1.saturating_sub(z0).abs()) / 2;
+    let dx = center_x.saturating_sub(view.position.x) as i64;
+    let dz = center_z.saturating_sub(view.position.z) as i64;
+    let forward_x = -(view.sin_yaw as i64);
+    let forward_z = -(view.cos_yaw as i64);
+    let depth = (dx
+        .saturating_mul(forward_x)
+        .saturating_add(dz.saturating_mul(forward_z)))
+        >> 12;
+    let lateral = (dx
+        .saturating_mul(view.cos_yaw as i64)
+        .saturating_sub(dz.saturating_mul(view.sin_yaw as i64))
+        >> 12)
+        .unsigned_abs();
+    let radius = radius.max(0) as u64;
+    let lateral_gap = lateral.saturating_sub(radius);
+    let behind_gap = if depth < 0 { (-depth) as u64 } else { 0 };
+    let ray_distance = lateral_gap
+        .saturating_mul(lateral_gap)
+        .saturating_add(behind_gap.saturating_mul(behind_gap));
+    let cone_limit = (depth.max(0) as u64)
+        .saturating_add(radius)
+        .saturating_add((current_record.sector_size.max(1) as u64).saturating_mul(2));
+    let view_tier = if depth.saturating_add(radius as i64) < 0 {
+        3
+    } else if lateral <= cone_limit {
+        0
+    } else if ray_distance
+        <= (current_record.sector_size.max(1) as u64)
+            .saturating_mul(current_record.sector_size.max(1) as u64)
+            .saturating_mul(16)
+    {
+        1
+    } else {
+        2
+    };
+    (view_tier, ray_distance)
 }
 
 fn authored_room_for_chunk(index: RoomIndex) -> Option<u32> {
