@@ -1642,12 +1642,16 @@ pub const DEFAULT_WORLD_CAMERA_DISTANCE: i32 = 2700;
 pub const DEFAULT_WORLD_CAMERA_HEIGHT: i32 = 1280;
 /// Default look-at height above the player origin.
 pub const DEFAULT_WORLD_CAMERA_TARGET_HEIGHT: i32 = 640;
+/// Default minimum camera origin height above the sampled floor.
+pub const DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE: i32 = HEIGHT_QUANTUM;
 /// Minimum authored third-person camera distance.
 pub const MIN_WORLD_CAMERA_DISTANCE: i32 = 384;
 /// Maximum authored third-person camera distance.
 pub const MAX_WORLD_CAMERA_DISTANCE: i32 = 16_384;
 /// Maximum authored camera vertical offset.
 pub const MAX_WORLD_CAMERA_HEIGHT: i32 = 16_384;
+/// Maximum authored minimum floor clearance for the third-person camera.
+pub const MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE: i32 = 4_096;
 /// Default wall span when no ceiling is authored above the edge.
 pub const DEFAULT_WALL_HEIGHT_SECTORS: i32 = 2;
 /// Minimum authored sector size.
@@ -1695,6 +1699,10 @@ fn default_world_camera_height() -> i32 {
 
 fn default_world_camera_target_height() -> i32 {
     DEFAULT_WORLD_CAMERA_TARGET_HEIGHT
+}
+
+fn default_world_camera_min_floor_clearance() -> i32 {
+    DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE
 }
 
 fn default_wall_height_for_sector_size(sector_size: i32) -> i32 {
@@ -2070,6 +2078,9 @@ pub struct WorldCameraSettings {
     /// Look-at height above the player origin.
     #[serde(default = "default_world_camera_target_height")]
     pub target_height: i32,
+    /// Minimum camera origin height above the sampled floor.
+    #[serde(default = "default_world_camera_min_floor_clearance")]
+    pub min_floor_clearance: i32,
 }
 
 impl WorldCameraSettings {
@@ -2081,6 +2092,9 @@ impl WorldCameraSettings {
                 .clamp(MIN_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_DISTANCE),
             height: self.height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
             target_height: self.target_height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
+            min_floor_clearance: self
+                .min_floor_clearance
+                .clamp(0, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE),
         }
     }
 }
@@ -2091,6 +2105,7 @@ impl Default for WorldCameraSettings {
             distance: default_world_camera_distance(),
             height: default_world_camera_height(),
             target_height: default_world_camera_target_height(),
+            min_floor_clearance: default_world_camera_min_floor_clearance(),
         }
     }
 }
@@ -5683,6 +5698,7 @@ mod tests {
                 distance: 1,
                 height: MAX_WORLD_CAMERA_HEIGHT + 1,
                 target_height: -1,
+                min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE + 1,
             };
         }
 
@@ -5694,6 +5710,7 @@ mod tests {
                 distance: MIN_WORLD_CAMERA_DISTANCE,
                 height: MAX_WORLD_CAMERA_HEIGHT,
                 target_height: 0,
+                min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
             })
         );
     }
@@ -6393,7 +6410,7 @@ mod tests {
         let legacy = DEFAULT_PROJECT_RON
             .replace(
                 &format!(
-                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: true, texture: None, texture_panels: (Some((116)), Some((117)), Some((118)), Some((119)), Some((120)), Some((121)), Some((122)), Some((123)), Some((124)), Some((125)), Some((126)), Some((127)), Some((128)), Some((129)), Some((130)), Some((131))), radius: 18000, height: 8192, vertical_offset: -2048, segments: 16, rotation_degrees: 0, tint: (128, 128, 128), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640)),"
+                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: true, texture: None, texture_panels: (Some((116)), Some((117)), Some((118)), Some((119)), Some((120)), Some((121)), Some((122)), Some((123)), Some((124)), Some((125)), Some((126)), Some((127)), None, None, None, None), radius: 18000, height: 8192, vertical_offset: -2048, segments: 12, rotation_degrees: 0, tint: (128, 128, 128), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640)),"
                 ),
                 "kind: World,",
             )

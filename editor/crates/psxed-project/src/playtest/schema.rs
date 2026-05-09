@@ -149,6 +149,8 @@ pub struct PlaytestCamera {
     pub height: i32,
     /// Look-at height above the player origin.
     pub target_height: i32,
+    /// Minimum camera origin height above the sampled floor.
+    pub min_floor_clearance: i32,
 }
 
 /// Per-room slice into generated visibility cells.

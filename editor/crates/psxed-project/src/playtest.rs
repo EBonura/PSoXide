@@ -40,7 +40,7 @@ use crate::world_cook::{
 };
 use crate::{
     spatial, AnimationRole, NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode,
-    WorldGrid, MAX_ROOM_BYTES,
+    WorldGrid, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -292,6 +292,10 @@ pub fn build_package(
                     resolved_far_vista
                         .texture_panels
                         .iter()
+                        .take(active_far_vista_panel_count(
+                            &resolved_far_vista.texture_panels,
+                            resolved_far_vista.segments,
+                        ))
                         .enumerate()
                         .map(|(panel_index, texture_id)| {
                             texture_id.and_then(|texture_id| {
@@ -381,6 +385,7 @@ pub fn build_package(
                     distance: resolved_camera.distance,
                     height: resolved_camera.height,
                     target_height: resolved_camera.target_height,
+                    min_floor_clearance: resolved_camera.min_floor_clearance,
                 },
                 flags: if chunk_grid.fog_enabled {
                     psx_level::room_flags::FOG_ENABLED
@@ -896,6 +901,19 @@ pub fn build_package(
         }),
         report,
     )
+}
+
+fn active_far_vista_panel_count(
+    texture_panels: &[Option<ResourceId>; FAR_VISTA_TEXTURE_PANEL_COUNT],
+    segments: u8,
+) -> usize {
+    texture_panels
+        .iter()
+        .rposition(Option::is_some)
+        .map(|index| index + 1)
+        .unwrap_or(0)
+        .min(segments as usize)
+        .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
 }
 
 fn cook_far_vista_texture_asset(
@@ -2788,7 +2806,7 @@ mod tests {
     use super::*;
     use crate::{
         NodeKind, ProjectDocument, DEFAULT_WORLD_CAMERA_DISTANCE, DEFAULT_WORLD_CAMERA_HEIGHT,
-        DEFAULT_WORLD_CAMERA_TARGET_HEIGHT,
+        DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, DEFAULT_WORLD_CAMERA_TARGET_HEIGHT,
     };
 
     fn starter_project_root() -> PathBuf {
@@ -3029,8 +3047,8 @@ mod tests {
             package.rooms[0].far_vista.flags & far_vista_flags::TEXTURED,
             far_vista_flags::TEXTURED
         );
-        assert_eq!(package.rooms[0].far_vista.segments, 16);
-        assert_eq!(package.rooms[0].far_vista.texture_asset_indices.len(), 16);
+        assert_eq!(package.rooms[0].far_vista.segments, 12);
+        assert_eq!(package.rooms[0].far_vista.texture_asset_indices.len(), 12);
         assert_eq!(
             package.rooms[0].camera.distance,
             DEFAULT_WORLD_CAMERA_DISTANCE
@@ -3039,6 +3057,10 @@ mod tests {
         assert_eq!(
             package.rooms[0].camera.target_height,
             DEFAULT_WORLD_CAMERA_TARGET_HEIGHT
+        );
+        assert_eq!(
+            package.rooms[0].camera.min_floor_clearance,
+            DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE
         );
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
@@ -3396,12 +3418,12 @@ mod tests {
 
     #[test]
     fn starter_project_emits_expected_texture_assets() {
-        // Starter currently cooks three room textures, sixteen
+        // Starter currently cooks three room textures, twelve
         // far-vista panels, and the obsidian wraith atlas.
         let project = project_with_one_room();
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
-        assert_eq!(package.texture_asset_count(), 20);
+        assert_eq!(package.texture_asset_count(), 16);
     }
 
     #[test]

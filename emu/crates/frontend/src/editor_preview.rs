@@ -88,6 +88,11 @@ const SCREEN_CX: i32 = SCREEN_W / 2;
 const SCREEN_CY: i32 = SCREEN_H / 2;
 /// Projection-plane distance (focal length). Bigger = narrower FOV.
 const PROJ_H: i32 = 320;
+const PSX_VERTEX_MIN: i16 = -1024;
+const PSX_VERTEX_MAX: i16 = 1023;
+const PSX_TRI_MAX_DX: i32 = 1023;
+const PSX_TRI_MAX_DY: i32 = 511;
+const MAX_PREVIEW_HW_SPLIT_DEPTH: u8 = 5;
 const GRID_TILE_UV: u8 = 64;
 const PREVIEW_FLOOR_UVS: [(u8, u8); 4] = [
     (0, 0),
@@ -3424,10 +3429,26 @@ fn far_vista_texture_for_segment(
     if !assigned_panels {
         return vista.texture;
     }
-    let panel_count = vista.texture_panels.len();
+    let panel_count = active_far_vista_panel_count(&vista.texture_panels, segments);
+    if panel_count == 0 {
+        return None;
+    }
     let panel_index = ((segment as usize) * panel_count / (segments as usize).max(1))
         .min(panel_count.saturating_sub(1));
     vista.texture_panels[panel_index]
+}
+
+fn active_far_vista_panel_count(
+    texture_panels: &[Option<ResourceId>; psxed_project::FAR_VISTA_TEXTURE_PANEL_COUNT],
+    segments: u8,
+) -> usize {
+    texture_panels
+        .iter()
+        .rposition(Option::is_some)
+        .map(|index| index + 1)
+        .unwrap_or(0)
+        .min(segments as usize)
+        .min(psxed_project::FAR_VISTA_TEXTURE_PANEL_COUNT)
 }
 
 fn push_far_vista_textured_quad(
@@ -3518,6 +3539,123 @@ fn projected_area(p: [psx_gte::scene::Projected; 3]) -> i32 {
     ax * by - ay * bx
 }
 
+fn preview_projected_triangle_hw_safe(p: [psx_gte::scene::Projected; 3]) -> bool {
+    let min_x = p[0].sx.min(p[1].sx).min(p[2].sx);
+    let max_x = p[0].sx.max(p[1].sx).max(p[2].sx);
+    let min_y = p[0].sy.min(p[1].sy).min(p[2].sy);
+    let max_y = p[0].sy.max(p[1].sy).max(p[2].sy);
+    min_x >= PSX_VERTEX_MIN
+        && max_x <= PSX_VERTEX_MAX
+        && min_y >= PSX_VERTEX_MIN
+        && max_y <= PSX_VERTEX_MAX
+        && ((max_x as i32) - (min_x as i32)) <= PSX_TRI_MAX_DX
+        && ((max_y as i32) - (min_y as i32)) <= PSX_TRI_MAX_DY
+}
+
+fn clamp_preview_projected_triangle(
+    p: [psx_gte::scene::Projected; 3],
+) -> [psx_gte::scene::Projected; 3] {
+    [
+        clamp_preview_projected(p[0]),
+        clamp_preview_projected(p[1]),
+        clamp_preview_projected(p[2]),
+    ]
+}
+
+fn clamp_preview_projected(p: psx_gte::scene::Projected) -> psx_gte::scene::Projected {
+    psx_gte::scene::Projected {
+        sx: p.sx.clamp(PSX_VERTEX_MIN, PSX_VERTEX_MAX),
+        sy: p.sy.clamp(PSX_VERTEX_MIN, PSX_VERTEX_MAX),
+        sz: p.sz,
+    }
+}
+
+fn split_preview_projected_triangle(
+    p: [psx_gte::scene::Projected; 3],
+    uvs: [(u8, u8); 3],
+) -> (
+    [psx_gte::scene::Projected; 3],
+    [(u8, u8); 3],
+    [psx_gte::scene::Projected; 3],
+    [(u8, u8); 3],
+) {
+    match largest_preview_projected_edge(p) {
+        0 => {
+            let mid = midpoint_projected(p[0], p[1]);
+            let uv = midpoint_uv(uvs[0], uvs[1]);
+            (
+                [p[0], mid, p[2]],
+                [uvs[0], uv, uvs[2]],
+                [mid, p[1], p[2]],
+                [uv, uvs[1], uvs[2]],
+            )
+        }
+        1 => {
+            let mid = midpoint_projected(p[1], p[2]);
+            let uv = midpoint_uv(uvs[1], uvs[2]);
+            (
+                [p[0], p[1], mid],
+                [uvs[0], uvs[1], uv],
+                [p[0], mid, p[2]],
+                [uvs[0], uv, uvs[2]],
+            )
+        }
+        _ => {
+            let mid = midpoint_projected(p[2], p[0]);
+            let uv = midpoint_uv(uvs[2], uvs[0]);
+            (
+                [p[0], p[1], mid],
+                [uvs[0], uvs[1], uv],
+                [mid, p[1], p[2]],
+                [uv, uvs[1], uvs[2]],
+            )
+        }
+    }
+}
+
+fn largest_preview_projected_edge(p: [psx_gte::scene::Projected; 3]) -> usize {
+    let mut edge = 0;
+    let mut score = preview_edge_split_score(p[0], p[1]);
+    let score_1 = preview_edge_split_score(p[1], p[2]);
+    if score_1 > score {
+        edge = 1;
+        score = score_1;
+    }
+    let score_2 = preview_edge_split_score(p[2], p[0]);
+    if score_2 > score {
+        edge = 2;
+    }
+    edge
+}
+
+fn preview_edge_split_score(a: psx_gte::scene::Projected, b: psx_gte::scene::Projected) -> i32 {
+    let dx = ((a.sx as i32) - (b.sx as i32)).abs();
+    let dy = ((a.sy as i32) - (b.sy as i32)).abs();
+    dx.max(dy.saturating_mul(2))
+}
+
+fn midpoint_projected(
+    a: psx_gte::scene::Projected,
+    b: psx_gte::scene::Projected,
+) -> psx_gte::scene::Projected {
+    psx_gte::scene::Projected {
+        sx: midpoint_i16(a.sx, b.sx),
+        sy: midpoint_i16(a.sy, b.sy),
+        sz: (((a.sz as u32) + (b.sz as u32)) / 2) as u16,
+    }
+}
+
+fn midpoint_i16(a: i16, b: i16) -> i16 {
+    (a as i32 + ((b as i32) - (a as i32)) / 2) as i16
+}
+
+fn midpoint_uv(a: (u8, u8), b: (u8, u8)) -> (u8, u8) {
+    (
+        (((a.0 as u16) + (b.0 as u16)) / 2) as u8,
+        (((a.1 as u16) + (b.1 as u16)) / 2) as u8,
+    )
+}
+
 /// Compose a [`TriTextured`] sampling `slot`'s tpage / CLUT, stash
 /// it in the static `tex_tris` arena, and chain it into the OT.
 ///
@@ -3573,6 +3711,29 @@ fn push_textured_material_tri(
     material: TextureMaterial,
     slot_idx: usize,
 ) -> bool {
+    push_textured_material_tri_split(scratch, p, uvs, material, slot_idx, 0)
+}
+
+fn push_textured_material_tri_split(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    uvs: [(u8, u8); 3],
+    material: TextureMaterial,
+    slot_idx: usize,
+    depth: u8,
+) -> bool {
+    let p = clamp_preview_projected_triangle(p);
+    if !preview_projected_triangle_hw_safe(p) {
+        if depth >= MAX_PREVIEW_HW_SPLIT_DEPTH {
+            return false;
+        }
+        let (a, a_uvs, b, b_uvs) = split_preview_projected_triangle(p, uvs);
+        let left =
+            push_textured_material_tri_split(scratch, a, a_uvs, material, slot_idx, depth + 1);
+        let right =
+            push_textured_material_tri_split(scratch, b, b_uvs, material, slot_idx, depth + 1);
+        return left || right;
+    }
     if scratch.tex_used >= TRI_CAP {
         return false;
     }
@@ -3600,6 +3761,25 @@ fn push_tri(
     p: [psx_gte::scene::Projected; 3],
     rgb: (u8, u8, u8),
 ) -> bool {
+    push_tri_split(scratch, p, rgb, 0)
+}
+
+fn push_tri_split(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 3],
+    rgb: (u8, u8, u8),
+    depth: u8,
+) -> bool {
+    let p = clamp_preview_projected_triangle(p);
+    if !preview_projected_triangle_hw_safe(p) {
+        if depth >= MAX_PREVIEW_HW_SPLIT_DEPTH {
+            return false;
+        }
+        let (a, _, b, _) = split_preview_projected_triangle(p, [(0, 0); 3]);
+        let left = push_tri_split(scratch, a, rgb, depth + 1);
+        let right = push_tri_split(scratch, b, rgb, depth + 1);
+        return left || right;
+    }
     if scratch.used >= TRI_CAP {
         return false;
     }
@@ -3648,12 +3828,13 @@ mod tests {
     use super::{
         face_side_visible, floor_anchored_model_origin, horizontal_triangle_world_points,
         light_face, material_sized_uvs, material_texture_tint, node_room_local_origin,
-        preview_lights, preview_model_reference, preview_player_reference, preview_shadow_radius,
-        preview_static_model_reference, preview_vertices_in_front, push_wall_face, room_depth_slot,
-        setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline, FaceShade,
-        MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS,
-        PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
-        PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
+        preview_lights, preview_model_reference, preview_player_reference,
+        preview_projected_triangle_hw_safe, preview_shadow_radius, preview_static_model_reference,
+        preview_vertices_in_front, push_wall_face, room_depth_slot, setup_gte_for_camera,
+        shadow_depth_slot, should_draw_culled_face_outline, FaceShade, MaterialSlot, PreviewFog,
+        WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
+        PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
+        PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -3891,6 +4072,25 @@ mod tests {
     }
 
     #[test]
+    fn preview_rejects_triangles_outside_psx_packet_extent() {
+        assert!(preview_projected_triangle_hw_safe([
+            projected(0, 0),
+            projected(64, 0),
+            projected(0, 64),
+        ]));
+        assert!(!preview_projected_triangle_hw_safe([
+            projected(-1024, 0),
+            projected(1023, 0),
+            projected(0, 16),
+        ]));
+        assert!(!preview_projected_triangle_hw_safe([
+            projected(0, -512),
+            projected(16, 512),
+            projected(0, 0),
+        ]));
+    }
+
+    #[test]
     fn editor_cardinal_wall_front_material_renders_from_owning_cell() {
         let cases = [
             (WallEdge::North, [512, 512, 512], 128, [512, 512, 1536], 0),
@@ -3964,7 +4164,7 @@ mod tests {
             camera,
             [0, 1024, 0, 1024],
             edge,
-            [0, 0, 1024, 1024],
+            [384, 384, 640, 640],
             None,
             GridUvTransform::default(),
             flat_sided(128, 128, 128, sidedness),
