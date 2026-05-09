@@ -212,15 +212,15 @@ const ROOM_GRID_VISIBILITY_RADIUS: u16 = 4;
 const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
 /// Cached room cell headers shared by the active room window. Rooms
 /// that exceed this fixed budget fall back to the uncached room draw.
-const MAX_CACHED_ROOM_CELLS: usize = 2048;
+const MAX_CACHED_ROOM_CELLS: usize = 1024;
 /// Deduplicated room vertices referenced by cached room surfaces.
-const MAX_CACHED_ROOM_VERTICES: usize = 4096;
+const MAX_CACHED_ROOM_VERTICES: usize = 2048;
 /// Cached floor/ceiling/wall records shared by the active room
 /// window. This mirrors the room triangle arena order of magnitude:
 /// a cached surface emits up to two textured Gouraud triangles.
-const MAX_CACHED_ROOM_SURFACES: usize = 4096;
+const MAX_CACHED_ROOM_SURFACES: usize = 2048;
 
-const MAX_TEXTURED_TRIS: usize = 4096;
+const MAX_TEXTURED_TRIS: usize = 3072;
 
 /// Cap on the per-room material slot count. Picked to comfortably
 /// exceed the cooker's currently-emitted material count without
@@ -905,8 +905,7 @@ impl Scene for Playtest {
         }
 
         if self.room.is_some() {
-            let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
-                .with_textured_triangle_splitting(false);
+            let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let actor_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let mut total_instance_stats = ModelInstanceDrawStats::default();
 
@@ -1449,6 +1448,7 @@ impl Playtest {
         let mut config =
             ThirdPersonCameraConfig::character(camera.distance, camera.height, camera.target_height);
         config.height = config.height.max(256);
+        config.min_floor_clearance = camera.min_floor_clearance;
         config
     }
 
