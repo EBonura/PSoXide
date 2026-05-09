@@ -36,12 +36,12 @@ use psx_engine::{
     CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder, CharacterMotorAnim,
     CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, CullMode,
     DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform, LocalToWorldScale,
-    Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitiveArena, ProjectedVertex, Rgb8,
-    RoomPoint, RoomRender, RuntimeRoom, Scene, TexturedModelRenderFace, TexturedModelRenderStats,
-    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass,
-    WorldSurfaceLighting, WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex,
-    Q8,
+    Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitivePacketArena, PrimitivePacketScratch,
+    PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender, RuntimeRoom, Scene,
+    TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
+    WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
+    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q8,
 };
 use psx_engine::{
     cache_room_vertex_lit_surfaces, draw_indexed_cached_room_vertex_lit_visible_cells,
@@ -56,14 +56,14 @@ use psx_gpu::{
     draw_line_mono, draw_tri_flat_blended, draw_tri_gouraud,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
-    prim::{TriTextured, TriTexturedGouraud},
+    prim::TriTextured,
 };
 use psx_level::{
-    equipment_flags, far_vista_flags, find_asset_of_kind, room_flags, sky_flags, AssetId,
-    AssetKind, EntityRecord, LevelCameraRecord, LevelCharacterRecord, LevelFarVistaRecord,
-    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex,
+    equipment_flags, far_vista_flags, find_asset_of_kind, room_flags, sky_flags,
+    visibility_edge_flags, AssetId, AssetKind, EntityRecord, LevelCameraRecord,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelMaterialRecord,
+    LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord,
+    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
     ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
@@ -86,7 +86,7 @@ mod generated {
 use generated::{
     ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
     MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
-    PLAYER_SPAWN, ROOMS, ROOM_RESIDENCY, ROOM_VISIBILITY, VISIBILITY_CELLS, VISIBLE_CELLS, WEAPONS,
+    PLAYER_SPAWN, ROOMS, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_VISIBILITY, VISIBILITY_CELLS, WEAPONS,
     WEAPON_HITBOXES,
 };
 
@@ -207,9 +207,15 @@ const OT_DEPTH: usize = 512;
 const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
-const ROOM_GRID_VISIBILITY_RADIUS: u16 = 4;
+const ROOM_GRID_VISIBILITY_RADIUS: u16 = 64;
+#[cfg(feature = "world-grid-visible")]
+const ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS: i32 = 64;
+#[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 96;
 #[cfg(feature = "world-grid-visible")]
 const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
+#[cfg(feature = "world-grid-visible")]
+const MAX_ACTIVE_VISIBLE_CELLS: usize = 1024;
 /// Cached room cell headers shared by the active room window. Rooms
 /// that exceed this fixed budget fall back to the uncached room draw.
 const MAX_CACHED_ROOM_CELLS: usize = 1024;
@@ -220,7 +226,7 @@ const MAX_CACHED_ROOM_VERTICES: usize = 2048;
 /// a cached surface emits up to two textured Gouraud triangles.
 const MAX_CACHED_ROOM_SURFACES: usize = 2048;
 
-const MAX_TEXTURED_TRIS: usize = 3072;
+const MAX_TEXTURED_TRIS: usize = 3328;
 
 /// Cap on the per-room material slot count. Picked to comfortably
 /// exceed the cooker's currently-emitted material count without
@@ -228,10 +234,11 @@ const MAX_TEXTURED_TRIS: usize = 3072;
 /// the runtime fails graceful (skips the over-cap material) and
 /// the cook report should also flag.
 const MAX_ROOM_MATERIALS: usize = 32;
-/// Current generated chunk plus the eight chunks touching it.
-/// Later visibility/portal logic can shrink this set; the first
-/// streaming pass keeps the active window deliberately simple.
-const MAX_ACTIVE_ROOMS: usize = 9;
+/// Current generated chunk plus the best cache-budgeted nearby chunks.
+const MAX_ACTIVE_ROOMS: usize = 8;
+const MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES: usize = 24;
+const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
+const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 
 /// Capacity of the residency manager's RAM table. Holds room
 /// world + model meshes + animation clips.
@@ -270,31 +277,9 @@ const MODEL_BOUNDS_CULLING_ENABLED: bool =
 const MARKER_HALF: i32 = 96;
 const MARKER_LIFT: i32 = MARKER_HALF;
 const MARKER_TINT: (u8, u8, u8) = (0xff, 0xa8, 0x40);
-const TRI_ZERO: TriTextured = TriTextured::new(
-    [(0, 0), (0, 0), (0, 0)],
-    [(0, 0), (0, 0), (0, 0)],
-    0,
-    0,
-    (0, 0, 0),
-);
-const GOURAUD_TRI_ZERO: TriTexturedGouraud = TriTexturedGouraud {
-    tag: 0,
-    tex_window: 0,
-    color0_cmd: 0,
-    v0: 0,
-    uv0_clut: 0,
-    color1: 0,
-    v1: 0,
-    uv1_tpage: 0,
-    color2: 0,
-    v2: 0,
-    uv2: 0,
-};
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
-static mut TEXTURED_TRIS: [TriTextured; MAX_TEXTURED_TRIS] =
-    [const { TRI_ZERO }; MAX_TEXTURED_TRIS];
-static mut TEXTURED_GOURAUD_TRIS: [TriTexturedGouraud; MAX_TEXTURED_TRIS] =
-    [const { GOURAUD_TRI_ZERO }; MAX_TEXTURED_TRIS];
+static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
+    PrimitivePacketScratch::ZERO;
 static mut WORLD_COMMANDS: [WorldTriCommand; MAX_TEXTURED_TRIS] =
     [WorldTriCommand::EMPTY; MAX_TEXTURED_TRIS];
 static mut CACHED_ROOM_CELLS: [CachedRoomCell; MAX_CACHED_ROOM_CELLS] =
@@ -562,6 +547,10 @@ fn clamp_model_render_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
     (uv.0.min(max_u), uv.1.min(max_v))
 }
 
+fn clamp_i16(value: i32) -> i16 {
+    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 fn runtime_model_faces<'a>(
     model: RuntimeModelAsset,
     face_pool: &'a [TexturedModelRenderFace],
@@ -584,6 +573,7 @@ struct ActiveRoomSurfaceCache {
     vertex_count: u16,
     surface_first: u16,
     surface_count: u16,
+    status: ActiveRoomCacheStatus,
     ready: bool,
 }
 
@@ -595,8 +585,17 @@ impl ActiveRoomSurfaceCache {
         vertex_count: 0,
         surface_first: 0,
         surface_count: 0,
+        status: ActiveRoomCacheStatus::NotBuilt,
         ready: false,
     };
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ActiveRoomCacheStatus {
+    Ready,
+    NotBuilt,
+    Overflow,
+    Empty,
 }
 
 #[derive(Copy, Clone)]
@@ -618,9 +617,10 @@ struct ActiveVisibleCellCache {
     room: RoomIndex,
     anchor_x: i32,
     anchor_z: i32,
+    rejected_global: u16,
+    first: u16,
     count: u16,
     ready: bool,
-    cells: [GridVisibleCell; MAX_PRECOMPUTED_VISIBLE_CELLS],
 }
 
 #[cfg(feature = "world-grid-visible")]
@@ -629,9 +629,10 @@ impl ActiveVisibleCellCache {
         room: RoomIndex::ZERO,
         anchor_x: 0,
         anchor_z: 0,
+        rejected_global: 0,
+        first: 0,
         count: 0,
         ready: false,
-        cells: [GridVisibleCell::EMPTY; MAX_PRECOMPUTED_VISIBLE_CELLS],
     };
 }
 
@@ -640,11 +641,18 @@ struct Playtest {
     /// when the manifest had at least one room and its bytes
     /// parsed.
     room: Option<RuntimeRoom<'static>>,
-    /// Current generated chunk plus immediately touching chunks,
-    /// all expressed relative to `room_index`.
+    /// Cache-budgeted draw chunks, all expressed relative to
+    /// `room_index`.
     active_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
     #[cfg(feature = "world-grid-visible")]
     visible_cell_caches: [ActiveVisibleCellCache; MAX_ACTIVE_ROOMS],
+    #[cfg(feature = "world-grid-visible")]
+    visible_cell_cache_cells: [GridVisibleCell; MAX_ACTIVE_VISIBLE_CELLS],
+    #[cfg(feature = "world-grid-visible")]
+    visible_cell_cache_cursor: usize,
+    active_room_candidates: u16,
+    active_room_cache_skips: u16,
+    active_room_anchor: RoomPoint,
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
@@ -710,6 +718,13 @@ impl Playtest {
             active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
             #[cfg(feature = "world-grid-visible")]
             visible_cell_caches: [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS],
+            #[cfg(feature = "world-grid-visible")]
+            visible_cell_cache_cells: [GridVisibleCell::EMPTY; MAX_ACTIVE_VISIBLE_CELLS],
+            #[cfg(feature = "world-grid-visible")]
+            visible_cell_cache_cursor: 0,
+            active_room_candidates: 0,
+            active_room_cache_skips: 0,
+            active_room_anchor: RoomPoint::ZERO,
             room_index: RoomIndex::ZERO,
             materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
             material_count: 0,
@@ -769,7 +784,6 @@ impl Scene for Playtest {
         self.motor
             .snap_to(self.spawn, Angle::from_q12(spawn.yaw as u16));
         self.room_index = spawn.room;
-        self.load_active_room_window();
         self.anim_state = PlayerAnim::Idle;
         self.anim_start_tick = 0;
         self.camera.snap_to_player_with_yaw(
@@ -777,6 +791,7 @@ impl Scene for Playtest {
             self.camera_config(),
             CAMERA_START_YAW,
         );
+        self.load_active_room_window();
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
@@ -845,7 +860,9 @@ impl Scene for Playtest {
         let motor_frame =
             self.motor
                 .update_vblanks_with_collision(collision, input, config, delta_vblanks);
-        self.update_current_room_from_player();
+        if !self.update_current_room_from_player() {
+            self.refresh_active_room_window_if_needed();
+        }
 
         // Animation state comes from the reusable motor, but the
         // playtest intentionally exposes only the core locomotion
@@ -895,24 +912,51 @@ impl Scene for Playtest {
         telemetry::stage_end(telemetry::stage::CAMERA);
 
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
-        let mut triangles = unsafe { PrimitiveArena::new(&mut TEXTURED_TRIS) };
-        let mut gouraud_triangles = unsafe { PrimitiveArena::new(&mut TEXTURED_GOURAUD_TRIS) };
+        let mut primitive_packets = unsafe { PrimitivePacketArena::new(&mut PRIMITIVE_PACKETS) };
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
             draw_sky_gradient(room_record.sky);
-            draw_far_vista_ring(camera, room_record.far_vista, &mut triangles, &mut world);
+            draw_far_vista_ring(
+                camera,
+                room_record.far_vista,
+                &mut primitive_packets,
+                &mut world,
+            );
         }
 
         if self.room.is_some() {
             let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let actor_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let mut total_instance_stats = ModelInstanceDrawStats::default();
+            let mut room_active_chunks = 0u32;
+            let mut room_cached_draws = 0u32;
+            let mut room_uncached_draws = 0u32;
+            let mut room_cache_cells = 0u32;
+            let mut room_cache_vertices = 0u32;
+            let mut room_cache_surfaces = 0u32;
+            let mut room_cache_fallback_draws = 0u32;
+            let mut room_visibility_fallback_draws = 0u32;
+            #[cfg(feature = "world-grid-visible")]
+            let mut room_visible_cells = 0u32;
+            #[cfg(feature = "world-grid-visible")]
+            let mut room_range_culled_cells = 0u32;
+            #[cfg(feature = "world-grid-visible")]
+            let mut room_stats_total = GridVisibilityStats::default();
 
             for active_slot in 0..MAX_ACTIVE_ROOMS {
                 let Some(active) = self.active_rooms[active_slot] else {
                     continue;
                 };
+                room_active_chunks = room_active_chunks.saturating_add(1);
+                if active.surface_cache.ready {
+                    room_cache_cells =
+                        room_cache_cells.saturating_add(active.surface_cache.cell_count as u32);
+                    room_cache_vertices = room_cache_vertices
+                        .saturating_add(active.surface_cache.vertex_count as u32);
+                    room_cache_surfaces = room_cache_surfaces
+                        .saturating_add(active.surface_cache.surface_count as u32);
+                }
                 let materials = &active.materials[..active.material_count];
                 let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                     continue;
@@ -931,21 +975,31 @@ impl Scene for Playtest {
                 #[cfg(feature = "world-grid-visible")]
                 {
                     let player = self.motor.position();
+                    let global_visibility_anchor =
+                        RoomPoint::new(camera.position.x, player.y, camera.position.z);
                     let visibility_anchor = RoomPoint::new(
-                        player.x.saturating_sub(active.offset_x),
+                        global_visibility_anchor.x.saturating_sub(active.offset_x),
                         player.y,
-                        player.z.saturating_sub(active.offset_z),
+                        global_visibility_anchor.z.saturating_sub(active.offset_z),
                     );
                     let visibility =
                         GridVisibility::around(visibility_anchor, ROOM_GRID_VISIBILITY_RADIUS)
-                            .with_screen_margin(0);
-                    let stats = if let Some(cells) = self.cached_precomputed_visible_cells(
-                        active_slot,
-                        active.index,
-                        active.room.render(),
-                        visibility_anchor,
-                    ) {
+                            .with_screen_margin(ROOM_VISIBLE_CELL_SCREEN_MARGIN);
+                    let stats = if let Some((cells, range_culled)) = self
+                        .cached_precomputed_visible_cells(
+                            active_slot,
+                            active.index,
+                            active.room.render(),
+                            visibility_anchor,
+                            active.offset_x,
+                            active.offset_z,
+                            global_visibility_anchor,
+                        ) {
+                        room_range_culled_cells =
+                            room_range_culled_cells.saturating_add(range_culled as u32);
+                        room_visible_cells = room_visible_cells.saturating_add(cells.len() as u32);
                         if active.surface_cache.ready {
+                            room_cached_draws = room_cached_draws.saturating_add(1);
                             let cell_first = active.surface_cache.cell_first as usize;
                             let cell_end = cell_first
                                 .saturating_add(active.surface_cache.cell_count as usize)
@@ -985,10 +1039,15 @@ impl Scene for Playtest {
                                 room_options,
                                 cells,
                                 visibility.screen_margin,
-                                &mut gouraud_triangles,
+                                &mut primitive_packets,
                                 &mut world,
                             )
                         } else {
+                            room_uncached_draws = room_uncached_draws.saturating_add(1);
+                            if active_surface_cache_failed(active.surface_cache) {
+                                room_cache_fallback_draws =
+                                    room_cache_fallback_draws.saturating_add(1);
+                            }
                             draw_room_vertex_lit_visible_cells(
                                 active.room.render(),
                                 materials,
@@ -997,48 +1056,40 @@ impl Scene for Playtest {
                                 room_options,
                                 cells,
                                 visibility.screen_margin,
-                                &mut gouraud_triangles,
+                                &mut primitive_packets,
                                 &mut world,
                             )
                         }
                     } else {
+                        room_uncached_draws = room_uncached_draws.saturating_add(1);
+                        room_visibility_fallback_draws =
+                            room_visibility_fallback_draws.saturating_add(1);
                         draw_room_vertex_lit(
                             active.room.render(),
                             materials,
                             &lighting,
                             &room_camera,
                             room_options,
-                            &mut gouraud_triangles,
+                            &mut primitive_packets,
                             &mut world,
                         );
                         GridVisibilityStats::default()
                     };
-                    telemetry::counter(
-                        telemetry::counter::ROOM_CELLS_CONSIDERED,
-                        stats.cells_considered as u32,
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_CELLS_DRAWN,
-                        stats.cells_drawn as u32,
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_CELLS_CULLED,
-                        stats.cells_frustum_culled as u32,
-                    );
-                    telemetry::counter(
-                        telemetry::counter::ROOM_SURFACES_CONSIDERED,
-                        stats.surfaces_considered as u32,
-                    );
+                    accumulate_grid_visibility_stats(&mut room_stats_total, stats);
                 }
                 #[cfg(not(feature = "world-grid-visible"))]
                 {
+                    room_uncached_draws = room_uncached_draws.saturating_add(1);
+                    if active_surface_cache_failed(active.surface_cache) {
+                        room_cache_fallback_draws = room_cache_fallback_draws.saturating_add(1);
+                    }
                     draw_room_vertex_lit(
                         active.room.render(),
                         materials,
                         &lighting,
                         &room_camera,
                         room_options,
-                        &mut gouraud_triangles,
+                        &mut primitive_packets,
                         &mut world,
                     );
                 }
@@ -1050,7 +1101,7 @@ impl Scene for Playtest {
                     materials,
                     &room_camera,
                     room_options,
-                    &mut triangles,
+                    &mut primitive_packets,
                     &mut world,
                 );
                 telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
@@ -1071,7 +1122,7 @@ impl Scene for Playtest {
                         &room_camera,
                         shadow_material,
                         &self.models,
-                        &mut triangles,
+                        &mut primitive_packets,
                         &mut world,
                     );
                 }
@@ -1086,7 +1137,7 @@ impl Scene for Playtest {
                     &self.model_faces[..self.model_face_count],
                     &self.clips,
                     instance_depth_pass,
-                    &mut triangles,
+                    &mut primitive_packets,
                     &mut world,
                 );
                 telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
@@ -1107,7 +1158,7 @@ impl Scene for Playtest {
                         actor_shadow_radius(character.radius),
                         &camera,
                         shadow_material,
-                        &mut triangles,
+                        &mut primitive_packets,
                         &mut world,
                     );
                 }
@@ -1129,7 +1180,7 @@ impl Scene for Playtest {
                             &camera,
                             actor_options,
                             &lighting,
-                            &mut triangles,
+                            &mut primitive_packets,
                             &mut world,
                         )
                     });
@@ -1170,7 +1221,7 @@ impl Scene for Playtest {
                             &camera,
                             actor_options,
                             &lighting,
-                            &mut triangles,
+                            &mut primitive_packets,
                             &mut world,
                         )
                     })
@@ -1234,7 +1285,7 @@ impl Scene for Playtest {
                         &self.model_faces[..self.model_face_count],
                         &self.clips,
                         ModelInstanceDepthPass::InFrontOfPlayer(player_depth),
-                        &mut triangles,
+                        &mut primitive_packets,
                         &mut world,
                     );
                     telemetry::stage_end(telemetry::stage::MODEL_INSTANCES);
@@ -1242,6 +1293,52 @@ impl Scene for Playtest {
                 }
             }
 
+            telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_active_chunks);
+            telemetry::counter(telemetry::counter::ROOM_CACHED_DRAWS, room_cached_draws);
+            telemetry::counter(telemetry::counter::ROOM_UNCACHED_DRAWS, room_uncached_draws);
+            telemetry::counter(telemetry::counter::ROOM_CACHE_CELLS, room_cache_cells);
+            telemetry::counter(telemetry::counter::ROOM_CACHE_VERTICES, room_cache_vertices);
+            telemetry::counter(telemetry::counter::ROOM_CACHE_SURFACES, room_cache_surfaces);
+            telemetry::counter(
+                telemetry::counter::ROOM_CACHE_FALLBACK_DRAWS,
+                room_cache_fallback_draws,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_VISIBILITY_FALLBACK_DRAWS,
+                room_visibility_fallback_draws,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_CHUNKS_CONSIDERED,
+                self.active_room_candidates as u32,
+            );
+            telemetry::counter(
+                telemetry::counter::ROOM_CHUNK_CACHE_SKIPS,
+                self.active_room_cache_skips as u32,
+            );
+            #[cfg(feature = "world-grid-visible")]
+            {
+                telemetry::counter(telemetry::counter::ROOM_VISIBLE_CELLS, room_visible_cells);
+                telemetry::counter(
+                    telemetry::counter::ROOM_CELLS_RANGE_CULLED,
+                    room_range_culled_cells,
+                );
+                telemetry::counter(
+                    telemetry::counter::ROOM_CELLS_CONSIDERED,
+                    room_stats_total.cells_considered as u32,
+                );
+                telemetry::counter(
+                    telemetry::counter::ROOM_CELLS_DRAWN,
+                    room_stats_total.cells_drawn as u32,
+                );
+                telemetry::counter(
+                    telemetry::counter::ROOM_CELLS_CULLED,
+                    room_stats_total.cells_frustum_culled as u32,
+                );
+                telemetry::counter(
+                    telemetry::counter::ROOM_SURFACES_CONSIDERED,
+                    room_stats_total.surfaces_considered as u32,
+                );
+            }
             telemetry::counter(
                 telemetry::counter::MODEL_INSTANCE_DRAWS,
                 total_instance_stats.draws as u32,
@@ -1265,7 +1362,11 @@ impl Scene for Playtest {
 
         telemetry::counter(
             telemetry::counter::TRI_PRIMITIVES,
-            triangles.len().saturating_add(gouraud_triangles.len()) as u32,
+            primitive_packets.len() as u32,
+        );
+        telemetry::counter(
+            telemetry::counter::TRI_PRIMITIVE_REMAINING,
+            primitive_packets.remaining() as u32,
         );
         telemetry::counter(
             telemetry::counter::WORLD_COMMANDS,
@@ -1445,8 +1546,11 @@ impl Playtest {
             .get(self.room_index.to_usize())
             .map(|room| room.camera)
             .unwrap_or(LevelCameraRecord::DEFAULT);
-        let mut config =
-            ThirdPersonCameraConfig::character(camera.distance, camera.height, camera.target_height);
+        let mut config = ThirdPersonCameraConfig::character(
+            camera.distance,
+            camera.height,
+            camera.target_height,
+        );
         config.height = config.height.max(256);
         config.min_floor_clearance = camera.min_floor_clearance;
         config
@@ -1523,9 +1627,11 @@ impl Playtest {
         self.materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
         self.material_count = 0;
         self.active_rooms = [const { None }; MAX_ACTIVE_ROOMS];
+        self.active_room_candidates = 0;
+        self.active_room_cache_skips = 0;
         #[cfg(feature = "world-grid-visible")]
         {
-            self.visible_cell_caches = [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS];
+            self.clear_visible_cell_caches();
         }
         let mut cached_cell_cursor = 0usize;
         let mut cached_vertex_cursor = 0usize;
@@ -1538,6 +1644,7 @@ impl Playtest {
         let Some(current_room) = parse_runtime_room(current_record) else {
             return;
         };
+        let player = self.motor.position();
 
         let mut next_slot = 0usize;
         if let Some(active) = build_active_room(
@@ -1554,42 +1661,88 @@ impl Playtest {
             self.active_rooms[next_slot] = Some(active);
             next_slot += 1;
         }
+        self.active_room_anchor = player;
 
-        for (raw_index, record) in ROOMS.iter().enumerate() {
-            if raw_index == current_index.to_usize() || next_slot >= MAX_ACTIVE_ROOMS {
-                continue;
+        if !ROOM_CHUNKS.is_empty() {
+            self.active_room_candidates =
+                count_spatial_chunk_candidates(current_index, current_record, player);
+            let mut skipped_rooms = [INVALID_ROOM_INDEX; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES];
+            let mut skipped_count = 0usize;
+            while next_slot < MAX_ACTIVE_ROOMS {
+                let Some(candidate) = best_spatial_chunk_candidate(
+                    current_index,
+                    current_record,
+                    player,
+                    &self.active_rooms,
+                    &skipped_rooms[..skipped_count],
+                ) else {
+                    break;
+                };
+                let Some(record) = ROOMS.get(candidate.to_usize()) else {
+                    break;
+                };
+                if let Some(active) = build_active_room(
+                    candidate,
+                    record,
+                    current_record,
+                    &mut cached_cell_cursor,
+                    &mut cached_vertex_cursor,
+                    &mut cached_surface_cursor,
+                ) {
+                    if active.surface_cache.ready {
+                        self.active_rooms[next_slot] = Some(active);
+                        next_slot += 1;
+                        continue;
+                    }
+                };
+                self.active_room_cache_skips = self.active_room_cache_skips.saturating_add(1);
+                if skipped_count >= skipped_rooms.len() {
+                    break;
+                }
+                skipped_rooms[skipped_count] = candidate;
+                skipped_count += 1;
             }
-            let Some(room) = parse_runtime_room(record) else {
-                continue;
-            };
-            if !rooms_touch(current_record, current_room, record, room) {
-                continue;
-            }
-            let index = RoomIndex::new(raw_index as u16);
-            if let Some(active) = build_active_room(
-                index,
-                record,
-                current_record,
-                &mut cached_cell_cursor,
-                &mut cached_vertex_cursor,
-                &mut cached_surface_cursor,
-            ) {
-                self.active_rooms[next_slot] = Some(active);
-                next_slot += 1;
+        } else {
+            while next_slot < MAX_ACTIVE_ROOMS {
+                let Some(raw_index) = nearest_touching_room_index(
+                    current_index,
+                    current_record,
+                    current_room,
+                    &self.active_rooms,
+                ) else {
+                    break;
+                };
+                let Some(record) = ROOMS.get(raw_index) else {
+                    break;
+                };
+                let index = RoomIndex::new(raw_index as u16);
+                if let Some(active) = build_active_room(
+                    index,
+                    record,
+                    current_record,
+                    &mut cached_cell_cursor,
+                    &mut cached_vertex_cursor,
+                    &mut cached_surface_cursor,
+                ) {
+                    self.active_rooms[next_slot] = Some(active);
+                    next_slot += 1;
+                } else {
+                    break;
+                }
             }
         }
     }
 
-    fn update_current_room_from_player(&mut self) {
+    fn update_current_room_from_player(&mut self) -> bool {
         if !self.chunked_level() {
-            return;
+            return false;
         }
         let global = local_to_global_room_point(self.room_index, self.motor.position());
         let Some(next_room) = room_index_containing_global(global) else {
-            return;
+            return false;
         };
         if next_room == self.room_index {
-            return;
+            return false;
         }
         let local = global_to_local_room_point(next_room, global);
         self.room_index = next_room;
@@ -1598,6 +1751,23 @@ impl Playtest {
         self.lock_switch_stick_held = false;
         self.soft_lock_target = None;
         self.load_active_room_window();
+        true
+    }
+
+    fn refresh_active_room_window_if_needed(&mut self) {
+        if !self.chunked_level() {
+            return;
+        }
+        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
+            return;
+        };
+        let sector_size = record.sector_size.max(1);
+        let threshold = sector_size.saturating_mul(ACTIVE_ROOM_REFRESH_SECTORS.max(1));
+        if point_xz_distance_sq(self.motor.position(), self.active_room_anchor)
+            >= (threshold as u64).saturating_mul(threshold as u64)
+        {
+            self.load_active_room_window();
+        }
     }
 
     fn lock_target_position(&self) -> Option<RoomPoint> {
@@ -1819,7 +1989,7 @@ fn draw_player(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
     let Some(runtime_model) = models.get(character.model.to_usize()).copied().flatten() else {
@@ -1914,7 +2084,7 @@ fn draw_player_equipment(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> EquipmentDrawStats {
     let mut out = EquipmentDrawStats::default();
@@ -2211,6 +2381,20 @@ fn emit_model_counters(
     }
 }
 
+#[cfg(feature = "world-grid-visible")]
+fn accumulate_grid_visibility_stats(total: &mut GridVisibilityStats, stats: GridVisibilityStats) {
+    total.cells_considered = total
+        .cells_considered
+        .saturating_add(stats.cells_considered);
+    total.cells_drawn = total.cells_drawn.saturating_add(stats.cells_drawn);
+    total.cells_frustum_culled = total
+        .cells_frustum_culled
+        .saturating_add(stats.cells_frustum_culled);
+    total.surfaces_considered = total
+        .surfaces_considered
+        .saturating_add(stats.surfaces_considered);
+}
+
 fn draw_sky_gradient(sky: LevelSkyRecord) {
     if sky.flags & sky_flags::ENABLED == 0 {
         return;
@@ -2237,7 +2421,7 @@ fn draw_sky_gradient_quad(y0: i16, y1: i16, top_rgb: [u8; 3], bottom_rgb: [u8; 3
 fn draw_far_vista_ring(
     camera: WorldCamera,
     vista: LevelFarVistaRecord,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     if vista.flags & far_vista_flags::ENABLED == 0 {
@@ -2336,34 +2520,92 @@ const fn room_material_fallback() -> WorldRenderMaterial {
 
 #[cfg(feature = "world-grid-visible")]
 impl Playtest {
+    fn clear_visible_cell_caches(&mut self) {
+        self.visible_cell_caches = [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS];
+        self.visible_cell_cache_cursor = 0;
+    }
+
     fn cached_precomputed_visible_cells(
         &mut self,
-        cache_slot: usize,
+        active_slot: usize,
         room_index: RoomIndex,
         room: RoomRender<'_, '_>,
         anchor: RoomPoint,
-    ) -> Option<&[GridVisibleCell]> {
+        room_offset_x: i32,
+        room_offset_z: i32,
+        global_anchor: RoomPoint,
+    ) -> Option<(&[GridVisibleCell], u16)> {
         let sector_size = room.sector_size().max(1);
         let anchor_x = grid_cell_for_room(anchor.x, sector_size).clamp(0, room.width() as i32 - 1);
         let anchor_z = grid_cell_for_room(anchor.z, sector_size).clamp(0, room.depth() as i32 - 1);
-        let cache = self.visible_cell_caches.get_mut(cache_slot)?;
+        let cache = *self.visible_cell_caches.get(active_slot)?;
         if cache.ready
             && cache.room == room_index
             && cache.anchor_x == anchor_x
             && cache.anchor_z == anchor_z
         {
+            let first = cache.first as usize;
             let count = cache.count as usize;
-            return Some(&cache.cells[..count]);
+            let end = first.checked_add(count)?;
+            return self
+                .visible_cell_cache_cells
+                .get(first..end)
+                .map(|cells| (cells, cache.rejected_global));
         }
 
-        let count =
-            fill_precomputed_visible_cells(room_index, anchor_x, anchor_z, &mut cache.cells)?;
-        cache.room = room_index;
-        cache.anchor_x = anchor_x;
-        cache.anchor_z = anchor_z;
-        cache.count = count as u16;
-        cache.ready = true;
-        Some(&cache.cells[..count])
+        let mut first = self.visible_cell_cache_cursor;
+        if MAX_ACTIVE_VISIBLE_CELLS.saturating_sub(first) < MAX_PRECOMPUTED_VISIBLE_CELLS {
+            self.clear_visible_cell_caches();
+            first = 0;
+        }
+        let (mut count, mut rejected_global) = {
+            let cells = self.visible_cell_cache_cells.get_mut(first..)?;
+            fill_precomputed_visible_cells(
+                room_index,
+                anchor_x,
+                anchor_z,
+                room_offset_x,
+                room_offset_z,
+                sector_size,
+                global_anchor,
+                cells,
+            )
+        }?;
+
+        if first.saturating_add(count) > MAX_ACTIVE_VISIBLE_CELLS || count > u16::MAX as usize {
+            self.clear_visible_cell_caches();
+            first = 0;
+            (count, rejected_global) = {
+                let cells = self.visible_cell_cache_cells.get_mut(first..)?;
+                fill_precomputed_visible_cells(
+                    room_index,
+                    anchor_x,
+                    anchor_z,
+                    room_offset_x,
+                    room_offset_z,
+                    sector_size,
+                    global_anchor,
+                    cells,
+                )
+            }?;
+            if count > MAX_ACTIVE_VISIBLE_CELLS || count > u16::MAX as usize {
+                return None;
+            }
+        }
+
+        self.visible_cell_caches[active_slot] = ActiveVisibleCellCache {
+            room: room_index,
+            anchor_x,
+            anchor_z,
+            rejected_global,
+            first: first as u16,
+            count: count as u16,
+            ready: true,
+        };
+        self.visible_cell_cache_cursor = first.saturating_add(count);
+        self.visible_cell_cache_cells
+            .get(first..self.visible_cell_cache_cursor)
+            .map(|cells| (cells, rejected_global))
     }
 }
 
@@ -2372,36 +2614,224 @@ fn fill_precomputed_visible_cells(
     room_index: RoomIndex,
     anchor_x: i32,
     anchor_z: i32,
+    room_offset_x: i32,
+    room_offset_z: i32,
+    sector_size: i32,
+    global_anchor: RoomPoint,
     out: &mut [GridVisibleCell],
-) -> Option<usize> {
+) -> Option<(usize, u16)> {
     let room_visibility = ROOM_VISIBILITY
         .iter()
         .find(|visibility| visibility.room == room_index)?;
     let first = room_visibility.cell_first.to_usize();
     let count = room_visibility.cell_count as usize;
-    let room_cells = VISIBILITY_CELLS.get(first..first.checked_add(count)?)?;
-    let anchor_cell = room_cells
-        .iter()
-        .find(|cell| cell.x as i32 == anchor_x && cell.z as i32 == anchor_z)?;
-    let visible_first = anchor_cell.visible_first.to_usize();
-    let visible_count = anchor_cell.visible_count as usize;
-    let visible = VISIBLE_CELLS.get(visible_first..visible_first.checked_add(visible_count)?)?;
-    let mut written = 0usize;
-    for reference in visible {
-        let cell = *VISIBILITY_CELLS.get(reference.cell.to_usize())?;
-        if cell.room != room_index {
-            return None;
-        }
-        if written >= out.len() {
-            return None;
-        }
-        out[written] = GridVisibleCell::new(cell.x, cell.z, cell.min_y, cell.max_y);
-        written += 1;
+    if count > out.len() || count > MAX_PRECOMPUTED_VISIBLE_CELLS {
+        return None;
     }
-    Some(written)
+    let room_cells = VISIBILITY_CELLS.get(first..first.checked_add(count)?)?;
+    let (lookup_depth, lookup_len) = runtime_visibility_lookup_shape(room_cells)?;
+    let mut lookup = [RUNTIME_VISIBILITY_EMPTY_LOOKUP; MAX_PRECOMPUTED_VISIBLE_CELLS];
+    for (index, cell) in room_cells.iter().enumerate() {
+        let slot = runtime_visibility_lookup_slot(cell.x, cell.z, lookup_depth, lookup_len)?;
+        lookup[slot] = index as u16;
+    }
+    let anchor_index =
+        runtime_visibility_lookup_i32(&lookup, lookup_depth, lookup_len, anchor_x, anchor_z)?;
+    let mut visited = [false; MAX_PRECOMPUTED_VISIBLE_CELLS];
+    let mut queue = [0usize; MAX_PRECOMPUTED_VISIBLE_CELLS];
+    let mut distances = [0u16; MAX_PRECOMPUTED_VISIBLE_CELLS];
+    let mut read = 0usize;
+    let mut queued = 1usize;
+    visited[anchor_index] = true;
+    queue[0] = anchor_index;
+
+    let mut written = 0usize;
+    let mut rejected_global = 0u16;
+    while read < queued {
+        let cell_index = queue[read];
+        let distance = distances[read];
+        read += 1;
+        let cell = room_cells[cell_index];
+        if !visibility_cell_in_global_range(
+            cell.x,
+            cell.z,
+            sector_size,
+            room_offset_x,
+            room_offset_z,
+            global_anchor,
+        ) {
+            rejected_global = rejected_global.saturating_add(1);
+        } else {
+            out[written] = GridVisibleCell::new(cell.x, cell.z, cell.min_y, cell.max_y);
+            written += 1;
+        }
+        if distance >= ROOM_GRID_VISIBILITY_RADIUS {
+            continue;
+        }
+        for edge in RUNTIME_VISIBILITY_EDGES {
+            if cell.portal_mask & edge.bit == 0 {
+                continue;
+            }
+            let Some(neighbour_index) = runtime_visibility_neighbour(
+                &lookup,
+                lookup_depth,
+                lookup_len,
+                cell.x,
+                cell.z,
+                edge.dx,
+                edge.dz,
+            ) else {
+                continue;
+            };
+            if visited[neighbour_index] || queued >= MAX_PRECOMPUTED_VISIBLE_CELLS {
+                continue;
+            }
+            visited[neighbour_index] = true;
+            queue[queued] = neighbour_index;
+            distances[queued] = distance + 1;
+            queued += 1;
+        }
+    }
+    Some((written, rejected_global))
 }
 
 #[cfg(feature = "world-grid-visible")]
+fn visibility_cell_in_global_range(
+    x: u16,
+    z: u16,
+    sector_size: i32,
+    room_offset_x: i32,
+    room_offset_z: i32,
+    global_anchor: RoomPoint,
+) -> bool {
+    let radius = ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS.saturating_mul(sector_size);
+    let x0 = room_offset_x.saturating_add((x as i32).saturating_mul(sector_size));
+    let z0 = room_offset_z.saturating_add((z as i32).saturating_mul(sector_size));
+    let x1 = x0.saturating_add(sector_size);
+    let z1 = z0.saturating_add(sector_size);
+    rect_distance_sq(global_anchor.x, global_anchor.z, x0, x1, z0, z1)
+        <= (radius as u64).saturating_mul(radius as u64)
+}
+
+#[cfg(feature = "world-grid-visible")]
+const RUNTIME_VISIBILITY_EMPTY_LOOKUP: u16 = u16::MAX;
+
+#[cfg(feature = "world-grid-visible")]
+#[derive(Clone, Copy)]
+struct RuntimeVisibilityEdge {
+    bit: u8,
+    dx: i32,
+    dz: i32,
+}
+
+#[cfg(feature = "world-grid-visible")]
+const RUNTIME_VISIBILITY_EDGES: [RuntimeVisibilityEdge; 4] = [
+    RuntimeVisibilityEdge {
+        bit: visibility_edge_flags::NORTH,
+        dx: 0,
+        dz: -1,
+    },
+    RuntimeVisibilityEdge {
+        bit: visibility_edge_flags::EAST,
+        dx: 1,
+        dz: 0,
+    },
+    RuntimeVisibilityEdge {
+        bit: visibility_edge_flags::SOUTH,
+        dx: 0,
+        dz: 1,
+    },
+    RuntimeVisibilityEdge {
+        bit: visibility_edge_flags::WEST,
+        dx: -1,
+        dz: 0,
+    },
+];
+
+#[cfg(feature = "world-grid-visible")]
+fn runtime_visibility_neighbour(
+    lookup: &[u16; MAX_PRECOMPUTED_VISIBLE_CELLS],
+    lookup_depth: usize,
+    lookup_len: usize,
+    x: u16,
+    z: u16,
+    dx: i32,
+    dz: i32,
+) -> Option<usize> {
+    let nx = x as i32 + dx;
+    let nz = z as i32 + dz;
+    if nx < 0 || nz < 0 || nx > u16::MAX as i32 || nz > u16::MAX as i32 {
+        return None;
+    }
+    runtime_visibility_lookup(lookup, lookup_depth, lookup_len, nx as u16, nz as u16)
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn runtime_visibility_lookup_shape(
+    cells: &[psx_level::LevelVisibilityCellRecord],
+) -> Option<(usize, usize)> {
+    let mut max_x = 0usize;
+    let mut max_z = 0usize;
+    for cell in cells {
+        max_x = max_x.max(cell.x as usize);
+        max_z = max_z.max(cell.z as usize);
+    }
+    let lookup_width = max_x.checked_add(1)?;
+    let lookup_depth = max_z.checked_add(1)?;
+    let lookup_len = lookup_width.checked_mul(lookup_depth)?;
+    if lookup_len > MAX_PRECOMPUTED_VISIBLE_CELLS {
+        return None;
+    }
+    Some((lookup_depth, lookup_len))
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn runtime_visibility_lookup_i32(
+    lookup: &[u16; MAX_PRECOMPUTED_VISIBLE_CELLS],
+    lookup_depth: usize,
+    lookup_len: usize,
+    x: i32,
+    z: i32,
+) -> Option<usize> {
+    if x < 0 || z < 0 || x > u16::MAX as i32 || z > u16::MAX as i32 {
+        return None;
+    }
+    runtime_visibility_lookup(lookup, lookup_depth, lookup_len, x as u16, z as u16)
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn runtime_visibility_lookup(
+    lookup: &[u16; MAX_PRECOMPUTED_VISIBLE_CELLS],
+    lookup_depth: usize,
+    lookup_len: usize,
+    x: u16,
+    z: u16,
+) -> Option<usize> {
+    let slot = runtime_visibility_lookup_slot(x, z, lookup_depth, lookup_len)?;
+    let index = lookup[slot];
+    if index == RUNTIME_VISIBILITY_EMPTY_LOOKUP {
+        return None;
+    }
+    Some(index as usize)
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn runtime_visibility_lookup_slot(
+    x: u16,
+    z: u16,
+    lookup_depth: usize,
+    lookup_len: usize,
+) -> Option<usize> {
+    let slot = (x as usize)
+        .checked_mul(lookup_depth)?
+        .checked_add(z as usize)?;
+    if slot < lookup_len {
+        Some(slot)
+    } else {
+        None
+    }
+}
+
 fn grid_cell_for_room(value: i32, sector_size: i32) -> i32 {
     if value >= 0 {
         value / sector_size
@@ -2462,7 +2892,10 @@ fn cache_active_room_surfaces(
         || vertex_first >= MAX_CACHED_ROOM_VERTICES
         || surface_first >= MAX_CACHED_ROOM_SURFACES
     {
-        return ActiveRoomSurfaceCache::EMPTY;
+        return ActiveRoomSurfaceCache {
+            status: ActiveRoomCacheStatus::Overflow,
+            ..ActiveRoomSurfaceCache::EMPTY
+        };
     }
 
     let stats = unsafe {
@@ -2475,12 +2908,20 @@ fn cache_active_room_surfaces(
         )
     };
     if stats.overflow
-        || stats.cell_count == 0
         || stats.cell_count > u16::MAX as usize
         || stats.vertex_count > u16::MAX as usize
         || stats.surface_count > u16::MAX as usize
     {
-        return ActiveRoomSurfaceCache::EMPTY;
+        return ActiveRoomSurfaceCache {
+            status: ActiveRoomCacheStatus::Overflow,
+            ..ActiveRoomSurfaceCache::EMPTY
+        };
+    }
+    if stats.cell_count == 0 {
+        return ActiveRoomSurfaceCache {
+            status: ActiveRoomCacheStatus::Empty,
+            ..ActiveRoomSurfaceCache::EMPTY
+        };
     }
 
     *cached_cell_cursor = (*cached_cell_cursor).saturating_add(stats.cell_count);
@@ -2493,8 +2934,13 @@ fn cache_active_room_surfaces(
         vertex_count: stats.vertex_count as u16,
         surface_first: surface_first as u16,
         surface_count: stats.surface_count as u16,
+        status: ActiveRoomCacheStatus::Ready,
         ready: true,
     }
+}
+
+fn active_surface_cache_failed(cache: ActiveRoomSurfaceCache) -> bool {
+    !cache.ready && cache.status != ActiveRoomCacheStatus::Empty
 }
 
 fn room_origin_x(record: &LevelRoomRecord) -> i32 {
@@ -2503,6 +2949,190 @@ fn room_origin_x(record: &LevelRoomRecord) -> i32 {
 
 fn room_origin_z(record: &LevelRoomRecord) -> i32 {
     record.origin_z.saturating_mul(record.sector_size)
+}
+
+fn count_spatial_chunk_candidates(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+) -> u16 {
+    let mut count = 0u16;
+    for chunk in ROOM_CHUNKS {
+        if chunk.room == current_index
+            || chunk_activation_score(*chunk, current_index, current_record, player).is_none()
+        {
+            continue;
+        }
+        count = count.saturating_add(1);
+    }
+    count
+}
+
+fn best_spatial_chunk_candidate(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    skipped_rooms: &[RoomIndex],
+) -> Option<RoomIndex> {
+    let mut best = None;
+    let mut best_score = ChunkActivationScore::WORST;
+    for chunk in ROOM_CHUNKS {
+        if chunk.room == current_index
+            || active_room_window_contains(active_rooms, chunk.room)
+            || skipped_rooms.contains(&chunk.room)
+        {
+            continue;
+        }
+        let Some(score) = chunk_activation_score(*chunk, current_index, current_record, player)
+        else {
+            continue;
+        };
+        if best.is_none() || score.better_than(best_score) {
+            best_score = score;
+            best = Some(chunk.room);
+        }
+    }
+    best
+}
+
+#[derive(Copy, Clone)]
+struct ChunkActivationScore {
+    tier: u8,
+    distance: u64,
+}
+
+impl ChunkActivationScore {
+    const WORST: Self = Self {
+        tier: u8::MAX,
+        distance: u64::MAX,
+    };
+
+    fn better_than(self, other: Self) -> bool {
+        self.tier < other.tier || (self.tier == other.tier && self.distance < other.distance)
+    }
+}
+
+fn chunk_activation_score(
+    chunk: LevelChunkRecord,
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+) -> Option<ChunkActivationScore> {
+    if !chunk_within_activation_range(chunk, current_record, player) {
+        return None;
+    }
+    let current_authored_room = authored_room_for_chunk(current_index)?;
+    let same_authored = chunk.authored_room == current_authored_room;
+    if !same_authored
+        && authored_room_for_chunk(current_index)
+            .and_then(|authored| authored_bounds_current_space(authored, current_record))
+            .is_some_and(|bounds| rects_overlap(chunk_bounds_current_space(chunk, current_record), bounds))
+    {
+        return None;
+    }
+    let distance = chunk_distance_sq_current_space(chunk, current_record, player);
+    Some(ChunkActivationScore {
+        tier: if same_authored { 0 } else { 1 },
+        distance,
+    })
+}
+
+fn authored_room_for_chunk(index: RoomIndex) -> Option<u32> {
+    ROOM_CHUNKS
+        .iter()
+        .find(|chunk| chunk.room == index)
+        .map(|chunk| chunk.authored_room)
+}
+
+fn authored_bounds_current_space(
+    authored_room: u32,
+    current_record: &LevelRoomRecord,
+) -> Option<(i32, i32, i32, i32)> {
+    let mut bounds: Option<(i32, i32, i32, i32)> = None;
+    for chunk in ROOM_CHUNKS {
+        if chunk.authored_room != authored_room {
+            continue;
+        }
+        bounds = Some(match bounds {
+            Some((ax0, ax1, az0, az1)) => {
+                let (bx0, bx1, bz0, bz1) = chunk_bounds_current_space(*chunk, current_record);
+                (ax0.min(bx0), ax1.max(bx1), az0.min(bz0), az1.max(bz1))
+            }
+            None => chunk_bounds_current_space(*chunk, current_record),
+        });
+    }
+    bounds
+}
+
+fn rects_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    let (ax0, ax1, az0, az1) = a;
+    let (bx0, bx1, bz0, bz1) = b;
+    ax0 < bx1 && ax1 > bx0 && az0 < bz1 && az1 > bz0
+}
+
+fn chunk_within_activation_range(
+    chunk: LevelChunkRecord,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+) -> bool {
+    let sector_size = current_record.sector_size.max(1);
+    let radius = ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS.saturating_mul(sector_size);
+    chunk_distance_sq_current_space(chunk, current_record, player)
+        <= (radius as u64).saturating_mul(radius as u64)
+}
+
+fn chunk_distance_sq_current_space(
+    chunk: LevelChunkRecord,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+) -> u64 {
+    let (x0, x1, z0, z1) = chunk_bounds_current_space(chunk, current_record);
+    rect_distance_sq(player.x, player.z, x0, x1, z0, z1)
+}
+
+fn chunk_bounds_current_space(
+    chunk: LevelChunkRecord,
+    current_record: &LevelRoomRecord,
+) -> (i32, i32, i32, i32) {
+    let sector_size = current_record.sector_size.max(1);
+    let x0 = chunk
+        .origin_x
+        .saturating_sub(current_record.origin_x)
+        .saturating_mul(sector_size);
+    let z0 = chunk
+        .origin_z
+        .saturating_sub(current_record.origin_z)
+        .saturating_mul(sector_size);
+    let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector_size));
+    let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector_size));
+    (x0, x1, z0, z1)
+}
+
+fn rect_distance_sq(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u64 {
+    let dx = if x < x0 {
+        x0 - x
+    } else if x > x1 {
+        x - x1
+    } else {
+        0
+    };
+    let dz = if z < z0 {
+        z0 - z
+    } else if z > z1 {
+        z - z1
+    } else {
+        0
+    };
+    (dx as u64)
+        .saturating_mul(dx as u64)
+        .saturating_add((dz as u64).saturating_mul(dz as u64))
+}
+
+fn point_xz_distance_sq(a: RoomPoint, b: RoomPoint) -> u64 {
+    let dx = (a.x as i64).saturating_sub(b.x as i64).unsigned_abs();
+    let dz = (a.z as i64).saturating_sub(b.z as i64).unsigned_abs();
+    dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz))
 }
 
 fn room_bounds(record: &LevelRoomRecord, room: RuntimeRoom<'_>) -> (i32, i32, i32, i32) {
@@ -2522,6 +3152,63 @@ fn rooms_touch(
     let (ax0, ax1, az0, az1) = room_bounds(a_record, a_room);
     let (bx0, bx1, bz0, bz1) = room_bounds(b_record, b_room);
     bx0 <= ax1 && bx1 >= ax0 && bz0 <= az1 && bz1 >= az0
+}
+
+fn nearest_touching_room_index(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    current_room: RuntimeRoom<'_>,
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+) -> Option<usize> {
+    let mut best_index = None;
+    let mut best_score = u64::MAX;
+    for (raw_index, record) in ROOMS.iter().enumerate() {
+        let index = RoomIndex::new(raw_index as u16);
+        if index == current_index || active_room_window_contains(active_rooms, index) {
+            continue;
+        }
+        let Some(room) = parse_runtime_room(record) else {
+            continue;
+        };
+        if !rooms_touch(current_record, current_room, record, room) {
+            continue;
+        }
+        let score = room_center_distance_sq(current_record, current_room, record, room);
+        if score < best_score {
+            best_score = score;
+            best_index = Some(raw_index);
+        }
+    }
+    best_index
+}
+
+fn active_room_window_contains(
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    index: RoomIndex,
+) -> bool {
+    active_rooms
+        .iter()
+        .flatten()
+        .any(|active| active.index == index)
+}
+
+fn room_center_distance_sq(
+    a_record: &LevelRoomRecord,
+    a_room: RuntimeRoom<'_>,
+    b_record: &LevelRoomRecord,
+    b_room: RuntimeRoom<'_>,
+) -> u64 {
+    let (ax0, ax1, az0, az1) = room_bounds(a_record, a_room);
+    let (bx0, bx1, bz0, bz1) = room_bounds(b_record, b_room);
+    let acx = (ax0 as i64 + ax1 as i64) / 2;
+    let acz = (az0 as i64 + az1 as i64) / 2;
+    let bcx = (bx0 as i64 + bx1 as i64) / 2;
+    let bcz = (bz0 as i64 + bz1 as i64) / 2;
+    let dx = acx - bcx;
+    let dz = acz - bcz;
+    dx.unsigned_abs()
+        .saturating_mul(dx.unsigned_abs())
+        .saturating_add(dz.unsigned_abs().saturating_mul(dz.unsigned_abs()))
 }
 
 fn room_index_containing_global(point: RoomPoint) -> Option<RoomIndex> {
@@ -2615,6 +3302,9 @@ fn build_room_materials(
         if slot >= MAX_ROOM_MATERIALS {
             continue;
         }
+        if slot + 1 > max_slot {
+            max_slot = slot + 1;
+        }
         let Some(asset) = find_asset_of_kind(ASSETS, material.texture_asset, AssetKind::Texture)
         else {
             continue;
@@ -2635,9 +3325,6 @@ fn build_room_materials(
         }
         .with_texture_size(slot_record.texture_width, slot_record.texture_height);
         out[slot] = Some(render_material);
-        if slot + 1 > max_slot {
-            max_slot = slot + 1;
-        }
     }
     max_slot
 }
@@ -3145,7 +3832,7 @@ fn draw_model_instance_shadows(
     camera: &WorldCamera,
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     let mut drawn = 0usize;
@@ -3178,7 +3865,7 @@ fn draw_actor_shadow(
     radius: i32,
     camera: &WorldCamera,
     material: TextureMaterial,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     if radius <= 0 {
@@ -3294,7 +3981,7 @@ fn draw_model_instances(
     model_faces: &[TexturedModelRenderFace],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     depth_pass: ModelInstanceDepthPass,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
     let mut drawn = 0usize;
@@ -3513,7 +4200,7 @@ fn draw_entity_markers(
     materials: &[WorldRenderMaterial],
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     if entities.is_empty() || materials.is_empty() {
