@@ -396,6 +396,34 @@ pub struct PrimitiveArena<'a, T> {
     len: usize,
 }
 
+/// Minimal typed primitive sink used by render paths.
+///
+/// Some games can afford one arena per packet type, while PS1-sized
+/// scenes often need one shared packet scratch buffer for mixed flat
+/// and Gouraud packets. This trait keeps render code independent of
+/// that storage choice.
+pub trait PrimitiveSink<T> {
+    /// Number of primitives written through this sink.
+    fn len(&self) -> usize;
+
+    /// Backing primitive capacity when it is statically known.
+    fn capacity(&self) -> usize;
+
+    /// Write `prim` and return a stable mutable reference suitable
+    /// for ordering-table insertion.
+    fn push(&mut self, prim: T) -> Option<&mut T>;
+
+    /// True if no primitives have been written.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Remaining primitive slots or packet-sized equivalents.
+    fn remaining(&self) -> usize {
+        self.capacity().saturating_sub(self.len())
+    }
+}
+
 impl<'a, T> PrimitiveArena<'a, T> {
     /// Wrap caller-owned primitive storage.
     pub fn new(storage: &'a mut [T]) -> Self {
@@ -457,6 +485,124 @@ impl<'a, T> PrimitiveArena<'a, T> {
             return None;
         }
         Some(&mut self.storage[index])
+    }
+}
+
+impl<T> PrimitiveSink<T> for PrimitiveArena<'_, T> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn capacity(&self) -> usize {
+        self.storage.len()
+    }
+
+    fn push(&mut self, prim: T) -> Option<&mut T> {
+        PrimitiveArena::push(self, prim)
+    }
+}
+
+const PRIMITIVE_PACKET_SLOT_WORDS: usize =
+    (core::mem::size_of::<TriTexturedGouraud>() + core::mem::size_of::<u32>() - 1)
+        / core::mem::size_of::<u32>();
+
+/// One aligned primitive packet slot sized for the largest triangle packet.
+#[derive(Copy, Clone)]
+#[repr(C, align(4))]
+struct PrimitivePacketSlot {
+    words: [u32; PRIMITIVE_PACKET_SLOT_WORDS],
+}
+
+impl PrimitivePacketSlot {
+    const ZERO: Self = Self {
+        words: [0; PRIMITIVE_PACKET_SLOT_WORDS],
+    };
+}
+
+/// Fixed slot-backed primitive scratch aligned for PSX GPU packets.
+pub struct PrimitivePacketScratch<const SLOTS: usize> {
+    slots: [PrimitivePacketSlot; SLOTS],
+}
+
+impl<const SLOTS: usize> PrimitivePacketScratch<SLOTS> {
+    /// Zero-initialised scratch storage for statics.
+    pub const ZERO: Self = Self {
+        slots: [PrimitivePacketSlot::ZERO; SLOTS],
+    };
+}
+
+/// Type-erased packet arena over [`PrimitivePacketScratch`].
+///
+/// Packets of different concrete types are written into fixed slots
+/// sized to [`TriTexturedGouraud`]. The returned references stay
+/// valid until the arena is reset/reused, so callers can insert their
+/// packet pointers into an ordering table exactly like with
+/// [`PrimitiveArena`].
+pub struct PrimitivePacketArena<'a> {
+    storage: &'a mut [PrimitivePacketSlot],
+    len: usize,
+}
+
+impl<'a> PrimitivePacketArena<'a> {
+    /// Wrap slot-backed primitive scratch.
+    pub fn new<const SLOTS: usize>(scratch: &'a mut PrimitivePacketScratch<SLOTS>) -> Self {
+        Self {
+            storage: &mut scratch.slots,
+            len: 0,
+        }
+    }
+
+    /// Number of mixed packets written this frame.
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Packet capacity expressed in worst-case Gouraud triangle slots.
+    pub fn capacity(&self) -> usize {
+        self.storage.len()
+    }
+
+    /// Remaining worst-case packet slots.
+    pub fn remaining(&self) -> usize {
+        self.capacity().saturating_sub(self.len())
+    }
+
+    /// True when no packets have been written.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn push_packet<T>(&mut self, prim: T) -> Option<&mut T> {
+        let size = core::mem::size_of::<T>();
+        if size == 0 || size > core::mem::size_of::<PrimitivePacketSlot>() {
+            return None;
+        }
+        if core::mem::align_of::<T>() > core::mem::align_of::<PrimitivePacketSlot>() {
+            return None;
+        }
+        if self.len >= self.storage.len() {
+            return None;
+        }
+        let ptr = self.storage[self.len].words.as_mut_ptr().cast::<T>();
+        unsafe {
+            ptr.write(prim);
+            self.len += 1;
+            Some(&mut *ptr)
+        }
+    }
+}
+
+impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn capacity(&self) -> usize {
+        self.storage.len()
+    }
+
+    fn push(&mut self, prim: T) -> Option<&mut T> {
+        self.push_packet(prim)
     }
 }
 

@@ -4,19 +4,19 @@
 
 use psx_level::{
     EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCameraRecord, LevelCharacterRecord,
-    LevelFarVistaRecord, LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
-    LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
+    LevelChunkRecord, LevelFarVistaRecord, LevelMaterialRecord, LevelModelClipBoundsRecord,
+    LevelModelClipRecord, LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelRoomRecord, LevelRoomVisibilityRecord, LevelSkyRecord,
-    LevelVisibilityCellRecord, LevelVisibleCellRecord, LevelWeaponRecord, PlayerControllerRecord,
-    PlayerSpawnRecord, PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
+    LevelVisibilityCellRecord, LevelWeaponRecord, PlayerControllerRecord, PlayerSpawnRecord,
+    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
 };
 
 pub static ASSETS: &[LevelAssetRecord] = &[];
 pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
+pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];
 pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[];
 pub static VISIBILITY_CELLS: &[LevelVisibilityCellRecord] = &[];
-pub static VISIBLE_CELLS: &[LevelVisibleCellRecord] = &[];
 pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[];
 
 pub static PLAYER_SPAWN: PlayerSpawnRecord = PlayerSpawnRecord {

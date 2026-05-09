@@ -1605,6 +1605,21 @@ fn wall_top_edge_heights(walls: &[GridVerticalFace]) -> Option<[i32; 2]> {
         })
 }
 
+fn floor_transition_wall_material(
+    floor: &GridHorizontalFace,
+    neighbour_floor: &GridHorizontalFace,
+    floor_edge: [i32; 2],
+    neighbour_edge: [i32; 2],
+) -> Option<ResourceId> {
+    let floor_sum = i64::from(floor_edge[0]) + i64::from(floor_edge[1]);
+    let neighbour_sum = i64::from(neighbour_edge[0]) + i64::from(neighbour_edge[1]);
+    if floor_sum >= neighbour_sum {
+        floor.material.or(neighbour_floor.material)
+    } else {
+        neighbour_floor.material.or(floor.material)
+    }
+}
+
 /// Hard caps on a single room's authoring shape. The cooker
 /// rejects past these, and the editor inspector warns as the
 /// budget approaches them -- both to keep the cooked `.psxw`
@@ -2638,6 +2653,56 @@ impl WorldGrid {
         Some(heights)
     }
 
+    /// Cook-time wall generated for a shared floor edge whose two
+    /// sides do not meet. This closes vertical cracks in authored
+    /// terrain without requiring artists to hand-place every step
+    /// riser. Existing authored walls always win.
+    pub fn floor_transition_wall_for_edge(
+        &self,
+        x: u16,
+        z: u16,
+        direction: GridDirection,
+    ) -> Option<GridVerticalFace> {
+        if !direction.is_cardinal() || self.physical_wall_authored(x, z, direction) {
+            return None;
+        }
+        let sector = self.sector(x, z)?;
+        let floor = sector.floor.as_ref()?;
+        let current = HorizontalSurface::Floor.edge_heights(sector, direction)?;
+        let (nx, nz, opposite) = self.neighbor_across_cardinal_edge(x, z, direction)?;
+        let neighbour_sector = self.sector(nx, nz)?;
+        let neighbour_floor = neighbour_sector.floor.as_ref()?;
+        let mut neighbour = HorizontalSurface::Floor.edge_heights(neighbour_sector, opposite)?;
+        neighbour.swap(0, 1);
+        if current == neighbour {
+            return None;
+        }
+
+        let bottom = [current[0].min(neighbour[0]), current[1].min(neighbour[1])];
+        let top = [current[0].max(neighbour[0]), current[1].max(neighbour[1])];
+        if bottom == top {
+            return None;
+        }
+        Some(GridVerticalFace::with_heights(
+            [bottom[0], bottom[1], top[1], top[0]],
+            floor_transition_wall_material(floor, neighbour_floor, current, neighbour),
+        ))
+    }
+
+    fn physical_wall_authored(&self, x: u16, z: u16, direction: GridDirection) -> bool {
+        if self
+            .sector(x, z)
+            .is_some_and(|sector| !sector.walls.get(direction).is_empty())
+        {
+            return true;
+        }
+        let Some((nx, nz, opposite)) = self.neighbor_across_cardinal_edge(x, z, direction) else {
+            return false;
+        };
+        self.sector(nx, nz)
+            .is_some_and(|sector| !sector.walls.get(opposite).is_empty())
+    }
+
     fn neighbor_world_cell_across_cardinal_edge(
         wcx: i32,
         wcz: i32,
@@ -2766,6 +2831,13 @@ impl WorldGrid {
                 }
                 for direction in GridDirection::ALL {
                     for wall in sector.walls.get(direction) {
+                        let count = wall.autotile_segment_count(self.sector_size);
+                        b.walls += count;
+                        b.triangles += if wall.is_triangle() { 1 } else { count * 2 };
+                    }
+                }
+                for direction in [GridDirection::East, GridDirection::North] {
+                    if let Some(wall) = self.floor_transition_wall_for_edge(sx, sz, direction) {
                         let count = wall.autotile_segment_count(self.sector_size);
                         b.walls += count;
                         b.triangles += if wall.is_triangle() { 1 } else { count * 2 };
@@ -6289,6 +6361,19 @@ mod tests {
         );
         assert!(!b.over_budget());
         assert!(!b.static_lit_over_budget());
+    }
+
+    #[test]
+    fn budget_counts_generated_floor_transition_walls() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 512, None);
+
+        let b = grid.budget();
+
+        assert_eq!(b.floors, 2);
+        assert_eq!(b.walls, 1);
+        assert_eq!(b.triangles, 6);
     }
 
     #[test]
