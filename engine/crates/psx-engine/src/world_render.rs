@@ -14,7 +14,7 @@ use psx_gpu::{
 
 use crate::{
     render3d::{project_world_vertices_gte, CullMode, DepthPolicy, ProjectedVertex},
-    PrimitiveArena, RoomPoint, RoomRender, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
+    PrimitiveSink, RoomPoint, RoomRender, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
     WorldVertex,
 };
 
@@ -221,9 +221,10 @@ impl GridVisibleCell {
 /// Predecoded room cell header used by the cached vertex-lit room
 /// renderer.
 ///
-/// The cache stores cells in flat `[x * depth + z]` order so a
-/// cooked visible-cell reference can jump directly to its surface
-/// range without asking the `.psxw` room view for its sector again.
+/// The cache stores only populated cells, sorted by `(x, z)`, so
+/// empty room-grid space does not consume active runtime cache. A
+/// cooked visible-cell reference finds its surface range with a small
+/// binary search over this compact table.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct CachedRoomCell {
     /// Grid X coordinate inside the cooked room.
@@ -296,24 +297,32 @@ impl WorldSurfaceSample {
 /// Predecoded vertex-lit room surface.
 ///
 /// This stores the frame-invariant half of room drawing: material
-/// slot, emitted vertex order, UV order, split id, and the surface
+/// slot, cached vertex indices, UV order, split id, and the surface
 /// lighting sample. Per-frame work still applies camera projection,
 /// culling, fog, and final ordering-table submission.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct CachedRoomSurface {
     /// Local room material slot referenced by this surface.
     pub material_slot: u16,
-    /// Emitted quad vertices in the same order the uncached path
-    /// would submit them.
-    pub vertices: [WorldVertex; 4],
     /// Indices into the cached room vertex stream. The indexed
     /// renderer uses these to project shared room corners once per
     /// frame instead of once per surface.
     pub vertex_indices: [u16; 4],
+    /// Sector X coordinate for the reconstructed lighting sample.
+    pub sample_sx: u16,
+    /// Sector Z coordinate for the reconstructed lighting sample.
+    pub sample_sz: u16,
+    /// Surface ordinal for the reconstructed lighting sample.
+    pub sample_ordinal: u16,
     /// Texture-page-relative UVs matching `vertices`.
     pub uvs: [(u8, u8); 4],
-    /// Surface lighting/material sample.
-    pub sample: WorldSurfaceSample,
+    /// Cached baked RGB values. Valid when `kind_flags` carries
+    /// [`CACHED_SURFACE_HAS_BAKED_RGB`].
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Packed surface kind + optional baked-light flag.
+    pub kind_flags: u8,
+    /// Runtime wall direction when this is a wall surface.
+    pub wall_direction: u8,
     /// Authored diagonal split id for floors/ceilings.
     pub split: u8,
     /// Split-triangle index for floor/ceiling records, or `2`
@@ -325,32 +334,85 @@ impl CachedRoomSurface {
     /// Empty placeholder for fixed runtime cache arrays.
     pub const EMPTY: Self = Self {
         material_slot: 0,
-        vertices: [WorldVertex::ZERO; 4],
         vertex_indices: [0; 4],
+        sample_sx: 0,
+        sample_sz: 0,
+        sample_ordinal: 0,
         uvs: [(0, 0); 4],
-        sample: WorldSurfaceSample::EMPTY,
+        baked_vertex_rgb: [(0, 0, 0); 4],
+        kind_flags: CACHED_SURFACE_KIND_FLOOR,
+        wall_direction: 0,
         split: SPLIT_NW_SE,
         triangle_index: WHOLE_QUAD_TRIANGLE_INDEX,
     };
 
     const fn new(
         material_slot: u16,
-        vertices: [WorldVertex; 4],
         vertex_indices: [u16; 4],
         uvs: [(u8, u8); 4],
         sample: WorldSurfaceSample,
         split: u8,
         triangle_index: u8,
     ) -> Self {
+        let (kind, wall_direction) = cached_surface_kind_code(sample.kind);
+        let mut kind_flags = kind;
+        let mut baked_vertex_rgb = [(0, 0, 0); 4];
+        if let Some(rgb) = sample.baked_vertex_rgb {
+            baked_vertex_rgb = rgb;
+            kind_flags |= CACHED_SURFACE_HAS_BAKED_RGB;
+        }
         Self {
             material_slot,
-            vertices,
             vertex_indices,
+            sample_sx: sample.sx,
+            sample_sz: sample.sz,
+            sample_ordinal: sample.ordinal,
             uvs,
-            sample,
+            baked_vertex_rgb,
+            kind_flags,
+            wall_direction,
             split,
             triangle_index,
         }
+    }
+
+    fn sample(self, vertices: [WorldVertex; 4]) -> WorldSurfaceSample {
+        WorldSurfaceSample {
+            kind: cached_surface_kind(self.kind_flags, self.wall_direction),
+            sx: self.sample_sx,
+            sz: self.sample_sz,
+            center: cached_surface_center(vertices, self.split, self.triangle_index),
+            baked_vertex_rgb: if self.kind_flags & CACHED_SURFACE_HAS_BAKED_RGB != 0 {
+                Some(self.baked_vertex_rgb)
+            } else {
+                None
+            },
+            ordinal: self.sample_ordinal,
+        }
+    }
+}
+
+const CACHED_SURFACE_KIND_MASK: u8 = 0b0000_0011;
+const CACHED_SURFACE_KIND_FLOOR: u8 = 0;
+const CACHED_SURFACE_KIND_CEILING: u8 = 1;
+const CACHED_SURFACE_KIND_WALL: u8 = 2;
+const CACHED_SURFACE_HAS_BAKED_RGB: u8 = 0b1000_0000;
+
+const fn cached_surface_kind_code(kind: WorldSurfaceKind) -> (u8, u8) {
+    match kind {
+        WorldSurfaceKind::Floor => (CACHED_SURFACE_KIND_FLOOR, 0),
+        WorldSurfaceKind::Ceiling => (CACHED_SURFACE_KIND_CEILING, 0),
+        WorldSurfaceKind::Wall { direction } => (CACHED_SURFACE_KIND_WALL, direction),
+    }
+}
+
+const fn cached_surface_kind(kind_flags: u8, wall_direction: u8) -> WorldSurfaceKind {
+    match kind_flags & CACHED_SURFACE_KIND_MASK {
+        CACHED_SURFACE_KIND_CEILING => WorldSurfaceKind::Ceiling,
+        CACHED_SURFACE_KIND_WALL => WorldSurfaceKind::Wall {
+            direction: wall_direction,
+        },
+        _ => WorldSurfaceKind::Floor,
     }
 }
 
@@ -522,7 +584,7 @@ pub fn draw_room<const OT: usize>(
     materials: &[WorldRenderMaterial],
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     draw_room_lit(
@@ -545,7 +607,7 @@ pub fn draw_room_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     for sx in 0..room.width() {
@@ -574,7 +636,7 @@ pub fn draw_room_lit_grid_visible<const OT: usize, L: WorldSurfaceLighting>(
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     visibility: GridVisibility,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
     let mut stats = GridVisibilityStats::default();
@@ -659,7 +721,7 @@ pub fn draw_room_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     for sx in 0..room.width() {
@@ -684,7 +746,7 @@ pub fn draw_room_vertex_lit_grid_visible<const OT: usize, L: WorldSurfaceLightin
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     visibility: GridVisibility,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
     let mut stats = GridVisibilityStats::default();
@@ -773,7 +835,7 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
     options: WorldSurfaceOptions,
     cells: &[GridVisibleCell],
     screen_margin: i32,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
     let mut stats = GridVisibilityStats::default();
@@ -811,9 +873,9 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
 /// Predecode all renderable floor, ceiling, and wall surfaces in a
 /// room into caller-owned fixed arrays.
 ///
-/// Cell headers are written in flat `[x * depth + z]` order for the
-/// whole room grid. Surface records are only written for populated
-/// sectors that reference a material slot and have valid geometry.
+/// Cell headers are written in `(x, z)` order only for populated cells.
+/// Surface records are only written for populated sectors that
+/// reference a material slot and have valid geometry.
 /// If either output slice is too small, `overflow` is set and callers
 /// should fall back to the uncached room renderer for that room.
 pub fn cache_room_vertex_lit_surfaces(
@@ -825,27 +887,16 @@ pub fn cache_room_vertex_lit_surfaces(
 ) -> CachedRoomSurfaceCacheStats {
     let width = room.width();
     let depth = room.depth();
-    let cell_count = (width as usize).saturating_mul(depth as usize);
-    if cell_count > cells_out.len() || cell_count > u16::MAX as usize {
-        return CachedRoomSurfaceCacheStats {
-            cell_count: 0,
-            surface_count: 0,
-            vertex_count: 0,
-            overflow: true,
-        };
-    }
 
     let sector_size = room.sector_size();
+    let mut cell_count = 0usize;
     let mut vertex_count = 0usize;
     let mut surface_count = 0usize;
     let mut sx = 0u16;
     while sx < width {
         let mut sz = 0u16;
         while sz < depth {
-            let cell_index = sx as usize * depth as usize + sz as usize;
             let surface_first = surface_count;
-            cells_out[cell_index] =
-                CachedRoomCell::new(sx, sz, sector_size, 0, 0, surface_first as u16, 0);
 
             let Some(sector) = room.sector(sx, sz) else {
                 sz += 1;
@@ -880,7 +931,6 @@ pub fn cache_room_vertex_lit_surfaces(
                         &mut surface_count,
                         CachedRoomSurface::new(
                             slot,
-                            vertices,
                             vertex_indices,
                             cached_material_uvs(materials, slot, uvs),
                             sample,
@@ -948,7 +998,6 @@ pub fn cache_room_vertex_lit_surfaces(
                             &mut surface_count,
                             CachedRoomSurface::new(
                                 slot,
-                                vertices,
                                 vertex_indices,
                                 cached_material_uvs(
                                     materials,
@@ -999,7 +1048,6 @@ pub fn cache_room_vertex_lit_surfaces(
                         &mut surface_count,
                         CachedRoomSurface::new(
                             slot,
-                            vertices,
                             vertex_indices,
                             cached_material_uvs(materials, slot, uvs),
                             sample,
@@ -1067,7 +1115,6 @@ pub fn cache_room_vertex_lit_surfaces(
                             &mut surface_count,
                             CachedRoomSurface::new(
                                 slot,
-                                vertices,
                                 vertex_indices,
                                 cached_material_uvs(
                                     materials,
@@ -1123,7 +1170,6 @@ pub fn cache_room_vertex_lit_surfaces(
                             &mut surface_count,
                             CachedRoomSurface::new(
                                 wall.material(),
-                                vertices,
                                 vertex_indices,
                                 cached_material_uvs(materials, wall.material(), wall.uvs()),
                                 sample,
@@ -1144,7 +1190,10 @@ pub fn cache_room_vertex_lit_surfaces(
             }
 
             let surface_len = surface_count.saturating_sub(surface_first);
-            if surface_len > u16::MAX as usize || surface_first > u16::MAX as usize {
+            if surface_len > u16::MAX as usize
+                || surface_first > u16::MAX as usize
+                || cell_count > u16::MAX as usize
+            {
                 return CachedRoomSurfaceCacheStats {
                     cell_count,
                     surface_count,
@@ -1153,8 +1202,16 @@ pub fn cache_room_vertex_lit_surfaces(
                 };
             }
             if surface_len > 0 {
+                if cell_count >= cells_out.len() {
+                    return CachedRoomSurfaceCacheStats {
+                        cell_count,
+                        surface_count,
+                        vertex_count,
+                        overflow: true,
+                    };
+                }
                 let (min_y, max_y) = sector_y_bounds(room, sector);
-                cells_out[cell_index] = CachedRoomCell::new(
+                cells_out[cell_count] = CachedRoomCell::new(
                     sx,
                     sz,
                     sector_size,
@@ -1163,6 +1220,7 @@ pub fn cache_room_vertex_lit_surfaces(
                     surface_first as u16,
                     surface_len as u16,
                 );
+                cell_count += 1;
             }
 
             sz += 1;
@@ -1189,8 +1247,9 @@ pub fn cache_room_vertex_lit_surfaces(
 #[allow(clippy::too_many_arguments)]
 pub fn draw_cached_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighting>(
     cached_cells: &[CachedRoomCell],
+    cached_vertices: &[WorldVertex],
     cached_surfaces: &[CachedRoomSurface],
-    room_depth: u16,
+    _room_depth: u16,
     _sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
@@ -1198,23 +1257,15 @@ pub fn draw_cached_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfac
     options: WorldSurfaceOptions,
     visible_cells: &[GridVisibleCell],
     screen_margin: i32,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
     let mut stats = GridVisibilityStats::default();
-    let depth = room_depth as usize;
-    if depth == 0 {
-        return stats;
-    }
 
     for visible in visible_cells {
-        let cell_index = visible.x as usize * depth + visible.z as usize;
-        let Some(cell) = cached_cells.get(cell_index).copied() else {
+        let Some(cell) = cached_room_cell(cached_cells, visible.x, visible.z) else {
             continue;
         };
-        if cell.surface_count == 0 || cell.x != visible.x || cell.z != visible.z {
-            continue;
-        }
 
         stats.cells_considered = stats.cells_considered.saturating_add(1);
         if !cell_visibility_visible_to_camera(
@@ -1240,6 +1291,7 @@ pub fn draw_cached_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfac
                     .surfaces_considered
                     .saturating_add(draw_cached_room_surface(
                         cached_surfaces[i],
+                        cached_vertices,
                         materials,
                         lighting,
                         camera,
@@ -1267,7 +1319,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     projected_vertices: &mut [crate::render3d::ProjectedVertex],
     projected_valid: &mut [bool],
     projected_depths: &mut [i32],
-    room_depth: u16,
+    _room_depth: u16,
     _sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
@@ -1275,13 +1327,11 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     options: WorldSurfaceOptions,
     visible_cells: &[GridVisibleCell],
     screen_margin: i32,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
     let mut stats = GridVisibilityStats::default();
-    let depth = room_depth as usize;
-    if depth == 0
-        || projected_vertices.len() < cached_vertices.len()
+    if projected_vertices.len() < cached_vertices.len()
         || projected_valid.len() < cached_vertices.len()
         || projected_depths.len() < cached_vertices.len()
     {
@@ -1305,13 +1355,9 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     }
 
     for visible in visible_cells {
-        let cell_index = visible.x as usize * depth + visible.z as usize;
-        let Some(cell) = cached_cells.get(cell_index).copied() else {
+        let Some(cell) = cached_room_cell(cached_cells, visible.x, visible.z) else {
             continue;
         };
-        if cell.surface_count == 0 || cell.x != visible.x || cell.z != visible.z {
-            continue;
-        }
 
         stats.cells_considered = stats.cells_considered.saturating_add(1);
         if !cell_visibility_visible_to_camera(
@@ -1337,9 +1383,11 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                     .surfaces_considered
                     .saturating_add(draw_indexed_cached_room_surface(
                         cached_surfaces[i],
+                        cached_vertices,
                         projected_vertices,
                         projected_valid,
                         projected_depths,
+                        use_vertex_depths,
                         materials,
                         lighting,
                         options,
@@ -1350,6 +1398,28 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         }
     }
     stats
+}
+
+fn cached_room_cell(cells: &[CachedRoomCell], x: u16, z: u16) -> Option<CachedRoomCell> {
+    let key = cached_room_cell_key(x, z);
+    let mut low = 0usize;
+    let mut high = cells.len();
+    while low < high {
+        let mid = (low + high) / 2;
+        let cell = cells[mid];
+        let cell_key = cached_room_cell_key(cell.x, cell.z);
+        if cell_key < key {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let cell = cells.get(low).copied()?;
+    (cached_room_cell_key(cell.x, cell.z) == key && cell.surface_count != 0).then_some(cell)
+}
+
+const fn cached_room_cell_key(x: u16, z: u16) -> u32 {
+    ((x as u32) << 16) | z as u32
 }
 
 fn cache_room_surface(
@@ -1496,46 +1566,52 @@ fn triangle_heights_to_quad(
 #[allow(clippy::too_many_arguments)]
 fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
+    cached_vertices: &[WorldVertex],
     materials: &[WorldRenderMaterial],
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> u16 {
     let Some(&material) = materials.get(surface.material_slot as usize) else {
         return 0;
     };
+    let ids = surface.vertex_indices;
+    let Some(vertices) = indexed_world_quad(cached_vertices, ids) else {
+        return 0;
+    };
     let material = cached_uv_material(material);
-    let colors = vertex_lighting_colors(lighting, surface.sample, material, surface.vertices);
-    match surface.sample.kind {
+    let sample = surface.sample(vertices);
+    let colors = vertex_lighting_colors(lighting, sample, material, vertices);
+    match sample.kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
+            let is_ceiling = matches!(sample.kind, WorldSurfaceKind::Ceiling);
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 submit_split_triangle_vertex_lit(
                     camera,
                     options.with_depth_policy(DepthPolicy::Farthest),
                     CullMode::Back,
                     material,
-                    surface.vertices,
+                    vertices,
                     surface.uvs,
                     colors,
                     surface.split,
                     surface.triangle_index as usize,
-                    matches!(surface.sample.kind, WorldSurfaceKind::Ceiling),
+                    is_ceiling,
                     triangles,
                     world,
                 )
             } else {
-                let (vertices, uvs, colors) =
-                    if matches!(surface.sample.kind, WorldSurfaceKind::Ceiling) {
-                        (
-                            reverse_quad_winding(surface.vertices),
-                            reverse_quad_winding(surface.uvs),
-                            reverse_quad_winding(colors),
-                        )
-                    } else {
-                        (surface.vertices, surface.uvs, colors)
-                    };
+                let (vertices, uvs, colors) = if is_ceiling {
+                    (
+                        reverse_quad_winding(vertices),
+                        reverse_quad_winding(surface.uvs),
+                        reverse_quad_winding(colors),
+                    )
+                } else {
+                    (vertices, surface.uvs, colors)
+                };
                 submit_split_quad_vertex_lit(
                     camera,
                     options.with_depth_policy(DepthPolicy::Farthest),
@@ -1558,7 +1634,7 @@ fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     options,
                     CullMode::Back,
                     material,
-                    surface.vertices,
+                    vertices,
                     surface.uvs,
                     colors,
                     surface.split,
@@ -1573,7 +1649,7 @@ fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     options,
                     CullMode::Back,
                     material,
-                    surface.vertices,
+                    vertices,
                     surface.uvs,
                     colors,
                     triangles,
@@ -1589,13 +1665,15 @@ fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
 #[inline(always)]
 fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
+    cached_vertices: &[WorldVertex],
     projected_vertices: &[ProjectedVertex],
     projected_valid: &[bool],
     projected_depths: &[i32],
+    use_vertex_depths: bool,
     materials: &[WorldRenderMaterial],
     lighting: &L,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> u16 {
     let Some(&material) = materials.get(surface.material_slot as usize) else {
@@ -1603,11 +1681,16 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     };
     let material = cached_uv_material(material);
     let ids = surface.vertex_indices;
+    let Some(vertices) = indexed_world_quad(cached_vertices, ids) else {
+        return 0;
+    };
     let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
         return 0;
     };
-    match surface.sample.kind {
+    let sample = surface.sample(vertices);
+    match sample.kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
+            let is_ceiling = matches!(sample.kind, WorldSurfaceKind::Ceiling);
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 if projected_split_triangle_backface_culled(
                     projected,
@@ -1615,20 +1698,21 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     CullMode::Back,
                     surface.split,
                     surface.triangle_index as usize,
-                    matches!(surface.sample.kind, WorldSurfaceKind::Ceiling),
+                    is_ceiling,
                 ) {
                     return 1;
                 }
-                let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+                let Some(colors) = indexed_vertex_lighting_colors(
+                    lighting,
+                    sample,
+                    material,
+                    vertices,
+                    projected_depths,
+                    ids,
+                    use_vertex_depths,
+                ) else {
                     return 0;
                 };
-                let colors = vertex_lighting_colors_with_depths(
-                    lighting,
-                    surface.sample,
-                    material,
-                    surface.vertices,
-                    depths,
-                );
                 submit_projected_split_triangle_vertex_lit_cached_uvs(
                     projected,
                     surface.uvs,
@@ -1638,13 +1722,12 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     CullMode::Back,
                     surface.split,
                     surface.triangle_index as usize,
-                    matches!(surface.sample.kind, WorldSurfaceKind::Ceiling),
+                    is_ceiling,
                     triangles,
                     world,
                 )
             } else {
-                let projected_for_cull = if matches!(surface.sample.kind, WorldSurfaceKind::Ceiling)
-                {
+                let projected_for_cull = if is_ceiling {
                     reverse_quad_winding(projected)
                 } else {
                     projected
@@ -1657,26 +1740,26 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 ) {
                     return 1;
                 }
-                let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+                let Some(colors) = indexed_vertex_lighting_colors(
+                    lighting,
+                    sample,
+                    material,
+                    vertices,
+                    projected_depths,
+                    ids,
+                    use_vertex_depths,
+                ) else {
                     return 0;
                 };
-                let colors = vertex_lighting_colors_with_depths(
-                    lighting,
-                    surface.sample,
-                    material,
-                    surface.vertices,
-                    depths,
-                );
-                let (projected, uvs, colors) =
-                    if matches!(surface.sample.kind, WorldSurfaceKind::Ceiling) {
-                        (
-                            reverse_quad_winding(projected),
-                            reverse_quad_winding(surface.uvs),
-                            reverse_quad_winding(colors),
-                        )
-                    } else {
-                        (projected, surface.uvs, colors)
-                    };
+                let (projected, uvs, colors) = if is_ceiling {
+                    (
+                        reverse_quad_winding(projected),
+                        reverse_quad_winding(surface.uvs),
+                        reverse_quad_winding(colors),
+                    )
+                } else {
+                    (projected, surface.uvs, colors)
+                };
                 submit_sided_projected_gouraud_quad_cached_uvs(
                     world,
                     triangles,
@@ -1703,16 +1786,17 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 ) {
                     return 1;
                 }
-                let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+                let Some(colors) = indexed_vertex_lighting_colors(
+                    lighting,
+                    sample,
+                    material,
+                    vertices,
+                    projected_depths,
+                    ids,
+                    use_vertex_depths,
+                ) else {
                     return 0;
                 };
-                let colors = vertex_lighting_colors_with_depths(
-                    lighting,
-                    surface.sample,
-                    material,
-                    surface.vertices,
-                    depths,
-                );
                 submit_projected_split_triangle_vertex_lit_cached_uvs(
                     projected,
                     surface.uvs,
@@ -1735,16 +1819,17 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 ) {
                     return 1;
                 }
-                let Some(depths) = indexed_quad_depths(projected_depths, ids) else {
+                let Some(colors) = indexed_vertex_lighting_colors(
+                    lighting,
+                    sample,
+                    material,
+                    vertices,
+                    projected_depths,
+                    ids,
+                    use_vertex_depths,
+                ) else {
                     return 0;
                 };
-                let colors = vertex_lighting_colors_with_depths(
-                    lighting,
-                    surface.sample,
-                    material,
-                    surface.vertices,
-                    depths,
-                );
                 submit_sided_projected_gouraud_quad_cached_uvs(
                     world,
                     triangles,
@@ -1760,6 +1845,35 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
         }
     }
     1
+}
+
+#[inline(always)]
+fn indexed_world_quad(vertices: &[WorldVertex], ids: [u16; 4]) -> Option<[WorldVertex; 4]> {
+    let a = ids[0] as usize;
+    let b = ids[1] as usize;
+    let c = ids[2] as usize;
+    let d = ids[3] as usize;
+    let max_index = a.max(b).max(c).max(d);
+    if max_index >= vertices.len() {
+        return None;
+    }
+    Some([vertices[a], vertices[b], vertices[c], vertices[d]])
+}
+
+fn cached_surface_center(vertices: [WorldVertex; 4], split: u8, triangle_index: u8) -> RoomPoint {
+    if triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+        let (a, b, c) = split_triangles_runtime(split)[triangle_index as usize];
+        return RoomPoint::new(
+            (vertices[a].x + vertices[b].x + vertices[c].x) / 3,
+            (vertices[a].y + vertices[b].y + vertices[c].y) / 3,
+            (vertices[a].z + vertices[b].z + vertices[c].z) / 3,
+        );
+    }
+    RoomPoint::new(
+        average4_i32(vertices[0].x, vertices[1].x, vertices[2].x, vertices[3].x),
+        average4_i32(vertices[0].y, vertices[1].y, vertices[2].y, vertices[3].y),
+        average4_i32(vertices[0].z, vertices[1].z, vertices[2].z, vertices[3].z),
+    )
 }
 
 #[inline(always)]
@@ -1798,6 +1912,25 @@ fn indexed_quad_depths(depths: &[i32], ids: [u16; 4]) -> Option<[i32; 4]> {
         return None;
     }
     Some([depths[a], depths[b], depths[c], depths[d]])
+}
+
+#[inline(always)]
+fn indexed_vertex_lighting_colors<L: WorldSurfaceLighting>(
+    lighting: &L,
+    sample: WorldSurfaceSample,
+    material: WorldRenderMaterial,
+    vertices: [WorldVertex; 4],
+    depths: &[i32],
+    ids: [u16; 4],
+    use_vertex_depths: bool,
+) -> Option<[(u8, u8, u8); 4]> {
+    if use_vertex_depths {
+        let depths = indexed_quad_depths(depths, ids)?;
+        return Some(vertex_lighting_colors_with_depths(
+            lighting, sample, material, vertices, depths,
+        ));
+    }
+    Some(vertex_lighting_colors(lighting, sample, material, vertices))
 }
 
 #[inline(always)]
@@ -1873,7 +2006,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> u16 {
     let sector_size = room.sector_size();
@@ -2104,7 +2237,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> u16 {
     let sector_size = room.sector_size();
@@ -2436,7 +2569,7 @@ fn emit_floor<const OT: usize>(
     material: WorldRenderMaterial,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
@@ -2474,7 +2607,7 @@ fn emit_ceiling<const OT: usize>(
     material: WorldRenderMaterial,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
@@ -2509,7 +2642,7 @@ fn emit_floor_triangle<const OT: usize>(
     material: WorldRenderMaterial,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     submit_split_triangle(
@@ -2539,7 +2672,7 @@ fn emit_ceiling_triangle<const OT: usize>(
     material: WorldRenderMaterial,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     submit_split_triangle(
@@ -2571,7 +2704,7 @@ fn emit_wall<const OT: usize>(
     material: WorldRenderMaterial,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
@@ -2620,7 +2753,7 @@ fn emit_floor_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
@@ -2659,7 +2792,7 @@ fn emit_ceiling_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
@@ -2698,7 +2831,7 @@ fn emit_floor_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let verts =
@@ -2734,7 +2867,7 @@ fn emit_ceiling_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let verts =
@@ -2770,7 +2903,7 @@ fn emit_wall_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
@@ -2837,7 +2970,7 @@ fn submit_quad<const OT: usize>(
     material: WorldRenderMaterial,
     verts: [WorldVertex; 4],
     uvs: [(u8, u8); 4],
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let Some(projected) = camera.project_world_quad(verts) else {
@@ -2862,7 +2995,7 @@ fn submit_split_quad<const OT: usize>(
     verts: [WorldVertex; 4],
     uvs: [(u8, u8); 4],
     split: u8,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     if split != SPLIT_NE_SW {
@@ -2916,7 +3049,7 @@ fn submit_split_triangle<const OT: usize>(
     split: u8,
     triangle_index: usize,
     reverse_front: bool,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let Some(projected) = camera.project_world_quad(verts) else {
@@ -2949,7 +3082,7 @@ fn submit_quad_vertex_lit<const OT: usize>(
     verts: [WorldVertex; 4],
     uvs: [(u8, u8); 4],
     colors: [(u8, u8, u8); 4],
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let Some(projected) = camera.project_world_quad(verts) else {
@@ -2978,7 +3111,7 @@ fn submit_split_quad_vertex_lit<const OT: usize>(
     uvs: [(u8, u8); 4],
     colors: [(u8, u8, u8); 4],
     split: u8,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let Some(projected) = camera.project_world_quad(verts) else {
@@ -3014,7 +3147,7 @@ fn submit_split_triangle_vertex_lit<const OT: usize>(
     split: u8,
     triangle_index: usize,
     reverse_front: bool,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let Some(projected) = camera.project_world_quad(verts) else {
@@ -3051,7 +3184,7 @@ fn submit_projected_split_triangle_vertex_lit_cached_uvs<const OT: usize>(
     split: u8,
     triangle_index: usize,
     reverse_front: bool,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) {
     let opts = options
@@ -3076,7 +3209,7 @@ fn submit_projected_split_triangle_vertex_lit_cached_uvs<const OT: usize>(
 #[inline(always)]
 fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
     world: &mut WorldRenderPass<'_, '_, OT>,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     verts: [crate::render3d::ProjectedVertex; 4],
     uvs: [(u8, u8); 4],
     colors: [(u8, u8, u8); 4],
@@ -3121,7 +3254,7 @@ fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
 #[allow(clippy::too_many_arguments)]
 fn submit_sided_projected_gouraud_quad<const OT: usize>(
     world: &mut WorldRenderPass<'_, '_, OT>,
-    triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     verts: [crate::render3d::ProjectedVertex; 4],
     uvs: [(u8, u8); 4],
     colors: [(u8, u8, u8); 4],
@@ -3166,7 +3299,7 @@ fn submit_sided_projected_gouraud_quad<const OT: usize>(
 
 fn submit_sided_projected_quad<const OT: usize>(
     world: &mut WorldRenderPass<'_, '_, OT>,
-    triangles: &mut PrimitiveArena<'_, TriTextured>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
     verts: [crate::render3d::ProjectedVertex; 4],
     uvs: [(u8, u8); 4],
     material: WorldRenderMaterial,
@@ -3424,6 +3557,7 @@ fn reverse_quad_winding<T: Copy>(corners: [T; 4]) -> [T; 4] {
 mod tests {
     use super::*;
     use crate::Angle;
+    use crate::PrimitiveArena;
     use crate::{ProjectedVertex, WorldProjection, Q12};
 
     /// Helper: the two indices both triangles in `[t0, t1]`
@@ -3811,7 +3945,6 @@ mod tests {
         let vertices = horizontal_vertices(0, 0, 1024, [1024, 1024, 1024, 1024]);
         let surface = CachedRoomSurface::new(
             0,
-            vertices,
             [0, 1, 2, 3],
             uvs,
             WorldSurfaceSample {
@@ -3829,6 +3962,7 @@ mod tests {
         assert_eq!(
             draw_cached_room_surface(
                 surface,
+                &vertices,
                 &[WorldRenderMaterial::front(TextureMaterial::opaque(
                     0,
                     0,
