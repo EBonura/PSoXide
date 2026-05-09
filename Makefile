@@ -30,7 +30,7 @@
         showcase-particles run-showcase-particles \
         hello-engine run-hello-engine \
         showcase-room run-showcase-room \
-        cook-playtest build-editor-playtest
+        cook-playtest build-editor-playtest profile-demo3
 
 help:
 	@echo "PSoXide targets:"
@@ -53,6 +53,7 @@ help:
 	@echo "    make tekken-fight-guard - assert Tekken 3 early-fight HUD/stage/fighter coverage"
 	@echo "    make tekken-late-fight-guard - assert Tekken 3 late-fight sky/fighter coverage"
 	@echo "    make test-sdk     - build every SDK example + run Milestone-C regression suite"
+	@echo "    make profile-demo3 - cook/build demo3 and dump headless screenshot/profile"
 	@echo ""
 	@echo "  SDK examples (build mipsel-sony-psx binaries):"
 	@echo "    make examples     - build every example"
@@ -200,6 +201,9 @@ test-sdk: examples
 # --- SDK examples ---------------------------------------------------------
 
 EXAMPLE_OUT := build/examples/mipsel-sony-psx/release
+PROFILE_DEMO3_FRAMES ?= 60
+PROFILE_DEMO3_STEPS ?= 120000000
+PROFILE_DEMO3_HW ?= /tmp/psoxide-demo3-hw-$(PROFILE_DEMO3_FRAMES).ppm
 
 hello-tri:
 	cd sdk/examples/hello-tri && cargo build --release
@@ -275,6 +279,17 @@ cook-playtest:
 # job (or `make cook-playtest` if you want the starter).
 build-editor-playtest:
 	cd engine/examples/editor-playtest && cargo build --release
+
+profile-demo3:
+	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
+	$(MAKE) build-editor-playtest
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--guest-frames $(PROFILE_DEMO3_FRAMES) \
+		--steps $(PROFILE_DEMO3_STEPS) \
+		--dump-hw $(PROFILE_DEMO3_HW) \
+		--dump-hash \
+		--dump-guest-profile
 
 # --- Content pipeline (host-side editor tooling) ------------------------
 

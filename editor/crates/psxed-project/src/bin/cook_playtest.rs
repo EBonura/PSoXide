@@ -122,6 +122,41 @@ fn main() -> ExitCode {
                     total_vram_refs,
                     package.entities.len(),
                 );
+                let total_room_bytes: usize = package
+                    .chunks
+                    .iter()
+                    .map(|chunk| chunk.static_lit_bytes)
+                    .sum();
+                let total_visibility_bytes = package.visibility_cells.len()
+                    * std::mem::size_of::<psxed_project::playtest::PlaytestVisibilityCell>();
+                let total_populated_cells: usize = package
+                    .chunks
+                    .iter()
+                    .map(|chunk| chunk.populated_cells as usize)
+                    .sum();
+                let total_triangles: usize =
+                    package.chunks.iter().map(|chunk| chunk.triangles).sum();
+                if let Some(largest) = package
+                    .chunks
+                    .iter()
+                    .max_by_key(|chunk| chunk.static_lit_bytes)
+                {
+                    println!(
+                        "[cook-playtest] Chunks: {}  Populated cells: {}  Triangle est: {}  Room bytes: {}  Visibility bytes: {}  Largest: room {} chunk {} {}x{} cells={} tris={} bytes={}",
+                        package.chunks.len(),
+                        total_populated_cells,
+                        total_triangles,
+                        total_room_bytes,
+                        total_visibility_bytes,
+                        largest.room,
+                        largest.chunk_index,
+                        largest.width,
+                        largest.depth,
+                        largest.populated_cells,
+                        largest.triangles,
+                        largest.static_lit_bytes,
+                    );
+                }
             }
             println!("[cook-playtest] wrote → {}", dir.display());
             println!("[cook-playtest] Build: make build-editor-playtest");
