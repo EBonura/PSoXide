@@ -95,6 +95,8 @@ pub struct PlaytestRoom {
     pub sky: PlaytestSky,
     /// Resolved far-vista ring for this cooked room.
     pub far_vista: PlaytestFarVista,
+    /// Resolved world camera for this cooked room.
+    pub camera: PlaytestCamera,
     /// Room flags mirrored into the runtime manifest.
     pub flags: u16,
 }
@@ -136,6 +138,17 @@ pub struct PlaytestFarVista {
     pub tint_rgb: [u8; 3],
     /// Runtime far-vista flags.
     pub flags: u16,
+}
+
+/// Resolved third-person camera values written into one runtime room record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCamera {
+    /// Preferred trailing distance from focus to camera.
+    pub distance: i32,
+    /// Camera origin height above the player origin.
+    pub height: i32,
+    /// Look-at height above the player origin.
+    pub target_height: i32,
 }
 
 /// Per-room slice into generated visibility cells.
