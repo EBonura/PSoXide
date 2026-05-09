@@ -130,10 +130,36 @@ pub mod counter {
     pub const TEXTURED_MODEL_VERTICES: u16 = 30;
     /// Face records considered by textured model submits.
     pub const TEXTURED_MODEL_FACES: u16 = 31;
+    /// Active runtime room/chunk records walked this frame.
+    pub const ROOM_ACTIVE_CHUNKS: u16 = 32;
+    /// Precomputed/grid-visible cells supplied to the room renderer.
+    pub const ROOM_VISIBLE_CELLS: u16 = 33;
+    /// Active room/chunk draws that used the cached surface path.
+    pub const ROOM_CACHED_DRAWS: u16 = 34;
+    /// Active room/chunk draws that used the direct uncached path.
+    pub const ROOM_UNCACHED_DRAWS: u16 = 35;
+    /// Remaining primitive packet slots at the end of scene emission.
+    pub const TRI_PRIMITIVE_REMAINING: u16 = 36;
+    /// Cached room cell headers resident in the active chunk window.
+    pub const ROOM_CACHE_CELLS: u16 = 37;
+    /// Cached room vertices resident in the active chunk window.
+    pub const ROOM_CACHE_VERTICES: u16 = 38;
+    /// Cached room surfaces resident in the active chunk window.
+    pub const ROOM_CACHE_SURFACES: u16 = 39;
+    /// Active room/chunk draws that fell back because surface caching failed.
+    pub const ROOM_CACHE_FALLBACK_DRAWS: u16 = 40;
+    /// Active room/chunk draws that fell back because visibility cells were unavailable.
+    pub const ROOM_VISIBILITY_FALLBACK_DRAWS: u16 = 41;
+    /// Room cells rejected by the global player/camera range gate.
+    pub const ROOM_CELLS_RANGE_CULLED: u16 = 42;
+    /// Candidate chunks that were within activation range this frame.
+    pub const ROOM_CHUNKS_CONSIDERED: u16 = 43;
+    /// Candidate chunks skipped because the active cache budget was full.
+    pub const ROOM_CHUNK_CACHE_SKIPS: u16 = 44;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 32;
+pub const COUNTER_COUNT: usize = 45;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,6 +407,19 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::TEXTURED_MODEL_PARTS => "mdl parts",
         counter::TEXTURED_MODEL_VERTICES => "mdl verts",
         counter::TEXTURED_MODEL_FACES => "mdl faces",
+        counter::ROOM_ACTIVE_CHUNKS => "room chunks",
+        counter::ROOM_VISIBLE_CELLS => "room visible cells",
+        counter::ROOM_CACHED_DRAWS => "room cached draws",
+        counter::ROOM_UNCACHED_DRAWS => "room uncached draws",
+        counter::TRI_PRIMITIVE_REMAINING => "tri slots free",
+        counter::ROOM_CACHE_CELLS => "room cache cells",
+        counter::ROOM_CACHE_VERTICES => "room cache verts",
+        counter::ROOM_CACHE_SURFACES => "room cache surfaces",
+        counter::ROOM_CACHE_FALLBACK_DRAWS => "room cache fallbacks",
+        counter::ROOM_VISIBILITY_FALLBACK_DRAWS => "room visibility fallbacks",
+        counter::ROOM_CELLS_RANGE_CULLED => "room range culled",
+        counter::ROOM_CHUNKS_CONSIDERED => "room chunks considered",
+        counter::ROOM_CHUNK_CACHE_SKIPS => "room chunk cache skips",
         _ => "unknown",
     }
 }
