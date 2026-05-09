@@ -204,6 +204,23 @@ impl ThirdPersonCameraState {
         self.last_rotated = false;
     }
 
+    /// Re-express the camera in a different room-local coordinate
+    /// space while preserving the same physical camera/focus
+    /// positions. Streaming chunk transitions should call this with
+    /// the same local-space delta applied to the player root.
+    pub fn relocate_room_space(&mut self, delta: RoomPoint) {
+        self.position = RoomPoint::new(
+            self.position.x.saturating_add(delta.x),
+            self.position.y.saturating_add(delta.y),
+            self.position.z.saturating_add(delta.z),
+        );
+        self.focus = RoomPoint::new(
+            self.focus.x.saturating_add(delta.x),
+            self.focus.y.saturating_add(delta.y),
+            self.focus.z.saturating_add(delta.z),
+        );
+    }
+
     /// Advance the controller by one display tick and build a render camera.
     pub fn update(
         &mut self,
