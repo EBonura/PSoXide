@@ -143,8 +143,7 @@ struct PreviewScratch {
 }
 
 const EMPTY_TRI: TriFlat = TriFlat::new([(0, 0), (0, 0), (0, 0)], 0, 0, 0);
-const EMPTY_FAR_VISTA_QUAD: QuadFlat =
-    QuadFlat::new([(0, 0), (0, 0), (0, 0), (0, 0)], 0, 0, 0);
+const EMPTY_FAR_VISTA_QUAD: QuadFlat = QuadFlat::new([(0, 0), (0, 0), (0, 0), (0, 0)], 0, 0, 0);
 const EMPTY_SKY_QUAD: QuadGouraud = QuadGouraud::new(
     [(0, 0), (0, 0), (0, 0), (0, 0)],
     [(0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
@@ -235,7 +234,13 @@ pub fn build_phase1_frame(
         .world_far_vista_for_node(room_id)
         .unwrap_or_default()
         .resolved_for_room(grid.fog_enabled && preview_fog, grid.fog_color);
-    push_far_vista_ring(&mut scratch, camera, resolved_far_vista);
+    push_far_vista_ring(
+        &mut scratch,
+        camera,
+        world_camera,
+        resolved_far_vista,
+        textures,
+    );
     let fog = PreviewFog::from_grid(grid, preview_fog);
     walk_room(
         project,
@@ -507,7 +512,7 @@ fn walk_room(
                     scratch,
                     camera,
                     [x0, x1, z0, z1],
-                    floor.heights,
+                    [floor.triangle_heights(0), floor.triangle_heights(1)],
                     floor.split,
                     floor.dropped_corner,
                     floor.triangle_uv(0),
@@ -557,7 +562,7 @@ fn walk_room(
                     scratch,
                     camera,
                     [x0, x1, z0, z1],
-                    ceiling.heights,
+                    [ceiling.triangle_heights(0), ceiling.triangle_heights(1)],
                     ceiling.split,
                     ceiling.dropped_corner,
                     ceiling.triangle_uv(0),
@@ -1130,8 +1135,9 @@ fn light_face(
     }
 }
 
-/// Project the four corners of a sector-aligned horizontal face
-/// and emit one or two triangles. `heights` is `[NW, NE, SE, SW]`.
+/// Project the two triangles of a sector-aligned horizontal face
+/// and emit one or two triangles. `triangle_heights` are in each
+/// triangle's split-corner order.
 /// `flip_winding=true` reverses the vertex order for ceilings.
 /// `dropped_corner=Some(c)` makes the face a triangle: the half
 /// containing `c` is skipped (`split` must already be on the
@@ -1141,7 +1147,7 @@ fn push_horizontal_face(
     scratch: &mut PreviewScratch,
     camera: psx_engine::WorldCamera,
     bounds: [i32; 4],
-    heights: [i32; 4],
+    triangle_heights: [[i32; 3]; 2],
     split: GridSplit,
     dropped_corner: Option<psxed_project::Corner>,
     uv_transform_a: GridUvTransform,
@@ -1150,18 +1156,6 @@ fn push_horizontal_face(
     shade_b: FaceShade,
     flip_winding: bool,
 ) -> bool {
-    let [x0, x1, z0, z1] = bounds;
-    let w_nw = [x0, heights[0], z1];
-    let w_ne = [x1, heights[1], z1];
-    let w_se = [x1, heights[2], z0];
-    let w_sw = [x0, heights[3], z0];
-    if !preview_vertices_in_front(camera, &[w_nw, w_ne, w_se, w_sw]) {
-        return false;
-    }
-    let p_nw = gte_scene::project_vertex(world_to_view(w_nw));
-    let p_ne = gte_scene::project_vertex(world_to_view(w_ne));
-    let p_se = gte_scene::project_vertex(world_to_view(w_se));
-    let p_sw = gte_scene::project_vertex(world_to_view(w_sw));
     let a_uvs = material_sized_uvs(
         shade_a,
         uv_transform_a.apply_to_quad(textured_base_uvs(shade_a, PREVIEW_FLOOR_UVS)),
@@ -1171,16 +1165,17 @@ fn push_horizontal_face(
         uv_transform_b.apply_to_quad(textured_base_uvs(shade_b, PREVIEW_FLOOR_UVS)),
     );
 
-    let projected = [p_nw, p_ne, p_se, p_sw];
     let tri_a_corners = psxed_project::horizontal_triangle_corners(split, 0);
     let tri_b_corners = psxed_project::horizontal_triangle_corners(split, 1);
+    let tri_a_world = horizontal_triangle_world_points(bounds, tri_a_corners, triangle_heights[0]);
+    let tri_b_world = horizontal_triangle_world_points(bounds, tri_b_corners, triangle_heights[1]);
     let tri_a = (
-        select_projected_corners(projected, tri_a_corners),
+        tri_a_world,
         select_uv_corners(a_uvs, tri_a_corners),
         tri_a_corners,
     );
     let tri_b = (
-        select_projected_corners(projected, tri_b_corners),
+        tri_b_world,
         select_uv_corners(b_uvs, tri_b_corners),
         tri_b_corners,
     );
@@ -1188,9 +1183,17 @@ fn push_horizontal_face(
     let triangle_contains =
         |members: [Corner; 3], target: Corner| -> bool { members.contains(&target) };
     let emit_triangle = |scratch: &mut PreviewScratch,
-                         verts: [psx_gte::scene::Projected; 3],
+                         verts: [[i32; 3]; 3],
                          uvs: [(u8, u8); 3],
                          shade: FaceShade| {
+        if !preview_vertices_in_front(camera, &verts) {
+            return false;
+        }
+        let verts = [
+            gte_scene::project_vertex(world_to_view(verts[0])),
+            gte_scene::project_vertex(world_to_view(verts[1])),
+            gte_scene::project_vertex(world_to_view(verts[2])),
+        ];
         if flip_winding {
             // Ceilings: forward `[0, 1, 2]` walk (CW from above
             // = CCW from below) so the inward normal points down.
@@ -1221,6 +1224,28 @@ fn push_horizontal_face(
         emitted |= emit_triangle(scratch, tri_b.0, tri_b.1, shade_b);
     }
     emitted
+}
+
+fn horizontal_triangle_world_points(
+    bounds: [i32; 4],
+    corners: [Corner; 3],
+    heights: [i32; 3],
+) -> [[i32; 3]; 3] {
+    [
+        horizontal_corner_world_point(bounds, corners[0], heights[0]),
+        horizontal_corner_world_point(bounds, corners[1], heights[1]),
+        horizontal_corner_world_point(bounds, corners[2], heights[2]),
+    ]
+}
+
+fn horizontal_corner_world_point(bounds: [i32; 4], corner: Corner, height: i32) -> [i32; 3] {
+    let [x0, x1, z0, z1] = bounds;
+    match corner {
+        Corner::NW => [x0, height, z1],
+        Corner::NE => [x1, height, z1],
+        Corner::SE => [x1, height, z0],
+        Corner::SW => [x0, height, z0],
+    }
 }
 
 /// Which edge of the sector this wall sits on. The renderer needs
@@ -1426,17 +1451,6 @@ fn material_sized_uv_component(value: u8, size: u8) -> u8 {
         size
     };
     ((u16::from(value) * u16::from(size)) / u16::from(GRID_TILE_UV)).min(u16::from(u8::MAX)) as u8
-}
-
-fn select_projected_corners(
-    projected: [psx_gte::scene::Projected; 4],
-    corners: [Corner; 3],
-) -> [psx_gte::scene::Projected; 3] {
-    [
-        projected[corners[0].idx()],
-        projected[corners[1].idx()],
-        projected[corners[2].idx()],
-    ]
 }
 
 fn select_uv_corners(uvs: [(u8, u8); 4], corners: [Corner; 3]) -> [(u8, u8); 3] {
@@ -3335,7 +3349,9 @@ fn push_sky_quad(
 fn push_far_vista_ring(
     scratch: &mut PreviewScratch,
     camera: ViewportCameraState,
+    world_camera: psx_engine::WorldCamera,
     vista: psxed_project::ResolvedFarVistaSettings,
+    textures: &EditorTextures,
 ) {
     if !vista.enabled {
         return;
@@ -3354,33 +3370,103 @@ fn push_far_vista_ring(
         let z0 = cam_z.saturating_add((a0.cos() * radius).round() as i32);
         let x1 = cam_x.saturating_add((a1.sin() * radius).round() as i32);
         let z1 = cam_z.saturating_add((a1.cos() * radius).round() as i32);
-        let projected = [
-            gte_scene::project_vertex(world_to_view([x0, y1, z0])),
-            gte_scene::project_vertex(world_to_view([x1, y1, z1])),
-            gte_scene::project_vertex(world_to_view([x0, y0, z0])),
-            gte_scene::project_vertex(world_to_view([x1, y0, z1])),
-        ];
+        let verts = [[x0, y1, z0], [x1, y1, z1], [x1, y0, z1], [x0, y0, z0]];
+        if !preview_vertices_in_front(world_camera, &verts) {
+            continue;
+        }
+        let projected = verts.map(|vertex| gte_scene::project_vertex(world_to_view(vertex)));
         if projected.iter().any(|point| point.sz == 0) {
             continue;
         }
-        push_far_vista_quad(
-            scratch,
-            [
-                (projected[0].sx, projected[0].sy),
-                (projected[1].sx, projected[1].sy),
-                (projected[2].sx, projected[2].sy),
-                (projected[3].sx, projected[3].sy),
-            ],
-            vista.tint,
-        );
+        if let Some((slot, texture_width, texture_height)) =
+            far_vista_texture_slot(vista, segment, segments, textures)
+        {
+            push_far_vista_textured_quad(
+                scratch,
+                projected,
+                slot,
+                texture_width,
+                texture_height,
+                vista.tint,
+            );
+        } else {
+            push_far_vista_quad(
+                scratch,
+                [
+                    (projected[0].sx, projected[0].sy),
+                    (projected[1].sx, projected[1].sy),
+                    (projected[3].sx, projected[3].sy),
+                    (projected[2].sx, projected[2].sy),
+                ],
+                vista.tint,
+            );
+        }
     }
 }
 
-fn push_far_vista_quad(
+fn far_vista_texture_slot(
+    vista: psxed_project::ResolvedFarVistaSettings,
+    segment: u8,
+    segments: u8,
+    textures: &EditorTextures,
+) -> Option<(MaterialSlot, u8, u8)> {
+    let texture_id = far_vista_texture_for_segment(vista, segment, segments)?;
+    let slot = textures.slot(texture_id)?;
+    Some((slot, slot.texture_width, slot.texture_height))
+}
+
+fn far_vista_texture_for_segment(
+    vista: psxed_project::ResolvedFarVistaSettings,
+    segment: u8,
+    segments: u8,
+) -> Option<ResourceId> {
+    let assigned_panels = vista.texture_panels.iter().any(Option::is_some);
+    if !assigned_panels {
+        return vista.texture;
+    }
+    let panel_count = vista.texture_panels.len();
+    let panel_index = ((segment as usize) * panel_count / (segments as usize).max(1))
+        .min(panel_count.saturating_sub(1));
+    vista.texture_panels[panel_index]
+}
+
+fn push_far_vista_textured_quad(
     scratch: &mut PreviewScratch,
-    verts: [(i16, i16); 4],
-    color: [u8; 3],
+    projected: [psx_gte::scene::Projected; 4],
+    slot: MaterialSlot,
+    texture_width: u8,
+    texture_height: u8,
+    tint: [u8; 3],
 ) {
+    let material =
+        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (tint[0], tint[1], tint[2]))
+            .with_texture_window(slot.texture_window);
+    let uvs = [
+        (0, 0),
+        (texture_width.saturating_sub(1), 0),
+        (
+            texture_width.saturating_sub(1),
+            texture_height.saturating_sub(1),
+        ),
+        (0, texture_height.saturating_sub(1)),
+    ];
+    let _ = push_textured_material_tri(
+        scratch,
+        [projected[0], projected[1], projected[2]],
+        [uvs[0], uvs[1], uvs[2]],
+        material,
+        PREVIEW_FAR_VISTA_SLOT,
+    );
+    let _ = push_textured_material_tri(
+        scratch,
+        [projected[0], projected[2], projected[3]],
+        [uvs[0], uvs[2], uvs[3]],
+        material,
+        PREVIEW_FAR_VISTA_SLOT,
+    );
+}
+
+fn push_far_vista_quad(scratch: &mut PreviewScratch, verts: [(i16, i16); 4], color: [u8; 3]) {
     if scratch.far_vista_used >= scratch.far_vista_quads.len() {
         return;
     }
@@ -3560,20 +3646,20 @@ fn preview_geometry_depth_slot(avg_sz: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        face_side_visible, floor_anchored_model_origin, light_face, material_sized_uvs,
-        material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
-        preview_player_reference, preview_shadow_radius, preview_static_model_reference,
-        preview_vertices_in_front, push_wall_face, room_depth_slot, setup_gte_for_camera,
-        shadow_depth_slot, should_draw_culled_face_outline, FaceShade, MaterialSlot, PreviewFog,
-        WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
-        PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
-        PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
+        face_side_visible, floor_anchored_model_origin, horizontal_triangle_world_points,
+        light_face, material_sized_uvs, material_texture_tint, node_room_local_origin,
+        preview_lights, preview_model_reference, preview_player_reference, preview_shadow_radius,
+        preview_static_model_reference, preview_vertices_in_front, push_wall_face, room_depth_slot,
+        setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline, FaceShade,
+        MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS,
+        PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
+        PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
     use psxed_project::{
-        GridUvTransform, MaterialFaceSidedness, MaterialResource, NodeKind, ProjectDocument,
-        ResourceData, WorldGrid,
+        Corner, GridSplit, GridUvTransform, MaterialFaceSidedness, MaterialResource, NodeKind,
+        ProjectDocument, ResourceData, WorldGrid,
     };
     use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
@@ -3640,6 +3726,16 @@ mod tests {
         assert_eq!(
             transform.apply_to_quad(PREVIEW_WALL_UVS),
             [(0, 128), (64, 128), (64, 0), (0, 0)]
+        );
+    }
+
+    #[test]
+    fn horizontal_preview_points_use_triangle_local_heights() {
+        let corners = psxed_project::horizontal_triangle_corners(GridSplit::NorthWestSouthEast, 0);
+        assert_eq!(corners, [Corner::NW, Corner::NE, Corner::SE]);
+        assert_eq!(
+            horizontal_triangle_world_points([0, 1024, 0, 1024], corners, [64, 128, 192]),
+            [[0, 64, 1024], [1024, 128, 1024], [1024, 192, 0]]
         );
     }
 
