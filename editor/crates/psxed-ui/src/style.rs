@@ -24,6 +24,17 @@ pub(crate) const STUDIO_ACCENT_DIM: Color32 = Color32::from_rgb(17, 82, 101);
 pub(crate) const STUDIO_ROOM_FLOOR: Color32 = Color32::from_rgb(119, 132, 143);
 pub(crate) const STUDIO_ROOM_WALL: Color32 = Color32::from_rgb(126, 73, 43);
 
+pub(crate) const PANEL_HEADER_MIN_HEIGHT: f32 = 18.0;
+
+pub(crate) fn panel_header_margin() -> Margin {
+    Margin {
+        left: 8,
+        right: 8,
+        top: 2,
+        bottom: 0,
+    }
+}
+
 pub(crate) fn apply_studio_visuals(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.style_mut(|style| {
@@ -146,9 +157,9 @@ pub(crate) fn tool_panel_header(
 ) {
     Frame::new()
         .fill(STUDIO_PANEL_HEADER)
-        .inner_margin(Margin::symmetric(8, 5))
+        .inner_margin(panel_header_margin())
         .show(ui, |ui| {
-            ui.set_min_height(24.0);
+            ui.set_min_height(PANEL_HEADER_MIN_HEIGHT);
             ui.horizontal(|ui| {
                 ui.label(icons::text(icon, 15.0).color(STUDIO_ACCENT));
                 ui.label(RichText::new(label).strong().color(STUDIO_TEXT));

@@ -3,8 +3,8 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCharacterRecord, LevelFarVistaRecord,
-    LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
+    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCameraRecord, LevelCharacterRecord,
+    LevelFarVistaRecord, LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelRoomRecord, LevelRoomVisibilityRecord, LevelSkyRecord,
     LevelVisibilityCellRecord, LevelVisibleCellRecord, LevelWeaponRecord, PlayerControllerRecord,
