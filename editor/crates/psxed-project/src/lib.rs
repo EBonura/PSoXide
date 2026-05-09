@@ -1636,6 +1636,18 @@ pub const HEIGHT_QUANTUM: i32 = 64;
 pub const WORLD_SECTOR_SIZE_QUANTUM: i32 = 128;
 /// Default sector size used by starter/legacy projects.
 pub const DEFAULT_WORLD_SECTOR_SIZE: i32 = 1024;
+/// Default third-person camera distance inherited by rooms.
+pub const DEFAULT_WORLD_CAMERA_DISTANCE: i32 = 2700;
+/// Default camera origin height above the player origin.
+pub const DEFAULT_WORLD_CAMERA_HEIGHT: i32 = 1280;
+/// Default look-at height above the player origin.
+pub const DEFAULT_WORLD_CAMERA_TARGET_HEIGHT: i32 = 640;
+/// Minimum authored third-person camera distance.
+pub const MIN_WORLD_CAMERA_DISTANCE: i32 = 384;
+/// Maximum authored third-person camera distance.
+pub const MAX_WORLD_CAMERA_DISTANCE: i32 = 16_384;
+/// Maximum authored camera vertical offset.
+pub const MAX_WORLD_CAMERA_HEIGHT: i32 = 16_384;
 /// Default wall span when no ceiling is authored above the edge.
 pub const DEFAULT_WALL_HEIGHT_SECTORS: i32 = 2;
 /// Minimum authored sector size.
@@ -1671,6 +1683,18 @@ pub fn snap_world_sector_size(size: i32) -> i32 {
 
 fn default_world_sector_size() -> i32 {
     DEFAULT_WORLD_SECTOR_SIZE
+}
+
+fn default_world_camera_distance() -> i32 {
+    DEFAULT_WORLD_CAMERA_DISTANCE
+}
+
+fn default_world_camera_height() -> i32 {
+    DEFAULT_WORLD_CAMERA_HEIGHT
+}
+
+fn default_world_camera_target_height() -> i32 {
+    DEFAULT_WORLD_CAMERA_TARGET_HEIGHT
 }
 
 fn default_wall_height_for_sector_size(sector_size: i32) -> i32 {
@@ -2031,6 +2055,44 @@ pub struct ResolvedFarVistaSettings {
     pub rotation_degrees: i16,
     /// Resolved tint.
     pub tint: [u8; 3],
+}
+
+/// World-level third-person camera configuration inherited by
+/// descendant Rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldCameraSettings {
+    /// Preferred trailing distance from focus to camera.
+    #[serde(default = "default_world_camera_distance")]
+    pub distance: i32,
+    /// Camera origin height above the player origin.
+    #[serde(default = "default_world_camera_height")]
+    pub height: i32,
+    /// Look-at height above the player origin.
+    #[serde(default = "default_world_camera_target_height")]
+    pub target_height: i32,
+}
+
+impl WorldCameraSettings {
+    /// Clamp authored values to runtime-safe third-person camera ranges.
+    pub fn normalized(self) -> Self {
+        Self {
+            distance: self
+                .distance
+                .clamp(MIN_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_DISTANCE),
+            height: self.height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
+            target_height: self.target_height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
+        }
+    }
+}
+
+impl Default for WorldCameraSettings {
+    fn default() -> Self {
+        Self {
+            distance: default_world_camera_distance(),
+            height: default_world_camera_height(),
+            target_height: default_world_camera_target_height(),
+        }
+    }
 }
 
 fn face_triangle_count(face: &GridHorizontalFace) -> usize {
@@ -3877,6 +3939,9 @@ pub enum NodeKind {
         /// Distant scenery ring drawn between sky and room geometry.
         #[serde(default)]
         far_vista: FarVistaSettings,
+        /// Third-person camera defaults inherited by descendant Rooms.
+        #[serde(default)]
+        camera: WorldCameraSettings,
     },
     /// One streamed level chunk: a sector grid plus its child
     /// entities. Cooks to a single `.psxw` blob the runtime loads
@@ -4353,6 +4418,19 @@ impl Scene {
         None
     }
 
+    /// Third-person camera settings inherited by `id` from the nearest World ancestor.
+    pub fn world_camera_for_node(&self, id: NodeId) -> Option<WorldCameraSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { camera, .. } = &node.kind {
+                return Some(camera.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
     /// Rows in root-first depth-first order.
     pub fn hierarchy_rows(&self) -> Vec<NodeRow> {
         let mut rows = Vec::new();
@@ -4757,6 +4835,7 @@ impl ProjectDocument {
                         sector_size,
                         sky,
                         far_vista,
+                        camera,
                     } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
@@ -4765,6 +4844,7 @@ impl ProjectDocument {
                         far_vista.vertical_offset =
                             far_vista.vertical_offset.clamp(-32_768, 32_768);
                         far_vista.segments = far_vista.segments.clamp(3, 16);
+                        *camera = camera.normalized();
                     }
                     _ => {}
                 }
@@ -5573,6 +5653,52 @@ mod tests {
     }
 
     #[test]
+    fn world_camera_settings_default_normalize_and_inherit() {
+        let mut project = ProjectDocument::starter();
+        let scene = project.active_scene();
+        let world_id = scene
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::World { .. }))
+            .map(|node| node.id)
+            .expect("starter has world");
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .expect("starter has room");
+
+        assert_eq!(
+            scene.world_camera_for_node(room_id),
+            Some(WorldCameraSettings::default())
+        );
+
+        {
+            let world = project.active_scene_mut().node_mut(world_id).unwrap();
+            let NodeKind::World { camera, .. } = &mut world.kind else {
+                panic!("expected world");
+            };
+            *camera = WorldCameraSettings {
+                distance: 1,
+                height: MAX_WORLD_CAMERA_HEIGHT + 1,
+                target_height: -1,
+            };
+        }
+
+        project.normalize_loaded();
+
+        assert_eq!(
+            project.active_scene().world_camera_for_node(room_id),
+            Some(WorldCameraSettings {
+                distance: MIN_WORLD_CAMERA_DISTANCE,
+                height: MAX_WORLD_CAMERA_HEIGHT,
+                target_height: 0,
+            })
+        );
+    }
+
+    #[test]
     fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
         let mut project = ProjectDocument::new("test");
         let scene = project.active_scene_mut();
@@ -5583,6 +5709,7 @@ mod tests {
                 sector_size: 1024,
                 sky: SkySettings::default(),
                 far_vista: FarVistaSettings::default(),
+                camera: WorldCameraSettings::default(),
             },
         );
         let mut grid = WorldGrid::empty(1, 1, 1024);
@@ -6266,7 +6393,7 @@ mod tests {
         let legacy = DEFAULT_PROJECT_RON
             .replace(
                 &format!(
-                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: true, texture: None, radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true)),"
+                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: true, texture: None, texture_panels: (Some((116)), Some((117)), Some((118)), Some((119)), Some((120)), Some((121)), Some((122)), Some((123)), Some((124)), Some((125)), Some((126)), Some((127)), Some((128)), Some((129)), Some((130)), Some((131))), radius: 18000, height: 8192, vertical_offset: -2048, segments: 16, rotation_degrees: 0, tint: (128, 128, 128), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640)),"
                 ),
                 "kind: World,",
             )
