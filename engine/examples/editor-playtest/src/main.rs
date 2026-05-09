@@ -2640,6 +2640,7 @@ fn fill_precomputed_visible_cells(
     let mut visited = [false; MAX_PRECOMPUTED_VISIBLE_CELLS];
     let mut queue = [0usize; MAX_PRECOMPUTED_VISIBLE_CELLS];
     let mut distances = [0u16; MAX_PRECOMPUTED_VISIBLE_CELLS];
+    let mut selected = [false; MAX_PRECOMPUTED_VISIBLE_CELLS];
     let mut read = 0usize;
     let mut queued = 1usize;
     visited[anchor_index] = true;
@@ -2661,9 +2662,11 @@ fn fill_precomputed_visible_cells(
             global_anchor,
         ) {
             rejected_global = rejected_global.saturating_add(1);
+            selected[cell_index] = true;
         } else {
             out[written] = GridVisibleCell::new(cell.x, cell.z, cell.min_y, cell.max_y);
             written += 1;
+            selected[cell_index] = true;
         }
         if distance >= ROOM_GRID_VISIBILITY_RADIUS {
             continue;
@@ -2690,6 +2693,47 @@ fn fill_precomputed_visible_cells(
             queue[queued] = neighbour_index;
             distances[queued] = distance + 1;
             queued += 1;
+        }
+    }
+
+    // Visibility traversal walks through open cell edges only, but cooked
+    // walls can be owned by the cell on the closed side of an edge. Emit a
+    // one-cell non-traversing shell around the visited set so boundary walls
+    // are present without opening the traversal through occluders.
+    for cell_index in 0..queued {
+        let cell = room_cells[queue[cell_index]];
+        for edge in RUNTIME_VISIBILITY_EDGES {
+            let Some(neighbour_index) = runtime_visibility_neighbour(
+                &lookup,
+                lookup_depth,
+                lookup_len,
+                cell.x,
+                cell.z,
+                edge.dx,
+                edge.dz,
+            ) else {
+                continue;
+            };
+            if selected[neighbour_index] || written >= count {
+                continue;
+            }
+            let neighbour = room_cells[neighbour_index];
+            if !visibility_cell_in_global_range(
+                neighbour.x,
+                neighbour.z,
+                sector_size,
+                room_offset_x,
+                room_offset_z,
+                global_anchor,
+            ) {
+                rejected_global = rejected_global.saturating_add(1);
+                selected[neighbour_index] = true;
+                continue;
+            }
+            out[written] =
+                GridVisibleCell::new(neighbour.x, neighbour.z, neighbour.min_y, neighbour.max_y);
+            written += 1;
+            selected[neighbour_index] = true;
         }
     }
     Some((written, rejected_global))
@@ -3027,7 +3071,9 @@ fn chunk_activation_score(
     if !same_authored
         && authored_room_for_chunk(current_index)
             .and_then(|authored| authored_bounds_current_space(authored, current_record))
-            .is_some_and(|bounds| rects_overlap(chunk_bounds_current_space(chunk, current_record), bounds))
+            .is_some_and(|bounds| {
+                rects_overlap(chunk_bounds_current_space(chunk, current_record), bounds)
+            })
     {
         return None;
     }
