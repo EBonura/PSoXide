@@ -38,8 +38,8 @@ use psxed_project::{
     PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
     WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
     HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
-    MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_SECTOR_SIZE,
-    MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
+    MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
+    MAX_WORLD_SECTOR_SIZE, MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
     WORLD_SECTOR_SIZE_QUANTUM,
 };
 
@@ -13627,6 +13627,17 @@ fn draw_world_grid_settings(
                             .speed(64.0)
                             .range(0..=MAX_WORLD_CAMERA_HEIGHT),
                     )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Floor Clearance").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.min_floor_clearance)
+                            .speed(16.0)
+                            .range(0..=MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE),
+                    )
+                    .on_hover_text("Minimum camera origin height above the sampled floor.")
                     .changed();
             });
         });

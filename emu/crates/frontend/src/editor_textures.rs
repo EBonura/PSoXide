@@ -98,7 +98,8 @@ pub struct EditorTextures {
     shadow_slot: MaterialSlot,
     /// Ordered material ids, texture paths, and fallback names used to
     /// populate the limited room-material VRAM band. Scene-used
-    /// materials are prioritized ahead of unused library resources.
+    /// materials and active far-vista panels are prioritized ahead
+    /// of unused library resources.
     room_signature: Vec<(ResourceId, String, String, bool, bool)>,
     /// 8-texel-grid allocator for room textures inside tpages 5..15.
     room_allocator: TextureWindowAtlas<ROOM_TPAGE_COUNT>,
@@ -178,8 +179,9 @@ impl EditorTextures {
         self.shadow_slot
     }
 
-    /// Walk scene-used Materials first, then unused library Materials,
-    /// and ensure as many as fit have textures in VRAM.
+    /// Walk scene-used Materials first, then active far-vista panels,
+    /// then unused library Materials, and ensure as many as fit have
+    /// textures in VRAM.
     ///
     /// Resolution order per material:
     ///
@@ -192,8 +194,8 @@ impl EditorTextures {
     ///    checker) so the preview is never blank.
     ///
     /// The editor preview's room-material region is intentionally small,
-    /// so authored scene materials must get slots before unused
-    /// resource-library entries.
+    /// so authored scene materials and far-vista panels must get slots
+    /// before unused resource-library entries.
     pub fn refresh(&mut self, project: &ProjectDocument, project_root: &Path) {
         let plan = preview_texture_upload_plan(project);
         let room_signature: Vec<(ResourceId, String, String, bool, bool)> = plan
@@ -640,32 +642,44 @@ struct PreviewTextureUploadPlan {
 }
 
 fn preview_texture_upload_plan(project: &ProjectDocument) -> Vec<PreviewTextureUploadPlan> {
-    let mut ids = collect_scene_resource_use(project).materials;
+    let scene_material_ids = collect_scene_resource_use(project).materials;
+    let mut plan = Vec::new();
+    for id in scene_material_ids {
+        push_material_resource_upload(project, id, &mut plan);
+    }
+
+    push_far_vista_texture_uploads(project, &mut plan);
+
     for resource in &project.resources {
         if matches!(&resource.data, ResourceData::Material(_)) {
-            push_unique_resource_id(&mut ids, resource.id);
+            push_material_resource_upload(project, resource.id, &mut plan);
         }
     }
 
-    let mut plan = ids
-        .into_iter()
-        .filter_map(|id| {
-            let resource = project.resource(id)?;
-            let ResourceData::Material(material) = &resource.data else {
-                return None;
-            };
-            Some(PreviewTextureUploadPlan {
-                id,
-                name: resource.name.clone(),
-                signature: texture_path(project, material).unwrap_or_default(),
-                force_zero_opaque: true,
-                allow_procedural_fallback: true,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    push_far_vista_texture_uploads(project, &mut plan);
     plan
+}
+
+fn push_material_resource_upload(
+    project: &ProjectDocument,
+    id: ResourceId,
+    plan: &mut Vec<PreviewTextureUploadPlan>,
+) {
+    if plan.iter().any(|item| item.id == id) {
+        return;
+    }
+    let Some(resource) = project.resource(id) else {
+        return;
+    };
+    let ResourceData::Material(material) = &resource.data else {
+        return;
+    };
+    plan.push(PreviewTextureUploadPlan {
+        id,
+        name: resource.name.clone(),
+        signature: texture_path(project, material).unwrap_or_default(),
+        force_zero_opaque: true,
+        allow_procedural_fallback: true,
+    });
 }
 
 fn push_far_vista_texture_uploads(
@@ -711,12 +725,6 @@ fn push_texture_resource_upload(
         force_zero_opaque: false,
         allow_procedural_fallback: false,
     });
-}
-
-fn push_unique_resource_id(ids: &mut Vec<ResourceId>, id: ResourceId) {
-    if !ids.contains(&id) {
-        ids.push(id);
-    }
 }
 
 /// Resolve a Material's texture link to the underlying `.psxt`
@@ -1254,5 +1262,52 @@ mod tests {
         assert_eq!(item.signature, "vista.psxt");
         assert!(!item.force_zero_opaque);
         assert!(!item.allow_procedural_fallback);
+    }
+
+    #[test]
+    fn upload_plan_prioritizes_far_vista_panels_before_unused_materials() {
+        let mut project = ProjectDocument::new("preview");
+        let used = add_material(&mut project, "Active Material");
+        let unused: Vec<_> = (0..80)
+            .map(|index| add_material(&mut project, format!("Unused {index}")))
+            .collect();
+        let panel = project.add_resource(
+            "Vista Panel",
+            ResourceData::Texture {
+                psxt_path: "vista.psxt".to_string(),
+            },
+        );
+        let grid = WorldGrid::stone_room(1, 1, 1024, Some(used), Some(used));
+        let mut far_vista = FarVistaSettings {
+            enabled: true,
+            ..FarVistaSettings::default()
+        };
+        far_vista.texture_panels[0] = Some(panel);
+
+        let scene = project.active_scene_mut();
+        scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+        scene.add_node(
+            scene.root,
+            "World",
+            NodeKind::World {
+                sector_size: 1024,
+                sky: Default::default(),
+                far_vista,
+                camera: Default::default(),
+            },
+        );
+
+        let plan = preview_texture_upload_plan(&project);
+        let panel_index = plan
+            .iter()
+            .position(|item| item.id == panel)
+            .expect("far-vista panel texture is uploaded for preview");
+        let first_unused_index = plan
+            .iter()
+            .position(|item| item.id == unused[0])
+            .expect("unused material remains in the upload plan");
+
+        assert_eq!(plan.first().map(|item| item.id), Some(used));
+        assert!(panel_index < first_unused_index);
     }
 }

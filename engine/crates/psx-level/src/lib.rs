@@ -340,6 +340,8 @@ pub struct LevelCameraRecord {
     pub height: i32,
     /// Look-at height above the player origin.
     pub target_height: i32,
+    /// Minimum camera origin height above the sampled floor.
+    pub min_floor_clearance: i32,
 }
 
 impl LevelCameraRecord {
@@ -348,6 +350,7 @@ impl LevelCameraRecord {
         distance: 2_700,
         height: 1_280,
         target_height: 640,
+        min_floor_clearance: 64,
     };
 }
 
