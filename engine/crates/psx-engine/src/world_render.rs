@@ -376,12 +376,20 @@ impl CachedRoomSurface {
         }
     }
 
-    fn sample(self, vertices: [WorldVertex; 4]) -> WorldSurfaceSample {
+    fn sample_with_center(
+        self,
+        vertices: [WorldVertex; 4],
+        include_center: bool,
+    ) -> WorldSurfaceSample {
         WorldSurfaceSample {
             kind: cached_surface_kind(self.kind_flags, self.wall_direction),
             sx: self.sample_sx,
             sz: self.sample_sz,
-            center: cached_surface_center(vertices, self.split, self.triangle_index),
+            center: if include_center {
+                cached_surface_center(vertices, self.split, self.triangle_index)
+            } else {
+                RoomPoint::ZERO
+            },
             baked_vertex_rgb: if self.kind_flags & CACHED_SURFACE_HAS_BAKED_RGB != 0 {
                 Some(self.baked_vertex_rgb)
             } else {
@@ -389,6 +397,10 @@ impl CachedRoomSurface {
             },
             ordinal: self.sample_ordinal,
         }
+    }
+
+    const fn has_baked_rgb(self) -> bool {
+        self.kind_flags & CACHED_SURFACE_HAS_BAKED_RGB != 0
     }
 }
 
@@ -490,6 +502,14 @@ pub trait WorldSurfaceLighting {
     /// Whether this lighting pass needs the cached camera-space
     /// depth values supplied to [`Self::shade_vertices_with_depths`].
     fn uses_vertex_depths(&self) -> bool {
+        true
+    }
+
+    /// Whether cached renderers must reconstruct the exact surface
+    /// center before calling lighting hooks. Implementations that
+    /// shade only from baked RGB or emitted vertices can return
+    /// `false` and skip that arithmetic in the room hot path.
+    fn needs_surface_sample_center(&self, _sample_has_baked_rgb: bool) -> bool {
         true
     }
 }
@@ -1236,75 +1256,6 @@ pub fn cache_room_vertex_lit_surfaces(
     }
 }
 
-/// Draw a vertex-lit room from cached surface records and a cooked
-/// visible-cell list.
-///
-/// This is the hot-path counterpart to
-/// [`cache_room_vertex_lit_surfaces`]. It preserves the same
-/// projection, culling, lighting/fog, and material sidedness behavior
-/// as [`draw_room_vertex_lit_visible_cells`] while avoiding per-frame
-/// room-sector decode work.
-#[allow(clippy::too_many_arguments)]
-pub fn draw_cached_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighting>(
-    cached_cells: &[CachedRoomCell],
-    cached_vertices: &[WorldVertex],
-    cached_surfaces: &[CachedRoomSurface],
-    _room_depth: u16,
-    _sector_size: i32,
-    materials: &[WorldRenderMaterial],
-    lighting: &L,
-    camera: &WorldCamera,
-    options: WorldSurfaceOptions,
-    visible_cells: &[GridVisibleCell],
-    screen_margin: i32,
-    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
-    world: &mut WorldRenderPass<'_, '_, OT>,
-) -> GridVisibilityStats {
-    let mut stats = GridVisibilityStats::default();
-
-    for visible in visible_cells {
-        let Some(cell) = cached_room_cell(cached_cells, visible.x, visible.z) else {
-            continue;
-        };
-
-        stats.cells_considered = stats.cells_considered.saturating_add(1);
-        if !cell_visibility_visible_to_camera(
-            camera,
-            options,
-            cell.visibility_center,
-            cell.visibility_radius,
-            screen_margin,
-        ) {
-            stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
-            continue;
-        }
-
-        stats.cells_drawn = stats.cells_drawn.saturating_add(1);
-        let first = cell.surface_first as usize;
-        let end = first
-            .saturating_add(cell.surface_count as usize)
-            .min(cached_surfaces.len());
-        let mut i = first;
-        while i < end {
-            stats.surfaces_considered =
-                stats
-                    .surfaces_considered
-                    .saturating_add(draw_cached_room_surface(
-                        cached_surfaces[i],
-                        cached_vertices,
-                        materials,
-                        lighting,
-                        camera,
-                        options,
-                        triangles,
-                        world,
-                    ));
-            i += 1;
-        }
-    }
-    stats
-}
-
 /// Draw a cached vertex-lit room using a deduplicated cached vertex
 /// stream. The projected scratch slices must be at least as long as
 /// `cached_vertices`.
@@ -1453,12 +1404,12 @@ fn cache_room_vertex(
     vertex_count: &mut usize,
     vertex: WorldVertex,
 ) -> Option<u16> {
-    let mut i = 0usize;
-    while i < *vertex_count {
+    let mut i = *vertex_count;
+    while i > 0 {
+        i -= 1;
         if vertices_out[i] == vertex {
             return u16::try_from(i).ok();
         }
-        i += 1;
     }
 
     if *vertex_count >= vertices_out.len() || *vertex_count >= u16::MAX as usize {
@@ -1564,104 +1515,6 @@ fn triangle_heights_to_quad(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
-    surface: CachedRoomSurface,
-    cached_vertices: &[WorldVertex],
-    materials: &[WorldRenderMaterial],
-    lighting: &L,
-    camera: &WorldCamera,
-    options: WorldSurfaceOptions,
-    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
-    world: &mut WorldRenderPass<'_, '_, OT>,
-) -> u16 {
-    let Some(&material) = materials.get(surface.material_slot as usize) else {
-        return 0;
-    };
-    let ids = surface.vertex_indices;
-    let Some(vertices) = indexed_world_quad(cached_vertices, ids) else {
-        return 0;
-    };
-    let material = cached_uv_material(material);
-    let sample = surface.sample(vertices);
-    let colors = vertex_lighting_colors(lighting, sample, material, vertices);
-    match sample.kind {
-        WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
-            let is_ceiling = matches!(sample.kind, WorldSurfaceKind::Ceiling);
-            if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
-                submit_split_triangle_vertex_lit(
-                    camera,
-                    options.with_depth_policy(DepthPolicy::Farthest),
-                    CullMode::Back,
-                    material,
-                    vertices,
-                    surface.uvs,
-                    colors,
-                    surface.split,
-                    surface.triangle_index as usize,
-                    is_ceiling,
-                    triangles,
-                    world,
-                )
-            } else {
-                let (vertices, uvs, colors) = if is_ceiling {
-                    (
-                        reverse_quad_winding(vertices),
-                        reverse_quad_winding(surface.uvs),
-                        reverse_quad_winding(colors),
-                    )
-                } else {
-                    (vertices, surface.uvs, colors)
-                };
-                submit_split_quad_vertex_lit(
-                    camera,
-                    options.with_depth_policy(DepthPolicy::Farthest),
-                    CullMode::Back,
-                    material,
-                    vertices,
-                    uvs,
-                    colors,
-                    surface.split,
-                    triangles,
-                    world,
-                )
-            }
-        }
-        WorldSurfaceKind::Wall { .. } => {
-            let material = wall_material(material);
-            if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
-                submit_split_triangle_vertex_lit(
-                    camera,
-                    options,
-                    CullMode::Back,
-                    material,
-                    vertices,
-                    surface.uvs,
-                    colors,
-                    surface.split,
-                    surface.triangle_index as usize,
-                    false,
-                    triangles,
-                    world,
-                )
-            } else {
-                submit_quad_vertex_lit(
-                    camera,
-                    options,
-                    CullMode::Back,
-                    material,
-                    vertices,
-                    surface.uvs,
-                    colors,
-                    triangles,
-                    world,
-                )
-            }
-        }
-    }
-    1
-}
-
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
@@ -1687,7 +1540,10 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
         return 0;
     };
-    let sample = surface.sample(vertices);
+    let sample = surface.sample_with_center(
+        vertices,
+        lighting.needs_surface_sample_center(surface.has_baked_rgb()),
+    );
     match sample.kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
             let is_ceiling = matches!(sample.kind, WorldSurfaceKind::Ceiling);
@@ -1718,7 +1574,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface.uvs,
                     colors,
                     material,
-                    options.with_depth_policy(DepthPolicy::Farthest),
+                    options.with_depth_policy(DepthPolicy::Average),
                     CullMode::Back,
                     surface.split,
                     surface.triangle_index as usize,
@@ -1767,7 +1623,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     uvs,
                     colors,
                     material,
-                    options.with_depth_policy(DepthPolicy::Farthest),
+                    options.with_depth_policy(DepthPolicy::Average),
                     CullMode::Back,
                     split_triangles_runtime(surface.split),
                 );
@@ -2581,7 +2437,7 @@ fn emit_floor<const OT: usize>(
     ];
     submit_split_quad(
         camera,
-        options.with_depth_policy(DepthPolicy::Farthest),
+        options.with_depth_policy(DepthPolicy::Average),
         CullMode::Back,
         material,
         verts,
@@ -2619,7 +2475,7 @@ fn emit_ceiling<const OT: usize>(
     ]);
     submit_split_quad(
         camera,
-        options.with_depth_policy(DepthPolicy::Farthest),
+        options.with_depth_policy(DepthPolicy::Average),
         CullMode::Back,
         material,
         verts,
@@ -2647,7 +2503,7 @@ fn emit_floor_triangle<const OT: usize>(
 ) {
     submit_split_triangle(
         camera,
-        options.with_depth_policy(DepthPolicy::Farthest),
+        options.with_depth_policy(DepthPolicy::Average),
         CullMode::Back,
         material,
         horizontal_triangle_vertices(sx, sz, sector_size, split, triangle_index, heights, [0; 4]),
@@ -2677,7 +2533,7 @@ fn emit_ceiling_triangle<const OT: usize>(
 ) {
     submit_split_triangle(
         camera,
-        options.with_depth_policy(DepthPolicy::Farthest),
+        options.with_depth_policy(DepthPolicy::Average),
         CullMode::Back,
         material,
         horizontal_triangle_vertices(sx, sz, sector_size, split, triangle_index, heights, [0; 4]),
@@ -2766,7 +2622,7 @@ fn emit_floor_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_quad_vertex_lit(
         camera,
-        options.with_depth_policy(DepthPolicy::Farthest),
+        options.with_depth_policy(DepthPolicy::Average),
         CullMode::Back,
         material,
         verts,
@@ -2805,7 +2661,7 @@ fn emit_ceiling_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_quad_vertex_lit(
         camera,
-        options.with_depth_policy(DepthPolicy::Farthest),
+        options.with_depth_policy(DepthPolicy::Average),
         CullMode::Back,
         material,
         verts,
@@ -2839,7 +2695,7 @@ fn emit_floor_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_triangle_vertex_lit(
         camera,
-        options.with_depth_policy(DepthPolicy::Farthest),
+        options.with_depth_policy(DepthPolicy::Average),
         CullMode::Back,
         material,
         verts,
@@ -2875,7 +2731,7 @@ fn emit_ceiling_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_triangle_vertex_lit(
         camera,
-        options.with_depth_policy(DepthPolicy::Farthest),
+        options.with_depth_policy(DepthPolicy::Average),
         CullMode::Back,
         material,
         verts,
@@ -3853,7 +3709,7 @@ mod tests {
     }
 
     #[test]
-    fn floor_depth_uses_farthest_projected_corner() {
+    fn floor_depth_uses_average_projected_depth() {
         const ZERO: TriTextured = TriTextured::new(
             [(0, 0), (0, 0), (0, 0)],
             [(0, 0), (0, 0), (0, 0)],
@@ -3906,11 +3762,11 @@ mod tests {
         let [(a, b, c), (d, e, f)] = SPLIT_NW_SE_TRIANGLES;
         assert_eq!(
             commands[0].depth_raw(),
-            max3(projected[a].sz, projected[b].sz, projected[c].sz)
+            average3(projected[a].sz, projected[b].sz, projected[c].sz)
         );
         assert_eq!(
             commands[1].depth_raw(),
-            max3(projected[d].sz, projected[e].sz, projected[f].sz)
+            average3(projected[d].sz, projected[e].sz, projected[f].sz)
         );
     }
 
@@ -3943,6 +3799,7 @@ mod tests {
                 .with_textured_triangle_splitting(false);
         let uvs = [(0, 0), (TILE_UV, 0), (TILE_UV, TILE_UV), (0, TILE_UV)];
         let vertices = horizontal_vertices(0, 0, 1024, [1024, 1024, 1024, 1024]);
+        let cells = [CachedRoomCell::new(0, 0, 1024, 1024, 1024, 0, 1)];
         let surface = CachedRoomSurface::new(
             0,
             [0, 1, 2, 3],
@@ -3958,24 +3815,35 @@ mod tests {
             SPLIT_NW_SE,
             WHOLE_QUAD_TRIANGLE_INDEX,
         );
+        let surfaces = [surface];
+        let visible_cells = [GridVisibleCell::new(0, 0, 1024, 1024)];
+        let mut projected = [ProjectedVertex::new(0, 0, 0); 4];
+        let mut projected_valid = [false; 4];
+        let mut projected_depths = [0; 4];
 
-        assert_eq!(
-            draw_cached_room_surface(
-                surface,
-                &vertices,
-                &[WorldRenderMaterial::front(TextureMaterial::opaque(
-                    0,
-                    0,
-                    (128, 128, 128)
-                ))],
-                &NoWorldSurfaceLighting,
-                &camera,
-                options,
-                &mut triangles,
-                &mut pass,
-            ),
-            1
+        let stats = draw_indexed_cached_room_vertex_lit_visible_cells(
+            &cells,
+            &vertices,
+            &surfaces,
+            &mut projected,
+            &mut projected_valid,
+            &mut projected_depths,
+            1,
+            1024,
+            &[WorldRenderMaterial::front(TextureMaterial::opaque(
+                0,
+                0,
+                (128, 128, 128),
+            ))],
+            &NoWorldSurfaceLighting,
+            &camera,
+            options,
+            &visible_cells,
+            0,
+            &mut triangles,
+            &mut pass,
         );
+        assert_eq!(stats.surfaces_considered, 1);
         assert_eq!(pass.command_len(), 2);
     }
 
@@ -4032,12 +3900,7 @@ mod tests {
         ax * by - ay * bx
     }
 
-    const fn max3(a: i32, b: i32, c: i32) -> i32 {
-        let ab = if a > b { a } else { b };
-        if ab > c {
-            ab
-        } else {
-            c
-        }
+    const fn average3(a: i32, b: i32, c: i32) -> i32 {
+        (a + b + c) / 3
     }
 }

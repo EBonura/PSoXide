@@ -55,6 +55,12 @@ pub mod stage {
     pub const TEXTURED_MODEL_PROJECT: u16 = 18;
     /// Textured model face culling, packet build, and command enqueue.
     pub const TEXTURED_MODEL_FACES: u16 = 19;
+    /// Active room/chunk window rebuilds, including residency and cache setup.
+    pub const ACTIVE_ROOM_WINDOW: u16 = 20;
+    /// Runtime room surface-cache construction.
+    pub const ROOM_SURFACE_CACHE: u16 = 21;
+    /// Texture/atlas upload work.
+    pub const VRAM_UPLOAD: u16 = 22;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -64,7 +70,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 20;
+pub const STAGE_COUNT: usize = 23;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -156,10 +162,26 @@ pub mod counter {
     pub const ROOM_CHUNKS_CONSIDERED: u16 = 43;
     /// Candidate chunks skipped because the active cache budget was full.
     pub const ROOM_CHUNK_CACHE_SKIPS: u16 = 44;
+    /// Active room/chunk windows rebuilt.
+    pub const ROOM_WINDOW_REBUILDS: u16 = 45;
+    /// Active chunks successfully built during room-window rebuilds.
+    pub const ROOM_WINDOW_BUILT_CHUNKS: u16 = 46;
+    /// Runtime room surface caches built.
+    pub const ROOM_SURFACE_CACHE_BUILDS: u16 = 47;
+    /// Cells emitted while building runtime room surface caches.
+    pub const ROOM_SURFACE_CACHE_BUILD_CELLS: u16 = 48;
+    /// Vertices emitted while building runtime room surface caches.
+    pub const ROOM_SURFACE_CACHE_BUILD_VERTICES: u16 = 49;
+    /// Surfaces emitted while building runtime room surface caches.
+    pub const ROOM_SURFACE_CACHE_BUILD_SURFACES: u16 = 50;
+    /// Room texture uploads performed.
+    pub const ROOM_TEXTURE_UPLOADS: u16 = 51;
+    /// Model atlas uploads performed.
+    pub const MODEL_ATLAS_UPLOADS: u16 = 52;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 45;
+pub const COUNTER_COUNT: usize = 53;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,6 +303,8 @@ pub struct GuestTelemetrySummary {
     pub stage_cycles: [u64; STAGE_COUNT],
     /// Number of completed spans per known stage id.
     pub stage_hits: [u64; STAGE_COUNT],
+    /// Largest single completed span per known stage id.
+    pub stage_max_cycles: [u64; STAGE_COUNT],
     /// Summed counter values per known counter id.
     pub counters: [u64; COUNTER_COUNT],
 }
@@ -291,6 +315,7 @@ impl Default for GuestTelemetrySummary {
             frames: 0,
             stage_cycles: [0; STAGE_COUNT],
             stage_hits: [0; STAGE_COUNT],
+            stage_max_cycles: [0; STAGE_COUNT],
             counters: [0; COUNTER_COUNT],
         }
     }
@@ -325,9 +350,10 @@ impl GuestTelemetrySummary {
                         continue;
                     };
                     let idx = event.id as usize;
-                    self.stage_cycles[idx] =
-                        self.stage_cycles[idx].saturating_add(event.cycles.saturating_sub(start));
+                    let elapsed = event.cycles.saturating_sub(start);
+                    self.stage_cycles[idx] = self.stage_cycles[idx].saturating_add(elapsed);
                     self.stage_hits[idx] = self.stage_hits[idx].saturating_add(1);
+                    self.stage_max_cycles[idx] = self.stage_max_cycles[idx].max(elapsed);
                 }
                 GuestTelemetryKind::Counter => {
                     if let Some(counter) = self.counters.get_mut(event.id as usize) {
@@ -366,6 +392,9 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::TEXTURED_MODEL_JOINTS => "mdl joints",
         stage::TEXTURED_MODEL_PROJECT => "mdl project",
         stage::TEXTURED_MODEL_FACES => "mdl faces",
+        stage::ACTIVE_ROOM_WINDOW => "room window",
+        stage::ROOM_SURFACE_CACHE => "room cache build",
+        stage::VRAM_UPLOAD => "vram upload",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
@@ -420,6 +449,14 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_CELLS_RANGE_CULLED => "room range culled",
         counter::ROOM_CHUNKS_CONSIDERED => "room chunks considered",
         counter::ROOM_CHUNK_CACHE_SKIPS => "room chunk cache skips",
+        counter::ROOM_WINDOW_REBUILDS => "room window rebuilds",
+        counter::ROOM_WINDOW_BUILT_CHUNKS => "room window chunks",
+        counter::ROOM_SURFACE_CACHE_BUILDS => "room cache builds",
+        counter::ROOM_SURFACE_CACHE_BUILD_CELLS => "cache build cells",
+        counter::ROOM_SURFACE_CACHE_BUILD_VERTICES => "cache build verts",
+        counter::ROOM_SURFACE_CACHE_BUILD_SURFACES => "cache build surfaces",
+        counter::ROOM_TEXTURE_UPLOADS => "room texture uploads",
+        counter::MODEL_ATLAS_UPLOADS => "model atlas uploads",
         _ => "unknown",
     }
 }
