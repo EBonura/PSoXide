@@ -545,6 +545,48 @@ const ROOM_TEXTURE_UV_SIZE: u8 = 64;
 #[cfg(test)]
 const TILE_UV: u8 = 64;
 
+const fn horizontal_depth_policy() -> DepthPolicy {
+    DepthPolicy::Farthest
+}
+
+const HORIZONTAL_DEPTH_BIAS: i32 = 512;
+
+const fn horizontal_depth_options(options: WorldSurfaceOptions) -> WorldSurfaceOptions {
+    let options = match options.depth_policy {
+        DepthPolicy::Fixed(_) => options,
+        _ => options.with_depth_policy(horizontal_depth_policy()),
+    };
+    options.with_depth_bias(options.depth_bias.saturating_add(HORIZONTAL_DEPTH_BIAS))
+}
+
+fn tile_depth_options(
+    options: WorldSurfaceOptions,
+    camera: &WorldCamera,
+    cell: GridVisibleCell,
+    sector_size: i32,
+) -> WorldSurfaceOptions {
+    options.with_depth_policy(DepthPolicy::Fixed(tile_camera_depth(
+        camera,
+        cell,
+        sector_size,
+    )))
+}
+
+fn tile_camera_depth(camera: &WorldCamera, cell: GridVisibleCell, sector_size: i32) -> i32 {
+    let sector_size = sector_size.max(1);
+    let half = sector_size / 2;
+    let center = WorldVertex::new(
+        (cell.x as i32)
+            .saturating_mul(sector_size)
+            .saturating_add(half),
+        cell.min_y.saturating_add(cell.max_y) / 2,
+        (cell.z as i32)
+            .saturating_mul(sector_size)
+            .saturating_add(half),
+    );
+    camera.view_vertex(center).z
+}
+
 /// Direction id for the north edge.
 ///
 /// Mirrors `psxed_format::world::direction::NORTH` -- kept inline
@@ -703,10 +745,24 @@ pub fn draw_room_lit_grid_visible<const OT: usize, L: WorldSurfaceLighting>(
                                 stats.cells_frustum_culled.saturating_add(1);
                         } else {
                             stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+                            let cell_options = tile_depth_options(
+                                options,
+                                camera,
+                                GridVisibleCell::new(sx, sz, min_y, max_y),
+                                sector_size,
+                            );
                             stats.surfaces_considered =
                                 stats.surfaces_considered.saturating_add(draw_sector_lit(
-                                    room, sx, sz, sector, materials, lighting, camera, options,
-                                    triangles, world,
+                                    room,
+                                    sx,
+                                    sz,
+                                    sector,
+                                    materials,
+                                    lighting,
+                                    camera,
+                                    cell_options,
+                                    triangles,
+                                    world,
                                 ));
                         }
                     }
@@ -813,12 +869,26 @@ pub fn draw_room_vertex_lit_grid_visible<const OT: usize, L: WorldSurfaceLightin
                                 stats.cells_frustum_culled.saturating_add(1);
                         } else {
                             stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+                            let cell_options = tile_depth_options(
+                                options,
+                                camera,
+                                GridVisibleCell::new(sx, sz, min_y, max_y),
+                                sector_size,
+                            );
                             stats.surfaces_considered =
                                 stats
                                     .surfaces_considered
                                     .saturating_add(draw_sector_vertex_lit(
-                                        room, sx, sz, sector, materials, lighting, camera, options,
-                                        triangles, world,
+                                        room,
+                                        sx,
+                                        sz,
+                                        sector,
+                                        materials,
+                                        lighting,
+                                        camera,
+                                        cell_options,
+                                        triangles,
+                                        world,
                                     ));
                         }
                     }
@@ -879,11 +949,20 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
             continue;
         }
         stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        let cell_options = tile_depth_options(options, camera, *cell, sector_size);
         stats.surfaces_considered =
             stats
                 .surfaces_considered
                 .saturating_add(draw_sector_vertex_lit(
-                    room, cell.x, cell.z, sector, materials, lighting, camera, options, triangles,
+                    room,
+                    cell.x,
+                    cell.z,
+                    sector,
+                    materials,
+                    lighting,
+                    camera,
+                    cell_options,
+                    triangles,
                     world,
                 ));
     }
@@ -1271,7 +1350,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     projected_valid: &mut [bool],
     projected_depths: &mut [i32],
     _room_depth: u16,
-    _sector_size: i32,
+    sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
     camera: &WorldCamera,
@@ -1323,6 +1402,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         }
 
         stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        let cell_options = tile_depth_options(options, camera, *visible, sector_size);
         let first = cell.surface_first as usize;
         let end = first
             .saturating_add(cell.surface_count as usize)
@@ -1341,7 +1421,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         use_vertex_depths,
                         materials,
                         lighting,
-                        options,
+                        cell_options,
                         triangles,
                         world,
                     ));
@@ -1574,7 +1654,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface.uvs,
                     colors,
                     material,
-                    options.with_depth_policy(DepthPolicy::Average),
+                    horizontal_depth_options(options),
                     CullMode::Back,
                     surface.split,
                     surface.triangle_index as usize,
@@ -1623,7 +1703,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     uvs,
                     colors,
                     material,
-                    options.with_depth_policy(DepthPolicy::Average),
+                    horizontal_depth_options(options),
                     CullMode::Back,
                     split_triangles_runtime(surface.split),
                 );
@@ -2437,7 +2517,7 @@ fn emit_floor<const OT: usize>(
     ];
     submit_split_quad(
         camera,
-        options.with_depth_policy(DepthPolicy::Average),
+        horizontal_depth_options(options),
         CullMode::Back,
         material,
         verts,
@@ -2475,7 +2555,7 @@ fn emit_ceiling<const OT: usize>(
     ]);
     submit_split_quad(
         camera,
-        options.with_depth_policy(DepthPolicy::Average),
+        horizontal_depth_options(options),
         CullMode::Back,
         material,
         verts,
@@ -2503,7 +2583,7 @@ fn emit_floor_triangle<const OT: usize>(
 ) {
     submit_split_triangle(
         camera,
-        options.with_depth_policy(DepthPolicy::Average),
+        horizontal_depth_options(options),
         CullMode::Back,
         material,
         horizontal_triangle_vertices(sx, sz, sector_size, split, triangle_index, heights, [0; 4]),
@@ -2533,7 +2613,7 @@ fn emit_ceiling_triangle<const OT: usize>(
 ) {
     submit_split_triangle(
         camera,
-        options.with_depth_policy(DepthPolicy::Average),
+        horizontal_depth_options(options),
         CullMode::Back,
         material,
         horizontal_triangle_vertices(sx, sz, sector_size, split, triangle_index, heights, [0; 4]),
@@ -2622,7 +2702,7 @@ fn emit_floor_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_quad_vertex_lit(
         camera,
-        options.with_depth_policy(DepthPolicy::Average),
+        horizontal_depth_options(options),
         CullMode::Back,
         material,
         verts,
@@ -2661,7 +2741,7 @@ fn emit_ceiling_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_quad_vertex_lit(
         camera,
-        options.with_depth_policy(DepthPolicy::Average),
+        horizontal_depth_options(options),
         CullMode::Back,
         material,
         verts,
@@ -2695,7 +2775,7 @@ fn emit_floor_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_triangle_vertex_lit(
         camera,
-        options.with_depth_policy(DepthPolicy::Average),
+        horizontal_depth_options(options),
         CullMode::Back,
         material,
         verts,
@@ -2731,7 +2811,7 @@ fn emit_ceiling_triangle_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     submit_split_triangle_vertex_lit(
         camera,
-        options.with_depth_policy(DepthPolicy::Average),
+        horizontal_depth_options(options),
         CullMode::Back,
         material,
         verts,
@@ -3709,7 +3789,7 @@ mod tests {
     }
 
     #[test]
-    fn floor_depth_uses_average_projected_depth() {
+    fn floor_depth_uses_farthest_projected_depth() {
         const ZERO: TriTextured = TriTextured::new(
             [(0, 0), (0, 0), (0, 0)],
             [(0, 0), (0, 0), (0, 0)],
@@ -3762,11 +3842,11 @@ mod tests {
         let [(a, b, c), (d, e, f)] = SPLIT_NW_SE_TRIANGLES;
         assert_eq!(
             commands[0].depth_raw(),
-            average3(projected[a].sz, projected[b].sz, projected[c].sz)
+            max3(projected[a].sz, projected[b].sz, projected[c].sz) + HORIZONTAL_DEPTH_BIAS
         );
         assert_eq!(
             commands[1].depth_raw(),
-            average3(projected[d].sz, projected[e].sz, projected[f].sz)
+            max3(projected[d].sz, projected[e].sz, projected[f].sz) + HORIZONTAL_DEPTH_BIAS
         );
     }
 
@@ -3845,6 +3925,12 @@ mod tests {
         );
         assert_eq!(stats.surfaces_considered, 1);
         assert_eq!(pass.command_len(), 2);
+        drop(pass);
+
+        let expected_depth =
+            tile_camera_depth(&camera, visible_cells[0], 1024) + HORIZONTAL_DEPTH_BIAS;
+        assert_eq!(commands[0].depth_raw(), expected_depth);
+        assert_eq!(commands[1].depth_raw(), expected_depth);
     }
 
     #[test]
@@ -3900,7 +3986,12 @@ mod tests {
         ax * by - ay * bx
     }
 
-    const fn average3(a: i32, b: i32, c: i32) -> i32 {
-        (a + b + c) / 3
+    const fn max3(a: i32, b: i32, c: i32) -> i32 {
+        let ab = if a > b { a } else { b };
+        if ab > c {
+            ab
+        } else {
+            c
+        }
     }
 }
