@@ -840,6 +840,11 @@ impl SectorCollision {
         self.0.floor_triangle_walkable(index)
     }
 
+    /// `true` if the floor split triangle is present.
+    pub fn floor_triangle_present(self, index: usize) -> bool {
+        self.0.floor_triangle_present(index)
+    }
+
     /// Floor diagonal split id (decides the triangulation used
     /// to interpolate height samples).
     pub fn floor_split(self) -> u8 {
