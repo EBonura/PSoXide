@@ -77,6 +77,12 @@ pub enum DepthPolicy {
     Nearest,
     /// Use the farthest projected vertex depth.
     Farthest,
+    /// Use a caller-supplied camera-space depth for every triangle.
+    ///
+    /// Grid-visible room drawing uses this to make the quantised tile cell,
+    /// not a single sloped/oversized triangle corner, the painter's
+    /// algorithm ordering unit.
+    Fixed(i32),
 }
 
 impl DepthPolicy {
@@ -85,6 +91,7 @@ impl DepthPolicy {
             DepthPolicy::Average => (z0 + z1 + z2) / 3,
             DepthPolicy::Nearest => z0.min(z1).min(z2),
             DepthPolicy::Farthest => z0.max(z1).max(z2),
+            DepthPolicy::Fixed(depth) => depth,
         }
     }
 
@@ -3754,6 +3761,7 @@ mod tests {
         assert_eq!(DepthPolicy::Average.depth(verts), 400);
         assert_eq!(DepthPolicy::Nearest.depth(verts), 100);
         assert_eq!(DepthPolicy::Farthest.depth(verts), 700);
+        assert_eq!(DepthPolicy::Fixed(250).depth(verts), 250);
     }
 
     #[test]
