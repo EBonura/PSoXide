@@ -33,12 +33,12 @@ extern crate psx_rt;
 use psx_asset::{Animation, Model, Texture};
 use psx_engine::{
     button, compute_joint_world_transform, telemetry, Angle, App, CachedRoomCell,
-    CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder, CharacterMotorAnim,
-    CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, CullMode,
-    DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform, LocalToWorldScale,
-    Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitivePacketArena, PrimitivePacketScratch,
-    PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender, RuntimeRoom, Scene,
-    TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
+    CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder, CharacterCollisionRoom,
+    CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
+    Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
+    LocalToWorldScale, Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitivePacketArena,
+    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender,
+    RuntimeRoom, Scene, TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
     ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
     WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
     WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q8,
@@ -207,24 +207,26 @@ const OT_DEPTH: usize = 512;
 const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
-const ROOM_GRID_VISIBILITY_RADIUS: u16 = 64;
+const ROOM_GRID_VISIBILITY_RADIUS: u16 = 32;
 #[cfg(feature = "world-grid-visible")]
 const ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS: i32 = 64;
 #[cfg(feature = "world-grid-visible")]
-const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 96;
+const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
 #[cfg(feature = "world-grid-visible")]
 const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
 #[cfg(feature = "world-grid-visible")]
 const MAX_ACTIVE_VISIBLE_CELLS: usize = 1024;
 /// Cached room cell headers shared by the active room window. Rooms
 /// that exceed this fixed budget fall back to the uncached room draw.
-const MAX_CACHED_ROOM_CELLS: usize = 1024;
+const MAX_CACHED_ROOM_CELLS: usize = 2048;
 /// Deduplicated room vertices referenced by cached room surfaces.
-const MAX_CACHED_ROOM_VERTICES: usize = 2048;
+const MAX_CACHED_ROOM_VERTICES: usize = 4096;
 /// Cached floor/ceiling/wall records shared by the active room
 /// window. This mirrors the room triangle arena order of magnitude:
 /// a cached surface emits up to two textured Gouraud triangles.
-const MAX_CACHED_ROOM_SURFACES: usize = 2048;
+const MAX_CACHED_ROOM_SURFACES: usize = 4096;
+/// Persistent cache metadata slots keyed by generated room index.
+const MAX_RUNTIME_ROOM_CACHES: usize = 64;
 
 const MAX_TEXTURED_TRIS: usize = 3328;
 
@@ -590,6 +592,12 @@ impl ActiveRoomSurfaceCache {
     };
 }
 
+static mut ROOM_SURFACE_CACHE_BY_ROOM: [ActiveRoomSurfaceCache; MAX_RUNTIME_ROOM_CACHES] =
+    [ActiveRoomSurfaceCache::EMPTY; MAX_RUNTIME_ROOM_CACHES];
+static mut ROOM_SURFACE_CACHE_CELL_CURSOR: usize = 0;
+static mut ROOM_SURFACE_CACHE_VERTEX_CURSOR: usize = 0;
+static mut ROOM_SURFACE_CACHE_SURFACE_CURSOR: usize = 0;
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ActiveRoomCacheStatus {
     Ready,
@@ -791,6 +799,8 @@ impl Scene for Playtest {
             self.camera_config(),
             CAMERA_START_YAW,
         );
+        reset_room_surface_cache_arena();
+        self.prewarm_room_surface_caches();
         self.load_active_room_window();
     }
 
@@ -849,14 +859,36 @@ impl Scene for Playtest {
 
         let input = motor_input(ctx, self.camera.yaw());
         let config = self.motor_config();
-        let room_collision = if self.chunked_level() {
-            None
+        let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_ACTIVE_ROOMS];
+        let collision_room_count = if self.chunked_level() {
+            let catchup = delta_vblanks.min(4) as i32;
+            let margin = config
+                .radius
+                .saturating_add(config.run_speed.saturating_mul(catchup));
+            self.collect_collision_rooms(self.motor.position(), margin, &mut collision_rooms)
         } else {
-            self.room.as_ref().map(|room| room.collision())
+            0
+        };
+        let single_collision_room = if collision_room_count == 1 {
+            collision_rooms[0].room
+        } else {
+            None
+        };
+        let room_collision = match collision_room_count {
+            0 => self.room.as_ref().map(|room| room.collision()),
+            1 => single_collision_room.as_ref().map(|room| room.collision()),
+            _ => None,
         };
         let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_MODEL_INSTANCES];
         let blocker_count = self.collect_collision_blockers(&mut blockers);
-        let collision = CharacterCollision::new(room_collision, &blockers[..blocker_count]);
+        let collision = if collision_room_count <= 1 {
+            CharacterCollision::new(room_collision, &blockers[..blocker_count])
+        } else {
+            CharacterCollision::rooms(
+                &collision_rooms[..collision_room_count],
+                &blockers[..blocker_count],
+            )
+        };
         let motor_frame =
             self.motor
                 .update_vblanks_with_collision(collision, input, config, delta_vblanks);
@@ -1410,6 +1442,10 @@ fn begin_world_render_pass<'a, 'ot>(
     ot: &'a mut OtFrame<'ot, OT_DEPTH>,
     commands: &'a mut [WorldTriCommand],
 ) -> WorldRenderPass<'a, 'ot, OT_DEPTH> {
+    #[cfg(feature = "world-order-global")]
+    {
+        return WorldRenderPass::new_deferred_sorted(ot, commands);
+    }
     #[cfg(feature = "world-order-slot")]
     {
         return WorldRenderPass::new_deferred_slot_sorted(ot, commands);
@@ -1423,6 +1459,7 @@ fn begin_world_render_pass<'a, 'ot>(
         return WorldRenderPass::new_bucketed(ot, commands);
     }
     #[cfg(not(any(
+        feature = "world-order-global",
         feature = "world-order-slot",
         feature = "world-order-linked",
         feature = "world-order-bucketed"
@@ -1505,6 +1542,32 @@ impl Playtest {
                 radius,
                 height,
             );
+            count += 1;
+        }
+        count
+    }
+
+    fn collect_collision_rooms(
+        &self,
+        anchor: RoomPoint,
+        margin: i32,
+        out: &mut [CharacterCollisionRoom<'static>; MAX_ACTIVE_ROOMS],
+    ) -> usize {
+        let mut count = 0usize;
+        let current_authored = authored_room_for_chunk(self.room_index);
+        for active in self.active_rooms.iter().flatten() {
+            if count >= out.len() {
+                break;
+            }
+            if current_authored.is_some()
+                && authored_room_for_chunk(active.index) != current_authored
+            {
+                continue;
+            }
+            if !active_room_overlaps_collision_window(*active, anchor, margin) {
+                continue;
+            }
+            out[count] = CharacterCollisionRoom::new(active.room, active.offset_x, active.offset_z);
             count += 1;
         }
         count
@@ -1623,6 +1686,8 @@ impl Playtest {
     }
 
     fn load_active_room_window(&mut self) {
+        telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
+        telemetry::counter(telemetry::counter::ROOM_WINDOW_REBUILDS, 1);
         self.room = None;
         self.materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
         self.material_count = 0;
@@ -1633,28 +1698,20 @@ impl Playtest {
         {
             self.clear_visible_cell_caches();
         }
-        let mut cached_cell_cursor = 0usize;
-        let mut cached_vertex_cursor = 0usize;
-        let mut cached_surface_cursor = 0usize;
 
         let current_index = self.room_index;
         let Some(current_record) = ROOMS.get(current_index.to_usize()) else {
+            telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
             return;
         };
         let Some(current_room) = parse_runtime_room(current_record) else {
+            telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
             return;
         };
         let player = self.motor.position();
 
         let mut next_slot = 0usize;
-        if let Some(active) = build_active_room(
-            current_index,
-            current_record,
-            current_record,
-            &mut cached_cell_cursor,
-            &mut cached_vertex_cursor,
-            &mut cached_surface_cursor,
-        ) {
+        if let Some(active) = build_active_room(current_index, current_record, current_record) {
             self.room = Some(active.room);
             self.materials = active.materials;
             self.material_count = active.material_count;
@@ -1681,14 +1738,7 @@ impl Playtest {
                 let Some(record) = ROOMS.get(candidate.to_usize()) else {
                     break;
                 };
-                if let Some(active) = build_active_room(
-                    candidate,
-                    record,
-                    current_record,
-                    &mut cached_cell_cursor,
-                    &mut cached_vertex_cursor,
-                    &mut cached_surface_cursor,
-                ) {
+                if let Some(active) = build_active_room(candidate, record, current_record) {
                     if active.surface_cache.ready {
                         self.active_rooms[next_slot] = Some(active);
                         next_slot += 1;
@@ -1716,14 +1766,7 @@ impl Playtest {
                     break;
                 };
                 let index = RoomIndex::new(raw_index as u16);
-                if let Some(active) = build_active_room(
-                    index,
-                    record,
-                    current_record,
-                    &mut cached_cell_cursor,
-                    &mut cached_vertex_cursor,
-                    &mut cached_surface_cursor,
-                ) {
+                if let Some(active) = build_active_room(index, record, current_record) {
                     self.active_rooms[next_slot] = Some(active);
                     next_slot += 1;
                 } else {
@@ -1731,6 +1774,11 @@ impl Playtest {
                 }
             }
         }
+        telemetry::counter(
+            telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
+            next_slot as u32,
+        );
+        telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
     }
 
     fn update_current_room_from_player(&mut self) -> bool {
@@ -1744,9 +1792,16 @@ impl Playtest {
         if next_room == self.room_index {
             return false;
         }
+        let previous_local = self.motor.position();
         let local = global_to_local_room_point(next_room, global);
+        let camera_delta = RoomPoint::new(
+            local.x.saturating_sub(previous_local.x),
+            local.y.saturating_sub(previous_local.y),
+            local.z.saturating_sub(previous_local.z),
+        );
         self.room_index = next_room;
         self.motor.relocate(local);
+        self.camera.relocate_room_space(camera_delta);
         self.lock_target = None;
         self.lock_switch_stick_held = false;
         self.soft_lock_target = None;
@@ -1763,10 +1818,74 @@ impl Playtest {
         };
         let sector_size = record.sector_size.max(1);
         let threshold = sector_size.saturating_mul(ACTIVE_ROOM_REFRESH_SECTORS.max(1));
-        if point_xz_distance_sq(self.motor.position(), self.active_room_anchor)
-            >= (threshold as u64).saturating_mul(threshold as u64)
+        let player = self.motor.position();
+        if point_xz_distance_sq(player, self.active_room_anchor)
+            < (threshold as u64).saturating_mul(threshold as u64)
         {
+            return;
+        }
+        if self.active_room_window_matches_selection(self.room_index, record, player) {
+            self.active_room_anchor = player;
+        } else {
             self.load_active_room_window();
+        }
+    }
+
+    fn active_room_window_matches_selection(
+        &self,
+        current_index: RoomIndex,
+        current_record: &LevelRoomRecord,
+        player: RoomPoint,
+    ) -> bool {
+        if ROOM_CHUNKS.is_empty() || self.active_rooms[0].is_none() {
+            return false;
+        }
+
+        let mut selected = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+        selected[0] = current_index;
+        let mut selected_count = 1usize;
+        while selected_count < MAX_ACTIVE_ROOMS {
+            let Some(candidate) = best_spatial_chunk_candidate_from_indices(
+                current_index,
+                current_record,
+                player,
+                &selected[..selected_count],
+            ) else {
+                break;
+            };
+            selected[selected_count] = candidate;
+            selected_count += 1;
+        }
+
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            match self.active_rooms[slot] {
+                Some(active) if slot < selected_count && active.index == selected[slot] => {}
+                None if slot >= selected_count => {}
+                _ => return false,
+            }
+            slot += 1;
+        }
+        true
+    }
+
+    fn prewarm_room_surface_caches(&mut self) {
+        if ROOM_CHUNKS.is_empty() {
+            return;
+        }
+        for (raw_index, record) in ROOMS.iter().enumerate() {
+            if raw_index >= MAX_RUNTIME_ROOM_CACHES {
+                break;
+            }
+            let index = RoomIndex::new(raw_index as u16);
+            if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
+                let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
+            }
+            let Some(room) = parse_runtime_room(record) else {
+                continue;
+            };
+            let (materials, material_count) = build_runtime_room_material_table(record);
+            let _ = active_room_surface_cache_for(index, room, &materials[..material_count]);
         }
     }
 
@@ -2636,7 +2755,8 @@ fn fill_precomputed_visible_cells(
         lookup[slot] = index as u16;
     }
     let anchor_index =
-        runtime_visibility_lookup_i32(&lookup, lookup_depth, lookup_len, anchor_x, anchor_z)?;
+        runtime_visibility_lookup_i32(&lookup, lookup_depth, lookup_len, anchor_x, anchor_z)
+            .or_else(|| nearest_runtime_visibility_cell(room_cells, anchor_x, anchor_z))?;
     let mut visited = [false; MAX_PRECOMPUTED_VISIBLE_CELLS];
     let mut queue = [0usize; MAX_PRECOMPUTED_VISIBLE_CELLS];
     let mut distances = [0u16; MAX_PRECOMPUTED_VISIBLE_CELLS];
@@ -2860,6 +2980,26 @@ fn runtime_visibility_lookup(
 }
 
 #[cfg(feature = "world-grid-visible")]
+fn nearest_runtime_visibility_cell(
+    cells: &[psx_level::LevelVisibilityCellRecord],
+    x: i32,
+    z: i32,
+) -> Option<usize> {
+    let mut best_index = None;
+    let mut best_score = u64::MAX;
+    for (index, cell) in cells.iter().enumerate() {
+        let dx = (cell.x as i64).saturating_sub(x as i64).unsigned_abs();
+        let dz = (cell.z as i64).saturating_sub(z as i64).unsigned_abs();
+        let score = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
+        if best_index.is_none() || score < best_score {
+            best_index = Some(index);
+            best_score = score;
+        }
+    }
+    best_index
+}
+
+#[cfg(feature = "world-grid-visible")]
 fn runtime_visibility_lookup_slot(
     x: u16,
     z: u16,
@@ -2888,29 +3028,13 @@ fn build_active_room(
     index: RoomIndex,
     record: &LevelRoomRecord,
     current_record: &LevelRoomRecord,
-    cached_cell_cursor: &mut usize,
-    cached_vertex_cursor: &mut usize,
-    cached_surface_cursor: &mut usize,
 ) -> Option<ActiveRuntimeRoom> {
     if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
         let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
     }
     let room = parse_runtime_room(record)?;
-    let mut resolved_materials = [const { None }; MAX_ROOM_MATERIALS];
-    let material_count = build_room_materials(record, &mut resolved_materials);
-    let mut materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
-    for i in 0..material_count {
-        if let Some(material) = resolved_materials[i] {
-            materials[i] = material;
-        }
-    }
-    let surface_cache = cache_active_room_surfaces(
-        room,
-        &materials[..material_count],
-        cached_cell_cursor,
-        cached_vertex_cursor,
-        cached_surface_cursor,
-    );
+    let (materials, material_count) = build_runtime_room_material_table(record);
+    let surface_cache = active_room_surface_cache_for(index, room, &materials[..material_count]);
     Some(ActiveRuntimeRoom {
         index,
         room,
@@ -2922,13 +3046,67 @@ fn build_active_room(
     })
 }
 
-fn cache_active_room_surfaces(
+fn build_runtime_room_material_table(
+    record: &LevelRoomRecord,
+) -> ([WorldRenderMaterial; MAX_ROOM_MATERIALS], usize) {
+    let mut resolved_materials = [const { None }; MAX_ROOM_MATERIALS];
+    let material_count = build_room_materials(record, &mut resolved_materials);
+    let mut materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
+    for i in 0..material_count {
+        if let Some(material) = resolved_materials[i] {
+            materials[i] = material;
+        }
+    }
+    (materials, material_count)
+}
+
+fn reset_room_surface_cache_arena() {
+    unsafe {
+        ROOM_SURFACE_CACHE_BY_ROOM = [ActiveRoomSurfaceCache::EMPTY; MAX_RUNTIME_ROOM_CACHES];
+        ROOM_SURFACE_CACHE_CELL_CURSOR = 0;
+        ROOM_SURFACE_CACHE_VERTEX_CURSOR = 0;
+        ROOM_SURFACE_CACHE_SURFACE_CURSOR = 0;
+    }
+}
+
+fn active_room_surface_cache_for(
+    index: RoomIndex,
+    room: RuntimeRoom<'static>,
+    materials: &[WorldRenderMaterial],
+) -> ActiveRoomSurfaceCache {
+    let slot = index.to_usize();
+    if slot >= MAX_RUNTIME_ROOM_CACHES {
+        return ActiveRoomSurfaceCache {
+            status: ActiveRoomCacheStatus::Overflow,
+            ..ActiveRoomSurfaceCache::EMPTY
+        };
+    }
+    unsafe {
+        let cached = ROOM_SURFACE_CACHE_BY_ROOM[slot];
+        if cached.status != ActiveRoomCacheStatus::NotBuilt {
+            return cached;
+        }
+        let built = cache_room_surfaces_in_runtime_arena(
+            room,
+            materials,
+            &mut ROOM_SURFACE_CACHE_CELL_CURSOR,
+            &mut ROOM_SURFACE_CACHE_VERTEX_CURSOR,
+            &mut ROOM_SURFACE_CACHE_SURFACE_CURSOR,
+        );
+        ROOM_SURFACE_CACHE_BY_ROOM[slot] = built;
+        built
+    }
+}
+
+fn cache_room_surfaces_in_runtime_arena(
     room: RuntimeRoom<'static>,
     materials: &[WorldRenderMaterial],
     cached_cell_cursor: &mut usize,
     cached_vertex_cursor: &mut usize,
     cached_surface_cursor: &mut usize,
 ) -> ActiveRoomSurfaceCache {
+    telemetry::stage_begin(telemetry::stage::ROOM_SURFACE_CACHE);
+    telemetry::counter(telemetry::counter::ROOM_SURFACE_CACHE_BUILDS, 1);
     let cell_first = *cached_cell_cursor;
     let vertex_first = *cached_vertex_cursor;
     let surface_first = *cached_surface_cursor;
@@ -2936,6 +3114,7 @@ fn cache_active_room_surfaces(
         || vertex_first >= MAX_CACHED_ROOM_VERTICES
         || surface_first >= MAX_CACHED_ROOM_SURFACES
     {
+        telemetry::stage_end(telemetry::stage::ROOM_SURFACE_CACHE);
         return ActiveRoomSurfaceCache {
             status: ActiveRoomCacheStatus::Overflow,
             ..ActiveRoomSurfaceCache::EMPTY
@@ -2956,12 +3135,14 @@ fn cache_active_room_surfaces(
         || stats.vertex_count > u16::MAX as usize
         || stats.surface_count > u16::MAX as usize
     {
+        telemetry::stage_end(telemetry::stage::ROOM_SURFACE_CACHE);
         return ActiveRoomSurfaceCache {
             status: ActiveRoomCacheStatus::Overflow,
             ..ActiveRoomSurfaceCache::EMPTY
         };
     }
     if stats.cell_count == 0 {
+        telemetry::stage_end(telemetry::stage::ROOM_SURFACE_CACHE);
         return ActiveRoomSurfaceCache {
             status: ActiveRoomCacheStatus::Empty,
             ..ActiveRoomSurfaceCache::EMPTY
@@ -2971,6 +3152,19 @@ fn cache_active_room_surfaces(
     *cached_cell_cursor = (*cached_cell_cursor).saturating_add(stats.cell_count);
     *cached_vertex_cursor = (*cached_vertex_cursor).saturating_add(stats.vertex_count);
     *cached_surface_cursor = (*cached_surface_cursor).saturating_add(stats.surface_count);
+    telemetry::counter(
+        telemetry::counter::ROOM_SURFACE_CACHE_BUILD_CELLS,
+        stats.cell_count as u32,
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_SURFACE_CACHE_BUILD_VERTICES,
+        stats.vertex_count as u32,
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_SURFACE_CACHE_BUILD_SURFACES,
+        stats.surface_count as u32,
+    );
+    telemetry::stage_end(telemetry::stage::ROOM_SURFACE_CACHE);
     ActiveRoomSurfaceCache {
         cell_first: cell_first as u16,
         cell_count: stats.cell_count as u16,
@@ -3026,6 +3220,30 @@ fn best_spatial_chunk_candidate(
             || active_room_window_contains(active_rooms, chunk.room)
             || skipped_rooms.contains(&chunk.room)
         {
+            continue;
+        }
+        let Some(score) = chunk_activation_score(*chunk, current_index, current_record, player)
+        else {
+            continue;
+        };
+        if best.is_none() || score.better_than(best_score) {
+            best_score = score;
+            best = Some(chunk.room);
+        }
+    }
+    best
+}
+
+fn best_spatial_chunk_candidate_from_indices(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    selected_rooms: &[RoomIndex],
+) -> Option<RoomIndex> {
+    let mut best = None;
+    let mut best_score = ChunkActivationScore::WORST;
+    for chunk in ROOM_CHUNKS {
+        if chunk.room == current_index || selected_rooms.contains(&chunk.room) {
             continue;
         }
         let Some(score) = chunk_activation_score(*chunk, current_index, current_record, player)
@@ -3307,6 +3525,23 @@ fn camera_for_room(camera: WorldCamera, active: ActiveRuntimeRoom) -> WorldCamer
     )
 }
 
+fn active_room_overlaps_collision_window(
+    active: ActiveRuntimeRoom,
+    anchor: RoomPoint,
+    margin: i32,
+) -> bool {
+    let sector_size = active.room.sector_size().max(1);
+    let x0 = active.offset_x;
+    let z0 = active.offset_z;
+    let x1 = x0.saturating_add((active.room.width() as i32).saturating_mul(sector_size));
+    let z1 = z0.saturating_add((active.room.depth() as i32).saturating_mul(sector_size));
+    let margin = margin.max(0);
+    anchor.x.saturating_add(margin) >= x0
+        && anchor.x.saturating_sub(margin) < x1
+        && anchor.z.saturating_add(margin) >= z0
+        && anchor.z.saturating_sub(margin) < z1
+}
+
 fn player_actor_depth_for_room(
     active: ActiveRuntimeRoom,
     character: Option<RuntimeCharacter>,
@@ -3557,6 +3792,10 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
     fn prepare_vertex_depth(&self, depth: i32) -> i32 {
         self.fog_weight_at_depth(depth)
     }
+
+    fn needs_surface_sample_center(&self, sample_has_baked_rgb: bool) -> bool {
+        !sample_has_baked_rgb
+    }
 }
 
 fn room_fog_weight(depth: i32, enabled: bool, fog_near: i32, fog_far: i32) -> i32 {
@@ -3704,16 +3943,21 @@ fn ensure_texture_uploaded_with_clut_mode(
         return None;
     }
     let tpage = Tpage::new(tpage_x, SHARED_TPAGE.y(), TexDepth::Bit4);
+    let texture_x = tpage_x.checked_add(u16::from(placement.origin_u()) / 4)?;
+    let texture_y = SHARED_TPAGE
+        .y()
+        .checked_add(u16::from(placement.origin_v()))?;
 
+    telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
+    telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
     if !upload_4bpp_tile(
-        tpage_x.checked_add(u16::from(placement.origin_u()) / 4)?,
-        SHARED_TPAGE
-            .y()
-            .checked_add(u16::from(placement.origin_v()))?,
+        texture_x,
+        texture_y,
         texture_width_halfwords,
         texture_height_rows,
         &texture,
     ) {
+        telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
         return None;
     }
 
@@ -3723,6 +3967,7 @@ fn ensure_texture_uploaded_with_clut_mode(
     } else {
         upload_clut(clut_rect, texture.clut_bytes());
     }
+    telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
 
     let clut = Clut::new(clut_x, ROOM_CLUT_Y);
     let slot = VramSlot {
@@ -3798,6 +4043,8 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     if tpage_x.checked_add(slot_halfwords)? > 1024 {
         return None;
     }
+    telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
+    telemetry::counter(telemetry::counter::MODEL_ATLAS_UPLOADS, 1);
     let pix_rect = VramRect::new(
         tpage_x,
         MODEL_TPAGE.y(),
@@ -3811,6 +4058,7 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     let clut_y = MODEL_CLUT_BASE_Y + atlas_count as u16;
     let clut_rect = VramRect::new(0, clut_y, texture.clut_entries(), 1);
     upload_model_clut(clut_rect, texture.clut_bytes());
+    telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
 
     let slot = VramSlot {
         asset: asset_id,
