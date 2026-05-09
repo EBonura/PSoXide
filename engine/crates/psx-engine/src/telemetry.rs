@@ -39,6 +39,12 @@ pub mod stage {
     pub const TEXTURED_MODEL_PROJECT: u16 = 18;
     /// Textured model face culling, packet build, and command enqueue.
     pub const TEXTURED_MODEL_FACES: u16 = 19;
+    /// Active room/chunk window rebuilds, including residency and cache setup.
+    pub const ACTIVE_ROOM_WINDOW: u16 = 20;
+    /// Runtime room surface-cache construction.
+    pub const ROOM_SURFACE_CACHE: u16 = 21;
+    /// Texture/atlas upload work.
+    pub const VRAM_UPLOAD: u16 = 22;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -137,6 +143,22 @@ pub mod counter {
     pub const ROOM_CHUNKS_CONSIDERED: u16 = 43;
     /// Candidate chunks skipped because the active cache budget was full.
     pub const ROOM_CHUNK_CACHE_SKIPS: u16 = 44;
+    /// Active room/chunk windows rebuilt.
+    pub const ROOM_WINDOW_REBUILDS: u16 = 45;
+    /// Active chunks successfully built during room-window rebuilds.
+    pub const ROOM_WINDOW_BUILT_CHUNKS: u16 = 46;
+    /// Runtime room surface caches built.
+    pub const ROOM_SURFACE_CACHE_BUILDS: u16 = 47;
+    /// Cells emitted while building runtime room surface caches.
+    pub const ROOM_SURFACE_CACHE_BUILD_CELLS: u16 = 48;
+    /// Vertices emitted while building runtime room surface caches.
+    pub const ROOM_SURFACE_CACHE_BUILD_VERTICES: u16 = 49;
+    /// Surfaces emitted while building runtime room surface caches.
+    pub const ROOM_SURFACE_CACHE_BUILD_SURFACES: u16 = 50;
+    /// Room texture uploads performed.
+    pub const ROOM_TEXTURE_UPLOADS: u16 = 51;
+    /// Model atlas uploads performed.
+    pub const MODEL_ATLAS_UPLOADS: u16 = 52;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
