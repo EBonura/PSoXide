@@ -1891,6 +1891,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
             return false;
         }
+        if !projected_triangle_hw_safe(verts) {
+            stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+            return false;
+        }
         if self.command_len >= self.commands.len() {
             stats.command_overflow = true;
             return true;
@@ -1939,6 +1943,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if projected_back_facing(projected) {
             return WorldRenderStats {
                 culled_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        }
+        if !projected_triangle_hw_safe(projected) {
+            return WorldRenderStats {
+                dropped_triangles: 1,
                 ..WorldRenderStats::default()
             };
         }
