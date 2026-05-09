@@ -79,11 +79,6 @@ typed_index! {
 }
 
 typed_index! {
-    /// Index into the generated `VISIBLE_CELLS` table.
-    pub struct VisibleCellIndex;
-}
-
-typed_index! {
     /// Local material slot stored inside a cooked `.psxw` face.
     pub struct MaterialSlot;
 }
@@ -392,9 +387,67 @@ pub struct LevelRoomRecord {
     pub flags: u16,
 }
 
+/// Cardinal neighbours for one cooked room chunk.
+///
+/// Missing neighbours are encoded as `RoomIndex(u16::MAX)` so the
+/// record stays plain data in generated manifests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelChunkNeighbours {
+    /// Chunk touching the north edge, if any.
+    pub north: RoomIndex,
+    /// Chunk touching the east edge, if any.
+    pub east: RoomIndex,
+    /// Chunk touching the south edge, if any.
+    pub south: RoomIndex,
+    /// Chunk touching the west edge, if any.
+    pub west: RoomIndex,
+}
+
+impl LevelChunkNeighbours {
+    /// Sentinel used for absent neighbour links.
+    pub const NONE: RoomIndex = RoomIndex(u16::MAX);
+
+    /// Empty neighbour set.
+    pub const EMPTY: Self = Self {
+        north: Self::NONE,
+        east: Self::NONE,
+        south: Self::NONE,
+        west: Self::NONE,
+    };
+}
+
+/// Runtime chunk metadata emitted by the playtest cooker.
+///
+/// Authored editor Rooms may be arbitrarily large; the cooker splits
+/// them into these runtime chunks. This table lets the engine stream
+/// and render by cooked chunk identity instead of deriving active
+/// neighbours from broad room bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelChunkRecord {
+    /// Owning room/chunk index in the generated `ROOMS` table.
+    pub room: RoomIndex,
+    /// Stable authored Room node id, truncated to 32 bits for a
+    /// compact runtime diagnostic key.
+    pub authored_room: u32,
+    /// Stable chunk order inside the authored Room's cook plan.
+    pub chunk_index: u16,
+    /// Chunk origin X in authored grid sectors.
+    pub origin_x: i32,
+    /// Chunk origin Z in authored grid sectors.
+    pub origin_z: i32,
+    /// Chunk width in sectors.
+    pub width: u16,
+    /// Chunk depth in sectors.
+    pub depth: u16,
+    /// Cardinal chunk links inside the same authored Room.
+    pub neighbours: LevelChunkNeighbours,
+    /// Reserved.
+    pub flags: u16,
+}
+
 /// Visibility metadata for one cooked room/chunk. Points into the
-/// generated cell table; individual cells then point into the
-/// flattened per-anchor visible-cell reference table.
+/// generated compact cell table; runtime traversal walks those cells
+/// directly through their open-edge masks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelRoomVisibilityRecord {
     /// Owning room index.
@@ -448,21 +501,8 @@ pub struct LevelVisibilityCellRecord {
     /// Cardinal edges that contain a conservative full-height solid
     /// blocker.
     pub blocker_mask: u8,
-    /// First visible-cell reference for this anchor cell.
-    pub visible_first: VisibleCellIndex,
-    /// Number of visible-cell references for this anchor cell.
-    pub visible_count: u16,
     /// Reserved.
     pub flags: u16,
-}
-
-/// One reference from an anchor cell to a potentially visible cell.
-/// The table is flattened so every anchor cell can have a compact
-/// far-to-near traversal list without heap allocation at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LevelVisibleCellRecord {
-    /// Referenced cell in the generated `VISIBILITY_CELLS` table.
-    pub cell: VisibilityCellIndex,
 }
 
 /// One material slot for one room. The compiler emits records
