@@ -89,6 +89,7 @@ pub use movement::{
 };
 pub use render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, PrimitiveArena,
+    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink,
 };
 pub use render3d::{
     compute_joint_view_transform, compute_joint_world_transform,

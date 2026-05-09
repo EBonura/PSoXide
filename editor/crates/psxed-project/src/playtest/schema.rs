@@ -101,6 +101,38 @@ pub struct PlaytestRoom {
     pub flags: u16,
 }
 
+/// One cooked runtime chunk emitted from an authored Room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestChunk {
+    /// Owning room/chunk index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Stable editor Room node id, truncated for compact runtime
+    /// diagnostics.
+    pub authored_room: u32,
+    /// Stable order inside the authored Room's generated chunk plan.
+    pub chunk_index: u16,
+    /// Chunk origin X in authored grid sectors.
+    pub origin_x: i32,
+    /// Chunk origin Z in authored grid sectors.
+    pub origin_z: i32,
+    /// Chunk width in sectors.
+    pub width: u16,
+    /// Chunk depth in sectors.
+    pub depth: u16,
+    /// Cardinal neighbour chunk rooms. `None` means no link.
+    pub neighbours: [Option<u16>; 4],
+    /// Estimated triangle count from the chunk budget.
+    pub triangles: usize,
+    /// Estimated base `.psxw` byte count.
+    pub psxw_bytes: usize,
+    /// Estimated static-lit `.psxw` byte count.
+    pub static_lit_bytes: usize,
+    /// Number of populated cells in the cooked chunk.
+    pub populated_cells: u16,
+    /// Runtime flags.
+    pub flags: u16,
+}
+
 /// Resolved sky values written into one runtime room record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestSky {
@@ -181,19 +213,8 @@ pub struct PlaytestVisibilityCell {
     pub portal_mask: u8,
     /// Cardinal full-height solid-blocker mask.
     pub blocker_mask: u8,
-    /// First index into [`PlaytestPackage::visible_cells`].
-    pub visible_first: u16,
-    /// Number of visible-cell references for this anchor.
-    pub visible_count: u16,
     /// Runtime flags.
     pub flags: u16,
-}
-
-/// One flattened PVS reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlaytestVisibleCell {
-    /// Index into [`PlaytestPackage::visibility_cells`].
-    pub cell: u16,
 }
 
 /// One material slot binding. Lifted from
@@ -553,14 +574,14 @@ pub struct PlaytestPackage {
     pub assets: Vec<PlaytestAsset>,
     /// Cooked rooms with material-slice metadata.
     pub rooms: Vec<PlaytestRoom>,
+    /// Runtime chunk metadata, one record per cooked room.
+    pub chunks: Vec<PlaytestChunk>,
     /// Material records ordered as `(room, local_slot)`.
     pub materials: Vec<PlaytestMaterial>,
     /// Per-room visibility slices.
     pub room_visibility: Vec<PlaytestRoomVisibility>,
     /// Per-cell visibility metadata.
     pub visibility_cells: Vec<PlaytestVisibilityCell>,
-    /// Flattened per-anchor visible-cell references.
-    pub visible_cells: Vec<PlaytestVisibleCell>,
     /// Cooked model bundles, deduplicated across instances.
     pub models: Vec<PlaytestModel>,
     /// Per-model clip records ordered as `(model, clip_index)`.

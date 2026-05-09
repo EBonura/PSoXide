@@ -12,7 +12,9 @@
 //! frame's opaque mesh triangles share one depth policy and one
 //! deterministic OT insertion order.
 
-use crate::render::{CameraDepth, DepthBand, DepthRange, DepthSlot, OtFrame, PrimitiveArena};
+use crate::render::{
+    CameraDepth, DepthBand, DepthRange, DepthSlot, OtFrame, PrimitiveArena, PrimitiveSink,
+};
 use crate::{Angle, WorldVertex, Q12};
 use psx_asset::{Animation, JointPose, Mesh, Model, ModelFaceCorner, ModelVertex};
 use psx_gpu::{
@@ -595,6 +597,13 @@ impl WorldRenderLayer {
     }
 }
 
+const fn world_render_layer_code(layer: WorldRenderLayer) -> u8 {
+    match layer {
+        WorldRenderLayer::Opaque => 0,
+        WorldRenderLayer::Transparent => 1,
+    }
+}
+
 /// Shared options for projected world surfaces.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WorldSurfaceOptions {
@@ -677,25 +686,25 @@ impl WorldSurfaceOptions {
 /// [`WorldRenderPass::flush`] has inserted them into the OT.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WorldTriCommand {
-    slot: DepthSlot,
-    depth: i32,
-    render_layer: WorldRenderLayer,
     packet_ptr: *mut u32,
-    words: u8,
-    order: usize,
+    depth: i32,
+    slot: u16,
+    order: u16,
     next: u16,
+    render_layer: u8,
+    words: u8,
 }
 
 impl WorldTriCommand {
     /// Empty command value for static scratch-buffer initialisation.
     pub const EMPTY: Self = Self {
-        slot: DepthSlot::new(0),
-        depth: 0,
-        render_layer: WorldRenderLayer::Opaque,
         packet_ptr: core::ptr::null_mut(),
-        words: 0,
+        depth: 0,
+        slot: 0,
         order: 0,
-        next: WORLD_COMMAND_NONE,
+        next: 0,
+        render_layer: 0,
+        words: 0,
     };
 
     #[cfg(test)]
@@ -852,7 +861,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Submit a projected textured triangle.
     pub fn submit_textured_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [ProjectedVertex; 3],
         uvs: [(u8, u8); 3],
         material: TextureMaterial,
@@ -884,7 +893,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// vertex rather than once per face.
     pub fn submit_projected_textured_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [ProjectedTexturedVertex; 3],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
@@ -905,7 +914,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_textured_triangle_split(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [ProjectedTexturedVertex; 3],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
@@ -943,7 +952,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_split_textured_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [ProjectedTexturedVertex; 3],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
@@ -995,7 +1004,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_textured_triangle_leaf(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [ProjectedTexturedVertex; 3],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
@@ -1058,7 +1067,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// wrong.
     pub fn submit_textured_quad(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [ProjectedVertex; 4],
         uvs: [(u8, u8); 4],
         material: TextureMaterial,
@@ -1102,7 +1111,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// GPU interpolate that tint across the textured triangle.
     pub fn submit_textured_gouraud_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
         verts: [ProjectedVertex; 3],
         uvs: [(u8, u8); 3],
         colors: [(u8, u8, u8); 3],
@@ -1151,7 +1160,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_textured_gouraud_triangle_split(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
         verts: [ProjectedTexturedGouraudVertex; 3],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
@@ -1190,7 +1199,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_split_textured_gouraud_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
         verts: [ProjectedTexturedGouraudVertex; 3],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
@@ -1242,7 +1251,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_textured_gouraud_triangle_leaf(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTexturedGouraud>,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
         verts: [ProjectedTexturedGouraudVertex; 3],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
@@ -1304,7 +1313,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// floor or wall crosses the camera plane.
     pub fn submit_textured_view_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [TexturedViewVertex; 3],
         projection: WorldProjection,
         material: TextureMaterial,
@@ -1351,7 +1360,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// share the `0`–`2` diagonal per [`TEXTURED_QUAD_TRIANGLES`].
     pub fn submit_textured_view_quad(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [TexturedViewVertex; 4],
         projection: WorldProjection,
         material: TextureMaterial,
@@ -1385,7 +1394,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// `camera`.
     pub fn submit_textured_world_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         camera: WorldCamera,
         verts: [WorldVertex; 3],
         uvs: [(u8, u8); 3],
@@ -1409,7 +1418,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// `camera`.
     pub fn submit_textured_world_quad(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         camera: WorldCamera,
         verts: [WorldVertex; 4],
         uvs: [(u8, u8); 4],
@@ -1451,7 +1460,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     #[allow(clippy::too_many_arguments)]
     pub fn submit_textured_model(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         model: Model<'_>,
         animation: Animation<'_>,
         frame_q12: u32,
@@ -1488,7 +1497,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     #[allow(clippy::too_many_arguments)]
     pub fn submit_textured_model_predecoded_faces(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         model: Model<'_>,
         animation: Animation<'_>,
         frame_q12: u32,
@@ -1527,7 +1536,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     #[allow(clippy::too_many_arguments)]
     pub fn submit_textured_model_primary_joints(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         model: Model<'_>,
         animation: Animation<'_>,
         frame_q12: u32,
@@ -1563,7 +1572,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     #[allow(clippy::too_many_arguments)]
     pub fn submit_textured_model_primary_joints_predecoded_faces(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         model: Model<'_>,
         animation: Animation<'_>,
         frame_q12: u32,
@@ -1596,7 +1605,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     #[allow(clippy::too_many_arguments)]
     fn submit_textured_model_impl(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         model: Model<'_>,
         animation: Animation<'_>,
         frame_q12: u32,
@@ -1880,7 +1889,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_projected_model_triangle_preclamped_fast(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [ProjectedVertex; 3],
         uvs: [(u8, u8); 3],
         material: TextureMaterial,
@@ -1932,7 +1941,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_projected_model_triangle_fast(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [ProjectedTexturedVertex; 3],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
@@ -2040,7 +2049,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     fn submit_clipped_textured_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriTextured>,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
         verts: [TexturedViewVertex; 3],
         projection: WorldProjection,
         material: TextureMaterial,
@@ -2080,7 +2089,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Submit a Gouraud triangle packet already projected and lit.
     pub fn submit_gouraud_triangle(
         &mut self,
-        triangles: &mut PrimitiveArena<'_, TriGouraud>,
+        triangles: &mut impl PrimitiveSink<TriGouraud>,
         verts: [ProjectedLit; 3],
         options: WorldSurfaceOptions,
     ) -> WorldRenderStats {
@@ -2141,13 +2150,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) {
         let command_index = self.command_len;
         self.commands[command_index] = WorldTriCommand {
-            slot,
-            depth,
-            render_layer,
             packet_ptr,
-            words,
-            order: self.next_order,
+            depth,
+            slot: slot.index().min(u16::MAX as usize) as u16,
+            order: self.next_order.min(u16::MAX as usize) as u16,
             next: WORLD_COMMAND_NONE,
+            render_layer: world_render_layer_code(render_layer),
+            words,
         };
         self.command_len += 1;
         self.next_order = self.next_order.saturating_add(1);
@@ -2164,7 +2173,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             return;
         }
 
-        let slot = self.commands[command_index].slot.index().min(OT_DEPTH - 1);
+        let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
         let command_link = command_index as u16;
         let tail = self.slot_tails[slot];
         if tail == WORLD_COMMAND_NONE {
@@ -2180,7 +2189,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             return;
         }
 
-        let slot = self.commands[command_index].slot.index().min(OT_DEPTH - 1);
+        let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
         let command_link = command_index as u16;
         let head = self.slot_heads[slot];
         if head == WORLD_COMMAND_NONE
@@ -2305,8 +2314,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     // arenas borrowed by submit methods. Those packets live
                     // until after this pass flushes and the frame submits.
                     unsafe {
-                        self.ot
-                            .add_raw_slot(command.slot, command.packet_ptr, command.words)
+                        self.ot.add_raw_slot(
+                            DepthSlot::new(command.slot as usize),
+                            command.packet_ptr,
+                            command.words,
+                        )
                     };
                 }
                 command_index += 1;
@@ -2327,8 +2339,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     // arenas borrowed by submit methods. Those packets live
                     // until after this pass flushes and the frame submits.
                     unsafe {
-                        self.ot
-                            .add_raw_slot(command.slot, command.packet_ptr, command.words)
+                        self.ot.add_raw_slot(
+                            DepthSlot::new(command.slot as usize),
+                            command.packet_ptr,
+                            command.words,
+                        )
                     };
                 }
             }
@@ -2349,8 +2364,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     // arenas borrowed by submit methods. Those packets live
                     // until after this pass flushes and the frame submits.
                     unsafe {
-                        self.ot
-                            .add_raw_slot(command.slot, command.packet_ptr, command.words)
+                        self.ot.add_raw_slot(
+                            DepthSlot::new(command.slot as usize),
+                            command.packet_ptr,
+                            command.words,
+                        )
                     };
                 }
                 command_index = command.next;
@@ -3500,15 +3518,15 @@ fn sort_world_for_ot_insert(commands: &mut [WorldTriCommand]) {
 }
 
 fn should_insert_world_after(a: WorldTriCommand, b: WorldTriCommand) -> bool {
-    if a.slot.index() != b.slot.index() {
-        return a.slot.index() > b.slot.index();
+    if a.slot != b.slot {
+        return a.slot > b.slot;
     }
     if a.depth != b.depth {
         return a.depth > b.depth;
     }
     if a.render_layer != b.render_layer {
-        return a.render_layer == WorldRenderLayer::Opaque
-            && b.render_layer == WorldRenderLayer::Transparent;
+        return a.render_layer == world_render_layer_code(WorldRenderLayer::Opaque)
+            && b.render_layer == world_render_layer_code(WorldRenderLayer::Transparent);
     }
     a.order < b.order
 }
@@ -3518,8 +3536,8 @@ fn should_insert_world_before(a: WorldTriCommand, b: WorldTriCommand) -> bool {
         return a.depth < b.depth;
     }
     if a.render_layer != b.render_layer {
-        return a.render_layer == WorldRenderLayer::Transparent
-            && b.render_layer == WorldRenderLayer::Opaque;
+        return a.render_layer == world_render_layer_code(WorldRenderLayer::Transparent)
+            && b.render_layer == world_render_layer_code(WorldRenderLayer::Opaque);
     }
     a.order > b.order
 }
@@ -3551,13 +3569,13 @@ mod tests {
         order: usize,
     ) -> WorldTriCommand {
         WorldTriCommand {
-            slot: DepthSlot::new(slot),
-            depth,
-            render_layer,
             packet_ptr: core::ptr::null_mut(),
-            words: 0,
-            order,
+            depth,
+            slot: slot as u16,
+            order: order as u16,
             next: WORLD_COMMAND_NONE,
+            render_layer: world_render_layer_code(render_layer),
+            words: 0,
         }
     }
 
@@ -4055,7 +4073,10 @@ mod tests {
         };
 
         assert_eq!(stats.submitted_triangles, 1);
-        assert_eq!(commands[0].render_layer, WorldRenderLayer::Transparent);
+        assert_eq!(
+            commands[0].render_layer,
+            world_render_layer_code(WorldRenderLayer::Transparent)
+        );
     }
 
     #[test]

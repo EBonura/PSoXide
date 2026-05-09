@@ -49,7 +49,7 @@ pub struct EguiRenderProfile {
 }
 
 /// Guest-runtime profiler data emitted by instrumented homebrew.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct GuestRuntimeProfile {
     /// Number of guest frame-begin markers observed.
     pub frames: f32,
@@ -59,6 +59,17 @@ pub struct GuestRuntimeProfile {
     pub stage_hits: [f32; STAGE_COUNT],
     /// Summed counter values per guest counter id.
     pub counters: [f32; COUNTER_COUNT],
+}
+
+impl Default for GuestRuntimeProfile {
+    fn default() -> Self {
+        Self {
+            frames: 0.0,
+            stage_cycles: [0.0; STAGE_COUNT],
+            stage_hits: [0.0; STAGE_COUNT],
+            counters: [0.0; COUNTER_COUNT],
+        }
+    }
 }
 
 impl GuestRuntimeProfile {

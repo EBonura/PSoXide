@@ -39,8 +39,8 @@ use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
 use crate::{
-    spatial, AnimationRole, NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode,
-    WorldGrid, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    spatial, AnimationRole, GridDirection, NodeId, NodeKind, ProjectDocument, ResourceData,
+    ResourceId, SceneNode, WorldGrid, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -55,6 +55,9 @@ use assets::{
 pub use manifest::{cook_to_dir, default_generated_dir, render_manifest_source, write_package};
 pub use schema::*;
 
+#[cfg(test)]
+const PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 4;
+
 struct PlayerSpawnCandidate<'a> {
     node: &'a SceneNode,
     room_index: u16,
@@ -65,26 +68,30 @@ struct PlayerSpawnCandidate<'a> {
 #[derive(Debug, Clone, Copy)]
 struct AuthoredRoomChunk {
     room_index: u16,
+    authored_room: u32,
+    chunk_index: u16,
     array_origin: [u16; 2],
     world_origin: [i32; 2],
     size: [u16; 2],
+    triangles: usize,
+    psxw_bytes: usize,
+    static_lit_bytes: usize,
+    populated_cells: u16,
 }
 
 #[derive(Debug, Clone)]
 struct CookedRoomBakeInput {
     room_index: u16,
     world_asset_index: usize,
+    world_origin: [i32; 2],
     cooked: CookedWorldGrid,
 }
 
 /// Chunking policy used by Embedded Play. Authored Rooms may grow
-/// beyond the runtime room cap, but each generated `.psxw` still
-/// respects the current runtime limits.
+/// beyond the runtime room cap, but generated `.psxw` chunks should be
+/// sized for render cost before the hard runtime limits are reached.
 pub fn playtest_streaming_chunk_config() -> StreamingChunkConfig {
-    let mut config = StreamingChunkConfig::default();
-    config.target_width = config.max_width;
-    config.target_depth = config.max_depth;
-    config
+    StreamingChunkConfig::default()
 }
 
 /// Build a playtest package from `project`. Validates the scene
@@ -131,7 +138,6 @@ pub fn build_package(
     let mut room_bake_inputs: Vec<CookedRoomBakeInput> = Vec::new();
     let mut room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
     let mut visibility_cells: Vec<PlaytestVisibilityCell> = Vec::new();
-    let mut visible_cells: Vec<PlaytestVisibleCell> = Vec::new();
 
     for room_node in &room_nodes {
         let NodeKind::Room { grid } = &room_node.kind else {
@@ -166,9 +172,16 @@ pub fn build_package(
                 .or_default()
                 .push(AuthoredRoomChunk {
                     room_index,
+                    authored_room: room_node.id.raw() as u32,
+                    chunk_index: u16::try_from(chunk.index).unwrap_or(u16::MAX),
                     array_origin: chunk.array_origin,
                     world_origin: chunk.world_origin,
                     size: chunk.size,
+                    triangles: chunk.budget.triangles,
+                    psxw_bytes: chunk.budget.psxw_bytes,
+                    static_lit_bytes: chunk.budget.psxw_static_lit_bytes,
+                    populated_cells: u16::try_from(chunk_grid.populated_sector_count())
+                        .unwrap_or(u16::MAX),
                 });
 
             // Room asset goes into the master table first (ahead of
@@ -268,7 +281,6 @@ pub fn build_package(
                 &cooked,
                 &mut room_visibility,
                 &mut visibility_cells,
-                &mut visible_cells,
             );
 
             let resolved_sky = scene
@@ -396,6 +408,7 @@ pub fn build_package(
             room_bake_inputs.push(CookedRoomBakeInput {
                 room_index,
                 world_asset_index,
+                world_origin: chunk.world_origin,
                 cooked,
             });
         }
@@ -405,6 +418,7 @@ pub fn build_package(
         report.error("every Room is empty — cook needs at least one populated room");
         return (None, report);
     }
+    let mut chunks = build_playtest_chunks(&room_chunks_by_node, rooms.len());
 
     // Pass 3: spawn + entities + model instances + lights.
     let mut player_spawns: Vec<PlayerSpawnCandidate<'_>> = Vec::new();
@@ -844,6 +858,7 @@ pub fn build_package(
         return (None, report);
     }
 
+    let lights = expand_lights_across_chunks(&room_bake_inputs, &lights);
     bake_static_surface_lights(&mut room_bake_inputs, &lights);
     for room in &room_bake_inputs {
         let bytes = match room.cooked.to_psxw_bytes() {
@@ -874,16 +889,22 @@ pub fn build_package(
         if let Some(asset) = assets.get_mut(room.world_asset_index) {
             asset.bytes = bytes;
         }
+        if let Some(chunk) = chunks.get_mut(room.room_index as usize) {
+            chunk.static_lit_bytes = assets
+                .get(room.world_asset_index)
+                .map(|asset| asset.bytes.len())
+                .unwrap_or(chunk.static_lit_bytes);
+        }
     }
 
     (
         Some(PlaytestPackage {
             assets,
             rooms,
+            chunks,
             materials,
             room_visibility,
             visibility_cells,
-            visible_cells,
             models,
             model_clips,
             model_clip_bounds,
@@ -2155,6 +2176,73 @@ fn push_point_light(
     true
 }
 
+fn expand_lights_across_chunks(
+    rooms: &[CookedRoomBakeInput],
+    lights: &[PlaytestLight],
+) -> Vec<PlaytestLight> {
+    let mut out = Vec::new();
+    for light in lights {
+        let Some(source_room) = rooms.iter().find(|room| room.room_index == light.room) else {
+            out.push(*light);
+            continue;
+        };
+        let source_origin = room_origin_units(source_room);
+        let global_x = source_origin[0].saturating_add(light.x);
+        let global_z = source_origin[1].saturating_add(light.z);
+        let mut emitted = false;
+        for target_room in rooms {
+            if !light_overlaps_room_chunk(global_x, global_z, light.radius, target_room) {
+                continue;
+            }
+            let target_origin = room_origin_units(target_room);
+            out.push(PlaytestLight {
+                room: target_room.room_index,
+                x: global_x.saturating_sub(target_origin[0]),
+                y: light.y,
+                z: global_z.saturating_sub(target_origin[1]),
+                radius: light.radius,
+                intensity_q8: light.intensity_q8,
+                color: light.color,
+            });
+            emitted = true;
+        }
+        if !emitted {
+            out.push(*light);
+        }
+    }
+    out
+}
+
+fn light_overlaps_room_chunk(
+    global_x: i32,
+    global_z: i32,
+    radius: u16,
+    room: &CookedRoomBakeInput,
+) -> bool {
+    let origin = room_origin_units(room);
+    let min_x = origin[0] as i64;
+    let min_z = origin[1] as i64;
+    let max_x =
+        origin[0].saturating_add((room.cooked.width as i32) * room.cooked.sector_size) as i64;
+    let max_z =
+        origin[1].saturating_add((room.cooked.depth as i32) * room.cooked.sector_size) as i64;
+    let x = global_x as i64;
+    let z = global_z as i64;
+    let closest_x = x.clamp(min_x, max_x);
+    let closest_z = z.clamp(min_z, max_z);
+    let dx = x - closest_x;
+    let dz = z - closest_z;
+    let radius = radius as i64;
+    dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz)) <= radius.saturating_mul(radius)
+}
+
+fn room_origin_units(room: &CookedRoomBakeInput) -> [i32; 2] {
+    [
+        room.world_origin[0].saturating_mul(room.cooked.sector_size),
+        room.world_origin[1].saturating_mul(room.cooked.sector_size),
+    ]
+}
+
 fn bake_static_surface_lights(rooms: &mut [CookedRoomBakeInput], lights: &[PlaytestLight]) {
     for room in rooms {
         room.cooked.static_vertex_lighting = true;
@@ -2394,7 +2482,6 @@ fn append_room_visibility(
     cooked: &CookedWorldGrid,
     room_visibility: &mut Vec<PlaytestRoomVisibility>,
     visibility_cells: &mut Vec<PlaytestVisibilityCell>,
-    visible_cells: &mut Vec<PlaytestVisibleCell>,
 ) {
     let cell_first = u16::try_from(visibility_cells.len()).unwrap_or(u16::MAX);
     let mut local_cells = build_visibility_cells(room_index, cooked);
@@ -2406,25 +2493,6 @@ fn append_room_visibility(
         &index_by_coord,
         &mut local_cells,
     );
-
-    for local_index in 0..local_cells.len() {
-        let visible_first = u16::try_from(visible_cells.len()).unwrap_or(u16::MAX);
-        let visible = visible_cells_for_anchor(
-            local_index,
-            cooked.width,
-            cooked.depth,
-            &local_cells,
-            &index_by_coord,
-        );
-        local_cells[local_index].visible_first = visible_first;
-        local_cells[local_index].visible_count = u16::try_from(visible.len()).unwrap_or(u16::MAX);
-        for visible_local in visible {
-            let global_index = (cell_first as usize).saturating_add(visible_local);
-            visible_cells.push(PlaytestVisibleCell {
-                cell: u16::try_from(global_index).unwrap_or(u16::MAX),
-            });
-        }
-    }
 
     visibility_cells.extend(local_cells);
     room_visibility.push(PlaytestRoomVisibility {
@@ -2453,8 +2521,6 @@ fn build_visibility_cells(
                 max_y,
                 portal_mask: 0,
                 blocker_mask: blocker_mask_for_sector(sector, cooked.sector_size),
-                visible_first: 0,
-                visible_count: 0,
                 flags: visibility_cell_flags::HAS_GEOMETRY,
             });
         }
@@ -2505,19 +2571,51 @@ fn assign_visibility_portals(
     }
 }
 
+#[cfg(test)]
 fn visible_cells_for_anchor(
     anchor_index: usize,
-    _width: u16,
-    _depth: u16,
+    width: u16,
+    depth: u16,
     cells: &[PlaytestVisibilityCell],
     index_by_coord: &[Option<usize>],
 ) -> Vec<usize> {
     if anchor_index >= cells.len() {
         return Vec::new();
     }
-    let _ = index_by_coord;
     let anchor = cells[anchor_index];
-    let mut visible: Vec<usize> = (0..cells.len()).collect();
+    let mut visible = Vec::new();
+    let mut visited = vec![false; cells.len()];
+    let mut queue = Vec::new();
+    visited[anchor_index] = true;
+    queue.push((anchor_index, 0u16));
+
+    let mut cursor = 0usize;
+    while let Some(&(cell_index, distance)) = queue.get(cursor) {
+        cursor += 1;
+        visible.push(cell_index);
+        if distance >= PLAYTEST_VISIBILITY_CELL_RADIUS {
+            continue;
+        }
+
+        let cell = cells[cell_index];
+        for edge in VISIBILITY_EDGES {
+            if cell.portal_mask & edge.bit == 0 {
+                continue;
+            }
+            let Some((nx, nz)) = neighbour_cell(width, depth, cell.x, cell.z, edge.dx, edge.dz)
+            else {
+                continue;
+            };
+            let Some(neighbour_index) = visibility_cell_index(index_by_coord, depth, nx, nz) else {
+                continue;
+            };
+            if visited[neighbour_index] {
+                continue;
+            }
+            visited[neighbour_index] = true;
+            queue.push((neighbour_index, distance + 1));
+        }
+    }
 
     visible.sort_by(|&a, &b| {
         let ca = cells[a];
@@ -2564,6 +2662,7 @@ const VISIBILITY_EDGES: [VisibilityEdge; 4] = [
     },
 ];
 
+#[cfg(test)]
 fn chebyshev_distance(anchor: PlaytestVisibilityCell, cell: PlaytestVisibilityCell) -> i32 {
     (cell.x as i32 - anchor.x as i32)
         .abs()
@@ -2711,7 +2810,55 @@ fn grid_rect(grid: &WorldGrid, origin: [u16; 2], size: [u16; 2]) -> Option<World
             out.sectors[dst] = grid.sectors[src].clone();
         }
     }
+    append_chunk_boundary_floor_transition_walls(grid, &mut out, origin, size);
     Some(out)
+}
+
+fn append_chunk_boundary_floor_transition_walls(
+    source: &WorldGrid,
+    chunk: &mut WorldGrid,
+    origin: [u16; 2],
+    size: [u16; 2],
+) {
+    for x in 0..size[0] {
+        append_boundary_floor_transition_wall(
+            source,
+            chunk,
+            origin,
+            x,
+            size[1] - 1,
+            GridDirection::North,
+        );
+    }
+    for z in 0..size[1] {
+        append_boundary_floor_transition_wall(
+            source,
+            chunk,
+            origin,
+            size[0] - 1,
+            z,
+            GridDirection::East,
+        );
+    }
+}
+
+fn append_boundary_floor_transition_wall(
+    source: &WorldGrid,
+    chunk: &mut WorldGrid,
+    origin: [u16; 2],
+    local_x: u16,
+    local_z: u16,
+    direction: GridDirection,
+) {
+    let source_x = origin[0].saturating_add(local_x);
+    let source_z = origin[1].saturating_add(local_z);
+    let Some(wall) = source.floor_transition_wall_for_edge(source_x, source_z, direction) else {
+        return;
+    };
+    let Some(sector) = chunk.ensure_sector(local_x, local_z) else {
+        return;
+    };
+    sector.walls.get_mut(direction).push(wall);
 }
 
 fn chunk_room_name(room_name: &str, chunk_count: usize, chunk_index: usize) -> String {
@@ -2751,6 +2898,106 @@ fn chunk_for_node<'a>(
         let z1 = z0.saturating_add(chunk.size[1]);
         sx >= x0 && sx < x1 && sz >= z0 && sz < z1
     })
+}
+
+fn build_playtest_chunks(
+    room_chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+    room_count: usize,
+) -> Vec<PlaytestChunk> {
+    let mut chunks = vec![
+        PlaytestChunk {
+            room: 0,
+            authored_room: 0,
+            chunk_index: 0,
+            origin_x: 0,
+            origin_z: 0,
+            width: 0,
+            depth: 0,
+            neighbours: [None; 4],
+            triangles: 0,
+            psxw_bytes: 0,
+            static_lit_bytes: 0,
+            populated_cells: 0,
+            flags: 0,
+        };
+        room_count
+    ];
+
+    for node_chunks in room_chunks_by_node.values() {
+        for chunk in node_chunks {
+            let Some(out) = chunks.get_mut(chunk.room_index as usize) else {
+                continue;
+            };
+            *out = PlaytestChunk {
+                room: chunk.room_index,
+                authored_room: chunk.authored_room,
+                chunk_index: chunk.chunk_index,
+                origin_x: chunk.world_origin[0],
+                origin_z: chunk.world_origin[1],
+                width: chunk.size[0],
+                depth: chunk.size[1],
+                neighbours: chunk_neighbours(chunk, node_chunks),
+                triangles: chunk.triangles,
+                psxw_bytes: chunk.psxw_bytes,
+                static_lit_bytes: chunk.static_lit_bytes,
+                populated_cells: chunk.populated_cells,
+                flags: 0,
+            };
+        }
+    }
+
+    chunks
+}
+
+fn chunk_neighbours(chunk: &AuthoredRoomChunk, chunks: &[AuthoredRoomChunk]) -> [Option<u16>; 4] {
+    let mut neighbours = [None; 4];
+    let mut scores = [0u16; 4];
+    for candidate in chunks {
+        if candidate.room_index == chunk.room_index {
+            continue;
+        }
+        if let Some((direction, score)) = chunk_cardinal_touch_score(chunk, candidate) {
+            if score > scores[direction] {
+                neighbours[direction] = Some(candidate.room_index);
+                scores[direction] = score;
+            }
+        }
+    }
+    neighbours
+}
+
+fn chunk_cardinal_touch_score(
+    a: &AuthoredRoomChunk,
+    b: &AuthoredRoomChunk,
+) -> Option<(usize, u16)> {
+    let ax0 = a.array_origin[0];
+    let az0 = a.array_origin[1];
+    let ax1 = ax0.saturating_add(a.size[0]);
+    let az1 = az0.saturating_add(a.size[1]);
+    let bx0 = b.array_origin[0];
+    let bz0 = b.array_origin[1];
+    let bx1 = bx0.saturating_add(b.size[0]);
+    let bz1 = bz0.saturating_add(b.size[1]);
+    let x_overlap = overlap_len(ax0, ax1, bx0, bx1);
+    let z_overlap = overlap_len(az0, az1, bz0, bz1);
+
+    if x_overlap > 0 && az0 == bz1 {
+        return Some((0, x_overlap));
+    }
+    if z_overlap > 0 && ax1 == bx0 {
+        return Some((1, z_overlap));
+    }
+    if x_overlap > 0 && az1 == bz0 {
+        return Some((2, x_overlap));
+    }
+    if z_overlap > 0 && ax0 == bx1 {
+        return Some((3, z_overlap));
+    }
+    None
+}
+
+fn overlap_len(a0: u16, a1: u16, b0: u16, b1: u16) -> u16 {
+    a1.min(b1).saturating_sub(a0.max(b0))
 }
 
 /// Convert a node's editor-space transform to its generated
@@ -2811,6 +3058,19 @@ mod tests {
 
     fn starter_project_root() -> PathBuf {
         crate::default_project_dir()
+    }
+
+    fn visibility_test_cell(x: u16, z: u16, blocker_mask: u8) -> PlaytestVisibilityCell {
+        PlaytestVisibilityCell {
+            room: 0,
+            x,
+            z,
+            min_y: 0,
+            max_y: crate::DEFAULT_WORLD_SECTOR_SIZE,
+            portal_mask: 0,
+            blocker_mask,
+            flags: visibility_cell_flags::HAS_GEOMETRY,
+        }
     }
 
     fn project_with_one_room() -> ProjectDocument {
@@ -3020,6 +3280,7 @@ mod tests {
         );
         assert!(manifest.contains("pub static ASSETS: &[LevelAssetRecord] = &[];"));
         assert!(manifest.contains("pub static ROOMS: &[LevelRoomRecord] = &[];"));
+        assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
         assert!(manifest.contains("pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];"));
         assert!(manifest.contains("pub static WEAPONS: &[LevelWeaponRecord] = &[];"));
         assert!(manifest.contains("pub static EQUIPMENT: &[EquipmentRecord] = &[];"));
@@ -3064,13 +3325,40 @@ mod tests {
         );
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
-        assert!(!package.visible_cells.is_empty());
-        assert_eq!(
-            package.visibility_cells[0].visible_count as usize,
-            package.visibility_cells.len(),
-            "starter visibility is conservative and includes every generated cell"
-        );
         assert!(package.spawn.is_some());
+    }
+
+    #[test]
+    fn visibility_cells_are_bounded_by_runtime_radius() {
+        let width = 1;
+        let depth = PLAYTEST_VISIBILITY_CELL_RADIUS + 6;
+        let mut cells: Vec<PlaytestVisibilityCell> =
+            (0..depth).map(|z| visibility_test_cell(0, z, 0)).collect();
+        let index_by_coord = visibility_index_by_coord(width, depth, &cells);
+        assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
+
+        let visible = visible_cells_for_anchor(0, width, depth, &cells, &index_by_coord);
+
+        assert_eq!(visible.len(), PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 1);
+        assert!(visible.contains(&0));
+        assert!(visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize)));
+        assert!(!visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 1)));
+    }
+
+    #[test]
+    fn visibility_cells_do_not_cross_full_height_blockers() {
+        let width = 2;
+        let depth = 1;
+        let mut cells = vec![
+            visibility_test_cell(0, 0, visibility_edge_flags::EAST),
+            visibility_test_cell(1, 0, visibility_edge_flags::WEST),
+        ];
+        let index_by_coord = visibility_index_by_coord(width, depth, &cells);
+        assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
+
+        let visible = visible_cells_for_anchor(0, width, depth, &cells, &index_by_coord);
+
+        assert_eq!(visible, vec![0]);
     }
 
     #[test]
@@ -3112,11 +3400,60 @@ mod tests {
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("package returned on ok report");
-        assert_eq!(package.rooms.len(), 2);
-        assert_eq!(package.room_asset_count(), 2);
+        assert_eq!(package.rooms.len(), 4);
+        assert_eq!(package.room_asset_count(), 4);
         assert!(package
             .spawn
             .is_some_and(|spawn| (spawn.room as usize) < package.rooms.len()));
+    }
+
+    #[test]
+    fn chunked_rooms_emit_warm_residency_hints() {
+        let mut project = project_with_one_room();
+        let floor_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a room material")
+            .id;
+        let room_id = {
+            let scene = project.active_scene();
+            scene
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+                .expect("starter has a room")
+                .id
+        };
+        if let Some(room) = project.active_scene_mut().node_mut(room_id) {
+            let NodeKind::Room { grid } = &mut room.kind else {
+                panic!("starter room is a room");
+            };
+            *grid = crate::WorldGrid::empty(1, 40, crate::DEFAULT_WORLD_SECTOR_SIZE);
+            for z in 0..grid.depth {
+                grid.set_floor(0, z, 0, Some(floor_material));
+            }
+        }
+        let spawn_id = player_spawn_node_id(&project);
+        if let Some(spawn) = project.active_scene_mut().node_mut(spawn_id) {
+            spawn.transform.translation = [0.0, 0.0, -19.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        let src = render_manifest_source(&package);
+
+        let warm_ram_line = src
+            .lines()
+            .find(|line| line.contains("pub static ROOM_0_WARM_RAM"))
+            .expect("room 0 warm RAM static emitted");
+        assert!(
+            warm_ram_line.contains("AssetId("),
+            "room 0 should warm at least one neighbouring room asset: {warm_ram_line}"
+        );
+        assert!(src.contains("warm_ram: ROOM_0_WARM_RAM"));
+        assert!(src.contains("warm_vram: ROOM_0_WARM_VRAM"));
     }
 
     #[test]
@@ -3555,6 +3892,7 @@ mod tests {
         assert!(src.contains("pub static ASSETS"));
         assert!(src.contains("pub static MATERIALS"));
         assert!(src.contains("pub static ROOMS"));
+        assert!(src.contains("pub static ROOM_CHUNKS"));
         assert!(src.contains("LevelSkyRecord"));
         assert!(src.contains("sky: LevelSkyRecord"));
         assert!(src.contains("LevelFarVistaRecord"));
@@ -3565,7 +3903,6 @@ mod tests {
         assert!(src.contains("texture_assets: FAR_VISTA_TEXTURES_0"));
         assert!(src.contains("pub static ROOM_VISIBILITY"));
         assert!(src.contains("pub static VISIBILITY_CELLS"));
-        assert!(src.contains("pub static VISIBLE_CELLS"));
         assert!(src.contains("pub static ROOM_RESIDENCY"));
         assert!(src.contains("pub static PLAYER_SPAWN"));
         assert!(src.contains("pub static ENTITIES"));
@@ -3921,6 +4258,126 @@ mod tests {
     }
 
     #[test]
+    fn chunk_boundary_light_is_emitted_for_each_overlapped_chunk() {
+        let mut project = project_with_one_room();
+        let floor_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a room material")
+            .id;
+        let room_id = {
+            let scene = project.active_scene();
+            scene
+                .nodes()
+                .iter()
+                .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+                .expect("starter has a room")
+                .id
+        };
+        if let Some(room) = project.active_scene_mut().node_mut(room_id) {
+            let NodeKind::Room { grid } = &mut room.kind else {
+                panic!("starter room is a room");
+            };
+            *grid = crate::WorldGrid::empty(1, 40, crate::DEFAULT_WORLD_SECTOR_SIZE);
+            for z in 0..grid.depth {
+                grid.set_floor(0, z, 0, Some(floor_material));
+            }
+        }
+        for id in starter_light_ids(&project) {
+            let Some(light) = project.active_scene_mut().node_mut(id) else {
+                continue;
+            };
+            light.transform.translation = [0.0, 0.0, -10.5];
+            let NodeKind::PointLight { radius, .. } = &mut light.kind else {
+                continue;
+            };
+            *radius = 2.0;
+        }
+        let player_character = player_character_resource_id(&project);
+        demote_player_spawns(&mut project);
+        let spawn_id = project.active_scene_mut().add_node(
+            room_id,
+            "Chunk Test Spawn",
+            NodeKind::SpawnPoint {
+                player: true,
+                character: Some(player_character),
+            },
+        );
+        if let Some(spawn) = project.active_scene_mut().node_mut(spawn_id) {
+            spawn.transform.translation = [0.0, 0.0, -19.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        assert_eq!(package.rooms.len(), 4);
+        assert_eq!(package.lights.len(), 2);
+        assert!(package.lights.iter().any(|light| light.room == 0));
+        assert!(package.lights.iter().any(|light| light.room == 1));
+    }
+
+    #[test]
+    fn chunk_boundary_floor_transition_wall_stays_with_canonical_chunk() {
+        let mut project = project_with_one_room();
+        let floor_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a room material")
+            .id;
+        let room_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .expect("starter has a room")
+            .id;
+        if let Some(room) = project.active_scene_mut().node_mut(room_id) {
+            let NodeKind::Room { grid } = &mut room.kind else {
+                panic!("starter room is a room");
+            };
+            *grid = crate::WorldGrid::empty(17, 1, crate::DEFAULT_WORLD_SECTOR_SIZE);
+            for x in 0..grid.width {
+                let height = if x < 16 { 0 } else { 512 };
+                grid.set_floor(x, 0, height, Some(floor_material));
+            }
+        }
+        let player = player_spawn_node_id(&project);
+        if let Some(node) = project.active_scene_mut().node_mut(player) {
+            node.transform.translation = [0.0, 0.0, 0.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        assert_eq!(package.rooms.len(), 2);
+        let mut transition_walls = 0usize;
+        for room in &package.rooms {
+            let world = psx_asset::World::from_bytes(&package.assets[room.world_asset_index].bytes)
+                .expect("chunk psxw parses");
+            for x in 0..world.width() {
+                for z in 0..world.depth() {
+                    let Some(sector) = world.sector(x, z) else {
+                        continue;
+                    };
+                    for local_wall in 0..sector.wall_count() {
+                        let wall = world.sector_wall(sector, local_wall).expect("wall exists");
+                        if wall.direction() == psxw::direction::EAST
+                            && wall.heights() == [0, 0, 512, 512]
+                        {
+                            transition_walls += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(transition_walls, 1);
+    }
+
+    #[test]
     fn starter_project_bakes_static_surface_lights() {
         let project = ProjectDocument::starter();
         let (package, report) = build_package(&project, &starter_project_root());
@@ -3957,6 +4414,7 @@ mod tests {
         let mut room = CookedRoomBakeInput {
             room_index: 0,
             world_asset_index: 0,
+            world_origin: [0, 0],
             cooked: CookedWorldGrid {
                 width: 1,
                 depth: 1,
@@ -4659,6 +5117,7 @@ mod tests {
         assert!(src.contains("pub static ASSETS: &[LevelAssetRecord] = &[\n];"));
         assert!(src.contains("pub static MATERIALS: &[LevelMaterialRecord] = &[\n];"));
         assert!(src.contains("pub static ROOMS: &[LevelRoomRecord] = &[\n];"));
+        assert!(src.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[\n];"));
         assert!(src.contains("pub static ENTITIES: &[EntityRecord] = &[\n];"));
         assert!(src.contains("pub static PLAYER_SPAWN"));
