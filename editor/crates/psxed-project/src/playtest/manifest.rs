@@ -152,7 +152,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -186,6 +186,9 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.far_vista.tint_rgb[1],
             room.far_vista.tint_rgb[2],
             room.far_vista.flags,
+            room.camera.distance,
+            room.camera.height,
+            room.camera.target_height,
             room.flags,
         );
     }
@@ -808,6 +811,7 @@ use psx_level::{
     EntityRecord,
     EquipmentRecord,
     LevelAssetRecord,
+    LevelCameraRecord,
     LevelCharacterRecord,
     LevelFarVistaRecord,
     LevelMaterialRecord,
