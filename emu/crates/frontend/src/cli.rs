@@ -25,8 +25,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use emulator_core::{
-    fast_boot_disc_with_hle, spu::SAMPLE_CYCLES, telemetry, warm_bios_for_disc_fast_boot, Bus, Cpu,
-    DISC_FAST_BOOT_WARMUP_STEPS,
+    button, fast_boot_disc_with_hle, spu::SAMPLE_CYCLES, telemetry,
+    warm_bios_for_disc_fast_boot, Bus, ButtonState, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use psoxide_settings::{
     library::{GameKind, LibraryEntry},
@@ -136,6 +136,12 @@ pub struct LaunchArgs {
     /// Print a guest-runtime telemetry summary captured out-of-band.
     #[arg(long)]
     pub dump_guest_profile: bool,
+    /// Hold the left analog stick fully forward during the headless run.
+    #[arg(long)]
+    pub hold_forward: bool,
+    /// Hold the game run button during the headless run.
+    #[arg(long)]
+    pub hold_run: bool,
 }
 
 /// Entry point. Dispatches on `cli.command`; returns `Ok(())` on
@@ -378,6 +384,17 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
         }
     }
 
+    if args.hold_forward || args.hold_run {
+        let mut buttons = ButtonState::NONE;
+        if args.hold_run {
+            buttons.press(button::CIRCLE);
+        }
+        bus.set_port1_buttons(buttons);
+        if args.hold_forward {
+            bus.set_port1_sticks(0x80, 0x80, 0x80, 0x00);
+        }
+    }
+
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
     let mut stopped_at: Option<u64> = None;
@@ -474,11 +491,12 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
             continue;
         }
         println!(
-            "  {:<18} total={:<10} per_frame={:.0} per_hit={:.0} hits={}",
+            "  {:<18} total={:<10} per_frame={:.0} per_hit={:.0} max_hit={} hits={}",
             telemetry::stage_name(id as u16),
             cycles,
             cycles as f32 / frames,
             cycles as f32 / (summary.stage_hits[id].max(1) as f32),
+            summary.stage_max_cycles[id],
             summary.stage_hits[id],
         );
     }
