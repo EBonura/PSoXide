@@ -556,6 +556,7 @@ pub fn cook_world_grid(
                 .map(|sector| {
                     cook_sector(
                         project,
+                        grid,
                         sector,
                         x,
                         z,
@@ -595,6 +596,7 @@ pub fn encode_world_grid_psxw(
 
 fn cook_sector(
     project: &ProjectDocument,
+    grid: &WorldGrid,
     sector: &GridSector,
     x: u16,
     z: u16,
@@ -656,6 +658,7 @@ fn cook_sector(
     let walls = cook_walls(
         project,
         &sector.walls,
+        &generated_floor_transition_walls(grid, x, z),
         x,
         z,
         sector_size,
@@ -798,6 +801,7 @@ fn editor_horizontal_triangle_visible(face: &GridHorizontalFace, index: usize) -
 fn cook_walls(
     project: &ProjectDocument,
     walls: &GridWalls,
+    generated_walls: &GridWalls,
     x: u16,
     z: u16,
     sector_size: i32,
@@ -811,7 +815,11 @@ fn cook_walls(
     // -- by the time we reach this loop the grid is guaranteed
     // to claim each physical edge from at most one side.
     for direction in GridDirection::ALL {
-        for wall in walls.get(direction) {
+        for wall in walls
+            .get(direction)
+            .iter()
+            .chain(generated_walls.get(direction).iter())
+        {
             validate_wall_heights(wall, x, z, direction)?;
             let material = material_slot(
                 project,
@@ -844,6 +852,16 @@ fn cook_walls(
         }
     }
     Ok(cooked)
+}
+
+fn generated_floor_transition_walls(grid: &WorldGrid, x: u16, z: u16) -> GridWalls {
+    let mut walls = GridWalls::default();
+    for direction in [GridDirection::East, GridDirection::North] {
+        if let Some(wall) = grid.floor_transition_wall_for_edge(x, z, direction) {
+            walls.get_mut(direction).push(wall);
+        }
+    }
+    walls
 }
 
 #[cfg(test)]
@@ -1580,6 +1598,23 @@ mod tests {
         let sector = parsed_world.sector(0, 0).unwrap();
         let wall = parsed_world.sector_wall(sector, 0).unwrap();
         assert_eq!(wall.shape(), world::wall_shape::DROP_TOP_RIGHT);
+    }
+
+    #[test]
+    fn cooks_floor_height_transition_wall_between_mismatched_neighbours() {
+        let project = ProjectDocument::starter();
+        let material = first_floor_material(&starter_grid(&project));
+        let mut grid = WorldGrid::empty(2, 1, world::SECTOR_SIZE);
+        grid.set_floor(0, 0, 0, Some(material));
+        grid.set_floor(1, 0, 512, Some(material));
+
+        let cooked = cook_world_grid(&project, &grid).unwrap();
+        let first_sector = cooked.sectors[0].as_ref().unwrap();
+        let second_sector = cooked.sectors[1].as_ref().unwrap();
+
+        assert_eq!(first_sector.walls.east.len(), 1);
+        assert!(second_sector.walls.west.is_empty());
+        assert_eq!(first_sector.walls.east[0].heights, [0, 0, 512, 512]);
     }
 
     #[test]
