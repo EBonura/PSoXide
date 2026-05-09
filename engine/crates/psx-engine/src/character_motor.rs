@@ -6,7 +6,7 @@
 //! Inputs are intent-shaped rather than pad-shaped so callers can feed
 //! either player controls or future behaviour-tree output.
 
-use crate::{Angle, RoomCollision, RoomPoint, Q12};
+use crate::{Angle, RoomCollision, RoomPoint, RuntimeRoom, Q12};
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
 const DEFAULT_BODY_HEIGHT: i32 = 768;
@@ -51,11 +51,51 @@ impl CharacterCollisionCylinder {
     }
 }
 
+/// One room collision view placed in the motor's current local
+/// coordinate space.
+///
+/// Chunked levels keep the player expressed in the current chunk's
+/// room-local coordinates. Adjacent chunks are therefore queried by
+/// subtracting their offset from that same current-space point.
+#[derive(Copy, Clone, Debug)]
+pub struct CharacterCollisionRoom<'room> {
+    /// Runtime room/chunk handle.
+    pub room: Option<RuntimeRoom<'room>>,
+    /// Offset from the motor's current room origin to this room's
+    /// origin, in engine units.
+    pub offset_x: i32,
+    /// Offset from the motor's current room origin to this room's
+    /// origin, in engine units.
+    pub offset_z: i32,
+}
+
+impl<'room> CharacterCollisionRoom<'room> {
+    /// Empty non-colliding placeholder for fixed stack buffers.
+    pub const EMPTY: Self = Self {
+        room: None,
+        offset_x: 0,
+        offset_z: 0,
+    };
+
+    /// Build a collision room with a current-space origin offset.
+    pub const fn new(room: RuntimeRoom<'room>, offset_x: i32, offset_z: i32) -> Self {
+        Self {
+            room: Some(room),
+            offset_x,
+            offset_z,
+        }
+    }
+}
+
 /// Collision inputs consumed by [`CharacterMotorState`].
 #[derive(Copy, Clone, Debug)]
 pub struct CharacterCollision<'room, 'room_ref, 'blockers> {
     /// Optional room grid collision.
     pub room: Option<RoomCollision<'room, 'room_ref>>,
+    /// Optional multi-room collision set, in the same current-space
+    /// coordinate system as the motor. When present, this takes
+    /// precedence over `room`.
+    pub rooms: &'blockers [CharacterCollisionRoom<'room>],
     /// Other coarse actor bodies that block this motor.
     pub blockers: &'blockers [CharacterCollisionCylinder],
 }
@@ -66,13 +106,30 @@ impl<'room, 'room_ref, 'blockers> CharacterCollision<'room, 'room_ref, 'blockers
         room: Option<RoomCollision<'room, 'room_ref>>,
         blockers: &'blockers [CharacterCollisionCylinder],
     ) -> Self {
-        Self { room, blockers }
+        Self {
+            room,
+            rooms: &[],
+            blockers,
+        }
+    }
+
+    /// Build a collision context from multiple offset room chunks.
+    pub const fn rooms(
+        rooms: &'blockers [CharacterCollisionRoom<'room>],
+        blockers: &'blockers [CharacterCollisionCylinder],
+    ) -> Self {
+        Self {
+            room: None,
+            rooms,
+            blockers,
+        }
     }
 
     /// Build a context that only checks room geometry.
     pub const fn room(room: Option<RoomCollision<'room, 'room_ref>>) -> Self {
         Self {
             room,
+            rooms: &[],
             blockers: &[],
         }
     }
@@ -848,21 +905,117 @@ fn body_stand_position(
 ) -> Option<RoomPoint> {
     let radius = radius.max(0);
     let height = height.max(1);
-    let position = match collision.room {
-        Some(room) => {
-            let floor = stand_height(room, target.x, target.z, radius)?;
-            let position = target.with_y(floor);
-            if body_hits_solid_wall(room, position, radius, height) {
-                return None;
-            }
-            position
+    let position = if !collision.rooms.is_empty() {
+        let floor = stand_height_in_rooms(collision.rooms, target.x, target.z, radius)?;
+        let position = target.with_y(floor);
+        if body_hits_solid_wall_in_rooms(collision.rooms, position, radius, height) {
+            return None;
         }
-        None => target,
+        position
+    } else {
+        match collision.room {
+            Some(room) => {
+                let floor = stand_height(room, target.x, target.z, radius)?;
+                let position = target.with_y(floor);
+                if body_hits_solid_wall(room, position, radius, height) {
+                    return None;
+                }
+                position
+            }
+            None => target,
+        }
     };
     if body_hits_blocker(position, radius, height, collision.blockers) {
         return None;
     }
     Some(position)
+}
+
+fn stand_height_in_rooms(
+    rooms: &[CharacterCollisionRoom<'_>],
+    x: i32,
+    z: i32,
+    radius: i32,
+) -> Option<i32> {
+    let height = floor_height_at_rooms(rooms, x, z)?;
+    if radius <= 0 {
+        return Some(height);
+    }
+    let r = radius.max(0);
+    floor_height_at_rooms(rooms, x.saturating_sub(r), z)?;
+    floor_height_at_rooms(rooms, x.saturating_add(r), z)?;
+    floor_height_at_rooms(rooms, x, z.saturating_sub(r))?;
+    floor_height_at_rooms(rooms, x, z.saturating_add(r))?;
+    Some(height)
+}
+
+fn floor_height_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -> Option<i32> {
+    for collision_room in rooms {
+        let Some(room) = collision_room.room else {
+            continue;
+        };
+        if !collision_room_contains_point(*collision_room, room, x, z) {
+            continue;
+        }
+        if let Some(height) = floor_height_at(
+            room.collision(),
+            x.saturating_sub(collision_room.offset_x),
+            z.saturating_sub(collision_room.offset_z),
+        ) {
+            return Some(height);
+        }
+    }
+    None
+}
+
+fn body_hits_solid_wall_in_rooms(
+    rooms: &[CharacterCollisionRoom<'_>],
+    position: RoomPoint,
+    radius: i32,
+    height: i32,
+) -> bool {
+    for collision_room in rooms {
+        let Some(room) = collision_room.room else {
+            continue;
+        };
+        if !collision_room_contains_point(*collision_room, room, position.x, position.z) {
+            continue;
+        }
+        let local_position = RoomPoint::new(
+            position.x.saturating_sub(collision_room.offset_x),
+            position.y,
+            position.z.saturating_sub(collision_room.offset_z),
+        );
+        return body_hits_solid_wall(room.collision(), local_position, radius, height);
+    }
+    false
+}
+
+fn collision_room_contains_point(
+    collision_room: CharacterCollisionRoom<'_>,
+    room: RuntimeRoom<'_>,
+    x: i32,
+    z: i32,
+) -> bool {
+    let Some((x0, x1, z0, z1)) = collision_room_bounds(collision_room, room) else {
+        return false;
+    };
+    x >= x0 && x < x1 && z >= z0 && z < z1
+}
+
+fn collision_room_bounds(
+    collision_room: CharacterCollisionRoom<'_>,
+    room: RuntimeRoom<'_>,
+) -> Option<(i32, i32, i32, i32)> {
+    let sector_size = room.sector_size();
+    if sector_size <= 0 {
+        return None;
+    }
+    let x0 = collision_room.offset_x;
+    let z0 = collision_room.offset_z;
+    let x1 = x0.checked_add((room.width() as i32).checked_mul(sector_size)?)?;
+    let z1 = z0.checked_add((room.depth() as i32).checked_mul(sector_size)?)?;
+    Some((x0, x1, z0, z1))
 }
 
 fn analog_move_vector(input: CharacterMotorInput) -> Option<(Q12, Q12, Q12)> {
@@ -1272,6 +1425,27 @@ mod tests {
         buf
     }
 
+    fn flat_floor_world() -> [u8; 92] {
+        const ASSET_HEADER: usize = 12;
+        const WORLD_HEADER: usize = 20;
+        const SECTOR_RECORD: usize = 60;
+        const SECTOR0: usize = ASSET_HEADER + WORLD_HEADER;
+        let payload_len = (WORLD_HEADER + SECTOR_RECORD) as u32;
+        let mut buf = [0u8; 92];
+        buf[0..4].copy_from_slice(b"PSXW");
+        buf[4..6].copy_from_slice(&3u16.to_le_bytes());
+        buf[8..12].copy_from_slice(&payload_len.to_le_bytes());
+        buf[12..14].copy_from_slice(&1u16.to_le_bytes());
+        buf[14..16].copy_from_slice(&1u16.to_le_bytes());
+        buf[16..20].copy_from_slice(&1024i32.to_le_bytes());
+        buf[20..22].copy_from_slice(&1u16.to_le_bytes());
+        buf[22..24].copy_from_slice(&1u16.to_le_bytes());
+
+        buf[SECTOR0] = 1 | 4;
+        buf[SECTOR0 + 4..SECTOR0 + 6].copy_from_slice(&0u16.to_le_bytes());
+        buf
+    }
+
     #[test]
     fn forward_input_moves_along_yaw() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
@@ -1407,6 +1581,36 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(512, 0, 800));
         assert!(!frame.moved);
         assert!(frame.blocked);
+    }
+
+    #[test]
+    fn multi_room_collision_crosses_flat_chunk_seam() {
+        let bytes_a = flat_floor_world();
+        let bytes_b = flat_floor_world();
+        let room_a = RuntimeRoom::from_bytes(&bytes_a).expect("room a parses");
+        let room_b = RuntimeRoom::from_bytes(&bytes_b).expect("room b parses");
+        let rooms = [
+            CharacterCollisionRoom::new(room_a, 0, 0),
+            CharacterCollisionRoom::new(room_b, 1024, 0),
+        ];
+        let mut motor = CharacterMotorState::new(RoomPoint::new(960, 0, 512), Angle::QUARTER);
+        let mut cfg = config();
+        cfg.walk_speed = 128;
+        cfg.radius = 96;
+
+        let frame = motor.update_vblanks_with_collision(
+            CharacterCollision::rooms(&rooms, &[]),
+            CharacterMotorInput {
+                walk: 1,
+                ..CharacterMotorInput::default()
+            },
+            cfg,
+            1,
+        );
+
+        assert_eq!(frame.position, RoomPoint::new(1088, 0, 512));
+        assert!(frame.moved);
+        assert!(!frame.blocked);
     }
 
     #[test]
