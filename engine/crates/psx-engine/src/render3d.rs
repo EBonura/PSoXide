@@ -1833,13 +1833,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ];
 
                 if options.split_textured_triangles {
-                    let tri_stats = self.submit_textured_triangle_split(
-                        triangles,
-                        textured,
-                        material,
-                        options,
-                        0,
-                    );
+                    let tri_stats = self
+                        .submit_textured_triangle_split(triangles, textured, material, options, 0);
                     merge_textured_model_stats(&mut stats, tri_stats);
                     if stats.primitive_overflow || stats.command_overflow {
                         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);

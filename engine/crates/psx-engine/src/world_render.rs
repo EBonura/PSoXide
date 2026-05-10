@@ -11,6 +11,9 @@ use psx_gpu::{
     material::TextureMaterial,
     prim::{TriTextured, TriTexturedGouraud},
 };
+use psx_level::{
+    LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
+};
 
 use crate::{
     render3d::{project_world_vertices_gte, CullMode, DepthPolicy, ProjectedVertex},
@@ -87,6 +90,13 @@ impl WorldRenderMaterial {
         self.texture_height = normalize_room_texture_uv_size(height);
         self
     }
+
+    /// Build a material descriptor for room-cache generation when
+    /// only the texture-window dimensions matter.
+    pub const fn cache_only(texture_width: u8, texture_height: u8) -> Self {
+        Self::front(TextureMaterial::opaque(0, 0, (0x80, 0x80, 0x80)))
+            .with_texture_size(texture_width, texture_height)
+    }
 }
 
 impl From<TextureMaterial> for WorldRenderMaterial {
@@ -102,6 +112,18 @@ const fn wall_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial
         SurfaceSidedness::Both => SurfaceSidedness::Both,
     };
     material
+}
+
+const fn wall_material_for_direction(
+    material: WorldRenderMaterial,
+    direction: u8,
+) -> WorldRenderMaterial {
+    // Cardinal wall windings make the owning cell's interior the back side.
+    // Diagonal walls are freestanding authored faces, matching editor preview.
+    match direction {
+        DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST => material,
+        _ => wall_material(material),
+    }
 }
 
 /// Kind of room surface currently being emitted.
@@ -225,6 +247,7 @@ impl GridVisibleCell {
 /// empty room-grid space does not consume active runtime cache. A
 /// cooked visible-cell reference finds its surface range with a small
 /// binary search over this compact table.
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct CachedRoomCell {
     /// Grid X coordinate inside the cooked room.
@@ -236,7 +259,7 @@ pub struct CachedRoomCell {
     /// Maximum authored surface height in room-local engine units.
     pub max_y: i32,
     /// Precomputed center used by the cached room frustum test.
-    pub visibility_center: WorldVertex,
+    pub visibility_center: [i32; 3],
     /// Precomputed radius used by the cached room frustum test.
     pub visibility_radius: i32,
     /// First surface record for this cell inside the room surface cache.
@@ -252,7 +275,7 @@ impl CachedRoomCell {
         z: 0,
         min_y: 0,
         max_y: 0,
-        visibility_center: WorldVertex::ZERO,
+        visibility_center: [0; 3],
         visibility_radius: 0,
         surface_first: 0,
         surface_count: 0,
@@ -274,7 +297,7 @@ impl CachedRoomCell {
             z,
             min_y,
             max_y,
-            visibility_center,
+            visibility_center: visibility_center.to_array(),
             visibility_radius,
             surface_first,
             surface_count,
@@ -300,6 +323,7 @@ impl WorldSurfaceSample {
 /// slot, cached vertex indices, UV order, split id, and the surface
 /// lighting sample. Per-frame work still applies camera projection,
 /// culling, fog, and final ordering-table submission.
+#[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct CachedRoomSurface {
     /// Local room material slot referenced by this surface.
@@ -409,6 +433,60 @@ const CACHED_SURFACE_KIND_FLOOR: u8 = 0;
 const CACHED_SURFACE_KIND_CEILING: u8 = 1;
 const CACHED_SURFACE_KIND_WALL: u8 = 2;
 const CACHED_SURFACE_HAS_BAKED_RGB: u8 = 0b1000_0000;
+
+const _: () = assert!(
+    core::mem::size_of::<LevelCachedRoomCellRecord>() == core::mem::size_of::<CachedRoomCell>()
+);
+const _: () = assert!(
+    core::mem::align_of::<LevelCachedRoomCellRecord>() == core::mem::align_of::<CachedRoomCell>()
+);
+const _: () = assert!(
+    core::mem::size_of::<LevelCachedRoomVertexRecord>() == core::mem::size_of::<WorldVertex>()
+);
+const _: () = assert!(
+    core::mem::align_of::<LevelCachedRoomVertexRecord>() == core::mem::align_of::<WorldVertex>()
+);
+const _: () = assert!(
+    core::mem::size_of::<LevelCachedRoomSurfaceRecord>()
+        == core::mem::size_of::<CachedRoomSurface>()
+);
+const _: () = assert!(
+    core::mem::align_of::<LevelCachedRoomSurfaceRecord>()
+        == core::mem::align_of::<CachedRoomSurface>()
+);
+
+/// View generated level cache cell records as renderer cache cells.
+///
+/// `psx-level` owns the manifest schema while `psx-engine` owns the
+/// renderer types. The two record layouts are asserted above so cooked
+/// manifests can be drawn without copying room-cache payloads into a
+/// mutable runtime arena.
+pub fn cached_room_cells_from_level_records(
+    records: &[LevelCachedRoomCellRecord],
+) -> &[CachedRoomCell] {
+    // SAFETY: The record and renderer structs are `repr(C)`, contain
+    // the same field types in the same order, and the const assertions
+    // above pin size/alignment equality.
+    unsafe { core::slice::from_raw_parts(records.as_ptr().cast::<CachedRoomCell>(), records.len()) }
+}
+
+/// View generated level cache vertex records as renderer vertices.
+pub fn cached_room_vertices_from_level_records(
+    records: &[LevelCachedRoomVertexRecord],
+) -> &[WorldVertex] {
+    // SAFETY: See `cached_room_cells_from_level_records`.
+    unsafe { core::slice::from_raw_parts(records.as_ptr().cast::<WorldVertex>(), records.len()) }
+}
+
+/// View generated level cache surface records as renderer surfaces.
+pub fn cached_room_surfaces_from_level_records(
+    records: &[LevelCachedRoomSurfaceRecord],
+) -> &[CachedRoomSurface] {
+    // SAFETY: See `cached_room_cells_from_level_records`.
+    unsafe {
+        core::slice::from_raw_parts(records.as_ptr().cast::<CachedRoomSurface>(), records.len())
+    }
+}
 
 const fn cached_surface_kind_code(kind: WorldSurfaceKind) -> (u8, u8) {
     match kind {
@@ -1390,10 +1468,15 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         };
 
         stats.cells_considered = stats.cells_considered.saturating_add(1);
+        let visibility_center = WorldVertex::new(
+            cell.visibility_center[0],
+            cell.visibility_center[1],
+            cell.visibility_center[2],
+        );
         if !cell_visibility_visible_to_camera(
             camera,
             options,
-            cell.visibility_center,
+            visibility_center,
             cell.visibility_radius,
             screen_margin,
         ) {
@@ -1709,8 +1792,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 );
             }
         }
-        WorldSurfaceKind::Wall { .. } => {
-            let wall_material = wall_material(material);
+        WorldSurfaceKind::Wall { direction } => {
+            let wall_material = wall_material_for_direction(material, direction);
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 if projected_split_triangle_backface_culled(
                     projected,
@@ -2646,7 +2729,7 @@ fn emit_wall<const OT: usize>(
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
         return;
     };
-    let material = wall_material(material);
+    let material = wall_material_for_direction(material, direction);
     if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
         submit_split_triangle(
             camera,
@@ -2845,7 +2928,7 @@ fn emit_wall_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
     let Some(verts) = wall_vertices(sx, sz, sector_size, direction, heights) else {
         return;
     };
-    let material = wall_material(material);
+    let material = wall_material_for_direction(material, direction);
     let colors = vertex_lighting_colors(lighting, sample, material, verts);
     if let Some((split, triangle_index)) = wall_shape_triangle(shape) {
         submit_split_triangle_vertex_lit(
@@ -3766,6 +3849,31 @@ mod tests {
     }
 
     #[test]
+    fn diagonal_wall_materials_keep_authored_sidedness() {
+        let texture = TextureMaterial::opaque(0, 0, (128, 128, 128));
+        assert_eq!(
+            wall_material_for_direction(WorldRenderMaterial::front(texture), DIR_NORTH).sidedness,
+            SurfaceSidedness::Back
+        );
+        assert_eq!(
+            wall_material_for_direction(
+                WorldRenderMaterial::front(texture),
+                DIR_NORTH_WEST_SOUTH_EAST
+            )
+            .sidedness,
+            SurfaceSidedness::Front
+        );
+        assert_eq!(
+            wall_material_for_direction(
+                WorldRenderMaterial::back(texture),
+                DIR_NORTH_EAST_SOUTH_WEST
+            )
+            .sidedness,
+            SurfaceSidedness::Back
+        );
+    }
+
+    #[test]
     fn material_texture_size_projects_default_uvs_once() {
         let material = WorldRenderMaterial::front(TextureMaterial::opaque(0, 0, (128, 128, 128)))
             .with_texture_size(32, 32);
@@ -3785,6 +3893,106 @@ mod tests {
         assert_eq!(
             material_uvs(material, [(0, 0), (128, 0), (128, TILE_UV), (0, TILE_UV)]),
             [(0, 0), (64, 0), (64, TILE_UV), (0, TILE_UV)]
+        );
+    }
+
+    #[test]
+    fn generated_cache_records_reconstruct_cached_samples() {
+        let vertices = [
+            WorldVertex::new(0, 10, 0),
+            WorldVertex::new(1024, 20, 0),
+            WorldVertex::new(1024, 30, 1024),
+            WorldVertex::new(0, 40, 1024),
+        ];
+        let vertex_records = [
+            LevelCachedRoomVertexRecord {
+                x: vertices[0].x,
+                y: vertices[0].y,
+                z: vertices[0].z,
+            },
+            LevelCachedRoomVertexRecord {
+                x: vertices[1].x,
+                y: vertices[1].y,
+                z: vertices[1].z,
+            },
+            LevelCachedRoomVertexRecord {
+                x: vertices[2].x,
+                y: vertices[2].y,
+                z: vertices[2].z,
+            },
+            LevelCachedRoomVertexRecord {
+                x: vertices[3].x,
+                y: vertices[3].y,
+                z: vertices[3].z,
+            },
+        ];
+        assert_eq!(
+            cached_room_vertices_from_level_records(&vertex_records),
+            &vertices
+        );
+
+        let cell_records = [LevelCachedRoomCellRecord {
+            x: 3,
+            z: 4,
+            min_y: 10,
+            max_y: 40,
+            visibility_center: [512, 25, 512],
+            visibility_radius: 1040,
+            surface_first: 7,
+            surface_count: 1,
+        }];
+        let cells = cached_room_cells_from_level_records(&cell_records);
+        assert_eq!(cells[0].x, 3);
+        assert_eq!(cells[0].visibility_center, [512, 25, 512]);
+        assert_eq!(cells[0].surface_first, 7);
+
+        let baked = [(1, 2, 3), (4, 5, 6), (7, 8, 9), (10, 11, 12)];
+        let surface = CachedRoomSurface::new(
+            5,
+            [0, 1, 2, 3],
+            [(0, 0), (32, 0), (32, 64), (0, 64)],
+            WorldSurfaceSample {
+                kind: WorldSurfaceKind::Wall {
+                    direction: DIR_EAST,
+                },
+                sx: 3,
+                sz: 4,
+                center: RoomPoint::ZERO,
+                baked_vertex_rgb: Some(baked),
+                ordinal: 9,
+            },
+            SPLIT_NE_SW,
+            1,
+        );
+        let surface_records = [LevelCachedRoomSurfaceRecord {
+            material_slot: surface.material_slot,
+            vertex_indices: surface.vertex_indices,
+            sample_sx: surface.sample_sx,
+            sample_sz: surface.sample_sz,
+            sample_ordinal: surface.sample_ordinal,
+            uvs: surface.uvs,
+            baked_vertex_rgb: surface.baked_vertex_rgb,
+            kind_flags: surface.kind_flags,
+            wall_direction: surface.wall_direction,
+            split: surface.split,
+            triangle_index: surface.triangle_index,
+        }];
+        let surfaces = cached_room_surfaces_from_level_records(&surface_records);
+        assert_eq!(surfaces[0], surface);
+        let sample = surfaces[0].sample_with_center(vertices, true);
+        assert_eq!(
+            sample.kind,
+            WorldSurfaceKind::Wall {
+                direction: DIR_EAST
+            }
+        );
+        assert_eq!(sample.sx, 3);
+        assert_eq!(sample.sz, 4);
+        assert_eq!(sample.ordinal, 9);
+        assert_eq!(sample.baked_vertex_rgb, Some(baked));
+        assert_eq!(
+            sample.center,
+            cached_surface_center(vertices, SPLIT_NE_SW, 1)
         );
     }
 
