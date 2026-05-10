@@ -301,6 +301,13 @@ pub struct MaterialResource {
     pub double_sided: bool,
 }
 
+/// Default authored width/height for image props, in engine/editor units.
+pub const DEFAULT_IMAGE_PROP_SIZE: u16 = 64;
+
+const fn default_image_prop_size() -> u16 {
+    DEFAULT_IMAGE_PROP_SIZE
+}
+
 impl MaterialResource {
     /// Build an opaque neutral material.
     pub const fn opaque(texture: Option<ResourceId>) -> Self {
@@ -4055,6 +4062,24 @@ pub enum NodeKind {
         #[serde(default)]
         animation_clip: Option<u16>,
     },
+    /// Flat material-backed image plane. The node transform marks
+    /// the bottom-center anchor; yaw controls the static facing
+    /// direction unless cylindrical billboarding is enabled.
+    ImageProp {
+        /// Material used by the quad.
+        #[serde(default)]
+        material: Option<ResourceId>,
+        /// Authored width in engine/editor units.
+        #[serde(default = "default_image_prop_size")]
+        width: u16,
+        /// Authored height in engine/editor units.
+        #[serde(default = "default_image_prop_size")]
+        height: u16,
+        /// Rotate around Y every frame so the card faces the camera
+        /// while staying upright.
+        #[serde(default)]
+        cylindrical_billboard: bool,
+    },
     /// Render a cooked [`ResourceData::Model`] from the transform
     /// on the nearest entity ancestor. This is the component form of
     /// the legacy [`MeshInstance`](Self::MeshInstance) node.
@@ -4206,6 +4231,7 @@ impl NodeKind {
             Self::World { .. } => "World",
             Self::Room { .. } => "Room",
             Self::MeshInstance { .. } => "Mesh Instance",
+            Self::ImageProp { .. } => "Image Prop",
             Self::ModelRenderer { .. } => "Model Renderer",
             Self::Animator { .. } => "Animator",
             Self::Collider { .. } => "Collider",
@@ -5074,6 +5100,7 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
             option_resource_reference_count(*mesh, id)
                 + option_resource_reference_count(*material, id)
         }
+        NodeKind::ImageProp { material, .. } => option_resource_reference_count(*material, id),
         NodeKind::ModelRenderer { model, material } => {
             option_resource_reference_count(*model, id)
                 + option_resource_reference_count(*material, id)
@@ -5122,6 +5149,7 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
         NodeKind::MeshInstance { mesh, material, .. } => {
             clear_option_resource(mesh, id) + clear_option_resource(material, id)
         }
+        NodeKind::ImageProp { material, .. } => clear_option_resource(material, id),
         NodeKind::ModelRenderer { model, material } => {
             clear_option_resource(model, id) + clear_option_resource(material, id)
         }
@@ -6451,10 +6479,6 @@ mod tests {
             &r.data,
             ResourceData::Texture { psxt_path } if psxt_path.ends_with("brick-wall.psxt")
         )));
-        assert!(project.resources.iter().any(|r| matches!(
-            &r.data,
-            ResourceData::Texture { psxt_path } if psxt_path.ends_with("dirt.psxt")
-        )));
         // Starter ships the obsidian wraith model plus a shared
         // standalone FBX animation library, so characters are
         // animated without relying on model-local Meshy clips.
@@ -6495,7 +6519,7 @@ mod tests {
         let legacy = DEFAULT_PROJECT_RON
             .replace(
                 &format!(
-                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: true, texture: None, texture_panels: (Some((116)), Some((117)), Some((118)), Some((119)), Some((120)), Some((121)), Some((122)), Some((123)), Some((124)), Some((125)), Some((126)), Some((127)), None, None, None, None), radius: 18000, height: 8192, vertical_offset: -2048, segments: 12, rotation_degrees: 0, tint: (128, 128, 128), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640)),"
+                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640, min_floor_clearance: 64)),"
                 ),
                 "kind: World,",
             )
@@ -6506,7 +6530,7 @@ mod tests {
         let world = scene
             .nodes()
             .iter()
-            .find(|node| node.name == "Demo World")
+            .find(|node| node.name == "World")
             .expect("starter world exists");
         assert!(matches!(
             &world.kind,
@@ -6515,7 +6539,7 @@ mod tests {
         let migrated = scene
             .nodes()
             .iter()
-            .find(|node| node.name == "Crimson Cross Knight Player")
+            .find(|node| node.name == "Player")
             .expect("starter player entity exists");
         assert!(matches!(&migrated.kind, NodeKind::Entity));
     }
@@ -6543,9 +6567,6 @@ mod tests {
             .is_file());
         assert!(default_project_dir()
             .join("assets/textures/floor.psxt")
-            .is_file());
-        assert!(default_project_dir()
-            .join("assets/textures/dirt.psxt")
             .is_file());
     }
 
