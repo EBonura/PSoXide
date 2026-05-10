@@ -710,24 +710,6 @@ impl CharacterMotorState {
             return (position.x != start.x || position.z != start.z, true);
         }
 
-        let z_first = RoomPoint::new(start.x, start.y, target.z);
-        if let Some(position) = body_stand_position(collision, z_first, radius, height) {
-            let x_after = RoomPoint::new(target.x, position.y, position.z);
-            if let Some(position) = body_stand_position(collision, x_after, radius, height) {
-                self.position = position;
-                return (position.x != start.x || position.z != start.z, true);
-            }
-        }
-
-        let x_first = RoomPoint::new(target.x, start.y, start.z);
-        if let Some(position) = body_stand_position(collision, x_first, radius, height) {
-            let z_after = RoomPoint::new(position.x, position.y, target.z);
-            if let Some(position) = body_stand_position(collision, z_after, radius, height) {
-                self.position = position;
-                return (position.x != start.x || position.z != start.z, true);
-            }
-        }
-
         if body_stand_position(collision, start, radius, height).is_some() {
             return (false, true);
         }
