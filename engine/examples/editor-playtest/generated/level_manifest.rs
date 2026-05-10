@@ -3,13 +3,15 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCameraRecord, LevelCharacterRecord,
-    LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord,
-    LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
-    LevelModelInstanceRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
+    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCachedRoomCellRecord,
+    LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord, LevelCameraRecord,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
+    LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
+    LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord, LevelWeaponRecord,
-    PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex, RoomResidencyRecord,
-    WeaponHitboxRecord,
+    PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
+    RoomResidencyRecord, WeaponHitboxRecord,
 };
 
 pub static ASSETS: &[LevelAssetRecord] = &[];
@@ -18,6 +20,10 @@ pub static ROOMS: &[LevelRoomRecord] = &[];
 pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];
 pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[];
 pub static VISIBILITY_CELLS: &[LevelVisibilityCellRecord] = &[];
+pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];
+pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];
+pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];
+pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];
 pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[];
 
 pub static PLAYER_SPAWN: PlayerSpawnRecord = PlayerSpawnRecord {
