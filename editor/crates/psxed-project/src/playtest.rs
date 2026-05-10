@@ -31,6 +31,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use psx_engine::{
+    cache_room_vertex_lit_surfaces, CachedRoomCell, CachedRoomSurface, RuntimeRoom,
+    WorldRenderMaterial, WorldVertex,
+};
 use psx_level::{
     far_vista_flags, image_prop_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
 };
@@ -140,6 +144,10 @@ pub fn build_package(
     let mut room_bake_inputs: Vec<CookedRoomBakeInput> = Vec::new();
     let mut room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
     let mut visibility_cells: Vec<PlaytestVisibilityCell> = Vec::new();
+    let mut room_surface_caches: Vec<PlaytestRoomSurfaceCache> = Vec::new();
+    let mut room_cache_cells: Vec<PlaytestCachedRoomCell> = Vec::new();
+    let mut room_cache_vertices: Vec<PlaytestCachedRoomVertex> = Vec::new();
+    let mut room_cache_surfaces: Vec<PlaytestCachedRoomSurface> = Vec::new();
 
     for room_node in &room_nodes {
         let NodeKind::Room { grid } = &room_node.kind else {
@@ -914,6 +922,19 @@ pub fn build_package(
             ));
             return (None, report);
         }
+        if let Err(msg) = append_room_surface_cache(
+            room.room_index,
+            &bytes,
+            &materials,
+            &assets,
+            &mut room_surface_caches,
+            &mut room_cache_cells,
+            &mut room_cache_vertices,
+            &mut room_cache_surfaces,
+        ) {
+            report.error(msg);
+            return (None, report);
+        }
         if let Some(asset) = assets.get_mut(room.world_asset_index) {
             asset.bytes = bytes;
         }
@@ -933,6 +954,10 @@ pub fn build_package(
             materials,
             room_visibility,
             visibility_cells,
+            room_surface_caches,
+            room_cache_cells,
+            room_cache_vertices,
+            room_cache_surfaces,
             models,
             model_clips,
             model_clip_bounds,
@@ -2627,6 +2652,168 @@ fn append_room_visibility(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_room_surface_cache(
+    room_index: u16,
+    room_bytes: &[u8],
+    materials: &[PlaytestMaterial],
+    assets: &[PlaytestAsset],
+    room_surface_caches: &mut Vec<PlaytestRoomSurfaceCache>,
+    room_cache_cells: &mut Vec<PlaytestCachedRoomCell>,
+    room_cache_vertices: &mut Vec<PlaytestCachedRoomVertex>,
+    room_cache_surfaces: &mut Vec<PlaytestCachedRoomSurface>,
+) -> Result<(), String> {
+    let room = RuntimeRoom::from_bytes(room_bytes)
+        .map_err(|e| format!("Room #{room_index} generated cache parse failed: {e:?}"))?;
+    let cache_materials = cache_materials_for_room(room_index, materials, assets)?;
+    let surface_capacity = (room.width() as usize)
+        .saturating_mul(room.depth() as usize)
+        .saturating_mul(4)
+        .saturating_add(room.world().wall_count() as usize)
+        .max(1);
+    let cell_capacity = (room.width() as usize)
+        .saturating_mul(room.depth() as usize)
+        .max(1);
+    let vertex_capacity = surface_capacity.saturating_mul(4).max(1);
+    let mut cells = vec![CachedRoomCell::EMPTY; cell_capacity];
+    let mut vertices = vec![WorldVertex::ZERO; vertex_capacity];
+    let mut surfaces = vec![CachedRoomSurface::EMPTY; surface_capacity];
+    let stats = cache_room_vertex_lit_surfaces(
+        room.render(),
+        &cache_materials,
+        &mut cells,
+        &mut vertices,
+        &mut surfaces,
+    );
+    if stats.overflow {
+        return Err(format!(
+            "Room #{room_index} generated surface cache overflowed its computed capacity"
+        ));
+    }
+    let cell_first = checked_u32(room_cache_cells.len(), "room cache cell start")?;
+    let vertex_first = checked_u32(room_cache_vertices.len(), "room cache vertex start")?;
+    let surface_first = checked_u32(room_cache_surfaces.len(), "room cache surface start")?;
+    let cell_count = checked_u16(stats.cell_count, "room cache cell count")?;
+    let vertex_count = checked_u16(stats.vertex_count, "room cache vertex count")?;
+    let surface_count = checked_u16(stats.surface_count, "room cache surface count")?;
+
+    room_cache_cells.extend(
+        cells[..stats.cell_count]
+            .iter()
+            .copied()
+            .map(playtest_cached_room_cell),
+    );
+    room_cache_vertices.extend(
+        vertices[..stats.vertex_count]
+            .iter()
+            .copied()
+            .map(playtest_cached_room_vertex),
+    );
+    room_cache_surfaces.extend(
+        surfaces[..stats.surface_count]
+            .iter()
+            .copied()
+            .map(playtest_cached_room_surface),
+    );
+    room_surface_caches.push(PlaytestRoomSurfaceCache {
+        room: room_index,
+        cell_first,
+        cell_count,
+        vertex_first,
+        vertex_count,
+        surface_first,
+        surface_count,
+    });
+    Ok(())
+}
+
+fn cache_materials_for_room(
+    room_index: u16,
+    materials: &[PlaytestMaterial],
+    assets: &[PlaytestAsset],
+) -> Result<Vec<WorldRenderMaterial>, String> {
+    let mut out = Vec::new();
+    for material in materials
+        .iter()
+        .filter(|material| material.room == room_index)
+    {
+        let slot = material.local_slot as usize;
+        if out.len() <= slot {
+            out.resize(slot + 1, WorldRenderMaterial::cache_only(64, 64));
+        }
+        let texture_asset = assets.get(material.texture_asset_index).ok_or_else(|| {
+            format!(
+                "Room #{room_index} material slot {} references missing texture asset {}",
+                material.local_slot, material.texture_asset_index
+            )
+        })?;
+        let texture = psx_asset::Texture::from_bytes(&texture_asset.bytes).map_err(|e| {
+            format!(
+                "Room #{room_index} material slot {} texture '{}' parse failed while building generated cache: {e:?}",
+                material.local_slot, texture_asset.source_label
+            )
+        })?;
+        out[slot] = WorldRenderMaterial::cache_only(
+            room_cache_texture_size(texture.width()),
+            room_cache_texture_size(texture.height()),
+        );
+    }
+    Ok(out)
+}
+
+fn room_cache_texture_size(size: u16) -> u8 {
+    if size < 8 || size > 64 || !size.is_power_of_two() || size % 8 != 0 {
+        64
+    } else {
+        size as u8
+    }
+}
+
+fn checked_u32(value: usize, what: &str) -> Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("{what} {value} exceeds u32::MAX"))
+}
+
+fn checked_u16(value: usize, what: &str) -> Result<u16, String> {
+    u16::try_from(value).map_err(|_| format!("{what} {value} exceeds u16::MAX"))
+}
+
+fn playtest_cached_room_cell(cell: CachedRoomCell) -> PlaytestCachedRoomCell {
+    PlaytestCachedRoomCell {
+        x: cell.x,
+        z: cell.z,
+        min_y: cell.min_y,
+        max_y: cell.max_y,
+        visibility_center: cell.visibility_center,
+        visibility_radius: cell.visibility_radius,
+        surface_first: cell.surface_first,
+        surface_count: cell.surface_count,
+    }
+}
+
+fn playtest_cached_room_vertex(vertex: WorldVertex) -> PlaytestCachedRoomVertex {
+    PlaytestCachedRoomVertex {
+        x: vertex.x,
+        y: vertex.y,
+        z: vertex.z,
+    }
+}
+
+fn playtest_cached_room_surface(surface: CachedRoomSurface) -> PlaytestCachedRoomSurface {
+    PlaytestCachedRoomSurface {
+        material_slot: surface.material_slot,
+        vertex_indices: surface.vertex_indices,
+        sample_sx: surface.sample_sx,
+        sample_sz: surface.sample_sz,
+        sample_ordinal: surface.sample_ordinal,
+        uvs: surface.uvs,
+        baked_vertex_rgb: surface.baked_vertex_rgb,
+        kind_flags: surface.kind_flags,
+        wall_direction: surface.wall_direction,
+        split: surface.split,
+        triangle_index: surface.triangle_index,
+    }
+}
+
 fn build_visibility_cells(
     room_index: u16,
     cooked: &CookedWorldGrid,
@@ -3406,6 +3593,15 @@ mod tests {
         assert!(manifest.contains("pub static ASSETS: &[LevelAssetRecord] = &[];"));
         assert!(manifest.contains("pub static ROOMS: &[LevelRoomRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
+        assert!(manifest
+            .contains("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
+        assert!(
+            manifest.contains("pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];")
+        );
+        assert!(manifest
+            .contains("pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];"));
+        assert!(manifest
+            .contains("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];"));
         assert!(manifest.contains("pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];"));
         assert!(manifest.contains("pub static WEAPONS: &[LevelWeaponRecord] = &[];"));
         assert!(manifest.contains("pub static EQUIPMENT: &[EquipmentRecord] = &[];"));
@@ -3450,7 +3646,51 @@ mod tests {
         );
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
+        assert_eq!(package.room_surface_caches.len(), package.rooms.len());
+        assert!(!package.room_cache_cells.is_empty());
+        assert!(!package.room_cache_vertices.is_empty());
+        assert!(!package.room_cache_surfaces.is_empty());
         assert!(package.spawn.is_some());
+    }
+
+    #[test]
+    fn generated_room_cache_counts_match_runtime_builder() {
+        let project = project_with_one_room();
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let package = package.expect("package");
+        let cache = package.room_surface_caches[0];
+        let room_record = &package.rooms[cache.room as usize];
+        let room_asset = &package.assets[room_record.world_asset_index];
+        let room = RuntimeRoom::from_bytes(&room_asset.bytes).expect("room parses");
+        let materials =
+            cache_materials_for_room(cache.room, &package.materials, &package.assets).unwrap();
+        let mut cells = vec![CachedRoomCell::EMPTY; cache.cell_count as usize];
+        let mut vertices = vec![WorldVertex::ZERO; cache.vertex_count as usize];
+        let mut surfaces = vec![CachedRoomSurface::EMPTY; cache.surface_count as usize];
+        let stats = cache_room_vertex_lit_surfaces(
+            room.render(),
+            &materials,
+            &mut cells,
+            &mut vertices,
+            &mut surfaces,
+        );
+        assert!(!stats.overflow);
+        assert_eq!(stats.cell_count, cache.cell_count as usize);
+        assert_eq!(stats.vertex_count, cache.vertex_count as usize);
+        assert_eq!(stats.surface_count, cache.surface_count as usize);
+        assert_eq!(
+            package.room_cache_cells[cache.cell_first as usize],
+            playtest_cached_room_cell(cells[0])
+        );
+        assert_eq!(
+            package.room_cache_vertices[cache.vertex_first as usize],
+            playtest_cached_room_vertex(vertices[0])
+        );
+        assert_eq!(
+            package.room_cache_surfaces[cache.surface_first as usize],
+            playtest_cached_room_surface(surfaces[0])
+        );
     }
 
     #[test]
@@ -4025,6 +4265,10 @@ mod tests {
         assert!(src.contains("camera: LevelCameraRecord"));
         assert!(src.contains("pub static ROOM_VISIBILITY"));
         assert!(src.contains("pub static VISIBILITY_CELLS"));
+        assert!(src.contains("pub static ROOM_SURFACE_CACHES"));
+        assert!(src.contains("pub static ROOM_CACHE_CELLS"));
+        assert!(src.contains("pub static ROOM_CACHE_VERTICES"));
+        assert!(src.contains("pub static ROOM_CACHE_SURFACES"));
         assert!(src.contains("pub static ROOM_RESIDENCY"));
         assert!(src.contains("pub static PLAYER_SPAWN"));
         assert!(src.contains("pub static ENTITIES"));
@@ -5278,6 +5522,15 @@ mod tests {
         assert!(src.contains("pub static MATERIALS: &[LevelMaterialRecord] = &[\n];"));
         assert!(src.contains("pub static ROOMS: &[LevelRoomRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n];"));
+        assert!(
+            src.contains("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[\n];")
+        );
+        assert!(src.contains("pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[\n];"));
+        assert!(
+            src.contains("pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[\n];")
+        );
+        assert!(src
+            .contains("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[\n];"));
         assert!(src.contains("pub static ENTITIES: &[EntityRecord] = &[\n];"));
         assert!(src.contains("pub static PLAYER_SPAWN"));
