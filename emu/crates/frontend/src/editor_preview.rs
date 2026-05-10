@@ -1294,7 +1294,7 @@ fn wall_side_visible(
     edge: WallEdge,
     camera_position: [i32; 3],
 ) -> bool {
-    let sidedness = wall_material_sidedness(sidedness);
+    let sidedness = wall_material_sidedness_for_edge(sidedness, edge);
     let [x0, x1, z0, z1] = bounds;
     let [cam_x, _, cam_z] = camera_position;
     let inside_distance = match edge {
@@ -1302,7 +1302,7 @@ fn wall_side_visible(
         WallEdge::East => x1.saturating_sub(cam_x),
         WallEdge::South => cam_z.saturating_sub(z0),
         WallEdge::West => cam_x.saturating_sub(x0),
-        WallEdge::NorthWestSouthEast | WallEdge::NorthEastSouthWest => return true,
+        WallEdge::NorthWestSouthEast | WallEdge::NorthEastSouthWest => 0,
     };
     match sidedness {
         psxed_project::MaterialFaceSidedness::Both => true,
@@ -1318,6 +1318,18 @@ fn wall_material_sidedness(
         psxed_project::MaterialFaceSidedness::Front => psxed_project::MaterialFaceSidedness::Back,
         psxed_project::MaterialFaceSidedness::Back => psxed_project::MaterialFaceSidedness::Front,
         psxed_project::MaterialFaceSidedness::Both => psxed_project::MaterialFaceSidedness::Both,
+    }
+}
+
+fn wall_material_sidedness_for_edge(
+    sidedness: psxed_project::MaterialFaceSidedness,
+    edge: WallEdge,
+) -> psxed_project::MaterialFaceSidedness {
+    match edge {
+        WallEdge::NorthWestSouthEast | WallEdge::NorthEastSouthWest => {
+            psxed_project::MaterialFaceSidedness::Both
+        }
+        _ => wall_material_sidedness(sidedness),
     }
 }
 
@@ -1404,7 +1416,7 @@ fn push_wall_face(
     // owning cell/interior, while wall materials swap Front/Back so
     // authors can use front-sided materials for interior walls.
     let flip_winding = !matches!(
-        wall_material_sidedness(shade.sidedness()),
+        wall_material_sidedness_for_edge(shade.sidedness(), edge),
         psxed_project::MaterialFaceSidedness::Back
     );
     let emit_wall_triangle = |scratch: &mut PreviewScratch,
@@ -3959,10 +3971,11 @@ mod tests {
         preview_lights, preview_model_reference, preview_player_reference,
         preview_projected_triangle_hw_safe, preview_shadow_radius, preview_static_model_reference,
         preview_vertices_in_front, push_wall_face, room_depth_slot, setup_gte_for_camera,
-        shadow_depth_slot, should_draw_culled_face_outline, FaceShade, MaterialSlot, PreviewFog,
-        WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
-        PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
-        PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
+        shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
+        wall_side_visible, FaceShade, MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV,
+        PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
+        PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
+        PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -4264,6 +4277,32 @@ mod tests {
                 ),
                 "{edge:?} wall back material should render from outside the owning cell"
             );
+        }
+    }
+
+    #[test]
+    fn editor_diagonal_wall_materials_are_forced_double_sided() {
+        for edge in [WallEdge::NorthWestSouthEast, WallEdge::NorthEastSouthWest] {
+            assert_eq!(
+                wall_material_sidedness_for_edge(MaterialFaceSidedness::Front, edge),
+                MaterialFaceSidedness::Both
+            );
+            assert_eq!(
+                wall_material_sidedness_for_edge(MaterialFaceSidedness::Back, edge),
+                MaterialFaceSidedness::Both
+            );
+            assert!(wall_side_visible(
+                MaterialFaceSidedness::Front,
+                [0, 1024, 0, 1024],
+                edge,
+                [256, 512, 256]
+            ));
+            assert!(wall_side_visible(
+                MaterialFaceSidedness::Back,
+                [0, 1024, 0, 1024],
+                edge,
+                [768, 512, 768]
+            ));
         }
     }
 
