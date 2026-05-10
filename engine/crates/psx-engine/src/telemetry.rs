@@ -159,6 +159,18 @@ pub mod counter {
     pub const ROOM_TEXTURE_UPLOADS: u16 = 51;
     /// Model atlas uploads performed.
     pub const MODEL_ATLAS_UPLOADS: u16 = 52;
+    /// Fixed simulation/control ticks run by the cadence layer.
+    pub const SIM_TICKS: u16 = 53;
+    /// Rendered visual frames produced by the cadence layer.
+    pub const VISUAL_FRAMES: u16 = 54;
+    /// Visual VBlank slots intentionally held/skipped instead of rendered.
+    pub const VISUAL_SKIPPED_VBLANKS: u16 = 55;
+    /// Visual frames that missed their target cadence slot.
+    pub const VISUAL_DEADLINE_MISSES: u16 = 56;
+    /// Configured visual cadence interval in VBlanks.
+    pub const VISUAL_INTERVAL_VBLANKS: u16 = 57;
+    /// Worst observed lateness for a visual frame in VBlanks.
+    pub const VISUAL_MAX_LATENESS_VBLANKS: u16 = 58;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
@@ -226,3 +238,18 @@ fn emit_event(kind: u8, id: u16) {
 #[cfg(not(target_arch = "mips"))]
 #[inline(always)]
 fn emit_event(_kind: u8, _id: u16) {}
+
+#[cfg(test)]
+mod tests {
+    use super::counter;
+
+    #[test]
+    fn frame_pacing_counter_ids_extend_existing_room_counters() {
+        assert_eq!(counter::SIM_TICKS, counter::MODEL_ATLAS_UPLOADS + 1);
+        assert_eq!(counter::VISUAL_FRAMES, counter::SIM_TICKS + 1);
+        assert_eq!(
+            counter::VISUAL_MAX_LATENESS_VBLANKS,
+            counter::VISUAL_INTERVAL_VBLANKS + 1
+        );
+    }
+}

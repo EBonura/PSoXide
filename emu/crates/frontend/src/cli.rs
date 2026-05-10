@@ -36,6 +36,10 @@ use psx_iso::{Disc, Exe};
 
 use crate::app::resolve_bios_path;
 
+const NTSC_CPU_CYCLES_PER_VBLANK: u64 = 33_868_800 / 60;
+const PACED20_INTERVAL_VBLANKS: u64 = 3;
+const PACED20_VISUAL_BUDGET_CYCLES: u64 = NTSC_CPU_CYCLES_PER_VBLANK * PACED20_INTERVAL_VBLANKS;
+
 /// Top-level argument parser. Passed to `clap::Parser::parse()`
 /// from `main.rs`.
 #[derive(Debug, Parser)]
@@ -113,6 +117,11 @@ pub struct LaunchArgs {
     /// frame-begin telemetry markers. `--steps` still acts as a safety cap.
     #[arg(long)]
     pub guest_frames: Option<u64>,
+    /// Stop once instrumented homebrew has emitted this many rendered
+    /// visual frames through the VISUAL_FRAMES telemetry counter. Pair
+    /// with `--guest-frames` as a fallback while cadence telemetry rolls out.
+    #[arg(long)]
+    pub guest_visual_frames: Option<u64>,
     /// Force the real BIOS disc boot path instead of direct
     /// SYSTEM.CNF fast boot.
     #[arg(long)]
@@ -414,6 +423,17 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus.run_spu_samples(sample_count);
             let _ = bus.spu.drain_audio();
         }
+        if let Some(target) = args.guest_visual_frames {
+            if target > 0
+                && bus
+                    .telemetry
+                    .counter_total(telemetry::counter::VISUAL_FRAMES)
+                    >= target
+            {
+                stopped_at = Some(i + 1);
+                break;
+            }
+        }
         if let Some(target) = args.guest_frames {
             if target > 0 && bus.telemetry.frames_seen() >= target {
                 stopped_at = Some(i + 1);
@@ -447,8 +467,12 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
     }
 
     if args.dump_guest_profile {
+        let counter_totals = bus.telemetry.counter_totals();
+        let counter_max_values = bus.telemetry.counter_max_values();
         let events = bus.telemetry.drain_events();
-        let summary = telemetry::GuestTelemetrySummary::from_events(&events);
+        let mut summary = telemetry::GuestTelemetrySummary::from_events(&events);
+        summary.counters = counter_totals;
+        summary.counter_max_values = counter_max_values;
         print_guest_profile(&summary);
     }
 
@@ -484,6 +508,8 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
 
     let frames = summary.frames.max(1) as f32;
     println!("guest_profile_frames={}", summary.frames);
+    println!("guest_profile_frame_meaning=frame_begin_markers");
+    print_guest_pacing_profile(summary);
     println!("guest_profile_stages:");
     for id in 1..telemetry::STAGE_COUNT {
         let cycles = summary.stage_cycles[id];
@@ -512,6 +538,129 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
             value,
             value as f32 / frames,
         );
+    }
+}
+
+fn print_guest_pacing_profile(summary: &telemetry::GuestTelemetrySummary) {
+    let pacing_ids = [
+        telemetry::counter::SIM_TICKS,
+        telemetry::counter::VISUAL_FRAMES,
+        telemetry::counter::VISUAL_SKIPPED_VBLANKS,
+        telemetry::counter::VISUAL_DEADLINE_MISSES,
+        telemetry::counter::VISUAL_INTERVAL_VBLANKS,
+        telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS,
+    ];
+    let has_pacing = pacing_ids
+        .iter()
+        .any(|&id| counter_total(summary, id) > 0 || counter_max_value(summary, id) > 0);
+    if !has_pacing {
+        println!("guest_profile_pacing=not_emitted");
+        return;
+    }
+
+    let sim_ticks = counter_total(summary, telemetry::counter::SIM_TICKS);
+    let visual_frames = counter_total(summary, telemetry::counter::VISUAL_FRAMES);
+    let skipped = counter_total(summary, telemetry::counter::VISUAL_SKIPPED_VBLANKS);
+    let misses = counter_total(summary, telemetry::counter::VISUAL_DEADLINE_MISSES);
+    let interval_total = counter_total(summary, telemetry::counter::VISUAL_INTERVAL_VBLANKS);
+    let max_lateness = counter_max_value(summary, telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS);
+    let interval = if summary.frames > 0 && interval_total > 0 {
+        Some(interval_total as f64 / summary.frames as f64)
+    } else {
+        None
+    };
+    let update_per_sim = div_u64(
+        summary.stage_cycles[telemetry::stage::UPDATE as usize],
+        sim_ticks,
+    );
+    let render_per_visual = div_u64(
+        summary.stage_cycles[telemetry::stage::RENDER as usize],
+        visual_frames,
+    );
+
+    println!("guest_profile_pacing:");
+    println!("  sim_ticks={}", fmt_known_u64(sim_ticks));
+    println!("  visual_frames={}", fmt_known_u64(visual_frames));
+    println!("  visual_skipped_vblanks={}", skipped);
+    println!("  visual_deadline_misses={}", misses);
+    println!("  visual_interval_vblanks={}", fmt_optional_f64(interval));
+    println!("  visual_max_lateness_vblanks={}", max_lateness);
+    println!(
+        "  update_cycles_per_sim_tick={}",
+        fmt_optional_f64(update_per_sim)
+    );
+    println!(
+        "  render_cycles_per_visual_frame={}",
+        fmt_optional_f64(render_per_visual)
+    );
+    println!(
+        "  paced20_budget_cycles={}  vblanks={}  cycles_per_vblank={}",
+        PACED20_VISUAL_BUDGET_CYCLES, PACED20_INTERVAL_VBLANKS, NTSC_CPU_CYCLES_PER_VBLANK
+    );
+    println!(
+        "  paced20_budget_status={}",
+        paced20_budget_status(render_per_visual)
+    );
+    println!(
+        "  cadence_status={}",
+        cadence_status(interval, misses, max_lateness)
+    );
+}
+
+fn counter_total(summary: &telemetry::GuestTelemetrySummary, id: u16) -> u64 {
+    summary
+        .counters
+        .get(id as usize)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn counter_max_value(summary: &telemetry::GuestTelemetrySummary, id: u16) -> u32 {
+    summary
+        .counter_max_values
+        .get(id as usize)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn div_u64(numerator: u64, denominator: u64) -> Option<f64> {
+    (denominator > 0).then_some(numerator as f64 / denominator as f64)
+}
+
+fn fmt_known_u64(value: u64) -> String {
+    if value == 0 {
+        "unknown".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn fmt_optional_f64(value: Option<f64>) -> String {
+    match value {
+        Some(value) => format!("{value:.0}"),
+        None => "unknown".to_string(),
+    }
+}
+
+fn paced20_budget_status(render_per_visual: Option<f64>) -> &'static str {
+    match render_per_visual {
+        Some(cycles) if cycles <= PACED20_VISUAL_BUDGET_CYCLES as f64 => "pass",
+        Some(_) => "fail",
+        None => "unknown",
+    }
+}
+
+fn cadence_status(interval: Option<f64>, misses: u64, max_lateness: u32) -> &'static str {
+    match interval {
+        Some(interval)
+            if (interval - PACED20_INTERVAL_VBLANKS as f64).abs() <= 0.01
+                && misses == 0
+                && max_lateness == 0 =>
+        {
+            "steady"
+        }
+        Some(_) => "missed_or_non_20hz",
+        None => "unknown",
     }
 }
 

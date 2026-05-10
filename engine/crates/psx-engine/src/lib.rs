@@ -71,7 +71,7 @@ pub mod world;
 pub mod world_render;
 
 pub use angle::Angle;
-pub use app::{App, Config};
+pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
     CharacterCollision, CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAction,
     CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,

@@ -30,7 +30,8 @@
         showcase-particles run-showcase-particles \
         hello-engine run-hello-engine \
         showcase-room run-showcase-room \
-        cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward
+        cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
+        profile-demo3-paced20 profile-demo3-paced20-forward
 
 help:
 	@echo "PSoXide targets:"
@@ -55,6 +56,8 @@ help:
 	@echo "    make test-sdk     - build every SDK example + run Milestone-C regression suite"
 	@echo "    make profile-demo3 - cook/build demo3 and dump headless screenshot/profile"
 	@echo "    make profile-demo3-forward - profile demo3 while holding forward"
+	@echo "    make profile-demo3-paced20 - profile demo3 20Hz visual cadence telemetry"
+	@echo "    make profile-demo3-paced20-forward - paced20 profile while holding forward"
 	@echo ""
 	@echo "  SDK examples (build mipsel-sony-psx binaries):"
 	@echo "    make examples     - build every example"
@@ -208,6 +211,14 @@ PROFILE_DEMO3_HW ?= /tmp/psoxide-demo3-hw-$(PROFILE_DEMO3_FRAMES).ppm
 PROFILE_DEMO3_FORWARD_FRAMES ?= 240
 PROFILE_DEMO3_FORWARD_STEPS ?= 480000000
 PROFILE_DEMO3_FORWARD_HW ?= /tmp/psoxide-demo3-forward-hw-$(PROFILE_DEMO3_FORWARD_FRAMES).ppm
+PROFILE_DEMO3_PACED20_VISUAL_FRAMES ?= 60
+PROFILE_DEMO3_PACED20_GUEST_FRAMES ?= 720
+PROFILE_DEMO3_PACED20_STEPS ?= 360000000
+PROFILE_DEMO3_PACED20_HW ?= /tmp/psoxide-demo3-paced20-hw-$(PROFILE_DEMO3_PACED20_VISUAL_FRAMES).ppm
+PROFILE_DEMO3_PACED20_FORWARD_VISUAL_FRAMES ?= 80
+PROFILE_DEMO3_PACED20_FORWARD_GUEST_FRAMES ?= 1200
+PROFILE_DEMO3_PACED20_FORWARD_STEPS ?= 480000000
+PROFILE_DEMO3_PACED20_FORWARD_HW ?= /tmp/psoxide-demo3-paced20-forward-hw-$(PROFILE_DEMO3_PACED20_FORWARD_VISUAL_FRAMES).ppm
 
 hello-tri:
 	cd sdk/examples/hello-tri && cargo build --release
@@ -304,6 +315,31 @@ profile-demo3-forward:
 		--steps $(PROFILE_DEMO3_FORWARD_STEPS) \
 		--hold-forward \
 		--dump-hw $(PROFILE_DEMO3_FORWARD_HW) \
+		--dump-hash \
+		--dump-guest-profile
+
+profile-demo3-paced20:
+	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
+	$(MAKE) build-editor-playtest
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--guest-visual-frames $(PROFILE_DEMO3_PACED20_VISUAL_FRAMES) \
+		--guest-frames $(PROFILE_DEMO3_PACED20_GUEST_FRAMES) \
+		--steps $(PROFILE_DEMO3_PACED20_STEPS) \
+		--dump-hw $(PROFILE_DEMO3_PACED20_HW) \
+		--dump-hash \
+		--dump-guest-profile
+
+profile-demo3-paced20-forward:
+	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
+	$(MAKE) build-editor-playtest
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--guest-visual-frames $(PROFILE_DEMO3_PACED20_FORWARD_VISUAL_FRAMES) \
+		--guest-frames $(PROFILE_DEMO3_PACED20_FORWARD_GUEST_FRAMES) \
+		--steps $(PROFILE_DEMO3_PACED20_FORWARD_STEPS) \
+		--hold-forward \
+		--dump-hw $(PROFILE_DEMO3_PACED20_FORWARD_HW) \
 		--dump-hash \
 		--dump-guest-profile
 
