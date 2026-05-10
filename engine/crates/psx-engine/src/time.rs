@@ -9,6 +9,7 @@
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct EngineTime {
     rendered_frame: u32,
+    simulation_tick: u32,
     elapsed_vblanks: u32,
     delta_vblanks: u16,
     video_hz: u16,
@@ -19,7 +20,26 @@ impl EngineTime {
     pub const fn start(video_hz: u16) -> Self {
         Self {
             rendered_frame: 0,
+            simulation_tick: 0,
             elapsed_vblanks: 0,
+            delta_vblanks: 1,
+            video_hz,
+        }
+    }
+
+    /// Build a one-VBlank simulation snapshot for fixed-cadence
+    /// control loops. The tick is also the elapsed display VBlank
+    /// count, so animation sampled from `elapsed_vblanks()` stays on
+    /// display time while `delta_vblanks()` remains exactly `1`.
+    pub const fn fixed_simulation_tick(
+        rendered_frame: u32,
+        simulation_tick: u32,
+        video_hz: u16,
+    ) -> Self {
+        Self {
+            rendered_frame,
+            simulation_tick,
+            elapsed_vblanks: simulation_tick,
             delta_vblanks: 1,
             video_hz,
         }
@@ -29,6 +49,16 @@ impl EngineTime {
     #[inline]
     pub const fn rendered_frame(self) -> u32 {
         self.rendered_frame
+    }
+
+    /// Fixed simulation/control tick index.
+    ///
+    /// In the legacy one-update-per-render loop this matches the
+    /// rendered frame. In paced visual modes it advances once per
+    /// display VBlank even when a visual frame is skipped.
+    #[inline]
+    pub const fn simulation_tick(self) -> u32 {
+        self.simulation_tick
     }
 
     /// Total VBlank ticks observed since the engine clock started.
@@ -88,7 +118,7 @@ impl EngineClock {
         }
     }
 
-    pub(crate) fn begin_frame(&mut self, rendered_frame: u32) -> EngineTime {
+    pub(crate) fn begin_frame(&mut self, rendered_frame: u32, simulation_tick: u32) -> EngineTime {
         let now = platform::vblank_count();
         let elapsed = now.wrapping_sub(self.origin_vblank);
         let raw_delta = now.wrapping_sub(self.last_frame_vblank);
@@ -103,13 +133,18 @@ impl EngineClock {
 
         EngineTime {
             rendered_frame,
+            simulation_tick,
             elapsed_vblanks: elapsed,
             delta_vblanks: delta,
             video_hz: self.video_hz,
         }
     }
 
-    pub(crate) fn wait_present(&mut self) {
+    pub(crate) fn elapsed_vblanks(&self) -> u32 {
+        platform::vblank_count().wrapping_sub(self.origin_vblank)
+    }
+
+    pub(crate) fn wait_next_vblank(&mut self) {
         self.last_present_vblank = platform::wait_present_vblank(self.last_present_vblank);
     }
 }
@@ -165,12 +200,24 @@ mod tests {
     fn elapsed_seconds_uses_video_cadence() {
         let t = EngineTime {
             rendered_frame: 8,
+            simulation_tick: 8,
             elapsed_vblanks: 30,
             delta_vblanks: 2,
             video_hz: 60,
         };
         assert_eq!(t.rendered_frame(), 8);
+        assert_eq!(t.simulation_tick(), 8);
         assert_eq!(t.elapsed_seconds_q12(), 2048);
         assert_eq!(t.delta_seconds_q12(), 136);
+    }
+
+    #[test]
+    fn fixed_simulation_tick_uses_one_vblank_delta() {
+        let t = EngineTime::fixed_simulation_tick(3, 12, 60);
+        assert_eq!(t.rendered_frame(), 3);
+        assert_eq!(t.simulation_tick(), 12);
+        assert_eq!(t.elapsed_vblanks(), 12);
+        assert_eq!(t.delta_vblanks(), 1);
+        assert_eq!(t.delta_seconds_q12(), 68);
     }
 }
