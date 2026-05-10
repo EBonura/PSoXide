@@ -59,12 +59,13 @@ use psx_gpu::{
     prim::TriTextured,
 };
 use psx_level::{
-    equipment_flags, far_vista_flags, find_asset_of_kind, room_flags, sky_flags,
+    equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, room_flags, sky_flags,
     visibility_edge_flags, AssetId, AssetKind, EntityRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelMaterialRecord,
-    LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord,
-    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
-    ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
+    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
+    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
+    WeaponHitShapeRecord,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
 
@@ -85,9 +86,9 @@ mod generated {
 
 use generated::{
     ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
-    MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
-    PLAYER_SPAWN, ROOMS, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_VISIBILITY, VISIBILITY_CELLS, WEAPONS,
-    WEAPON_HITBOXES,
+    MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, IMAGE_PROPS,
+    PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_VISIBILITY,
+    VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 
 // VRAM layout. Room materials and model atlases live in
@@ -255,6 +256,8 @@ const MAX_RESIDENT_VRAM_ASSETS: usize = 64;
 const MODEL_VERTEX_CAP: usize = 1024;
 /// Predecoded face records shared by runtime model assets.
 const MAX_RUNTIME_MODEL_FACES: usize = 4096;
+/// Projected edge threshold used to subdivide close model triangles.
+const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Joint-transform scratch -- all biped rigs we currently cook
 /// fit comfortably in 32.
 const JOINT_CAP: usize = 32;
@@ -317,8 +320,8 @@ struct VramSlot {
     clut_word: u16,
     tpage_word: u16,
     texture_window: TextureWindow,
-    texture_width: u8,
-    texture_height: u8,
+    texture_width: u16,
+    texture_height: u16,
 }
 
 const VRAM_SLOT_EMPTY: Option<VramSlot> = None;
@@ -465,7 +468,13 @@ impl RuntimeModelAsset {
         let atlas_asset = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture)?;
         let atlas_slot = ensure_model_atlas_uploaded(atlas_asset.id, atlas_asset.bytes)?;
         let face_first = *face_cursor;
-        let face_count = decode_model_render_faces(model, face_pool, face_cursor)?;
+        let face_count = decode_model_render_faces(
+            model,
+            atlas_slot.texture_width,
+            atlas_slot.texture_height,
+            face_pool,
+            face_cursor,
+        )?;
         Some(Self {
             index,
             model,
@@ -508,6 +517,8 @@ impl RuntimeModelAsset {
 
 fn decode_model_render_faces(
     model: Model<'_>,
+    texture_width: u16,
+    texture_height: u16,
     face_pool: &mut [TexturedModelRenderFace],
     face_cursor: &mut usize,
 ) -> Option<usize> {
@@ -516,7 +527,7 @@ fn decode_model_render_faces(
         return None;
     }
 
-    let (max_u, max_v) = model_render_uv_limits(model);
+    let (max_u, max_v) = model_render_uv_limits(texture_width, texture_height);
     let mut i = 0usize;
     while i < face_count {
         let face = model.face(i as u16)?;
@@ -538,11 +549,15 @@ fn decode_model_render_faces(
     Some(face_count)
 }
 
-fn model_render_uv_limits(model: Model<'_>) -> (u8, u8) {
+fn model_render_uv_limits(texture_width: u16, texture_height: u16) -> (u8, u8) {
     (
-        model.texture_width().saturating_sub(1).min(127) as u8,
-        model.texture_height().saturating_sub(1).min(127) as u8,
+        model_render_uv_max(texture_width),
+        model_render_uv_max(texture_height),
     )
+}
+
+fn model_render_uv_max(size: u16) -> u8 {
+    size.saturating_sub(1).min(u16::from(u8::MAX)) as u8
 }
 
 fn clamp_model_render_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
@@ -1152,6 +1167,15 @@ impl Scene for Playtest {
                     &mut world,
                 );
                 telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
+                draw_image_props(
+                    IMAGE_PROPS,
+                    active.index,
+                    &room_camera,
+                    actor_options,
+                    &lighting,
+                    &mut primitive_packets,
+                    &mut world,
+                );
                 telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                 let player = self.motor.position();
                 let instance_depth_pass = player_actor_depth_for_room(
@@ -2197,11 +2221,12 @@ fn draw_player(
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(CullMode::Back)
         .with_material_layer(material)
-        .with_textured_triangle_splitting(false);
+        .with_textured_triangle_splitting(true)
+        .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);
 
     telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
     let faces = runtime_model_faces(runtime_model, model_faces);
-    let stats = world.submit_textured_model_primary_joints_predecoded_faces(
+    let stats = world.submit_textured_model_predecoded_faces(
         triangles,
         runtime_model.model,
         anim,
@@ -2320,8 +2345,9 @@ fn draw_player_equipment(
                         .with_depth_policy(DepthPolicy::Average)
                         .with_cull_mode(CullMode::Back)
                         .with_material_layer(material)
-                        .with_textured_triangle_splitting(false);
-                    let stats = world.submit_textured_model_primary_joints(
+                        .with_textured_triangle_splitting(true)
+                        .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);
+                    let stats = world.submit_textured_model(
                         triangles,
                         weapon_model.model,
                         anim,
@@ -2674,9 +2700,13 @@ fn far_vista_texture_material(
     Some((
         TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb_tuple(tint_rgb))
             .with_texture_window(slot.texture_window),
-        slot.texture_width,
-        slot.texture_height,
+        vram_slot_texture_size_u8(slot.texture_width),
+        vram_slot_texture_size_u8(slot.texture_height),
     ))
+}
+
+fn vram_slot_texture_size_u8(size: u16) -> u8 {
+    size.min(u16::from(u8::MAX)) as u8
 }
 
 fn parse_runtime_room(record: &LevelRoomRecord) -> Option<RuntimeRoom<'static>> {
@@ -3869,7 +3899,10 @@ fn build_room_materials(
             LevelMaterialSidedness::Back => WorldRenderMaterial::back(texture),
             LevelMaterialSidedness::Both => WorldRenderMaterial::both(texture),
         }
-        .with_texture_size(slot_record.texture_width, slot_record.texture_height);
+        .with_texture_size(
+            vram_slot_texture_size_u8(slot_record.texture_width),
+            vram_slot_texture_size_u8(slot_record.texture_height),
+        );
         out[slot] = Some(render_material);
     }
     max_slot
@@ -4245,8 +4278,8 @@ fn ensure_texture_uploaded_with_clut_mode(
             texture_width,
             texture_height,
         ),
-        texture_width,
-        texture_height,
+        texture_width: u16::from(texture_width),
+        texture_height: u16::from(texture_height),
     };
 
     unsafe {
@@ -4295,12 +4328,26 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     if count >= MAX_RESIDENT_VRAM_ASSETS {
         return None;
     }
-    if texture.height() > 256 || texture.halfwords_per_row() > MODEL_TPAGE_MAX_HALFWORDS {
+    let texture_width = texture.width();
+    let texture_height = texture.height();
+    let texture_halfwords_per_row = texture.halfwords_per_row();
+    if texture_width == 0
+        || texture_width > 256
+        || texture_height == 0
+        || texture_height > 256
+        || texture_halfwords_per_row > MODEL_TPAGE_MAX_HALFWORDS
+    {
+        return None;
+    }
+    let expected_pixel_bytes = (texture_halfwords_per_row as usize)
+        .saturating_mul(texture_height as usize)
+        .saturating_mul(2);
+    if texture.pixel_bytes().len() != expected_pixel_bytes {
         return None;
     }
 
     let tpage_x = MODEL_TPAGE.x() + unsafe { MODEL_TPAGE_X_CURSOR };
-    let slot_halfwords = if texture.halfwords_per_row() <= MODEL_TPAGE_SLOT_HALFWORDS {
+    let slot_halfwords = if texture_halfwords_per_row <= MODEL_TPAGE_SLOT_HALFWORDS {
         MODEL_TPAGE_SLOT_HALFWORDS
     } else {
         MODEL_TPAGE_MAX_HALFWORDS
@@ -4313,8 +4360,8 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     let pix_rect = VramRect::new(
         tpage_x,
         MODEL_TPAGE.y(),
-        texture.halfwords_per_row(),
-        texture.height(),
+        texture_halfwords_per_row,
+        texture_height,
     );
     upload_bytes(pix_rect, texture.pixel_bytes());
     let tpage = Tpage::new(tpage_x, MODEL_TPAGE.y(), TexDepth::Bit8);
@@ -4322,7 +4369,11 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     // 256-entry CLUT: 256 halfwords on a single row.
     let clut_y = MODEL_CLUT_BASE_Y + atlas_count as u16;
     let clut_rect = VramRect::new(0, clut_y, texture.clut_entries(), 1);
-    upload_model_clut(clut_rect, texture.clut_bytes());
+    upload_model_clut(
+        clut_rect,
+        texture.clut_bytes(),
+        texture.index_zero_transparent(),
+    );
     telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
 
     let slot = VramSlot {
@@ -4330,8 +4381,8 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
         clut_word: Clut::new(0, clut_y).uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::NONE,
-        texture_width: ROOM_TILE_TEXELS as u8,
-        texture_height: ROOM_TILE_TEXELS as u8,
+        texture_width,
+        texture_height,
     };
 
     unsafe {
@@ -4593,11 +4644,12 @@ fn draw_model_instances(
             .with_depth_policy(DepthPolicy::Average)
             .with_cull_mode(CullMode::Back)
             .with_material_layer(material)
-            .with_textured_triangle_splitting(false);
+            .with_textured_triangle_splitting(true)
+            .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);
 
         telemetry::stage_begin(telemetry::stage::MODEL_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
-        let stats = world.submit_textured_model_primary_joints_predecoded_faces(
+        let stats = world.submit_textured_model_predecoded_faces(
             triangles,
             runtime_model.model,
             anim,
@@ -4747,6 +4799,88 @@ fn sphere_visible_to_camera(
     let projected_x = view.x.abs().saturating_sub(radius).saturating_mul(focal);
     let projected_y = view.y.abs().saturating_sub(radius).saturating_mul(focal);
     projected_x <= half_w.saturating_mul(z) && projected_y <= half_h.saturating_mul(z)
+}
+
+fn draw_image_props(
+    props: &[LevelImagePropRecord],
+    current_room: RoomIndex,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) {
+    for prop in props {
+        if prop.room != current_room {
+            continue;
+        }
+        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture)
+        else {
+            continue;
+        };
+        let Some(slot) = ensure_texture_uploaded_with_clut_mode(asset.id, asset.bytes, false)
+        else {
+            continue;
+        };
+        let origin = WorldVertex::new(prop.x, prop.y, prop.z);
+        let center = WorldVertex::new(
+            prop.x,
+            prop.y.saturating_add((prop.height as i32) / 2),
+            prop.z,
+        );
+        let radius = ((prop.width.max(prop.height) as i32) / 2).max(32);
+        if !sphere_visible_to_camera(camera, options, center, radius, 96) {
+            continue;
+        }
+        let verts = image_prop_vertices(origin, prop.width, prop.height, prop.yaw, prop.flags, *camera);
+        let Some(projected) = camera.project_world_quad(verts) else {
+            continue;
+        };
+        let tint = lighting.shade_tint_at(
+            RoomPoint::new(prop.x, prop.y, prop.z),
+            rgb_tuple(prop.tint_rgb),
+        );
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+            .with_texture_window(slot.texture_window);
+        let u_max = model_render_uv_max(slot.texture_width);
+        let v_max = model_render_uv_max(slot.texture_height);
+        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+        let opts = options
+            .with_cull_mode(CullMode::None)
+            .with_material_layer(material)
+            .with_textured_triangle_splitting(false);
+        let _ = world.submit_textured_quad(triangles, projected, uvs, material, opts);
+    }
+}
+
+fn image_prop_vertices(
+    origin: WorldVertex,
+    width: u16,
+    height: u16,
+    yaw: i16,
+    flags: u16,
+    camera: WorldCamera,
+) -> [WorldVertex; 4] {
+    let (sin_yaw, cos_yaw) = if flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0 {
+        (camera.sin_yaw.raw(), camera.cos_yaw.raw())
+    } else {
+        let angle = Angle::from_q12(yaw as u16);
+        (angle.sin().raw(), angle.cos().raw())
+    };
+    let half_width = (width as i32) / 2;
+    let right_x = mul_q12_i32(half_width, cos_yaw);
+    let right_z = -mul_q12_i32(half_width, sin_yaw);
+    let top_y = origin.y.saturating_add(height as i32);
+    [
+        WorldVertex::new(origin.x - right_x, top_y, origin.z - right_z),
+        WorldVertex::new(origin.x + right_x, top_y, origin.z + right_z),
+        WorldVertex::new(origin.x + right_x, origin.y, origin.z + right_z),
+        WorldVertex::new(origin.x - right_x, origin.y, origin.z - right_z),
+    ]
+}
+
+fn mul_q12_i32(value: i32, q12: i32) -> i32 {
+    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 /// Draw one tinted cube per generated entity record. Cubes
