@@ -27,6 +27,7 @@
 //!     depth: Depth::Bit4,
 //!     crop: CropMode::CentreSquare,
 //!     resampler: Resampler::Lanczos3,
+//!     transparent_index_zero: false,
 //! };
 //! let psxt = convert(&src, &cfg).unwrap();
 //! std::fs::write("brick-wall.psxt", psxt).unwrap();
@@ -35,6 +36,8 @@
 use image::{imageops, DynamicImage, GenericImageView};
 use psxed_format::texture::{Depth, TextureHeader, MAGIC, VERSION};
 use psxed_format::AssetHeader;
+
+const TRANSPARENT_ALPHA_THRESHOLD: u8 = 128;
 
 /// Rectangle into the source image, pre-resize.
 #[derive(Copy, Clone, Debug)]
@@ -100,6 +103,13 @@ pub struct Config {
     pub crop: CropMode,
     /// Resampling kernel. `Lanczos3` is a good default.
     pub resampler: Resampler,
+    /// Reserve indexed palette entry 0 for alpha-transparent pixels.
+    ///
+    /// PS1 textured polygons treat sampled texel value 0 as
+    /// transparent. Model atlases use this to keep unused UV gutters
+    /// from drawing black, while regular room textures leave it off so
+    /// palette index 0 remains an ordinary opaque colour.
+    pub transparent_index_zero: bool,
 }
 
 /// How the cooker should handle source aspect vs target aspect.
@@ -181,7 +191,13 @@ pub fn convert(src: &[u8], cfg: &Config) -> Result<Vec<u8>, Error> {
     };
     let resized = resize(&cropped, cfg.width as u32, cfg.height as u32, cfg.resampler);
 
-    encode_psxt(&resized, cfg.width, cfg.height, cfg.depth)
+    encode_psxt(
+        &resized,
+        cfg.width,
+        cfg.height,
+        cfg.depth,
+        cfg.transparent_index_zero,
+    )
 }
 
 /// Resize `img` to `w × h` using the chosen resampling kernel.
@@ -202,21 +218,31 @@ fn encode_psxt(
     width: u16,
     height: u16,
     depth: Depth,
+    transparent_index_zero: bool,
 ) -> Result<Vec<u8>, Error> {
-    // Collect pixels as RGB triples (alpha is dropped; the PSX mask
-    // bit is a separate concern we don't expose yet).
-    let pixels: Vec<[u8; 3]> = img.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+    let pixels: Vec<[u8; 4]> = img.pixels().map(|p| [p[0], p[1], p[2], p[3]]).collect();
 
     match depth {
         Depth::Bit4 | Depth::Bit8 => {
             let n_entries = depth.clut_entries().unwrap() as usize;
-            let (palette, indices) = median_cut_quantize(&pixels, n_entries);
+            let (palette, indices) = if transparent_index_zero {
+                median_cut_quantize_with_transparent_zero(&pixels, n_entries)
+            } else {
+                let rgb_pixels: Vec<[u8; 3]> = pixels.iter().map(|p| [p[0], p[1], p[2]]).collect();
+                median_cut_quantize(&rgb_pixels, n_entries)
+            };
             let pixel_halfwords = pack_indices(&indices, width, height, depth);
             let clut_halfwords = encode_clut(&palette, n_entries);
+            let flags = if transparent_index_zero {
+                psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT
+            } else {
+                0
+            };
             Ok(assemble_blob(
                 width,
                 height,
                 depth,
+                flags,
                 n_entries as u16,
                 &pixel_halfwords,
                 &clut_halfwords,
@@ -233,11 +259,53 @@ fn encode_psxt(
                 height,
                 depth,
                 0,
+                0,
                 &pixel_halfwords,
                 &[],
             ))
         }
     }
+}
+
+fn median_cut_quantize_with_transparent_zero(
+    pixels: &[[u8; 4]],
+    n_entries: usize,
+) -> (Vec<[u8; 3]>, Vec<u8>) {
+    assert!(
+        (2..=256).contains(&n_entries),
+        "transparent indexed textures need at least two palette entries"
+    );
+
+    let opaque_pixels: Vec<[u8; 3]> = pixels
+        .iter()
+        .filter(|p| p[3] >= TRANSPARENT_ALPHA_THRESHOLD)
+        .map(|p| [p[0], p[1], p[2]])
+        .collect();
+    if opaque_pixels.is_empty() {
+        return (vec![[0, 0, 0]; n_entries], vec![0; pixels.len()]);
+    }
+
+    let (opaque_palette, _) = median_cut_quantize(&opaque_pixels, n_entries - 1);
+    let mut palette = Vec::with_capacity(n_entries);
+    palette.push([0, 0, 0]);
+    palette.extend_from_slice(&opaque_palette);
+    palette.truncate(n_entries);
+    while palette.len() < n_entries {
+        palette.push([0, 0, 0]);
+    }
+
+    let indices = pixels
+        .iter()
+        .map(|p| {
+            if p[3] < TRANSPARENT_ALPHA_THRESHOLD {
+                0
+            } else {
+                nearest_index(&[p[0], p[1], p[2]], &palette[1..]).saturating_add(1)
+            }
+        })
+        .collect();
+
+    (palette, indices)
 }
 
 /// Median-cut colour quantisation. Input: per-pixel RGB. Output:
@@ -252,8 +320,8 @@ fn encode_psxt(
 /// sorts -- so repeated builds produce byte-identical PSXT blobs.
 fn median_cut_quantize(pixels: &[[u8; 3]], n_entries: usize) -> (Vec<[u8; 3]>, Vec<u8>) {
     assert!(
-        n_entries.is_power_of_two() && (2..=256).contains(&n_entries),
-        "n_entries must be a power of two in [2, 256]"
+        (2..=256).contains(&n_entries),
+        "n_entries must be in [2, 256]"
     );
 
     // Start with one box containing all pixels (as owned Vec so we
@@ -420,6 +488,7 @@ fn assemble_blob(
     width: u16,
     height: u16,
     depth: Depth,
+    flags: u16,
     clut_entries: u16,
     pixel_hw: &[u16],
     clut_hw: &[u16],
@@ -432,7 +501,7 @@ fn assemble_blob(
     // AssetHeader.
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // flags -- reserved
+    out.extend_from_slice(&flags.to_le_bytes());
     out.extend_from_slice(&payload_len.to_le_bytes());
     // TextureHeader.
     out.push(depth as u8);
@@ -540,6 +609,7 @@ mod tests {
             depth: Depth::Bit4,
             crop: CropMode::None,
             resampler: Resampler::Nearest,
+            transparent_index_zero: false,
         };
         let psxt = convert(&buf, &cfg).unwrap();
 
@@ -561,5 +631,43 @@ mod tests {
             u32::from_le_bytes([psxt[24], psxt[25], psxt[26], psxt[27]]),
             32
         );
+    }
+
+    #[test]
+    fn indexed_alpha_can_reserve_palette_zero_for_transparency() {
+        let mut buf = Vec::new();
+        {
+            let img = image::RgbaImage::from_fn(2, 1, |x, _| {
+                if x == 0 {
+                    image::Rgba([255, 0, 0, 0])
+                } else {
+                    image::Rgba([0, 0, 255, 255])
+                }
+            });
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .unwrap();
+        }
+        let cfg = Config {
+            width: 2,
+            height: 1,
+            depth: Depth::Bit4,
+            crop: CropMode::None,
+            resampler: Resampler::Nearest,
+            transparent_index_zero: true,
+        };
+
+        let psxt = convert(&buf, &cfg).unwrap();
+        let first_halfword = u16::from_le_bytes([psxt[28], psxt[29]]);
+        let left = first_halfword & 0x000F;
+        let right = (first_halfword >> 4) & 0x000F;
+
+        assert_eq!(
+            u16::from_le_bytes([psxt[6], psxt[7]]),
+            psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT
+        );
+        assert_eq!(left, 0);
+        assert_ne!(right, 0);
+        assert_eq!(u16::from_le_bytes([psxt[30], psxt[31]]), 0);
     }
 }

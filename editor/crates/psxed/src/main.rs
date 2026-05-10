@@ -58,6 +58,8 @@
 //!   --size WxH           Target texel dimensions (default 64x64).
 //!   --depth 4|8|15       Bits per texel (default 4 = 16-colour CLUT).
 //!   --crop X,Y,W,H       Crop window on the source, pre-resize.
+//!   --transparent-index-zero
+//!                        Reserve palette index 0 for source-alpha transparency.
 //!   --resample nearest|triangle|lanczos3  (default lanczos3)
 //! ```
 //!
@@ -142,6 +144,7 @@ TEX SUBCOMMAND:
                           [--depth 4|8|15]        (default 4)
                           [--crop X,Y,W,H]        (overrides centre-square)
                           [--no-crop]             (resize-stretch the full source)
+                          [--transparent-index-zero]
                           [--resample nearest|triangle|lanczos3]
 
     The default crop is centre-square: the largest square that
@@ -606,6 +609,7 @@ fn run_tex(args: &[String]) -> Result<(), String> {
     let mut depth = psxed_format::texture::Depth::Bit4;
     let mut crop = psxed_tex::CropMode::CentreSquare;
     let mut resampler = psxed_tex::Resampler::Lanczos3;
+    let mut transparent_index_zero = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -668,6 +672,9 @@ fn run_tex(args: &[String]) -> Result<(), String> {
             "--no-crop" => {
                 crop = psxed_tex::CropMode::None;
             }
+            "--transparent-index-zero" | "--alpha" => {
+                transparent_index_zero = true;
+            }
             "--resample" => {
                 i += 1;
                 let val = args
@@ -708,6 +715,7 @@ fn run_tex(args: &[String]) -> Result<(), String> {
         depth,
         crop,
         resampler,
+        transparent_index_zero,
     };
     let psxt = psxed_tex::convert(&src_bytes, &cfg).map_err(|e| format!("convert: {e}"))?;
     if let Some(parent) = output.parent() {

@@ -131,6 +131,12 @@ pub mod equipment_flags {
     pub const PLAYER: u16 = 1 << 0;
 }
 
+/// Image prop record flags.
+pub mod image_prop_flags {
+    /// Prop rotates around Y to face the active camera while staying upright.
+    pub const CYLINDRICAL_BILLBOARD: u16 = 1 << 0;
+}
+
 typed_index! {
     /// Clip index local to one model's clip slice.
     pub struct ModelClipIndex;
@@ -769,6 +775,33 @@ pub struct LevelModelInstanceRecord {
 /// Sentinel for [`LevelModelInstanceRecord::clip`] meaning
 /// "inherit model default".
 pub const MODEL_CLIP_INHERIT: OptionalModelClipIndex = OptionalModelClipIndex::INHERIT;
+
+/// One placed flat image prop. Coordinates are room-local engine
+/// units and `x/y/z` names the bottom-center anchor of the quad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelImagePropRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Texture asset used by the prop material.
+    pub texture_asset: AssetId,
+    /// Bottom-center room-local X.
+    pub x: i32,
+    /// Bottom Y.
+    pub y: i32,
+    /// Bottom-center room-local Z.
+    pub z: i32,
+    /// Static yaw in PSX angle units. Ignored when
+    /// [`image_prop_flags::CYLINDRICAL_BILLBOARD`] is set.
+    pub yaw: i16,
+    /// Quad width in engine units.
+    pub width: u16,
+    /// Quad height in engine units.
+    pub height: u16,
+    /// Per-material modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Runtime flags.
+    pub flags: u16,
+}
 
 /// Cooked weapon-local hit shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

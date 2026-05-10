@@ -1014,6 +1014,7 @@ pub struct Texture<'a> {
     height_px: u16,
     depth: psxed_format::texture::Depth,
     clut_entries: u16,
+    flags: u16,
 }
 
 impl<'a> Texture<'a> {
@@ -1035,6 +1036,7 @@ impl<'a> Texture<'a> {
         if version != VERSION {
             return Err(ParseError::UnsupportedVersion(version));
         }
+        let flags = u16::from_le_bytes([bytes[6], bytes[7]]);
         let payload_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
         let payload_start = psxed_format::AssetHeader::SIZE;
         let actual_payload = bytes.len().saturating_sub(payload_start);
@@ -1077,6 +1079,7 @@ impl<'a> Texture<'a> {
             height_px,
             depth,
             clut_entries,
+            flags,
         })
     }
 
@@ -1102,6 +1105,18 @@ impl<'a> Texture<'a> {
     #[inline]
     pub fn clut_entries(&self) -> u16 {
         self.clut_entries
+    }
+
+    /// Texture feature flags from the shared asset header.
+    #[inline]
+    pub fn flags(&self) -> u16 {
+        self.flags
+    }
+
+    /// True when indexed palette entry 0 should remain transparent.
+    #[inline]
+    pub fn index_zero_transparent(&self) -> bool {
+        self.flags & psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT != 0
     }
 
     /// Raw packed pixel halfwords, as bytes. Suitable for

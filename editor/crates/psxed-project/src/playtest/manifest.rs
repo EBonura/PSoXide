@@ -435,6 +435,28 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Placed flat image props, room-local coordinates.\n");
+    out.push_str("pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[\n");
+    for prop in &package.image_props {
+        let _ = writeln!(
+            out,
+            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, yaw: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], flags: {} }},",
+            prop.room,
+            prop.texture_asset_index,
+            prop.x,
+            prop.y,
+            prop.z,
+            prop.yaw,
+            prop.width,
+            prop.height,
+            prop.tint_rgb[0],
+            prop.tint_rgb[1],
+            prop.tint_rgb[2],
+            prop.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Weapon hitboxes, local to weapon grips.\n");
     out.push_str("pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[\n");
     for hitbox in &package.weapon_hitboxes {
@@ -671,6 +693,11 @@ fn room_required_assets(
     for asset_index in room.far_vista.texture_asset_indices.iter().flatten() {
         push_unique(&mut required_vram, *asset_index);
     }
+    for prop in &package.image_props {
+        if prop.room == room_index as u16 {
+            push_unique(&mut required_vram, prop.texture_asset_index);
+        }
+    }
     let mut required_ram: Vec<usize> = vec![room.world_asset_index];
 
     // Models the room references -- placed MeshInstance bindings
@@ -856,10 +883,32 @@ fn purge_models_dir(dir: &Path) -> std::io::Result<()> {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            std::fs::remove_dir_all(&path)?;
+            purge_generated_tree(&path)?;
         }
     }
     Ok(())
+}
+
+fn purge_generated_tree(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if child.is_dir() {
+            purge_generated_tree(&child)?;
+        } else {
+            std::fs::remove_file(&child)?;
+        }
+    }
+    match std::fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            std::fs::remove_dir_all(path)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -922,6 +971,7 @@ use psx_level::{
     LevelChunkNeighbours,
     LevelChunkRecord,
     LevelFarVistaRecord,
+    LevelImagePropRecord,
     LevelMaterialRecord,
     LevelModelClipBoundsRecord,
     LevelModelClipRecord,

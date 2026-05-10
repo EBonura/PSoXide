@@ -358,6 +358,31 @@ pub struct PlaytestModelInstance {
 /// [`psx_level::MODEL_CLIP_INHERIT`].
 pub const MODEL_CLIP_INHERIT: u16 = 0xFFFF;
 
+/// One material-backed flat image prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestImageProp {
+    /// Owning room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Index into [`PlaytestPackage::assets`] of the prop texture.
+    pub texture_asset_index: usize,
+    /// Bottom-center room-local X.
+    pub x: i32,
+    /// Bottom Y.
+    pub y: i32,
+    /// Bottom-center room-local Z.
+    pub z: i32,
+    /// Static yaw, PSX angle units.
+    pub yaw: i16,
+    /// Quad width in engine units.
+    pub width: u16,
+    /// Quad height in engine units.
+    pub height: u16,
+    /// Material modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Runtime flags.
+    pub flags: u16,
+}
+
 /// Weapon-local hit shape, ready for manifest emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestWeaponHitShape {
@@ -594,6 +619,8 @@ pub struct PlaytestPackage {
     pub model_sockets: Vec<PlaytestModelSocket>,
     /// Placed model instances, room-local coordinates.
     pub model_instances: Vec<PlaytestModelInstance>,
+    /// Placed flat image props, room-local coordinates.
+    pub image_props: Vec<PlaytestImageProp>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.

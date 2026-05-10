@@ -107,6 +107,11 @@ fn main() -> ExitCode {
                             }
                         }
                     }
+                    for prop in &package.image_props {
+                        if prop.room == i_u16 && !vram_seen.contains(&prop.texture_asset_index) {
+                            vram_seen.push(prop.texture_asset_index);
+                        }
+                    }
                     total_ram_refs += ram_seen.len();
                     total_vram_refs += vram_seen.len();
                 }

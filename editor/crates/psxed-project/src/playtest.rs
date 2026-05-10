@@ -31,7 +31,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use psx_level::{far_vista_flags, sky_flags, visibility_cell_flags, visibility_edge_flags};
+use psx_level::{
+    far_vista_flags, image_prop_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
+};
 use psxed_format::world as psxw;
 
 use crate::streaming::{plan_generated_chunks, StreamingChunkConfig};
@@ -429,6 +431,7 @@ pub fn build_package(
     let mut model_frame_bounds: Vec<PlaytestModelFrameBounds> = Vec::new();
     let mut model_sockets: Vec<PlaytestModelSocket> = Vec::new();
     let mut model_instances: Vec<PlaytestModelInstance> = Vec::new();
+    let mut image_props: Vec<PlaytestImageProp> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
@@ -708,6 +711,31 @@ pub fn build_package(
                     return (None, report);
                 }
             }
+            NodeKind::ImageProp {
+                material,
+                width,
+                height,
+                cylindrical_billboard,
+            } => {
+                if !push_image_prop(
+                    project,
+                    project_root,
+                    node.name.as_str(),
+                    room_index,
+                    raw_pos,
+                    yaw,
+                    *material,
+                    *width,
+                    *height,
+                    *cylindrical_billboard,
+                    &mut texture_asset_for_resource,
+                    &mut assets,
+                    &mut image_props,
+                    &mut report,
+                ) {
+                    return (None, report);
+                }
+            }
             NodeKind::Trigger { .. } => {
                 if warned_unsupported.insert("Trigger") {
                     report.warn("Trigger volumes are skipped in this pass");
@@ -911,6 +939,7 @@ pub fn build_package(
             model_frame_bounds,
             model_sockets,
             model_instances,
+            image_props,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -2133,6 +2162,102 @@ fn component_children<'a>(
         .filter(|node| node.kind.is_component())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_image_prop(
+    project: &ProjectDocument,
+    project_root: &Path,
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    yaw: i16,
+    material: Option<ResourceId>,
+    width: u16,
+    height: u16,
+    cylindrical_billboard: bool,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    image_props: &mut Vec<PlaytestImageProp>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let Some(material_id) = material else {
+        report.warn(format!(
+            "Image Prop '{node_name}' has no Material — skipped"
+        ));
+        return true;
+    };
+    let Some(material_resource) = project.resource(material_id) else {
+        report.warn(format!(
+            "Image Prop '{node_name}' references missing Material #{} — skipped",
+            material_id.raw()
+        ));
+        return true;
+    };
+    let ResourceData::Material(material) = &material_resource.data else {
+        report.warn(format!(
+            "Image Prop '{node_name}' references '{}' but it is not a Material — skipped",
+            material_resource.name
+        ));
+        return true;
+    };
+    let Some(texture_id) = material.texture else {
+        report.warn(format!(
+            "Image Prop '{node_name}' material '{}' has no Texture — skipped",
+            material_resource.name
+        ));
+        return true;
+    };
+    let Some(texture_resource) = find_resource(project, texture_id) else {
+        report.warn(format!(
+            "Image Prop '{node_name}' material '{}' references missing Texture #{} — skipped",
+            material_resource.name,
+            texture_id.raw()
+        ));
+        return true;
+    };
+    let texture_asset_index = if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
+        existing
+    } else {
+        let bytes = match load_texture_bytes(texture_resource, project_root) {
+            Ok(bytes) => bytes,
+            Err(msg) => {
+                report.warn(format!("Image Prop '{node_name}': {msg} — skipped"));
+                return true;
+            }
+        };
+        if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
+            report.warn(format!("Image Prop '{node_name}': {msg} — skipped"));
+            return true;
+        }
+        let texture_index = texture_asset_for_resource.len();
+        let new_index = assets.len();
+        assets.push(PlaytestAsset {
+            kind: PlaytestAssetKind::Texture,
+            bytes,
+            filename: format!("texture_{texture_index:03}.psxt"),
+            source_label: texture_resource.name.clone(),
+        });
+        texture_asset_for_resource.insert(texture_id, new_index);
+        new_index
+    };
+    image_props.push(PlaytestImageProp {
+        room: room_index,
+        texture_asset_index,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        yaw,
+        width: width.max(1),
+        height: height.max(1),
+        tint_rgb: material.tint,
+        flags: if cylindrical_billboard {
+            image_prop_flags::CYLINDRICAL_BILLBOARD
+        } else {
+            0
+        },
+    });
+    true
+}
+
 fn push_point_light(
     node_name: &str,
     grid: &crate::WorldGrid,
@@ -3301,15 +3426,15 @@ mod tests {
         );
         assert_eq!(package.rooms[0].sky.horizon_percent, 58);
         assert_eq!(
-            package.rooms[0].far_vista.flags & far_vista_flags::ENABLED,
-            far_vista_flags::ENABLED
+            package.rooms[0].far_vista.flags & far_vista_flags::TEXTURED,
+            0
         );
         assert_eq!(
-            package.rooms[0].far_vista.flags & far_vista_flags::TEXTURED,
-            far_vista_flags::TEXTURED
+            package.rooms[0].far_vista.flags & far_vista_flags::ENABLED,
+            0
         );
         assert_eq!(package.rooms[0].far_vista.segments, 12);
-        assert_eq!(package.rooms[0].far_vista.texture_asset_indices.len(), 12);
+        assert!(package.rooms[0].far_vista.texture_asset_indices.is_empty());
         assert_eq!(
             package.rooms[0].camera.distance,
             DEFAULT_WORLD_CAMERA_DISTANCE
@@ -3755,12 +3880,11 @@ mod tests {
 
     #[test]
     fn starter_project_emits_expected_texture_assets() {
-        // Starter currently cooks three room textures, twelve
-        // far-vista panels, and the obsidian wraith atlas.
+        // Starter cooks two room textures and the player atlas.
         let project = project_with_one_room();
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
-        assert_eq!(package.texture_asset_count(), 16);
+        assert_eq!(package.texture_asset_count(), 3);
     }
 
     #[test]
@@ -3899,8 +4023,6 @@ mod tests {
         assert!(src.contains("far_vista: LevelFarVistaRecord"));
         assert!(src.contains("LevelCameraRecord"));
         assert!(src.contains("camera: LevelCameraRecord"));
-        assert!(src.contains("static FAR_VISTA_TEXTURES_0"));
-        assert!(src.contains("texture_assets: FAR_VISTA_TEXTURES_0"));
         assert!(src.contains("pub static ROOM_VISIBILITY"));
         assert!(src.contains("pub static VISIBILITY_CELLS"));
         assert!(src.contains("pub static ROOM_RESIDENCY"));
@@ -4801,6 +4923,44 @@ mod tests {
             "errors: {:?}",
             report.errors,
         );
+    }
+
+    #[test]
+    fn model_atlas_preserves_source_texture_flags() {
+        let project = ProjectDocument::starter();
+        let root = starter_project_root();
+        let player_model = player_model_resource_id(&project);
+        let source_texture_path = project
+            .resources
+            .iter()
+            .find_map(|resource| {
+                if resource.id != player_model {
+                    return None;
+                }
+                let ResourceData::Model(model) = &resource.data else {
+                    return None;
+                };
+                model.texture_path.as_deref()
+            })
+            .expect("starter player has a texture");
+        let source_bytes = std::fs::read(root.join(source_texture_path)).expect("source atlas");
+        let source_flags = psx_asset::Texture::from_bytes(&source_bytes)
+            .expect("source atlas parses")
+            .flags();
+
+        let (package, report) = build_package(&project, &root);
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("starter cooks");
+        let cooked_atlas = package
+            .assets
+            .iter()
+            .find(|asset| asset.filename.ends_with("/atlas.psxt"))
+            .expect("model atlas asset");
+        let cooked_flags = psx_asset::Texture::from_bytes(&cooked_atlas.bytes)
+            .expect("cooked atlas parses")
+            .flags();
+
+        assert_eq!(cooked_flags, source_flags);
     }
 
     #[test]

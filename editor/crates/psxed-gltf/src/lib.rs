@@ -1550,6 +1550,7 @@ fn cook_fbx_base_color_texture(
         depth: cfg.texture_depth,
         crop: psxed_tex::CropMode::None,
         resampler: psxed_tex::Resampler::Lanczos3,
+        transparent_index_zero: true,
     };
     for material in &mesh.materials {
         let texture = material
@@ -2628,6 +2629,7 @@ fn cook_base_color_texture(
             depth: cfg.texture_depth,
             crop: psxed_tex::CropMode::None,
             resampler: psxed_tex::Resampler::Lanczos3,
+            transparent_index_zero: true,
         };
         return psxed_tex::convert(bytes, &tex_cfg)
             .map(Some)

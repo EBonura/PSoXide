@@ -495,7 +495,9 @@ fn clamp_camera_to_floor(
     let Some(floor_y) = floor_height_at(room, position.x, position.z) else {
         return position;
     };
-    let min_y = floor_y.saturating_add(min_floor_clearance);
+    let Some(min_y) = floor_y.checked_add(min_floor_clearance) else {
+        return position;
+    };
     if position.y < min_y {
         RoomPoint::new(position.x, min_y, position.z)
     } else {
@@ -644,18 +646,20 @@ fn probe_clear_distance(
     }
 
     let mut nearest = max_distance;
+    let mut last_clear_distance = 0;
     let mut checked_cells = CheckedCameraCells::new();
     let mut i = 1;
     while i <= steps {
         let sample = lerp_vertex(from, to, i, steps);
         if point_outside_camera_space(room, sample, sector, ray.room_width, ray.room_depth) {
-            nearest = ((max_distance * i) / steps).min(nearest);
+            nearest = last_clear_distance.min(nearest);
             break;
         }
         if let Some(hit) = nearest_wall_hit_around(room, sample, ray, &mut checked_cells) {
             nearest = hit.min(nearest);
             break;
         }
+        last_clear_distance = (max_distance.saturating_mul(i)) / steps;
         i += 1;
     }
 
@@ -1100,6 +1104,10 @@ mod tests {
     }
 
     fn flat_floor_world() -> [u8; 92] {
+        floor_world_with_heights([0, 0, 0, 0])
+    }
+
+    fn floor_world_with_heights(heights: [i32; 4]) -> [u8; 92] {
         const ASSET_HEADER: usize = 12;
         const WORLD_HEADER: usize = 20;
         const SECTOR_RECORD: usize = 60;
@@ -1117,6 +1125,10 @@ mod tests {
 
         buf[SECTOR0] = 1 | 4;
         buf[SECTOR0 + 4..SECTOR0 + 6].copy_from_slice(&0u16.to_le_bytes());
+        for (index, height) in heights.iter().enumerate() {
+            let start = SECTOR0 + 12 + index * 4;
+            buf[start..start + 4].copy_from_slice(&height.to_le_bytes());
+        }
         buf
     }
 
@@ -1319,6 +1331,48 @@ mod tests {
         );
 
         assert_eq!(frame.camera.position.y, 64);
+    }
+
+    #[test]
+    fn camera_floor_clearance_ignores_saturated_floor_height() {
+        let bytes = floor_world_with_heights([i32::MAX; 4]);
+        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
+        let mut camera = ThirdPersonCameraState::new(Angle::ZERO);
+        let mut config = ThirdPersonCameraConfig::character(384, 0, 0);
+        config.min_floor_clearance = 64;
+        config.pitch_min_q12 = 0;
+        config.pitch_max_q12 = 0;
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::new(512, 0, 640),
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+
+        let frame = camera.update(
+            WorldProjection::new(160, 120, 320, 64),
+            Some(room.collision()),
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
+        );
+
+        assert_eq!(frame.camera.position.y, 0);
+    }
+
+    #[test]
+    fn camera_collision_stops_at_last_clear_sample_before_void() {
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
+        let mut config = ThirdPersonCameraConfig::character(1536, 0, 0);
+        config.min_distance = 0;
+        config.collision_margin = 0;
+        let from = RoomPoint::new(512, 0, 512);
+        let to = RoomPoint::new(512, 0, 2048);
+
+        let clear = probe_clear_distance(room.collision(), from, to, 1536, config);
+
+        assert_eq!(clear, 256);
     }
 
     #[test]
