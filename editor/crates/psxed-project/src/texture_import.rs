@@ -36,6 +36,8 @@ pub struct TextureImportConfig {
     pub resampler: Resampler,
     /// Baked RGB tint. `[255, 255, 255]` leaves the source unchanged.
     pub tint: [u8; 3],
+    /// Reserve palette index 0 for source-alpha transparency.
+    pub transparent_index_zero: bool,
 }
 
 impl TextureImportConfig {
@@ -46,6 +48,7 @@ impl TextureImportConfig {
             depth: self.depth,
             crop: self.crop,
             resampler: self.resampler,
+            transparent_index_zero: self.transparent_index_zero,
         }
     }
 }
@@ -395,6 +398,7 @@ mod tests {
             crop: CropMode::CentreSquare,
             resampler: Resampler::Nearest,
             tint: [255, 255, 255],
+            transparent_index_zero: false,
         }
     }
 

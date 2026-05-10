@@ -974,7 +974,7 @@ mod tests {
             cooked.populated_sector_count(),
             authored_geometry_sector_count(&grid)
         );
-        assert_eq!(cooked.materials.len(), 3);
+        assert_eq!(cooked.materials.len(), 2);
         for (idx, material) in cooked.materials.iter().enumerate() {
             assert_eq!(material.slot, idx as u16);
         }

@@ -281,6 +281,7 @@ pub struct SceneResourceUse {
     pub character_controllers: usize,
     pub colliders: usize,
     pub interactables: usize,
+    pub image_props: usize,
     pub lights: usize,
     pub triggers: usize,
     pub portals: usize,
@@ -341,6 +342,10 @@ fn collect_resource_use(
                     use_set.model_instances += 1;
                     push_unique(*model_id, &mut use_set.models, &mut models);
                 }
+            }
+            NodeKind::ImageProp { material, .. } => {
+                use_set.image_props += 1;
+                push_material(*material, &mut use_set, &mut materials);
             }
             NodeKind::CharacterController { character, .. } => {
                 use_set.character_controllers += 1;
