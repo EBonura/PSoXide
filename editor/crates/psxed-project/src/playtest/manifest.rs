@@ -247,6 +247,96 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Per-room generated room-surface cache slices.\n");
+    out.push_str("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[\n");
+    for cache in &package.room_surface_caches {
+        let _ = writeln!(
+            out,
+            "    LevelRoomSurfaceCacheRecord {{ room: RoomIndex({}), cell_first: {}, cell_count: {}, vertex_first: {}, vertex_count: {}, surface_first: {}, surface_count: {}, flags: 0 }},",
+            cache.room,
+            cache.cell_first,
+            cache.cell_count,
+            cache.vertex_first,
+            cache.vertex_count,
+            cache.surface_first,
+            cache.surface_count,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Generated cached room cells.\n");
+    out.push_str("pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[\n");
+    for cell in &package.room_cache_cells {
+        let _ = writeln!(
+            out,
+            "    LevelCachedRoomCellRecord {{ x: {}, z: {}, min_y: {}, max_y: {}, visibility_center: [{}, {}, {}], visibility_radius: {}, surface_first: {}, surface_count: {} }},",
+            cell.x,
+            cell.z,
+            cell.min_y,
+            cell.max_y,
+            cell.visibility_center[0],
+            cell.visibility_center[1],
+            cell.visibility_center[2],
+            cell.visibility_radius,
+            cell.surface_first,
+            cell.surface_count,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Generated cached room vertices.\n");
+    out.push_str("pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[\n");
+    for vertex in &package.room_cache_vertices {
+        let _ = writeln!(
+            out,
+            "    LevelCachedRoomVertexRecord {{ x: {}, y: {}, z: {} }},",
+            vertex.x, vertex.y, vertex.z,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Generated cached room surfaces.\n");
+    out.push_str("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[\n");
+    for surface in &package.room_cache_surfaces {
+        let _ = writeln!(
+            out,
+            "    LevelCachedRoomSurfaceRecord {{ material_slot: {}, vertex_indices: [{}, {}, {}, {}], sample_sx: {}, sample_sz: {}, sample_ordinal: {}, uvs: [({}, {}), ({}, {}), ({}, {}), ({}, {})], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], kind_flags: {}, wall_direction: {}, split: {}, triangle_index: {} }},",
+            surface.material_slot,
+            surface.vertex_indices[0],
+            surface.vertex_indices[1],
+            surface.vertex_indices[2],
+            surface.vertex_indices[3],
+            surface.sample_sx,
+            surface.sample_sz,
+            surface.sample_ordinal,
+            surface.uvs[0].0,
+            surface.uvs[0].1,
+            surface.uvs[1].0,
+            surface.uvs[1].1,
+            surface.uvs[2].0,
+            surface.uvs[2].1,
+            surface.uvs[3].0,
+            surface.uvs[3].1,
+            surface.baked_vertex_rgb[0].0,
+            surface.baked_vertex_rgb[0].1,
+            surface.baked_vertex_rgb[0].2,
+            surface.baked_vertex_rgb[1].0,
+            surface.baked_vertex_rgb[1].1,
+            surface.baked_vertex_rgb[1].2,
+            surface.baked_vertex_rgb[2].0,
+            surface.baked_vertex_rgb[2].1,
+            surface.baked_vertex_rgb[2].2,
+            surface.baked_vertex_rgb[3].0,
+            surface.baked_vertex_rgb[3].1,
+            surface.baked_vertex_rgb[3].2,
+            surface.kind_flags,
+            surface.wall_direction,
+            surface.split,
+            surface.triangle_index,
+        );
+    }
+    out.push_str("];\n\n");
+
     // Per-room residency: required RAM = the room's world
     // asset + every model mesh + every animation clip
     // referenced by an instance OR by the player character in
@@ -965,6 +1055,9 @@ use psx_level::{
     EntityKind,
     EntityRecord,
     EquipmentRecord,
+    LevelCachedRoomCellRecord,
+    LevelCachedRoomSurfaceRecord,
+    LevelCachedRoomVertexRecord,
     LevelAssetRecord,
     LevelCameraRecord,
     LevelCharacterRecord,
@@ -980,6 +1073,7 @@ use psx_level::{
     LevelModelRecord,
     LevelModelSocketRecord,
     LevelRoomRecord,
+    LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,
     LevelSkyRecord,
     LevelVisibilityCellRecord,
