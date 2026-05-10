@@ -217,6 +217,84 @@ pub struct PlaytestVisibilityCell {
     pub flags: u16,
 }
 
+/// Per-room slice into generated cached room geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestRoomSurfaceCache {
+    /// Owning room index.
+    pub room: u16,
+    /// First index into [`PlaytestPackage::room_cache_cells`].
+    pub cell_first: u32,
+    /// Number of cached cell records for this room.
+    pub cell_count: u16,
+    /// First index into [`PlaytestPackage::room_cache_vertices`].
+    pub vertex_first: u32,
+    /// Number of cached vertex records for this room.
+    pub vertex_count: u16,
+    /// First index into [`PlaytestPackage::room_cache_surfaces`].
+    pub surface_first: u32,
+    /// Number of cached surface records for this room.
+    pub surface_count: u16,
+}
+
+/// Cached populated-cell header generated for editor-playtest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCachedRoomCell {
+    /// Grid X coordinate inside the cooked room.
+    pub x: u16,
+    /// Grid Z coordinate inside the cooked room.
+    pub z: u16,
+    /// Minimum authored surface height in room-local engine units.
+    pub min_y: i32,
+    /// Maximum authored surface height in room-local engine units.
+    pub max_y: i32,
+    /// Precomputed visibility center as `[x, y, z]`.
+    pub visibility_center: [i32; 3],
+    /// Precomputed visibility radius.
+    pub visibility_radius: i32,
+    /// First cached surface in this room-local cell.
+    pub surface_first: u16,
+    /// Number of cached surfaces in this cell.
+    pub surface_count: u16,
+}
+
+/// Cached deduplicated room vertex generated for editor-playtest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCachedRoomVertex {
+    /// Room-local X coordinate.
+    pub x: i32,
+    /// Room-local Y coordinate.
+    pub y: i32,
+    /// Room-local Z coordinate.
+    pub z: i32,
+}
+
+/// Cached room surface generated for editor-playtest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCachedRoomSurface {
+    /// Local room material slot referenced by this surface.
+    pub material_slot: u16,
+    /// Indices into the room-local cached vertex stream.
+    pub vertex_indices: [u16; 4],
+    /// Sector X coordinate for lighting-sample reconstruction.
+    pub sample_sx: u16,
+    /// Sector Z coordinate for lighting-sample reconstruction.
+    pub sample_sz: u16,
+    /// Surface ordinal for lighting-sample reconstruction.
+    pub sample_ordinal: u16,
+    /// Texture-page-relative UVs matching vertex order.
+    pub uvs: [(u8, u8); 4],
+    /// Cached baked RGB values.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Packed surface kind plus baked-light flag.
+    pub kind_flags: u8,
+    /// Runtime wall direction when this is a wall surface.
+    pub wall_direction: u8,
+    /// Authored diagonal split id for floors/ceilings.
+    pub split: u8,
+    /// Split-triangle index, or the whole-quad sentinel.
+    pub triangle_index: u8,
+}
+
 /// One material slot binding. Lifted from
 /// [`CookedWorldMaterial`] and pinned to its owning room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,6 +685,14 @@ pub struct PlaytestPackage {
     pub room_visibility: Vec<PlaytestRoomVisibility>,
     /// Per-cell visibility metadata.
     pub visibility_cells: Vec<PlaytestVisibilityCell>,
+    /// Per-room room-surface cache slices.
+    pub room_surface_caches: Vec<PlaytestRoomSurfaceCache>,
+    /// Flattened cached room cell records.
+    pub room_cache_cells: Vec<PlaytestCachedRoomCell>,
+    /// Flattened cached room vertex records.
+    pub room_cache_vertices: Vec<PlaytestCachedRoomVertex>,
+    /// Flattened cached room surface records.
+    pub room_cache_surfaces: Vec<PlaytestCachedRoomSurface>,
     /// Cooked model bundles, deduplicated across instances.
     pub models: Vec<PlaytestModel>,
     /// Per-model clip records ordered as `(model, clip_index)`.

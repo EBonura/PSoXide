@@ -44,7 +44,8 @@ use psx_engine::{
     WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q8,
 };
 use psx_engine::{
-    cache_room_vertex_lit_surfaces, draw_indexed_cached_room_vertex_lit_visible_cells,
+    cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
+    cached_room_vertices_from_level_records, draw_indexed_cached_room_vertex_lit_visible_cells,
     draw_room_vertex_lit,
 };
 #[cfg(feature = "world-grid-visible")]
@@ -85,10 +86,11 @@ mod generated {
 }
 
 use generated::{
-    ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
-    MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, IMAGE_PROPS,
-    PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_VISIBILITY,
-    VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
+    MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
+    PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS,
+    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, VISIBILITY_CELLS, WEAPONS,
+    WEAPON_HITBOXES,
 };
 
 // VRAM layout. Room materials and model atlases live in
@@ -214,20 +216,26 @@ const ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS: i32 = 64;
 #[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
 #[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_CAMERA_MARGIN: i32 = 96;
+#[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_SAFETY_RING: i32 = 1;
+#[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_NEAR_RING: i32 = 4;
+#[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_REAR_RING: i32 = 6;
+#[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS: i32 = 3;
+#[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_WEDGE_NUM: u64 = 3;
+#[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_WEDGE_DEN: u64 = 4;
+#[cfg(feature = "world-grid-visible")]
 const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
 #[cfg(feature = "world-grid-visible")]
 const MAX_ACTIVE_VISIBLE_CELLS: usize = 1024;
-/// Cached room cell headers shared by the active room window. Rooms
-/// that exceed this fixed budget fall back to the uncached room draw.
-const MAX_CACHED_ROOM_CELLS: usize = 2048;
-/// Deduplicated room vertices referenced by cached room surfaces.
+/// Per-frame projected scratch for one generated room surface cache.
+/// Rooms that exceed this vertex budget fall back to the uncached draw.
 const MAX_CACHED_ROOM_VERTICES: usize = 4096;
-/// Cached floor/ceiling/wall records shared by the active room
-/// window. This mirrors the room triangle arena order of magnitude:
-/// a cached surface emits up to two textured Gouraud triangles.
-const MAX_CACHED_ROOM_SURFACES: usize = 4096;
-/// Persistent cache metadata slots keyed by generated room index.
-const MAX_RUNTIME_ROOM_CACHES: usize = 64;
 
 const MAX_TEXTURED_TRIS: usize = 3328;
 
@@ -238,7 +246,7 @@ const MAX_TEXTURED_TRIS: usize = 3328;
 /// the cook report should also flag.
 const MAX_ROOM_MATERIALS: usize = 32;
 /// Current generated chunk plus the best cache-budgeted nearby chunks.
-const MAX_ACTIVE_ROOMS: usize = 8;
+const MAX_ACTIVE_ROOMS: usize = 4;
 const MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES: usize = 24;
 const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
 const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
@@ -287,18 +295,12 @@ static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
     PrimitivePacketScratch::ZERO;
 static mut WORLD_COMMANDS: [WorldTriCommand; MAX_TEXTURED_TRIS] =
     [WorldTriCommand::EMPTY; MAX_TEXTURED_TRIS];
-static mut CACHED_ROOM_CELLS: [CachedRoomCell; MAX_CACHED_ROOM_CELLS] =
-    [CachedRoomCell::EMPTY; MAX_CACHED_ROOM_CELLS];
-static mut CACHED_ROOM_VERTICES: [WorldVertex; MAX_CACHED_ROOM_VERTICES] =
-    [WorldVertex::ZERO; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_VERTICES: [ProjectedVertex; MAX_CACHED_ROOM_VERTICES] =
     [ProjectedVertex::new(0, 0, 0); MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_VALID: [bool; MAX_CACHED_ROOM_VERTICES] =
     [false; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_DEPTHS: [i32; MAX_CACHED_ROOM_VERTICES] =
     [0; MAX_CACHED_ROOM_VERTICES];
-static mut CACHED_ROOM_SURFACES: [CachedRoomSurface; MAX_CACHED_ROOM_SURFACES] =
-    [CachedRoomSurface::EMPTY; MAX_CACHED_ROOM_SURFACES];
 static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
     [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
 static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
@@ -584,12 +586,12 @@ fn runtime_model_faces<'a>(
 
 #[derive(Copy, Clone)]
 struct ActiveRoomSurfaceCache {
-    cell_first: u16,
-    cell_count: u16,
-    vertex_first: u16,
-    vertex_count: u16,
-    surface_first: u16,
-    surface_count: u16,
+    cell_first: usize,
+    cell_count: usize,
+    vertex_first: usize,
+    vertex_count: usize,
+    surface_first: usize,
+    surface_count: usize,
     status: ActiveRoomCacheStatus,
     ready: bool,
 }
@@ -606,12 +608,6 @@ impl ActiveRoomSurfaceCache {
         ready: false,
     };
 }
-
-static mut ROOM_SURFACE_CACHE_BY_ROOM: [ActiveRoomSurfaceCache; MAX_RUNTIME_ROOM_CACHES] =
-    [ActiveRoomSurfaceCache::EMPTY; MAX_RUNTIME_ROOM_CACHES];
-static mut ROOM_SURFACE_CACHE_CELL_CURSOR: usize = 0;
-static mut ROOM_SURFACE_CACHE_VERTEX_CURSOR: usize = 0;
-static mut ROOM_SURFACE_CACHE_SURFACE_CURSOR: usize = 0;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ActiveRoomCacheStatus {
@@ -822,8 +818,6 @@ impl Scene for Playtest {
             self.camera_config(),
             CAMERA_START_YAW,
         );
-        reset_room_surface_cache_arena();
-        self.prewarm_room_surface_caches();
         self.load_active_room_window();
     }
 
@@ -1062,48 +1056,48 @@ impl Scene for Playtest {
                         room_visible_cells = room_visible_cells.saturating_add(cells.len() as u32);
                         if active.surface_cache.ready {
                             room_cached_draws = room_cached_draws.saturating_add(1);
-                            let cell_first = active.surface_cache.cell_first as usize;
-                            let cell_end = cell_first
-                                .saturating_add(active.surface_cache.cell_count as usize)
-                                .min(MAX_CACHED_ROOM_CELLS);
-                            let vertex_first = active.surface_cache.vertex_first as usize;
-                            let vertex_count = active.surface_cache.vertex_count as usize;
-                            let vertex_end = vertex_first
-                                .saturating_add(vertex_count)
-                                .min(MAX_CACHED_ROOM_VERTICES);
-                            let surface_first = active.surface_cache.surface_first as usize;
-                            let surface_end = surface_first
-                                .saturating_add(active.surface_cache.surface_count as usize)
-                                .min(MAX_CACHED_ROOM_SURFACES);
-                            let cached_cells = unsafe { &CACHED_ROOM_CELLS[cell_first..cell_end] };
-                            let cached_vertices =
-                                unsafe { &CACHED_ROOM_VERTICES[vertex_first..vertex_end] };
-                            let cached_surfaces =
-                                unsafe { &CACHED_ROOM_SURFACES[surface_first..surface_end] };
-                            let projected_vertices =
-                                unsafe { &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count] };
-                            let projected_valid =
-                                unsafe { &mut CACHED_ROOM_PROJECTED_VALID[..vertex_count] };
-                            let projected_depths =
-                                unsafe { &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count] };
-                            draw_indexed_cached_room_vertex_lit_visible_cells(
-                                cached_cells,
-                                cached_vertices,
-                                cached_surfaces,
-                                projected_vertices,
-                                projected_valid,
-                                projected_depths,
-                                active.room.render().depth(),
-                                active.room.render().sector_size(),
-                                materials,
-                                &lighting,
-                                &room_camera,
-                                room_options,
-                                cells,
-                                visibility.screen_margin,
-                                &mut primitive_packets,
-                                &mut world,
-                            )
+                            if let Some((cached_cells, cached_vertices, cached_surfaces)) =
+                                generated_room_surface_cache_slices(active.surface_cache)
+                            {
+                                let vertex_count = cached_vertices.len();
+                                let projected_vertices =
+                                    unsafe { &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count] };
+                                let projected_valid =
+                                    unsafe { &mut CACHED_ROOM_PROJECTED_VALID[..vertex_count] };
+                                let projected_depths =
+                                    unsafe { &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count] };
+                                draw_indexed_cached_room_vertex_lit_visible_cells(
+                                    cached_cells,
+                                    cached_vertices,
+                                    cached_surfaces,
+                                    projected_vertices,
+                                    projected_valid,
+                                    projected_depths,
+                                    active.room.render().depth(),
+                                    active.room.render().sector_size(),
+                                    materials,
+                                    &lighting,
+                                    &room_camera,
+                                    room_options,
+                                    cells,
+                                    visibility.screen_margin,
+                                    &mut primitive_packets,
+                                    &mut world,
+                                )
+                            } else {
+                                room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                draw_room_vertex_lit_visible_cells(
+                                    active.room.render(),
+                                    materials,
+                                    &lighting,
+                                    &room_camera,
+                                    room_options,
+                                    cells,
+                                    visibility.screen_margin,
+                                    &mut primitive_packets,
+                                    &mut world,
+                                )
+                            }
                         } else {
                             room_uncached_draws = room_uncached_draws.saturating_add(1);
                             if active_surface_cache_failed(active.surface_cache) {
@@ -1942,26 +1936,6 @@ impl Playtest {
             slot += 1;
         }
         true
-    }
-
-    fn prewarm_room_surface_caches(&mut self) {
-        if ROOM_CHUNKS.is_empty() {
-            return;
-        }
-        for (raw_index, record) in ROOMS.iter().enumerate() {
-            if raw_index >= MAX_RUNTIME_ROOM_CACHES {
-                break;
-            }
-            let index = RoomIndex::new(raw_index as u16);
-            if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
-                let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
-            }
-            let Some(room) = parse_runtime_room(record) else {
-                continue;
-            };
-            let (materials, material_count) = build_runtime_room_material_table(record);
-            let _ = active_room_surface_cache_for(index, room, &materials[..material_count]);
-        }
     }
 
     fn lock_target_position(&self) -> Option<RoomPoint> {
@@ -2851,6 +2825,15 @@ fn fill_precomputed_visible_cells(
     let mut queue = [0usize; MAX_PRECOMPUTED_VISIBLE_CELLS];
     let mut distances = [0u16; MAX_PRECOMPUTED_VISIBLE_CELLS];
     let mut selected = [false; MAX_PRECOMPUTED_VISIBLE_CELLS];
+    let filter = VisibleCellFilter {
+        anchor_x,
+        anchor_z,
+        sector_size,
+        room_offset_x,
+        room_offset_z,
+        global_anchor,
+        camera,
+    };
     let mut read = 0usize;
     let mut queued = 1usize;
     visited[anchor_index] = true;
@@ -2922,25 +2905,13 @@ fn fill_precomputed_visible_cells(
             selected[neighbour_index] = true;
             write_visible_cell_candidate(
                 room_cells[neighbour_index],
-                sector_size,
-                room_offset_x,
-                room_offset_z,
-                global_anchor,
+                filter,
                 out,
                 &mut written,
                 &mut rejected_global,
             );
         }
-        write_visible_cell_candidate(
-            cell,
-            sector_size,
-            room_offset_x,
-            room_offset_z,
-            global_anchor,
-            out,
-            &mut written,
-            &mut rejected_global,
-        );
+        write_visible_cell_candidate(cell, filter, out, &mut written, &mut rejected_global);
     }
     sort_visible_cells_for_camera(&mut out[..written], camera, sector_size);
     Some((written, rejected_global))
@@ -2995,32 +2966,239 @@ fn visible_cell_camera_depth(cell: GridVisibleCell, camera: WorldCamera, sector_
 }
 
 #[cfg(feature = "world-grid-visible")]
-fn write_visible_cell_candidate(
-    cell: psx_level::LevelVisibilityCellRecord,
+#[derive(Copy, Clone)]
+struct VisibleCellFilter {
+    anchor_x: i32,
+    anchor_z: i32,
     sector_size: i32,
     room_offset_x: i32,
     room_offset_z: i32,
     global_anchor: RoomPoint,
+    camera: WorldCamera,
+}
+
+#[cfg(feature = "world-grid-visible")]
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum VisibleCellReject {
+    GlobalRange,
+    Camera,
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn write_visible_cell_candidate(
+    cell: psx_level::LevelVisibilityCellRecord,
+    filter: VisibleCellFilter,
     out: &mut [GridVisibleCell],
     written: &mut usize,
     rejected_global: &mut u16,
 ) {
-    if !visibility_cell_in_global_range(
-        cell.x,
-        cell.z,
-        sector_size,
-        room_offset_x,
-        room_offset_z,
-        global_anchor,
-    ) {
-        *rejected_global = rejected_global.saturating_add(1);
-        return;
+    match visible_cell_reject_reason(cell, filter) {
+        Some(VisibleCellReject::GlobalRange) => {
+            *rejected_global = rejected_global.saturating_add(1);
+            return;
+        }
+        Some(VisibleCellReject::Camera) => return,
+        None => {}
     }
     if *written >= out.len() {
         return;
     }
     out[*written] = GridVisibleCell::new(cell.x, cell.z, cell.min_y, cell.max_y);
     *written += 1;
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn visible_cell_reject_reason(
+    cell: psx_level::LevelVisibilityCellRecord,
+    filter: VisibleCellFilter,
+) -> Option<VisibleCellReject> {
+    if visibility_cell_safety_ring(cell, filter.anchor_x, filter.anchor_z) {
+        return None;
+    }
+    if !visibility_cell_in_global_range(
+        cell.x,
+        cell.z,
+        filter.sector_size,
+        filter.room_offset_x,
+        filter.room_offset_z,
+        filter.global_anchor,
+    ) {
+        return Some(VisibleCellReject::GlobalRange);
+    }
+    if !visibility_cell_aabb_intersects_camera(cell, filter.sector_size, filter.camera) {
+        return Some(VisibleCellReject::Camera);
+    }
+    if !visibility_cell_in_view_wedge(cell, filter) {
+        return Some(VisibleCellReject::Camera);
+    }
+    None
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn visibility_cell_safety_ring(
+    cell: psx_level::LevelVisibilityCellRecord,
+    anchor_x: i32,
+    anchor_z: i32,
+) -> bool {
+    visibility_cell_anchor_distance(cell, anchor_x, anchor_z) <= ROOM_VISIBLE_CELL_SAFETY_RING
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn visibility_cell_anchor_distance(
+    cell: psx_level::LevelVisibilityCellRecord,
+    anchor_x: i32,
+    anchor_z: i32,
+) -> i32 {
+    let dx = (cell.x as i32).saturating_sub(anchor_x).abs();
+    let dz = (cell.z as i32).saturating_sub(anchor_z).abs();
+    dx.max(dz)
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn visibility_cell_in_view_wedge(
+    cell: psx_level::LevelVisibilityCellRecord,
+    filter: VisibleCellFilter,
+) -> bool {
+    let anchor_distance = visibility_cell_anchor_distance(cell, filter.anchor_x, filter.anchor_z);
+    if anchor_distance <= ROOM_VISIBLE_CELL_NEAR_RING {
+        return true;
+    }
+    if cell.blocker_mask != 0 || cell.portal_mask != 0x0f {
+        return true;
+    }
+
+    let sector_size = filter.sector_size.max(1);
+    let half = sector_size / 2;
+    let center_x = (cell.x as i32)
+        .saturating_mul(sector_size)
+        .saturating_add(half);
+    let center_z = (cell.z as i32)
+        .saturating_mul(sector_size)
+        .saturating_add(half);
+    let anchor_x = filter
+        .anchor_x
+        .saturating_mul(sector_size)
+        .saturating_add(half);
+    let anchor_z = filter
+        .anchor_z
+        .saturating_mul(sector_size)
+        .saturating_add(half);
+    let dx = center_x.saturating_sub(anchor_x) as i64;
+    let dz = center_z.saturating_sub(anchor_z) as i64;
+    let sin_yaw = filter.camera.sin_yaw.raw() as i64;
+    let cos_yaw = filter.camera.cos_yaw.raw() as i64;
+    let forward_x = -sin_yaw;
+    let forward_z = -cos_yaw;
+    let depth = dx
+        .saturating_mul(forward_x)
+        .saturating_add(dz.saturating_mul(forward_z))
+        >> 12;
+    if depth < 0 {
+        return anchor_distance <= ROOM_VISIBLE_CELL_REAR_RING;
+    }
+    let lateral = (dx
+        .saturating_mul(cos_yaw)
+        .saturating_sub(dz.saturating_mul(sin_yaw))
+        >> 12)
+        .unsigned_abs();
+    let lateral_limit = (depth as u64)
+        .saturating_mul(ROOM_VISIBLE_CELL_WEDGE_NUM)
+        .checked_div(ROOM_VISIBLE_CELL_WEDGE_DEN.max(1))
+        .unwrap_or(u64::MAX)
+        .saturating_add(
+            (sector_size as u64).saturating_mul(ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS as u64),
+        );
+    lateral <= lateral_limit
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn visibility_cell_aabb_intersects_camera(
+    cell: psx_level::LevelVisibilityCellRecord,
+    sector_size: i32,
+    camera: WorldCamera,
+) -> bool {
+    let sector_size = sector_size.max(1);
+    let margin = ROOM_VISIBLE_CELL_CAMERA_MARGIN.max(sector_size / 4);
+    let x0 = (cell.x as i32)
+        .saturating_mul(sector_size)
+        .saturating_sub(margin);
+    let x1 = (cell.x as i32)
+        .saturating_add(1)
+        .saturating_mul(sector_size)
+        .saturating_add(margin);
+    let z0 = (cell.z as i32)
+        .saturating_mul(sector_size)
+        .saturating_sub(margin);
+    let z1 = (cell.z as i32)
+        .saturating_add(1)
+        .saturating_mul(sector_size)
+        .saturating_add(margin);
+    let y0 = cell.min_y.saturating_sub(margin);
+    let y1 = cell.max_y.saturating_add(margin);
+    aabb_intersects_camera_frustum(x0, x1, y0, y1, z0, z1, camera)
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn aabb_intersects_camera_frustum(
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+    z0: i32,
+    z1: i32,
+    camera: WorldCamera,
+) -> bool {
+    let near = camera.projection.near_z.max(1);
+    let far = FAR_Z.max(near);
+    let focal = camera.projection.focal_length.max(1) as i64;
+    let half_w = (camera.projection.screen_x as i32)
+        .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
+        .max(1) as i64;
+    let half_h = (camera.projection.screen_y as i32)
+        .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
+        .max(1) as i64;
+    let mut max_depth = i32::MIN;
+    let mut min_depth = i32::MAX;
+    let mut all_right = true;
+    let mut all_left = true;
+    let mut all_above = true;
+    let mut all_below = true;
+    for x in [x0, x1] {
+        for y in [y0, y1] {
+            for z in [z0, z1] {
+                let view = camera.view_vertex(WorldVertex::new(x, y, z));
+                max_depth = max_depth.max(view.z);
+                min_depth = min_depth.min(view.z);
+                if view.z < near {
+                    all_right = false;
+                    all_left = false;
+                    all_above = false;
+                    all_below = false;
+                    continue;
+                }
+                let depth_limit_x = half_w.saturating_mul(view.z as i64);
+                let depth_limit_y = half_h.saturating_mul(view.z as i64);
+                let projected_x = (view.x as i64).saturating_mul(focal);
+                let projected_y = (view.y as i64).saturating_mul(focal);
+                if projected_x <= depth_limit_x {
+                    all_right = false;
+                }
+                if -projected_x <= depth_limit_x {
+                    all_left = false;
+                }
+                if projected_y <= depth_limit_y {
+                    all_above = false;
+                }
+                if -projected_y <= depth_limit_y {
+                    all_below = false;
+                }
+            }
+        }
+    }
+    if max_depth < near || min_depth > far {
+        return false;
+    }
+    !(all_right || all_left || all_above || all_below)
 }
 
 #[cfg(feature = "world-grid-visible")]
@@ -3240,7 +3418,7 @@ fn build_active_room(
     }
     let room = parse_runtime_room(record)?;
     let (materials, material_count) = build_runtime_room_material_table(record);
-    let surface_cache = active_room_surface_cache_for(index, room, &materials[..material_count]);
+    let surface_cache = active_room_surface_cache_for(index);
     Some(ActiveRuntimeRoom {
         index,
         room,
@@ -3266,121 +3444,65 @@ fn build_runtime_room_material_table(
     (materials, material_count)
 }
 
-fn reset_room_surface_cache_arena() {
-    unsafe {
-        ROOM_SURFACE_CACHE_BY_ROOM = [ActiveRoomSurfaceCache::EMPTY; MAX_RUNTIME_ROOM_CACHES];
-        ROOM_SURFACE_CACHE_CELL_CURSOR = 0;
-        ROOM_SURFACE_CACHE_VERTEX_CURSOR = 0;
-        ROOM_SURFACE_CACHE_SURFACE_CURSOR = 0;
-    }
-}
-
-fn active_room_surface_cache_for(
-    index: RoomIndex,
-    room: RuntimeRoom<'static>,
-    materials: &[WorldRenderMaterial],
-) -> ActiveRoomSurfaceCache {
-    let slot = index.to_usize();
-    if slot >= MAX_RUNTIME_ROOM_CACHES {
-        return ActiveRoomSurfaceCache {
-            status: ActiveRoomCacheStatus::Overflow,
-            ..ActiveRoomSurfaceCache::EMPTY
-        };
-    }
-    unsafe {
-        let cached = ROOM_SURFACE_CACHE_BY_ROOM[slot];
-        if cached.status != ActiveRoomCacheStatus::NotBuilt {
-            return cached;
-        }
-        let built = cache_room_surfaces_in_runtime_arena(
-            room,
-            materials,
-            &mut ROOM_SURFACE_CACHE_CELL_CURSOR,
-            &mut ROOM_SURFACE_CACHE_VERTEX_CURSOR,
-            &mut ROOM_SURFACE_CACHE_SURFACE_CURSOR,
-        );
-        ROOM_SURFACE_CACHE_BY_ROOM[slot] = built;
-        built
-    }
-}
-
-fn cache_room_surfaces_in_runtime_arena(
-    room: RuntimeRoom<'static>,
-    materials: &[WorldRenderMaterial],
-    cached_cell_cursor: &mut usize,
-    cached_vertex_cursor: &mut usize,
-    cached_surface_cursor: &mut usize,
-) -> ActiveRoomSurfaceCache {
-    telemetry::stage_begin(telemetry::stage::ROOM_SURFACE_CACHE);
-    telemetry::counter(telemetry::counter::ROOM_SURFACE_CACHE_BUILDS, 1);
-    let cell_first = *cached_cell_cursor;
-    let vertex_first = *cached_vertex_cursor;
-    let surface_first = *cached_surface_cursor;
-    if cell_first >= MAX_CACHED_ROOM_CELLS
-        || vertex_first >= MAX_CACHED_ROOM_VERTICES
-        || surface_first >= MAX_CACHED_ROOM_SURFACES
-    {
-        telemetry::stage_end(telemetry::stage::ROOM_SURFACE_CACHE);
-        return ActiveRoomSurfaceCache {
-            status: ActiveRoomCacheStatus::Overflow,
-            ..ActiveRoomSurfaceCache::EMPTY
-        };
-    }
-
-    let stats = unsafe {
-        cache_room_vertex_lit_surfaces(
-            room.render(),
-            materials,
-            &mut CACHED_ROOM_CELLS[cell_first..],
-            &mut CACHED_ROOM_VERTICES[vertex_first..],
-            &mut CACHED_ROOM_SURFACES[surface_first..],
-        )
+fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfaceCache {
+    let Some(cache) = ROOM_SURFACE_CACHES.iter().find(|cache| cache.room == index) else {
+        return ActiveRoomSurfaceCache::EMPTY;
     };
-    if stats.overflow
-        || stats.cell_count > u16::MAX as usize
-        || stats.vertex_count > u16::MAX as usize
-        || stats.surface_count > u16::MAX as usize
+    let cell_first = cache.cell_first as usize;
+    let cell_count = cache.cell_count as usize;
+    let vertex_first = cache.vertex_first as usize;
+    let vertex_count = cache.vertex_count as usize;
+    let surface_first = cache.surface_first as usize;
+    let surface_count = cache.surface_count as usize;
+    if vertex_count > MAX_CACHED_ROOM_VERTICES
+        || cell_first.saturating_add(cell_count) > ROOM_CACHE_CELLS.len()
+        || vertex_first.saturating_add(vertex_count) > ROOM_CACHE_VERTICES.len()
+        || surface_first.saturating_add(surface_count) > ROOM_CACHE_SURFACES.len()
     {
-        telemetry::stage_end(telemetry::stage::ROOM_SURFACE_CACHE);
         return ActiveRoomSurfaceCache {
             status: ActiveRoomCacheStatus::Overflow,
             ..ActiveRoomSurfaceCache::EMPTY
         };
     }
-    if stats.cell_count == 0 {
-        telemetry::stage_end(telemetry::stage::ROOM_SURFACE_CACHE);
+    if cell_count == 0 || vertex_count == 0 || surface_count == 0 {
         return ActiveRoomSurfaceCache {
             status: ActiveRoomCacheStatus::Empty,
             ..ActiveRoomSurfaceCache::EMPTY
         };
     }
-
-    *cached_cell_cursor = (*cached_cell_cursor).saturating_add(stats.cell_count);
-    *cached_vertex_cursor = (*cached_vertex_cursor).saturating_add(stats.vertex_count);
-    *cached_surface_cursor = (*cached_surface_cursor).saturating_add(stats.surface_count);
-    telemetry::counter(
-        telemetry::counter::ROOM_SURFACE_CACHE_BUILD_CELLS,
-        stats.cell_count as u32,
-    );
-    telemetry::counter(
-        telemetry::counter::ROOM_SURFACE_CACHE_BUILD_VERTICES,
-        stats.vertex_count as u32,
-    );
-    telemetry::counter(
-        telemetry::counter::ROOM_SURFACE_CACHE_BUILD_SURFACES,
-        stats.surface_count as u32,
-    );
-    telemetry::stage_end(telemetry::stage::ROOM_SURFACE_CACHE);
     ActiveRoomSurfaceCache {
-        cell_first: cell_first as u16,
-        cell_count: stats.cell_count as u16,
-        vertex_first: vertex_first as u16,
-        vertex_count: stats.vertex_count as u16,
-        surface_first: surface_first as u16,
-        surface_count: stats.surface_count as u16,
+        cell_first,
+        cell_count,
+        vertex_first,
+        vertex_count,
+        surface_first,
+        surface_count,
         status: ActiveRoomCacheStatus::Ready,
         ready: true,
     }
+}
+
+fn generated_room_surface_cache_slices(
+    cache: ActiveRoomSurfaceCache,
+) -> Option<(
+    &'static [CachedRoomCell],
+    &'static [WorldVertex],
+    &'static [CachedRoomSurface],
+)> {
+    if !cache.ready || cache.vertex_count > MAX_CACHED_ROOM_VERTICES {
+        return None;
+    }
+    let cell_end = cache.cell_first.checked_add(cache.cell_count)?;
+    let vertex_end = cache.vertex_first.checked_add(cache.vertex_count)?;
+    let surface_end = cache.surface_first.checked_add(cache.surface_count)?;
+    let cells = ROOM_CACHE_CELLS.get(cache.cell_first..cell_end)?;
+    let vertices = ROOM_CACHE_VERTICES.get(cache.vertex_first..vertex_end)?;
+    let surfaces = ROOM_CACHE_SURFACES.get(cache.surface_first..surface_end)?;
+    Some((
+        cached_room_cells_from_level_records(cells),
+        cached_room_vertices_from_level_records(vertices),
+        cached_room_surfaces_from_level_records(surfaces),
+    ))
 }
 
 fn active_surface_cache_failed(cache: ActiveRoomSurfaceCache) -> bool {
@@ -3583,6 +3705,10 @@ fn chunk_view_score_current_space(
         .saturating_add((current_record.sector_size.max(1) as u64).saturating_mul(2));
     let view_tier = if depth.saturating_add(radius as i64) < 0 {
         3
+    } else if depth < (current_record.sector_size.max(1) as i64).saturating_mul(4)
+        && lateral > radius / 2
+    {
+        1
     } else if lateral <= cone_limit {
         0
     } else if ray_distance
@@ -4814,8 +4940,7 @@ fn draw_image_props(
         if prop.room != current_room {
             continue;
         }
-        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture)
-        else {
+        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
             continue;
         };
         let Some(slot) = ensure_texture_uploaded_with_clut_mode(asset.id, asset.bytes, false)
@@ -4832,7 +4957,14 @@ fn draw_image_props(
         if !sphere_visible_to_camera(camera, options, center, radius, 96) {
             continue;
         }
-        let verts = image_prop_vertices(origin, prop.width, prop.height, prop.yaw, prop.flags, *camera);
+        let verts = image_prop_vertices(
+            origin,
+            prop.width,
+            prop.height,
+            prop.yaw,
+            prop.flags,
+            *camera,
+        );
         let Some(projected) = camera.project_world_quad(verts) else {
             continue;
         };
