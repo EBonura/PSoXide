@@ -1700,7 +1700,27 @@ impl Playtest {
             .or_else(|| self.soft_lock_target_position());
         let target = self.camera_target(lock_target, self.anim_state != PlayerAnim::Idle);
         let config = self.camera_config();
-        let collision = if CAMERA_COLLISION_ENABLED && !self.chunked_level() {
+        if CAMERA_COLLISION_ENABLED && self.chunked_level() {
+            let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_ACTIVE_ROOMS];
+            let margin = config
+                .distance
+                .saturating_add(config.collision_margin)
+                .max(config.min_distance);
+            let collision_room_count =
+                self.collect_collision_rooms(target.player, margin, &mut collision_rooms);
+            return self
+                .camera
+                .update_vblanks_with_collision_rooms(
+                    PROJECTION,
+                    &collision_rooms[..collision_room_count],
+                    target,
+                    input,
+                    config,
+                    ctx.time.delta_vblanks(),
+                )
+                .camera;
+        }
+        let collision = if CAMERA_COLLISION_ENABLED {
             self.room.as_ref().map(|room| room.collision())
         } else {
             None
@@ -4207,6 +4227,25 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
                 depths[3],
             ),
         ]
+    }
+
+    fn shade_cached_baked_vertices(
+        &self,
+        sample: WorldSurfaceSample,
+        depths: Option<[i32; 4]>,
+        _material: WorldRenderMaterial,
+    ) -> Option<[(u8, u8, u8); 4]> {
+        let vertex_rgb = sample.baked_vertex_rgb?;
+        if !self.fog_enabled || self.fog_far <= self.fog_near {
+            return Some(vertex_rgb);
+        }
+        let depths = depths?;
+        Some([
+            self.apply_vertex_fog_weight(vertex_rgb[0], depths[0]),
+            self.apply_vertex_fog_weight(vertex_rgb[1], depths[1]),
+            self.apply_vertex_fog_weight(vertex_rgb[2], depths[2]),
+            self.apply_vertex_fog_weight(vertex_rgb[3], depths[3]),
+        ])
     }
 
     fn uses_vertex_depths(&self) -> bool {

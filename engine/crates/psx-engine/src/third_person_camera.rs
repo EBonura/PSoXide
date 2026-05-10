@@ -8,7 +8,9 @@
 //! lock-on facing, and a spring-arm collision solve that shortens the
 //! boom without taking yaw control away from the player.
 
-use crate::{Angle, RoomCollision, RoomPoint, WorldCamera, WorldProjection, Q12};
+use crate::{
+    Angle, CharacterCollisionRoom, RoomCollision, RoomPoint, WorldCamera, WorldProjection, Q12,
+};
 
 const RAY_STEPS_MAX: i32 = 8;
 const RAY_STEPS_MIN: i32 = 3;
@@ -16,6 +18,7 @@ const RAY_NEIGHBORHOOD_CELLS: usize = 9;
 const MAX_RAY_CHECKED_CELLS: usize = RAY_STEPS_MAX as usize * RAY_NEIGHBORHOOD_CELLS;
 const CHECKED_CAMERA_CELL_BITS: usize = 512;
 const CHECKED_CAMERA_CELL_WORDS: usize = CHECKED_CAMERA_CELL_BITS / 32;
+const MAX_CAMERA_COLLISION_ROOMS: usize = 4;
 const MAX_CAMERA_CATCHUP_VBLANKS: u16 = 4;
 
 // Mirrors psxed_format::world::direction::* without adding a direct
@@ -231,7 +234,7 @@ impl ThirdPersonCameraState {
         config: ThirdPersonCameraConfig,
     ) -> ThirdPersonCameraFrame {
         let config = normalize_config(config);
-        self.advance_one_vblank(collision, target, input, config);
+        self.advance_one_vblank(CameraCollision::Single(collision), target, input, config);
         self.current_frame(projection)
     }
 
@@ -253,7 +256,38 @@ impl ThirdPersonCameraState {
         let config = normalize_config(config);
         let mut i = 0;
         while i < steps {
-            self.advance_one_vblank(collision, target, input, config);
+            self.advance_one_vblank(CameraCollision::Single(collision), target, input, config);
+            i += 1;
+        }
+        self.current_frame(projection)
+    }
+
+    /// Advance the controller against a fixed active-room collision set.
+    ///
+    /// Chunked levels keep the player, camera, and focus in the current room's
+    /// local coordinate space. Nearby chunks are supplied with offsets into
+    /// that same space, mirroring the character motor's multi-room collision
+    /// path so the spring arm can cross loaded chunk boundaries and still hit
+    /// walls.
+    pub fn update_vblanks_with_collision_rooms(
+        &mut self,
+        projection: WorldProjection,
+        collision_rooms: &[CharacterCollisionRoom<'_>],
+        target: ThirdPersonCameraTarget,
+        input: ThirdPersonCameraInput,
+        config: ThirdPersonCameraConfig,
+        delta_vblanks: u16,
+    ) -> ThirdPersonCameraFrame {
+        let steps = delta_vblanks.max(1).min(MAX_CAMERA_CATCHUP_VBLANKS);
+        let config = normalize_config(config);
+        let mut i = 0;
+        while i < steps {
+            self.advance_one_vblank(
+                CameraCollision::Rooms(collision_rooms),
+                target,
+                input,
+                config,
+            );
             i += 1;
         }
         self.current_frame(projection)
@@ -261,7 +295,7 @@ impl ThirdPersonCameraState {
 
     fn advance_one_vblank(
         &mut self,
-        collision: Option<RoomCollision<'_, '_>>,
+        collision: CameraCollision<'_, '_, '_>,
         target: ThirdPersonCameraTarget,
         input: ThirdPersonCameraInput,
         config: ThirdPersonCameraConfig,
@@ -316,7 +350,7 @@ impl ThirdPersonCameraState {
         };
 
         let collision_solve =
-            solve_camera_collision(collision, self.focus, self.yaw, self.pitch_q12, config);
+            solve_camera_collision_context(collision, self.focus, self.yaw, self.pitch_q12, config);
 
         if collision_solve.distance < self.distance {
             self.distance = collision_solve.distance;
@@ -331,7 +365,7 @@ impl ThirdPersonCameraState {
             );
         }
 
-        let desired_position = clamp_camera_to_floor(
+        let desired_position = clamp_camera_to_floor_context(
             collision,
             camera_position(self.focus, self.distance, self.yaw, self.pitch_q12),
             config.min_floor_clearance,
@@ -342,7 +376,8 @@ impl ThirdPersonCameraState {
             self.position =
                 approach_vertex_shift(self.position, desired_position, config.position_lag_shift);
         }
-        self.position = clamp_camera_to_floor(collision, self.position, config.min_floor_clearance);
+        self.position =
+            clamp_camera_to_floor_context(collision, self.position, config.min_floor_clearance);
 
         self.last_pull_in = collision_solve.pull_in;
         self.last_rotated = false;
@@ -399,6 +434,12 @@ struct CameraRay {
     room_width: i32,
     room_depth: i32,
     vertical_margin: i32,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum CameraCollision<'room, 'room_ref, 'rooms> {
+    Single(Option<RoomCollision<'room, 'room_ref>>),
+    Rooms(&'rooms [CharacterCollisionRoom<'room>]),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -503,6 +544,63 @@ fn clamp_camera_to_floor(
     } else {
         position
     }
+}
+
+fn clamp_camera_to_floor_context(
+    collision: CameraCollision<'_, '_, '_>,
+    position: RoomPoint,
+    min_floor_clearance: i32,
+) -> RoomPoint {
+    match collision {
+        CameraCollision::Single(room) => clamp_camera_to_floor(room, position, min_floor_clearance),
+        CameraCollision::Rooms(rooms) => {
+            clamp_camera_to_floor_rooms(rooms, position, min_floor_clearance)
+        }
+    }
+}
+
+fn clamp_camera_to_floor_rooms(
+    rooms: &[CharacterCollisionRoom<'_>],
+    position: RoomPoint,
+    min_floor_clearance: i32,
+) -> RoomPoint {
+    if min_floor_clearance <= 0 {
+        return position;
+    }
+    let Some(floor_y) = floor_height_at_rooms(rooms, position) else {
+        return position;
+    };
+    let Some(min_y) = floor_y.checked_add(min_floor_clearance) else {
+        return position;
+    };
+    if position.y < min_y {
+        RoomPoint::new(position.x, min_y, position.z)
+    } else {
+        position
+    }
+}
+
+fn floor_height_at_rooms(rooms: &[CharacterCollisionRoom<'_>], point: RoomPoint) -> Option<i32> {
+    let mut i = 0usize;
+    while i < rooms.len() && i < MAX_CAMERA_COLLISION_ROOMS {
+        let entry = rooms[i];
+        if let Some(room) = entry.room {
+            let local = collision_room_local_point(entry, point);
+            if let Some(height) = floor_height_at(room.collision(), local.x, local.z) {
+                return Some(height);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn collision_room_local_point(entry: CharacterCollisionRoom<'_>, point: RoomPoint) -> RoomPoint {
+    RoomPoint::new(
+        point.x.saturating_sub(entry.offset_x),
+        point.y,
+        point.z.saturating_sub(entry.offset_z),
+    )
 }
 
 fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
@@ -619,6 +717,46 @@ fn solve_camera_collision(
     }
 }
 
+fn solve_camera_collision_context(
+    collision: CameraCollision<'_, '_, '_>,
+    focus: RoomPoint,
+    yaw: Angle,
+    pitch_q12: i16,
+    config: ThirdPersonCameraConfig,
+) -> CollisionSolve {
+    match collision {
+        CameraCollision::Single(room) => {
+            solve_camera_collision(room, focus, yaw, pitch_q12, config)
+        }
+        CameraCollision::Rooms(rooms) => {
+            solve_camera_collision_rooms(rooms, focus, yaw, pitch_q12, config)
+        }
+    }
+}
+
+fn solve_camera_collision_rooms(
+    rooms: &[CharacterCollisionRoom<'_>],
+    focus: RoomPoint,
+    yaw: Angle,
+    pitch_q12: i16,
+    config: ThirdPersonCameraConfig,
+) -> CollisionSolve {
+    if rooms.is_empty() {
+        return CollisionSolve {
+            distance: config.distance,
+            pull_in: false,
+        };
+    }
+
+    let desired = camera_position(focus, config.distance, yaw, pitch_q12);
+    let clear = probe_clear_distance_rooms(rooms, focus, desired, config.distance, config);
+    let distance = clear.clamp(config.min_distance, config.distance);
+    CollisionSolve {
+        distance,
+        pull_in: distance < config.distance,
+    }
+}
+
 fn probe_clear_distance(
     room: RoomCollision<'_, '_>,
     from: RoomPoint,
@@ -668,6 +806,64 @@ fn probe_clear_distance(
         .clamp(config.min_distance, config.distance)
 }
 
+fn probe_clear_distance_rooms(
+    rooms: &[CharacterCollisionRoom<'_>],
+    from: RoomPoint,
+    to: RoomPoint,
+    max_distance: i32,
+    config: ThirdPersonCameraConfig,
+) -> i32 {
+    let Some(sector) = first_collision_room_sector_size(rooms) else {
+        return config.distance;
+    };
+    let max_distance = max_distance.max(1);
+    let mut steps = (max_distance / (sector / 4).max(1)).clamp(RAY_STEPS_MIN, RAY_STEPS_MAX);
+    if steps <= 0 {
+        steps = RAY_STEPS_MIN;
+    }
+
+    let mut nearest = max_distance;
+    let mut last_clear_distance = 0;
+    let mut checked_cells = [const { CheckedCameraCells::new() }; MAX_CAMERA_COLLISION_ROOMS];
+    let mut i = 1;
+    while i <= steps {
+        let sample = lerp_vertex(from, to, i, steps);
+        if point_outside_camera_rooms(rooms, sample) {
+            nearest = last_clear_distance.min(nearest);
+            break;
+        }
+        if let Some(hit) = nearest_wall_hit_around_rooms(
+            rooms,
+            from,
+            to,
+            max_distance,
+            sample,
+            config,
+            &mut checked_cells,
+        ) {
+            nearest = hit.min(nearest);
+            break;
+        }
+        last_clear_distance = (max_distance.saturating_mul(i)) / steps;
+        i += 1;
+    }
+
+    nearest
+        .saturating_sub(config.collision_margin)
+        .clamp(config.min_distance, config.distance)
+}
+
+fn first_collision_room_sector_size(rooms: &[CharacterCollisionRoom<'_>]) -> Option<i32> {
+    let mut i = 0usize;
+    while i < rooms.len() && i < MAX_CAMERA_COLLISION_ROOMS {
+        if let Some(room) = rooms[i].room {
+            return Some(room.collision().sector_size().max(1));
+        }
+        i += 1;
+    }
+    None
+}
+
 fn point_outside_camera_space(
     room: RoomCollision<'_, '_>,
     point: RoomPoint,
@@ -687,6 +883,28 @@ fn point_outside_camera_space(
         Some(sector) => !sector.has_floor(),
         None => true,
     }
+}
+
+fn point_outside_camera_rooms(rooms: &[CharacterCollisionRoom<'_>], point: RoomPoint) -> bool {
+    let mut i = 0usize;
+    while i < rooms.len() && i < MAX_CAMERA_COLLISION_ROOMS {
+        let entry = rooms[i];
+        if let Some(room) = entry.room {
+            let collision = room.collision();
+            let local = collision_room_local_point(entry, point);
+            if !point_outside_camera_space(
+                collision,
+                local,
+                collision.sector_size().max(1),
+                collision.width() as i32,
+                collision.depth() as i32,
+            ) {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    true
 }
 
 fn nearest_wall_hit_around(
@@ -741,6 +959,50 @@ fn nearest_wall_hit_around(
             oz += 1;
         }
         ox += 1;
+    }
+    nearest
+}
+
+fn nearest_wall_hit_around_rooms(
+    rooms: &[CharacterCollisionRoom<'_>],
+    from: RoomPoint,
+    to: RoomPoint,
+    max_distance: i32,
+    sample: RoomPoint,
+    config: ThirdPersonCameraConfig,
+    checked_cells: &mut [CheckedCameraCells; MAX_CAMERA_COLLISION_ROOMS],
+) -> Option<i32> {
+    let mut nearest: Option<i32> = None;
+    let mut i = 0usize;
+    while i < rooms.len() && i < MAX_CAMERA_COLLISION_ROOMS {
+        let entry = rooms[i];
+        if let Some(room) = entry.room {
+            let collision = room.collision();
+            let local_from = collision_room_local_point(entry, from);
+            let local_to = collision_room_local_point(entry, to);
+            let local_sample = collision_room_local_point(entry, sample);
+            let ray = CameraRay {
+                from: local_from,
+                to: local_to,
+                dx: local_to.x.saturating_sub(local_from.x),
+                dy: local_to.y.saturating_sub(local_from.y),
+                dz: local_to.z.saturating_sub(local_from.z),
+                distance: max_distance,
+                sector_size: collision.sector_size().max(1),
+                room_width: collision.width() as i32,
+                room_depth: collision.depth() as i32,
+                vertical_margin: config.collision_margin,
+            };
+            if let Some(hit) =
+                nearest_wall_hit_around(collision, local_sample, ray, &mut checked_cells[i])
+            {
+                nearest = Some(match nearest {
+                    Some(prev) => prev.min(hit),
+                    None => hit,
+                });
+            }
+        }
+        i += 1;
     }
     nearest
 }
@@ -1373,6 +1635,30 @@ mod tests {
         let clear = probe_clear_distance(room.collision(), from, to, 1536, config);
 
         assert_eq!(clear, 256);
+    }
+
+    #[test]
+    fn camera_collision_rooms_cross_active_chunk_boundary() {
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
+        let rooms = [
+            CharacterCollisionRoom::new(room, 0, 0),
+            CharacterCollisionRoom::new(room, 0, 1024),
+        ];
+        let mut config = ThirdPersonCameraConfig::character(1280, 0, 0);
+        config.min_distance = 0;
+        config.collision_margin = 0;
+        let from = RoomPoint::new(512, 0, 512);
+        let to = RoomPoint::new(512, 0, 1792);
+
+        assert_eq!(
+            probe_clear_distance(room.collision(), from, to, 1280, config),
+            256
+        );
+        assert_eq!(
+            probe_clear_distance_rooms(&rooms, from, to, 1280, config),
+            1280
+        );
     }
 
     #[test]
