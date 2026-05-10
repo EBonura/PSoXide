@@ -36,11 +36,11 @@ use psxed_project::{
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
     PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
-    WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
-    HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
-    MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-    MAX_WORLD_SECTOR_SIZE, MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
-    WORLD_SECTOR_SIZE_QUANTUM,
+    WorldGrid, WorldGridBudget, DEFAULT_IMAGE_PROP_SIZE, DEFAULT_WALL_HEIGHT_SECTORS,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
+    MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_SECTOR_SIZE, MIN_WORLD_CAMERA_DISTANCE,
+    MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -48,7 +48,6 @@ const CONTENT_BROWSER_MIN_HEIGHT: f32 = 48.0;
 const CENTRAL_WORKSPACE_MIN_WIDTH: f32 = 360.0;
 const CENTRAL_WORKSPACE_MIN_HEIGHT: f32 = 220.0;
 const LEFT_DOCK_LABEL_CHARS: usize = 34;
-const ENTITY_POSITION_STEP: f32 = 0.1;
 const EDITOR_OUTLINE_STROKE_WIDTH: f32 = 1.25;
 const EDITOR_SELECTED_OUTLINE_STROKE_WIDTH: f32 = 3.0;
 const EDITOR_OUTLINE_ACCENT: Color32 = Color32::from_rgb(165, 238, 255);
@@ -202,6 +201,10 @@ pub struct EditorWorkspace {
     /// reuse grid-snapped primitive movement; Y reuses per-vertex
     /// height editing so every handle maps to exact authored data.
     primitive_gizmo_drag: Option<PrimitiveGizmoDrag>,
+    /// Active axis-gizmo drag for selected scene nodes. Entity and
+    /// PointLight nodes use this so they can move on X/Y/Z from the
+    /// 3D viewport instead of only X/Z plane dragging their bounds.
+    node_gizmo_drag: Option<NodeGizmoDrag>,
     /// Floating duplicate placement created by Cmd+D. While active,
     /// `project` contains the preview copy, but `base_project`
     /// lets Escape cancel without dirtying the document and lets
@@ -261,6 +264,10 @@ pub struct EditorWorkspace {
     /// `active_tool == Place`. Player Spawn enforces uniqueness
     /// at place-time; the others are additive markers.
     place_kind: PlaceKind,
+    /// Resource chosen in the Place toolbar. Kept separate from the
+    /// resource browser selection so repeated placement doesn't lose
+    /// the chosen Model/Profile/Image after each click.
+    place_resource: Option<ResourceId>,
     /// Material the next Floor / Wall / Ceiling paint will use, when
     /// set. `None` means "fall back to the name-based heuristic
     /// (`floor → first 'floor' material, brick → first 'brick' …`)" --
@@ -334,6 +341,7 @@ struct TextureImportDialog {
     height: i32,
     depth_bits: u8,
     centre_crop: bool,
+    transparent_index_zero: bool,
     resampler: TextureImportResamplerChoice,
     tint: [u8; 3],
     status: Option<TextureImportStatus>,
@@ -350,6 +358,7 @@ impl Default for TextureImportDialog {
             height: 64,
             depth_bits: 4,
             centre_crop: true,
+            transparent_index_zero: false,
             resampler: TextureImportResamplerChoice::Lanczos3,
             tint: [255, 255, 255],
             status: None,
@@ -400,6 +409,7 @@ struct TextureImportPreviewKey {
     height: i32,
     depth_bits: u8,
     centre_crop: bool,
+    transparent_index_zero: bool,
     resampler: TextureImportResamplerChoice,
     tint: [u8; 3],
 }
@@ -929,6 +939,8 @@ pub enum EntityBoundKind {
     Model,
     /// Legacy / unbound `MeshInstance` -- fallback box.
     MeshFallback,
+    /// Flat `ImageProp`.
+    ImageProp,
     /// `SpawnPoint` (player or non-player).
     SpawnPoint,
     /// `PointLight`. Marker box only -- radius ring is drawn
@@ -1272,7 +1284,7 @@ struct PrimitiveGridDrag {
     cells: Vec<GeometryClipboardCell>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PrimitiveGizmoAxis {
     X,
     Y,
@@ -1345,6 +1357,23 @@ struct PrimitiveGizmoGridDrag {
 }
 
 #[derive(Debug, Clone)]
+struct NodeGizmoDrag {
+    axis: PrimitiveGizmoAxis,
+    start_pointer: Pos2,
+    screen_axis: Vec2,
+    targets: Vec<NodeGizmoTarget>,
+    current_steps: i32,
+    snapshot_pushed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NodeGizmoTarget {
+    node: NodeId,
+    start_translation: [f32; 3],
+    sector_size: i32,
+}
+
+#[derive(Debug, Clone)]
 struct GeometryClipboard {
     mode: GeometryClipboardMode,
     source_room: NodeId,
@@ -1377,6 +1406,8 @@ struct FloatingGeometryPlacement {
     width: i32,
     height: i32,
     rotation_quarters: u8,
+    flip_x: bool,
+    flip_z: bool,
     cells: Vec<GeometryClipboardCell>,
 }
 
@@ -1459,6 +1490,15 @@ pub enum ViewportCameraMode {
     Orbit,
     /// Explicit-position fly camera.
     Free,
+}
+
+impl ViewportCameraMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Orbit => "Orbit",
+            Self::Free => "Free",
+        }
+    }
 }
 
 /// Snapshot of the editor's 3D viewport camera, handed to the
@@ -1650,6 +1690,8 @@ enum PlaceKind {
     /// CharacterController + Collider` referencing a
     /// [`ResourceData::Character`] profile.
     Character,
+    /// Flat material-backed image prop.
+    ImageProp,
     /// `PointLight` with default color / intensity / radius.
     PointLightMarker,
 }
@@ -1661,12 +1703,35 @@ impl PlaceKind {
             Self::SpawnMarker => "Spawn",
             Self::ModelInstance => "Prop",
             Self::Character => "Character",
+            Self::ImageProp => "Image Prop",
             Self::PointLightMarker => "Point Light",
         }
     }
 }
 
 impl ViewTool {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Select => "Select",
+            Self::PaintFloor => "Floor",
+            Self::PaintWall => "Wall",
+            Self::PaintCeiling => "Ceiling",
+            Self::Erase => "Erase",
+            Self::Place => "Place",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Select => icons::POINTER,
+            Self::PaintFloor => icons::GRID,
+            Self::PaintWall => icons::BRICK_WALL,
+            Self::PaintCeiling => icons::LAYERS,
+            Self::Erase => icons::TRASH,
+            Self::Place => icons::PLUS,
+        }
+    }
+
     /// `true` when the tool only makes sense once a Room is the
     /// active context -- viewport clicks should be suppressed
     /// otherwise so we don't paint into thin air.
@@ -1683,6 +1748,7 @@ enum ResourceFilter {
     All,
     Texture,
     Material,
+    ImagePropSource,
     Model,
     Animation,
     Character,
@@ -1720,6 +1786,7 @@ impl ResourceFilter {
             Self::All => "All Resources",
             Self::Texture => "Texture",
             Self::Material => "Material",
+            Self::ImagePropSource => "Image Source",
             Self::Model => "Model",
             Self::Animation => "Animation",
             Self::Character => "Character Profiles",
@@ -1735,6 +1802,7 @@ impl ResourceFilter {
             Self::All => icons::LAYERS,
             Self::Texture => icons::PALETTE,
             Self::Material => icons::BLEND,
+            Self::ImagePropSource => icons::PALETTE,
             Self::Model => icons::BOX,
             Self::Animation => icons::PLAY,
             Self::Character => icons::MAP_PIN,
@@ -1750,6 +1818,12 @@ impl ResourceFilter {
             Self::All => true,
             Self::Texture => matches!(data, ResourceData::Texture { .. }),
             Self::Material => matches!(data, ResourceData::Material(_)),
+            Self::ImagePropSource => {
+                matches!(
+                    data,
+                    ResourceData::Texture { .. } | ResourceData::Material(_)
+                )
+            }
             Self::Model => matches!(data, ResourceData::Model(_)),
             Self::Animation => matches!(
                 data,
@@ -1848,6 +1922,7 @@ impl EditorWorkspace {
             primitive_drag: None,
             primitive_grid_drag: None,
             primitive_gizmo_drag: None,
+            node_gizmo_drag: None,
             floating_geometry: None,
             hovered_entity_node: None,
             node_drag: None,
@@ -1867,6 +1942,7 @@ impl EditorWorkspace {
             resource_delete_confirm: None,
             active_tool: ViewTool::Select,
             place_kind: PlaceKind::PlayerSpawn,
+            place_resource: None,
             brush_material: None,
             snap_to_grid: true,
             snap_units: 16,
@@ -2015,6 +2091,7 @@ impl EditorWorkspace {
                 self.selected_resource = None;
                 self.selected_resources.clear();
                 self.resource_selection_anchor = None;
+                self.place_resource = None;
                 self.clear_sector_selection();
                 self.resource_renaming = None;
                 self.resource_delete_confirm = None;
@@ -2739,6 +2816,17 @@ impl EditorWorkspace {
                             .color(STUDIO_TEXT_WEAK)
                             .small(),
                         );
+                        ui.checkbox(
+                            &mut dialog.transparent_index_zero,
+                            "Source alpha is transparent",
+                        );
+                        ui.label(
+                            RichText::new(
+                                "For cutout props and sprites: transparent source pixels become PSX texel 0.",
+                            )
+                            .color(STUDIO_TEXT_WEAK)
+                            .small(),
+                        );
                         ui.add_space(4.0);
                         color_editor(ui, "Tint", &mut dialog.tint);
                         ui.horizontal(|ui| {
@@ -3008,6 +3096,7 @@ impl EditorWorkspace {
             crop,
             resampler: self.texture_import_dialog.resampler.to_import(),
             tint: self.texture_import_dialog.tint,
+            transparent_index_zero: self.texture_import_dialog.transparent_index_zero,
         }
     }
 
@@ -3018,6 +3107,7 @@ impl EditorWorkspace {
             height: self.texture_import_dialog.height.clamp(1, 256),
             depth_bits: self.texture_import_dialog.depth_bits,
             centre_crop: self.texture_import_dialog.centre_crop,
+            transparent_index_zero: self.texture_import_dialog.transparent_index_zero,
             resampler: self.texture_import_dialog.resampler,
             tint: self.texture_import_dialog.tint,
         }
@@ -3602,27 +3692,6 @@ impl EditorWorkspace {
         ui: &mut egui::Ui,
         viewport_3d: EditorViewport3dPresentation,
     ) {
-        ui.horizontal(|ui| {
-            ui.label(icons::text(icons::BOX, 14.0).color(STUDIO_ACCENT));
-            ui.label(RichText::new("3D Preview").strong().color(STUDIO_TEXT));
-            ui.separator();
-            match self.viewport_3d_camera_mode {
-                ViewportCameraMode::Orbit => {
-                    ui.weak(format!(
-                        "Orbit yaw {} pitch {} r {}",
-                        self.viewport_3d_yaw, self.viewport_3d_pitch, self.viewport_3d_radius
-                    ));
-                }
-                ViewportCameraMode::Free => {
-                    let [x, y, z] = self.viewport_3d_free_position;
-                    ui.weak(format!(
-                        "Free x {x} y {y} z {z} yaw {} pitch {}",
-                        self.viewport_3d_free_yaw, self.viewport_3d_free_pitch
-                    ));
-                }
-            }
-        });
-        ui.separator();
         let (rect, response) =
             allocate_centered_preview_rect(ui, "viewport_3d_canvas", egui::Sense::click_and_drag());
         let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
@@ -3779,6 +3848,8 @@ impl EditorWorkspace {
                     if let Some(pointer) = response.interact_pointer_pos() {
                         if let Some(axis) = self.pick_primitive_gizmo_axis(rect, pointer) {
                             self.begin_primitive_gizmo_drag(axis, rect, pointer);
+                        } else if let Some(axis) = self.pick_node_gizmo_axis(rect, pointer) {
+                            self.begin_node_gizmo_drag(axis, rect, pointer);
                         } else {
                             let entity_hit =
                                 self.pick_entity_bound(rect, pointer, self.active_room_id());
@@ -3802,6 +3873,10 @@ impl EditorWorkspace {
                         if let Some(p) = response.interact_pointer_pos() {
                             self.update_primitive_gizmo_drag(p);
                         }
+                    } else if self.node_gizmo_drag.is_some() {
+                        if let Some(p) = response.interact_pointer_pos() {
+                            self.update_node_gizmo_drag(p);
+                        }
                     } else if self.node_drag.is_some() {
                         if let Some(p) = response.interact_pointer_pos() {
                             self.update_node_drag(rect, p);
@@ -3822,6 +3897,8 @@ impl EditorWorkspace {
                 if response.drag_stopped_by(egui::PointerButton::Primary) {
                     if self.primitive_gizmo_drag.is_some() {
                         self.end_primitive_gizmo_drag();
+                    } else if self.node_gizmo_drag.is_some() {
+                        self.end_node_gizmo_drag();
                     } else if self.node_drag.is_some() {
                         self.end_node_drag();
                     } else if self.primitive_grid_drag.is_some() {
@@ -3877,6 +3954,7 @@ impl EditorWorkspace {
         let painter = ui.painter_at(rect);
         Self::draw_viewport_3d_overlay_lines(&painter, rect, &viewport_3d);
         self.draw_primitive_gizmo(&painter, rect);
+        self.draw_node_gizmo(&painter, rect);
         draw_viewport_box_select_marquee(&painter, self.viewport_3d_box_select_rect());
         if resource_drop_hovered {
             painter.rect_stroke(
@@ -4053,18 +4131,6 @@ impl EditorWorkspace {
                 input_captured: true
             }
         );
-        ui.horizontal(|ui| {
-            ui.label(icons::text(icons::PLAY, 14.0).color(STUDIO_ACCENT));
-            ui.label(RichText::new("Play Mode").strong().color(STUDIO_TEXT));
-            ui.separator();
-            if captured {
-                ui.weak("input captured");
-            } else {
-                ui.weak("click viewport to capture input");
-            }
-        });
-        ui.separator();
-
         let (rect, response) =
             allocate_centered_preview_rect(ui, "viewport_3d_play_canvas", egui::Sense::click());
         if response.clicked() {
@@ -4839,6 +4905,127 @@ impl EditorWorkspace {
         }
     }
 
+    fn node_gizmo_screen_axes(&self, rect: Rect) -> Vec<PrimitiveGizmoScreenAxis> {
+        let targets = self.selected_node_gizmo_targets();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let Some((pivot, _)) = self.node_gizmo_bounds_3d(&targets) else {
+            return Vec::new();
+        };
+        let camera = self.viewport_3d_camera();
+        let Some(start) = project_world_to_viewport_screen(camera, rect, pivot) else {
+            return Vec::new();
+        };
+        let axis_len = self.node_gizmo_axis_world_length(&targets);
+        [
+            PrimitiveGizmoAxis::X,
+            PrimitiveGizmoAxis::Y,
+            PrimitiveGizmoAxis::Z,
+        ]
+        .into_iter()
+        .filter_map(|axis| {
+            let delta = axis.world_delta(axis_len);
+            let end_world = [
+                pivot[0] + delta[0],
+                pivot[1] + delta[1],
+                pivot[2] + delta[2],
+            ];
+            let end = project_world_to_viewport_screen(camera, rect, end_world)?;
+            ((end - start).length_sq() >= 64.0).then_some(PrimitiveGizmoScreenAxis {
+                axis,
+                start,
+                end,
+            })
+        })
+        .collect()
+    }
+
+    fn selected_node_gizmo_targets(&self) -> Vec<NodeId> {
+        self.selected_node_ids_in_hierarchy()
+            .into_iter()
+            .filter(|id| self.node_supports_axis_gizmo(*id))
+            .collect()
+    }
+
+    fn node_supports_axis_gizmo(&self, id: NodeId) -> bool {
+        if self.scene_node_effectively_hidden(id) {
+            return false;
+        }
+        self.project.active_scene().node(id).is_some_and(|node| {
+            matches!(
+                node.kind,
+                NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. }
+            )
+        })
+    }
+
+    fn node_gizmo_bounds_3d(&self, targets: &[NodeId]) -> Option<([f32; 3], [f32; 3])> {
+        let mut bounds = None;
+        for id in targets {
+            if let Some((center, half)) = self.node_frame_bounds_3d(*id) {
+                merge_bounds_3d(&mut bounds, center, half);
+            }
+        }
+        bounds.map(bounds_3d_to_center_half)
+    }
+
+    fn node_gizmo_axis_world_length(&self, targets: &[NodeId]) -> i32 {
+        let scene = self.project.active_scene();
+        for id in targets {
+            let Some(room_id) = enclosing_room_id(scene, *id) else {
+                continue;
+            };
+            let Some(room) = scene.node(room_id) else {
+                continue;
+            };
+            let NodeKind::Room { grid } = &room.kind else {
+                continue;
+            };
+            return grid.sector_size.max(1);
+        }
+        DEFAULT_WORLD_SECTOR_SIZE
+    }
+
+    fn pick_node_gizmo_axis(&self, rect: Rect, pointer: Pos2) -> Option<PrimitiveGizmoAxis> {
+        self.node_gizmo_screen_axes(rect)
+            .into_iter()
+            .filter_map(|screen_axis| {
+                let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
+                    .min((pointer - screen_axis.end).length());
+                (distance <= 10.0).then_some((distance, screen_axis.axis))
+            })
+            .min_by(|(a, _), (b, _)| a.total_cmp(b))
+            .map(|(_, axis)| axis)
+    }
+
+    fn draw_node_gizmo(&self, painter: &egui::Painter, rect: Rect) {
+        let axes = self.node_gizmo_screen_axes(rect);
+        if axes.is_empty() {
+            return;
+        }
+        let active_axis = self.node_gizmo_drag.as_ref().map(|drag| drag.axis);
+        painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
+        for screen_axis in axes {
+            let active = active_axis == Some(screen_axis.axis);
+            let color = screen_axis.axis.color();
+            let stroke_width = if active { 4.0 } else { 2.5 };
+            painter.line_segment(
+                [screen_axis.start, screen_axis.end],
+                Stroke::new(stroke_width, color),
+            );
+            painter.circle_filled(screen_axis.end, if active { 6.0 } else { 5.0 }, color);
+            let label_offset = (screen_axis.end - screen_axis.start).normalized() * 12.0;
+            painter.text(
+                screen_axis.end + label_offset,
+                Align2::CENTER_CENTER,
+                screen_axis.axis.label(),
+                FontId::monospace(12.0),
+                color,
+            );
+        }
+    }
+
     fn begin_primitive_gizmo_drag(
         &mut self,
         axis: PrimitiveGizmoAxis,
@@ -5077,6 +5264,127 @@ impl EditorWorkspace {
                 format!("Moved {moved} primitives by {delta} height units")
             };
         }
+    }
+
+    fn begin_node_gizmo_drag(
+        &mut self,
+        axis: PrimitiveGizmoAxis,
+        rect: Rect,
+        pointer: Pos2,
+    ) -> bool {
+        let ids = self.selected_node_gizmo_targets();
+        if ids.is_empty() {
+            return false;
+        }
+        let Some(screen_axis) = self
+            .node_gizmo_screen_axes(rect)
+            .into_iter()
+            .find(|candidate| candidate.axis == axis)
+        else {
+            return false;
+        };
+        let screen_axis_delta = screen_axis.end - screen_axis.start;
+        if screen_axis_delta.length_sq() < 64.0 {
+            return false;
+        }
+
+        let scene = self.project.active_scene();
+        let targets: Vec<NodeGizmoTarget> = ids
+            .into_iter()
+            .filter_map(|id| {
+                scene.node(id).map(|node| NodeGizmoTarget {
+                    node: id,
+                    start_translation: node.transform.translation,
+                    sector_size: node_enclosing_sector_size(scene, id),
+                })
+            })
+            .collect();
+        if targets.is_empty() {
+            return false;
+        }
+
+        self.node_gizmo_drag = Some(NodeGizmoDrag {
+            axis,
+            start_pointer: pointer,
+            screen_axis: screen_axis_delta,
+            targets,
+            current_steps: 0,
+            snapshot_pushed: false,
+        });
+        true
+    }
+
+    fn update_node_gizmo_drag(&mut self, pointer: Pos2) {
+        let Some(drag) = self.node_gizmo_drag.as_ref() else {
+            return;
+        };
+        let axis_len_sq = drag.screen_axis.length_sq();
+        if axis_len_sq < f32::EPSILON {
+            return;
+        }
+        const PIXELS_PER_NODE_GIZMO_STEP: f32 = 8.0;
+        let pointer_delta = pointer - drag.start_pointer;
+        let unit = drag.screen_axis / axis_len_sq.sqrt();
+        let steps = (pointer_delta.dot(unit) / PIXELS_PER_NODE_GIZMO_STEP).round() as i32;
+        if steps == drag.current_steps {
+            return;
+        }
+        if let Some(drag) = self.node_gizmo_drag.as_mut() {
+            drag.current_steps = steps;
+        }
+        self.apply_node_gizmo_drag();
+    }
+
+    fn apply_node_gizmo_drag(&mut self) {
+        let Some(drag) = self.node_gizmo_drag.as_ref() else {
+            return;
+        };
+        if drag.current_steps == 0 && !drag.snapshot_pushed {
+            return;
+        }
+        if !drag.snapshot_pushed {
+            if let Some(drag) = self.node_gizmo_drag.as_mut() {
+                drag.snapshot_pushed = true;
+            }
+            self.push_undo();
+        }
+
+        let Some(drag) = self.node_gizmo_drag.as_ref() else {
+            return;
+        };
+        let axis = drag.axis;
+        let steps = drag.current_steps;
+        let targets = drag.targets.clone();
+        let scene = self.project.active_scene_mut();
+        for target in targets {
+            let Some(node) = scene.node_mut(target.node) else {
+                continue;
+            };
+            node.transform.translation = node_gizmo_translation(
+                node,
+                target.start_translation,
+                axis,
+                steps,
+                target.sector_size,
+            );
+        }
+        self.mark_dirty();
+    }
+
+    fn end_node_gizmo_drag(&mut self) {
+        let Some(drag) = self.node_gizmo_drag.take() else {
+            return;
+        };
+        if !drag.snapshot_pushed {
+            return;
+        }
+        let axis = drag.axis.label();
+        let moved = drag.targets.len();
+        self.status = if moved == 1 {
+            format!("Moved 1 node on {axis}")
+        } else {
+            format!("Moved {moved} nodes on {axis}")
+        };
     }
 
     fn primitive_drag_targets(&self, target: Selection) -> Vec<Selection> {
@@ -5320,6 +5628,102 @@ impl EditorWorkspace {
         true
     }
 
+    fn select_horizontal_face_rect(
+        &mut self,
+        selection: Selection,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        let Selection::Face(current) = selection else {
+            return false;
+        };
+        if !matches!(current.kind, FaceKind::Floor | FaceKind::Ceiling) {
+            return false;
+        }
+        let Some(anchor) = self.horizontal_face_selection_anchor(current.kind) else {
+            return false;
+        };
+        if anchor.room != current.room {
+            return false;
+        }
+
+        let min_x = anchor.sx.min(current.sx);
+        let max_x = anchor.sx.max(current.sx);
+        let min_z = anchor.sz.min(current.sz);
+        let max_z = anchor.sz.max(current.sz);
+        let selections = self.existing_horizontal_rect_faces(
+            current.room,
+            current.kind,
+            min_x,
+            max_x,
+            min_z,
+            max_z,
+        );
+        if selections.is_empty() {
+            return false;
+        }
+
+        let additive = modifiers.command || modifiers.ctrl;
+        self.clear_sector_selection();
+        self.clear_node_selection_state();
+        if !additive {
+            self.selected_primitives.clear();
+        }
+        for rect_selection in selections {
+            self.push_selected_primitive_unique(rect_selection);
+        }
+        self.selected_primitive = Some(selection);
+        self.update_primitive_resource_selection();
+        self.status = match self.selected_primitives.len() {
+            0 => "Cleared primitive selection".to_string(),
+            1 => format!("Selected {}", describe_selection(selection)),
+            count => format!("Selected {count} {}", horizontal_face_plural(current.kind)),
+        };
+        true
+    }
+
+    fn horizontal_face_selection_anchor(&self, kind: FaceKind) -> Option<FaceRef> {
+        self.selected_primitives
+            .iter()
+            .copied()
+            .find_map(|selection| selection_horizontal_face(selection, kind))
+            .or_else(|| {
+                self.selected_primitive
+                    .and_then(|selection| selection_horizontal_face(selection, kind))
+            })
+    }
+
+    fn existing_horizontal_rect_faces(
+        &self,
+        room: NodeId,
+        kind: FaceKind,
+        min_x: u16,
+        max_x: u16,
+        min_z: u16,
+        max_z: u16,
+    ) -> Vec<Selection> {
+        let scene = self.project.active_scene();
+        let Some(node) = scene.node(room) else {
+            return Vec::new();
+        };
+        let NodeKind::Room { grid } = &node.kind else {
+            return Vec::new();
+        };
+        let mut selections = Vec::new();
+        for sx in min_x..=max_x {
+            for sz in min_z..=max_z {
+                let has_face = grid.sector(sx, sz).is_some_and(|sector| match kind {
+                    FaceKind::Floor => sector.floor.is_some(),
+                    FaceKind::Ceiling => sector.ceiling.is_some(),
+                    FaceKind::Wall { .. } => false,
+                });
+                if has_face {
+                    selections.push(Selection::Face(FaceRef { room, sx, sz, kind }));
+                }
+            }
+        }
+        selections
+    }
+
     fn wall_face_selection_anchor(&self) -> Option<FaceRef> {
         self.selected_primitives
             .iter()
@@ -5479,6 +5883,9 @@ impl EditorWorkspace {
         modifiers: egui::Modifiers,
     ) {
         let toggle = modifiers.command || modifiers.ctrl;
+        if modifiers.shift && self.select_horizontal_face_rect(selection, modifiers) {
+            return;
+        }
         if modifiers.shift && self.select_wall_face_span(selection, modifiers) {
             return;
         }
@@ -6128,6 +6535,21 @@ impl EditorWorkspace {
                         return;
                     }
                 },
+                PlaceKind::ImageProp => match self.resolve_place_image_prop_material() {
+                    Ok((material_id, name)) => (
+                        format!("{name} Image"),
+                        NodeKind::ImageProp {
+                            material: Some(material_id),
+                            width: DEFAULT_IMAGE_PROP_SIZE,
+                            height: DEFAULT_IMAGE_PROP_SIZE,
+                            cylindrical_billboard: false,
+                        },
+                    ),
+                    Err(message) => {
+                        self.status = message;
+                        return;
+                    }
+                },
                 PlaceKind::PointLightMarker => (
                     "Point Light".to_string(),
                     NodeKind::PointLight {
@@ -6145,6 +6567,9 @@ impl EditorWorkspace {
                 .add_node(room_id, default_name, node_kind);
             if let Some(node) = self.project.active_scene_mut().node_mut(id) {
                 node.transform.translation = [editor[0], 0.0, editor[1]];
+                if matches!(kind, PlaceKind::ImageProp) {
+                    node.transform.translation[1] = hit_world[1] as f32 / sector_size;
+                }
             }
             self.replace_node_selection(id);
             self.clear_resource_selection_state();
@@ -6355,6 +6780,66 @@ impl EditorWorkspace {
             }
         }
         faces
+    }
+
+    fn selected_sector_wall_faces(&self) -> Vec<FaceRef> {
+        self.selected_sector_faces()
+            .into_iter()
+            .filter(|face| matches!(face.kind, FaceKind::Wall { .. }))
+            .collect()
+    }
+
+    fn autotile_selected_sector_walls(&mut self) -> usize {
+        let selected_tiles = self.selected_sectors.len();
+        if selected_tiles == 0 {
+            self.status = "No selected tiles to autotile".to_string();
+            return 0;
+        }
+
+        let targets = self.selected_sector_wall_faces();
+        if targets.is_empty() {
+            self.status = "No selected tiles have walls to autotile".to_string();
+            return 0;
+        }
+
+        let mut visited = 0usize;
+        let mut updated = 0usize;
+        let mut clamped = 0usize;
+        for face in targets {
+            let Some((changed, was_clamped)) = self.autotile_wall_face_no_undo(face) else {
+                continue;
+            };
+            visited += 1;
+            if changed {
+                updated += 1;
+            }
+            if was_clamped {
+                clamped += 1;
+            }
+        }
+
+        if updated > 0 {
+            self.mark_dirty();
+        }
+        self.status = autotile_selection_status(selected_tiles, visited, updated, clamped);
+        updated
+    }
+
+    fn autotile_wall_face_no_undo(&mut self, face: FaceRef) -> Option<(bool, bool)> {
+        let FaceKind::Wall { dir, stack } = face.kind else {
+            return None;
+        };
+        let scene = self.project.active_scene_mut();
+        let node = scene.node_mut(face.room)?;
+        let NodeKind::Room { grid } = &mut node.kind else {
+            return None;
+        };
+        let sector_size = grid.sector_size;
+        let sector = grid.sector_mut(face.sx, face.sz)?;
+        let wall = sector.walls.get_mut(dir).get_mut(stack as usize)?;
+        let before = wall.uv;
+        let clamped = wall.autotile_uv(sector_size);
+        Some((wall.uv != before, clamped))
     }
 
     fn assign_face_material_no_undo(
@@ -7071,6 +7556,14 @@ impl EditorWorkspace {
             if rot && self.renaming.is_none() {
                 self.rotate_current_selection_90();
             }
+            let flip = ctx.input_mut(|i| i.key_pressed(egui::Key::F));
+            if flip && self.floating_geometry.is_some() {
+                if modifiers.shift {
+                    self.flip_floating_geometry_z();
+                } else {
+                    self.flip_floating_geometry_x();
+                }
+            }
             let escape = ctx.input_mut(|i| i.key_pressed(egui::Key::Escape));
             if escape && self.floating_geometry.is_some() {
                 self.cancel_floating_geometry();
@@ -7255,6 +7748,7 @@ impl EditorWorkspace {
             node.kind,
             NodeKind::Entity
                 | NodeKind::MeshInstance { .. }
+                | NodeKind::ImageProp { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Trigger { .. }
                 | NodeKind::AudioSource { .. }
@@ -8080,9 +8574,16 @@ impl EditorWorkspace {
                                                 ui.label(format!(
                                                     "{selected_sector_count} sectors selected"
                                                 ));
-                                                ui.weak(
-                                                    "The inspector edits the last selected sector for now.",
-                                                );
+                                                if ui
+                                                    .button("Autotile")
+                                                    .on_hover_text(
+                                                        "Autotile every wall in the selected sector tiles.",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.autotile_selected_sector_walls();
+                                                }
+                                                ui.weak("The detailed inspector edits the last selected sector for now.");
                                             });
                                         }
                                         if draw_sector_inspector(
@@ -9665,6 +10166,64 @@ impl EditorWorkspace {
         true
     }
 
+    fn viewport_context_chips(&self) -> Vec<String> {
+        if self.active_workspace == WorkspaceView::Animation {
+            return vec!["Animation Viewer".to_string()];
+        }
+
+        let mut chips = vec![
+            "Room Edit".to_string(),
+            self.active_tool.label().to_string(),
+        ];
+        match self.active_tool {
+            ViewTool::Select => {
+                chips.push(self.selection_mode.label().to_string());
+                chips.push(self.horizontal_edit_mode.label().to_string());
+                chips.push(self.vertex_connectivity.label().to_string());
+            }
+            ViewTool::PaintWall => {
+                chips.push(self.wall_paint_shape.label().to_string());
+            }
+            ViewTool::Place => {
+                chips.push(self.place_kind.label().to_string());
+            }
+            ViewTool::PaintFloor | ViewTool::PaintCeiling | ViewTool::Erase => {}
+        }
+        chips.push(if self.view_2d {
+            "2D".to_string()
+        } else {
+            format!("3D {}", self.viewport_3d_camera_mode.label())
+        });
+        chips
+    }
+
+    fn viewport_header_status(&self) -> String {
+        if self.active_workspace == WorkspaceView::Animation {
+            return "Animation Preview".to_string();
+        }
+        if self.view_2d {
+            let zoom = (self.viewport_zoom / DEFAULT_VIEWPORT_ZOOM * 100.0).round() as u16;
+            return format!("2D Preview · Zoom {zoom}%");
+        }
+        self.viewport_3d_status_text()
+    }
+
+    fn viewport_3d_status_text(&self) -> String {
+        match self.viewport_3d_camera_mode {
+            ViewportCameraMode::Orbit => format!(
+                "3D Preview · Orbit yaw {} pitch {} r {}",
+                self.viewport_3d_yaw, self.viewport_3d_pitch, self.viewport_3d_radius
+            ),
+            ViewportCameraMode::Free => {
+                let [x, y, z] = self.viewport_3d_free_position;
+                format!(
+                    "3D Preview · Free x {x} y {y} z {z} yaw {} pitch {}",
+                    self.viewport_3d_free_yaw, self.viewport_3d_free_pitch
+                )
+            }
+        }
+    }
+
     fn draw_viewport(
         &mut self,
         ctx: &egui::Context,
@@ -9895,12 +10454,14 @@ impl EditorWorkspace {
             .map(|node| node.name.as_str())
             .unwrap_or("(no room)");
         let title = format!("{room_label}.room");
+        let context_chips = self.viewport_context_chips();
+        let header_status = self.viewport_header_status();
         egui::Frame::new()
             .fill(STUDIO_PANEL_HEADER)
             .inner_margin(panel_header_margin())
             .show(ui, |ui| {
                 ui.set_min_height(PANEL_HEADER_MIN_HEIGHT);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     for (view, label) in [
                         (WorkspaceView::Room, title.as_str()),
                         (WorkspaceView::Animation, WorkspaceView::Animation.label()),
@@ -9913,11 +10474,16 @@ impl EditorWorkspace {
                             self.active_workspace = view;
                         }
                     }
+                    ui.separator();
+                    for (index, chip) in context_chips.iter().enumerate() {
+                        context_chip(ui, chip, index == 1);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!("Project: {}", self.project.name))
                                 .color(STUDIO_TEXT_WEAK),
                         );
+                        ui.label(RichText::new(header_status).small().color(STUDIO_TEXT_WEAK));
                     });
                 });
             });
@@ -9929,136 +10495,151 @@ impl EditorWorkspace {
         if !room_active && self.active_tool.requires_room_context() {
             self.active_tool = ViewTool::Select;
         }
-        // Two rows: row 1 is "what to do" (tools + the brush
-        // material a paint tool will use); row 2 is "how to view"
-        // (snap / grid / 2D-vs-3D / zoom). Splitting keeps the
-        // toolbar from overflowing on narrow windows and groups
-        // controls by intent so each row scans as one decision.
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                {
-                    let (tool, label, hint) = (
-                        ViewTool::Select,
-                        icons::label(icons::POINTER, "Select"),
-                        "Click to select; drag the selection vertically to translate it.",
-                    );
-                    ui.selectable_value(&mut self.active_tool, tool, label)
-                        .on_hover_text(hint);
-                }
-                ui.separator();
-                ui.add_enabled_ui(room_active, |ui| {
-                    for (tool, label, hint) in [
+        egui::ScrollArea::horizontal()
+            .id_salt("viewport-toolbar-scroll")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (tool, hint) in [
+                        (
+                            ViewTool::Select,
+                            "Click to select; drag a selected primitive vertically to move it.",
+                        ),
                         (
                             ViewTool::PaintFloor,
-                            icons::label(icons::GRID, "Floor"),
                             "Paint a floor on each cell you click or drag over.",
                         ),
                         (
                             ViewTool::PaintWall,
-                            icons::label(icons::BRICK_WALL, "Wall"),
                             "Paint a wall on the edge nearest the click.",
                         ),
-                        (
-                            ViewTool::PaintCeiling,
-                            icons::label(icons::LAYERS, "Ceiling"),
-                            "Paint a ceiling on each cell.",
-                        ),
-                        (
-                            ViewTool::Erase,
-                            icons::label(icons::TRASH, "Erase"),
-                            "Clear floor/walls/ceiling from the cell.",
-                        ),
+                        (ViewTool::PaintCeiling, "Paint a ceiling on each cell."),
+                        (ViewTool::Erase, "Clear floor/walls/ceiling from the cell."),
                         (
                             ViewTool::Place,
-                            icons::label(icons::PLUS, "Place"),
-                            "Drop a Spawn Point at the clicked cell.",
+                            "Drop a Spawn Point or entity marker at the clicked cell.",
                         ),
                     ] {
-                        ui.selectable_value(&mut self.active_tool, tool, label)
-                            .on_hover_text(hint);
+                        let enabled = room_active || !tool.requires_room_context();
+                        let clicked = ui
+                            .add_enabled_ui(enabled, |ui| {
+                                toolbar_icon_button(
+                                    ui,
+                                    self.active_tool == tool,
+                                    tool.icon(),
+                                    tool.label(),
+                                    hint,
+                                )
+                            })
+                            .inner;
+                        if clicked {
+                            self.active_tool = tool;
+                        }
                     }
-                });
-                ui.separator();
-                if matches!(self.active_tool, ViewTool::Select) {
-                    self.draw_selection_mode_picker(ui);
                     ui.separator();
-                    self.draw_horizontal_edit_mode_picker(ui);
-                    ui.separator();
-                    self.draw_vertex_connectivity_picker(ui);
-                } else if matches!(self.active_tool, ViewTool::Place) {
-                    self.draw_place_kind_picker(ui);
-                } else if matches!(self.active_tool, ViewTool::PaintWall) {
-                    self.draw_wall_paint_shape_picker(ui);
-                    ui.separator();
-                    self.draw_brush_material_picker(ui);
-                } else {
-                    self.draw_brush_material_picker(ui);
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(
-                    &mut self.snap_to_grid,
-                    icons::label(icons::WAYPOINT, "Snap"),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut self.snap_units)
-                        .speed(1.0)
-                        .range(1..=256),
-                );
-                ui.separator();
-                ui.checkbox(&mut self.show_grid, icons::label(icons::GRID, "Grid"));
-                ui.add_enabled_ui(!self.view_2d, |ui| {
-                    ui.toggle_value(&mut self.preview_fog, icons::label(icons::EYE, "Fog"))
-                        .on_hover_text("Toggle authored room fog in the editor 3D preview.");
-                    ui.toggle_value(
-                        &mut self.preview_backface_wireframe,
-                        icons::label(icons::SCAN, "Backfaces"),
-                    )
-                    .on_hover_text("Toggle passive outlines for culled backfaces.");
-                });
-                ui.separator();
-                ui.add_enabled_ui(!self.view_2d, |ui| {
-                    if ui
-                        .selectable_label(
-                            self.viewport_3d_camera_mode == ViewportCameraMode::Orbit,
-                            icons::label(icons::ROTATE_3D, "Orbit"),
-                        )
-                        .on_hover_text("Use the target/radius orbit camera.")
-                        .clicked()
-                    {
-                        self.set_viewport_3d_camera_mode(ViewportCameraMode::Orbit);
+                    if matches!(self.active_tool, ViewTool::Select) {
+                        self.draw_selection_mode_picker(ui);
+                        ui.separator();
+                        self.draw_horizontal_edit_mode_picker(ui);
+                        ui.separator();
+                        self.draw_vertex_connectivity_picker(ui);
+                    } else if matches!(self.active_tool, ViewTool::Place) {
+                        self.draw_place_kind_picker(ui);
+                    } else if matches!(self.active_tool, ViewTool::PaintWall) {
+                        self.draw_wall_paint_shape_picker(ui);
+                        ui.separator();
+                        self.draw_brush_material_picker(ui);
+                    } else {
+                        self.draw_brush_material_picker(ui);
                     }
-                    if ui
-                        .selectable_label(
-                            self.viewport_3d_camera_mode == ViewportCameraMode::Free,
-                            icons::label(icons::MOVE, "Free"),
-                        )
-                        .on_hover_text("Use the free camera. Right/middle drag looks; WASD moves.")
-                        .clicked()
-                    {
-                        self.set_viewport_3d_camera_mode(ViewportCameraMode::Free);
+                    ui.separator();
+                    if toolbar_icon_button(
+                        ui,
+                        self.snap_to_grid,
+                        icons::WAYPOINT,
+                        "Snap",
+                        "Snap movement and placement to the grid.",
+                    ) {
+                        self.snap_to_grid = !self.snap_to_grid;
                     }
-                });
-                ui.separator();
-                ui.selectable_value(&mut self.view_2d, true, icons::label(icons::GRID, "2D"));
-                ui.selectable_value(&mut self.view_2d, false, icons::label(icons::BOX, "3D"));
-                ui.separator();
-                ui.label(RichText::new("Zoom").color(STUDIO_TEXT_WEAK));
-                let mut zoom_percent = (self.viewport_zoom / DEFAULT_VIEWPORT_ZOOM * 100.0) as u16;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut zoom_percent)
+                    ui.add_sized(
+                        [48.0, 22.0],
+                        egui::DragValue::new(&mut self.snap_units)
                             .speed(1.0)
-                            .range(25..=250)
-                            .suffix("%"),
+                            .range(1..=256),
                     )
-                    .changed()
-                {
-                    self.viewport_zoom = (zoom_percent as f32 / 100.0 * DEFAULT_VIEWPORT_ZOOM)
-                        .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
-                }
+                    .on_hover_text("Snap interval.");
+                    if toolbar_icon_button(
+                        ui,
+                        self.show_grid,
+                        icons::GRID,
+                        "Grid",
+                        "Toggle grid overlay.",
+                    ) {
+                        self.show_grid = !self.show_grid;
+                    }
+                    ui.add_enabled_ui(!self.view_2d, |ui| {
+                        if toolbar_icon_button(
+                            ui,
+                            self.preview_fog,
+                            icons::EYE,
+                            "Fog",
+                            "Toggle authored room fog in the editor 3D preview.",
+                        ) {
+                            self.preview_fog = !self.preview_fog;
+                        }
+                        if toolbar_icon_button(
+                            ui,
+                            self.preview_backface_wireframe,
+                            icons::SCAN,
+                            "Backfaces",
+                            "Toggle passive outlines for culled backfaces.",
+                        ) {
+                            self.preview_backface_wireframe = !self.preview_backface_wireframe;
+                        }
+                    });
+                    ui.separator();
+                    ui.add_enabled_ui(!self.view_2d, |ui| {
+                        if toolbar_text_segment(
+                            ui,
+                            self.viewport_3d_camera_mode == ViewportCameraMode::Orbit,
+                            "Orbit",
+                            "Use the target/radius orbit camera.",
+                        ) {
+                            self.set_viewport_3d_camera_mode(ViewportCameraMode::Orbit);
+                        }
+                        if toolbar_text_segment(
+                            ui,
+                            self.viewport_3d_camera_mode == ViewportCameraMode::Free,
+                            "Free",
+                            "Use the free camera. Right/middle drag looks; WASD moves.",
+                        ) {
+                            self.set_viewport_3d_camera_mode(ViewportCameraMode::Free);
+                        }
+                    });
+                    ui.separator();
+                    ui.selectable_value(&mut self.view_2d, true, "2D");
+                    ui.selectable_value(&mut self.view_2d, false, "3D");
+                    ui.separator();
+                    let mut zoom_percent =
+                        (self.viewport_zoom / DEFAULT_VIEWPORT_ZOOM * 100.0) as u16;
+                    if ui
+                        .add_sized(
+                            [58.0, 22.0],
+                            egui::DragValue::new(&mut zoom_percent)
+                                .speed(1.0)
+                                .range(25..=250)
+                                .suffix("%"),
+                        )
+                        .on_hover_text("Viewport zoom.")
+                        .changed()
+                    {
+                        self.viewport_zoom = (zoom_percent as f32 / 100.0 * DEFAULT_VIEWPORT_ZOOM)
+                            .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
+                    }
+                });
             });
-        });
     }
 
     /// Toolbar combobox for the active brush material. Selecting
@@ -10074,15 +10655,16 @@ impl EditorWorkspace {
     /// `1` / `2` / `3` hotkeys; clicking goes through
     /// `set_selection_mode` so the existing selection adapts.
     fn draw_selection_mode_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(icons::label(icons::POINTER, "Mode"));
         for mode in [
             SelectionMode::Face,
             SelectionMode::Edge,
             SelectionMode::Vertex,
         ] {
-            if ui
-                .selectable_label(self.selection_mode == mode, mode.label())
-                .on_hover_text(match mode {
+            if toolbar_text_segment(
+                ui,
+                self.selection_mode == mode,
+                mode.label(),
+                match mode {
                     SelectionMode::Face => "Pick a whole face (1).",
                     SelectionMode::Edge => {
                         "Pick the closest edge of the face under the cursor (2)."
@@ -10090,78 +10672,91 @@ impl EditorWorkspace {
                     SelectionMode::Vertex => {
                         "Pick the closest corner of the face under the cursor (3)."
                     }
-                })
-                .clicked()
-            {
+                },
+            ) {
                 self.set_selection_mode(mode);
             }
         }
     }
 
     fn draw_horizontal_edit_mode_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(icons::label(icons::GRID, "Surface"));
         for mode in [HorizontalEditMode::Quad, HorizontalEditMode::Triangle] {
-            if ui
-                .selectable_label(self.horizontal_edit_mode == mode, mode.label())
-                .on_hover_text(match mode {
+            if toolbar_text_segment(
+                ui,
+                self.horizontal_edit_mode == mode,
+                mode.label(),
+                match mode {
                     HorizontalEditMode::Quad => "Pick floor and ceiling quads.",
                     HorizontalEditMode::Triangle => "Pick one triangle half of a floor or ceiling.",
-                })
-                .clicked()
-            {
+                },
+            ) {
                 self.set_horizontal_edit_mode(mode);
             }
         }
     }
 
     fn draw_vertex_connectivity_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(icons::label(icons::WAYPOINT, "Verts"));
         for mode in [VertexConnectivity::Welded, VertexConnectivity::Detached] {
-            if ui
-                .selectable_label(self.vertex_connectivity == mode, mode.label())
-                .on_hover_text(match mode {
+            if toolbar_text_segment(
+                ui,
+                self.vertex_connectivity == mode,
+                mode.label(),
+                match mode {
                     VertexConnectivity::Welded => {
                         "Move every face-corner sharing the selected physical vertex."
                     }
                     VertexConnectivity::Detached => {
                         "Move only the selected face, edge, or vertex corner records."
                     }
-                })
-                .clicked()
-            {
+                },
+            ) {
                 self.vertex_connectivity = mode;
             }
         }
     }
 
     fn draw_wall_paint_shape_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(icons::label(icons::BRICK_WALL, "Wall"));
         for shape in [
             WallPaintShape::Cardinal,
             WallPaintShape::NorthWestSouthEast,
             WallPaintShape::NorthEastSouthWest,
         ] {
-            ui.selectable_value(&mut self.wall_paint_shape, shape, shape.label());
+            if toolbar_text_segment(
+                ui,
+                self.wall_paint_shape == shape,
+                shape.label(),
+                "Choose how wall paint picks cell edges.",
+            ) {
+                self.wall_paint_shape = shape;
+            }
         }
     }
 
     fn draw_place_kind_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(icons::label(icons::PLUS, "Place"));
-        for kind in [
-            PlaceKind::PlayerSpawn,
-            PlaceKind::SpawnMarker,
-            PlaceKind::ModelInstance,
-            PlaceKind::Character,
-            PlaceKind::PointLightMarker,
-        ] {
-            ui.selectable_value(&mut self.place_kind, kind, kind.label());
-        }
+        ui.label(icons::text(icons::PLUS, 14.0).color(STUDIO_TEXT_WEAK));
+        egui::ComboBox::from_id_salt("place-kind-toolbar")
+            .selected_text(self.place_kind.label())
+            .show_ui(ui, |ui| {
+                for kind in [
+                    PlaceKind::PlayerSpawn,
+                    PlaceKind::SpawnMarker,
+                    PlaceKind::ModelInstance,
+                    PlaceKind::Character,
+                    PlaceKind::ImageProp,
+                    PlaceKind::PointLightMarker,
+                ] {
+                    ui.selectable_value(&mut self.place_kind, kind, kind.label());
+                }
+            });
         match self.place_kind {
             PlaceKind::ModelInstance => {
                 self.draw_place_resource_picker(ui, ResourceFilter::Model, "Model")
             }
             PlaceKind::Character => {
                 self.draw_place_resource_picker(ui, ResourceFilter::Character, "Profile")
+            }
+            PlaceKind::ImageProp => {
+                self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Image")
             }
             _ => {}
         }
@@ -10180,8 +10775,14 @@ impl EditorWorkspace {
             .filter(|resource| filter.matches(&resource.data))
             .map(|resource| (resource.id, resource.name.clone()))
             .collect();
-        let selected = self
-            .selected_resource
+        let selected_id = self
+            .place_resource
+            .filter(|id| options.iter().any(|(candidate, _)| candidate == id))
+            .or_else(|| {
+                self.selected_resource
+                    .filter(|id| options.iter().any(|(candidate, _)| candidate == id))
+            });
+        let selected = selected_id
             .and_then(|id| {
                 options
                     .iter()
@@ -10196,19 +10797,24 @@ impl EditorWorkspace {
                 }
             });
 
-        ui.label(icons::label(filter.icon(), label));
+        ui.label(icons::text(filter.icon(), 14.0).color(STUDIO_TEXT_WEAK))
+            .on_hover_text(label);
         egui::ComboBox::from_id_salt(("place-resource-picker", filter.label()))
             .selected_text(selected)
             .show_ui(ui, |ui| {
                 for (id, name) in options {
-                    if ui
-                        .selectable_label(self.selected_resource == Some(id), name)
-                        .clicked()
-                    {
+                    if ui.selectable_label(selected_id == Some(id), name).clicked() {
+                        self.place_resource = Some(id);
                         self.replace_resource_selection(id);
                     }
                 }
             });
+    }
+
+    fn place_resource_candidates(&self) -> impl Iterator<Item = ResourceId> {
+        [self.place_resource, self.selected_resource]
+            .into_iter()
+            .flatten()
     }
 
     /// Pick the Model resource a `PlaceKind::ModelInstance` prop click
@@ -10218,8 +10824,9 @@ impl EditorWorkspace {
     /// the place altogether -- never silently substitutes a
     /// generic marker.
     fn resolve_place_model_resource(&self) -> Result<(ResourceId, String), String> {
-        // (a) Selected resource is a Model? Use it.
-        if let Some(id) = self.selected_resource {
+        // (a) Chosen Place toolbar resource, or selected resource,
+        // is a Model? Use it.
+        for id in self.place_resource_candidates() {
             if let Some(resource) = self.project.resource(id) {
                 if matches!(resource.data, ResourceData::Model(_)) {
                     return Ok((id, resource.name.clone()));
@@ -10242,10 +10849,74 @@ impl EditorWorkspace {
         }
     }
 
+    fn resolve_place_image_prop_material(&mut self) -> Result<(ResourceId, String), String> {
+        for id in self.place_resource_candidates().collect::<Vec<_>>() {
+            let Some(resource) = self.project.resource(id) else {
+                continue;
+            };
+            match &resource.data {
+                ResourceData::Material(_) => return Ok((id, resource.name.clone())),
+                ResourceData::Texture { .. } => {
+                    let name = resource.name.clone();
+                    let material = self.material_for_image_texture(id, &name);
+                    return Ok((material, name));
+                }
+                _ => {}
+            }
+        }
+
+        let image_sources: Vec<(ResourceId, String, bool)> = self
+            .project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Material(_) => Some((resource.id, resource.name.clone(), false)),
+                ResourceData::Texture { .. } => Some((resource.id, resource.name.clone(), true)),
+                _ => None,
+            })
+            .collect();
+        match image_sources.len() {
+            0 => Err("No Texture or Material resources exist. Import a texture first.".to_string()),
+            1 => {
+                let (id, name, is_texture) = &image_sources[0];
+                let material = if *is_texture {
+                    self.material_for_image_texture(*id, name)
+                } else {
+                    *id
+                };
+                Ok((material, name.clone()))
+            }
+            n => Err(format!(
+                "Select a Texture or Material before placing an image prop ({n} available)"
+            )),
+        }
+    }
+
+    fn material_for_image_texture(
+        &mut self,
+        texture_id: ResourceId,
+        texture_name: &str,
+    ) -> ResourceId {
+        if let Some(existing) = self.project.resources.iter().find(|resource| {
+            matches!(
+                &resource.data,
+                ResourceData::Material(material) if material.texture == Some(texture_id)
+            )
+        }) {
+            return existing.id;
+        }
+        let material_id = self.project.add_resource(
+            texture_name.to_string(),
+            ResourceData::Material(MaterialResource::opaque(Some(texture_id))),
+        );
+        self.place_resource = Some(material_id);
+        material_id
+    }
+
     fn resolve_place_character_resource(
         &self,
     ) -> Result<(ResourceId, String, psxed_project::CharacterResource), String> {
-        if let Some(id) = self.selected_resource {
+        for id in self.place_resource_candidates() {
             if let Some(resource) = self.project.resource(id) {
                 if let ResourceData::Character(character) = &resource.data {
                     return Ok((id, resource.name.clone(), character.clone()));
@@ -10283,7 +10954,8 @@ impl EditorWorkspace {
                 .unwrap_or_else(|| "(missing)".to_string()),
             None => "Auto".to_string(),
         };
-        ui.label(icons::label(icons::PALETTE, "Brush"));
+        ui.label(icons::text(icons::PALETTE, 14.0).color(STUDIO_TEXT_WEAK))
+            .on_hover_text("Brush material");
         egui::ComboBox::from_id_salt("brush-material-picker")
             .selected_text(label)
             .show_ui(ui, |ui| {
@@ -11934,12 +12606,13 @@ impl EditorWorkspace {
             width: clipboard.width,
             height: clipboard.height,
             rotation_quarters: 0,
+            flip_x: false,
+            flip_z: false,
             cells: clipboard.cells,
         });
         self.apply_floating_geometry_preview();
-        self.status =
-            "Duplicating world geometry - move cursor, R rotates, click places, Esc cancels"
-                .to_string();
+        self.status = "Duplicating world geometry - move cursor, R rotates, F flips, Shift+F flips vertically, click places, Esc cancels"
+            .to_string();
     }
 
     fn paste_target_room(&self, clipboard: &GeometryClipboard) -> Option<NodeId> {
@@ -11982,6 +12655,24 @@ impl EditorWorkspace {
         self.status = "Rotated duplicate preview 90°".to_string();
     }
 
+    fn flip_floating_geometry_x(&mut self) {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return;
+        };
+        preview.flip_x = !preview.flip_x;
+        self.apply_floating_geometry_preview();
+        self.status = "Flipped duplicate preview horizontally".to_string();
+    }
+
+    fn flip_floating_geometry_z(&mut self) {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return;
+        };
+        preview.flip_z = !preview.flip_z;
+        self.apply_floating_geometry_preview();
+        self.status = "Flipped duplicate preview vertically".to_string();
+    }
+
     fn commit_floating_geometry(&mut self) -> bool {
         let Some(preview) = self.floating_geometry.take() else {
             return false;
@@ -12016,6 +12707,8 @@ impl EditorWorkspace {
             preview.width,
             preview.height,
             preview.rotation_quarters,
+            preview.flip_x,
+            preview.flip_z,
         );
         let mut selected_cells = Vec::new();
         let mut selected_primitives = Vec::new();
@@ -13039,18 +13732,30 @@ impl EditorWorkspace {
             screen_delta.x / self.viewport_zoom,
             -screen_delta.y / self.viewport_zoom,
         ];
+        let targets = {
+            let scene = self.project.active_scene();
+            selected
+                .into_iter()
+                .map(|id| (id, node_enclosing_sector_size(scene, id)))
+                .collect::<Vec<_>>()
+        };
         let mut moved = Vec::new();
-        for id in selected {
+        for (id, sector_size) in targets {
             if let Some(node) = self.project.active_scene_mut().node_mut(id) {
                 node.transform.translation[0] += world_delta[0];
                 node.transform.translation[2] += world_delta[1];
-                if matches!(node.kind, NodeKind::Entity) {
-                    node.transform.translation[0] =
-                        snap_to_step(node.transform.translation[0], ENTITY_POSITION_STEP);
-                    node.transform.translation[1] =
-                        snap_to_step(node.transform.translation[1], ENTITY_POSITION_STEP);
-                    node.transform.translation[2] =
-                        snap_to_step(node.transform.translation[2], ENTITY_POSITION_STEP);
+                if matches!(
+                    node.kind,
+                    NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. }
+                ) {
+                    node.transform.translation[0] = snap_node_transform_component_to_world_step(
+                        node.transform.translation[0],
+                        sector_size,
+                    );
+                    node.transform.translation[2] = snap_node_transform_component_to_world_step(
+                        node.transform.translation[2],
+                        sector_size,
+                    );
                 }
                 moved.push(node.name.clone());
             }
@@ -13503,17 +14208,19 @@ fn draw_transform_policy_editor(
             egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
                 .default_open(true)
                 .show(ui, |ui| {
-                    changed |= light_transform_editor(ui, &mut node.transform);
+                    changed |=
+                        light_transform_editor(ui, &mut node.transform, inherited_sector_size);
                 });
             changed
         }
         kind if kind.is_component() => false,
-        NodeKind::Entity => {
+        NodeKind::Entity | NodeKind::ImageProp { .. } => {
             let mut changed = false;
             egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
                 .default_open(true)
                 .show(ui, |ui| {
-                    changed |= entity_transform_editor(ui, &mut node.transform);
+                    changed |=
+                        entity_transform_editor(ui, &mut node.transform, inherited_sector_size);
                 });
             changed
         }
@@ -13767,36 +14474,43 @@ fn room_grid_transform_editor(
     changed
 }
 
-fn entity_transform_editor(ui: &mut egui::Ui, transform: &mut psxed_project::Transform3) -> bool {
+fn entity_transform_editor(
+    ui: &mut egui::Ui,
+    transform: &mut psxed_project::Transform3,
+    sector_size: i32,
+) -> bool {
     let mut changed = false;
+    let sector_size = sector_size.max(1);
     ui.horizontal(|ui| {
         ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
         ui.label("Position");
-        let mut position = transform.translation;
+        let mut x = node_transform_component_to_world_units(transform.translation[0], sector_size);
+        let mut y = node_transform_component_to_world_units(transform.translation[1], sector_size);
+        let mut z = node_transform_component_to_world_units(transform.translation[2], sector_size);
         let pos_changed = ui
             .add(
-                egui::DragValue::new(&mut position[0])
+                egui::DragValue::new(&mut x)
                     .prefix("X ")
-                    .speed(ENTITY_POSITION_STEP as f64),
+                    .speed(HEIGHT_QUANTUM as f64),
             )
             .changed()
             | ui.add(
-                egui::DragValue::new(&mut position[1])
+                egui::DragValue::new(&mut y)
                     .prefix("Y ")
-                    .speed(ENTITY_POSITION_STEP as f64),
+                    .speed(HEIGHT_QUANTUM as f64),
             )
             .changed()
             | ui.add(
-                egui::DragValue::new(&mut position[2])
+                egui::DragValue::new(&mut z)
                     .prefix("Z ")
-                    .speed(ENTITY_POSITION_STEP as f64),
+                    .speed(HEIGHT_QUANTUM as f64),
             )
             .changed();
         if pos_changed {
             transform.translation = [
-                snap_to_step(position[0], ENTITY_POSITION_STEP),
-                snap_to_step(position[1], ENTITY_POSITION_STEP),
-                snap_to_step(position[2], ENTITY_POSITION_STEP),
+                node_transform_component_from_world_units(snap_height(x), sector_size),
+                node_transform_component_from_world_units(snap_height(y), sector_size),
+                node_transform_component_from_world_units(snap_height(z), sector_size),
             ];
             changed = true;
         }
@@ -13832,16 +14546,25 @@ fn entity_transform_editor(ui: &mut egui::Ui, transform: &mut psxed_project::Tra
     changed
 }
 
-fn light_transform_editor(ui: &mut egui::Ui, transform: &mut psxed_project::Transform3) -> bool {
-    let mut changed = normalise_light_transform(transform);
+fn light_transform_editor(
+    ui: &mut egui::Ui,
+    transform: &mut psxed_project::Transform3,
+    sector_size: i32,
+) -> bool {
+    let mut changed = normalise_light_transform(transform, sector_size);
+    let sector_size = sector_size.max(1);
     ui.horizontal(|ui| {
         ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
         ui.label("Position");
-        let mut x = transform.translation[0].round() as i32;
-        let mut y = transform.translation[1].round() as i32;
-        let mut z = transform.translation[2].round() as i32;
+        let mut x = node_transform_component_to_world_units(transform.translation[0], sector_size);
+        let mut y = node_transform_component_to_world_units(transform.translation[1], sector_size);
+        let mut z = node_transform_component_to_world_units(transform.translation[2], sector_size);
         let pos_changed = ui
-            .add(egui::DragValue::new(&mut x).prefix("X ").speed(1.0))
+            .add(
+                egui::DragValue::new(&mut x)
+                    .prefix("X ")
+                    .speed(HEIGHT_QUANTUM as f64),
+            )
             .changed()
             | ui.add(
                 egui::DragValue::new(&mut y)
@@ -13849,19 +14572,61 @@ fn light_transform_editor(ui: &mut egui::Ui, transform: &mut psxed_project::Tran
                     .speed(HEIGHT_QUANTUM as f64),
             )
             .changed()
-            | ui.add(egui::DragValue::new(&mut z).prefix("Z ").speed(1.0))
-                .changed();
+            | ui.add(
+                egui::DragValue::new(&mut z)
+                    .prefix("Z ")
+                    .speed(HEIGHT_QUANTUM as f64),
+            )
+            .changed();
         if pos_changed {
-            transform.translation = [x as f32, snap_height(y) as f32, z as f32];
+            transform.translation = [
+                node_transform_component_from_world_units(snap_height(x), sector_size),
+                node_transform_component_from_world_units(snap_height(y), sector_size),
+                node_transform_component_from_world_units(snap_height(z), sector_size),
+            ];
             changed = true;
         }
     });
     changed
 }
 
-fn normalise_light_transform(transform: &mut psxed_project::Transform3) -> bool {
+fn node_gizmo_translation(
+    node: &psxed_project::SceneNode,
+    start: [f32; 3],
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+    sector_size: i32,
+) -> [f32; 3] {
+    let mut translation = start;
+    let sector_size = sector_size.max(1);
+    let index = match axis {
+        PrimitiveGizmoAxis::X => 0,
+        PrimitiveGizmoAxis::Y => 1,
+        PrimitiveGizmoAxis::Z => 2,
+    };
+    let step = match (&node.kind, axis) {
+        (NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. }, _) => {
+            node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
+        }
+        _ => 1.0,
+    };
+    translation[index] = start[index] + steps as f32 * step;
+
+    match &node.kind {
+        NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. } => {
+            if steps != 0 {
+                translation[index] =
+                    snap_node_transform_component_to_world_step(translation[index], sector_size);
+            }
+            translation
+        }
+        _ => translation,
+    }
+}
+
+fn normalise_light_transform(transform: &mut psxed_project::Transform3, sector_size: i32) -> bool {
     let mut changed = false;
-    let snapped_y = snap_height(transform.translation[1].round() as i32) as f32;
+    let snapped_y = snap_light_transform_y(transform.translation[1], sector_size);
     if transform.translation[1] != snapped_y {
         transform.translation[1] = snapped_y;
         changed = true;
@@ -13877,13 +14642,26 @@ fn normalise_light_transform(transform: &mut psxed_project::Transform3) -> bool 
     changed
 }
 
+fn node_transform_component_to_world_units(value: f32, sector_size: i32) -> i32 {
+    (value * sector_size.max(1) as f32).round() as i32
+}
+
+fn node_transform_component_from_world_units(value: i32, sector_size: i32) -> f32 {
+    value as f32 / sector_size.max(1) as f32
+}
+
+fn snap_node_transform_component_to_world_step(value: f32, sector_size: i32) -> f32 {
+    let world = node_transform_component_to_world_units(value, sector_size);
+    node_transform_component_from_world_units(snap_height(world), sector_size)
+}
+
+fn snap_light_transform_y(value: f32, sector_size: i32) -> f32 {
+    snap_node_transform_component_to_world_step(value, sector_size)
+}
+
 fn cardinal_yaw(degrees: f32) -> i32 {
     let normalized = degrees.rem_euclid(360.0);
     ((normalized / 90.0).round() as i32 * 90).rem_euclid(360)
-}
-
-fn snap_to_step(value: f32, step: f32) -> f32 {
-    (value / step).round() * step
 }
 
 fn transform_editor(ui: &mut egui::Ui, label: &str, values: &mut [f32; 3], speed: f64) -> bool {
@@ -14135,6 +14913,46 @@ fn draw_node_kind_editor(
                     }
                 }
             });
+        }
+        NodeKind::ImageProp {
+            material,
+            width,
+            height,
+            cylindrical_billboard,
+        } => {
+            ui.weak(
+                "Flat material-backed image plane. Transform position is the bottom-center anchor.",
+            );
+            changed |= material_picker(ui, "Material", material, material_options, nav_target);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Size").color(STUDIO_TEXT_WEAK));
+                let mut w = i32::from(*width);
+                let mut h = i32::from(*height);
+                let w_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut w)
+                            .speed(1.0)
+                            .range(1..=4096)
+                            .prefix("W "),
+                    )
+                    .changed();
+                let h_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut h)
+                            .speed(1.0)
+                            .range(1..=4096)
+                            .prefix("H "),
+                    )
+                    .changed();
+                if w_changed || h_changed {
+                    *width = w.clamp(1, u16::MAX as i32) as u16;
+                    *height = h.clamp(1, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+            });
+            changed |= ui
+                .checkbox(cylindrical_billboard, "Face camera cylindrically")
+                .changed();
         }
         NodeKind::ModelRenderer { model, material: _ } => {
             ui.weak("Component: renders a Model from the parent Entity transform.");
@@ -14479,6 +15297,7 @@ fn node_lucide_icon(kind: &str, root: bool) -> char {
         "World" => icons::HOUSE,
         "Room" => icons::GRID,
         "Mesh Instance" | "MeshInstance" => icons::BOX,
+        "Image Prop" | "ImageProp" => icons::PALETTE,
         "Model Renderer" | "ModelRenderer" => icons::BOX,
         "Animator" => icons::PLAY,
         "Collider" => icons::SCALE_3D,
@@ -14510,6 +15329,7 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
         "World" => Color32::from_rgb(232, 152, 96),
         "Room" => Color32::from_rgb(209, 118, 71),
         "Mesh Instance" | "MeshInstance" => Color32::from_rgb(156, 174, 190),
+        "Image Prop" | "ImageProp" => Color32::from_rgb(210, 170, 120),
         "Model Renderer" | "ModelRenderer" => Color32::from_rgb(134, 168, 196),
         "Animator" => Color32::from_rgb(126, 164, 220),
         "Collider" => Color32::from_rgb(180, 170, 112),
@@ -14530,6 +15350,48 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
 
 fn draw_inline_icon(ui: &mut egui::Ui, icon: char, color: Color32) {
     ui.label(icons::text(icon, 16.0).color(color));
+}
+
+fn context_chip(ui: &mut egui::Ui, text: &str, strong: bool) {
+    let fill = if strong {
+        STUDIO_ACCENT_DIM
+    } else {
+        STUDIO_PANEL_DARK
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0, STUDIO_BORDER))
+        .corner_radius(egui::CornerRadius::same(3))
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).small().color(STUDIO_TEXT));
+        });
+}
+
+fn toolbar_icon_button(
+    ui: &mut egui::Ui,
+    selected: bool,
+    icon: char,
+    label: &str,
+    hint: &str,
+) -> bool {
+    let response = ui.add_sized(
+        [30.0, 23.0],
+        egui::SelectableLabel::new(selected, icons::text(icon, 15.0)),
+    );
+    let clicked = response.clicked();
+    response.on_hover_text(format!("{label}: {hint}"));
+    clicked
+}
+
+fn toolbar_text_segment(ui: &mut egui::Ui, selected: bool, label: &str, hint: &str) -> bool {
+    let response = ui.add_sized(
+        [label.len() as f32 * 7.0 + 18.0, 23.0],
+        egui::SelectableLabel::new(selected, label),
+    );
+    let clicked = response.clicked();
+    response.on_hover_text(hint);
+    clicked
 }
 
 fn draw_model_import_preview(
@@ -18177,6 +19039,7 @@ const fn component_slot(kind: &NodeKind) -> Option<&'static str> {
 fn node_draw_mode(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::MeshInstance { .. } => "Textured Triangles",
+        NodeKind::ImageProp { .. } => "Flat Image",
         NodeKind::ModelRenderer { .. } => "Render Component",
         NodeKind::Animator { .. } => "Animation Component",
         NodeKind::Collider { .. } => "Collision Component",
@@ -19168,6 +20031,18 @@ fn draw_scene_viewport(
                     node,
                     selected_nodes.contains(&node.id)
                         || (selected_nodes.is_empty() && selected == node.id),
+                    &mut hits,
+                );
+            }
+            NodeKind::ImageProp { .. } => {
+                draw_simple_marker(
+                    painter,
+                    transform,
+                    node,
+                    selected_nodes.contains(&node.id)
+                        || (selected_nodes.is_empty() && selected == node.id),
+                    "I",
+                    Color32::from_rgb(210, 170, 120),
                     &mut hits,
                 );
             }
@@ -20275,6 +21150,21 @@ fn selection_wall_face(selection: Selection) -> Option<FaceRef> {
     matches!(face.kind, FaceKind::Wall { .. }).then_some(face)
 }
 
+fn selection_horizontal_face(selection: Selection, kind: FaceKind) -> Option<FaceRef> {
+    let Selection::Face(face) = selection else {
+        return None;
+    };
+    (face.kind == kind && matches!(face.kind, FaceKind::Floor | FaceKind::Ceiling)).then_some(face)
+}
+
+const fn horizontal_face_plural(kind: FaceKind) -> &'static str {
+    match kind {
+        FaceKind::Floor => "floors",
+        FaceKind::Ceiling => "ceilings",
+        FaceKind::Wall { .. } => "faces",
+    }
+}
+
 fn selection_edge(selection: Selection) -> Option<EdgeRef> {
     let Selection::Edge(edge) = selection else {
         return None;
@@ -20375,6 +21265,26 @@ fn push_unique_material_target(targets: &mut Vec<MaterialTarget>, target: Materi
     if !targets.contains(&target) {
         targets.push(target);
     }
+}
+
+fn autotile_selection_status(
+    selected_tiles: usize,
+    visited_walls: usize,
+    updated_walls: usize,
+    clamped_walls: usize,
+) -> String {
+    if visited_walls == 0 {
+        return "No selected tiles have walls to autotile".to_string();
+    }
+    if updated_walls == 0 {
+        return format!("Selected walls already autotiled across {selected_tiles} tile(s)");
+    }
+    let mut status =
+        format!("Autotiled {updated_walls} wall(s) across {selected_tiles} selected tile(s)");
+    if clamped_walls > 0 {
+        status.push_str(&format!("; {clamped_walls} V span(s) clamped"));
+    }
+    status
 }
 
 fn face_edges(face: FaceRef) -> Vec<EdgeRef> {
@@ -21503,20 +22413,47 @@ fn transformed_geometry_cells(
     width: i32,
     height: i32,
     rotation_quarters: u8,
+    flip_x: bool,
+    flip_z: bool,
 ) -> Vec<([i32; 2], Option<GridSector>)> {
+    let (rotated_width, rotated_height) =
+        rotated_geometry_dimensions(width, height, rotation_quarters);
     cells
         .iter()
         .map(|cell| {
-            let offset = rotate_cell_offset_cw(cell.offset, width, height, rotation_quarters);
+            let mut offset = rotate_cell_offset_cw(cell.offset, width, height, rotation_quarters);
             let mut sector = cell.sector.clone();
             if let Some(sector) = sector.as_mut() {
                 for _ in 0..rotation_quarters % 4 {
                     *sector = rotate_sector_cw(sector);
                 }
+                if flip_x {
+                    *sector = flip_sector_x(sector);
+                }
+                if flip_z {
+                    *sector = flip_sector_z(sector);
+                }
+            }
+            if flip_x {
+                offset[0] = rotated_width - 1 - offset[0];
+            }
+            if flip_z {
+                offset[1] = rotated_height - 1 - offset[1];
             }
             (offset, sector)
         })
         .collect()
+}
+
+fn rotated_geometry_dimensions(
+    mut width: i32,
+    mut height: i32,
+    rotation_quarters: u8,
+) -> (i32, i32) {
+    if rotation_quarters % 2 == 1 {
+        std::mem::swap(&mut width, &mut height);
+    }
+    (width, height)
 }
 
 fn rotate_cell_offset_cw(
@@ -21546,6 +22483,38 @@ fn rotate_sector_cw(sector: &GridSector) -> GridSector {
         }
     }
     rotated
+}
+
+fn flip_sector_x(sector: &GridSector) -> GridSector {
+    let mut flipped = GridSector::empty();
+    flipped.floor = sector.floor.clone().map(flip_horizontal_face_x);
+    flipped.ceiling = sector.ceiling.clone().map(flip_horizontal_face_x);
+    for direction in GridDirection::ALL {
+        let flipped_direction = flip_direction_x(direction);
+        for wall in sector.walls.get(direction) {
+            flipped
+                .walls
+                .get_mut(flipped_direction)
+                .push(flip_vertical_face_x(direction, wall.clone()));
+        }
+    }
+    flipped
+}
+
+fn flip_sector_z(sector: &GridSector) -> GridSector {
+    let mut flipped = GridSector::empty();
+    flipped.floor = sector.floor.clone().map(flip_horizontal_face_z);
+    flipped.ceiling = sector.ceiling.clone().map(flip_horizontal_face_z);
+    for direction in GridDirection::ALL {
+        let flipped_direction = flip_direction_z(direction);
+        for wall in sector.walls.get(direction) {
+            flipped
+                .walls
+                .get_mut(flipped_direction)
+                .push(flip_vertical_face_z(direction, wall.clone()));
+        }
+    }
+    flipped
 }
 
 fn rotate_horizontal_face_cw(mut face: GridHorizontalFace) -> GridHorizontalFace {
@@ -21578,15 +22547,83 @@ fn rotate_horizontal_face_cw(mut face: GridHorizontalFace) -> GridHorizontalFace
     face
 }
 
+fn flip_horizontal_face_x(mut face: GridHorizontalFace) -> GridHorizontalFace {
+    let old_heights = face.heights;
+    face.heights = [
+        old_heights[Corner::NE.idx()],
+        old_heights[Corner::NW.idx()],
+        old_heights[Corner::SW.idx()],
+        old_heights[Corner::SE.idx()],
+    ];
+    flip_horizontal_face(face, flip_corner_x, flip_uv_transform_u)
+}
+
+fn flip_horizontal_face_z(mut face: GridHorizontalFace) -> GridHorizontalFace {
+    let old_heights = face.heights;
+    face.heights = [
+        old_heights[Corner::SW.idx()],
+        old_heights[Corner::SE.idx()],
+        old_heights[Corner::NE.idx()],
+        old_heights[Corner::NW.idx()],
+    ];
+    flip_horizontal_face(face, flip_corner_z, flip_uv_transform_v)
+}
+
+fn flip_horizontal_face(
+    mut face: GridHorizontalFace,
+    flip_corner: fn(Corner) -> Corner,
+    flip_uv: fn(GridUvTransform) -> GridUvTransform,
+) -> GridHorizontalFace {
+    let old_split = face.split;
+    let old_overrides = face.triangle_overrides;
+    face.split = flip_split(old_split);
+    face.dropped_corner = face.dropped_corner.map(flip_corner);
+    face.uv = flip_uv(face.uv);
+
+    for new_index in 0..2 {
+        let old_index = transformed_horizontal_triangle_source_index(
+            old_split,
+            face.split,
+            new_index,
+            flip_corner,
+        );
+        let mut triangle_override = *old_overrides.get(old_index);
+        if let Some(uv) = triangle_override.uv.as_mut() {
+            *uv = flip_uv(*uv);
+        }
+        if let Some(heights) = triangle_override.heights {
+            triangle_override.heights = Some(transform_triangle_heights(
+                old_split,
+                old_index,
+                face.split,
+                new_index,
+                heights,
+                flip_corner,
+            ));
+        }
+        *face.triangle_override_mut(new_index) = triangle_override;
+    }
+    face
+}
+
 fn rotated_horizontal_triangle_source_index(
     old_split: GridSplit,
     new_split: GridSplit,
     new_index: usize,
 ) -> usize {
+    transformed_horizontal_triangle_source_index(old_split, new_split, new_index, rotate_corner_cw)
+}
+
+fn transformed_horizontal_triangle_source_index(
+    old_split: GridSplit,
+    new_split: GridSplit,
+    new_index: usize,
+    transform_corner: fn(Corner) -> Corner,
+) -> usize {
     let new_corners = psxed_project::horizontal_triangle_corners(new_split, new_index);
     for old_index in 0..2 {
         let old_corners =
-            psxed_project::horizontal_triangle_corners(old_split, old_index).map(rotate_corner_cw);
+            psxed_project::horizontal_triangle_corners(old_split, old_index).map(transform_corner);
         if same_corner_set(old_corners, new_corners) {
             return old_index;
         }
@@ -21605,11 +22642,29 @@ fn rotate_triangle_heights_cw(
     new_index: usize,
     old_heights: [i32; 3],
 ) -> [i32; 3] {
+    transform_triangle_heights(
+        old_split,
+        old_index,
+        new_split,
+        new_index,
+        old_heights,
+        rotate_corner_cw,
+    )
+}
+
+fn transform_triangle_heights(
+    old_split: GridSplit,
+    old_index: usize,
+    new_split: GridSplit,
+    new_index: usize,
+    old_heights: [i32; 3],
+    transform_corner: fn(Corner) -> Corner,
+) -> [i32; 3] {
     let old_corners = psxed_project::horizontal_triangle_corners(old_split, old_index);
     let new_corners = psxed_project::horizontal_triangle_corners(new_split, new_index);
     let mut new_heights = old_heights;
     for (old_corner, height) in old_corners.into_iter().zip(old_heights) {
-        let rotated_corner = rotate_corner_cw(old_corner);
+        let rotated_corner = transform_corner(old_corner);
         if let Some(slot) = new_corners
             .iter()
             .position(|corner| *corner == rotated_corner)
@@ -21643,6 +22698,38 @@ fn rotate_vertical_face_cw(
     wall
 }
 
+fn flip_vertical_face_x(direction: GridDirection, wall: GridVerticalFace) -> GridVerticalFace {
+    flip_vertical_face(direction, wall, flip_wall_corner_x)
+}
+
+fn flip_vertical_face_z(direction: GridDirection, wall: GridVerticalFace) -> GridVerticalFace {
+    flip_vertical_face(direction, wall, flip_wall_corner_z)
+}
+
+fn flip_vertical_face(
+    direction: GridDirection,
+    mut wall: GridVerticalFace,
+    flip_corner: fn(GridDirection, WallCorner) -> WallCorner,
+) -> GridVerticalFace {
+    let old_heights = wall.heights;
+    let mut heights = [0; 4];
+    for corner in [
+        WallCorner::BL,
+        WallCorner::BR,
+        WallCorner::TR,
+        WallCorner::TL,
+    ] {
+        let flipped_corner = flip_corner(direction, corner);
+        heights[flipped_corner.idx()] = old_heights[corner.idx()];
+    }
+    wall.heights = heights;
+    wall.dropped_corner = wall
+        .dropped_corner
+        .map(|corner| flip_corner(direction, corner));
+    wall.uv = flip_uv_transform_u(wall.uv);
+    wall
+}
+
 const fn rotate_direction_cw(direction: GridDirection) -> GridDirection {
     match direction {
         GridDirection::North => GridDirection::East,
@@ -21654,7 +22741,33 @@ const fn rotate_direction_cw(direction: GridDirection) -> GridDirection {
     }
 }
 
+const fn flip_direction_x(direction: GridDirection) -> GridDirection {
+    match direction {
+        GridDirection::North => GridDirection::North,
+        GridDirection::East => GridDirection::West,
+        GridDirection::South => GridDirection::South,
+        GridDirection::West => GridDirection::East,
+        GridDirection::NorthWestSouthEast => GridDirection::NorthEastSouthWest,
+        GridDirection::NorthEastSouthWest => GridDirection::NorthWestSouthEast,
+    }
+}
+
+const fn flip_direction_z(direction: GridDirection) -> GridDirection {
+    match direction {
+        GridDirection::North => GridDirection::South,
+        GridDirection::East => GridDirection::East,
+        GridDirection::South => GridDirection::North,
+        GridDirection::West => GridDirection::West,
+        GridDirection::NorthWestSouthEast => GridDirection::NorthEastSouthWest,
+        GridDirection::NorthEastSouthWest => GridDirection::NorthWestSouthEast,
+    }
+}
+
 const fn rotate_split_cw(split: GridSplit) -> GridSplit {
+    flip_split(split)
+}
+
+const fn flip_split(split: GridSplit) -> GridSplit {
     match split {
         GridSplit::NorthWestSouthEast => GridSplit::NorthEastSouthWest,
         GridSplit::NorthEastSouthWest => GridSplit::NorthWestSouthEast,
@@ -21670,11 +22783,43 @@ const fn rotate_corner_cw(corner: Corner) -> Corner {
     }
 }
 
+const fn flip_corner_x(corner: Corner) -> Corner {
+    match corner {
+        Corner::NW => Corner::NE,
+        Corner::NE => Corner::NW,
+        Corner::SE => Corner::SW,
+        Corner::SW => Corner::SE,
+    }
+}
+
+const fn flip_corner_z(corner: Corner) -> Corner {
+    match corner {
+        Corner::NW => Corner::SW,
+        Corner::NE => Corner::SE,
+        Corner::SE => Corner::NE,
+        Corner::SW => Corner::NW,
+    }
+}
+
 fn rotate_wall_corner_cw(direction: GridDirection, corner: WallCorner) -> WallCorner {
     let rotated_direction = rotate_direction_cw(direction);
     let (horizontal_corner, top) = wall_corner_horizontal_endpoint(direction, corner);
     let rotated_corner = rotate_corner_cw(horizontal_corner);
     wall_corner_from_horizontal_endpoint(rotated_direction, rotated_corner, top).unwrap_or(corner)
+}
+
+fn flip_wall_corner_x(direction: GridDirection, corner: WallCorner) -> WallCorner {
+    let flipped_direction = flip_direction_x(direction);
+    let (horizontal_corner, top) = wall_corner_horizontal_endpoint(direction, corner);
+    let flipped_corner = flip_corner_x(horizontal_corner);
+    wall_corner_from_horizontal_endpoint(flipped_direction, flipped_corner, top).unwrap_or(corner)
+}
+
+fn flip_wall_corner_z(direction: GridDirection, corner: WallCorner) -> WallCorner {
+    let flipped_direction = flip_direction_z(direction);
+    let (horizontal_corner, top) = wall_corner_horizontal_endpoint(direction, corner);
+    let flipped_corner = flip_corner_z(horizontal_corner);
+    wall_corner_from_horizontal_endpoint(flipped_direction, flipped_corner, top).unwrap_or(corner)
 }
 
 const fn wall_corner_horizontal_endpoint(
@@ -21718,6 +22863,16 @@ fn wall_corner_from_horizontal_endpoint(
 
 fn rotate_uv_transform_cw(mut uv: GridUvTransform) -> GridUvTransform {
     uv.rotation = rotate_uv_rotation_cw(uv.rotation);
+    uv
+}
+
+fn flip_uv_transform_u(mut uv: GridUvTransform) -> GridUvTransform {
+    uv.flip_u = !uv.flip_u;
+    uv
+}
+
+fn flip_uv_transform_v(mut uv: GridUvTransform) -> GridUvTransform {
+    uv.flip_v = !uv.flip_v;
     uv
 }
 
@@ -22069,6 +23224,16 @@ fn enclosing_room_id(scene: &psxed_project::Scene, node_id: NodeId) -> Option<No
     None
 }
 
+fn node_enclosing_sector_size(scene: &psxed_project::Scene, node_id: NodeId) -> i32 {
+    enclosing_room_id(scene, node_id)
+        .and_then(|room_id| scene.node(room_id))
+        .and_then(|room| match &room.kind {
+            NodeKind::Room { grid } => Some(grid.sector_size.max(1)),
+            _ => None,
+        })
+        .unwrap_or(DEFAULT_WORLD_SECTOR_SIZE)
+}
+
 /// Per-kind half-extents in world units. Picked so:
 /// - bounds are big enough to click reliably at typical
 ///   editor zoom levels,
@@ -22122,6 +23287,14 @@ fn entity_bound_kind_and_size(
             }
             Some((EntityBoundKind::MeshFallback, [256.0, 256.0, 256.0]))
         }
+        NodeKind::ImageProp { width, height, .. } => Some((
+            EntityBoundKind::ImageProp,
+            [
+                (*width as f32 * 0.5).max(32.0),
+                (*height as f32 * 0.5).max(32.0),
+                32.0,
+            ],
+        )),
         NodeKind::SpawnPoint { .. } => Some((EntityBoundKind::SpawnPoint, [128.0, 256.0, 128.0])),
         NodeKind::PointLight { .. } => Some((EntityBoundKind::PointLight, [128.0, 128.0, 128.0])),
         NodeKind::Trigger { .. } => Some((EntityBoundKind::Trigger, [256.0, 256.0, 256.0])),
@@ -23545,6 +24718,18 @@ mod tests {
             .expect("gizmo axis projects")
     }
 
+    fn projected_node_gizmo_axis(
+        workspace: &EditorWorkspace,
+        viewport: Rect,
+        axis: PrimitiveGizmoAxis,
+    ) -> PrimitiveGizmoScreenAxis {
+        workspace
+            .node_gizmo_screen_axes(viewport)
+            .into_iter()
+            .find(|candidate| candidate.axis == axis)
+            .expect("node gizmo axis projects")
+    }
+
     fn assert_pos_approx(actual: Pos2, expected: Pos2) {
         assert!((actual.x - expected.x).abs() < 0.001);
         assert!((actual.y - expected.y).abs() < 0.001);
@@ -24361,6 +25546,7 @@ mod tests {
         let mut workspace =
             EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
         let spawn = starter_player_entity(workspace.project.active_scene()).id;
+        let sector_size = node_enclosing_sector_size(workspace.project.active_scene(), spawn);
         let start = workspace
             .project
             .active_scene()
@@ -24374,13 +25560,15 @@ mod tests {
 
         let node = workspace.project.active_scene().node(spawn).unwrap();
         assert!(
-            (node.transform.translation[0] - snap_to_step(start[0] + 1.0, ENTITY_POSITION_STEP))
-                .abs()
+            (node.transform.translation[0]
+                - snap_node_transform_component_to_world_step(start[0] + 1.0, sector_size))
+            .abs()
                 < 0.001
         );
         assert!(
-            (node.transform.translation[2] - snap_to_step(start[2] + 0.5, ENTITY_POSITION_STEP))
-                .abs()
+            (node.transform.translation[2]
+                - snap_node_transform_component_to_world_step(start[2] + 0.5, sector_size))
+            .abs()
                 < 0.001
         );
         assert!(workspace.is_dirty());
@@ -24389,17 +25577,30 @@ mod tests {
     #[test]
     fn light_transform_normalises_hidden_rotation_scale_and_y_quantum() {
         let mut transform = psxed_project::Transform3 {
-            translation: [10.0, 47.0, 20.0],
+            translation: [10.0, 0.05, 20.0],
             rotation_degrees: [10.0, 90.0, 5.0],
             scale: [2.0, 3.0, 4.0],
         };
 
-        assert!(normalise_light_transform(&mut transform));
+        assert!(normalise_light_transform(
+            &mut transform,
+            DEFAULT_WORLD_SECTOR_SIZE
+        ));
 
-        assert_eq!(transform.translation, [10.0, snap_height(47) as f32, 20.0]);
+        assert_eq!(
+            transform.translation,
+            [
+                10.0,
+                HEIGHT_QUANTUM as f32 / DEFAULT_WORLD_SECTOR_SIZE as f32,
+                20.0
+            ]
+        );
         assert_eq!(transform.rotation_degrees, [0.0, 0.0, 0.0]);
         assert_eq!(transform.scale, [1.0, 1.0, 1.0]);
-        assert!(!normalise_light_transform(&mut transform));
+        assert!(!normalise_light_transform(
+            &mut transform,
+            DEFAULT_WORLD_SECTOR_SIZE
+        ));
     }
 
     #[test]
@@ -24842,6 +26043,34 @@ mod tests {
     }
 
     #[test]
+    fn autotile_selected_sector_walls_updates_all_selected_tiles() {
+        let mut project = ProjectDocument::new("autotile-selected-tiles");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        for sx in 0..=1 {
+            grid.add_wall(sx, 0, GridDirection::North, 0, 2048, None);
+        }
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let mut ctrl = egui::Modifiers::NONE;
+        ctrl.ctrl = true;
+
+        workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
+        workspace.select_sector((room, 1, 0), ctrl);
+
+        assert_eq!(workspace.autotile_selected_sector_walls(), 2);
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        for sx in 0..=1 {
+            let wall = &grid.sector(sx, 0).unwrap().walls.get(GridDirection::North)[0];
+            assert_eq!(wall.uv.span, [0, 128]);
+        }
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
     fn shift_selects_sector_rectangle_from_anchor() {
         let mut workspace =
             EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
@@ -24900,6 +26129,70 @@ mod tests {
         assert!(workspace.selected_sectors.is_empty());
         assert!(workspace.selected_sector_faces().is_empty());
         assert_eq!(workspace.selected_primitive, Some(ceiling_1));
+    }
+
+    #[test]
+    fn shift_selects_horizontal_face_rectangle_from_anchor() {
+        let mut project = ProjectDocument::new("horizontal-face-rect-selection");
+        let mut grid = WorldGrid::empty(3, 3, 1024);
+        for sx in 0..3 {
+            for sz in 0..3 {
+                grid.set_floor(sx, sz, 0, None);
+                grid.ensure_sector(sx, sz).unwrap().ceiling =
+                    Some(GridHorizontalFace::flat(1024, None));
+            }
+        }
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("horizontal-face-rect-selection"), project);
+        let floor_at = |sx, sz| {
+            Selection::Face(FaceRef {
+                room,
+                sx,
+                sz,
+                kind: FaceKind::Floor,
+            })
+        };
+        let ceiling_at = |sx, sz| {
+            Selection::Face(FaceRef {
+                room,
+                sx,
+                sz,
+                kind: FaceKind::Ceiling,
+            })
+        };
+        let mut shift = egui::Modifiers::NONE;
+        shift.shift = true;
+
+        workspace.apply_primitive_selection_modifiers(floor_at(0, 0), egui::Modifiers::NONE);
+        workspace.apply_primitive_selection_modifiers(floor_at(2, 1), shift);
+
+        assert_eq!(workspace.selected_primitives.len(), 6);
+        for sx in 0..=2 {
+            for sz in 0..=1 {
+                assert!(workspace.selected_primitives.contains(&floor_at(sx, sz)));
+            }
+        }
+        assert!(!workspace.selected_primitives.contains(&floor_at(2, 2)));
+        assert!(!workspace.selected_primitives.contains(&ceiling_at(0, 0)));
+        assert_eq!(workspace.selected_primitive, Some(floor_at(2, 1)));
+
+        workspace.apply_primitive_selection_modifiers(ceiling_at(2, 2), egui::Modifiers::NONE);
+        workspace.apply_primitive_selection_modifiers(ceiling_at(1, 0), shift);
+
+        assert_eq!(workspace.selected_primitives.len(), 6);
+        for sx in 1..=2 {
+            for sz in 0..=2 {
+                assert!(workspace.selected_primitives.contains(&ceiling_at(sx, sz)));
+            }
+        }
+        assert!(!workspace.selected_primitives.contains(&ceiling_at(0, 0)));
+        assert!(!workspace.selected_primitives.contains(&floor_at(2, 2)));
+        assert_eq!(workspace.selected_primitive, Some(ceiling_at(1, 0)));
+        assert!(workspace.selected_sectors.is_empty());
     }
 
     #[test]
@@ -25194,6 +26487,169 @@ mod tests {
             })));
         assert_eq!(workspace.selected_primitives.len(), 2);
         assert!(!workspace.is_dirty());
+    }
+
+    #[test]
+    fn floating_duplicate_flip_x_mirrors_preview_geometry() {
+        let mut project = ProjectDocument::new("geometry-duplicate-flip-x");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.sector_mut(0, 0)
+            .unwrap()
+            .floor
+            .as_mut()
+            .unwrap()
+            .heights = [0, 32, 64, 96];
+        grid.ensure_sector(0, 0)
+            .unwrap()
+            .walls
+            .get_mut(GridDirection::North)
+            .push(GridVerticalFace::with_heights([0, 10, 110, 100], None));
+        grid.set_floor(1, 0, 0, None);
+        grid.sector_mut(1, 0)
+            .unwrap()
+            .floor
+            .as_mut()
+            .unwrap()
+            .heights = [100, 132, 164, 196];
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("geometry-duplicate-flip-x"), project);
+        let mut ctrl = egui::Modifiers::NONE;
+        ctrl.ctrl = true;
+        workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
+        workspace.select_sector((room, 1, 0), ctrl);
+
+        workspace.begin_floating_geometry_duplicate();
+        workspace.flip_floating_geometry_x();
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        assert_eq!(
+            grid.sector(2, 0).unwrap().floor.as_ref().unwrap().heights,
+            [132, 100, 196, 164]
+        );
+        let mirrored_first = grid.sector(3, 0).unwrap();
+        assert_eq!(
+            mirrored_first.floor.as_ref().unwrap().heights,
+            [32, 0, 96, 64]
+        );
+        assert_eq!(
+            mirrored_first.walls.get(GridDirection::North)[0].heights,
+            [10, 0, 100, 110]
+        );
+        assert!(workspace.selected_sectors.contains(&(room, 2, 0)));
+        assert!(workspace.selected_sectors.contains(&(room, 3, 0)));
+        assert!(!workspace.is_dirty());
+    }
+
+    #[test]
+    fn flip_sector_z_reverses_floor_and_wall_orientation() {
+        let mut sector = GridSector::empty();
+        sector.floor = Some(GridHorizontalFace::flat(0, None));
+        sector.floor.as_mut().unwrap().heights = [0, 32, 64, 96];
+        sector
+            .walls
+            .get_mut(GridDirection::North)
+            .push(GridVerticalFace::with_heights([1, 2, 3, 4], None));
+        sector
+            .walls
+            .get_mut(GridDirection::NorthWestSouthEast)
+            .push(GridVerticalFace::with_heights([5, 6, 7, 8], None));
+
+        let flipped = flip_sector_z(&sector);
+
+        assert_eq!(flipped.floor.as_ref().unwrap().heights, [96, 64, 32, 0]);
+        assert!(flipped.walls.get(GridDirection::North).is_empty());
+        assert_eq!(
+            flipped.walls.get(GridDirection::South)[0].heights,
+            [2, 1, 4, 3]
+        );
+        assert!(flipped
+            .walls
+            .get(GridDirection::NorthWestSouthEast)
+            .is_empty());
+        assert_eq!(
+            flipped.walls.get(GridDirection::NorthEastSouthWest)[0].heights,
+            [6, 5, 8, 7]
+        );
+    }
+
+    #[test]
+    fn flip_sector_x_remaps_split_triangles_and_diagonal_walls() {
+        let mut sector = GridSector::empty();
+        let mut face = GridHorizontalFace::flat(0, None);
+        face.heights = [0, 10, 20, 30];
+        face.split = GridSplit::NorthWestSouthEast;
+        face.dropped_corner = Some(Corner::NW);
+        face.uv.flip_u = false;
+        face.triangle_override_mut(0).heights = Some([100, 110, 120]);
+        face.triangle_override_mut(0).uv = Some(GridUvTransform::IDENTITY);
+        face.triangle_override_mut(0).walkable = Some(false);
+        sector.floor = Some(face);
+        sector
+            .walls
+            .get_mut(GridDirection::NorthWestSouthEast)
+            .push(GridVerticalFace::with_heights([1, 2, 3, 4], None));
+
+        let flipped = flip_sector_x(&sector);
+        let floor = flipped.floor.as_ref().unwrap();
+
+        assert_eq!(floor.heights, [10, 0, 30, 20]);
+        assert_eq!(floor.split, GridSplit::NorthEastSouthWest);
+        assert_eq!(floor.dropped_corner, Some(Corner::NE));
+        assert!(floor.uv.flip_u);
+        assert!(!floor.uv.flip_v);
+        assert_eq!(floor.triangle_override(0).heights, Some([110, 100, 120]));
+        assert!(floor.triangle_override(0).uv.unwrap().flip_u);
+        assert_eq!(floor.triangle_override(0).walkable, Some(false));
+        assert!(flipped
+            .walls
+            .get(GridDirection::NorthWestSouthEast)
+            .is_empty());
+        assert_eq!(
+            flipped.walls.get(GridDirection::NorthEastSouthWest)[0].heights,
+            [1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn flip_sector_z_remaps_split_triangles_and_dropped_wall_corners() {
+        let mut sector = GridSector::empty();
+        let mut face = GridHorizontalFace::flat(0, None);
+        face.heights = [0, 10, 20, 30];
+        face.split = GridSplit::NorthEastSouthWest;
+        face.dropped_corner = Some(Corner::SE);
+        face.uv.flip_v = false;
+        face.triangle_override_mut(1).heights = Some([200, 210, 220]);
+        face.triangle_override_mut(1).uv = Some(GridUvTransform::IDENTITY);
+        sector.ceiling = Some(face);
+        let mut diagonal = GridVerticalFace::with_heights([5, 6, 7, 8], None);
+        diagonal.dropped_corner = Some(WallCorner::TR);
+        sector
+            .walls
+            .get_mut(GridDirection::NorthEastSouthWest)
+            .push(diagonal);
+
+        let flipped = flip_sector_z(&sector);
+        let ceiling = flipped.ceiling.as_ref().unwrap();
+
+        assert_eq!(ceiling.heights, [30, 20, 10, 0]);
+        assert_eq!(ceiling.split, GridSplit::NorthWestSouthEast);
+        assert_eq!(ceiling.dropped_corner, Some(Corner::NE));
+        assert!(!ceiling.uv.flip_u);
+        assert!(ceiling.uv.flip_v);
+        assert_eq!(ceiling.triangle_override(0).heights, Some([220, 210, 200]));
+        assert!(ceiling.triangle_override(0).uv.unwrap().flip_v);
+        assert!(flipped
+            .walls
+            .get(GridDirection::NorthEastSouthWest)
+            .is_empty());
+        let wall = &flipped.walls.get(GridDirection::NorthWestSouthEast)[0];
+        assert_eq!(wall.heights, [6, 5, 8, 7]);
+        assert_eq!(wall.dropped_corner, Some(WallCorner::TL));
     }
 
     #[test]
@@ -25689,6 +27145,145 @@ mod tests {
     }
 
     #[test]
+    fn node_gizmo_axes_appear_for_selected_entity_and_light() {
+        let mut project = ProjectDocument::new("node-gizmo-axes");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let entity = project
+            .active_scene_mut()
+            .add_node(room, "Entity", NodeKind::Entity);
+        let light = project.active_scene_mut().add_node(
+            room,
+            "Light",
+            NodeKind::PointLight {
+                color: [255, 240, 200],
+                intensity: 1.0,
+                radius: 4.0,
+            },
+        );
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("node-gizmo-axes"), project);
+        set_gizmo_test_camera(&mut workspace);
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+
+        workspace.replace_node_selection(entity);
+        let entity_axes: HashSet<_> = workspace
+            .node_gizmo_screen_axes(viewport)
+            .into_iter()
+            .map(|axis| axis.axis)
+            .collect();
+        assert!(entity_axes.contains(&PrimitiveGizmoAxis::X));
+        assert!(entity_axes.contains(&PrimitiveGizmoAxis::Y));
+        assert!(entity_axes.contains(&PrimitiveGizmoAxis::Z));
+
+        workspace.replace_node_selection(light);
+        let light_axes: HashSet<_> = workspace
+            .node_gizmo_screen_axes(viewport)
+            .into_iter()
+            .map(|axis| axis.axis)
+            .collect();
+        assert!(light_axes.contains(&PrimitiveGizmoAxis::X));
+        assert!(light_axes.contains(&PrimitiveGizmoAxis::Y));
+        assert!(light_axes.contains(&PrimitiveGizmoAxis::Z));
+    }
+
+    #[test]
+    fn node_gizmo_moves_entity_on_selected_axis() {
+        let mut project = ProjectDocument::new("entity-gizmo-x");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let entity = project
+            .active_scene_mut()
+            .add_node(room, "Entity", NodeKind::Entity);
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("entity-gizmo-x"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.replace_node_selection(entity);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+        let unit = (x_axis.end - x_axis.start).normalized();
+        assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+        workspace.update_node_gizmo_drag(x_axis.start + unit * 8.0);
+        workspace.end_node_gizmo_drag();
+
+        let node = workspace.project.active_scene().node(entity).unwrap();
+        assert!((node.transform.translation[0] - HEIGHT_QUANTUM as f32 / 1024.0).abs() < 0.001);
+        assert_eq!(node.transform.translation[1], 0.0);
+        assert_eq!(node.transform.translation[2], 0.0);
+        let scene = workspace.project.active_scene();
+        let room_node = scene.node(room).unwrap();
+        let NodeKind::Room { grid } = &room_node.kind else {
+            unreachable!("test room is a room");
+        };
+        let world = psxed_project::spatial::node_preview_origin(grid, &node.transform);
+        assert_eq!(world[0], DEFAULT_WORLD_SECTOR_SIZE / 2 + HEIGHT_QUANTUM);
+        assert!(workspace.is_dirty());
+
+        workspace.do_undo();
+        let node = workspace.project.active_scene().node(entity).unwrap();
+        assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn node_gizmo_moves_point_light_on_y_axis() {
+        let mut project = ProjectDocument::new("light-gizmo-y");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let light = project.active_scene_mut().add_node(
+            room,
+            "Light",
+            NodeKind::PointLight {
+                color: [255, 240, 200],
+                intensity: 1.0,
+                radius: 4.0,
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("light-gizmo-y"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.replace_node_selection(light);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let y_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
+        let unit = (y_axis.end - y_axis.start).normalized();
+        assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, y_axis.start));
+        workspace.update_node_gizmo_drag(y_axis.start + unit * 8.0);
+        workspace.end_node_gizmo_drag();
+
+        let node = workspace.project.active_scene().node(light).unwrap();
+        assert_vec3_approx(
+            node.transform.translation,
+            [0.0, HEIGHT_QUANTUM as f32 / 1024.0, 0.0],
+        );
+        let scene = workspace.project.active_scene();
+        let room_node = scene.node(room).unwrap();
+        let NodeKind::Room { grid } = &room_node.kind else {
+            unreachable!("test room is a room");
+        };
+        let world = psxed_project::spatial::node_preview_origin(grid, &node.transform);
+        assert_eq!(world[1], HEIGHT_QUANTUM);
+        assert!(workspace.is_dirty());
+
+        workspace.do_undo();
+        let node = workspace.project.active_scene().node(light).unwrap();
+        assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
     fn duplicate_wall_cook_error_marks_both_authored_faces() {
         let mut project = ProjectDocument::new("duplicate-wall");
         let room = project.active_scene_mut().add_node(
@@ -25848,6 +27443,98 @@ mod tests {
                 Some(target)
             );
         }
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn place_image_prop_with_selected_material_creates_node() {
+        let mut project = ProjectDocument::new("image-prop-material-place");
+        let material = project.add_resource(
+            "Banner",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.place_kind = PlaceKind::ImageProp;
+        workspace.replace_resource_selection(material);
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 384.0, 512.0]);
+
+        let node = workspace
+            .project
+            .active_scene()
+            .node(workspace.selected_node_id())
+            .expect("placed image prop is selected");
+        assert_eq!(node.name, "Banner Image");
+        assert_eq!(node.transform.translation[1], 384.0 / 1024.0);
+        let NodeKind::ImageProp {
+            material: Some(actual),
+            width,
+            height,
+            cylindrical_billboard,
+        } = &node.kind
+        else {
+            panic!("expected image prop node");
+        };
+        assert_eq!(*actual, material);
+        assert_eq!(*width, DEFAULT_IMAGE_PROP_SIZE);
+        assert_eq!(*height, DEFAULT_IMAGE_PROP_SIZE);
+        assert!(!*cylindrical_billboard);
+        assert_eq!(workspace.status, "Placed Image Prop at 0,0");
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn place_image_prop_with_texture_creates_material_wrapper() {
+        let mut project = ProjectDocument::new("image-prop-texture-place");
+        let texture = project.add_resource(
+            "Crimson Banner",
+            ResourceData::Texture {
+                psxt_path: "assets/textures/crimson_banner.psxt".to_string(),
+            },
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.place_kind = PlaceKind::ImageProp;
+        workspace.place_resource = Some(texture);
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 128.0, 512.0]);
+
+        let node = workspace
+            .project
+            .active_scene()
+            .node(workspace.selected_node_id())
+            .expect("placed image prop is selected");
+        let NodeKind::ImageProp {
+            material: Some(material),
+            ..
+        } = &node.kind
+        else {
+            panic!("expected image prop node");
+        };
+        assert_ne!(*material, texture);
+        assert_eq!(workspace.place_resource, Some(*material));
+        let Some(resource) = workspace.project.resource(*material) else {
+            panic!("created material resource exists");
+        };
+        let ResourceData::Material(material_resource) = &resource.data else {
+            panic!("created resource is a material");
+        };
+        assert_eq!(resource.name, "Crimson Banner");
+        assert_eq!(material_resource.texture, Some(texture));
+        assert_eq!(workspace.status, "Placed Image Prop at 0,0");
         assert!(workspace.is_dirty());
     }
 

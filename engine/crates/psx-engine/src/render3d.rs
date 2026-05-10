@@ -107,6 +107,8 @@ pub enum CullMode {
     None,
     /// Cull clockwise screen-space triangles.
     Back,
+    /// Cull counter-clockwise screen-space triangles.
+    Front,
 }
 
 /// Projected vertex used by CPU-projected world surfaces.
@@ -284,9 +286,13 @@ impl TexturedModelRenderFace {
 
 fn model_uv_limits(model: Model<'_>) -> (i32, i32) {
     (
-        model.texture_width().saturating_sub(1).min(127) as i32,
-        model.texture_height().saturating_sub(1).min(127) as i32,
+        model_uv_max(model.texture_width()),
+        model_uv_max(model.texture_height()),
     )
+}
+
+fn model_uv_max(size: u16) -> i32 {
+    size.saturating_sub(1).min(u16::from(u8::MAX)) as i32
 }
 
 fn clamp_model_uv(u: i32, v: i32, max_u: i32, max_v: i32) -> (i32, i32) {
@@ -633,6 +639,13 @@ pub struct WorldSurfaceOptions {
     /// direct packet path and spend their budget on GTE transforms instead of
     /// conservative CPU-side subdivision checks.
     pub split_textured_triangles: bool,
+    /// Optional projected-edge limit for visual subdivision.
+    ///
+    /// Zero keeps the splitter focused on PS1 hardware extent limits. A
+    /// positive value lets close textured meshes subdivide before packet
+    /// emission, reducing affine/painter artifacts without forcing world
+    /// geometry to spend the same budget.
+    pub textured_split_max_edge: u16,
 }
 
 impl WorldSurfaceOptions {
@@ -646,6 +659,7 @@ impl WorldSurfaceOptions {
             cull_mode: CullMode::Back,
             render_layer: WorldRenderLayer::Opaque,
             split_textured_triangles: true,
+            textured_split_max_edge: 0,
         }
     }
 
@@ -682,6 +696,12 @@ impl WorldSurfaceOptions {
     /// Return options with textured triangle splitting enabled/disabled.
     pub const fn with_textured_triangle_splitting(mut self, enabled: bool) -> Self {
         self.split_textured_triangles = enabled;
+        self
+    }
+
+    /// Return options with an optional projected-edge split threshold.
+    pub const fn with_textured_triangle_max_edge(mut self, max_edge: u16) -> Self {
+        self.textured_split_max_edge = max_edge;
         self
     }
 }
@@ -875,7 +895,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
     ) -> WorldRenderStats {
         let mut stats = WorldRenderStats::default();
-        if options.cull_mode == CullMode::Back && projected_back_facing(verts) {
+        if projected_culled(verts, options.cull_mode) {
             stats.culled_triangles = 1;
             return stats;
         }
@@ -907,7 +927,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) -> WorldRenderStats {
         let mut stats = WorldRenderStats::default();
         let projected = [verts[0].projected, verts[1].projected, verts[2].projected];
-        if options.cull_mode == CullMode::Back && projected_back_facing(projected) {
+        if projected_culled(projected, options.cull_mode) {
             stats.culled_triangles = 1;
             return stats;
         }
@@ -937,8 +957,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             clamp_projected_textured_vertex(verts[2]),
         ];
 
-        if projected_textured_exceeds_hw_extent(verts) && split_depth < MAX_TEXTURED_HW_SPLIT_DEPTH
-        {
+        let needs_split = projected_textured_needs_split(verts, options);
+        if needs_split && split_depth < MAX_TEXTURED_HW_SPLIT_DEPTH {
             return self.submit_split_textured_triangle(
                 triangles,
                 verts,
@@ -1126,7 +1146,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
     ) -> WorldRenderStats {
         let mut stats = WorldRenderStats::default();
-        if options.cull_mode == CullMode::Back && projected_back_facing(verts) {
+        if projected_culled(verts, options.cull_mode) {
             stats.culled_triangles = 1;
             return stats;
         }
@@ -1783,7 +1803,55 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     continue;
                 }
 
-                if self.submit_projected_model_triangle_preclamped_fast(
+                if projected_culled_gte(projected, options.cull_mode) {
+                    stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+                    face_index += 1;
+                    continue;
+                }
+
+                let projected = [
+                    clamp_projected_vertex(projected[0]),
+                    clamp_projected_vertex(projected[1]),
+                    clamp_projected_vertex(projected[2]),
+                ];
+                let textured = [
+                    ProjectedTexturedVertex::new(
+                        projected[0],
+                        face.uvs[0].0 as i32,
+                        face.uvs[0].1 as i32,
+                    ),
+                    ProjectedTexturedVertex::new(
+                        projected[1],
+                        face.uvs[1].0 as i32,
+                        face.uvs[1].1 as i32,
+                    ),
+                    ProjectedTexturedVertex::new(
+                        projected[2],
+                        face.uvs[2].0 as i32,
+                        face.uvs[2].1 as i32,
+                    ),
+                ];
+
+                if options.split_textured_triangles {
+                    let tri_stats = self.submit_textured_triangle_split(
+                        triangles,
+                        textured,
+                        material,
+                        options,
+                        0,
+                    );
+                    merge_textured_model_stats(&mut stats, tri_stats);
+                    if stats.primitive_overflow || stats.command_overflow {
+                        crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                        emit_textured_model_detail_counters(
+                            joint_count,
+                            model.part_count(),
+                            project_count,
+                            faces_considered,
+                        );
+                        return stats;
+                    }
+                } else if self.submit_projected_model_triangle_preclamped_fast(
                     triangles, projected, face.uvs, material, options, &mut stats,
                 ) {
                     crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
@@ -1857,6 +1925,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         continue;
                     }
 
+                    if projected_culled([a.projected, b.projected, c.projected], options.cull_mode)
+                    {
+                        stats.culled_triangles = stats.culled_triangles.saturating_add(1);
+                        face_index += 1;
+                        continue;
+                    }
+
                     let tri_stats = self.submit_projected_model_triangle_fast(
                         triangles,
                         [a, b, c],
@@ -1903,10 +1978,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
     ) -> bool {
-        if projected_back_facing_gte(verts) {
-            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
-            return false;
-        }
+        let verts = [
+            clamp_projected_vertex(verts[0]),
+            clamp_projected_vertex(verts[1]),
+            clamp_projected_vertex(verts[2]),
+        ];
         if !projected_triangle_hw_safe(verts) {
             stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
             return false;
@@ -1930,9 +2006,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             return true;
         };
 
-        let depth = CameraDepth::new(
-            ((verts[0].sz + verts[1].sz + verts[2].sz) / 3).saturating_add(options.depth_bias),
-        );
+        let depth = CameraDepth::new(options.depth_policy.depth_values(
+            verts[0].sz,
+            verts[1].sz,
+            verts[2].sz,
+        ))
+        .saturating_add(options.depth_bias);
         self.push_command(
             options
                 .depth_band
@@ -1956,12 +2035,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         max_v: i32,
     ) -> WorldRenderStats {
         let projected = [verts[0].projected, verts[1].projected, verts[2].projected];
-        if projected_back_facing(projected) {
-            return WorldRenderStats {
-                culled_triangles: 1,
-                ..WorldRenderStats::default()
-            };
-        }
         if !projected_triangle_hw_safe(projected) {
             return WorldRenderStats {
                 dropped_triangles: 1,
@@ -1975,56 +2048,19 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             };
         }
 
-        let max_u = max_u.clamp(0, 127);
-        let max_v = max_v.clamp(0, 127);
-        let u0 = if verts[0].u <= 0 {
-            0
-        } else if verts[0].u > max_u {
-            max_u as u8
-        } else {
-            verts[0].u as u8
-        };
-        let v0 = if verts[0].v <= 0 {
-            0
-        } else if verts[0].v > max_v {
-            max_v as u8
-        } else {
-            verts[0].v as u8
-        };
-        let u1 = if verts[1].u <= 0 {
-            0
-        } else if verts[1].u > max_u {
-            max_u as u8
-        } else {
-            verts[1].u as u8
-        };
-        let v1 = if verts[1].v <= 0 {
-            0
-        } else if verts[1].v > max_v {
-            max_v as u8
-        } else {
-            verts[1].v as u8
-        };
-        let u2 = if verts[2].u <= 0 {
-            0
-        } else if verts[2].u > max_u {
-            max_u as u8
-        } else {
-            verts[2].u as u8
-        };
-        let v2 = if verts[2].v <= 0 {
-            0
-        } else if verts[2].v > max_v {
-            max_v as u8
-        } else {
-            verts[2].v as u8
-        };
-
+        let max_u = max_u.clamp(0, u8::MAX as i32);
+        let max_v = max_v.clamp(0, u8::MAX as i32);
+        let u0 = clamp_model_uv_i32_component(verts[0].u, max_u) as u8;
+        let v0 = clamp_model_uv_i32_component(verts[0].v, max_v) as u8;
+        let u1 = clamp_model_uv_i32_component(verts[1].u, max_u) as u8;
+        let v1 = clamp_model_uv_i32_component(verts[1].v, max_v) as u8;
+        let u2 = clamp_model_uv_i32_component(verts[2].u, max_u) as u8;
+        let v2 = clamp_model_uv_i32_component(verts[2].v, max_v) as u8;
         let Some(tri) = triangles.push(TriTextured::with_material_packet_texcoords(
             [
-                (verts[0].projected.sx, verts[0].projected.sy),
-                (verts[1].projected.sx, verts[1].projected.sy),
-                (verts[2].projected.sx, verts[2].projected.sy),
+                (projected[0].sx, projected[0].sy),
+                (projected[1].sx, projected[1].sy),
+                (projected[2].sx, projected[2].sy),
             ],
             [(u0, v0), (u1, v1), (u2, v2)],
             material,
@@ -2035,10 +2071,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             };
         };
 
-        let depth = CameraDepth::new(
-            ((verts[0].projected.sz + verts[1].projected.sz + verts[2].projected.sz) / 3)
-                .saturating_add(options.depth_bias),
-        );
+        let depth = CameraDepth::new(options.depth_policy.depth_values(
+            projected[0].sz,
+            projected[1].sz,
+            projected[2].sz,
+        ))
+        .saturating_add(options.depth_bias);
         self.push_command(
             options
                 .depth_band
@@ -2106,7 +2144,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             ProjectedVertex::from(verts[1]),
             ProjectedVertex::from(verts[2]),
         ];
-        if options.cull_mode == CullMode::Back && projected_back_facing(projected) {
+        if projected_culled(projected, options.cull_mode) {
             stats.culled_triangles = 1;
             return stats;
         }
@@ -3146,12 +3184,28 @@ fn projected_back_facing(verts: [ProjectedVertex; 3]) -> bool {
     (ax * by - ay * bx) <= 0
 }
 
+fn projected_culled(verts: [ProjectedVertex; 3], cull_mode: CullMode) -> bool {
+    match cull_mode {
+        CullMode::None => false,
+        CullMode::Back => projected_back_facing(verts),
+        CullMode::Front => !projected_back_facing(verts),
+    }
+}
+
 fn projected_back_facing_gte(verts: [ProjectedVertex; 3]) -> bool {
     scene::screen_triangle_back_facing([
         (verts[0].sx, verts[0].sy),
         (verts[1].sx, verts[1].sy),
         (verts[2].sx, verts[2].sy),
     ])
+}
+
+fn projected_culled_gte(verts: [ProjectedVertex; 3], cull_mode: CullMode) -> bool {
+    match cull_mode {
+        CullMode::None => false,
+        CullMode::Back => projected_back_facing_gte(verts),
+        CullMode::Front => !projected_back_facing_gte(verts),
+    }
 }
 
 fn clamp_projected_textured_vertex(vertex: ProjectedTexturedVertex) -> ProjectedTexturedVertex {
@@ -3187,6 +3241,26 @@ fn projected_textured_exceeds_hw_extent(verts: [ProjectedTexturedVertex; 3]) -> 
         || projected_edge_exceeds_hw_extent(verts[2], verts[0])
 }
 
+fn projected_textured_needs_split(
+    verts: [ProjectedTexturedVertex; 3],
+    options: WorldSurfaceOptions,
+) -> bool {
+    projected_textured_exceeds_hw_extent(verts)
+        || projected_textured_exceeds_quality_extent(verts, options.textured_split_max_edge)
+}
+
+fn projected_textured_exceeds_quality_extent(
+    verts: [ProjectedTexturedVertex; 3],
+    max_edge: u16,
+) -> bool {
+    if max_edge == 0 {
+        return false;
+    }
+    projected_edge_split_score(verts[0], verts[1]) > max_edge as i32
+        || projected_edge_split_score(verts[1], verts[2]) > max_edge as i32
+        || projected_edge_split_score(verts[2], verts[0]) > max_edge as i32
+}
+
 fn projected_textured_gouraud_exceeds_hw_extent(
     verts: [ProjectedTexturedGouraudVertex; 3],
 ) -> bool {
@@ -3206,6 +3280,14 @@ fn projected_triangle_hw_safe(verts: [ProjectedVertex; 3]) -> bool {
         && max_y <= PSX_VERTEX_MAX
         && ((max_x as i32) - (min_x as i32)) <= PSX_TRI_MAX_DX
         && ((max_y as i32) - (min_y as i32)) <= PSX_TRI_MAX_DY
+}
+
+fn clamp_projected_vertex(vertex: ProjectedVertex) -> ProjectedVertex {
+    ProjectedVertex::new(
+        clamp_i16_range(vertex.sx, PSX_VERTEX_MIN, PSX_VERTEX_MAX),
+        clamp_i16_range(vertex.sy, PSX_VERTEX_MIN, PSX_VERTEX_MAX),
+        vertex.sz,
+    )
 }
 
 fn projected_edge_exceeds_hw_extent(
@@ -3241,6 +3323,7 @@ fn largest_projected_gouraud_edge(verts: [ProjectedTexturedGouraudVertex; 3]) ->
     largest_projected_edge(textured)
 }
 
+#[inline(always)]
 fn projected_edge_split_score(a: ProjectedTexturedVertex, b: ProjectedTexturedVertex) -> i32 {
     let dx = ((a.projected.sx as i32) - (b.projected.sx as i32)).abs();
     let dy = ((a.projected.sy as i32) - (b.projected.sy as i32)).abs();
@@ -3726,7 +3809,18 @@ mod tests {
     fn model_uv_limit_clamps_to_declared_atlas_extent() {
         assert_eq!(clamp_model_uv(64, 32, 127, 63), (64, 32));
         assert_eq!(clamp_model_uv(153, 80, 127, 63), (127, 63));
+        assert_eq!(clamp_model_uv(240, 250, 255, 255), (240, 250));
+        assert_eq!(clamp_model_uv(300, 260, 255, 255), (255, 255));
         assert_eq!(clamp_model_uv(-4, -9, 127, 63), (0, 0));
+    }
+
+    #[test]
+    fn model_uv_limit_allows_full_8bpp_page() {
+        assert_eq!(model_uv_max(0), 0);
+        assert_eq!(model_uv_max(64), 63);
+        assert_eq!(model_uv_max(128), 127);
+        assert_eq!(model_uv_max(256), 255);
+        assert_eq!(model_uv_max(512), 255);
     }
 
     #[test]
