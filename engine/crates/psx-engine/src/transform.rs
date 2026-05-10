@@ -140,6 +140,7 @@ impl From<RoomPoint> for WorldVertex {
 /// Gameplay code that is specifically operating inside a cooked room
 /// should prefer [`RoomPoint`] and convert here only at render
 /// submission boundaries.
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorldVertex {
     /// World-space X.

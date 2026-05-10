@@ -515,6 +515,7 @@ dependencies = [
  "psx-asset",
  "psx-gpu",
  "psx-gte",
+ "psx-level",
  "psx-math",
  "psx-pad",
  "psx-rt",
@@ -633,6 +634,7 @@ name = "psxed-project"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
+ "psx-engine",
  "psx-level",
  "psxed-format",
  "psxed-gltf",
