@@ -25,8 +25,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use emulator_core::{
-    button, fast_boot_disc_with_hle, spu::SAMPLE_CYCLES, telemetry,
-    warm_bios_for_disc_fast_boot, Bus, ButtonState, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
+    button, fast_boot_disc_with_hle, spu::SAMPLE_CYCLES, telemetry, warm_bios_for_disc_fast_boot,
+    Bus, ButtonState, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use psoxide_settings::{
     library::{GameKind, LibraryEntry},
