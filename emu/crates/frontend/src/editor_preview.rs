@@ -258,6 +258,15 @@ pub fn build_phase1_frame(
         hidden_scene_nodes,
         &mut scratch,
     );
+    walk_image_props(
+        project,
+        room_id,
+        grid,
+        textures,
+        world_camera,
+        hidden_scene_nodes,
+        &mut scratch,
+    );
     push_streaming_chunk_boundaries(grid, &mut scratch);
     walk_entities(project, grid, hidden_scene_nodes, selected, &mut scratch);
     walk_light_gizmos(
@@ -1565,6 +1574,123 @@ fn walk_entities(
     }
 }
 
+fn walk_image_props(
+    project: &ProjectDocument,
+    room_id: psxed_project::NodeId,
+    grid: &WorldGrid,
+    textures: &EditorTextures,
+    camera: psx_engine::WorldCamera,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    for node in scene.nodes() {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
+            || !is_descendant_of_room(scene, node.id, room_id)
+        {
+            continue;
+        }
+        let NodeKind::ImageProp {
+            material,
+            width,
+            height,
+            cylindrical_billboard,
+        } = &node.kind
+        else {
+            continue;
+        };
+        let Some(material_id) = *material else {
+            continue;
+        };
+        let Some(slot) = textures.slot(material_id) else {
+            continue;
+        };
+        let tint = project
+            .resource(material_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Material(material) => Some(material.tint),
+                _ => None,
+            })
+            .unwrap_or([0x80, 0x80, 0x80]);
+        let origin = node_room_local_origin(grid, &node.transform);
+        let verts = image_prop_vertices(
+            origin,
+            *width,
+            *height,
+            node.transform.rotation_degrees[1],
+            *cylindrical_billboard,
+            camera,
+        );
+        let Some(projected) = camera.project_world_quad(verts) else {
+            continue;
+        };
+        let p = projected.map(preview_projected_from_engine);
+        let u_max = slot.texture_width.saturating_sub(1);
+        let v_max = slot.texture_height.saturating_sub(1);
+        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+        let material =
+            TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (tint[0], tint[1], tint[2]))
+                .with_texture_window(slot.texture_window);
+        let _ = push_textured_material_tri(
+            scratch,
+            [p[0], p[1], p[2]],
+            [uvs[0], uvs[1], uvs[2]],
+            material,
+            room_depth_slot(projected_avg_sz([p[0], p[1], p[2]])),
+        );
+        let _ = push_textured_material_tri(
+            scratch,
+            [p[0], p[2], p[3]],
+            [uvs[0], uvs[2], uvs[3]],
+            material,
+            room_depth_slot(projected_avg_sz([p[0], p[2], p[3]])),
+        );
+    }
+}
+
+fn image_prop_vertices(
+    origin: psx_engine::WorldVertex,
+    width: u16,
+    height: u16,
+    yaw_degrees: f32,
+    cylindrical_billboard: bool,
+    camera: psx_engine::WorldCamera,
+) -> [psx_engine::WorldVertex; 4] {
+    let (sin_yaw, cos_yaw) = if cylindrical_billboard {
+        (camera.sin_yaw.raw(), camera.cos_yaw.raw())
+    } else {
+        let yaw = yaw_to_q12(yaw_degrees);
+        (
+            psx_gte::transform::sin_1_3_12(yaw) as i32,
+            psx_gte::transform::cos_1_3_12(yaw) as i32,
+        )
+    };
+    let half_width = (width as i32) / 2;
+    let right_x = mul_q12_i32(half_width, cos_yaw);
+    let right_z = -mul_q12_i32(half_width, sin_yaw);
+    let top_y = origin.y.saturating_add(height as i32);
+    [
+        psx_engine::WorldVertex::new(origin.x - right_x, top_y, origin.z - right_z),
+        psx_engine::WorldVertex::new(origin.x + right_x, top_y, origin.z + right_z),
+        psx_engine::WorldVertex::new(origin.x + right_x, origin.y, origin.z + right_z),
+        psx_engine::WorldVertex::new(origin.x - right_x, origin.y, origin.z - right_z),
+    ]
+}
+
+fn mul_q12_i32(value: i32, q12: i32) -> i32 {
+    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn preview_projected_from_engine(
+    projected: psx_engine::ProjectedVertex,
+) -> psx_gte::scene::Projected {
+    psx_gte::scene::Projected {
+        sx: projected.sx,
+        sy: projected.sy,
+        sz: projected.sz.clamp(0, u16::MAX as i32) as u16,
+    }
+}
+
 /// Per-frame tick used to advance animation phase for the
 /// editor's looping model preview. Bumped once per
 /// `build_phase1_frame` call. PSX angle / phase math needs
@@ -2321,6 +2447,7 @@ fn entity_bound_style(
     let rgb = match kind {
         psxed_ui::EntityBoundKind::Model => (0xC0, 0xC8, 0xD0),
         psxed_ui::EntityBoundKind::MeshFallback => (0x90, 0x98, 0xA0),
+        psxed_ui::EntityBoundKind::ImageProp => (0xD0, 0xAA, 0x78),
         psxed_ui::EntityBoundKind::SpawnPoint => (0x60, 0xE0, 0x80),
         psxed_ui::EntityBoundKind::PointLight => (0xFF, 0xD8, 0x70),
         psxed_ui::EntityBoundKind::Trigger => (0xC8, 0x80, 0xE0),
@@ -2566,6 +2693,7 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         NodeKind::SpawnPoint { player: true, .. } => Some((0x60, 0xE0, 0x80)),
         NodeKind::SpawnPoint { player: false, .. } => Some((0x60, 0xB8, 0xF0)),
         NodeKind::MeshInstance { .. } => Some((0xC0, 0xC8, 0xD0)),
+        NodeKind::ImageProp { .. } => Some((0xD0, 0xAA, 0x78)),
         NodeKind::Entity => Some((0xA0, 0xB0, 0xC0)),
         // Lights draw their own bulb icon + radius ring in
         // `walk_light_gizmos`; using the generic billboard square
