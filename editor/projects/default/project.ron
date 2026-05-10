@@ -7,15 +7,14 @@
             next_node_id: 34,
             nodes: [
                 /*[0]*/ (id: (1), name: "Root", kind: Node3D, transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: None, children: [(2)]),
-                /*[1]*/ (id: (2), name: "Demo World", kind: World(sector_size: 768, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: true, texture: None, texture_panels: (Some((116)), Some((117)), Some((118)), Some((119)), Some((120)), Some((121)), Some((122)), Some((123)), Some((124)), Some((125)), Some((126)), Some((127)), None, None, None, None), radius: 18000, height: 8192, vertical_offset: -2048, segments: 12, rotation_degrees: 0, tint: (128, 128, 128), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((1)), children: [(18)]),
-                /*[2]*/ (id: (18), name: "Room", kind: Room(grid: (width: 10, depth: 32, sector_size: 768, sectors: [None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (0, 0, 1536, 1696), material: Some((4)), solid: true, dropped_corner: None)], west: [(heights: (0, 0, 1536, 1536), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 64, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (0, 0, 1536, 1536), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 64, 64, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (0, 0, 1536, 1536), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 64, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (0, 0, 1536, 1536), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [(heights: (0, 0, 1536, 1536), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, Some((floor: Some((heights: (0, 224, 224, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (224, 0, 1696, 1696), material: Some((4)), uv: (offset: (0, 0), span: (0, 141), rotation: Deg0, flip_u: false, flip_v: false), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 64, 224, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 64, 64, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 64, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (0, 0, 1504, 1536), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, Some((floor: Some((heights: (224, 224, 224, 224), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (224, 224, 1696, 1344), material: Some((4)), uv: (offset: (0, 0), span: (0, 123), rotation: Deg0, flip_u: false, flip_v: false), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 0, 224, 224), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 0, 0, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (0, 0, 1504, 1504), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 384, -224, -224), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (-224, -224, 1152, 1344), material: Some((4)), solid: true, dropped_corner: None)], west: [(heights: (-224, 0, 1376, 1152), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 384, 384, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (0, 0, 1376, 1376), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (448, 192, 384, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (0, 448, 1472, 1376), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (448, 192, 192, 448), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (448, 448, 1856, 1472), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (224, 64, 192, 448), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (448, 224, 1760, 1856), material: Some((4)), uv: (offset: (0, 0), span: (0, 128), rotation: Deg0, flip_u: false, flip_v: false), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (224, 64, 64, 224), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (224, 224, 1344, 1760), material: Some((4)), uv: (offset: (0, 0), span: (0, 128), rotation: Deg0, flip_u: false, flip_v: false), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (224, 32, 64, 224), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, -32, 32, 224), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, -32, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (0, 0, 1504, 1504), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (0, 0, 1504, 1504), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (0, 0, 1504, 1504), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [(heights: (0, 0, 1504, 1504), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (384, 384, 192, -224), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (192, -224, 1344, 1440), material: Some((4)), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (384, 384, 384, 384), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (192, 64, 384, 384), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (192, 64, 64, 192), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, -96, 64, 192), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, -96, -96, 64), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (32, 32, -96, 64), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (-32, -32, 32, 32), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, -32, -32), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 352, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (0, 352, 1536, 1504), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (384, 384, 384, 192), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (384, 192, 1440, 1440), material: Some((4)), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (384, 0, 384, 384), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 64, 0, 384), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 64, 64, 64), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (-96, -96, 64, 64), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (-96, -96, -96, -96), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (32, 64, -96, -96), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (-32, 0, 64, 32), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, -32), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (352, 352, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (352, 352, 1536, 1536), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (384, 192, 192, 384), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (192, 384, 1440, 1440), material: Some((4)), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 192, 384), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 64, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 64, 64, 64), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (-96, 64, 64, 64), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (-96, 64, 64, -96), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 64, 64, -96), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 64, 64), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (352, 480, 0, 0), split: NorthWestSouthEast, material: Some((13)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (352, 480, 1664, 1536), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: Some((heights: (192, 192, 192, 192), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (192, 192, 1440, 1440), material: Some((4)), solid: true, dropped_corner: None)], south: [(heights: (192, 192, 1440, 1440), material: Some((4)), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 192, 192), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 192, 1440, 1440), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1440, 1248), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 0, 0, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1248, 1248), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 0, 0, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1248, 1248), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 0, 0, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1248, 1248), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (64, 0, 0, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1248, 1088), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 64), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1088, 1088), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1088, 1088), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1088, 1216), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1216, 1216), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 1216, 1216), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (480, 128, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (480, 128, 1312, 1664), material: Some((4)), solid: true, dropped_corner: None)], east: [(heights: (128, 0, 1216, 1312), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: None, ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), None, None, None, None, None], origin: (-3, 8), ambient_color: (17, 15, 15), fog_enabled: true, fog_color: (24, 28, 34), fog_near: 5250, fog_far: 22500)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((2)), children: [(19), (28)]),
-                /*[3]*/ (id: (19), name: "Point Light", kind: PointLight(color: (198, 0, 0), intensity: 0.77, radius: 5.8), transform: (translation: (2.1183136, 2.0, 7.026195), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((18)), children: []),
-                /*[4]*/ (id: (28), name: "Crimson Cross Knight Player", kind: Entity, transform: (translation: (1.705177, 0.0, 6.732449), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((18)), children: [(29), (30), (31), (32), (33)]),
+                /*[1]*/ (id: (2), name: "World", kind: World(sector_size: 1024, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640, min_floor_clearance: 64)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((1)), children: [(18)]),
+                /*[2]*/ (id: (18), name: "Room", kind: Room(grid: (width: 3, depth: 3, sector_size: 1024, sectors: [Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], west: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], south: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: []))), Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], east: [(heights: (0, 0, 2048, 2048), material: Some((4)), solid: true, dropped_corner: None)], south: [], west: [], north_west_south_east: [], north_east_south_west: [])))], origin: (0, 0), ambient_color: (48, 48, 48), fog_enabled: false, fog_color: (24, 28, 34), fog_near: 4096, fog_far: 16384)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((2)), children: [(19), (28)]),
+                /*[3]*/ (id: (19), name: "Point Light", kind: PointLight(color: (255, 240, 200), intensity: 1.0, radius: 6.0), transform: (translation: (0.0, 2.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((18)), children: []),
+                /*[4]*/ (id: (28), name: "Player", kind: Entity, transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((18)), children: [(29), (30), (31), (32)]),
                 /*[5]*/ (id: (29), name: "Model Renderer", kind: ModelRenderer(model: Some((25)), material: None), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
                 /*[6]*/ (id: (30), name: "Animator", kind: Animator(clip: Some(0), autoplay: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
                 /*[7]*/ (id: (31), name: "Character Controller", kind: CharacterController(character: Some((6)), player: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
                 /*[8]*/ (id: (32), name: "Collider", kind: Collider(shape: Capsule(radius: 192, height: 1024), solid: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
-                /*[9]*/ (id: (33), name: "Practice Sword Equipment", kind: Equipment(weapon: Some((9)), character_socket: "right_hand_grip", weapon_grip: "grip"), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
             ],
         ),
     ],
@@ -93,44 +92,6 @@
             )),
         ),
         /*[6]*/ (
-            id: (9),
-            name: "Practice Sword",
-            data: Weapon((
-                model: None,
-                default_character_socket: "right_hand_grip",
-                grip: (name: "grip", translation: (0, 0, 0), rotation_q12: (0, 0, 0)),
-                hitboxes: [(name: "Blade Capsule", shape: Capsule(start: (0, 0, 0), end: (0, 640, 0), radius: 32), active_start_frame: 4, active_end_frame: 12)],
-            )),
-        ),
-        /*[7]*/ (
-            id: (12),
-            name: "Dirt",
-            data: Texture(
-                psxt_path: "assets/textures/dirt.psxt",
-            ),
-        ),
-        /*[8]*/ (
-            id: (13),
-            name: "Dirt",
-            data: Material((
-                texture: Some((12)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[9]*/ (
-            id: (14),
-            name: "New Weapon",
-            data: Weapon((
-                model: None,
-                default_character_socket: "right_hand_grip",
-                grip: (name: "grip", translation: (0, 0, 0), rotation_q12: (0, 0, 0)),
-                hitboxes: [(name: "Main Hit", shape: Capsule(start: (0, 0, 0), end: (0, 512, 0), radius: 48), active_start_frame: 0, active_end_frame: 0)],
-            )),
-        ),
-        /*[10]*/ (
             id: (16),
             name: "Meshy Biped Skeleton",
             data: Skeleton((
@@ -140,7 +101,7 @@
                 note: "Shared by the Meshy biped player and enemy characters",
             )),
         ),
-        /*[11]*/ (
+        /*[7]*/ (
             id: (25),
             name: "Crimson Cross Knight",
             data: Model((
@@ -156,7 +117,7 @@
                 attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[12]*/ (
+        /*[8]*/ (
             id: (29),
             name: "Hooded Wretch",
             data: Model((
@@ -172,7 +133,7 @@
                 attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[13]*/ (
+        /*[9]*/ (
             id: (32),
             name: "Crowned Wraith",
             data: Model((
@@ -188,7 +149,7 @@
                 attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[14]*/ (
+        /*[10]*/ (
             id: (38),
             name: "Obsidian Wraith Enemy Set",
             data: AnimationSet((
@@ -200,7 +161,7 @@
                 clips: [(47), (48), (49), (50), (51), (52), (53)],
             )),
         ),
-        /*[15]*/ (
+        /*[11]*/ (
             id: (39),
             name: "Crimson Cross Knight Player Set",
             data: AnimationSet((
@@ -212,7 +173,7 @@
                 clips: [(47), (48), (49), (50), (51), (52), (53)],
             )),
         ),
-        /*[16]*/ (
+        /*[12]*/ (
             id: (40),
             name: "Hooded Wretch Enemy Set",
             data: AnimationSet((
@@ -224,7 +185,7 @@
                 clips: [(47), (48), (49), (50), (51), (52), (53)],
             )),
         ),
-        /*[17]*/ (
+        /*[13]*/ (
             id: (41),
             name: "Crowned Wraith Enemy Set",
             data: AnimationSet((
@@ -236,7 +197,7 @@
                 clips: [(47), (48), (49), (50), (51), (52), (53)],
             )),
         ),
-        /*[18]*/ (
+        /*[14]*/ (
             id: (42),
             name: "Obsidian Wraith Enemy",
             data: Character((
@@ -256,7 +217,7 @@
                 camera_target_height: 640,
             )),
         ),
-        /*[19]*/ (
+        /*[15]*/ (
             id: (43),
             name: "Hooded Wretch Enemy",
             data: Character((
@@ -276,7 +237,7 @@
                 camera_target_height: 640,
             )),
         ),
-        /*[20]*/ (
+        /*[16]*/ (
             id: (44),
             name: "Crowned Wraith Enemy",
             data: Character((
@@ -296,7 +257,7 @@
                 camera_target_height: 640,
             )),
         ),
-        /*[21]*/ (
+        /*[17]*/ (
             id: (45),
             name: "Standalone FBX / neutral idle",
             data: AnimationClip((
@@ -307,7 +268,7 @@
                 tags: ["standalone", "idle"],
             )),
         ),
-        /*[22]*/ (
+        /*[18]*/ (
             id: (46),
             name: "Standalone FBX / walking",
             data: AnimationClip((
@@ -318,7 +279,7 @@
                 tags: ["standalone", "walk"],
             )),
         ),
-        /*[23]*/ (
+        /*[19]*/ (
             id: (47),
             name: "Standalone FBX / walk backwards",
             data: AnimationClip((
@@ -329,7 +290,7 @@
                 tags: ["standalone", "walk"],
             )),
         ),
-        /*[24]*/ (
+        /*[20]*/ (
             id: (48),
             name: "Standalone FBX / zombie reaction hit",
             data: AnimationClip((
@@ -340,7 +301,7 @@
                 tags: ["standalone", "hit"],
             )),
         ),
-        /*[25]*/ (
+        /*[21]*/ (
             id: (49),
             name: "Standalone FBX / stand to roll",
             data: AnimationClip((
@@ -351,7 +312,7 @@
                 tags: ["standalone", "roll"],
             )),
         ),
-        /*[26]*/ (
+        /*[22]*/ (
             id: (50),
             name: "Standalone FBX / standing react death backward",
             data: AnimationClip((
@@ -362,7 +323,7 @@
                 tags: ["standalone", "death"],
             )),
         ),
-        /*[27]*/ (
+        /*[23]*/ (
             id: (51),
             name: "Standalone FBX / standing melee combo attack ver 3",
             data: AnimationClip((
@@ -373,7 +334,7 @@
                 tags: ["standalone", "attack"],
             )),
         ),
-        /*[28]*/ (
+        /*[24]*/ (
             id: (52),
             name: "Standalone FBX / sword and shield attack",
             data: AnimationClip((
@@ -384,7 +345,7 @@
                 tags: ["standalone", "attack"],
             )),
         ),
-        /*[29]*/ (
+        /*[25]*/ (
             id: (53),
             name: "Standalone FBX / standing melee attack downward",
             data: AnimationClip((
@@ -394,648 +355,6 @@
                 looping: false,
                 tags: ["standalone", "attack"],
             )),
-        ),
-        /*[30]*/ (
-            id: (54),
-            name: "Torment Stone Brick 1",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_brick_1.psxt",
-            ),
-        ),
-        /*[31]*/ (
-            id: (55),
-            name: "Torment Stone Brick 1",
-            data: Material((
-                texture: Some((54)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[32]*/ (
-            id: (56),
-            name: "Torment Stone Brick 2",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_brick_2.psxt",
-            ),
-        ),
-        /*[33]*/ (
-            id: (57),
-            name: "Torment Stone Brick 2",
-            data: Material((
-                texture: Some((56)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[34]*/ (
-            id: (58),
-            name: "Torment Stone Brick 3",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_brick_3.psxt",
-            ),
-        ),
-        /*[35]*/ (
-            id: (59),
-            name: "Torment Stone Brick 3",
-            data: Material((
-                texture: Some((58)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[36]*/ (
-            id: (60),
-            name: "Torment Stone Brick 4",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_brick_4.psxt",
-            ),
-        ),
-        /*[37]*/ (
-            id: (61),
-            name: "Torment Stone Brick 4",
-            data: Material((
-                texture: Some((60)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[38]*/ (
-            id: (62),
-            name: "Torment Stone Floor 1",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_floor_1.psxt",
-            ),
-        ),
-        /*[39]*/ (
-            id: (63),
-            name: "Torment Stone Floor 1",
-            data: Material((
-                texture: Some((62)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[40]*/ (
-            id: (64),
-            name: "Torment Stone Floor 2",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_floor_2.psxt",
-            ),
-        ),
-        /*[41]*/ (
-            id: (65),
-            name: "Torment Stone Floor 2",
-            data: Material((
-                texture: Some((64)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[42]*/ (
-            id: (66),
-            name: "Torment Stone Floor 3",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_floor_3.psxt",
-            ),
-        ),
-        /*[43]*/ (
-            id: (67),
-            name: "Torment Stone Floor 3",
-            data: Material((
-                texture: Some((66)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[44]*/ (
-            id: (68),
-            name: "Torment Stone Floor 4",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_floor_4.psxt",
-            ),
-        ),
-        /*[45]*/ (
-            id: (69),
-            name: "Torment Stone Floor 4",
-            data: Material((
-                texture: Some((68)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[46]*/ (
-            id: (70),
-            name: "Torment Stone General 1",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_general_1.psxt",
-            ),
-        ),
-        /*[47]*/ (
-            id: (71),
-            name: "Torment Stone General 1",
-            data: Material((
-                texture: Some((70)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[48]*/ (
-            id: (72),
-            name: "Torment Stone General 2",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_general_2.psxt",
-            ),
-        ),
-        /*[49]*/ (
-            id: (73),
-            name: "Torment Stone General 2",
-            data: Material((
-                texture: Some((72)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[50]*/ (
-            id: (74),
-            name: "Torment Stone General 3",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_general_3.psxt",
-            ),
-        ),
-        /*[51]*/ (
-            id: (75),
-            name: "Torment Stone General 3",
-            data: Material((
-                texture: Some((74)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[52]*/ (
-            id: (76),
-            name: "Torment Stone General 4",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_general_4.psxt",
-            ),
-        ),
-        /*[53]*/ (
-            id: (77),
-            name: "Torment Stone General 4",
-            data: Material((
-                texture: Some((76)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[54]*/ (
-            id: (78),
-            name: "Torment Stone General 5",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_general_5.psxt",
-            ),
-        ),
-        /*[55]*/ (
-            id: (79),
-            name: "Torment Stone General 5",
-            data: Material((
-                texture: Some((78)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[56]*/ (
-            id: (80),
-            name: "Torment Stone General 6",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_general_6.psxt",
-            ),
-        ),
-        /*[57]*/ (
-            id: (81),
-            name: "Torment Stone General 6",
-            data: Material((
-                texture: Some((80)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[58]*/ (
-            id: (82),
-            name: "Torment Stone Wall 1",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_wall_1.psxt",
-            ),
-        ),
-        /*[59]*/ (
-            id: (83),
-            name: "Torment Stone Wall 1",
-            data: Material((
-                texture: Some((82)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[60]*/ (
-            id: (84),
-            name: "Torment Stone Wall 2",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_wall_2.psxt",
-            ),
-        ),
-        /*[61]*/ (
-            id: (85),
-            name: "Torment Stone Wall 2",
-            data: Material((
-                texture: Some((84)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[62]*/ (
-            id: (86),
-            name: "Torment Stone Wall 3",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_wall_3.psxt",
-            ),
-        ),
-        /*[63]*/ (
-            id: (87),
-            name: "Torment Stone Wall 3",
-            data: Material((
-                texture: Some((86)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[64]*/ (
-            id: (88),
-            name: "Torment Stone Wall 4",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_wall_4.psxt",
-            ),
-        ),
-        /*[65]*/ (
-            id: (89),
-            name: "Torment Stone Wall 4",
-            data: Material((
-                texture: Some((88)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[66]*/ (
-            id: (90),
-            name: "Torment Stone Rubble",
-            data: Texture(
-                psxt_path: "assets/textures/torment_stone_rubble.psxt",
-            ),
-        ),
-        /*[67]*/ (
-            id: (91),
-            name: "Torment Stone Rubble",
-            data: Material((
-                texture: Some((90)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[68]*/ (
-            id: (92),
-            name: "Torment Rot Wood 1",
-            data: Texture(
-                psxt_path: "assets/textures/torment_rot_wood_1.psxt",
-            ),
-        ),
-        /*[69]*/ (
-            id: (93),
-            name: "Torment Rot Wood 1",
-            data: Material((
-                texture: Some((92)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[70]*/ (
-            id: (94),
-            name: "Torment Rot Wood 2",
-            data: Texture(
-                psxt_path: "assets/textures/torment_rot_wood_2.psxt",
-            ),
-        ),
-        /*[71]*/ (
-            id: (95),
-            name: "Torment Rot Wood 2",
-            data: Material((
-                texture: Some((94)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[72]*/ (
-            id: (96),
-            name: "Torment Rot Wood 3",
-            data: Texture(
-                psxt_path: "assets/textures/torment_rot_wood_3.psxt",
-            ),
-        ),
-        /*[73]*/ (
-            id: (97),
-            name: "Torment Rot Wood 3",
-            data: Material((
-                texture: Some((96)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[74]*/ (
-            id: (98),
-            name: "Torment Grating 1",
-            data: Texture(
-                psxt_path: "assets/textures/torment_grating_1.psxt",
-            ),
-        ),
-        /*[75]*/ (
-            id: (99),
-            name: "Torment Grating 1",
-            data: Material((
-                texture: Some((98)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[76]*/ (
-            id: (100),
-            name: "Torment Grating 2",
-            data: Texture(
-                psxt_path: "assets/textures/torment_grating_2.psxt",
-            ),
-        ),
-        /*[77]*/ (
-            id: (101),
-            name: "Torment Grating 2",
-            data: Material((
-                texture: Some((100)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[78]*/ (
-            id: (102),
-            name: "Torment Grating 3",
-            data: Texture(
-                psxt_path: "assets/textures/torment_grating_3.psxt",
-            ),
-        ),
-        /*[79]*/ (
-            id: (103),
-            name: "Torment Grating 3",
-            data: Material((
-                texture: Some((102)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[80]*/ (
-            id: (104),
-            name: "Torment Wasteland 1",
-            data: Texture(
-                psxt_path: "assets/textures/torment_wasteland_1.psxt",
-            ),
-        ),
-        /*[81]*/ (
-            id: (105),
-            name: "Torment Wasteland 1",
-            data: Material((
-                texture: Some((104)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[82]*/ (
-            id: (106),
-            name: "Torment Wasteland 2",
-            data: Texture(
-                psxt_path: "assets/textures/torment_wasteland_2.psxt",
-            ),
-        ),
-        /*[83]*/ (
-            id: (107),
-            name: "Torment Wasteland 2",
-            data: Material((
-                texture: Some((106)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[84]*/ (
-            id: (108),
-            name: "Torment Wasteland 3",
-            data: Texture(
-                psxt_path: "assets/textures/torment_wasteland_3.psxt",
-            ),
-        ),
-        /*[85]*/ (
-            id: (109),
-            name: "Torment Wasteland 3",
-            data: Material((
-                texture: Some((108)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[86]*/ (
-            id: (110),
-            name: "Torment Wasteland 4",
-            data: Texture(
-                psxt_path: "assets/textures/torment_wasteland_4.psxt",
-            ),
-        ),
-        /*[87]*/ (
-            id: (111),
-            name: "Torment Wasteland 4",
-            data: Material((
-                texture: Some((110)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[88]*/ (
-            id: (112),
-            name: "Torment Wasteland 5",
-            data: Texture(
-                psxt_path: "assets/textures/torment_wasteland_5.psxt",
-            ),
-        ),
-        /*[89]*/ (
-            id: (113),
-            name: "Torment Wasteland 5",
-            data: Material((
-                texture: Some((112)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[90]*/ (
-            id: (114),
-            name: "Torment Wasteland 6",
-            data: Texture(
-                psxt_path: "assets/textures/torment_wasteland_6.psxt",
-            ),
-        ),
-        /*[91]*/ (
-            id: (115),
-            name: "Torment Wasteland 6",
-            data: Material((
-                texture: Some((114)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: true,
-            )),
-        ),
-        /*[92]*/ (
-            id: (116),
-            name: "Far Vista 00",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_00.psxt",
-            ),
-        ),
-        /*[93]*/ (
-            id: (117),
-            name: "Far Vista 01",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_01.psxt",
-            ),
-        ),
-        /*[94]*/ (
-            id: (118),
-            name: "Far Vista 02",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_02.psxt",
-            ),
-        ),
-        /*[95]*/ (
-            id: (119),
-            name: "Far Vista 03",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_03.psxt",
-            ),
-        ),
-        /*[96]*/ (
-            id: (120),
-            name: "Far Vista 04",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_04.psxt",
-            ),
-        ),
-        /*[97]*/ (
-            id: (121),
-            name: "Far Vista 05",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_05.psxt",
-            ),
-        ),
-        /*[98]*/ (
-            id: (122),
-            name: "Far Vista 06",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_06.psxt",
-            ),
-        ),
-        /*[99]*/ (
-            id: (123),
-            name: "Far Vista 07",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_07.psxt",
-            ),
-        ),
-        /*[100]*/ (
-            id: (124),
-            name: "Far Vista 08",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_08.psxt",
-            ),
-        ),
-        /*[101]*/ (
-            id: (125),
-            name: "Far Vista 09",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_09.psxt",
-            ),
-        ),
-        /*[102]*/ (
-            id: (126),
-            name: "Far Vista 10",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_10.psxt",
-            ),
-        ),
-        /*[103]*/ (
-            id: (127),
-            name: "Far Vista 11",
-            data: Texture(
-                psxt_path: "assets/textures/far_vista_11.psxt",
-            ),
         ),
     ],
     next_resource_id: 132,

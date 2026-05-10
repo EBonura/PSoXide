@@ -48,6 +48,15 @@ pub const MAGIC: [u8; 4] = *b"PSXT";
 /// Current texture format revision.
 pub const VERSION: u16 = 1;
 
+/// Texture-specific feature flags stored in the shared
+/// [`AssetHeader`](crate::AssetHeader).
+pub mod flags {
+    /// Indexed texture palette entry 0 is reserved for transparent
+    /// texels. Runtime upload paths should leave CLUT entry 0 as raw
+    /// zero instead of forcing it opaque.
+    pub const INDEX_ZERO_TRANSPARENT: u16 = 1 << 0;
+}
+
 /// The three bit-depths the PSX GPU supports natively.
 ///
 /// Stored in [`TextureHeader::depth`] as the exact integer (4, 8,
