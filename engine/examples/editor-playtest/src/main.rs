@@ -39,9 +39,9 @@ use psx_engine::{
     LocalToWorldScale, Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitivePacketArena,
     PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender,
     RuntimeRoom, Scene, TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, WorldCamera,
-    WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
-    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q8,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing,
+    WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
+    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -58,6 +58,7 @@ use psx_gpu::{
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::TriTextured,
+    VideoMode,
 };
 use psx_level::{
     equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, room_flags, sky_flags,
@@ -706,9 +707,11 @@ struct Playtest {
     free_orbit: bool,
     orbit_yaw: Angle,
     orbit_radius: i32,
-    /// Runtime third-person camera rig. Updated from render so it
-    /// can consume the same room collision view used for drawing.
+    /// Runtime third-person camera rig. Updated at simulation cadence
+    /// so control remains responsive when visuals are paced lower.
     camera: ThirdPersonCameraState,
+    /// Last visual camera produced by the simulation update.
+    render_camera: WorldCamera,
     /// Index into `MODEL_INSTANCES` for the current lock-on target.
     /// Player-controlled characters are consumed by the player path,
     /// so remaining placed model instances are targetable actors for
@@ -763,6 +766,14 @@ impl Playtest {
             orbit_yaw: CAMERA_START_YAW,
             orbit_radius: CAMERA_START_RADIUS,
             camera: ThirdPersonCameraState::new(CAMERA_START_YAW),
+            render_camera: WorldCamera::from_basis(
+                PROJECTION,
+                WorldVertex::ZERO,
+                Q12::ZERO,
+                Q12::ONE,
+                Q12::ZERO,
+                Q12::ONE,
+            ),
             lock_target: None,
             lock_switch_stick_held: false,
             soft_lock_target: None,
@@ -872,6 +883,9 @@ impl Scene for Playtest {
                 self.orbit_radius = (self.orbit_radius + button_radius_step).min(CAMERA_RADIUS_MAX);
             }
             self.refresh_active_room_window_if_needed();
+            telemetry::stage_begin(telemetry::stage::CAMERA);
+            self.render_camera = self.free_orbit_camera();
+            telemetry::stage_end(telemetry::stage::CAMERA);
             return;
         }
 
@@ -937,6 +951,10 @@ impl Scene for Playtest {
             self.soft_lock_target = None;
             self.soft_lock_suppressed = false;
         }
+
+        telemetry::stage_begin(telemetry::stage::CAMERA);
+        self.render_camera = self.update_follow_camera(ctx);
+        telemetry::stage_end(telemetry::stage::CAMERA);
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
@@ -947,19 +965,7 @@ impl Scene for Playtest {
             return;
         }
 
-        telemetry::stage_begin(telemetry::stage::CAMERA);
-        let camera = if self.free_orbit {
-            WorldCamera::orbit_yaw(
-                PROJECTION,
-                self.spawn.to_world_vertex(),
-                CAMERA_Y_OFFSET,
-                self.orbit_radius,
-                self.orbit_yaw,
-            )
-        } else {
-            self.update_follow_camera(ctx)
-        };
-        telemetry::stage_end(telemetry::stage::CAMERA);
+        let camera = self.render_camera;
 
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut primitive_packets = unsafe { PrimitivePacketArena::new(&mut PRIMITIVE_PACKETS) };
@@ -1683,6 +1689,16 @@ impl Playtest {
             fog_near: room_record.fog_near,
             fog_far: room_record.fog_far,
         })
+    }
+
+    fn free_orbit_camera(&self) -> WorldCamera {
+        WorldCamera::orbit_yaw(
+            PROJECTION,
+            self.spawn.to_world_vertex(),
+            CAMERA_Y_OFFSET,
+            self.orbit_radius,
+            self.orbit_yaw,
+        )
     }
 
     fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
@@ -5185,11 +5201,24 @@ fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle)
     )
 }
 
+fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
+    match video_mode {
+        VideoMode::Ntsc => VisualPacing::EveryNVBlanks(3),
+        // PAL is 50Hz, so exact 20Hz pacing does not divide cleanly.
+        // Use a deterministic 25Hz fallback instead of a jittery 2/3
+        // cadence; PAL-specific 20Hz interpolation can be added later.
+        VideoMode::Pal => VisualPacing::EveryNVBlanks(2),
+    }
+}
+
 #[no_mangle]
 fn main() -> ! {
     let mut scene = Playtest::new();
+    let video_mode = VideoMode::Ntsc;
     let config = Config {
         clear_color: (5, 7, 12),
+        video_mode,
+        visual_pacing: playtest_visual_pacing(video_mode),
         ..Config::default()
     };
     App::run(config, &mut scene);

@@ -22,6 +22,9 @@ const BUDGET_60_MS: f32 = 1000.0 / 60.0;
 const BUDGET_30_MS: f32 = 1000.0 / 30.0;
 const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
 const PSX_CYCLES_PER_MS: f32 = PSX_MASTER_CLOCK_HZ / 1000.0;
+const NTSC_CPU_CYCLES_PER_VBLANK: f32 = PSX_MASTER_CLOCK_HZ / 60.0;
+const PACED20_INTERVAL_VBLANKS: f32 = 3.0;
+const PACED20_VISUAL_BUDGET_CYCLES: f32 = NTSC_CPU_CYCLES_PER_VBLANK * PACED20_INTERVAL_VBLANKS;
 
 /// Timing breakdown returned by [`crate::gfx::Graphics::render`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -59,6 +62,8 @@ pub struct GuestRuntimeProfile {
     pub stage_hits: [f32; STAGE_COUNT],
     /// Summed counter values per guest counter id.
     pub counters: [f32; COUNTER_COUNT],
+    /// Largest single value observed per guest counter id.
+    pub counter_max_values: [f32; COUNTER_COUNT],
 }
 
 impl Default for GuestRuntimeProfile {
@@ -68,6 +73,7 @@ impl Default for GuestRuntimeProfile {
             stage_cycles: [0.0; STAGE_COUNT],
             stage_hits: [0.0; STAGE_COUNT],
             counters: [0.0; COUNTER_COUNT],
+            counter_max_values: [0.0; COUNTER_COUNT],
         }
     }
 }
@@ -84,6 +90,8 @@ impl GuestRuntimeProfile {
         let mut j = 0;
         while j < COUNTER_COUNT {
             self.counters[j] += other.counters[j];
+            self.counter_max_values[j] =
+                self.counter_max_values[j].max(other.counter_max_values[j]);
             j += 1;
         }
     }
@@ -131,6 +139,52 @@ impl GuestRuntimeProfile {
 
     fn counter_per_guest_frame(self, counter_id: usize) -> f32 {
         per_guest_frame(self.counters[counter_id], self.frames)
+    }
+
+    fn counter_total(self, counter_id: usize) -> f32 {
+        self.counters[counter_id]
+    }
+
+    fn counter_max_value(self, counter_id: usize) -> f32 {
+        self.counter_max_values[counter_id]
+    }
+
+    fn has_pacing_data(self) -> bool {
+        self.counter_total(emulator_core::telemetry::counter::SIM_TICKS as usize) > 0.0
+            || self.counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize) > 0.0
+            || self
+                .counter_total(emulator_core::telemetry::counter::VISUAL_DEADLINE_MISSES as usize)
+                > 0.0
+    }
+
+    fn visual_interval_vblanks(self) -> f32 {
+        if self.frames > 0.0 {
+            self.counter_total(emulator_core::telemetry::counter::VISUAL_INTERVAL_VBLANKS as usize)
+                / self.frames
+        } else {
+            0.0
+        }
+    }
+
+    fn render_cycles_per_visual_frame(self) -> f32 {
+        let visual_frames =
+            self.counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize);
+        if visual_frames > 0.0 {
+            self.stage_cycles[emulator_core::telemetry::stage::RENDER as usize] / visual_frames
+        } else {
+            0.0
+        }
+    }
+
+    fn paced20_budget_status(self) -> &'static str {
+        let render_cycles = self.render_cycles_per_visual_frame();
+        if render_cycles <= 0.0 {
+            "?"
+        } else if render_cycles <= PACED20_VISUAL_BUDGET_CYCLES {
+            "pass"
+        } else {
+            "fail"
+        }
     }
 }
 
@@ -498,6 +552,9 @@ impl FrameProfiler {
                     if let Some(counter) = out.counters.get_mut(event.id as usize) {
                         *counter += event.value as f32;
                     }
+                    if let Some(max_value) = out.counter_max_values.get_mut(event.id as usize) {
+                        *max_value = (*max_value).max(event.value as f32);
+                    }
                 }
                 emulator_core::telemetry::GuestTelemetryKind::Unknown(_) => {}
             }
@@ -626,6 +683,60 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                 ),
             );
         });
+        if avg.guest.has_pacing_data() {
+            ui.horizontal_wrapped(|ui| {
+                metric(
+                    ui,
+                    "SIM",
+                    format!(
+                        "{:.0}",
+                        avg.guest
+                            .counter_total(emulator_core::telemetry::counter::SIM_TICKS as usize)
+                    ),
+                );
+                metric(
+                    ui,
+                    "VIS",
+                    format!(
+                        "{:.0}",
+                        avg.guest.counter_total(
+                            emulator_core::telemetry::counter::VISUAL_FRAMES as usize
+                        )
+                    ),
+                );
+                metric(
+                    ui,
+                    "INT",
+                    format!("{:.2}", avg.guest.visual_interval_vblanks()),
+                );
+                metric(
+                    ui,
+                    "MISS",
+                    format!(
+                        "{:.0}",
+                        avg.guest.counter_total(
+                            emulator_core::telemetry::counter::VISUAL_DEADLINE_MISSES as usize
+                        )
+                    ),
+                );
+                metric(
+                    ui,
+                    "LATE",
+                    format!(
+                        "{:.0}",
+                        avg.guest.counter_max_value(
+                            emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS as usize
+                        )
+                    ),
+                );
+                metric(
+                    ui,
+                    "REN/V",
+                    format!("{:.0}", avg.guest.render_cycles_per_visual_frame()),
+                );
+                metric(ui, "3VB", avg.guest.paced20_budget_status().to_string());
+            });
+        }
         draw_guest_runtime(ui, avg.guest);
     }
 
@@ -873,6 +984,8 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
          gte_f={:.0} gtecy_f={:.0} cmd_f={:.0} draw_f={:.0} image_f={:.0} words_f={:.0} \
          guest_frames={:.1} guest_render_hit={:.0} guest_models_hit={:.0} guest_player_hit={:.0} \
          guest_flush_hit={:.0} guest_prims_f={:.0} guest_cmds_f={:.0} \
+         guest_sim={:.0} guest_visual={:.0} guest_int={:.2} guest_miss={:.0} \
+         guest_late={:.0} guest_render_visual={:.0} guest_20hz={} \
          scale={:.0}x ticks={:.0} cycles={:.0}",
         sample.total_ms,
         sample.host_dt_ms,
@@ -917,6 +1030,21 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
         sample
             .guest
             .counter_per_guest_frame(emulator_core::telemetry::counter::WORLD_COMMANDS as usize),
+        sample
+            .guest
+            .counter_total(emulator_core::telemetry::counter::SIM_TICKS as usize),
+        sample
+            .guest
+            .counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize),
+        sample.guest.visual_interval_vblanks(),
+        sample
+            .guest
+            .counter_total(emulator_core::telemetry::counter::VISUAL_DEADLINE_MISSES as usize),
+        sample.guest.counter_max_value(
+            emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS as usize,
+        ),
+        sample.guest.render_cycles_per_visual_frame(),
+        sample.guest.paced20_budget_status(),
         sample.hw_scale.max(1.0),
         sample.cpu_ticks,
         sample.bus_cycles,
@@ -1009,6 +1137,72 @@ mod tests {
     }
 
     #[test]
+    fn guest_pacing_counters_track_totals_and_lateness_max() {
+        let mut profiler = FrameProfiler::default();
+        let events = [
+            GuestTelemetryEvent {
+                cycles: 10,
+                kind: emulator_core::telemetry::GuestTelemetryKind::FrameBegin,
+                id: 0,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 20,
+                kind: emulator_core::telemetry::GuestTelemetryKind::StageBegin,
+                id: emulator_core::telemetry::stage::RENDER,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 120,
+                kind: emulator_core::telemetry::GuestTelemetryKind::StageEnd,
+                id: emulator_core::telemetry::stage::RENDER,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 130,
+                kind: emulator_core::telemetry::GuestTelemetryKind::Counter,
+                id: emulator_core::telemetry::counter::SIM_TICKS,
+                value: 3,
+            },
+            GuestTelemetryEvent {
+                cycles: 140,
+                kind: emulator_core::telemetry::GuestTelemetryKind::Counter,
+                id: emulator_core::telemetry::counter::VISUAL_FRAMES,
+                value: 1,
+            },
+            GuestTelemetryEvent {
+                cycles: 150,
+                kind: emulator_core::telemetry::GuestTelemetryKind::Counter,
+                id: emulator_core::telemetry::counter::VISUAL_INTERVAL_VBLANKS,
+                value: 3,
+            },
+            GuestTelemetryEvent {
+                cycles: 160,
+                kind: emulator_core::telemetry::GuestTelemetryKind::Counter,
+                id: emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS,
+                value: 2,
+            },
+        ];
+
+        let guest = profiler.consume_guest_events(&events);
+
+        assert!(guest.has_pacing_data());
+        assert_eq!(
+            guest.counter_total(emulator_core::telemetry::counter::SIM_TICKS as usize),
+            3.0
+        );
+        assert_eq!(
+            guest.counter_max_value(
+                emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS as usize
+            ),
+            2.0
+        );
+        assert_eq!(guest.visual_interval_vblanks(), 3.0);
+        assert_eq!(guest.render_cycles_per_visual_frame(), 100.0);
+        assert_eq!(guest.paced20_budget_status(), "pass");
+    }
+
+    #[test]
     fn log_line_separates_host_and_guest_work() {
         let line = format_log_line(
             "ui",
@@ -1039,5 +1233,6 @@ mod tests {
         assert!(line.contains("cyc_f=564398"));
         assert!(line.contains("gte_f=96"));
         assert!(line.contains("draw_f=32"));
+        assert!(line.contains("guest_20hz=?"));
     }
 }

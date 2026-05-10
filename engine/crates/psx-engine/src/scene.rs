@@ -4,8 +4,8 @@
 //! [`Scene::init`] once at boot, then [`Scene::update`] + [`Scene::render`]
 //! in a loop, passing a [`Ctx`] that carries the live-per-frame
 //! things the scene needs: the current pad state (with edge-detection
-//! helpers), the render-frame counter, engine time, and a
-//! [`FrameBuffer`] ready to draw into.
+//! helpers), the render-frame and simulation counters, engine time,
+//! and a [`FrameBuffer`] ready to draw into.
 //!
 //! The split into `update` + `render` is cosmetic -- both get the
 //! same `Ctx`. Keeping them separate reads better and makes it easy
@@ -29,6 +29,16 @@ pub struct Ctx {
     /// raw `u32` so the common `frame % N` / `frame & N` cases
     /// compose without unwrap ceremony.
     pub frame: u32,
+    /// Monotonic simulation/control tick counter. In default engine
+    /// pacing this advances with `frame`. In paced visual modes it
+    /// advances once per display VBlank, including VBlanks where the
+    /// engine intentionally keeps the previous framebuffer visible.
+    pub simulation_tick: u32,
+    /// Visual intervals that elapsed before the current render beyond
+    /// the first due interval. `0` means the render is on its chosen
+    /// visual cadence; non-zero values let profiling/reporting code
+    /// identify missed visual deadlines.
+    pub missed_visual_intervals: u16,
     /// PS1 display-time snapshot for this app iteration. Unlike
     /// `frame`, this advances by elapsed VBlanks, so heavy render
     /// paths can keep animation/simulation time independent of
