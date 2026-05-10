@@ -13,6 +13,7 @@ description = "PSoXide engine layer. Scene/App framework + canonical unit types 
 psx-asset = { path = "../../../sdk/crates/psx-asset" }
 psx-gpu   = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte   = { path = "../../../sdk/crates/psx-gte" }
+psx-level = { path = "../psx-level" }
 psx-math  = { path = "../../../sdk/crates/psx-math" }
 psx-pad   = { path = "../../../sdk/crates/psx-pad" }
 psx-spu   = { path = "../../../sdk/crates/psx-spu" }

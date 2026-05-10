@@ -302,7 +302,7 @@ pub struct MaterialResource {
 }
 
 /// Default authored width/height for image props, in engine/editor units.
-pub const DEFAULT_IMAGE_PROP_SIZE: u16 = 64;
+pub const DEFAULT_IMAGE_PROP_SIZE: u16 = DEFAULT_WORLD_SECTOR_SIZE as u16;
 
 const fn default_image_prop_size() -> u16 {
     DEFAULT_IMAGE_PROP_SIZE

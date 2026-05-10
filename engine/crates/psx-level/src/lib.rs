@@ -511,6 +511,94 @@ pub struct LevelVisibilityCellRecord {
     pub flags: u16,
 }
 
+/// Per-room slice into generated cached room-surface records.
+///
+/// The cache payload is frame-invariant room geometry: populated
+/// cells, deduplicated room-local vertices, and predecoded surface
+/// records. Camera projection remains runtime scratch.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelRoomSurfaceCacheRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// First cell record for this room in `ROOM_CACHE_CELLS`.
+    pub cell_first: u32,
+    /// Number of cached cell records for this room.
+    pub cell_count: u16,
+    /// First vertex record for this room in `ROOM_CACHE_VERTICES`.
+    pub vertex_first: u32,
+    /// Number of cached vertex records for this room.
+    pub vertex_count: u16,
+    /// First surface record for this room in `ROOM_CACHE_SURFACES`.
+    pub surface_first: u32,
+    /// Number of cached surface records for this room.
+    pub surface_count: u16,
+    /// Reserved.
+    pub flags: u16,
+}
+
+/// Generated cached room cell header.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCachedRoomCellRecord {
+    /// Grid X coordinate inside the cooked room.
+    pub x: u16,
+    /// Grid Z coordinate inside the cooked room.
+    pub z: u16,
+    /// Minimum authored surface height in room-local engine units.
+    pub min_y: i32,
+    /// Maximum authored surface height in room-local engine units.
+    pub max_y: i32,
+    /// Precomputed visibility center as `[x, y, z]`.
+    pub visibility_center: [i32; 3],
+    /// Precomputed visibility radius.
+    pub visibility_radius: i32,
+    /// First cached surface in this cell's room-local surface slice.
+    pub surface_first: u16,
+    /// Number of cached surfaces in this cell.
+    pub surface_count: u16,
+}
+
+/// Generated cached room vertex.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCachedRoomVertexRecord {
+    /// Room-local X coordinate in engine units.
+    pub x: i32,
+    /// Room-local Y coordinate in engine units.
+    pub y: i32,
+    /// Room-local Z coordinate in engine units.
+    pub z: i32,
+}
+
+/// Generated cached room surface.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCachedRoomSurfaceRecord {
+    /// Local room material slot referenced by this surface.
+    pub material_slot: u16,
+    /// Indices into the room-local cached vertex stream.
+    pub vertex_indices: [u16; 4],
+    /// Sector X coordinate for the reconstructed lighting sample.
+    pub sample_sx: u16,
+    /// Sector Z coordinate for the reconstructed lighting sample.
+    pub sample_sz: u16,
+    /// Surface ordinal for the reconstructed lighting sample.
+    pub sample_ordinal: u16,
+    /// Texture-page-relative UVs matching the vertex order.
+    pub uvs: [(u8, u8); 4],
+    /// Cached baked RGB values.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Packed surface kind plus baked-light flag.
+    pub kind_flags: u8,
+    /// Runtime wall direction when this is a wall surface.
+    pub wall_direction: u8,
+    /// Authored diagonal split id for floors/ceilings.
+    pub split: u8,
+    /// Split-triangle index, or the whole-quad sentinel.
+    pub triangle_index: u8,
+}
+
 /// One material slot for one room. The compiler emits records
 /// in `(room, local_slot)` order; the runtime walks the room's
 /// slice and binds `local_slot` → `texture_asset` into a
