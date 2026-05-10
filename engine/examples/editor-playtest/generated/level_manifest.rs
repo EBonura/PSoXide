@@ -4,11 +4,12 @@
 
 use psx_level::{
     EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCameraRecord, LevelCharacterRecord,
-    LevelChunkRecord, LevelFarVistaRecord, LevelMaterialRecord, LevelModelClipBoundsRecord,
-    LevelModelClipRecord, LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelRoomVisibilityRecord, LevelSkyRecord,
-    LevelVisibilityCellRecord, LevelWeaponRecord, PlayerControllerRecord, PlayerSpawnRecord,
-    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
+    LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord,
+    LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
+    LevelModelInstanceRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
+    LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord, LevelWeaponRecord,
+    PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex, RoomResidencyRecord,
+    WeaponHitboxRecord,
 };
 
 pub static ASSETS: &[LevelAssetRecord] = &[];
@@ -34,6 +35,7 @@ pub static MODEL_FRAME_BOUNDS: &[LevelModelFrameBoundsRecord] = &[];
 pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];
 pub static MODELS: &[LevelModelRecord] = &[];
 pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
+pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
 pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[];
 pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
