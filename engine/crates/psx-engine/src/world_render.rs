@@ -115,13 +115,17 @@ const fn wall_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial
 }
 
 const fn wall_material_for_direction(
-    material: WorldRenderMaterial,
+    mut material: WorldRenderMaterial,
     direction: u8,
 ) -> WorldRenderMaterial {
     // Cardinal wall windings make the owning cell's interior the back side.
-    // Diagonal walls are freestanding authored faces, matching editor preview.
+    // Diagonal walls are freestanding cuts through a cell and are always used
+    // from both sides, so they ignore the authored Front/Back distinction.
     match direction {
-        DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST => material,
+        DIR_NORTH_WEST_SOUTH_EAST | DIR_NORTH_EAST_SOUTH_WEST => {
+            material.sidedness = SurfaceSidedness::Both;
+            material
+        }
         _ => wall_material(material),
     }
 }
@@ -423,6 +427,21 @@ impl CachedRoomSurface {
         }
     }
 
+    fn sample_without_center(self) -> WorldSurfaceSample {
+        WorldSurfaceSample {
+            kind: cached_surface_kind(self.kind_flags, self.wall_direction),
+            sx: self.sample_sx,
+            sz: self.sample_sz,
+            center: RoomPoint::ZERO,
+            baked_vertex_rgb: if self.kind_flags & CACHED_SURFACE_HAS_BAKED_RGB != 0 {
+                Some(self.baked_vertex_rgb)
+            } else {
+                None
+            },
+            ordinal: self.sample_ordinal,
+        }
+    }
+
     const fn has_baked_rgb(self) -> bool {
         self.kind_flags & CACHED_SURFACE_HAS_BAKED_RGB != 0
     }
@@ -568,6 +587,20 @@ pub trait WorldSurfaceLighting {
         material: WorldRenderMaterial,
     ) -> [(u8, u8, u8); 4] {
         self.shade_vertices(sample, vertices, material)
+    }
+
+    /// Fast path for cached surfaces that already carry baked vertex RGB.
+    ///
+    /// Returning `Some` lets indexed cached renderers skip reconstructing
+    /// the source world quad when the lighting implementation can shade
+    /// directly from baked RGB plus optional prepared depth values.
+    fn shade_cached_baked_vertices(
+        &self,
+        _sample: WorldSurfaceSample,
+        _depths: Option<[i32; 4]>,
+        _material: WorldRenderMaterial,
+    ) -> Option<[(u8, u8, u8); 4]> {
+        None
     }
 
     /// Convert a projected camera-space depth into the value cached
@@ -1697,19 +1730,13 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     };
     let material = cached_uv_material(material);
     let ids = surface.vertex_indices;
-    let Some(vertices) = indexed_world_quad(cached_vertices, ids) else {
-        return 0;
-    };
     let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
         return 0;
     };
-    let sample = surface.sample_with_center(
-        vertices,
-        lighting.needs_surface_sample_center(surface.has_baked_rgb()),
-    );
-    match sample.kind {
+    let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
+    match kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
-            let is_ceiling = matches!(sample.kind, WorldSurfaceKind::Ceiling);
+            let is_ceiling = matches!(kind, WorldSurfaceKind::Ceiling);
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 if projected_split_triangle_backface_culled(
                     projected,
@@ -1723,9 +1750,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 }
                 let Some(colors) = indexed_vertex_lighting_colors(
                     lighting,
-                    sample,
+                    surface,
                     material,
-                    vertices,
+                    cached_vertices,
                     projected_depths,
                     ids,
                     use_vertex_depths,
@@ -1761,9 +1788,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 }
                 let Some(colors) = indexed_vertex_lighting_colors(
                     lighting,
-                    sample,
+                    surface,
                     material,
-                    vertices,
+                    cached_vertices,
                     projected_depths,
                     ids,
                     use_vertex_depths,
@@ -1807,9 +1834,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 }
                 let Some(colors) = indexed_vertex_lighting_colors(
                     lighting,
-                    sample,
+                    surface,
                     material,
-                    vertices,
+                    cached_vertices,
                     projected_depths,
                     ids,
                     use_vertex_depths,
@@ -1840,9 +1867,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 }
                 let Some(colors) = indexed_vertex_lighting_colors(
                     lighting,
-                    sample,
+                    surface,
                     material,
-                    vertices,
+                    cached_vertices,
                     projected_depths,
                     ids,
                     use_vertex_depths,
@@ -1936,13 +1963,32 @@ fn indexed_quad_depths(depths: &[i32], ids: [u16; 4]) -> Option<[i32; 4]> {
 #[inline(always)]
 fn indexed_vertex_lighting_colors<L: WorldSurfaceLighting>(
     lighting: &L,
-    sample: WorldSurfaceSample,
+    surface: CachedRoomSurface,
     material: WorldRenderMaterial,
-    vertices: [WorldVertex; 4],
+    cached_vertices: &[WorldVertex],
     depths: &[i32],
     ids: [u16; 4],
     use_vertex_depths: bool,
 ) -> Option<[(u8, u8, u8); 4]> {
+    if surface.has_baked_rgb() {
+        let sample = surface.sample_without_center();
+        let prepared_depths = if use_vertex_depths {
+            Some(indexed_quad_depths(depths, ids)?)
+        } else {
+            None
+        };
+        if let Some(colors) =
+            lighting.shade_cached_baked_vertices(sample, prepared_depths, material)
+        {
+            return Some(colors);
+        }
+    }
+
+    let vertices = indexed_world_quad(cached_vertices, ids)?;
+    let sample = surface.sample_with_center(
+        vertices,
+        lighting.needs_surface_sample_center(surface.has_baked_rgb()),
+    );
     if use_vertex_depths {
         let depths = indexed_quad_depths(depths, ids)?;
         return Some(vertex_lighting_colors_with_depths(
@@ -3849,7 +3895,7 @@ mod tests {
     }
 
     #[test]
-    fn diagonal_wall_materials_keep_authored_sidedness() {
+    fn diagonal_wall_materials_are_forced_double_sided() {
         let texture = TextureMaterial::opaque(0, 0, (128, 128, 128));
         assert_eq!(
             wall_material_for_direction(WorldRenderMaterial::front(texture), DIR_NORTH).sidedness,
@@ -3861,7 +3907,7 @@ mod tests {
                 DIR_NORTH_WEST_SOUTH_EAST
             )
             .sidedness,
-            SurfaceSidedness::Front
+            SurfaceSidedness::Both
         );
         assert_eq!(
             wall_material_for_direction(
@@ -3869,7 +3915,7 @@ mod tests {
                 DIR_NORTH_EAST_SOUTH_WEST
             )
             .sidedness,
-            SurfaceSidedness::Back
+            SurfaceSidedness::Both
         );
     }
 
