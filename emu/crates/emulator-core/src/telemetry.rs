@@ -16,7 +16,7 @@ pub const EVENT_PHYS: u32 = BASE_PHYS;
 /// Event value register. The next command write snapshots this value.
 pub const VALUE_PHYS: u32 = BASE_PHYS + 4;
 
-const EVENT_CAP: usize = 8192;
+const EVENT_CAP: usize = 65_536;
 const KIND_SHIFT: u32 = 24;
 const KIND_MASK: u32 = 0xFF;
 const ID_MASK: u32 = 0xFFFF;
@@ -178,10 +178,22 @@ pub mod counter {
     pub const ROOM_TEXTURE_UPLOADS: u16 = 51;
     /// Model atlas uploads performed.
     pub const MODEL_ATLAS_UPLOADS: u16 = 52;
+    /// Fixed simulation/control ticks run by the cadence layer.
+    pub const SIM_TICKS: u16 = 53;
+    /// Rendered visual frames produced by the cadence layer.
+    pub const VISUAL_FRAMES: u16 = 54;
+    /// Visual VBlank slots intentionally held/skipped instead of rendered.
+    pub const VISUAL_SKIPPED_VBLANKS: u16 = 55;
+    /// Visual frames that missed their target cadence slot.
+    pub const VISUAL_DEADLINE_MISSES: u16 = 56;
+    /// Configured visual cadence interval in VBlanks.
+    pub const VISUAL_INTERVAL_VBLANKS: u16 = 57;
+    /// Worst observed lateness for a visual frame in VBlanks.
+    pub const VISUAL_MAX_LATENESS_VBLANKS: u16 = 58;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 53;
+pub const COUNTER_COUNT: usize = 59;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +240,8 @@ pub struct GuestTelemetry {
     pending_value: u32,
     events: VecDeque<GuestTelemetryEvent>,
     frames_seen: u64,
+    counter_totals: [u64; COUNTER_COUNT],
+    counter_max_values: [u32; COUNTER_COUNT],
 }
 
 impl Default for GuestTelemetry {
@@ -236,6 +250,8 @@ impl Default for GuestTelemetry {
             pending_value: 0,
             events: VecDeque::with_capacity(EVENT_CAP),
             frames_seen: 0,
+            counter_totals: [0; COUNTER_COUNT],
+            counter_max_values: [0; COUNTER_COUNT],
         }
     }
 }
@@ -283,9 +299,43 @@ impl GuestTelemetry {
         self.frames_seen
     }
 
+    /// Summed value observed for a known counter since reset.
+    pub fn counter_total(&self, id: u16) -> u64 {
+        self.counter_totals
+            .get(id as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Largest single value observed for a known counter since reset.
+    pub fn counter_max_value(&self, id: u16) -> u32 {
+        self.counter_max_values
+            .get(id as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Snapshot of all summed counter values observed since reset.
+    pub const fn counter_totals(&self) -> [u64; COUNTER_COUNT] {
+        self.counter_totals
+    }
+
+    /// Snapshot of all largest counter values observed since reset.
+    pub const fn counter_max_values(&self) -> [u32; COUNTER_COUNT] {
+        self.counter_max_values
+    }
+
     fn push(&mut self, event: GuestTelemetryEvent) {
         if matches!(event.kind, GuestTelemetryKind::FrameBegin) {
             self.frames_seen = self.frames_seen.saturating_add(1);
+        }
+        if matches!(event.kind, GuestTelemetryKind::Counter) {
+            if let Some(total) = self.counter_totals.get_mut(event.id as usize) {
+                *total = total.saturating_add(event.value as u64);
+            }
+            if let Some(max_value) = self.counter_max_values.get_mut(event.id as usize) {
+                *max_value = (*max_value).max(event.value);
+            }
         }
         if self.events.len() >= EVENT_CAP {
             self.events.pop_front();
@@ -307,6 +357,8 @@ pub struct GuestTelemetrySummary {
     pub stage_max_cycles: [u64; STAGE_COUNT],
     /// Summed counter values per known counter id.
     pub counters: [u64; COUNTER_COUNT],
+    /// Largest single value observed per known counter id.
+    pub counter_max_values: [u32; COUNTER_COUNT],
 }
 
 impl Default for GuestTelemetrySummary {
@@ -317,6 +369,7 @@ impl Default for GuestTelemetrySummary {
             stage_hits: [0; STAGE_COUNT],
             stage_max_cycles: [0; STAGE_COUNT],
             counters: [0; COUNTER_COUNT],
+            counter_max_values: [0; COUNTER_COUNT],
         }
     }
 }
@@ -356,8 +409,12 @@ impl GuestTelemetrySummary {
                     self.stage_max_cycles[idx] = self.stage_max_cycles[idx].max(elapsed);
                 }
                 GuestTelemetryKind::Counter => {
-                    if let Some(counter) = self.counters.get_mut(event.id as usize) {
+                    let idx = event.id as usize;
+                    if let Some(counter) = self.counters.get_mut(idx) {
                         *counter = counter.saturating_add(event.value as u64);
+                    }
+                    if let Some(max_value) = self.counter_max_values.get_mut(idx) {
+                        *max_value = (*max_value).max(event.value);
                     }
                 }
                 GuestTelemetryKind::Unknown(_) => {}
@@ -457,6 +514,12 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_SURFACE_CACHE_BUILD_SURFACES => "cache build surfaces",
         counter::ROOM_TEXTURE_UPLOADS => "room texture uploads",
         counter::MODEL_ATLAS_UPLOADS => "model atlas uploads",
+        counter::SIM_TICKS => "sim ticks",
+        counter::VISUAL_FRAMES => "visual frames",
+        counter::VISUAL_SKIPPED_VBLANKS => "visual skipped vblanks",
+        counter::VISUAL_DEADLINE_MISSES => "visual deadline misses",
+        counter::VISUAL_INTERVAL_VBLANKS => "visual interval vblanks",
+        counter::VISUAL_MAX_LATENESS_VBLANKS => "visual max lateness vblanks",
         _ => "unknown",
     }
 }
@@ -482,6 +545,8 @@ mod tests {
 
         let events = telemetry.drain_events();
         assert_eq!(telemetry.frames_seen(), 0);
+        assert_eq!(telemetry.counter_total(counter::WORLD_COMMANDS), 42);
+        assert_eq!(telemetry.counter_max_value(counter::WORLD_COMMANDS), 42);
         assert_eq!(
             events,
             [GuestTelemetryEvent {
@@ -520,11 +585,41 @@ mod tests {
                 id: counter::TRI_PRIMITIVES,
                 value: 12,
             },
+            GuestTelemetryEvent {
+                cycles: 90,
+                kind: GuestTelemetryKind::Counter,
+                id: counter::VISUAL_MAX_LATENESS_VBLANKS,
+                value: 2,
+            },
+            GuestTelemetryEvent {
+                cycles: 100,
+                kind: GuestTelemetryKind::Counter,
+                id: counter::VISUAL_MAX_LATENESS_VBLANKS,
+                value: 1,
+            },
         ];
         let summary = GuestTelemetrySummary::from_events(&events);
         assert_eq!(summary.frames, 1);
         assert_eq!(summary.stage_cycles[stage::RENDER as usize], 50);
         assert_eq!(summary.stage_hits[stage::RENDER as usize], 1);
         assert_eq!(summary.counters[counter::TRI_PRIMITIVES as usize], 12);
+        assert_eq!(
+            summary.counters[counter::VISUAL_MAX_LATENESS_VBLANKS as usize],
+            3
+        );
+        assert_eq!(
+            summary.counter_max_values[counter::VISUAL_MAX_LATENESS_VBLANKS as usize],
+            2
+        );
+    }
+
+    #[test]
+    fn frame_pacing_counter_names_are_known() {
+        assert_eq!(counter_name(counter::SIM_TICKS), "sim ticks");
+        assert_eq!(counter_name(counter::VISUAL_FRAMES), "visual frames");
+        assert_eq!(
+            counter_name(counter::VISUAL_MAX_LATENESS_VBLANKS),
+            "visual max lateness vblanks"
+        );
     }
 }
