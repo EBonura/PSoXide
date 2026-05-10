@@ -36,11 +36,11 @@ use psxed_project::{
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
     PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
-    WorldGrid, WorldGridBudget, DEFAULT_IMAGE_PROP_SIZE, DEFAULT_WALL_HEIGHT_SECTORS,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
-    MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
-    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_SECTOR_SIZE, MIN_WORLD_CAMERA_DISTANCE,
-    MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_QUANTUM,
+    WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
+    HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
+    MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
+    MAX_WORLD_SECTOR_SIZE, MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
+    WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -52,6 +52,7 @@ const EDITOR_OUTLINE_STROKE_WIDTH: f32 = 1.25;
 const EDITOR_SELECTED_OUTLINE_STROKE_WIDTH: f32 = 3.0;
 const EDITOR_OUTLINE_ACCENT: Color32 = Color32::from_rgb(165, 238, 255);
 const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
+const MAX_IMAGE_PROP_SIZE: u16 = 4096;
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
 const RESOURCE_CARD_WIDTH: f32 = 120.0;
 const RESOURCE_CARD_HEIGHT: f32 = 128.0;
@@ -157,6 +158,10 @@ pub struct EditorWorkspace {
     /// one of its edges, or one of its corners. Hotkeys 1 / 2 / 3
     /// toggle.
     selection_mode: SelectionMode,
+    /// Transform gizmo mode for selected scene nodes in the 3D
+    /// viewport. Move keeps the existing axis handles; Rotate edits
+    /// yaw; Scale edits size data for node kinds that support it.
+    transform_gizmo_mode: TransformGizmoMode,
     /// Whether floor/ceiling face picks address the authored quad
     /// or one triangle half of the current split.
     horizontal_edit_mode: HorizontalEditMode,
@@ -1201,6 +1206,39 @@ impl SelectionMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransformGizmoMode {
+    Move,
+    Rotate,
+    Scale,
+}
+
+impl TransformGizmoMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Move => "Move",
+            Self::Rotate => "Rotate",
+            Self::Scale => "Scale",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Move => icons::MOVE,
+            Self::Rotate => icons::ROTATE_3D,
+            Self::Scale => icons::SCALE_3D,
+        }
+    }
+
+    const fn hint(self) -> &'static str {
+        match self {
+            Self::Move => "Drag axis handles to move selected nodes.",
+            Self::Rotate => "Drag the ring to rotate selected nodes around Y.",
+            Self::Scale => "Drag handles to resize selected image props.",
+        }
+    }
+}
+
 /// Floor/ceiling edit granularity for Select mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum HorizontalEditMode {
@@ -1334,6 +1372,12 @@ struct PrimitiveGizmoScreenAxis {
 }
 
 #[derive(Debug, Clone)]
+struct NodeRotationGizmoScreenRing {
+    center: Pos2,
+    points: Vec<Pos2>,
+}
+
+#[derive(Debug, Clone)]
 struct PrimitiveGizmoDrag {
     axis: PrimitiveGizmoAxis,
     start_pointer: Pos2,
@@ -1358,6 +1402,7 @@ struct PrimitiveGizmoGridDrag {
 
 #[derive(Debug, Clone)]
 struct NodeGizmoDrag {
+    mode: TransformGizmoMode,
     axis: PrimitiveGizmoAxis,
     start_pointer: Pos2,
     screen_axis: Vec2,
@@ -1370,6 +1415,8 @@ struct NodeGizmoDrag {
 struct NodeGizmoTarget {
     node: NodeId,
     start_translation: [f32; 3],
+    start_rotation_degrees: [f32; 3],
+    start_image_prop_size: Option<[u16; 2]>,
     sector_size: i32,
 }
 
@@ -1912,6 +1959,7 @@ impl EditorWorkspace {
             viewport_box_select: None,
             viewport_3d_box_select: None,
             selection_mode: SelectionMode::default(),
+            transform_gizmo_mode: TransformGizmoMode::Move,
             horizontal_edit_mode: HorizontalEditMode::default(),
             vertex_connectivity: VertexConnectivity::default(),
             hovered_primitive: None,
@@ -3846,14 +3894,20 @@ impl EditorWorkspace {
             if select_tool {
                 if response.drag_started_by(egui::PointerButton::Primary) {
                     if let Some(pointer) = response.interact_pointer_pos() {
-                        if let Some(axis) = self.pick_primitive_gizmo_axis(rect, pointer) {
+                        let primitive_axis = (self.transform_gizmo_mode
+                            == TransformGizmoMode::Move)
+                            .then(|| self.pick_primitive_gizmo_axis(rect, pointer))
+                            .flatten();
+                        if let Some(axis) = primitive_axis {
                             self.begin_primitive_gizmo_drag(axis, rect, pointer);
                         } else if let Some(axis) = self.pick_node_gizmo_axis(rect, pointer) {
                             self.begin_node_gizmo_drag(axis, rect, pointer);
                         } else {
                             let entity_hit =
                                 self.pick_entity_bound(rect, pointer, self.active_room_id());
-                            if let Some(hit) = entity_hit {
+                            if let (TransformGizmoMode::Move, Some(hit)) =
+                                (self.transform_gizmo_mode, entity_hit)
+                            {
                                 self.begin_node_drag(hit, rect);
                             } else {
                                 let modifiers = ui.input(|input| input.modifiers);
@@ -4879,6 +4933,9 @@ impl EditorWorkspace {
     }
 
     fn draw_primitive_gizmo(&self, painter: &egui::Painter, rect: Rect) {
+        if self.transform_gizmo_mode != TransformGizmoMode::Move {
+            return;
+        }
         let axes = self.primitive_gizmo_screen_axes(rect);
         if axes.is_empty() {
             return;
@@ -4918,46 +4975,53 @@ impl EditorWorkspace {
             return Vec::new();
         };
         let axis_len = self.node_gizmo_axis_world_length(&targets);
-        [
-            PrimitiveGizmoAxis::X,
-            PrimitiveGizmoAxis::Y,
-            PrimitiveGizmoAxis::Z,
-        ]
-        .into_iter()
-        .filter_map(|axis| {
-            let delta = axis.world_delta(axis_len);
-            let end_world = [
-                pivot[0] + delta[0],
-                pivot[1] + delta[1],
-                pivot[2] + delta[2],
-            ];
-            let end = project_world_to_viewport_screen(camera, rect, end_world)?;
-            ((end - start).length_sq() >= 64.0).then_some(PrimitiveGizmoScreenAxis {
-                axis,
-                start,
-                end,
+        let axes: &[PrimitiveGizmoAxis] = match self.transform_gizmo_mode {
+            TransformGizmoMode::Move => &[
+                PrimitiveGizmoAxis::X,
+                PrimitiveGizmoAxis::Y,
+                PrimitiveGizmoAxis::Z,
+            ],
+            TransformGizmoMode::Rotate => &[PrimitiveGizmoAxis::Y],
+            TransformGizmoMode::Scale => &[
+                PrimitiveGizmoAxis::X,
+                PrimitiveGizmoAxis::Y,
+                PrimitiveGizmoAxis::Z,
+            ],
+        };
+        axes.iter()
+            .copied()
+            .filter_map(|axis| {
+                let delta = axis.world_delta(axis_len);
+                let end_world = [
+                    pivot[0] + delta[0],
+                    pivot[1] + delta[1],
+                    pivot[2] + delta[2],
+                ];
+                let end = project_world_to_viewport_screen(camera, rect, end_world)?;
+                ((end - start).length_sq() >= 64.0).then_some(PrimitiveGizmoScreenAxis {
+                    axis,
+                    start,
+                    end,
+                })
             })
-        })
-        .collect()
+            .collect()
     }
 
     fn selected_node_gizmo_targets(&self) -> Vec<NodeId> {
         self.selected_node_ids_in_hierarchy()
             .into_iter()
-            .filter(|id| self.node_supports_axis_gizmo(*id))
+            .filter(|id| self.node_supports_transform_gizmo(*id, self.transform_gizmo_mode))
             .collect()
     }
 
-    fn node_supports_axis_gizmo(&self, id: NodeId) -> bool {
+    fn node_supports_transform_gizmo(&self, id: NodeId, mode: TransformGizmoMode) -> bool {
         if self.scene_node_effectively_hidden(id) {
             return false;
         }
-        self.project.active_scene().node(id).is_some_and(|node| {
-            matches!(
-                node.kind,
-                NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. }
-            )
-        })
+        self.project
+            .active_scene()
+            .node(id)
+            .is_some_and(|node| node_kind_supports_transform_gizmo(&node.kind, mode))
     }
 
     fn node_gizmo_bounds_3d(&self, targets: &[NodeId]) -> Option<([f32; 3], [f32; 3])> {
@@ -4987,7 +5051,45 @@ impl EditorWorkspace {
         DEFAULT_WORLD_SECTOR_SIZE
     }
 
+    fn node_rotation_gizmo_screen_ring(&self, rect: Rect) -> Option<NodeRotationGizmoScreenRing> {
+        let targets = self.selected_node_gizmo_targets();
+        if targets.is_empty() {
+            return None;
+        }
+        let (pivot, half) = self.node_gizmo_bounds_3d(&targets)?;
+        let camera = self.viewport_3d_camera();
+        let center = project_world_to_viewport_screen(camera, rect, pivot)?;
+        let base_radius = self.node_gizmo_axis_world_length(&targets) as f32 * 0.65;
+        let bound_radius = half[0].max(half[2]) * 1.35;
+        let radius = base_radius.max(bound_radius).max(128.0);
+        let mut points = Vec::with_capacity(49);
+        for step in 0..=48 {
+            let angle = step as f32 / 48.0 * std::f32::consts::TAU;
+            let world = [
+                pivot[0] + angle.cos() * radius,
+                pivot[1],
+                pivot[2] + angle.sin() * radius,
+            ];
+            if let Some(screen) = project_world_to_viewport_screen(camera, rect, world) {
+                points.push(screen);
+            }
+        }
+        (points.len() >= 8).then_some(NodeRotationGizmoScreenRing { center, points })
+    }
+
     fn pick_node_gizmo_axis(&self, rect: Rect, pointer: Pos2) -> Option<PrimitiveGizmoAxis> {
+        if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
+            return self
+                .node_rotation_gizmo_screen_ring(rect)
+                .and_then(|ring| {
+                    ring.points
+                        .windows(2)
+                        .map(|pair| distance_to_segment_2d(pointer, pair[0], pair[1]))
+                        .min_by(|a, b| a.total_cmp(b))
+                })
+                .filter(|distance| *distance <= 12.0)
+                .map(|_| PrimitiveGizmoAxis::Y);
+        }
         self.node_gizmo_screen_axes(rect)
             .into_iter()
             .filter_map(|screen_axis| {
@@ -5000,6 +5102,29 @@ impl EditorWorkspace {
     }
 
     fn draw_node_gizmo(&self, painter: &egui::Painter, rect: Rect) {
+        if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
+            let Some(ring) = self.node_rotation_gizmo_screen_ring(rect) else {
+                return;
+            };
+            let active = self.node_gizmo_drag.is_some();
+            let color = PrimitiveGizmoAxis::Y.color();
+            let stroke_width = if active { 4.0 } else { 2.5 };
+            painter.circle_filled(ring.center, 4.0, Color32::from_rgb(235, 242, 248));
+            for pair in ring.points.windows(2) {
+                painter.line_segment([pair[0], pair[1]], Stroke::new(stroke_width, color));
+            }
+            if let Some(label_pos) = ring.points.first().copied() {
+                painter.circle_filled(label_pos, if active { 6.0 } else { 5.0 }, color);
+                painter.text(
+                    label_pos + Vec2::new(14.0, 0.0),
+                    Align2::CENTER_CENTER,
+                    "Y",
+                    FontId::monospace(12.0),
+                    color,
+                );
+            }
+            return;
+        }
         let axes = self.node_gizmo_screen_axes(rect);
         if axes.is_empty() {
             return;
@@ -5272,18 +5397,30 @@ impl EditorWorkspace {
         rect: Rect,
         pointer: Pos2,
     ) -> bool {
+        let mode = self.transform_gizmo_mode;
         let ids = self.selected_node_gizmo_targets();
         if ids.is_empty() {
             return false;
         }
-        let Some(screen_axis) = self
-            .node_gizmo_screen_axes(rect)
-            .into_iter()
-            .find(|candidate| candidate.axis == axis)
-        else {
-            return false;
+        let screen_axis_delta = if mode == TransformGizmoMode::Rotate {
+            let Some(ring) = self.node_rotation_gizmo_screen_ring(rect) else {
+                return false;
+            };
+            ring.points
+                .first()
+                .map(|point| *point - ring.center)
+                .filter(|delta| delta.length_sq() >= 64.0)
+                .unwrap_or(Vec2::new(64.0, 0.0))
+        } else {
+            let Some(screen_axis) = self
+                .node_gizmo_screen_axes(rect)
+                .into_iter()
+                .find(|candidate| candidate.axis == axis)
+            else {
+                return false;
+            };
+            screen_axis.end - screen_axis.start
         };
-        let screen_axis_delta = screen_axis.end - screen_axis.start;
         if screen_axis_delta.length_sq() < 64.0 {
             return false;
         }
@@ -5295,6 +5432,11 @@ impl EditorWorkspace {
                 scene.node(id).map(|node| NodeGizmoTarget {
                     node: id,
                     start_translation: node.transform.translation,
+                    start_rotation_degrees: node.transform.rotation_degrees,
+                    start_image_prop_size: match &node.kind {
+                        NodeKind::ImageProp { width, height, .. } => Some([*width, *height]),
+                        _ => None,
+                    },
                     sector_size: node_enclosing_sector_size(scene, id),
                 })
             })
@@ -5304,6 +5446,7 @@ impl EditorWorkspace {
         }
 
         self.node_gizmo_drag = Some(NodeGizmoDrag {
+            mode,
             axis,
             start_pointer: pointer,
             screen_axis: screen_axis_delta,
@@ -5322,10 +5465,13 @@ impl EditorWorkspace {
         if axis_len_sq < f32::EPSILON {
             return;
         }
-        const PIXELS_PER_NODE_GIZMO_STEP: f32 = 8.0;
+        let pixels_per_step = match drag.mode {
+            TransformGizmoMode::Move | TransformGizmoMode::Scale => 8.0,
+            TransformGizmoMode::Rotate => 4.0,
+        };
         let pointer_delta = pointer - drag.start_pointer;
         let unit = drag.screen_axis / axis_len_sq.sqrt();
-        let steps = (pointer_delta.dot(unit) / PIXELS_PER_NODE_GIZMO_STEP).round() as i32;
+        let steps = (pointer_delta.dot(unit) / pixels_per_step).round() as i32;
         if steps == drag.current_steps {
             return;
         }
@@ -5354,19 +5500,31 @@ impl EditorWorkspace {
         };
         let axis = drag.axis;
         let steps = drag.current_steps;
+        let mode = drag.mode;
         let targets = drag.targets.clone();
         let scene = self.project.active_scene_mut();
         for target in targets {
             let Some(node) = scene.node_mut(target.node) else {
                 continue;
             };
-            node.transform.translation = node_gizmo_translation(
-                node,
-                target.start_translation,
-                axis,
-                steps,
-                target.sector_size,
-            );
+            match mode {
+                TransformGizmoMode::Move => {
+                    node.transform.translation = node_gizmo_translation(
+                        node,
+                        target.start_translation,
+                        axis,
+                        steps,
+                        target.sector_size,
+                    );
+                }
+                TransformGizmoMode::Rotate => {
+                    node.transform.rotation_degrees =
+                        node_gizmo_rotation(node, target.start_rotation_degrees, steps);
+                }
+                TransformGizmoMode::Scale => {
+                    apply_node_gizmo_scale(node, target.start_image_prop_size, axis, steps);
+                }
+            }
         }
         self.mark_dirty();
     }
@@ -5380,10 +5538,15 @@ impl EditorWorkspace {
         }
         let axis = drag.axis.label();
         let moved = drag.targets.len();
+        let action = match drag.mode {
+            TransformGizmoMode::Move => "Moved",
+            TransformGizmoMode::Rotate => "Rotated",
+            TransformGizmoMode::Scale => "Scaled",
+        };
         self.status = if moved == 1 {
-            format!("Moved 1 node on {axis}")
+            format!("{action} 1 node on {axis}")
         } else {
-            format!("Moved {moved} nodes on {axis}")
+            format!("{action} {moved} nodes on {axis}")
         };
     }
 
@@ -6536,15 +6699,18 @@ impl EditorWorkspace {
                     }
                 },
                 PlaceKind::ImageProp => match self.resolve_place_image_prop_material() {
-                    Ok((material_id, name)) => (
-                        format!("{name} Image"),
-                        NodeKind::ImageProp {
-                            material: Some(material_id),
-                            width: DEFAULT_IMAGE_PROP_SIZE,
-                            height: DEFAULT_IMAGE_PROP_SIZE,
-                            cylindrical_billboard: false,
-                        },
-                    ),
+                    Ok((material_id, name)) => {
+                        let size = image_prop_default_size_for_sector(sector_size_i);
+                        (
+                            format!("{name} Image"),
+                            NodeKind::ImageProp {
+                                material: Some(material_id),
+                                width: size,
+                                height: size,
+                                cylindrical_billboard: false,
+                            },
+                        )
+                    }
                     Err(message) => {
                         self.status = message;
                         return;
@@ -10504,7 +10670,7 @@ impl EditorWorkspace {
                     for (tool, hint) in [
                         (
                             ViewTool::Select,
-                            "Click to select; drag a selected primitive vertically to move it.",
+                            "Click to select; use Move, Rotate, or Scale gizmo handles on selected nodes.",
                         ),
                         (
                             ViewTool::PaintFloor,
@@ -10539,6 +10705,8 @@ impl EditorWorkspace {
                     }
                     ui.separator();
                     if matches!(self.active_tool, ViewTool::Select) {
+                        self.draw_transform_gizmo_mode_picker(ui);
+                        ui.separator();
                         self.draw_selection_mode_picker(ui);
                         ui.separator();
                         self.draw_horizontal_edit_mode_picker(ui);
@@ -10654,6 +10822,27 @@ impl EditorWorkspace {
     /// Visible only while `active_tool == Select`. Mirrors the
     /// `1` / `2` / `3` hotkeys; clicking goes through
     /// `set_selection_mode` so the existing selection adapts.
+    fn draw_transform_gizmo_mode_picker(&mut self, ui: &mut egui::Ui) {
+        for mode in [
+            TransformGizmoMode::Move,
+            TransformGizmoMode::Rotate,
+            TransformGizmoMode::Scale,
+        ] {
+            if toolbar_icon_button(
+                ui,
+                self.transform_gizmo_mode == mode,
+                mode.icon(),
+                mode.label(),
+                mode.hint(),
+            ) {
+                self.transform_gizmo_mode = mode;
+                self.primitive_gizmo_drag = None;
+                self.node_gizmo_drag = None;
+                self.node_drag = None;
+            }
+        }
+    }
+
     fn draw_selection_mode_picker(&mut self, ui: &mut egui::Ui) {
         for mode in [
             SelectionMode::Face,
@@ -14624,6 +14813,66 @@ fn node_gizmo_translation(
     }
 }
 
+fn node_gizmo_rotation(node: &psxed_project::SceneNode, start: [f32; 3], steps: i32) -> [f32; 3] {
+    if !node_kind_supports_transform_gizmo(&node.kind, TransformGizmoMode::Rotate) {
+        return start;
+    }
+    [0.0, (start[1] + steps as f32).rem_euclid(360.0), 0.0]
+}
+
+fn apply_node_gizmo_scale(
+    node: &mut psxed_project::SceneNode,
+    start_image_prop_size: Option<[u16; 2]>,
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+) {
+    let Some([start_width, start_height]) = start_image_prop_size else {
+        return;
+    };
+    let NodeKind::ImageProp { width, height, .. } = &mut node.kind else {
+        return;
+    };
+    let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+    let resize_axis = |start: u16| -> u16 {
+        (i32::from(start) + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16
+    };
+    match axis {
+        PrimitiveGizmoAxis::X => *width = resize_axis(start_width),
+        PrimitiveGizmoAxis::Y => *height = resize_axis(start_height),
+        PrimitiveGizmoAxis::Z => {
+            *width = resize_axis(start_width);
+            *height = resize_axis(start_height);
+        }
+    }
+}
+
+fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode) -> bool {
+    match mode {
+        TransformGizmoMode::Move => matches!(
+            kind,
+            NodeKind::Entity
+                | NodeKind::PointLight { .. }
+                | NodeKind::ImageProp { .. }
+                | NodeKind::MeshInstance { .. }
+                | NodeKind::SpawnPoint { .. }
+                | NodeKind::Trigger { .. }
+                | NodeKind::AudioSource { .. }
+                | NodeKind::Portal { .. }
+        ),
+        TransformGizmoMode::Rotate => matches!(
+            kind,
+            NodeKind::Entity
+                | NodeKind::ImageProp { .. }
+                | NodeKind::MeshInstance { .. }
+                | NodeKind::SpawnPoint { .. }
+                | NodeKind::Trigger { .. }
+                | NodeKind::AudioSource { .. }
+                | NodeKind::Portal { .. }
+        ),
+        TransformGizmoMode::Scale => matches!(kind, NodeKind::ImageProp { .. }),
+    }
+}
+
 fn normalise_light_transform(transform: &mut psxed_project::Transform3, sector_size: i32) -> bool {
     let mut changed = false;
     let snapped_y = snap_light_transform_y(transform.translation[1], sector_size);
@@ -14657,6 +14906,10 @@ fn snap_node_transform_component_to_world_step(value: f32, sector_size: i32) -> 
 
 fn snap_light_transform_y(value: f32, sector_size: i32) -> f32 {
     snap_node_transform_component_to_world_step(value, sector_size)
+}
+
+fn image_prop_default_size_for_sector(sector_size: i32) -> u16 {
+    sector_size.clamp(1, MAX_IMAGE_PROP_SIZE as i32) as u16
 }
 
 fn cardinal_yaw(degrees: f32) -> i32 {
@@ -14932,7 +15185,7 @@ fn draw_node_kind_editor(
                     .add(
                         egui::DragValue::new(&mut w)
                             .speed(1.0)
-                            .range(1..=4096)
+                            .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
                             .prefix("W "),
                     )
                     .changed();
@@ -14940,13 +15193,13 @@ fn draw_node_kind_editor(
                     .add(
                         egui::DragValue::new(&mut h)
                             .speed(1.0)
-                            .range(1..=4096)
+                            .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
                             .prefix("H "),
                     )
                     .changed();
                 if w_changed || h_changed {
-                    *width = w.clamp(1, u16::MAX as i32) as u16;
-                    *height = h.clamp(1, u16::MAX as i32) as u16;
+                    *width = w.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16;
+                    *height = h.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16;
                     changed = true;
                 }
             });
@@ -27284,6 +27537,101 @@ mod tests {
     }
 
     #[test]
+    fn node_gizmo_rotates_image_prop_around_y() {
+        let mut project = ProjectDocument::new("image-prop-gizmo-rotate");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Banner",
+            NodeKind::ImageProp {
+                material: None,
+                width: 1024,
+                height: 1024,
+                cylindrical_billboard: false,
+            },
+        );
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("image-prop-gizmo-rotate"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.replace_node_selection(prop);
+        workspace.transform_gizmo_mode = TransformGizmoMode::Rotate;
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let ring = workspace
+            .node_rotation_gizmo_screen_ring(viewport)
+            .expect("rotation ring projects");
+        let start = ring.points[0];
+        let unit = (start - ring.center).normalized();
+        assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, start));
+        workspace.update_node_gizmo_drag(start + unit * 8.0);
+        workspace.end_node_gizmo_drag();
+
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        assert_eq!(node.transform.rotation_degrees, [0.0, 2.0, 0.0]);
+        assert!(workspace.is_dirty());
+
+        workspace.do_undo();
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        assert_eq!(node.transform.rotation_degrees, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn node_gizmo_scales_image_prop_width() {
+        let mut project = ProjectDocument::new("image-prop-gizmo-scale");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Banner",
+            NodeKind::ImageProp {
+                material: None,
+                width: 1024,
+                height: 1024,
+                cylindrical_billboard: false,
+            },
+        );
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("image-prop-gizmo-scale"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.replace_node_selection(prop);
+        workspace.transform_gizmo_mode = TransformGizmoMode::Scale;
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+        let unit = (x_axis.end - x_axis.start).normalized();
+        assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+        workspace.update_node_gizmo_drag(x_axis.start + unit * 8.0);
+        workspace.end_node_gizmo_drag();
+
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::ImageProp { width, height, .. } = &node.kind else {
+            panic!("expected image prop");
+        };
+        assert_eq!(*width, 1024 + HEIGHT_QUANTUM as u16);
+        assert_eq!(*height, 1024);
+        assert!(workspace.is_dirty());
+
+        workspace.do_undo();
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::ImageProp { width, height, .. } = &node.kind else {
+            panic!("expected image prop");
+        };
+        assert_eq!(*width, 1024);
+        assert_eq!(*height, 1024);
+    }
+
+    #[test]
     fn duplicate_wall_cook_error_marks_both_authored_faces() {
         let mut project = ProjectDocument::new("duplicate-wall");
         let room = project.active_scene_mut().add_node(
@@ -27483,11 +27831,43 @@ mod tests {
             panic!("expected image prop node");
         };
         assert_eq!(*actual, material);
-        assert_eq!(*width, DEFAULT_IMAGE_PROP_SIZE);
-        assert_eq!(*height, DEFAULT_IMAGE_PROP_SIZE);
+        assert_eq!(*width, psxed_project::DEFAULT_IMAGE_PROP_SIZE);
+        assert_eq!(*height, psxed_project::DEFAULT_IMAGE_PROP_SIZE);
         assert!(!*cylindrical_billboard);
         assert_eq!(workspace.status, "Placed Image Prop at 0,0");
         assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn place_image_prop_defaults_to_room_sector_size() {
+        let mut project = ProjectDocument::new("image-prop-sector-size-place");
+        let material = project.add_resource(
+            "Banner",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1536),
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.place_kind = PlaceKind::ImageProp;
+        workspace.replace_resource_selection(material);
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [768.0, 0.0, 768.0]);
+
+        let node = workspace
+            .project
+            .active_scene()
+            .node(workspace.selected_node_id())
+            .expect("placed image prop is selected");
+        let NodeKind::ImageProp { width, height, .. } = &node.kind else {
+            panic!("expected image prop node");
+        };
+        assert_eq!(*width, 1536);
+        assert_eq!(*height, 1536);
     }
 
     #[test]

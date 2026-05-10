@@ -23,6 +23,7 @@ dependencies = [
  "psx-asset",
  "psx-gpu",
  "psx-gte",
+ "psx-level",
  "psx-math",
  "psx-pad",
  "psx-rt",
