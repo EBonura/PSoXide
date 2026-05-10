@@ -12,10 +12,13 @@
 //!     ctx.pad      ← poll_port1()
 //!     ctx.time     ← elapsed display-time snapshot
 //!     scene.update(&mut ctx)
-//!     ctx.fb.clear(config.clear_color)
-//!     scene.render(&mut ctx)
-//!     display-clock wait + draw_sync + fb.swap
-//!     ctx.frame += 1
+//!     if a visual frame is due:
+//!       ctx.fb.clear(config.clear_color)
+//!       scene.render(&mut ctx)
+//!       display-clock wait + draw_sync + fb.swap
+//!       ctx.frame += 1
+//!     else:
+//!       wait for the next display VBlank, leaving the last framebuffer visible
 //! ```
 //!
 //! This mirrors every `sdk/examples/game-*/src/main.rs` file's
@@ -60,6 +63,21 @@ pub struct Config {
     /// background (textured backdrop, gouraud gradient, etc.) can
     /// set this to black and draw their own full-screen quad.
     pub clear_color: (u8, u8, u8),
+    /// Visual render cadence. The default renders every display
+    /// VBlank; paced modes keep update/control ticking every VBlank
+    /// while rendering only on selected VBlanks.
+    pub visual_pacing: VisualPacing,
+}
+
+/// Engine-level visual render cadence.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VisualPacing {
+    /// Preserve the legacy one-update, one-render, one-swap loop.
+    EveryVBlank,
+    /// Run update/control every VBlank and render once every `N`
+    /// VBlanks. Values less than `2` are normalized to
+    /// [`EveryVBlank`](Self::EveryVBlank).
+    EveryNVBlanks(u16),
 }
 
 impl Config {
@@ -81,8 +99,72 @@ impl Default for Config {
             video_mode: VideoMode::Ntsc,
             resolution: Resolution::R320X240,
             clear_color: (0, 0, 0),
+            visual_pacing: VisualPacing::EveryVBlank,
         }
     }
+}
+
+impl VisualPacing {
+    #[inline]
+    const fn interval_vblanks(self) -> u16 {
+        match self {
+            Self::EveryVBlank => 1,
+            Self::EveryNVBlanks(n) if n > 1 => n,
+            Self::EveryNVBlanks(_) => 1,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct VisualPacer {
+    interval: u16,
+    next_visual_tick: u32,
+}
+
+impl VisualPacer {
+    const fn new(interval: u16) -> Self {
+        Self {
+            interval,
+            next_visual_tick: 0,
+        }
+    }
+
+    fn mark_due_intervals(&mut self, simulation_tick: u32) -> u16 {
+        if simulation_tick < self.next_visual_tick {
+            return 0;
+        }
+        let interval = self.interval.max(1) as u32;
+        let due = simulation_tick
+            .wrapping_sub(self.next_visual_tick)
+            .checked_div(interval)
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.next_visual_tick = self
+            .next_visual_tick
+            .saturating_add(due.saturating_mul(interval));
+        due.min(u16::MAX as u32) as u16
+    }
+}
+
+#[inline(always)]
+fn emit_sim_tick_counters(visual_interval: u16) {
+    telemetry::counter(telemetry::counter::SIM_TICKS, 1);
+    telemetry::counter(
+        telemetry::counter::VISUAL_INTERVAL_VBLANKS,
+        visual_interval.max(1) as u32,
+    );
+}
+
+#[inline(always)]
+fn emit_visual_frame_counters(lateness_vblanks: u16) {
+    telemetry::counter(telemetry::counter::VISUAL_FRAMES, 1);
+    if lateness_vblanks > 0 {
+        telemetry::counter(telemetry::counter::VISUAL_DEADLINE_MISSES, 1);
+    }
+    telemetry::counter(
+        telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS,
+        lateness_vblanks as u32,
+    );
 }
 
 /// Engine entry point. Namespaced as a type (rather than a free
@@ -108,7 +190,7 @@ impl App {
     /// ```
     pub fn run<S: Scene>(config: Config, scene: &mut S) -> ! {
         gpu::init(config.video_mode, config.resolution);
-        let mut clock = EngineClock::new(config.video_hz());
+        let clock = EngineClock::new(config.video_hz());
         let fb = FrameBuffer::new(config.screen_w, config.screen_h);
         gpu::set_draw_area(
             0,
@@ -120,6 +202,8 @@ impl App {
 
         let mut ctx = Ctx {
             frame: 0,
+            simulation_tick: 0,
+            missed_visual_intervals: 0,
             time: EngineTime::start(config.video_hz()),
             pad: PadState::NONE,
             pad_prev: PadState::NONE,
@@ -128,9 +212,24 @@ impl App {
 
         scene.init(&mut ctx);
 
+        let visual_interval = config.visual_pacing.interval_vblanks();
+        if visual_interval <= 1 {
+            Self::run_every_vblank(config, scene, clock, ctx);
+        }
+        Self::run_paced_visuals(config, scene, clock, ctx, visual_interval);
+    }
+
+    fn run_every_vblank<S: Scene>(
+        config: Config,
+        scene: &mut S,
+        mut clock: EngineClock,
+        mut ctx: Ctx,
+    ) -> ! {
         loop {
             telemetry::frame_begin(ctx.frame);
-            ctx.time = clock.begin_frame(ctx.frame);
+            ctx.time = clock.begin_frame(ctx.frame, ctx.simulation_tick);
+            ctx.missed_visual_intervals = 0;
+            emit_sim_tick_counters(1);
             ctx.pad_prev = ctx.pad;
             ctx.pad = poll_port1();
 
@@ -151,11 +250,109 @@ impl App {
             telemetry::stage_end(telemetry::stage::RENDER);
 
             telemetry::stage_begin(telemetry::stage::PRESENT);
-            clock.wait_present();
+            clock.wait_next_vblank();
             gpu::draw_sync();
             ctx.fb.swap();
             telemetry::stage_end(telemetry::stage::PRESENT);
+            emit_visual_frame_counters(ctx.time.delta_vblanks().saturating_sub(1));
+            ctx.frame = ctx.frame.wrapping_add(1);
+            ctx.simulation_tick = ctx.frame;
+        }
+    }
+
+    fn run_paced_visuals<S: Scene>(
+        config: Config,
+        scene: &mut S,
+        mut clock: EngineClock,
+        mut ctx: Ctx,
+        visual_interval: u16,
+    ) -> ! {
+        let mut pacer = VisualPacer::new(visual_interval);
+        let mut next_simulation_tick = 0u32;
+
+        loop {
+            let elapsed_vblanks = clock.elapsed_vblanks();
+            if next_simulation_tick > elapsed_vblanks {
+                clock.wait_next_vblank();
+                continue;
+            }
+
+            let mut due_visual_intervals = 0u16;
+            while next_simulation_tick <= elapsed_vblanks {
+                telemetry::frame_begin(next_simulation_tick);
+                ctx.simulation_tick = next_simulation_tick;
+                ctx.time = EngineTime::fixed_simulation_tick(
+                    ctx.frame,
+                    next_simulation_tick,
+                    config.video_hz(),
+                );
+                ctx.missed_visual_intervals = 0;
+                emit_sim_tick_counters(visual_interval);
+                ctx.pad_prev = ctx.pad;
+                ctx.pad = poll_port1();
+
+                telemetry::stage_begin(telemetry::stage::UPDATE);
+                scene.update(&mut ctx);
+                telemetry::stage_end(telemetry::stage::UPDATE);
+
+                let tick_visual_intervals = pacer.mark_due_intervals(next_simulation_tick);
+                if tick_visual_intervals == 0 {
+                    telemetry::counter(telemetry::counter::VISUAL_SKIPPED_VBLANKS, 1);
+                } else {
+                    due_visual_intervals =
+                        due_visual_intervals.saturating_add(tick_visual_intervals);
+                }
+                next_simulation_tick = next_simulation_tick.wrapping_add(1);
+            }
+
+            if due_visual_intervals == 0 {
+                continue;
+            }
+
+            ctx.missed_visual_intervals = due_visual_intervals.saturating_sub(1);
+
+            telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+            ctx.fb.clear(
+                config.clear_color.0,
+                config.clear_color.1,
+                config.clear_color.2,
+            );
+            telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
+
+            telemetry::stage_begin(telemetry::stage::RENDER);
+            scene.render(&mut ctx);
+            telemetry::stage_end(telemetry::stage::RENDER);
+
+            telemetry::stage_begin(telemetry::stage::PRESENT);
+            clock.wait_next_vblank();
+            gpu::draw_sync();
+            ctx.fb.swap();
+            telemetry::stage_end(telemetry::stage::PRESENT);
+            emit_visual_frame_counters(ctx.missed_visual_intervals);
             ctx.frame = ctx.frame.wrapping_add(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visual_pacing_normalizes_single_vblank_modes() {
+        assert_eq!(VisualPacing::EveryVBlank.interval_vblanks(), 1);
+        assert_eq!(VisualPacing::EveryNVBlanks(0).interval_vblanks(), 1);
+        assert_eq!(VisualPacing::EveryNVBlanks(1).interval_vblanks(), 1);
+        assert_eq!(VisualPacing::EveryNVBlanks(3).interval_vblanks(), 3);
+    }
+
+    #[test]
+    fn visual_pacer_marks_due_and_collapses_missed_intervals() {
+        let mut pacer = VisualPacer::new(3);
+        assert_eq!(pacer.mark_due_intervals(0), 1);
+        assert_eq!(pacer.mark_due_intervals(1), 0);
+        assert_eq!(pacer.mark_due_intervals(2), 0);
+        assert_eq!(pacer.mark_due_intervals(3), 1);
+        assert_eq!(pacer.mark_due_intervals(10), 2);
     }
 }
