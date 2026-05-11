@@ -452,8 +452,7 @@ pub struct LevelChunkRecord {
 }
 
 /// Visibility metadata for one cooked room/chunk. Points into the
-/// generated compact cell table; runtime traversal walks those cells
-/// directly through their open-edge masks.
+/// generated compact cell table and the cooked position-cell PVS table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelRoomVisibilityRecord {
     /// Owning room index.
@@ -462,6 +461,27 @@ pub struct LevelRoomVisibilityRecord {
     pub cell_first: VisibilityCellIndex,
     /// Number of cell records in this room's visibility slice.
     pub cell_count: u16,
+    /// First PVS record for this room in `VISIBILITY_PVS`.
+    pub pvs_first: u32,
+    /// Number of PVS records for this room. This normally matches
+    /// `cell_count`; each visibility cell has one anchor PVS.
+    pub pvs_count: u16,
+    /// Reserved.
+    pub flags: u16,
+}
+
+/// One cooked position-cell PVS bitset slice.
+///
+/// Bits index the owning room's `LevelVisibilityCellRecord` slice.
+/// The runtime still applies camera/global filters and depth sorting,
+/// but it no longer builds a lookup table or traverses portals while
+/// rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelVisibilityPvsRecord {
+    /// First byte in `VISIBILITY_PVS_BITS`.
+    pub byte_first: u32,
+    /// Number of bitset bytes.
+    pub byte_count: u16,
     /// Reserved.
     pub flags: u16,
 }

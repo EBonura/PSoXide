@@ -9,9 +9,9 @@ use psx_level::{
     LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord,
-    LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord, LevelWeaponRecord,
-    PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
-    RoomResidencyRecord, WeaponHitboxRecord,
+    LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord,
+    LevelVisibilityPvsRecord, LevelWeaponRecord, PlayerControllerRecord, PlayerSpawnRecord,
+    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
 };
 
 pub static ASSETS: &[LevelAssetRecord] = &[];
@@ -19,6 +19,8 @@ pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
 pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];
 pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[];
+pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[];
+pub static VISIBILITY_PVS_BITS: &[u8] = &[];
 pub static VISIBILITY_CELLS: &[LevelVisibilityCellRecord] = &[];
 pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];
 pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];
