@@ -12,7 +12,7 @@ use emulator_core::{
 };
 use psoxide_settings::library::{GameKind, Region};
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
-use psx_iso::{Disc, Exe, SECTOR_BYTES};
+use psx_iso::{default_system_cnf, Disc, Exe, IsoBuilder, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
@@ -89,7 +89,8 @@ impl Workspace {
 /// Work to perform after the shared editor-playtest MIPS build exits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorBuildCompletion {
-    /// Load the built EXE into the embedded editor viewport.
+    /// Wrap the built EXE into a disc image and load it into the
+    /// embedded editor viewport.
     RunEmbedded,
     /// Copy the built EXE into the active project's baked output folder.
     ExportProject { dest_path: PathBuf },
@@ -898,10 +899,10 @@ impl AppState {
     }
 
     /// Build and run the active editor project: cook assets, spawn
-    /// the existing MIPS build target, then side-load the EXE. The
-    /// build is asynchronous; call
-    /// [`Self::poll_embedded_playtest_build`] once per frame to load
-    /// the resulting EXE when it exits successfully.
+    /// the existing MIPS build target, wrap the EXE into a bootable
+    /// disc image, then launch that disc. The build is asynchronous;
+    /// call [`Self::poll_embedded_playtest_build`] once per frame to
+    /// load the resulting disc when it exits successfully.
     pub fn start_embedded_playtest(&mut self) {
         self.stop_embedded_playtest();
         self.editor.set_status("Play: cooking assets...");
@@ -1024,22 +1025,26 @@ impl AppState {
             .take()
             .unwrap_or(EditorBuildCompletion::RunEmbedded);
         match completion {
-            EditorBuildCompletion::RunEmbedded => match self.load_embedded_playtest_exe() {
-                Ok(()) => {
-                    self.embedded_playtest.start_running(true);
-                    self.running = true;
-                    self.menu.open = false;
-                    self.menu.sync_run_label(true);
-                    self.editor
-                        .set_status("Embedded Play running in the 3D viewport");
-                    self.status_message_set("Embedded Play running");
+            EditorBuildCompletion::RunEmbedded => {
+                self.editor
+                    .set_status("Embedded Play build complete; creating disc image...");
+                match self.load_embedded_playtest_disc() {
+                    Ok(()) => {
+                        self.embedded_playtest.start_running(true);
+                        self.running = true;
+                        self.menu.open = false;
+                        self.menu.sync_run_label(true);
+                        self.editor
+                            .set_status("Embedded Play running in the 3D viewport");
+                        self.status_message_set("Embedded Play running");
+                    }
+                    Err(error) => {
+                        let message = format!("Embedded Play load failed: {error}");
+                        self.editor.set_status(message.clone());
+                        self.embedded_playtest.fail();
+                    }
                 }
-                Err(error) => {
-                    let message = format!("Embedded Play load failed: {error}");
-                    self.editor.set_status(message.clone());
-                    self.embedded_playtest.fail();
-                }
-            },
+            }
             EditorBuildCompletion::ExportProject { dest_path } => {
                 match self.export_project_build(dest_path) {
                     Ok(message) => {
@@ -1118,19 +1123,28 @@ impl AppState {
         }
     }
 
-    fn load_embedded_playtest_exe(&mut self) -> Result<(), String> {
+    fn load_embedded_playtest_disc(&mut self) -> Result<(), String> {
         let bios_path = resolve_bios_path(&self.settings)?;
         let bios =
             std::fs::read(&bios_path).map_err(|e| format!("BIOS {}: {e}", bios_path.display()))?;
         let mut bus = Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))?;
-        let exe_path = editor_playtest_exe_path();
-        let bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
-        let exe = Exe::parse(&bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
         let mut cpu = Cpu::new();
-        bus.load_exe_payload(exe.load_addr, &exe.payload);
-        bus.clear_exe_bss(exe.bss_addr, exe.bss_size);
-        cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
-        bus.enable_hle_bios();
+
+        let disc_path = build_embedded_playtest_disc()?;
+        let disc_bytes =
+            std::fs::read(&disc_path).map_err(|e| format!("{}: {e}", disc_path.display()))?;
+        if disc_bytes.len() < SECTOR_BYTES {
+            return Err(format!(
+                "{} is too small to be a valid disc image",
+                disc_path.display()
+            ));
+        }
+        let disc = Disc::from_bin(disc_bytes);
+        // Embedded Play should feel like the old side-load path: no BIOS
+        // logo wait, but the game still runs from a mounted disc image so
+        // future CD streaming code has a real disc available.
+        fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &disc_path);
+        bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
         let _ = bus.force_port1_analog_mode();
 
@@ -1423,11 +1437,41 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     }
 }
 
+fn fast_boot_embedded_playtest_disc(bus: &mut Bus, cpu: &mut Cpu, disc: &Disc, path: &Path) {
+    match fast_boot_disc_with_hle(bus, cpu, disc, true) {
+        Ok(info) => {
+            eprintln!(
+                "[frontend] embedded Play disc fast-booted {} via {} entry=0x{:08x} payload={}B",
+                path.display(),
+                info.boot_path,
+                info.initial_pc,
+                info.payload_len
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[frontend] embedded Play disc fast boot unavailable for {} ({e:?}); falling back to BIOS boot",
+                path.display()
+            );
+        }
+    }
+}
+
 fn maybe_fast_boot_disc(
     bus: &mut Bus,
     cpu: &mut Cpu,
     disc: &Disc,
     entry: &LibraryEntry,
+    enabled: bool,
+) -> &'static str {
+    maybe_fast_boot_disc_path(bus, cpu, disc, &entry.path, enabled)
+}
+
+fn maybe_fast_boot_disc_path(
+    bus: &mut Bus,
+    cpu: &mut Cpu,
+    disc: &Disc,
+    path: &Path,
     enabled: bool,
 ) -> &'static str {
     if !enabled {
@@ -1436,7 +1480,7 @@ fn maybe_fast_boot_disc(
     if let Err(e) = warm_bios_for_disc_fast_boot(bus, cpu, DISC_FAST_BOOT_WARMUP_STEPS) {
         eprintln!(
             "[frontend] BIOS warmup failed for {} ({e:?}); falling back to BIOS boot",
-            entry.path.display()
+            path.display()
         );
         return "BIOS boot";
     }
@@ -1444,7 +1488,7 @@ fn maybe_fast_boot_disc(
         Ok(info) => {
             eprintln!(
                 "[frontend] warm-fast-booted {} via {} entry=0x{:08x} load=0x{:08x} payload={}B",
-                entry.path.display(),
+                path.display(),
                 info.boot_path,
                 info.initial_pc,
                 info.load_addr,
@@ -1455,7 +1499,7 @@ fn maybe_fast_boot_disc(
         Err(e) => {
             eprintln!(
                 "[frontend] fast boot unavailable for {} ({e:?}); falling back to BIOS boot",
-                entry.path.display()
+                path.display()
             );
             "BIOS boot"
         }
@@ -1530,6 +1574,37 @@ fn editor_playtest_exe_path() -> PathBuf {
         .join("mipsel-sony-psx")
         .join("release")
         .join("editor-playtest.exe")
+}
+
+fn editor_playtest_disc_path() -> PathBuf {
+    repo_root_dir()
+        .join("build")
+        .join("examples")
+        .join("mipsel-sony-psx")
+        .join("release")
+        .join("editor-playtest.bin")
+}
+
+fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
+    let exe_path = editor_playtest_exe_path();
+    let exe_bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
+    let image = embedded_playtest_disc_image(exe_bytes)?;
+
+    let disc_path = editor_playtest_disc_path();
+    let dir = disc_path
+        .parent()
+        .ok_or_else(|| format!("invalid playtest disc path: {}", disc_path.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    std::fs::write(&disc_path, image).map_err(|e| format!("write {}: {e}", disc_path.display()))?;
+    Ok(disc_path)
+}
+
+fn embedded_playtest_disc_image(exe_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    Exe::parse(&exe_bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
+    let mut builder = IsoBuilder::new().volume_id("PSOXIDE");
+    builder.add_file("SYSTEM.CNF", default_system_cnf());
+    builder.add_file("PSX.EXE", exe_bytes);
+    Ok(builder.build_bin())
 }
 
 fn project_baked_exe_path(project_dir: &Path, project_name: &str) -> PathBuf {
@@ -1712,6 +1787,24 @@ mod tests {
                 .join("baked")
                 .join("demo_project.exe")
         );
+    }
+
+    #[test]
+    fn embedded_playtest_disc_image_boots_psx_exe() {
+        let mut exe = vec![0u8; psx_iso::EXE_HEADER_BYTES];
+        exe[..8].copy_from_slice(b"PS-X EXE");
+        exe[0x10..0x14].copy_from_slice(&0x8001_2340u32.to_le_bytes());
+        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x1C..0x20].copy_from_slice(&4u32.to_le_bytes());
+        exe.extend_from_slice(&[1, 2, 3, 4]);
+
+        let image = embedded_playtest_disc_image(exe).expect("disc image builds");
+        let disc = Disc::from_bin(image);
+        let boot = psx_iso::load_boot_exe_from_disc(&disc).expect("disc boots");
+
+        assert_eq!(boot.boot_path, "PSX.EXE;1");
+        assert_eq!(boot.exe.initial_pc, 0x8001_2340);
+        assert_eq!(boot.exe.payload, vec![1, 2, 3, 4]);
     }
 
     #[test]
