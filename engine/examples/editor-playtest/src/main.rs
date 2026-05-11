@@ -62,12 +62,11 @@ use psx_gpu::{
 };
 use psx_level::{
     equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, room_flags, sky_flags,
-    visibility_edge_flags, AssetId, AssetKind, EntityRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
-    WeaponHitShapeRecord,
+    AssetId, AssetKind, EntityRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
+    LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness,
+    LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
+    LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
+    OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
 
@@ -90,8 +89,8 @@ use generated::{
     ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
     MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS,
-    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, VISIBILITY_CELLS, WEAPONS,
-    WEAPON_HITBOXES,
+    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, VISIBILITY_CELLS, VISIBILITY_PVS,
+    VISIBILITY_PVS_BITS, WEAPONS, WEAPON_HITBOXES,
 };
 
 // VRAM layout. Room materials and model atlases live in
@@ -2848,19 +2847,16 @@ fn fill_precomputed_visible_cells(
         return None;
     }
     let room_cells = VISIBILITY_CELLS.get(first..first.checked_add(count)?)?;
-    let (lookup_depth, lookup_len) = runtime_visibility_lookup_shape(room_cells)?;
-    let mut lookup = [RUNTIME_VISIBILITY_EMPTY_LOOKUP; MAX_PRECOMPUTED_VISIBLE_CELLS];
-    for (index, cell) in room_cells.iter().enumerate() {
-        let slot = runtime_visibility_lookup_slot(cell.x, cell.z, lookup_depth, lookup_len)?;
-        lookup[slot] = index as u16;
+    let anchor_index = visibility_cell_index_for_anchor(room_cells, anchor_x, anchor_z)
+        .or_else(|| nearest_runtime_visibility_cell(room_cells, anchor_x, anchor_z))?;
+    let pvs_index = (room_visibility.pvs_first as usize).checked_add(anchor_index)?;
+    if anchor_index >= room_visibility.pvs_count as usize {
+        return None;
     }
-    let anchor_index =
-        runtime_visibility_lookup_i32(&lookup, lookup_depth, lookup_len, anchor_x, anchor_z)
-            .or_else(|| nearest_runtime_visibility_cell(room_cells, anchor_x, anchor_z))?;
-    let mut visited = [false; MAX_PRECOMPUTED_VISIBLE_CELLS];
-    let mut queue = [0usize; MAX_PRECOMPUTED_VISIBLE_CELLS];
-    let mut distances = [0u16; MAX_PRECOMPUTED_VISIBLE_CELLS];
-    let mut selected = [false; MAX_PRECOMPUTED_VISIBLE_CELLS];
+    let pvs = *VISIBILITY_PVS.get(pvs_index)?;
+    let byte_first = pvs.byte_first as usize;
+    let byte_end = byte_first.checked_add(pvs.byte_count as usize)?;
+    let pvs_bits = VISIBILITY_PVS_BITS.get(byte_first..byte_end)?;
     let filter = VisibleCellFilter {
         anchor_x,
         anchor_z,
@@ -2870,84 +2866,20 @@ fn fill_precomputed_visible_cells(
         global_anchor,
         camera,
     };
-    let mut read = 0usize;
-    let mut queued = 1usize;
-    visited[anchor_index] = true;
-    queue[0] = anchor_index;
-
-    while read < queued {
-        let cell_index = queue[read];
-        let distance = distances[read];
-        let cell = room_cells[cell_index];
-        read += 1;
-        if distance >= ROOM_GRID_VISIBILITY_RADIUS {
-            continue;
-        }
-        for edge in RUNTIME_VISIBILITY_EDGES {
-            if cell.portal_mask & edge.bit == 0 {
-                continue;
-            }
-            let Some(neighbour_index) = runtime_visibility_neighbour(
-                &lookup,
-                lookup_depth,
-                lookup_len,
-                cell.x,
-                cell.z,
-                edge.dx,
-                edge.dz,
-            ) else {
-                continue;
-            };
-            if visited[neighbour_index] || queued >= MAX_PRECOMPUTED_VISIBLE_CELLS {
-                continue;
-            }
-            visited[neighbour_index] = true;
-            queue[queued] = neighbour_index;
-            distances[queued] = distance + 1;
-            queued += 1;
-        }
-    }
-
-    for queue_slot in 0..queued {
-        let cell_index = queue[queue_slot];
-        selected[cell_index] = true;
-    }
-
-    // Visibility traversal walks through open cell edges only, but cooked
-    // walls can be owned by the cell on the closed side of an edge. Emit a
-    // one-cell non-traversing shell in the same reverse-BFS pass so boundary
-    // walls are present without opening traversal through occluders.
     let mut written = 0usize;
     let mut rejected_global = 0u16;
-    let mut queue_slot = queued;
-    while queue_slot != 0 {
-        queue_slot -= 1;
-        let cell = room_cells[queue[queue_slot]];
-        for edge in RUNTIME_VISIBILITY_EDGES {
-            let Some(neighbour_index) = runtime_visibility_neighbour(
-                &lookup,
-                lookup_depth,
-                lookup_len,
-                cell.x,
-                cell.z,
-                edge.dx,
-                edge.dz,
-            ) else {
-                continue;
-            };
-            if selected[neighbour_index] {
-                continue;
-            }
-            selected[neighbour_index] = true;
+    let mut cell_index = 0usize;
+    while cell_index < room_cells.len() {
+        if visibility_pvs_bit(pvs_bits, cell_index) {
             write_visible_cell_candidate(
-                room_cells[neighbour_index],
+                room_cells[cell_index],
                 filter,
                 out,
                 &mut written,
                 &mut rejected_global,
             );
         }
-        write_visible_cell_candidate(cell, filter, out, &mut written, &mut rejected_global);
+        cell_index += 1;
     }
     sort_visible_cells_for_camera(&mut out[..written], camera, sector_size);
     Some((written, rejected_global))
@@ -3256,39 +3188,52 @@ fn visibility_cell_in_global_range(
 }
 
 #[cfg(feature = "world-grid-visible")]
-const RUNTIME_VISIBILITY_EMPTY_LOOKUP: u16 = u16::MAX;
-
-#[cfg(feature = "world-grid-visible")]
-#[derive(Clone, Copy)]
-struct RuntimeVisibilityEdge {
-    bit: u8,
-    dx: i32,
-    dz: i32,
+fn visibility_pvs_bit(bits: &[u8], index: usize) -> bool {
+    let byte = index / 8;
+    let bit = index % 8;
+    bits.get(byte)
+        .map(|value| value & (1 << bit) != 0)
+        .unwrap_or(false)
 }
 
 #[cfg(feature = "world-grid-visible")]
-const RUNTIME_VISIBILITY_EDGES: [RuntimeVisibilityEdge; 4] = [
-    RuntimeVisibilityEdge {
-        bit: visibility_edge_flags::NORTH,
-        dx: 0,
-        dz: -1,
-    },
-    RuntimeVisibilityEdge {
-        bit: visibility_edge_flags::EAST,
-        dx: 1,
-        dz: 0,
-    },
-    RuntimeVisibilityEdge {
-        bit: visibility_edge_flags::SOUTH,
-        dx: 0,
-        dz: 1,
-    },
-    RuntimeVisibilityEdge {
-        bit: visibility_edge_flags::WEST,
-        dx: -1,
-        dz: 0,
-    },
-];
+fn visibility_cell_index_for_anchor(
+    cells: &[psx_level::LevelVisibilityCellRecord],
+    x: i32,
+    z: i32,
+) -> Option<usize> {
+    if x < 0 || z < 0 || x > u16::MAX as i32 || z > u16::MAX as i32 {
+        return None;
+    }
+    visibility_cell_index_by_coord(cells, x as u16, z as u16)
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn visibility_cell_index_by_coord(
+    cells: &[psx_level::LevelVisibilityCellRecord],
+    x: u16,
+    z: u16,
+) -> Option<usize> {
+    let key = visibility_cell_key(x, z);
+    let mut low = 0usize;
+    let mut high = cells.len();
+    while low < high {
+        let mid = (low + high) / 2;
+        let cell = cells[mid];
+        if visibility_cell_key(cell.x, cell.z) < key {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let cell = cells.get(low)?;
+    (visibility_cell_key(cell.x, cell.z) == key).then_some(low)
+}
+
+#[cfg(feature = "world-grid-visible")]
+const fn visibility_cell_key(x: u16, z: u16) -> u32 {
+    ((x as u32) << 16) | z as u32
+}
 
 const INVALID_ACTIVE_ROOM_SLOT: u8 = u8::MAX;
 
@@ -3333,73 +3278,6 @@ fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32
 }
 
 #[cfg(feature = "world-grid-visible")]
-fn runtime_visibility_neighbour(
-    lookup: &[u16; MAX_PRECOMPUTED_VISIBLE_CELLS],
-    lookup_depth: usize,
-    lookup_len: usize,
-    x: u16,
-    z: u16,
-    dx: i32,
-    dz: i32,
-) -> Option<usize> {
-    let nx = x as i32 + dx;
-    let nz = z as i32 + dz;
-    if nx < 0 || nz < 0 || nx > u16::MAX as i32 || nz > u16::MAX as i32 {
-        return None;
-    }
-    runtime_visibility_lookup(lookup, lookup_depth, lookup_len, nx as u16, nz as u16)
-}
-
-#[cfg(feature = "world-grid-visible")]
-fn runtime_visibility_lookup_shape(
-    cells: &[psx_level::LevelVisibilityCellRecord],
-) -> Option<(usize, usize)> {
-    let mut max_x = 0usize;
-    let mut max_z = 0usize;
-    for cell in cells {
-        max_x = max_x.max(cell.x as usize);
-        max_z = max_z.max(cell.z as usize);
-    }
-    let lookup_width = max_x.checked_add(1)?;
-    let lookup_depth = max_z.checked_add(1)?;
-    let lookup_len = lookup_width.checked_mul(lookup_depth)?;
-    if lookup_len > MAX_PRECOMPUTED_VISIBLE_CELLS {
-        return None;
-    }
-    Some((lookup_depth, lookup_len))
-}
-
-#[cfg(feature = "world-grid-visible")]
-fn runtime_visibility_lookup_i32(
-    lookup: &[u16; MAX_PRECOMPUTED_VISIBLE_CELLS],
-    lookup_depth: usize,
-    lookup_len: usize,
-    x: i32,
-    z: i32,
-) -> Option<usize> {
-    if x < 0 || z < 0 || x > u16::MAX as i32 || z > u16::MAX as i32 {
-        return None;
-    }
-    runtime_visibility_lookup(lookup, lookup_depth, lookup_len, x as u16, z as u16)
-}
-
-#[cfg(feature = "world-grid-visible")]
-fn runtime_visibility_lookup(
-    lookup: &[u16; MAX_PRECOMPUTED_VISIBLE_CELLS],
-    lookup_depth: usize,
-    lookup_len: usize,
-    x: u16,
-    z: u16,
-) -> Option<usize> {
-    let slot = runtime_visibility_lookup_slot(x, z, lookup_depth, lookup_len)?;
-    let index = lookup[slot];
-    if index == RUNTIME_VISIBILITY_EMPTY_LOOKUP {
-        return None;
-    }
-    Some(index as usize)
-}
-
-#[cfg(feature = "world-grid-visible")]
 fn nearest_runtime_visibility_cell(
     cells: &[psx_level::LevelVisibilityCellRecord],
     x: i32,
@@ -3417,23 +3295,6 @@ fn nearest_runtime_visibility_cell(
         }
     }
     best_index
-}
-
-#[cfg(feature = "world-grid-visible")]
-fn runtime_visibility_lookup_slot(
-    x: u16,
-    z: u16,
-    lookup_depth: usize,
-    lookup_len: usize,
-) -> Option<usize> {
-    let slot = (x as usize)
-        .checked_mul(lookup_depth)?
-        .checked_add(z as usize)?;
-    if slot < lookup_len {
-        Some(slot)
-    } else {
-        None
-    }
 }
 
 fn grid_cell_for_room(value: i32, sector_size: i32) -> i32 {

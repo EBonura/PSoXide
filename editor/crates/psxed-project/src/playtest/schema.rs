@@ -194,6 +194,19 @@ pub struct PlaytestRoomVisibility {
     pub cell_first: u16,
     /// Number of visibility cells for this room.
     pub cell_count: u16,
+    /// First index into [`PlaytestPackage::visibility_pvs`].
+    pub pvs_first: u32,
+    /// Number of PVS records for this room.
+    pub pvs_count: u16,
+}
+
+/// One cooked position-cell PVS bitset slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestVisibilityPvs {
+    /// First byte in [`PlaytestPackage::visibility_pvs_bits`].
+    pub byte_first: u32,
+    /// Number of bitset bytes.
+    pub byte_count: u16,
 }
 
 /// One cooked room grid cell with precomputed visibility metadata.
@@ -685,6 +698,10 @@ pub struct PlaytestPackage {
     pub room_visibility: Vec<PlaytestRoomVisibility>,
     /// Per-cell visibility metadata.
     pub visibility_cells: Vec<PlaytestVisibilityCell>,
+    /// Per-visibility-cell PVS bitset slices.
+    pub visibility_pvs: Vec<PlaytestVisibilityPvs>,
+    /// Flattened PVS bitset bytes.
+    pub visibility_pvs_bits: Vec<u8>,
     /// Per-room room-surface cache slices.
     pub room_surface_caches: Vec<PlaytestRoomSurfaceCache>,
     /// Flattened cached room cell records.
