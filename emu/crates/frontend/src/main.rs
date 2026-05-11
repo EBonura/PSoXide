@@ -973,6 +973,7 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         host_fps: sample.host_fps(),
         host_ms: sample.host_dt_ms,
         emu_hz: sample.emulated_vblank_hz(),
+        visual_hz: sample.guest_visual_frame_hz(),
         draw_hz: sample.psx_draw_hz(),
         total_ms: sample.total_ms,
         emu_ms: sample.emu_ms,
