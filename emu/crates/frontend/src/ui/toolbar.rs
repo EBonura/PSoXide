@@ -3,8 +3,9 @@
 //! Two halves on a single strip:
 //!
 //! - **Left**: live emulator status. Colored dot + RUNNING/PAUSED
-//!   label, followed by PS1 emulation cadence, draw cadence, host
-//!   redraw rate, MIPS, frame-time, and audio backlog.
+//!   label, followed by PS1 emulation cadence, paced visual cadence
+//!   when available, host redraw rate, MIPS, frame-time, and
+//!   audio backlog.
 //! - **Right**: icon buttons. Play/pause (context-sensitive),
 //!   reset, advance-one-frame. Clicking fires the same state
 //!   transition as the equivalent Menu menu item.
@@ -13,7 +14,7 @@
 //!
 //! ```text
 //!  ┌────────────────────────────────────────────────────────────────┐
-//!  │ ● RUNNING    EMU 60.0   DRAW 30.0   HOST 120.0       ▶  ⟲  ⇥ │
+//!  │ ● RUNNING    EMU 60.0   VIS 20.0   HOST 120.0        ▶  ⟲  ⇥ │
 //!  └────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -299,12 +300,25 @@ fn draw_metrics(ui: &mut egui::Ui, state: &AppState, available_width: f32) {
     let emu_hz = profile_avg
         .map(|sample| sample.emulated_vblank_hz())
         .unwrap_or(0.0);
-    let draw_hz = profile_avg
-        .map(|sample| sample.psx_draw_hz())
-        .unwrap_or(0.0);
+    let (cadence_label, cadence_hz) = profile_avg
+        .and_then(|sample| sample.guest_visual_frame_hz().map(|hz| ("VIS", hz)))
+        .unwrap_or_else(|| {
+            (
+                "DRAW",
+                profile_avg
+                    .map(|sample| sample.psx_draw_hz())
+                    .unwrap_or(0.0),
+            )
+        });
 
     maybe_metric(ui, available_width, 170.0, "EMU", format!("{emu_hz:4.1}"));
-    maybe_metric(ui, available_width, 260.0, "DRAW", format!("{draw_hz:4.1}"));
+    maybe_metric(
+        ui,
+        available_width,
+        260.0,
+        cadence_label,
+        format!("{cadence_hz:4.1}"),
+    );
     maybe_metric(
         ui,
         available_width,
