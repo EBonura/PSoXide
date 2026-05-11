@@ -223,9 +223,31 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for visibility in &package.room_visibility {
         let _ = writeln!(
             out,
-            "    LevelRoomVisibilityRecord {{ room: RoomIndex({}), cell_first: VisibilityCellIndex({}), cell_count: {}, flags: 0 }},",
-            visibility.room, visibility.cell_first, visibility.cell_count,
+            "    LevelRoomVisibilityRecord {{ room: RoomIndex({}), cell_first: VisibilityCellIndex({}), cell_count: {}, pvs_first: {}, pvs_count: {}, flags: 0 }},",
+            visibility.room,
+            visibility.cell_first,
+            visibility.cell_count,
+            visibility.pvs_first,
+            visibility.pvs_count,
         );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cooked position-cell PVS bitset slices.\n");
+    out.push_str("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[\n");
+    for pvs in &package.visibility_pvs {
+        let _ = writeln!(
+            out,
+            "    LevelVisibilityPvsRecord {{ byte_first: {}, byte_count: {}, flags: 0 }},",
+            pvs.byte_first, pvs.byte_count,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cooked position-cell PVS bitset bytes.\n");
+    out.push_str("pub static VISIBILITY_PVS_BITS: &[u8] = &[\n");
+    for byte in &package.visibility_pvs_bits {
+        let _ = writeln!(out, "    {},", byte);
     }
     out.push_str("];\n\n");
 
@@ -1077,6 +1099,7 @@ use psx_level::{
     LevelRoomVisibilityRecord,
     LevelSkyRecord,
     LevelVisibilityCellRecord,
+    LevelVisibilityPvsRecord,
     LevelWeaponRecord,
     MaterialIndex,
     MaterialSlot,
