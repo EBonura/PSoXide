@@ -406,6 +406,16 @@ impl FrameProfileSample {
         }
     }
 
+    pub fn guest_visual_frame_hz(self) -> Option<f32> {
+        if !self.guest.has_pacing_data() || self.host_dt_ms <= 0.0 {
+            return None;
+        }
+        let visual_frames = self
+            .guest
+            .counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize);
+        Some(visual_frames * 1000.0 / self.host_dt_ms)
+    }
+
     fn bus_cycles_per_guest_frame(self) -> f32 {
         per_guest_frame(self.bus_cycles, self.frames_run)
     }
@@ -573,8 +583,11 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
 
     ui.horizontal_wrapped(|ui| {
         metric(ui, "EMU Hz", format!("{:.1}", avg.emulated_vblank_hz()));
-        metric(ui, "DRAW Hz", format!("{:.1}", avg.psx_draw_hz()));
-        metric(ui, "DRAW/V", format!("{:.2}", avg.psx_draw_vblanks));
+        if let Some(visual_hz) = avg.guest_visual_frame_hz() {
+            metric(ui, "VIS Hz", format!("{visual_hz:.1}"));
+        } else {
+            metric(ui, "DRAW Hz", format!("{:.1}", avg.psx_draw_hz()));
+        }
         metric(ui, "CAP", format!("{:.0}", avg.psx_step_cap_misses));
     });
     ui.horizontal_wrapped(|ui| {
@@ -597,6 +610,8 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
         );
     });
     ui.horizontal_wrapped(|ui| {
+        metric(ui, "GPU Hz", format!("{:.1}", avg.psx_draw_hz()));
+        metric(ui, "GPU/V", format!("{:.2}", avg.psx_draw_vblanks));
         metric(
             ui,
             "CMD/F",
@@ -979,7 +994,7 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
     format!(
         "[profile {kind}] total={:.2}ms host_dt={:.2}ms fps={:.1} run={:.1} \
          emu={:.2}ms audio={:.2}ms vram={:.2}ms hw={:.2}ms ui={:.2}ms \
-         host_fps={:.1} emu_hz={:.1} draw_hz={:.1} step={:.1}% \
+         host_fps={:.1} emu_hz={:.1} vis_hz={:.1} draw_hz={:.1} step={:.1}% \
          cyc_f={:.0} budget_f={:.0} instr_f={:.0} vblanks={:.1} capmiss={:.0} \
          gte_f={:.0} gtecy_f={:.0} cmd_f={:.0} draw_f={:.0} image_f={:.0} words_f={:.0} \
          guest_frames={:.1} guest_render_hit={:.0} guest_models_hit={:.0} guest_player_hit={:.0} \
@@ -998,6 +1013,7 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
         sample.egui.total_ms,
         sample.host_fps(),
         sample.emulated_vblank_hz(),
+        sample.guest_visual_frame_hz().unwrap_or(0.0),
         sample.psx_draw_hz(),
         sample.psx_budget_percent(),
         sample.bus_cycles_per_guest_frame(),
@@ -1203,6 +1219,18 @@ mod tests {
     }
 
     #[test]
+    fn visual_frame_hz_uses_guest_visual_counter() {
+        let mut sample = FrameProfileSample {
+            host_dt_ms: 50.0,
+            ..FrameProfileSample::default()
+        };
+        sample.guest.counters[emulator_core::telemetry::counter::SIM_TICKS as usize] = 3.0;
+        sample.guest.counters[emulator_core::telemetry::counter::VISUAL_FRAMES as usize] = 1.0;
+
+        assert_eq!(sample.guest_visual_frame_hz(), Some(20.0));
+    }
+
+    #[test]
     fn log_line_separates_host_and_guest_work() {
         let line = format_log_line(
             "ui",
@@ -1228,6 +1256,7 @@ mod tests {
         assert!(line.contains("host_dt=8.00ms"));
         assert!(line.contains("host_fps=125.0"));
         assert!(line.contains("emu_hz=125.0"));
+        assert!(line.contains("vis_hz=0.0"));
         assert!(line.contains("draw_hz=60.0"));
         assert!(line.contains("step=100.0%"));
         assert!(line.contains("cyc_f=564398"));

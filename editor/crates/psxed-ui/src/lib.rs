@@ -4231,7 +4231,10 @@ impl EditorWorkspace {
                 &painter,
                 debug_rect.left() + 8.0,
                 &mut y,
-                &format!("DRAW {:>5.1} Hz", metrics.draw_hz),
+                &match metrics.visual_hz {
+                    Some(visual_hz) => format!("VIS  {:>5.1} Hz", visual_hz),
+                    None => format!("DRAW {:>5.1} Hz", metrics.draw_hz),
+                },
                 STUDIO_TEXT,
             );
             draw_play_metric_line(
