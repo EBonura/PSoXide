@@ -112,6 +112,8 @@ pub struct EditorPlaytestMetrics {
     pub host_ms: f32,
     /// Emulated VBlank rate per host second.
     pub emu_hz: f32,
+    /// Paced visual frames produced by instrumented playtest builds.
+    pub visual_hz: Option<f32>,
     /// VBlanks that produced draw traffic per guest refresh.
     pub draw_hz: f32,
     /// Full frontend frame cost.
