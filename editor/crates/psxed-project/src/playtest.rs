@@ -61,8 +61,7 @@ use assets::{
 pub use manifest::{cook_to_dir, default_generated_dir, render_manifest_source, write_package};
 pub use schema::*;
 
-#[cfg(test)]
-const PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 4;
+const PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
 
 struct PlayerSpawnCandidate<'a> {
     node: &'a SceneNode,
@@ -144,6 +143,8 @@ pub fn build_package(
     let mut room_bake_inputs: Vec<CookedRoomBakeInput> = Vec::new();
     let mut room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
     let mut visibility_cells: Vec<PlaytestVisibilityCell> = Vec::new();
+    let mut visibility_pvs: Vec<PlaytestVisibilityPvs> = Vec::new();
+    let mut visibility_pvs_bits: Vec<u8> = Vec::new();
     let mut room_surface_caches: Vec<PlaytestRoomSurfaceCache> = Vec::new();
     let mut room_cache_cells: Vec<PlaytestCachedRoomCell> = Vec::new();
     let mut room_cache_vertices: Vec<PlaytestCachedRoomVertex> = Vec::new();
@@ -291,6 +292,8 @@ pub fn build_package(
                 &cooked,
                 &mut room_visibility,
                 &mut visibility_cells,
+                &mut visibility_pvs,
+                &mut visibility_pvs_bits,
             );
 
             let resolved_sky = scene
@@ -954,6 +957,8 @@ pub fn build_package(
             materials,
             room_visibility,
             visibility_cells,
+            visibility_pvs,
+            visibility_pvs_bits,
             room_surface_caches,
             room_cache_cells,
             room_cache_vertices,
@@ -2632,6 +2637,8 @@ fn append_room_visibility(
     cooked: &CookedWorldGrid,
     room_visibility: &mut Vec<PlaytestRoomVisibility>,
     visibility_cells: &mut Vec<PlaytestVisibilityCell>,
+    visibility_pvs: &mut Vec<PlaytestVisibilityPvs>,
+    visibility_pvs_bits: &mut Vec<u8>,
 ) {
     let cell_first = u16::try_from(visibility_cells.len()).unwrap_or(u16::MAX);
     let mut local_cells = build_visibility_cells(room_index, cooked);
@@ -2643,12 +2650,25 @@ fn append_room_visibility(
         &index_by_coord,
         &mut local_cells,
     );
+    let pvs_first = u32::try_from(visibility_pvs.len()).unwrap_or(u32::MAX);
+    append_visibility_pvs(
+        cooked.width,
+        cooked.depth,
+        &local_cells,
+        &index_by_coord,
+        visibility_pvs,
+        visibility_pvs_bits,
+    );
+    let pvs_count = u16::try_from(visibility_pvs.len().saturating_sub(pvs_first as usize))
+        .unwrap_or(u16::MAX);
 
     visibility_cells.extend(local_cells);
     room_visibility.push(PlaytestRoomVisibility {
         room: room_index,
         cell_first,
         cell_count,
+        pvs_first,
+        pvs_count,
     });
 }
 
@@ -2883,8 +2903,83 @@ fn assign_visibility_portals(
     }
 }
 
-#[cfg(test)]
-fn visible_cells_for_anchor(
+fn append_visibility_pvs(
+    width: u16,
+    depth: u16,
+    cells: &[PlaytestVisibilityCell],
+    index_by_coord: &[Option<usize>],
+    visibility_pvs: &mut Vec<PlaytestVisibilityPvs>,
+    visibility_pvs_bits: &mut Vec<u8>,
+) {
+    let bitset_bytes = visibility_pvs_bitset_bytes(cells.len());
+    let mut bits = vec![0u8; bitset_bytes];
+    for anchor_index in 0..cells.len() {
+        bits.fill(0);
+        fill_visibility_pvs_bits(
+            anchor_index,
+            width,
+            depth,
+            cells,
+            index_by_coord,
+            &mut bits,
+        );
+        let byte_first = find_existing_visibility_pvs_bits(
+            visibility_pvs,
+            visibility_pvs_bits,
+            &bits,
+        )
+        .unwrap_or_else(|| {
+            let byte_first = u32::try_from(visibility_pvs_bits.len()).unwrap_or(u32::MAX);
+            visibility_pvs_bits.extend_from_slice(&bits);
+            byte_first
+        });
+        visibility_pvs.push(PlaytestVisibilityPvs {
+            byte_first,
+            byte_count: u16::try_from(bitset_bytes).unwrap_or(u16::MAX),
+        });
+    }
+}
+
+fn find_existing_visibility_pvs_bits(
+    visibility_pvs: &[PlaytestVisibilityPvs],
+    visibility_pvs_bits: &[u8],
+    bits: &[u8],
+) -> Option<u32> {
+    for pvs in visibility_pvs {
+        if pvs.byte_count as usize != bits.len() {
+            continue;
+        }
+        let start = pvs.byte_first as usize;
+        let Some(end) = start.checked_add(bits.len()) else {
+            continue;
+        };
+        if visibility_pvs_bits.get(start..end) == Some(bits) {
+            return Some(pvs.byte_first);
+        }
+    }
+    None
+}
+
+fn visibility_pvs_bitset_bytes(cell_count: usize) -> usize {
+    cell_count.saturating_add(7) / 8
+}
+
+fn fill_visibility_pvs_bits(
+    anchor_index: usize,
+    width: u16,
+    depth: u16,
+    cells: &[PlaytestVisibilityCell],
+    index_by_coord: &[Option<usize>],
+    bits: &mut [u8],
+) -> Vec<usize> {
+    let visible = visibility_indices_for_anchor(anchor_index, width, depth, cells, index_by_coord);
+    for &index in &visible {
+        set_visibility_pvs_bit(bits, index);
+    }
+    visible
+}
+
+fn visibility_indices_for_anchor(
     anchor_index: usize,
     width: u16,
     depth: u16,
@@ -2897,6 +2992,7 @@ fn visible_cells_for_anchor(
     let anchor = cells[anchor_index];
     let mut visible = Vec::new();
     let mut visited = vec![false; cells.len()];
+    let mut selected = vec![false; cells.len()];
     let mut queue = Vec::new();
     visited[anchor_index] = true;
     queue.push((anchor_index, 0u16));
@@ -2929,6 +3025,28 @@ fn visible_cells_for_anchor(
         }
     }
 
+    for &(index, _) in &queue {
+        selected[index] = true;
+    }
+    let mut i = queue.len();
+    while i != 0 {
+        i -= 1;
+        let cell = cells[queue[i].0];
+        for edge in VISIBILITY_EDGES {
+            let Some((nx, nz)) = neighbour_cell(width, depth, cell.x, cell.z, edge.dx, edge.dz)
+            else {
+                continue;
+            };
+            let Some(neighbour_index) = visibility_cell_index(index_by_coord, depth, nx, nz) else {
+                continue;
+            };
+            if !selected[neighbour_index] {
+                selected[neighbour_index] = true;
+                visible.push(neighbour_index);
+            }
+        }
+    }
+
     visible.sort_by(|&a, &b| {
         let ca = cells[a];
         let cb = cells[b];
@@ -2937,6 +3055,14 @@ fn visible_cells_for_anchor(
         db.cmp(&da).then(ca.x.cmp(&cb.x)).then(ca.z.cmp(&cb.z))
     });
     visible
+}
+
+fn set_visibility_pvs_bit(bits: &mut [u8], index: usize) {
+    let byte = index / 8;
+    let bit = index % 8;
+    if let Some(slot) = bits.get_mut(byte) {
+        *slot |= 1 << bit;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2974,7 +3100,6 @@ const VISIBILITY_EDGES: [VisibilityEdge; 4] = [
     },
 ];
 
-#[cfg(test)]
 fn chebyshev_distance(anchor: PlaytestVisibilityCell, cell: PlaytestVisibilityCell) -> i32 {
     (cell.x as i32 - anchor.x as i32)
         .abs()
@@ -3593,6 +3718,8 @@ mod tests {
         assert!(manifest.contains("pub static ASSETS: &[LevelAssetRecord] = &[];"));
         assert!(manifest.contains("pub static ROOMS: &[LevelRoomRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
+        assert!(manifest.contains("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[];"));
+        assert!(manifest.contains("pub static VISIBILITY_PVS_BITS: &[u8] = &[];"));
         assert!(manifest
             .contains("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
         assert!(
@@ -3646,6 +3773,8 @@ mod tests {
         );
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
+        assert!(!package.visibility_pvs.is_empty());
+        assert!(!package.visibility_pvs_bits.is_empty());
         assert_eq!(package.room_surface_caches.len(), package.rooms.len());
         assert!(!package.room_cache_cells.is_empty());
         assert!(!package.room_cache_vertices.is_empty());
@@ -3694,7 +3823,7 @@ mod tests {
     }
 
     #[test]
-    fn visibility_cells_are_bounded_by_runtime_radius() {
+    fn visibility_pvs_adds_one_cell_boundary_shell() {
         let width = 1;
         let depth = PLAYTEST_VISIBILITY_CELL_RADIUS + 6;
         let mut cells: Vec<PlaytestVisibilityCell> =
@@ -3702,16 +3831,17 @@ mod tests {
         let index_by_coord = visibility_index_by_coord(width, depth, &cells);
         assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
 
-        let visible = visible_cells_for_anchor(0, width, depth, &cells, &index_by_coord);
+        let visible = visibility_indices_for_anchor(0, width, depth, &cells, &index_by_coord);
 
-        assert_eq!(visible.len(), PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 1);
+        assert_eq!(visible.len(), PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 2);
         assert!(visible.contains(&0));
         assert!(visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize)));
-        assert!(!visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 1)));
+        assert!(visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 1)));
+        assert!(!visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 2)));
     }
 
     #[test]
-    fn visibility_cells_do_not_cross_full_height_blockers() {
+    fn visibility_pvs_keeps_blocked_boundary_shell_without_traversing() {
         let width = 2;
         let depth = 1;
         let mut cells = vec![
@@ -3721,9 +3851,28 @@ mod tests {
         let index_by_coord = visibility_index_by_coord(width, depth, &cells);
         assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
 
-        let visible = visible_cells_for_anchor(0, width, depth, &cells, &index_by_coord);
+        let visible = visibility_indices_for_anchor(0, width, depth, &cells, &index_by_coord);
 
-        assert_eq!(visible, vec![0]);
+        assert_eq!(visible, vec![1, 0]);
+    }
+
+    #[test]
+    fn visibility_pvs_reuses_identical_bitsets() {
+        let width = 2;
+        let depth = 1;
+        let mut cells = vec![visibility_test_cell(0, 0, 0), visibility_test_cell(1, 0, 0)];
+        let index_by_coord = visibility_index_by_coord(width, depth, &cells);
+        assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
+        let mut pvs = Vec::new();
+        let mut bits = Vec::new();
+
+        append_visibility_pvs(width, depth, &cells, &index_by_coord, &mut pvs, &mut bits);
+
+        assert_eq!(pvs.len(), 2);
+        assert_eq!(bits.len(), 1);
+        assert_eq!(pvs[0].byte_first, pvs[1].byte_first);
+        assert_eq!(pvs[0].byte_count, 1);
+        assert_eq!(bits[0], 0b0000_0011);
     }
 
     #[test]
@@ -4264,6 +4413,8 @@ mod tests {
         assert!(src.contains("LevelCameraRecord"));
         assert!(src.contains("camera: LevelCameraRecord"));
         assert!(src.contains("pub static ROOM_VISIBILITY"));
+        assert!(src.contains("pub static VISIBILITY_PVS"));
+        assert!(src.contains("pub static VISIBILITY_PVS_BITS"));
         assert!(src.contains("pub static VISIBILITY_CELLS"));
         assert!(src.contains("pub static ROOM_SURFACE_CACHES"));
         assert!(src.contains("pub static ROOM_CACHE_CELLS"));
@@ -5522,6 +5673,8 @@ mod tests {
         assert!(src.contains("pub static MATERIALS: &[LevelMaterialRecord] = &[\n];"));
         assert!(src.contains("pub static ROOMS: &[LevelRoomRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n];"));
+        assert!(src.contains("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[\n];"));
+        assert!(src.contains("pub static VISIBILITY_PVS_BITS: &[u8] = &[\n];"));
         assert!(
             src.contains("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[\n];")
         );
