@@ -545,9 +545,8 @@ impl<'a> RuntimeRoom<'a> {
 //
 // `RoomRender` / `RoomCollision` give us the same discipline
 // over a single `RuntimeRoom`. Both views are zero-cost
-// `Copy` borrows; the v1 byte format keeps render + collision
-// fields in one record so today's cooker writes both streams
-// in one pass -- but a caller that says
+// `Copy` borrows. Streamed chunks now expose separate render and
+// collision payload ranges, but a caller that says
 // `room.render().sector(...)` cannot accidentally branch on
 // `floor_walkable`, and a caller that says
 // `room.collision().sector(...)` cannot accidentally read a

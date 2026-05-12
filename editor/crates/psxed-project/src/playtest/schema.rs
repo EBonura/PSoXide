@@ -23,8 +23,8 @@ pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
 pub const ROOMS_DIRNAME: &str = "rooms";
 
 /// Subdirectory inside `generated/` that holds CD-streamable room
-/// chunks. Each `.psxc` contains the matching `.psxw` plus the
-/// cooked render cache for that room.
+/// chunks. Each `.psxc` stores a collision payload plus the cooked
+/// render cache for that room.
 pub const STREAM_CHUNKS_DIRNAME: &str = "stream_chunks";
 
 /// Subdirectory inside `generated/` that holds copied `.psxt`
@@ -234,6 +234,9 @@ pub struct PlaytestVisibilityCell {
     pub portal_mask: u8,
     /// Cardinal full-height solid-blocker mask.
     pub blocker_mask: u8,
+    /// Room-local index into [`PlaytestPackage::room_cache_cells`]
+    /// relative to the owning room cache's `cell_first`.
+    pub cache_cell_index: u16,
     /// Runtime flags.
     pub flags: u16,
 }
@@ -788,6 +791,59 @@ impl PlaytestPackage {
             .filter(|a| a.kind == PlaytestAssetKind::ModelAnimation)
             .count()
     }
+}
+
+/// Cooked memory footprint for one streamed room chunk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlaytestStreamChunkMemory {
+    /// Owning room/chunk id.
+    pub room: u16,
+    /// Number of CD sectors occupied by the sector-aligned chunk.
+    pub sector_count: usize,
+    /// Unpadded `.psxc` payload bytes.
+    pub payload_bytes: usize,
+    /// Sector-aligned stream bytes.
+    pub stream_bytes: usize,
+    /// Fixed chunk header bytes.
+    pub header_bytes: usize,
+    /// Collision payload bytes.
+    pub collision_bytes: usize,
+    /// Cached cell table bytes consumed by the render path.
+    pub render_cell_bytes: usize,
+    /// Cached vertex table bytes consumed by the render path.
+    pub render_vertex_bytes: usize,
+    /// Cached surface table bytes consumed by the render path.
+    pub render_surface_bytes: usize,
+    /// Total render-cache bytes.
+    pub render_cache_bytes: usize,
+    /// In-payload alignment padding between sections.
+    pub alignment_padding_bytes: usize,
+    /// Padding at the end of the file to fill CD sectors.
+    pub sector_padding_bytes: usize,
+}
+
+/// Summed memory footprint for streamed room chunks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlaytestStreamMemoryTotals {
+    pub sector_count: usize,
+    pub payload_bytes: usize,
+    pub stream_bytes: usize,
+    pub header_bytes: usize,
+    pub collision_bytes: usize,
+    pub render_cell_bytes: usize,
+    pub render_vertex_bytes: usize,
+    pub render_surface_bytes: usize,
+    pub render_cache_bytes: usize,
+    pub alignment_padding_bytes: usize,
+    pub sector_padding_bytes: usize,
+}
+
+/// Full streamed-room memory report generated at cook time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlaytestStreamMemoryReport {
+    pub chunks: Vec<PlaytestStreamChunkMemory>,
+    pub totals: PlaytestStreamMemoryTotals,
+    pub largest_chunk: Option<PlaytestStreamChunkMemory>,
 }
 
 /// Outcome of validating a project for playtest. Errors block
