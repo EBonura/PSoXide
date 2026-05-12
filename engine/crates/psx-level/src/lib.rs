@@ -520,11 +520,88 @@ pub mod streamed_room_chunk_header {
     pub const FLAGS: usize = 60;
 }
 
-/// The collision payload is the cooked `.psxw` room format.
-pub const STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW: u32 = 1 << 0;
+/// The collision payload is the compact collision-only room format.
+pub const STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT: u32 = 1 << 0;
 
-/// The collision `.psxw` payload has render-only static-light records stripped.
-pub const STREAMED_ROOM_CHUNK_FLAG_COLLISION_STRIPPED_LIGHTS: u32 = 1 << 1;
+/// Magic at the start of a compact collision-only room payload.
+pub const COMPACT_COLLISION_MAGIC: [u8; 8] = *b"PSXCOLL\0";
+
+/// Version of the compact collision-only room payload.
+pub const COMPACT_COLLISION_VERSION: u32 = 1;
+
+/// Byte length of the compact collision header.
+pub const COMPACT_COLLISION_HEADER_BYTES: usize = 36;
+
+/// Byte length of one compact collision sector record.
+pub const COMPACT_COLLISION_SECTOR_BYTES: usize = 44;
+
+/// Byte length of one compact collision wall record.
+pub const COMPACT_COLLISION_WALL_BYTES: usize = 20;
+
+/// Byte length of one compact collision height-override record.
+pub const COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES: usize = 28;
+
+/// Header offsets for a compact collision-only payload.
+pub mod compact_collision_header {
+    /// Header format version.
+    pub const VERSION: usize = 8;
+    /// Width in sectors.
+    pub const WIDTH: usize = 12;
+    /// Depth in sectors.
+    pub const DEPTH: usize = 14;
+    /// Engine units per sector.
+    pub const SECTOR_SIZE: usize = 16;
+    /// Number of sector records.
+    pub const SECTOR_COUNT: usize = 20;
+    /// Number of wall records.
+    pub const WALL_COUNT: usize = 22;
+    /// Number of height-override records.
+    pub const HEIGHT_OVERRIDE_COUNT: usize = 24;
+    /// Reserved header word.
+    pub const RESERVED: usize = 26;
+    /// Ambient room RGB used by actor lighting.
+    pub const AMBIENT_RGB: usize = 28;
+    /// Payload flags.
+    pub const FLAGS: usize = 32;
+}
+
+/// Flags stored in compact collision sector records.
+pub mod compact_collision_sector_flags {
+    /// Sector has a floor surface.
+    pub const HAS_FLOOR: u8 = 1 << 0;
+    /// Sector has a ceiling surface.
+    pub const HAS_CEILING: u8 = 1 << 1;
+    /// Floor has at least one walkable triangle.
+    pub const FLOOR_WALKABLE: u8 = 1 << 2;
+    /// Ceiling has at least one walkable triangle.
+    pub const CEILING_WALKABLE: u8 = 1 << 3;
+}
+
+/// Triangle bits stored in compact collision sector records.
+pub mod compact_collision_triangle_flags {
+    /// Triangle A is present.
+    pub const TRI_A_PRESENT: u8 = 1 << 0;
+    /// Triangle B is present.
+    pub const TRI_B_PRESENT: u8 = 1 << 1;
+    /// Triangle A is walkable.
+    pub const TRI_A_WALKABLE: u8 = 1 << 2;
+    /// Triangle B is walkable.
+    pub const TRI_B_WALKABLE: u8 = 1 << 3;
+}
+
+/// Surface ids stored in compact collision height overrides.
+pub mod compact_collision_surface {
+    /// Sector floor.
+    pub const FLOOR: u8 = 0;
+    /// Sector ceiling.
+    pub const CEILING: u8 = 1;
+}
+
+/// Flags stored in compact collision wall records.
+pub mod compact_collision_wall_flags {
+    /// Wall blocks collision.
+    pub const SOLID: u8 = 1 << 0;
+}
 
 /// Visibility metadata for one cooked room/chunk. Points into the
 /// generated compact cell table and the cooked position-cell PVS table.
@@ -1465,6 +1542,13 @@ mod tests {
         assert_eq!(STREAMED_ROOM_CHUNK_HEADER_BYTES, 64);
         assert_eq!(streamed_room_chunk_header::COLLISION_OFFSET, 20);
         assert_eq!(streamed_room_chunk_header::FLAGS, 60);
+        assert_eq!(STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT, 1);
+        assert_eq!(COMPACT_COLLISION_MAGIC, *b"PSXCOLL\0");
+        assert_eq!(COMPACT_COLLISION_VERSION, 1);
+        assert_eq!(COMPACT_COLLISION_HEADER_BYTES, 36);
+        assert_eq!(COMPACT_COLLISION_SECTOR_BYTES, 44);
+        assert_eq!(COMPACT_COLLISION_WALL_BYTES, 20);
+        assert_eq!(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES, 28);
         assert_eq!(core::mem::size_of::<LevelCachedRoomCellRecord>(), 32);
         assert_eq!(core::mem::size_of::<LevelCachedRoomVertexRecord>(), 12);
         assert_eq!(core::mem::size_of::<LevelCachedRoomSurfaceRecord>(), 40);

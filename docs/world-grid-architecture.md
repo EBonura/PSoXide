@@ -64,15 +64,11 @@ Same room data, two consumers, two read paths:
 * `RoomCollision` -- heights and splits for floor / ceiling sampling, walkable /
   solid bits for stop-or-pass decisions.
 
-Materials are render-only. Walkable / solid bits are collision-only. The two
-views are zero-cost `Copy` newtypes over `RuntimeRoom`; they exist to enforce
-discipline at the API level (a draw pass cannot accidentally branch on
-walkability; a collision query cannot reach a tpage word).
-
-The cooker today writes one record per sector / wall, with both render and
-collision concerns interleaved. When the compact byte format lands, those two
-concerns split into separate tables -- the cooker pipeline is already organized
-by render-emit / collision-emit phases so that future split is a small change.
+Materials are render-only. Walkable / solid bits are collision-only. The
+runtime exposes that split through `RoomRender` plus `RoomCollision`, and
+streamed chunks now store render cache tables separately from a compact
+collision-only `PSXCOLL` payload. A draw pass cannot accidentally branch on
+walkability; a collision query cannot reach a tpage word.
 
 ## Tomb Raider parallels
 

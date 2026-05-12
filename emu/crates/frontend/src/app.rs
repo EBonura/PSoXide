@@ -22,8 +22,6 @@ use crate::ui::hud::HudState;
 use crate::ui::memory::MemoryView;
 use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState};
 
-const WORLD_PACK_ORDER_FILE_NAME: &str = "world_pack_order.txt";
-
 /// Ring-buffer capacity for the execution-history panel. 16 rows is
 /// the "what just ran" context window -- enough to spot a tight loop
 /// or trace a branch without the history section taking over the
@@ -94,7 +92,7 @@ enum EditorBuildCompletion {
     /// Wrap the built EXE into a disc image and load it into the
     /// embedded editor viewport.
     RunEmbedded,
-    /// Copy the built EXE into the active project's baked output folder.
+    /// Copy the built disc image into the active project's baked output folder.
     ExportProject { dest_path: PathBuf },
 }
 
@@ -478,7 +476,7 @@ impl AppState {
     ///    `build/examples/mipsel-sony-psx/release/` under the repo
     ///    root) -- `.exe` homebrew built by `make examples`.
     /// 3. Auto-detected `editor/projects/` under the repo root --
-    ///    project-baked `.exe`s surfaced in the Projects category.
+    ///    project-baked disc images surfaced in the Projects category.
     ///
     /// Either can be missing without erroring. If neither yields
     /// entries, the Menu's columns show the "No … found" placeholder
@@ -561,7 +559,7 @@ impl AppState {
 
     /// Resolve the editor projects root used for launchable project
     /// builds. The editor owns the project folders; the frontend only
-    /// scans them for `.exe` outputs so baked builds can be launched
+    /// scans them for disc-image outputs so baked builds can be launched
     /// without opening the editor first.
     fn resolve_editor_projects_dir(&self) -> Option<PathBuf> {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -636,6 +634,22 @@ impl AppState {
                 // sidecar is not a separate library entry.
                 GameKind::DiscCue => continue,
                 GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd => {
+                    if let Some(root) = project_root
+                        .as_ref()
+                        .filter(|root| path_is_under(&e.path, root))
+                    {
+                        if let Some(metadata) = project_build_menu_metadata(&e.path, root) {
+                            if !metadata.current {
+                                continue;
+                            }
+                            projects.push(MenuLibraryItem {
+                                id: e.id.clone(),
+                                title: metadata.title,
+                                subtitle: metadata.subtitle,
+                            });
+                            continue;
+                        }
+                    }
                     // If a CUE owns this BIN, use the CUE's
                     // friendly title + stable ID. Also dedup: the
                     // *first* BIN of a CUE wins; subsequent BINs
@@ -950,7 +964,7 @@ impl AppState {
             return;
         }
         let dest_path =
-            project_baked_exe_path(self.editor.project_dir(), &self.editor.project().name);
+            project_baked_disc_path(self.editor.project_dir(), &self.editor.project().name);
         let cook_status = match self.editor.cook_playtest_to_disk() {
             Ok(status) => status,
             Err(error) => {
@@ -961,13 +975,13 @@ impl AppState {
             }
         };
         self.editor.set_status(format!(
-            "{cook_status}; compiling project EXE for {}...",
+            "{cook_status}; compiling project disc for {}...",
             dest_path.display()
         ));
 
         if let Err(error) = self.spawn_editor_playtest_build(
             EditorBuildCompletion::ExportProject { dest_path },
-            "Building project EXE",
+            "Building project disc",
         ) {
             let message = format!("Project build failed: {error}");
             self.editor.set_status(message.clone());
@@ -1160,13 +1174,13 @@ impl AppState {
     }
 
     fn export_project_build(&mut self, dest_path: PathBuf) -> Result<String, String> {
-        let source_path = editor_playtest_exe_path();
+        let source_path = build_embedded_playtest_disc()?;
         let dest_dir = dest_path
             .parent()
             .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
         std::fs::create_dir_all(dest_dir)
             .map_err(|error| format!("mkdir {}: {error}", dest_dir.display()))?;
-        remove_stale_project_build_exes(&dest_path)?;
+        remove_stale_project_builds(&dest_path)?;
         let bytes = std::fs::copy(&source_path, &dest_path).map_err(|error| {
             format!(
                 "copy {} to {}: {error}",
@@ -1177,7 +1191,7 @@ impl AppState {
 
         let rescan_error = self.rescan_library().err();
         let mut message = format!(
-            "Project build exported -> {} ({} KiB)",
+            "Project disc exported -> {} ({} KiB)",
             dest_path.display(),
             bytes / 1024
         );
@@ -1626,17 +1640,17 @@ fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
         .join("examples")
         .join("editor-playtest")
         .join("generated");
-    let rooms_dir = generated_dir.join("rooms");
-    if !rooms_dir.is_dir() {
+    let chunks_dir = generated_dir.join(psxed_project::playtest::STREAM_CHUNKS_DIRNAME);
+    if !chunks_dir.is_dir() {
         return Ok(None);
     }
     let mut rooms = Vec::new();
-    for entry in
-        std::fs::read_dir(&rooms_dir).map_err(|e| format!("read {}: {e}", rooms_dir.display()))?
+    for entry in std::fs::read_dir(&chunks_dir)
+        .map_err(|e| format!("read {}: {e}", chunks_dir.display()))?
     {
-        let entry = entry.map_err(|e| format!("read {}: {e}", rooms_dir.display()))?;
+        let entry = entry.map_err(|e| format!("read {}: {e}", chunks_dir.display()))?;
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("psxw") {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("psxc") {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -1655,7 +1669,7 @@ fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
         return Ok(None);
     }
     rooms.sort_by_key(|(chunk_id, _)| *chunk_id);
-    let order_file = generated_dir.join(WORLD_PACK_ORDER_FILE_NAME);
+    let order_file = generated_dir.join(psxed_project::playtest::WORLD_PACK_ORDER_FILENAME);
     if order_file.is_file() {
         let order = read_embedded_world_pack_order(&order_file)?;
         apply_embedded_world_pack_order(&mut rooms, &order, &order_file)?;
@@ -1728,17 +1742,17 @@ fn apply_embedded_world_pack_order(
     Ok(())
 }
 
-fn project_baked_exe_path(project_dir: &Path, project_name: &str) -> PathBuf {
+fn project_baked_disc_path(project_dir: &Path, project_name: &str) -> PathBuf {
     project_dir
         .join("baked")
-        .join(format!("{}.exe", safe_project_exe_stem(project_name)))
+        .join(format!("{}.bin", safe_project_build_stem(project_name)))
 }
 
-fn safe_project_exe_stem(name: &str) -> String {
+fn safe_project_build_stem(name: &str) -> String {
     psxed_project::project_file_stem(name)
 }
 
-fn remove_stale_project_build_exes(dest_path: &Path) -> Result<usize, String> {
+fn remove_stale_project_builds(dest_path: &Path) -> Result<usize, String> {
     let dest_dir = dest_path
         .parent()
         .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
@@ -1755,11 +1769,15 @@ fn remove_stale_project_build_exes(dest_path: &Path) -> Result<usize, String> {
     {
         let entry = entry.map_err(|error| format!("read {}: {error}", dest_dir.display()))?;
         let path = entry.path();
-        let is_exe = path
+        let is_build_artifact = path
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
-        if !is_exe || path.file_name().is_some_and(|name| name == dest_name) {
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("bin")
+                    || extension.eq_ignore_ascii_case("exe")
+                    || extension.eq_ignore_ascii_case("iso")
+            });
+        if !is_build_artifact || path.file_name().is_some_and(|name| name == dest_name) {
             continue;
         }
         std::fs::remove_file(&path)
@@ -1780,10 +1798,10 @@ fn project_build_menu_metadata(
     path: &Path,
     project_root: &Path,
 ) -> Option<ProjectBuildMenuMetadata> {
-    let project_dir = project_dir_for_build_exe(path, project_root)?;
+    let project_dir = project_dir_for_build(path, project_root)?;
     let project =
         psxed_project::ProjectDocument::load_from_path(project_dir.join("project.ron")).ok()?;
-    let expected_stem = safe_project_exe_stem(&project.name);
+    let expected_stem = safe_project_build_stem(&project.name);
     let actual_stem = path.file_stem()?.to_str()?;
     let subtitle = path
         .strip_prefix(project_root)
@@ -1798,7 +1816,7 @@ fn project_build_menu_metadata(
     })
 }
 
-fn project_dir_for_build_exe(path: &Path, project_root: &Path) -> Option<PathBuf> {
+fn project_dir_for_build(path: &Path, project_root: &Path) -> Option<PathBuf> {
     let mut dir = path.parent()?;
     loop {
         if dir.join("project.ron").is_file() {
@@ -1896,17 +1914,17 @@ mod tests {
     }
 
     #[test]
-    fn project_build_exe_name_is_filesystem_safe() {
+    fn project_build_disc_name_is_filesystem_safe() {
         assert_eq!(
-            safe_project_exe_stem("Stone Room: Vertical Slice!"),
+            safe_project_build_stem("Stone Room: Vertical Slice!"),
             "stone_room_vertical_slice"
         );
-        assert_eq!(safe_project_exe_stem("..."), "project");
+        assert_eq!(safe_project_build_stem("..."), "project");
         assert_eq!(
-            project_baked_exe_path(Path::new("editor/projects/default"), "Demo Project"),
+            project_baked_disc_path(Path::new("editor/projects/default"), "Demo Project"),
             Path::new("editor/projects/default")
                 .join("baked")
-                .join("demo_project.exe")
+                .join("demo_project.bin")
         );
     }
 
@@ -1944,19 +1962,22 @@ mod tests {
     }
 
     #[test]
-    fn project_build_export_removes_stale_sibling_exes() {
+    fn project_build_export_removes_stale_sibling_builds() {
         let root = frontend_test_temp_dir("stale-project-build-exes");
         let baked = root.join("baked");
         std::fs::create_dir_all(&baked).unwrap();
         let stale = baked.join("untitled_ps1_project.exe");
-        let current = baked.join("demo2.exe");
+        let stale_bin = baked.join("old_demo.bin");
+        let current = baked.join("demo2.bin");
         let notes = baked.join("notes.txt");
         std::fs::write(&stale, b"old").unwrap();
+        std::fs::write(&stale_bin, b"old bin").unwrap();
         std::fs::write(&current, b"new").unwrap();
         std::fs::write(&notes, b"keep").unwrap();
 
-        assert_eq!(remove_stale_project_build_exes(&current).unwrap(), 1);
+        assert_eq!(remove_stale_project_builds(&current).unwrap(), 2);
         assert!(!stale.exists());
+        assert!(!stale_bin.exists());
         assert!(current.exists());
         assert!(notes.exists());
 
@@ -1964,7 +1985,7 @@ mod tests {
     }
 
     #[test]
-    fn project_build_menu_metadata_uses_project_name_and_marks_stale_exes() {
+    fn project_build_menu_metadata_uses_project_name_and_marks_stale_builds() {
         let root = frontend_test_temp_dir("project-build-menu-metadata");
         let project_dir = root.join("demo2");
         let baked = project_dir.join("baked");
@@ -1973,8 +1994,8 @@ mod tests {
             .save_to_path(project_dir.join("project.ron"))
             .unwrap();
 
-        let current = baked.join("demo_two.exe");
-        let stale = baked.join("untitled_ps1_project.exe");
+        let current = baked.join("demo_two.bin");
+        let stale = baked.join("untitled_ps1_project.bin");
         std::fs::write(&current, b"current").unwrap();
         std::fs::write(&stale, b"stale").unwrap();
 

@@ -55,10 +55,10 @@ help:
 	@echo "    make tekken-fight-guard - assert Tekken 3 early-fight HUD/stage/fighter coverage"
 	@echo "    make tekken-late-fight-guard - assert Tekken 3 late-fight sky/fighter coverage"
 	@echo "    make test-sdk     - build every SDK example + run Milestone-C regression suite"
-	@echo "    make profile-demo3 - cook/build demo3 and dump headless screenshot/profile"
-	@echo "    make profile-demo3-forward - profile demo3 while holding forward"
-	@echo "    make profile-demo3-paced20 - profile demo3 20Hz visual cadence telemetry"
-	@echo "    make profile-demo3-paced20-forward - paced20 profile while holding forward"
+	@echo "    make profile-demo3 - cook/build demo3 BIN and dump streamed screenshot/profile"
+	@echo "    make profile-demo3-forward - streamed demo3 profile while holding forward"
+	@echo "    make profile-demo3-paced20 - alias for streamed 20Hz visual cadence telemetry"
+	@echo "    make profile-demo3-paced20-forward - streamed paced20 profile while holding forward"
 	@echo "    make profile-demo3-disc-stream - build/play demo3 from BIN and measure CD streaming"
 	@echo "    make profile-demo3-disc-stream-forward - same, while holding forward"
 	@echo "    make validate-demo3-disc-stream - run demo3 disc-stream budget/hash gates"
@@ -307,61 +307,26 @@ cook-playtest:
 # Build the editor-playtest example against whatever is in
 # `generated/level_manifest.cooked.rs` if present, otherwise
 # the tracked placeholder. Does NOT recook — that's the editor's
-# job (or `make cook-playtest` if you want the starter).
+# job (or `make cook-playtest` if you want the starter). The playtest runtime is
+# streaming-only, so the default build includes the CD streaming reader.
 build-editor-playtest:
-	cd engine/examples/editor-playtest && cargo build --release
+	cd engine/examples/editor-playtest && cargo build --release --features cd-stream-bench
 
 profile-demo3:
-	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
-	$(MAKE) build-editor-playtest
-	cd emu && cargo run -p frontend --release -- launch \
-		--path ../$(EXAMPLE_OUT)/editor-playtest.exe \
-		--guest-frames $(PROFILE_DEMO3_FRAMES) \
-		--steps $(PROFILE_DEMO3_STEPS) \
-		--dump-hw $(PROFILE_DEMO3_HW) \
-		--dump-hash \
-		--dump-guest-profile
+	$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(PROFILE_DEMO3_HW)
 
 profile-demo3-forward:
-	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
-	$(MAKE) build-editor-playtest
-	cd emu && cargo run -p frontend --release -- launch \
-		--path ../$(EXAMPLE_OUT)/editor-playtest.exe \
-		--guest-frames $(PROFILE_DEMO3_FORWARD_FRAMES) \
-		--steps $(PROFILE_DEMO3_FORWARD_STEPS) \
-		--hold-forward \
-		--dump-hw $(PROFILE_DEMO3_FORWARD_HW) \
-		--dump-hash \
-		--dump-guest-profile
+	$(MAKE) profile-demo3-disc-stream-forward PROFILE_DEMO3_DISC_STREAM_FORWARD_HW=$(PROFILE_DEMO3_FORWARD_HW)
 
 profile-demo3-paced20:
-	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
-	$(MAKE) build-editor-playtest
-	cd emu && cargo run -p frontend --release -- launch \
-		--path ../$(EXAMPLE_OUT)/editor-playtest.exe \
-		--guest-visual-frames $(PROFILE_DEMO3_PACED20_VISUAL_FRAMES) \
-		--guest-frames $(PROFILE_DEMO3_PACED20_GUEST_FRAMES) \
-		--steps $(PROFILE_DEMO3_PACED20_STEPS) \
-		--dump-hw $(PROFILE_DEMO3_PACED20_HW) \
-		--dump-hash \
-		--dump-guest-profile
+	$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(PROFILE_DEMO3_PACED20_HW)
 
 profile-demo3-paced20-forward:
-	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
-	$(MAKE) build-editor-playtest
-	cd emu && cargo run -p frontend --release -- launch \
-		--path ../$(EXAMPLE_OUT)/editor-playtest.exe \
-		--guest-visual-frames $(PROFILE_DEMO3_PACED20_FORWARD_VISUAL_FRAMES) \
-		--guest-frames $(PROFILE_DEMO3_PACED20_FORWARD_GUEST_FRAMES) \
-		--steps $(PROFILE_DEMO3_PACED20_FORWARD_STEPS) \
-		--hold-forward \
-		--dump-hw $(PROFILE_DEMO3_PACED20_FORWARD_HW) \
-		--dump-hash \
-		--dump-guest-profile
+	$(MAKE) profile-demo3-disc-stream-forward PROFILE_DEMO3_DISC_STREAM_FORWARD_HW=$(PROFILE_DEMO3_PACED20_FORWARD_HW)
 
 profile-demo3-disc-stream:
 	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
-	cd engine/examples/editor-playtest && cargo build --release --features cd-stream-bench
+	$(MAKE) build-editor-playtest
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
 		--out ../../$(EXAMPLE_OUT)/editor-playtest.bin \
@@ -380,7 +345,7 @@ profile-demo3-disc-stream:
 
 profile-demo3-disc-stream-forward:
 	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
-	cd engine/examples/editor-playtest && cargo build --release --features cd-stream-bench
+	$(MAKE) build-editor-playtest
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
 		--out ../../$(EXAMPLE_OUT)/editor-playtest.bin \

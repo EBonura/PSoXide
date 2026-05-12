@@ -879,6 +879,7 @@ fn streamed_room_chunk_memory(
 #[derive(Clone)]
 struct StreamedRoomChunkLayout<'a> {
     collision_payload: Vec<u8>,
+    collision_flags: u32,
     cell_slice: &'a [PlaytestCachedRoomCell],
     vertex_slice: &'a [PlaytestCachedRoomVertex],
     surface_slice: &'a [PlaytestCachedRoomSurface],
@@ -940,7 +941,8 @@ fn streamed_room_chunk_layout(
         .unwrap_or(&[]);
 
     Ok(StreamedRoomChunkLayout {
-        collision_payload: streamed_collision_payload(&asset.bytes),
+        collision_payload: compact_collision_payload(&asset.bytes)?,
+        collision_flags: psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
         cell_slice,
         vertex_slice,
         surface_slice,
@@ -1034,65 +1036,294 @@ fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<V
     write_u32_le(
         &mut out,
         psx_level::streamed_room_chunk_header::FLAGS,
-        psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW
-            | psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_STRIPPED_LIGHTS,
+        layout.collision_flags,
     )?;
     Ok(out)
 }
 
-fn streamed_collision_payload(bytes: &[u8]) -> Vec<u8> {
-    stripped_collision_psxw_payload(bytes).unwrap_or_else(|| bytes.to_vec())
+fn compact_collision_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let room = psx_engine::RuntimeRoom::from_bytes(bytes)
+        .map_err(|e| format!("room collision source did not parse: {e:?}"))?;
+    let width = room.width();
+    let depth = room.depth();
+    let sector_count = width
+        .checked_mul(depth)
+        .ok_or_else(|| "room collision sector count overflowed u16".to_string())?;
+    let wall_count = room.world().wall_count();
+    let mut sectors = Vec::with_capacity(
+        sector_count as usize * psx_level::COMPACT_COLLISION_SECTOR_BYTES,
+    );
+    let mut height_overrides = Vec::new();
+
+    let render = room.render();
+    let collision = room.collision();
+    let mut sx = 0u16;
+    while sx < width {
+        let mut sz = 0u16;
+        while sz < depth {
+            let render_sector = render.sector(sx, sz);
+            let collision_sector = collision.sector(sx, sz);
+            append_compact_collision_sector(
+                &mut sectors,
+                &mut height_overrides,
+                sx,
+                sz,
+                depth,
+                render_sector,
+                collision_sector,
+            )?;
+            sz += 1;
+        }
+        sx += 1;
+    }
+
+    let mut walls =
+        Vec::with_capacity(wall_count as usize * psx_level::COMPACT_COLLISION_WALL_BYTES);
+    let mut wall_index = 0u16;
+    while wall_index < wall_count {
+        let wall = room
+            .world()
+            .wall(wall_index)
+            .ok_or_else(|| format!("room collision wall {wall_index} missing"))?;
+        append_compact_collision_wall(&mut walls, wall);
+        wall_index += 1;
+    }
+
+    let override_count = height_overrides.len() / psx_level::COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES;
+    if override_count > u16::MAX as usize {
+        return Err("room collision height override count overflowed u16".to_string());
+    }
+
+    let mut out = vec![0u8; psx_level::COMPACT_COLLISION_HEADER_BYTES];
+    out[..8].copy_from_slice(&psx_level::COMPACT_COLLISION_MAGIC);
+    write_u32_le(
+        &mut out,
+        psx_level::compact_collision_header::VERSION,
+        psx_level::COMPACT_COLLISION_VERSION,
+    )?;
+    write_u16_le(&mut out, psx_level::compact_collision_header::WIDTH, width)?;
+    write_u16_le(&mut out, psx_level::compact_collision_header::DEPTH, depth)?;
+    write_i32_le(
+        &mut out,
+        psx_level::compact_collision_header::SECTOR_SIZE,
+        room.sector_size(),
+    )?;
+    write_u16_le(
+        &mut out,
+        psx_level::compact_collision_header::SECTOR_COUNT,
+        sector_count,
+    )?;
+    write_u16_le(
+        &mut out,
+        psx_level::compact_collision_header::WALL_COUNT,
+        wall_count,
+    )?;
+    write_u16_le(
+        &mut out,
+        psx_level::compact_collision_header::HEIGHT_OVERRIDE_COUNT,
+        override_count as u16,
+    )?;
+    out[psx_level::compact_collision_header::AMBIENT_RGB
+        ..psx_level::compact_collision_header::AMBIENT_RGB + 3]
+        .copy_from_slice(&room.render().ambient_color());
+    out.extend_from_slice(&sectors);
+    out.extend_from_slice(&walls);
+    out.extend_from_slice(&height_overrides);
+    Ok(out)
 }
 
-fn stripped_collision_psxw_payload(bytes: &[u8]) -> Option<Vec<u8>> {
-    use psxed_format::world::{world_flags, WorldHeader, MAGIC, VERSION};
+fn append_compact_collision_sector(
+    out: &mut Vec<u8>,
+    height_overrides: &mut Vec<u8>,
+    sx: u16,
+    sz: u16,
+    depth: u16,
+    render_sector: Option<psx_engine::SectorRender>,
+    collision_sector: Option<psx_engine::SectorCollision>,
+) -> Result<(), String> {
+    let mut flags = 0u8;
+    let mut floor_triangle_flags = 0u8;
+    let mut ceiling_triangle_flags = 0u8;
+    let floor_split = render_sector.map(|sector| sector.floor_split()).unwrap_or(0);
+    let ceiling_split = render_sector
+        .map(|sector| sector.ceiling_split())
+        .unwrap_or(0);
+    let floor_heights = render_sector
+        .map(|sector| sector.floor_heights())
+        .unwrap_or([0; 4]);
+    let ceiling_heights = render_sector
+        .map(|sector| sector.ceiling_heights())
+        .unwrap_or([0; 4]);
+    let first_wall = render_sector.map(|sector| sector.first_wall()).unwrap_or(0);
+    let wall_count = render_sector.map(|sector| sector.wall_count()).unwrap_or(0);
 
-    let asset_header = psxed_format::AssetHeader::SIZE;
-    let world_header = WorldHeader::SIZE;
-    if bytes.len() < asset_header.checked_add(world_header)? {
-        return None;
-    }
-    if bytes.get(0..4)? != MAGIC.as_slice() {
-        return None;
-    }
-    let version = u16::from_le_bytes([*bytes.get(4)?, *bytes.get(5)?]);
-    if version != VERSION {
-        return None;
-    }
-    let payload_len = read_u32_le(bytes, 8)? as usize;
-    if payload_len != bytes.len().checked_sub(asset_header)? {
-        return None;
-    }
-    let wh = bytes.get(asset_header..asset_header.checked_add(world_header)?)?;
-    let sector_count = read_u16_le(wh, 8)? as usize;
-    let wall_count = read_u16_le(wh, 12)? as usize;
-    let flags = *wh.get(17)?;
-    let surface_light_count = read_u16_le(wh, 18)? as usize;
-    if flags & world_flags::STATIC_VERTEX_LIGHTING == 0 && surface_light_count == 0 {
-        return Some(bytes.to_vec());
-    }
-    let horizontal_override_count = read_u16_le(wh, 20)? as usize;
-    let mut keep_len = asset_header.checked_add(world_header)?;
-    keep_len =
-        keep_len.checked_add(sector_count.checked_mul(psxed_format::world::SectorRecord::SIZE)?)?;
-    keep_len =
-        keep_len.checked_add(wall_count.checked_mul(psxed_format::world::WallRecord::SIZE)?)?;
-    keep_len = keep_len.checked_add(
-        horizontal_override_count
-            .checked_mul(psxed_format::world::HorizontalOverrideRecord::SIZE)?,
-    )?;
-    let light_bytes =
-        surface_light_count.checked_mul(psxed_format::world::SurfaceLightRecord::SIZE)?;
-    if keep_len.checked_add(light_bytes)? != bytes.len() {
-        return None;
+    if let Some(render_sector) = render_sector {
+        if render_sector.has_floor() {
+            flags |= psx_level::compact_collision_sector_flags::HAS_FLOOR;
+        }
+        if render_sector.has_ceiling() {
+            flags |= psx_level::compact_collision_sector_flags::HAS_CEILING;
+        }
+        floor_triangle_flags =
+            compact_floor_triangle_flags(render_sector, collision_sector);
+        ceiling_triangle_flags = compact_ceiling_triangle_flags(render_sector);
+        if collision_sector
+            .map(|sector| sector.floor_walkable())
+            .unwrap_or(false)
+        {
+            flags |= psx_level::compact_collision_sector_flags::FLOOR_WALKABLE;
+        }
+        append_height_override_if_needed(
+            height_overrides,
+            sx,
+            sz,
+            depth,
+            psx_level::compact_collision_surface::FLOOR,
+            floor_split,
+            floor_heights,
+            [
+                render_sector.floor_triangle_heights(0),
+                render_sector.floor_triangle_heights(1),
+            ],
+            floor_triangle_flags,
+        )?;
+        append_height_override_if_needed(
+            height_overrides,
+            sx,
+            sz,
+            depth,
+            psx_level::compact_collision_surface::CEILING,
+            ceiling_split,
+            ceiling_heights,
+            [
+                render_sector.ceiling_triangle_heights(0),
+                render_sector.ceiling_triangle_heights(1),
+            ],
+            ceiling_triangle_flags,
+        )?;
     }
 
-    let mut out = bytes[..keep_len].to_vec();
-    let new_payload_len = (keep_len - asset_header) as u32;
-    out[8..12].copy_from_slice(&new_payload_len.to_le_bytes());
-    out[asset_header + 17] = flags & !world_flags::STATIC_VERTEX_LIGHTING;
-    out[asset_header + 18..asset_header + 20].copy_from_slice(&0u16.to_le_bytes());
-    Some(out)
+    out.push(flags);
+    out.push(floor_split);
+    out.push(ceiling_split);
+    out.push(floor_triangle_flags);
+    out.push(ceiling_triangle_flags);
+    out.push(0);
+    append_u16_le(out, first_wall);
+    append_u16_le(out, wall_count);
+    append_u16_le(out, 0);
+    for value in floor_heights {
+        append_i32_le(out, value);
+    }
+    for value in ceiling_heights {
+        append_i32_le(out, value);
+    }
+    Ok(())
+}
+
+fn compact_floor_triangle_flags(
+    render: psx_engine::SectorRender,
+    collision: Option<psx_engine::SectorCollision>,
+) -> u8 {
+    let mut flags = 0u8;
+    for index in 0..2 {
+        if render.floor_triangle_present(index) {
+            flags |= compact_triangle_present_bit(index);
+        }
+        if collision
+            .map(|sector| sector.floor_triangle_walkable(index))
+            .unwrap_or(false)
+        {
+            flags |= compact_triangle_walkable_bit(index);
+        }
+    }
+    flags
+}
+
+fn compact_ceiling_triangle_flags(render: psx_engine::SectorRender) -> u8 {
+    let mut flags = 0u8;
+    for index in 0..2 {
+        if render.ceiling_triangle_present(index) {
+            flags |= compact_triangle_present_bit(index);
+        }
+    }
+    flags
+}
+
+fn compact_triangle_present_bit(index: usize) -> u8 {
+    if index == 0 {
+        psx_level::compact_collision_triangle_flags::TRI_A_PRESENT
+    } else {
+        psx_level::compact_collision_triangle_flags::TRI_B_PRESENT
+    }
+}
+
+fn compact_triangle_walkable_bit(index: usize) -> u8 {
+    if index == 0 {
+        psx_level::compact_collision_triangle_flags::TRI_A_WALKABLE
+    } else {
+        psx_level::compact_collision_triangle_flags::TRI_B_WALKABLE
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_height_override_if_needed(
+    out: &mut Vec<u8>,
+    sx: u16,
+    sz: u16,
+    depth: u16,
+    surface: u8,
+    split: u8,
+    heights: [i32; 4],
+    triangle_heights: [[i32; 3]; 2],
+    triangle_flags: u8,
+) -> Result<(), String> {
+    if triangle_flags == 0 {
+        return Ok(());
+    }
+    let derived = [
+        compact_horizontal_triangle_heights(heights, split, 0),
+        compact_horizontal_triangle_heights(heights, split, 1),
+    ];
+    if triangle_heights == derived {
+        return Ok(());
+    }
+    let sector_index = sx
+        .checked_mul(depth)
+        .and_then(|base| base.checked_add(sz))
+        .ok_or_else(|| "compact collision override sector index overflowed".to_string())?;
+    append_u16_le(out, sector_index);
+    out.push(surface);
+    out.push(0);
+    for value in triangle_heights[0] {
+        append_i32_le(out, value);
+    }
+    for value in triangle_heights[1] {
+        append_i32_le(out, value);
+    }
+    Ok(())
+}
+
+fn compact_horizontal_triangle_heights(heights: [i32; 4], split: u8, index: usize) -> [i32; 3] {
+    let corners = psxed_format::world::topology::split_triangle(split, index);
+    [
+        heights[corners[0]],
+        heights[corners[1]],
+        heights[corners[2]],
+    ]
+}
+
+fn append_compact_collision_wall(out: &mut Vec<u8>, wall: psx_asset::WorldWall) {
+    out.push(wall.direction());
+    out.push(if wall.solid() {
+        psx_level::compact_collision_wall_flags::SOLID
+    } else {
+        0
+    });
+    append_u16_le(out, wall.shape());
+    for value in wall.heights() {
+        append_i32_le(out, value);
+    }
 }
 
 fn checked_slice<T>(items: &[T], first: usize, count: usize) -> Option<&[T]> {
@@ -1113,14 +1344,20 @@ fn write_u32_le(out: &mut [u8], offset: usize, value: u32) -> Result<(), String>
     Ok(())
 }
 
-fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
-    let raw = bytes.get(offset..offset + 2)?;
-    Some(u16::from_le_bytes([raw[0], raw[1]]))
+fn write_u16_le(out: &mut [u8], offset: usize, value: u16) -> Result<(), String> {
+    let dst = out
+        .get_mut(offset..offset + 2)
+        .ok_or_else(|| format!("streamed chunk header write out of bounds at {offset}"))?;
+    dst.copy_from_slice(&value.to_le_bytes());
+    Ok(())
 }
 
-fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
-    let raw = bytes.get(offset..offset + 4)?;
-    Some(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+fn write_i32_le(out: &mut [u8], offset: usize, value: i32) -> Result<(), String> {
+    let dst = out
+        .get_mut(offset..offset + 4)
+        .ok_or_else(|| format!("streamed chunk header write out of bounds at {offset}"))?;
+    dst.copy_from_slice(&value.to_le_bytes());
+    Ok(())
 }
 
 fn append_u16_le(out: &mut Vec<u8>, value: u16) {
@@ -1714,9 +1951,9 @@ mod tests {
     fn world_pack_toc_uses_same_layout_as_pack_builder() {
         let mut package = PlaytestPackage::default();
         package.assets = vec![
-            test_room_asset(vec![0x11; 3000], 0),
-            test_room_asset(vec![0x22; 100], 1),
-            test_room_asset(vec![0x33; 4097], 2),
+            test_room_asset(static_lit_test_room_bytes(), 0),
+            test_room_asset(static_lit_test_room_bytes(), 1),
+            test_room_asset(static_lit_test_room_bytes(), 2),
         ];
         package.rooms = vec![test_room(0), test_room(1), test_room(2)];
         package.chunks = vec![
@@ -1756,13 +1993,13 @@ mod tests {
         let manifest = render_manifest_source(&package);
         assert!(manifest.contains("pub const WORLD_PACK_START_LBA: u32 = 54;"));
         assert!(manifest.contains("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord]"));
-        assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 3, byte_size: 4164"));
+        assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 1, byte_size: 144"));
     }
 
     #[test]
     fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
         let mut package = PlaytestPackage::default();
-        package.assets = vec![test_room_asset(vec![0x11; 32], 0)];
+        package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
         package.rooms = vec![test_room(0)];
         package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
             room: 0,
@@ -1786,7 +2023,7 @@ mod tests {
     #[test]
     fn streamed_room_chunk_payload_splits_collision_and_render_cache_records() {
         let mut package = PlaytestPackage::default();
-        package.assets = vec![test_room_asset(vec![0xaa, 0xbb, 0xcc], 0)];
+        package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
         package.rooms = vec![test_room(0)];
         package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
             room: 0,
@@ -1835,30 +2072,32 @@ mod tests {
         assert_eq!(u32_at(&payload, 12), 0);
         assert_eq!(u32_at(&payload, 16), payload.len() as u32);
         assert_eq!(u32_at(&payload, 20), 64);
-        assert_eq!(u32_at(&payload, 24), 3);
-        assert_eq!(u32_at(&payload, 28), 68);
+        assert_eq!(u32_at(&payload, 24), 80);
+        assert_eq!(u32_at(&payload, 28), 144);
         assert_eq!(u32_at(&payload, 32), 1);
-        assert_eq!(u32_at(&payload, 36), 100);
+        assert_eq!(u32_at(&payload, 36), 176);
         assert_eq!(u32_at(&payload, 40), 1);
-        assert_eq!(u32_at(&payload, 44), 112);
+        assert_eq!(u32_at(&payload, 44), 188);
         assert_eq!(u32_at(&payload, 48), 1);
         assert_eq!(
             u32_at(&payload, 60),
-            psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW
-                | psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_STRIPPED_LIGHTS
+            psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT
         );
-        assert_eq!(&payload[64..67], &[0xaa, 0xbb, 0xcc]);
-        assert_eq!(u16_at(&payload, 68), 2);
-        assert_eq!(i32_at(&payload, 72), -4);
-        assert_eq!(i32_at(&payload, 100), 12);
-        assert_eq!(u16_at(&payload, 112), 15);
-        assert_eq!(payload[151], 42);
+        assert_eq!(
+            &payload[64..72],
+            psx_level::COMPACT_COLLISION_MAGIC.as_slice()
+        );
+        assert_eq!(u16_at(&payload, 144), 2);
+        assert_eq!(i32_at(&payload, 148), -4);
+        assert_eq!(i32_at(&payload, 176), 12);
+        assert_eq!(u16_at(&payload, 188), 15);
+        assert_eq!(payload[227], 42);
     }
 
     #[test]
     fn streamed_room_chunk_memory_report_accounts_for_collision_render_and_padding() {
         let mut package = PlaytestPackage::default();
-        package.assets = vec![test_room_asset(vec![0xaa, 0xbb, 0xcc], 0)];
+        package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
         package.rooms = vec![test_room(0)];
         package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
             room: 0,
@@ -1906,12 +2145,12 @@ mod tests {
             chunk.payload_bytes,
             streamed_room_chunk_payload(&package, 0).unwrap().len()
         );
-        assert_eq!(chunk.collision_bytes, 3);
+        assert_eq!(chunk.collision_bytes, 80);
         assert_eq!(chunk.render_cell_bytes, 32);
         assert_eq!(chunk.render_vertex_bytes, 12);
         assert_eq!(chunk.render_surface_bytes, 40);
         assert_eq!(chunk.render_cache_bytes, 84);
-        assert_eq!(chunk.alignment_padding_bytes, 1);
+        assert_eq!(chunk.alignment_padding_bytes, 0);
         assert_eq!(chunk.sector_count, 1);
         assert_eq!(chunk.stream_bytes, psx_iso::SECTOR_USER_DATA_BYTES);
         assert_eq!(
@@ -1937,28 +2176,44 @@ mod tests {
     }
 
     #[test]
-    fn streamed_collision_payload_strips_static_lighting_table() {
+    fn compact_collision_payload_matches_runtime_room_collision() {
         let bytes = static_lit_test_room_bytes();
-        let stripped = stripped_collision_psxw_payload(&bytes).unwrap();
+        let payload = compact_collision_payload(&bytes).unwrap();
         assert_eq!(
-            stripped.len(),
-            bytes.len() - 2 * psxed_format::world::SurfaceLightRecord::SIZE
+            payload.len(),
+            psx_level::COMPACT_COLLISION_HEADER_BYTES + psx_level::COMPACT_COLLISION_SECTOR_BYTES
         );
         assert_eq!(
-            u32_at(&stripped, 8),
-            (psxed_format::world::WorldHeader::SIZE + psxed_format::world::SectorRecord::SIZE)
-                as u32
+            &payload[..8],
+            psx_level::COMPACT_COLLISION_MAGIC.as_slice()
         );
-        let header = psxed_format::AssetHeader::SIZE;
         assert_eq!(
-            stripped[header + 17] & psxed_format::world::world_flags::STATIC_VERTEX_LIGHTING,
-            0
+            u32_at(&payload, psx_level::compact_collision_header::VERSION),
+            psx_level::COMPACT_COLLISION_VERSION
         );
-        assert_eq!(u16_at(&stripped, header + 18), 0);
-        let room = psx_engine::RuntimeRoom::from_bytes(&stripped).unwrap();
+        assert_eq!(u16_at(&payload, psx_level::compact_collision_header::WIDTH), 1);
+        assert_eq!(u16_at(&payload, psx_level::compact_collision_header::DEPTH), 1);
+        assert_eq!(
+            i32_at(&payload, psx_level::compact_collision_header::SECTOR_SIZE),
+            1024
+        );
+        assert_eq!(
+            u16_at(&payload, psx_level::compact_collision_header::SECTOR_COUNT),
+            1
+        );
+        assert_eq!(
+            &payload[psx_level::compact_collision_header::AMBIENT_RGB
+                ..psx_level::compact_collision_header::AMBIENT_RGB + 3],
+            &[7, 8, 9]
+        );
+        let room = psx_engine::CompactCollisionRoom::from_bytes(&payload).unwrap();
         assert_eq!(room.width(), 1);
         assert_eq!(room.depth(), 1);
-        assert!(!room.render().static_vertex_lighting());
+        assert_eq!(room.ambient_color(), [7, 8, 9]);
+        let sector = room.collision().sector(0, 0).unwrap();
+        assert!(sector.has_floor());
+        assert!(sector.floor_walkable());
+        assert_eq!(sector.floor_heights(), [0; 4]);
     }
 
     fn test_room_asset(bytes: Vec<u8>, index: usize) -> PlaytestAsset {
