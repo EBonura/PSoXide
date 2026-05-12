@@ -6,7 +6,7 @@
 //! Inputs are intent-shaped rather than pad-shaped so callers can feed
 //! either player controls or future behaviour-tree output.
 
-use crate::{Angle, RoomCollision, RoomPoint, RuntimeRoom, Q12};
+use crate::{Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12};
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
 const DEFAULT_BODY_HEIGHT: i32 = 768;
@@ -60,7 +60,7 @@ impl CharacterCollisionCylinder {
 #[derive(Copy, Clone, Debug)]
 pub struct CharacterCollisionRoom<'room> {
     /// Runtime room/chunk handle.
-    pub room: Option<RuntimeRoom<'room>>,
+    pub room: Option<RuntimeCollisionRoom<'room>>,
     /// Offset from the motor's current room origin to this room's
     /// origin, in engine units.
     pub offset_x: i32,
@@ -79,6 +79,19 @@ impl<'room> CharacterCollisionRoom<'room> {
 
     /// Build a collision room with a current-space origin offset.
     pub const fn new(room: RuntimeRoom<'room>, offset_x: i32, offset_z: i32) -> Self {
+        Self {
+            room: Some(RuntimeCollisionRoom::Runtime(room)),
+            offset_x,
+            offset_z,
+        }
+    }
+
+    /// Build a collision room from an explicit collision payload source.
+    pub const fn from_collision(
+        room: RuntimeCollisionRoom<'room>,
+        offset_x: i32,
+        offset_z: i32,
+    ) -> Self {
         Self {
             room: Some(room),
             offset_x,
@@ -975,7 +988,7 @@ fn body_hits_solid_wall_in_rooms(
 
 fn collision_room_contains_point(
     collision_room: CharacterCollisionRoom<'_>,
-    room: RuntimeRoom<'_>,
+    room: RuntimeCollisionRoom<'_>,
     x: i32,
     z: i32,
 ) -> bool {
@@ -987,7 +1000,7 @@ fn collision_room_contains_point(
 
 fn collision_room_bounds(
     collision_room: CharacterCollisionRoom<'_>,
-    room: RuntimeRoom<'_>,
+    room: RuntimeCollisionRoom<'_>,
 ) -> Option<(i32, i32, i32, i32)> {
     let sector_size = room.sector_size();
     if sector_size <= 0 {
