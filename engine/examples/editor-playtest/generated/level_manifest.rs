@@ -10,14 +10,17 @@ use psx_level::{
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord,
-    LevelVisibilityPvsRecord, LevelWeaponRecord, PlayerControllerRecord, PlayerSpawnRecord,
-    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
+    LevelVisibilityPvsRecord, LevelWeaponRecord, LevelWorldPackEntryRecord,
+    PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex, RoomResidencyRecord,
+    WeaponHitboxRecord,
 };
 
 pub static ASSETS: &[LevelAssetRecord] = &[];
 pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
 pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];
+pub const WORLD_PACK_START_LBA: u32 = 54;
+pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[];
 pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[];
 pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[];
 pub static VISIBILITY_PVS_BITS: &[u8] = &[];

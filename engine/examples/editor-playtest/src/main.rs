@@ -68,8 +68,15 @@ use psx_level::{
     LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
     OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
 };
+#[cfg(feature = "cd-stream-bench")]
+use psx_level::{
+    LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
+    STREAMED_ROOM_CHUNK_HEADER_BYTES, STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION,
+};
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
 
+#[cfg(feature = "cd-stream-bench")]
+mod cd_stream;
 mod input;
 mod overlay;
 mod vram_upload;
@@ -92,6 +99,8 @@ use generated::{
     ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, VISIBILITY_CELLS, VISIBILITY_PVS,
     VISIBILITY_PVS_BITS, WEAPONS, WEAPON_HITBOXES,
 };
+#[cfg(feature = "cd-stream-bench")]
+use generated::{WORLD_PACK_START_LBA, WORLD_PACK_TOC};
 
 // VRAM layout. Room materials and model atlases live in
 // disjoint regions so a model atlas upload never overwrites a
@@ -247,6 +256,32 @@ const MAX_TEXTURED_TRIS: usize = 3328;
 const MAX_ROOM_MATERIALS: usize = 32;
 /// Current generated chunk plus the best cache-budgeted nearby chunks.
 const MAX_ACTIVE_ROOMS: usize = 4;
+/// Streamed room slot budget. A slot stores the room `.psxw` plus
+/// the room-local render cache records carried by the `.psxc` chunk.
+/// Keeping this at 16 sectors forces oversized authored rooms to be
+/// split at cook time instead of quietly reserving a larger RAM cache.
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
+/// CD-backed room residency cache. This is deliberately just larger than the
+/// visible active window so chunk-boundary traversal can retain overlap from
+/// the previous window without reserving a second full window.
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_SLOT_COUNT: usize = 6;
+/// Opportunistic lookahead for CD-backed rooms. Prefetch is only allowed when
+/// WORLD.PAK metadata proves the extra read span is tiny, so it cannot turn a
+/// local active-window read into a broad sector sweep.
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_PREFETCH_COUNT: usize = 1;
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_PREFETCH_MAX_EXTRA_SECTORS: u32 = 8;
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_PREFETCH_MAX_TOTAL_SECTORS: u32 = 48;
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_PUMP_SECTORS_PER_TICK: usize = 8;
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT: usize = 512;
 const MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES: usize = 24;
 const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
 const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
@@ -301,6 +336,12 @@ static mut CACHED_ROOM_PROJECTED_VALID: [bool; MAX_CACHED_ROOM_VERTICES] =
     [false; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_DEPTHS: [i32; MAX_CACHED_ROOM_VERTICES] =
     [0; MAX_CACHED_ROOM_VERTICES];
+#[cfg(feature = "cd-stream-bench")]
+static mut STREAMED_ROOM_WORDS: [[u32; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT] =
+    [[0; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT];
+#[cfg(feature = "cd-stream-bench")]
+static mut ROOM_STREAM_SCHEDULER: RoomStreamScheduler<STREAMED_ROOM_SLOT_COUNT> =
+    RoomStreamScheduler::new();
 static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
     [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
 static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
@@ -617,6 +658,388 @@ enum ActiveRoomCacheStatus {
     Empty,
 }
 
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone)]
+struct StreamedRoomSlot {
+    room: RoomIndex,
+    byte_count: usize,
+    last_used: u32,
+    state: RoomStreamSlotState,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+impl StreamedRoomSlot {
+    const EMPTY: Self = Self {
+        room: INVALID_ROOM_INDEX,
+        byte_count: 0,
+        last_used: 0,
+        state: RoomStreamSlotState::Empty,
+    };
+}
+
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum RoomStreamSlotState {
+    Empty,
+    Resident,
+    Loading,
+    Failed,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone)]
+struct RoomStreamLoadPlan<const N: usize> {
+    rooms: [RoomIndex; N],
+    slots: [usize; N],
+    count: usize,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+impl<const N: usize> RoomStreamLoadPlan<N> {
+    const EMPTY: Self = Self {
+        rooms: [INVALID_ROOM_INDEX; N],
+        slots: [usize::MAX; N],
+        count: 0,
+    };
+}
+
+#[cfg(feature = "cd-stream-bench")]
+struct RoomStreamScheduler<const N: usize> {
+    slots: [StreamedRoomSlot; N],
+    job: cd_stream::WorldRoomSlotsReadJob<N>,
+    job_plan: RoomStreamLoadPlan<N>,
+    epoch: u32,
+    window_requests: u16,
+    window_misses: u16,
+    window_prefetch_requests: u16,
+    window_evictions: u16,
+    window_failed_loads: u16,
+    window_pending_loads: u16,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+impl<const N: usize> RoomStreamScheduler<N> {
+    const fn new() -> Self {
+        Self {
+            slots: [StreamedRoomSlot::EMPTY; N],
+            job: cd_stream::WorldRoomSlotsReadJob::new(),
+            job_plan: RoomStreamLoadPlan::EMPTY,
+            epoch: 0,
+            window_requests: 0,
+            window_misses: 0,
+            window_prefetch_requests: 0,
+            window_evictions: 0,
+            window_failed_loads: 0,
+            window_pending_loads: 0,
+        }
+    }
+
+    fn begin_window(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1).max(1);
+        self.window_requests = 0;
+        self.window_misses = 0;
+        self.window_prefetch_requests = 0;
+        self.window_evictions = 0;
+        self.window_failed_loads = 0;
+        self.window_pending_loads = 0;
+    }
+
+    fn resident_slot_for(&mut self, room: RoomIndex) -> Option<usize> {
+        let mut slot = 0usize;
+        while slot < N {
+            let meta = self.slots[slot];
+            if meta.state == RoomStreamSlotState::Resident && meta.room == room {
+                self.slots[slot].last_used = self.epoch;
+                return Some(slot);
+            }
+            slot += 1;
+        }
+        None
+    }
+
+    fn is_resident(&self, room: RoomIndex) -> bool {
+        let mut slot = 0usize;
+        while slot < N {
+            let meta = self.slots[slot];
+            if meta.state == RoomStreamSlotState::Resident && meta.room == room {
+                return true;
+            }
+            slot += 1;
+        }
+        false
+    }
+
+    fn resident_byte_count(&self, slot: usize) -> Option<usize> {
+        let meta = *self.slots.get(slot)?;
+        if meta.state == RoomStreamSlotState::Resident && meta.byte_count > 0 {
+            Some(meta.byte_count)
+        } else {
+            None
+        }
+    }
+
+    fn loading_slot_for(&self, room: RoomIndex) -> Option<usize> {
+        let mut slot = 0usize;
+        while slot < N {
+            let meta = self.slots[slot];
+            if meta.state == RoomStreamSlotState::Loading && meta.room == room {
+                return Some(slot);
+            }
+            slot += 1;
+        }
+        None
+    }
+
+    fn plan_window_loads(
+        &mut self,
+        requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        requested_count: usize,
+        active_count: usize,
+    ) -> RoomStreamLoadPlan<N> {
+        let mut plan = RoomStreamLoadPlan::EMPTY;
+        let can_schedule_new_loads = !self.job.is_active();
+        let limit = requested_count.min(N).min(STREAMED_ROOM_SLOT_COUNT);
+        let mut i = 0usize;
+        while i < limit {
+            let room = requested_rooms[i];
+            if room == INVALID_ROOM_INDEX {
+                i += 1;
+                continue;
+            }
+            self.window_requests = self.window_requests.saturating_add(1);
+            if i >= active_count {
+                self.window_prefetch_requests = self.window_prefetch_requests.saturating_add(1);
+            }
+            if self.resident_slot_for(room).is_some() {
+                i += 1;
+                continue;
+            }
+            if self.loading_slot_for(room).is_some() {
+                self.window_misses = self.window_misses.saturating_add(1);
+                self.window_pending_loads = self.window_pending_loads.saturating_add(1);
+                i += 1;
+                continue;
+            }
+
+            self.window_misses = self.window_misses.saturating_add(1);
+            if !can_schedule_new_loads {
+                i += 1;
+                continue;
+            }
+            let Some(target) =
+                self.choose_slot(requested_rooms, requested_count, &plan.slots, plan.count)
+            else {
+                i += 1;
+                continue;
+            };
+            if self.slots[target].state == RoomStreamSlotState::Resident {
+                self.window_evictions = self.window_evictions.saturating_add(1);
+            }
+            self.slots[target] = StreamedRoomSlot {
+                room,
+                byte_count: 0,
+                last_used: self.epoch,
+                state: RoomStreamSlotState::Loading,
+            };
+            plan.rooms[plan.count] = room;
+            plan.slots[plan.count] = target;
+            plan.count += 1;
+            self.window_pending_loads = self.window_pending_loads.saturating_add(1);
+            i += 1;
+        }
+        plan
+    }
+
+    fn start_load_plan(&mut self, plan: RoomStreamLoadPlan<N>) {
+        if plan.count == 0 || self.job.is_active() {
+            return;
+        }
+        let mut room_ids = [u16::MAX; N];
+        let mut i = 0usize;
+        while i < plan.count.min(N) {
+            room_ids[i] = plan.rooms[i].raw();
+            i += 1;
+        }
+        self.job.start::<STREAMED_ROOM_SLOT_BYTES>(
+            WORLD_PACK_START_LBA,
+            WORLD_PACK_TOC,
+            &room_ids[..plan.count],
+            &plan.slots[..plan.count],
+        );
+        self.job_plan = plan;
+        if self.job.is_done() {
+            self.commit_completed_job();
+        }
+    }
+
+    fn pump(&mut self, dst: &mut [[u32; STREAMED_ROOM_SLOT_WORDS]; N], max_sectors: usize) -> bool {
+        if !self.job.is_active() {
+            return false;
+        }
+        self.job
+            .poll_words::<STREAMED_ROOM_SLOT_WORDS>(dst, max_sectors);
+        let committed = self.commit_ready_job_entries();
+        if self.job.is_done() {
+            self.commit_completed_job();
+            true
+        } else {
+            committed
+        }
+    }
+
+    fn commit_ready_job_entries(&mut self) -> bool {
+        let completed = self.job.completed_entries();
+        let byte_counts = *self.job.byte_counts();
+        let plan = self.job_plan;
+        let mut committed = false;
+        let mut i = 0usize;
+        while i < plan.count.min(N).min(STREAMED_ROOM_SLOT_COUNT) {
+            if !completed[i] {
+                i += 1;
+                continue;
+            }
+            let target = plan.slots[i];
+            if target < N
+                && self.slots[target].state == RoomStreamSlotState::Loading
+                && self.slots[target].room == plan.rooms[i]
+            {
+                self.slots[target] = StreamedRoomSlot {
+                    room: plan.rooms[i],
+                    byte_count: byte_counts[i],
+                    last_used: self.epoch,
+                    state: RoomStreamSlotState::Resident,
+                };
+                committed = true;
+            }
+            i += 1;
+        }
+        committed
+    }
+
+    fn commit_completed_job(&mut self) {
+        let byte_counts = *self.job.byte_counts();
+        let statuses = *self.job.statuses();
+        let plan = self.job_plan;
+        self.commit_window_loads(&plan, &byte_counts, &statuses);
+        self.job = cd_stream::WorldRoomSlotsReadJob::new();
+        self.job_plan = RoomStreamLoadPlan::EMPTY;
+    }
+
+    fn commit_window_loads(
+        &mut self,
+        plan: &RoomStreamLoadPlan<N>,
+        byte_counts: &[usize; N],
+        statuses: &[u32; N],
+    ) {
+        let mut loaded = 0usize;
+        while loaded < plan.count.min(N).min(STREAMED_ROOM_SLOT_COUNT) {
+            let target = plan.slots[loaded];
+            if target >= N {
+                loaded += 1;
+                continue;
+            }
+            if statuses[loaded] == cd_stream::ROOM_CHUNK_STATUS_OK && byte_counts[loaded] > 0 {
+                self.slots[target] = StreamedRoomSlot {
+                    room: plan.rooms[loaded],
+                    byte_count: byte_counts[loaded],
+                    last_used: self.epoch,
+                    state: RoomStreamSlotState::Resident,
+                };
+            } else {
+                self.slots[target] = StreamedRoomSlot {
+                    room: plan.rooms[loaded],
+                    byte_count: 0,
+                    last_used: self.epoch,
+                    state: RoomStreamSlotState::Failed,
+                };
+                self.window_failed_loads = self.window_failed_loads.saturating_add(1);
+            }
+            loaded += 1;
+        }
+    }
+
+    fn emit_counters(&self) {
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_REQUESTS,
+            self.window_requests as u32,
+        );
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_MISSES,
+            self.window_misses as u32,
+        );
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_PREFETCH_REQUESTS,
+            self.window_prefetch_requests as u32,
+        );
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
+            self.resident_slot_count() as u32,
+        );
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_EVICTIONS,
+            self.window_evictions as u32,
+        );
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_FAILED_LOADS,
+            self.window_failed_loads as u32,
+        );
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_PENDING_LOADS,
+            self.window_pending_loads as u32,
+        );
+    }
+
+    fn resident_slot_count(&self) -> usize {
+        let mut count = 0usize;
+        let mut slot = 0usize;
+        while slot < N {
+            if self.slots[slot].state == RoomStreamSlotState::Resident {
+                count += 1;
+            }
+            slot += 1;
+        }
+        count
+    }
+
+    fn choose_slot(
+        &self,
+        requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        requested_count: usize,
+        reserved_slots: &[usize; N],
+        reserved_count: usize,
+    ) -> Option<usize> {
+        let mut slot = 0usize;
+        while slot < N {
+            let state = self.slots[slot].state;
+            if (state == RoomStreamSlotState::Empty || state == RoomStreamSlotState::Failed)
+                && !streamed_slot_reserved(slot, reserved_slots, reserved_count)
+            {
+                return Some(slot);
+            }
+            slot += 1;
+        }
+
+        let mut best_slot = None;
+        let mut best_age = u32::MAX;
+        let mut candidate = 0usize;
+        while candidate < N {
+            let meta = self.slots[candidate];
+            if streamed_slot_reserved(candidate, reserved_slots, reserved_count)
+                || room_requested(meta.room, requested_rooms, requested_count)
+            {
+                candidate += 1;
+                continue;
+            }
+            if best_slot.is_none() || meta.last_used < best_age {
+                best_slot = Some(candidate);
+                best_age = meta.last_used;
+            }
+            candidate += 1;
+        }
+        best_slot
+    }
+}
+
 #[derive(Copy, Clone)]
 struct ActiveRuntimeRoom {
     index: RoomIndex,
@@ -829,9 +1252,18 @@ impl Scene for Playtest {
             CAMERA_START_YAW,
         );
         self.load_active_room_window();
+        #[cfg(feature = "cd-stream-bench")]
+        self.bootstrap_streamed_room_window();
+        #[cfg(feature = "cd-stream-benchmark")]
+        cd_stream::run_benchmark();
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        #[cfg(feature = "cd-stream-bench")]
+        if self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK) {
+            self.load_active_room_window();
+        }
+
         if ctx.just_pressed(button::R3) {
             self.lock_target = match self.lock_target {
                 Some(_) => None,
@@ -1062,7 +1494,7 @@ impl Scene for Playtest {
                         if active.surface_cache.ready {
                             room_cached_draws = room_cached_draws.saturating_add(1);
                             if let Some((cached_cells, cached_vertices, cached_surfaces)) =
-                                generated_room_surface_cache_slices(active.surface_cache)
+                                room_surface_cache_slices(active.index, active.surface_cache)
                             {
                                 let vertex_count = cached_vertices.len();
                                 let projected_vertices =
@@ -1796,17 +2228,27 @@ impl Playtest {
             telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
             return;
         };
-        let Some(current_room) = parse_runtime_room(current_record) else {
+        let current_room = parse_runtime_room_for_slot(0, current_index, current_record);
+        #[cfg(not(feature = "cd-stream-bench"))]
+        let Some(current_room) = current_room
+        else {
             telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
             return;
         };
+        #[cfg(feature = "cd-stream-bench")]
+        if current_room.is_none() && ROOM_CHUNKS.is_empty() {
+            telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
+            return;
+        }
         let player = self.motor.position();
         let view = self.active_room_selection_view();
         self.active_room_view_sin_key = view.sin_key;
         self.active_room_view_cos_key = view.cos_key;
 
         let mut next_slot = 0usize;
-        if let Some(active) = build_active_room(current_index, current_record, current_record) {
+        if let Some(active) =
+            build_active_room(next_slot, current_index, current_record, current_record)
+        {
             self.room = Some(active.room);
             self.materials = active.materials;
             self.material_count = active.material_count;
@@ -1814,12 +2256,12 @@ impl Playtest {
             next_slot += 1;
         }
         self.active_room_anchor = player;
+        let mut skipped_rooms = [INVALID_ROOM_INDEX; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES];
+        let mut skipped_count = 0usize;
 
         if !ROOM_CHUNKS.is_empty() {
             self.active_room_candidates =
                 count_spatial_chunk_candidates(current_index, current_record, player, view);
-            let mut skipped_rooms = [INVALID_ROOM_INDEX; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES];
-            let mut skipped_count = 0usize;
             while next_slot < MAX_ACTIVE_ROOMS {
                 let Some(candidate) = best_spatial_chunk_candidate(
                     current_index,
@@ -1834,7 +2276,9 @@ impl Playtest {
                 let Some(record) = ROOMS.get(candidate.to_usize()) else {
                     break;
                 };
-                if let Some(active) = build_active_room(candidate, record, current_record) {
+                if let Some(active) =
+                    build_active_room(next_slot, candidate, record, current_record)
+                {
                     if active.surface_cache.ready {
                         self.active_rooms[next_slot] = Some(active);
                         next_slot += 1;
@@ -1849,6 +2293,12 @@ impl Playtest {
                 skipped_count += 1;
             }
         } else {
+            #[cfg(feature = "cd-stream-bench")]
+            let Some(current_room) = current_room
+            else {
+                telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
+                return;
+            };
             while next_slot < MAX_ACTIVE_ROOMS {
                 let Some(raw_index) = nearest_touching_room_index(
                     current_index,
@@ -1862,7 +2312,7 @@ impl Playtest {
                     break;
                 };
                 let index = RoomIndex::new(raw_index as u16);
-                if let Some(active) = build_active_room(index, record, current_record) {
+                if let Some(active) = build_active_room(next_slot, index, record, current_record) {
                     self.active_rooms[next_slot] = Some(active);
                     next_slot += 1;
                 } else {
@@ -1874,7 +2324,223 @@ impl Playtest {
             telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
             next_slot as u32,
         );
+        #[cfg(feature = "cd-stream-bench")]
+        self.preload_streamed_active_room_window(
+            next_slot,
+            current_record,
+            &skipped_rooms,
+            skipped_count,
+        );
         telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn preload_streamed_active_room_window(
+        &mut self,
+        active_count: usize,
+        current_record: &LevelRoomRecord,
+        skipped_rooms: &[RoomIndex; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES],
+        skipped_count: usize,
+    ) {
+        let active_count = active_count.min(MAX_ACTIVE_ROOMS);
+        let mut room_ids = [u16::MAX; MAX_ACTIVE_ROOMS];
+        let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
+        let mut requested_count = 0usize;
+        let mut i = 0usize;
+        while i < active_count {
+            let Some(active) = self.active_rooms[i] else {
+                return;
+            };
+            room_ids[i] = active.index.raw();
+            requested_rooms[requested_count] = active.index;
+            requested_count += 1;
+            i += 1;
+        }
+        if requested_count == 0 {
+            requested_rooms[requested_count] = self.room_index;
+            requested_count += 1;
+        }
+        let mut skipped = 0usize;
+        while skipped < skipped_count
+            && requested_count < STREAMED_ROOM_SLOT_COUNT
+            && skipped < skipped_rooms.len()
+        {
+            let room = skipped_rooms[skipped];
+            if room != INVALID_ROOM_INDEX
+                && !room_requested(room, &requested_rooms, requested_count)
+                && cd_stream::world_room_chunk_info(room.raw(), WORLD_PACK_TOC).is_some_and(
+                    |info| {
+                        info.sector_count > 0
+                            && info.byte_size > 0
+                            && info.byte_size <= STREAMED_ROOM_SLOT_BYTES
+                    },
+                )
+            {
+                requested_rooms[requested_count] = room;
+                requested_count += 1;
+            }
+            skipped += 1;
+        }
+
+        let priority_count = requested_count;
+        let requested_count =
+            self.append_pack_aware_streamed_prefetches(&mut requested_rooms, requested_count);
+        self.ensure_streamed_room_residency(&requested_rooms, requested_count, priority_count);
+
+        let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
+        let mut slot = 0usize;
+        while slot < active_count {
+            let index = RoomIndex::new(room_ids[slot]);
+            if let Some(record) = ROOMS.get(index.to_usize()) {
+                rebuilt[slot] = build_active_room(slot, index, record, current_record);
+            }
+            slot += 1;
+        }
+        self.active_rooms = rebuilt;
+        if let Some(active) = self.active_rooms[0] {
+            self.room = Some(active.room);
+            self.materials = active.materials;
+            self.material_count = active.material_count;
+        }
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn append_pack_aware_streamed_prefetches(
+        &self,
+        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        active_count: usize,
+    ) -> usize {
+        let mut requested_count = active_count.min(STREAMED_ROOM_SLOT_COUNT);
+        if requested_count == 0
+            || requested_count >= STREAMED_ROOM_SLOT_COUNT
+            || STREAMED_ROOM_PREFETCH_COUNT == 0
+            || ROOM_CHUNKS.is_empty()
+        {
+            return requested_count;
+        }
+
+        let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
+            return requested_count;
+        };
+        let player = self.motor.position();
+        let view = self.active_room_selection_view();
+
+        let mut added = 0usize;
+        while added < STREAMED_ROOM_PREFETCH_COUNT && requested_count < STREAMED_ROOM_SLOT_COUNT {
+            let Some((span_start, span_end)) =
+                streamed_request_sector_span(requested_rooms, requested_count)
+            else {
+                break;
+            };
+            let base_span = span_end.saturating_sub(span_start);
+            let mut best_room = INVALID_ROOM_INDEX;
+            let mut best_score = ChunkActivationScore::WORST;
+            let mut best_extra_sectors = u32::MAX;
+            let mut best_total_sectors = u32::MAX;
+
+            for chunk in ROOM_CHUNKS {
+                if chunk.room == self.room_index
+                    || room_requested(chunk.room, requested_rooms, requested_count)
+                    || streamed_room_is_resident(chunk.room)
+                {
+                    continue;
+                }
+                let Some(score) =
+                    chunk_activation_score(*chunk, self.room_index, current_record, player, view)
+                else {
+                    continue;
+                };
+                let Some(info) = cd_stream::world_room_chunk_info(chunk.room.raw(), WORLD_PACK_TOC)
+                else {
+                    continue;
+                };
+                if info.sector_count == 0
+                    || info.byte_size == 0
+                    || info.byte_size > STREAMED_ROOM_SLOT_BYTES
+                {
+                    continue;
+                }
+                let candidate_end = info.sector_offset.saturating_add(info.sector_count);
+                let total_sectors = span_end
+                    .max(candidate_end)
+                    .saturating_sub(span_start.min(info.sector_offset));
+                let extra_sectors = total_sectors.saturating_sub(base_span);
+                if extra_sectors > STREAMED_ROOM_PREFETCH_MAX_EXTRA_SECTORS
+                    || (extra_sectors > 0
+                        && total_sectors > STREAMED_ROOM_PREFETCH_MAX_TOTAL_SECTORS)
+                {
+                    continue;
+                }
+                let better = best_room == INVALID_ROOM_INDEX
+                    || extra_sectors < best_extra_sectors
+                    || (extra_sectors == best_extra_sectors
+                        && (score.better_than(best_score)
+                            || (best_total_sectors > total_sectors
+                                && !best_score.better_than(score))));
+                if better {
+                    best_room = chunk.room;
+                    best_score = score;
+                    best_extra_sectors = extra_sectors;
+                    best_total_sectors = total_sectors;
+                }
+            }
+
+            if best_room == INVALID_ROOM_INDEX {
+                break;
+            }
+            requested_rooms[requested_count] = best_room;
+            requested_count += 1;
+            added += 1;
+        }
+
+        requested_count
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn ensure_streamed_room_residency(
+        &mut self,
+        requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        requested_count: usize,
+        active_count: usize,
+    ) {
+        let plan = unsafe {
+            ROOM_STREAM_SCHEDULER.begin_window();
+            ROOM_STREAM_SCHEDULER.plan_window_loads(
+                requested_rooms,
+                requested_count,
+                active_count.min(requested_count),
+            )
+        };
+        if plan.count == 0 {
+            unsafe {
+                ROOM_STREAM_SCHEDULER.emit_counters();
+            }
+            return;
+        }
+
+        unsafe {
+            ROOM_STREAM_SCHEDULER.start_load_plan(plan);
+            ROOM_STREAM_SCHEDULER.emit_counters();
+        }
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
+        unsafe { ROOM_STREAM_SCHEDULER.pump(&mut STREAMED_ROOM_WORDS, max_sectors) }
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn bootstrap_streamed_room_window(&mut self) {
+        let mut pumps = 0usize;
+        while pumps < STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT && streamed_room_stream_active() {
+            if self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK) {
+                self.load_active_room_window();
+            }
+            pumps += 1;
+        }
+        if self.room.is_none() {
+            self.load_active_room_window();
+        }
     }
 
     fn update_current_room_from_player(&mut self) -> bool {
@@ -2723,6 +3389,216 @@ fn parse_runtime_room(record: &LevelRoomRecord) -> Option<RuntimeRoom<'static>> 
     RuntimeRoom::from_bytes(asset.bytes).ok()
 }
 
+fn parse_runtime_room_for_slot(
+    slot: usize,
+    index: RoomIndex,
+    record: &LevelRoomRecord,
+) -> Option<RuntimeRoom<'static>> {
+    #[cfg(feature = "cd-stream-bench")]
+    if let Some(room) = parse_streamed_runtime_room(slot, index) {
+        return Some(room);
+    }
+    #[cfg(not(feature = "cd-stream-bench"))]
+    let _ = (slot, index);
+    parse_runtime_room(record)
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn parse_streamed_runtime_room(slot: usize, index: RoomIndex) -> Option<RuntimeRoom<'static>> {
+    let _ = slot;
+    unsafe {
+        let resident_slot = ROOM_STREAM_SCHEDULER.resident_slot_for(index)?;
+        let byte_count = ROOM_STREAM_SCHEDULER.resident_byte_count(resident_slot)?;
+        let bytes = streamed_room_slot_bytes(resident_slot, byte_count)?;
+        let view = streamed_room_chunk_view(bytes, index)?;
+        let psxw = bytes.get(view.psxw_offset..view.psxw_offset + view.psxw_bytes)?;
+        telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_HITS, 1);
+        RuntimeRoom::from_bytes(psxw).ok()
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone)]
+struct StreamedRoomChunkView {
+    total_bytes: usize,
+    psxw_offset: usize,
+    psxw_bytes: usize,
+    cells_offset: usize,
+    cell_count: usize,
+    vertices_offset: usize,
+    vertex_count: usize,
+    surfaces_offset: usize,
+    surface_count: usize,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_room_slot_bytes(slot: usize, byte_count: usize) -> Option<&'static [u8]> {
+    if slot >= STREAMED_ROOM_SLOT_COUNT || byte_count > STREAMED_ROOM_SLOT_BYTES {
+        return None;
+    }
+    unsafe {
+        let ptr = core::ptr::addr_of!(STREAMED_ROOM_WORDS[slot])
+            .cast::<u32>()
+            .cast::<u8>();
+        Some(core::slice::from_raw_parts(ptr, byte_count))
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_room_chunk_view(
+    bytes: &[u8],
+    expected_room: RoomIndex,
+) -> Option<StreamedRoomChunkView> {
+    if bytes.len() < STREAMED_ROOM_CHUNK_HEADER_BYTES {
+        return None;
+    }
+    if bytes.get(0..8)? != STREAMED_ROOM_CHUNK_MAGIC.as_slice() {
+        return None;
+    }
+    if read_streamed_chunk_u32(bytes, 8)? != STREAMED_ROOM_CHUNK_VERSION {
+        return None;
+    }
+    if read_streamed_chunk_u32(bytes, 12)? != u32::from(expected_room.raw()) {
+        return None;
+    }
+    let total_bytes = read_streamed_chunk_u32(bytes, 16)? as usize;
+    if total_bytes < STREAMED_ROOM_CHUNK_HEADER_BYTES || total_bytes > bytes.len() {
+        return None;
+    }
+    let psxw_offset = read_streamed_chunk_u32(bytes, 20)? as usize;
+    let psxw_bytes = read_streamed_chunk_u32(bytes, 24)? as usize;
+    let cells_offset = read_streamed_chunk_u32(bytes, 28)? as usize;
+    let cell_count = read_streamed_chunk_u32(bytes, 32)? as usize;
+    let vertices_offset = read_streamed_chunk_u32(bytes, 36)? as usize;
+    let vertex_count = read_streamed_chunk_u32(bytes, 40)? as usize;
+    let surfaces_offset = read_streamed_chunk_u32(bytes, 44)? as usize;
+    let surface_count = read_streamed_chunk_u32(bytes, 48)? as usize;
+    if !streamed_chunk_range_valid::<u8>(total_bytes, psxw_offset, psxw_bytes)
+        || !streamed_chunk_range_valid::<LevelCachedRoomCellRecord>(
+            total_bytes,
+            cells_offset,
+            cell_count,
+        )
+        || !streamed_chunk_range_valid::<LevelCachedRoomVertexRecord>(
+            total_bytes,
+            vertices_offset,
+            vertex_count,
+        )
+        || !streamed_chunk_range_valid::<LevelCachedRoomSurfaceRecord>(
+            total_bytes,
+            surfaces_offset,
+            surface_count,
+        )
+    {
+        return None;
+    }
+    Some(StreamedRoomChunkView {
+        total_bytes,
+        psxw_offset,
+        psxw_bytes,
+        cells_offset,
+        cell_count,
+        vertices_offset,
+        vertex_count,
+        surfaces_offset,
+        surface_count,
+    })
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn read_streamed_chunk_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let raw = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_chunk_range_valid<T>(total_bytes: usize, offset: usize, count: usize) -> bool {
+    if count == 0 {
+        return offset <= total_bytes;
+    }
+    if offset % core::mem::align_of::<T>() != 0 {
+        return false;
+    }
+    let Some(byte_count) = count.checked_mul(core::mem::size_of::<T>()) else {
+        return false;
+    };
+    offset
+        .checked_add(byte_count)
+        .is_some_and(|end| end <= total_bytes)
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_room_is_resident(index: RoomIndex) -> bool {
+    unsafe { ROOM_STREAM_SCHEDULER.is_resident(index) }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_room_stream_active() -> bool {
+    unsafe { ROOM_STREAM_SCHEDULER.job.is_active() }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_slot_reserved(slot: usize, reserved_slots: &[usize], reserved_count: usize) -> bool {
+    let mut i = 0usize;
+    while i < reserved_count.min(reserved_slots.len()) {
+        if reserved_slots[i] == slot {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn room_requested(
+    room: RoomIndex,
+    requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    requested_count: usize,
+) -> bool {
+    let mut i = 0usize;
+    while i < requested_count {
+        if requested_rooms[i] == room {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_request_sector_span(
+    requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    requested_count: usize,
+) -> Option<(u32, u32)> {
+    let mut span_start = u32::MAX;
+    let mut span_end = 0u32;
+    let mut found = false;
+    let mut i = 0usize;
+    while i < requested_count.min(STREAMED_ROOM_SLOT_COUNT) {
+        let room = requested_rooms[i];
+        if room == INVALID_ROOM_INDEX {
+            i += 1;
+            continue;
+        }
+        let info = cd_stream::world_room_chunk_info(room.raw(), WORLD_PACK_TOC)?;
+        if info.sector_count == 0
+            || info.byte_size == 0
+            || info.byte_size > STREAMED_ROOM_SLOT_BYTES
+        {
+            return None;
+        }
+        span_start = span_start.min(info.sector_offset);
+        span_end = span_end.max(info.sector_offset.saturating_add(info.sector_count));
+        found = true;
+        i += 1;
+    }
+    if found {
+        Some((span_start, span_end))
+    } else {
+        None
+    }
+}
+
 const fn room_material_fallback() -> WorldRenderMaterial {
     WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
 }
@@ -3306,6 +4182,7 @@ fn grid_cell_for_room(value: i32, sector_size: i32) -> i32 {
 }
 
 fn build_active_room(
+    slot: usize,
     index: RoomIndex,
     record: &LevelRoomRecord,
     current_record: &LevelRoomRecord,
@@ -3313,7 +4190,7 @@ fn build_active_room(
     if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
         let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
     }
-    let room = parse_runtime_room(record)?;
+    let room = parse_runtime_room_for_slot(slot, index, record)?;
     let (materials, material_count) = build_runtime_room_material_table(record);
     let surface_cache = active_room_surface_cache_for(index);
     Some(ActiveRuntimeRoom {
@@ -3342,6 +4219,11 @@ fn build_runtime_room_material_table(
 }
 
 fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfaceCache {
+    #[cfg(feature = "cd-stream-bench")]
+    if let Some(cache) = streamed_active_room_surface_cache_for(index) {
+        return cache;
+    }
+
     let Some(cache) = ROOM_SURFACE_CACHES.iter().find(|cache| cache.room == index) else {
         return ActiveRoomSurfaceCache::EMPTY;
     };
@@ -3379,6 +4261,56 @@ fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfaceCache {
     }
 }
 
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_active_room_surface_cache_for(index: RoomIndex) -> Option<ActiveRoomSurfaceCache> {
+    unsafe {
+        let resident_slot = ROOM_STREAM_SCHEDULER.resident_slot_for(index)?;
+        let byte_count = ROOM_STREAM_SCHEDULER.resident_byte_count(resident_slot)?;
+        let bytes = streamed_room_slot_bytes(resident_slot, byte_count)?;
+        let view = streamed_room_chunk_view(bytes, index)?;
+        if view.vertex_count > MAX_CACHED_ROOM_VERTICES {
+            return Some(ActiveRoomSurfaceCache {
+                status: ActiveRoomCacheStatus::Overflow,
+                ..ActiveRoomSurfaceCache::EMPTY
+            });
+        }
+        if view.cell_count == 0 || view.vertex_count == 0 || view.surface_count == 0 {
+            return Some(ActiveRoomSurfaceCache {
+                status: ActiveRoomCacheStatus::Empty,
+                ..ActiveRoomSurfaceCache::EMPTY
+            });
+        }
+        Some(ActiveRoomSurfaceCache {
+            cell_first: view.cells_offset,
+            cell_count: view.cell_count,
+            vertex_first: view.vertices_offset,
+            vertex_count: view.vertex_count,
+            surface_first: view.surfaces_offset,
+            surface_count: view.surface_count,
+            status: ActiveRoomCacheStatus::Ready,
+            ready: true,
+        })
+    }
+}
+
+fn room_surface_cache_slices(
+    index: RoomIndex,
+    cache: ActiveRoomSurfaceCache,
+) -> Option<(
+    &'static [CachedRoomCell],
+    &'static [WorldVertex],
+    &'static [CachedRoomSurface],
+)> {
+    #[cfg(feature = "cd-stream-bench")]
+    if let Some(slices) = streamed_room_surface_cache_slices(index, cache) {
+        return Some(slices);
+    }
+    #[cfg(not(feature = "cd-stream-bench"))]
+    let _ = index;
+
+    generated_room_surface_cache_slices(cache)
+}
+
 fn generated_room_surface_cache_slices(
     cache: ActiveRoomSurfaceCache,
 ) -> Option<(
@@ -3400,6 +4332,73 @@ fn generated_room_surface_cache_slices(
         cached_room_vertices_from_level_records(vertices),
         cached_room_surfaces_from_level_records(surfaces),
     ))
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_room_surface_cache_slices(
+    index: RoomIndex,
+    cache: ActiveRoomSurfaceCache,
+) -> Option<(
+    &'static [CachedRoomCell],
+    &'static [WorldVertex],
+    &'static [CachedRoomSurface],
+)> {
+    if !cache.ready || cache.vertex_count > MAX_CACHED_ROOM_VERTICES {
+        return None;
+    }
+    unsafe {
+        let resident_slot = ROOM_STREAM_SCHEDULER.resident_slot_for(index)?;
+        let byte_count = ROOM_STREAM_SCHEDULER.resident_byte_count(resident_slot)?;
+        let bytes = streamed_room_slot_bytes(resident_slot, byte_count)?;
+        let view = streamed_room_chunk_view(bytes, index)?;
+        if cache.cell_first != view.cells_offset
+            || cache.cell_count != view.cell_count
+            || cache.vertex_first != view.vertices_offset
+            || cache.vertex_count != view.vertex_count
+            || cache.surface_first != view.surfaces_offset
+            || cache.surface_count != view.surface_count
+        {
+            return None;
+        }
+        let cells = streamed_record_slice::<LevelCachedRoomCellRecord>(
+            bytes,
+            view.total_bytes,
+            view.cells_offset,
+            view.cell_count,
+        )?;
+        let vertices = streamed_record_slice::<LevelCachedRoomVertexRecord>(
+            bytes,
+            view.total_bytes,
+            view.vertices_offset,
+            view.vertex_count,
+        )?;
+        let surfaces = streamed_record_slice::<LevelCachedRoomSurfaceRecord>(
+            bytes,
+            view.total_bytes,
+            view.surfaces_offset,
+            view.surface_count,
+        )?;
+        Some((
+            cached_room_cells_from_level_records(cells),
+            cached_room_vertices_from_level_records(vertices),
+            cached_room_surfaces_from_level_records(surfaces),
+        ))
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn streamed_record_slice<T>(
+    bytes: &'static [u8],
+    total_bytes: usize,
+    offset: usize,
+    count: usize,
+) -> Option<&'static [T]> {
+    if !streamed_chunk_range_valid::<T>(total_bytes, offset, count) {
+        return None;
+    }
+    let byte_count = count.checked_mul(core::mem::size_of::<T>())?;
+    let slice = bytes.get(offset..offset + byte_count)?;
+    Some(unsafe { core::slice::from_raw_parts(slice.as_ptr().cast::<T>(), count) })
 }
 
 fn active_surface_cache_failed(cache: ActiveRoomSurfaceCache) -> bool {
