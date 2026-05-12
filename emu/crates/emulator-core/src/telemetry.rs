@@ -61,6 +61,14 @@ pub mod stage {
     pub const ROOM_SURFACE_CACHE: u16 = 21;
     /// Texture/atlas upload work.
     pub const VRAM_UPLOAD: u16 = 22;
+    /// Editor-playtest CD streaming benchmark.
+    pub const CD_STREAM_BENCH: u16 = 23;
+    /// Steady-state portion of the editor-playtest CD streaming benchmark.
+    pub const CD_STREAM_STEADY: u16 = 24;
+    /// Sequential read of the real cooked world package.
+    pub const CD_WORLD_PACK_STREAM: u16 = 25;
+    /// Synchronous read of one streamed room chunk from WORLD.PAK.
+    pub const CD_ROOM_CHUNK_LOAD: u16 = 26;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -70,7 +78,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 23;
+pub const STAGE_COUNT: usize = 27;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -190,10 +198,60 @@ pub mod counter {
     pub const VISUAL_INTERVAL_VBLANKS: u16 = 57;
     /// Worst observed lateness for a visual frame in VBlanks.
     pub const VISUAL_MAX_LATENESS_VBLANKS: u16 = 58;
+    /// Bytes read by the editor-playtest CD streaming benchmark.
+    pub const CD_STREAM_BENCH_BYTES: u16 = 59;
+    /// Sectors read by the editor-playtest CD streaming benchmark.
+    pub const CD_STREAM_BENCH_SECTORS: u16 = 60;
+    /// Poll-loop iterations spent waiting on CD/DMA readiness.
+    pub const CD_STREAM_BENCH_POLLS: u16 = 61;
+    /// FNV checksum observed over the streamed benchmark payload.
+    pub const CD_STREAM_BENCH_CHECKSUM: u16 = 62;
+    /// Expected FNV checksum for the streamed benchmark payload.
+    pub const CD_STREAM_BENCH_EXPECTED_CHECKSUM: u16 = 63;
+    /// Status code for the editor-playtest CD streaming benchmark.
+    pub const CD_STREAM_BENCH_STATUS: u16 = 64;
+    /// Bytes read during the steady-state CD streaming benchmark window.
+    pub const CD_STREAM_STEADY_BYTES: u16 = 65;
+    /// Sectors read during the steady-state CD streaming benchmark window.
+    pub const CD_STREAM_STEADY_SECTORS: u16 = 66;
+    /// Bytes read from WORLD.PAK during the CD streaming benchmark.
+    pub const CD_WORLD_PACK_BYTES: u16 = 67;
+    /// Sectors read from WORLD.PAK during the CD streaming benchmark.
+    pub const CD_WORLD_PACK_SECTORS: u16 = 68;
+    /// Chunk entries reported by the streamed WORLD.PAK header.
+    pub const CD_WORLD_PACK_CHUNKS: u16 = 69;
+    /// FNV checksum observed over streamed WORLD.PAK sectors.
+    pub const CD_WORLD_PACK_CHECKSUM: u16 = 70;
+    /// Status code for streamed WORLD.PAK validation.
+    pub const CD_WORLD_PACK_STATUS: u16 = 71;
+    /// Room chunk bytes loaded from WORLD.PAK resident slots.
+    pub const CD_ROOM_CHUNK_BYTES: u16 = 72;
+    /// Room chunk sectors read from WORLD.PAK resident slots.
+    pub const CD_ROOM_CHUNK_SECTORS: u16 = 73;
+    /// Room chunk slot loads issued against WORLD.PAK.
+    pub const CD_ROOM_CHUNK_LOADS: u16 = 74;
+    /// Room chunk slot loads served from an already-resident slot.
+    pub const CD_ROOM_CHUNK_HITS: u16 = 75;
+    /// Status code for streamed room chunk loading.
+    pub const CD_ROOM_CHUNK_STATUS: u16 = 76;
+    /// Stream scheduler requests considered for the active window.
+    pub const ROOM_STREAM_REQUESTS: u16 = 77;
+    /// Stream scheduler requests that were not resident yet.
+    pub const ROOM_STREAM_MISSES: u16 = 78;
+    /// Stream scheduler requests issued only as prefetch/lookahead.
+    pub const ROOM_STREAM_PREFETCH_REQUESTS: u16 = 79;
+    /// Resident room stream slots after scheduler processing.
+    pub const ROOM_STREAM_RESIDENT_SLOTS: u16 = 80;
+    /// Resident stream slots evicted to satisfy requests.
+    pub const ROOM_STREAM_EVICTIONS: u16 = 81;
+    /// Stream slot loads that failed validation or CD reads.
+    pub const ROOM_STREAM_FAILED_LOADS: u16 = 82;
+    /// Stream slot loads scheduled by the current window refresh.
+    pub const ROOM_STREAM_PENDING_LOADS: u16 = 83;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 59;
+pub const COUNTER_COUNT: usize = 84;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -452,6 +510,10 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::ACTIVE_ROOM_WINDOW => "room window",
         stage::ROOM_SURFACE_CACHE => "room cache build",
         stage::VRAM_UPLOAD => "vram upload",
+        stage::CD_STREAM_BENCH => "cd stream bench",
+        stage::CD_STREAM_STEADY => "cd stream steady",
+        stage::CD_WORLD_PACK_STREAM => "cd world pack",
+        stage::CD_ROOM_CHUNK_LOAD => "cd room chunk load",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
@@ -520,6 +582,31 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::VISUAL_DEADLINE_MISSES => "visual deadline misses",
         counter::VISUAL_INTERVAL_VBLANKS => "visual interval vblanks",
         counter::VISUAL_MAX_LATENESS_VBLANKS => "visual max lateness vblanks",
+        counter::CD_STREAM_BENCH_BYTES => "cd stream bytes",
+        counter::CD_STREAM_BENCH_SECTORS => "cd stream sectors",
+        counter::CD_STREAM_BENCH_POLLS => "cd stream polls",
+        counter::CD_STREAM_BENCH_CHECKSUM => "cd stream checksum",
+        counter::CD_STREAM_BENCH_EXPECTED_CHECKSUM => "cd stream expected checksum",
+        counter::CD_STREAM_BENCH_STATUS => "cd stream status",
+        counter::CD_STREAM_STEADY_BYTES => "cd steady bytes",
+        counter::CD_STREAM_STEADY_SECTORS => "cd steady sectors",
+        counter::CD_WORLD_PACK_BYTES => "cd world bytes",
+        counter::CD_WORLD_PACK_SECTORS => "cd world sectors",
+        counter::CD_WORLD_PACK_CHUNKS => "cd world chunks",
+        counter::CD_WORLD_PACK_CHECKSUM => "cd world checksum",
+        counter::CD_WORLD_PACK_STATUS => "cd world status",
+        counter::CD_ROOM_CHUNK_BYTES => "cd room chunk bytes",
+        counter::CD_ROOM_CHUNK_SECTORS => "cd room chunk sectors",
+        counter::CD_ROOM_CHUNK_LOADS => "cd room chunk loads",
+        counter::CD_ROOM_CHUNK_HITS => "cd room chunk hits",
+        counter::CD_ROOM_CHUNK_STATUS => "cd room chunk status",
+        counter::ROOM_STREAM_REQUESTS => "room stream requests",
+        counter::ROOM_STREAM_MISSES => "room stream misses",
+        counter::ROOM_STREAM_PREFETCH_REQUESTS => "room stream prefetches",
+        counter::ROOM_STREAM_RESIDENT_SLOTS => "room stream resident slots",
+        counter::ROOM_STREAM_EVICTIONS => "room stream evictions",
+        counter::ROOM_STREAM_FAILED_LOADS => "room stream failed loads",
+        counter::ROOM_STREAM_PENDING_LOADS => "room stream pending loads",
         _ => "unknown",
     }
 }
@@ -620,6 +707,22 @@ mod tests {
         assert_eq!(
             counter_name(counter::VISUAL_MAX_LATENESS_VBLANKS),
             "visual max lateness vblanks"
+        );
+        assert_eq!(stage_name(stage::CD_STREAM_BENCH), "cd stream bench");
+        assert_eq!(stage_name(stage::CD_STREAM_STEADY), "cd stream steady");
+        assert_eq!(stage_name(stage::CD_WORLD_PACK_STREAM), "cd world pack");
+        assert_eq!(stage_name(stage::CD_ROOM_CHUNK_LOAD), "cd room chunk load");
+        assert_eq!(
+            counter_name(counter::CD_STREAM_BENCH_STATUS),
+            "cd stream status"
+        );
+        assert_eq!(
+            counter_name(counter::CD_ROOM_CHUNK_BYTES),
+            "cd room chunk bytes"
+        );
+        assert_eq!(
+            counter_name(counter::ROOM_STREAM_RESIDENT_SLOTS),
+            "room stream resident slots"
         );
     }
 }
