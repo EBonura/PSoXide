@@ -17,6 +17,7 @@ dependencies = [
  "psx-font",
  "psx-gpu",
  "psx-gte",
+ "psx-io",
  "psx-level",
  "psx-math",
  "psx-rt",

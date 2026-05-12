@@ -451,6 +451,39 @@ pub struct LevelChunkRecord {
     pub flags: u16,
 }
 
+/// Generated CD streaming table entry for one cooked room payload.
+///
+/// The cooker emits this table from the same sector layout used to
+/// build `WORLD.PAK`, so runtime room streaming can seek directly to
+/// a room payload without reading the pack header/table from disc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelWorldPackEntryRecord {
+    /// Room/chunk id in the generated `ROOMS` table.
+    pub room: RoomIndex,
+    /// Payload start sector relative to the beginning of `WORLD.PAK`.
+    pub sector_offset: u32,
+    /// Sector-aligned payload length.
+    pub sector_count: u32,
+    /// Original unpadded byte size.
+    pub byte_size: u32,
+    /// FNV-1a checksum of the unpadded payload.
+    pub checksum: u32,
+}
+
+/// Magic at the start of a streamed room chunk payload.
+///
+/// A streamed chunk embeds the original cooked `.psxw` room plus
+/// renderer-native cache records. The fixed header lets the runtime
+/// recover both views directly from the CD-loaded slot without
+/// rebuilding geometry or carrying a second global cache copy.
+pub const STREAMED_ROOM_CHUNK_MAGIC: [u8; 8] = *b"PSXCHNK\0";
+
+/// Version of the streamed room chunk header.
+pub const STREAMED_ROOM_CHUNK_VERSION: u32 = 1;
+
+/// Byte length of the streamed room chunk header.
+pub const STREAMED_ROOM_CHUNK_HEADER_BYTES: usize = 64;
+
 /// Visibility metadata for one cooked room/chunk. Points into the
 /// generated compact cell table and the cooked position-cell PVS table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1378,5 +1411,18 @@ mod tests {
         assert_eq!(cs.missing_ram_count, 2);
         assert_eq!(cs.overflow_ram_count, 1);
         assert_eq!(r.ram_len(), 2);
+    }
+
+    #[test]
+    fn streamed_room_chunk_schema_sizes_are_stable() {
+        assert_eq!(STREAMED_ROOM_CHUNK_MAGIC, *b"PSXCHNK\0");
+        assert_eq!(STREAMED_ROOM_CHUNK_VERSION, 1);
+        assert_eq!(STREAMED_ROOM_CHUNK_HEADER_BYTES, 64);
+        assert_eq!(core::mem::size_of::<LevelCachedRoomCellRecord>(), 32);
+        assert_eq!(core::mem::size_of::<LevelCachedRoomVertexRecord>(), 12);
+        assert_eq!(core::mem::size_of::<LevelCachedRoomSurfaceRecord>(), 40);
+        assert_eq!(core::mem::align_of::<LevelCachedRoomCellRecord>(), 4);
+        assert_eq!(core::mem::align_of::<LevelCachedRoomVertexRecord>(), 4);
+        assert_eq!(core::mem::align_of::<LevelCachedRoomSurfaceRecord>(), 2);
     }
 }
