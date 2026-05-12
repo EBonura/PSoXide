@@ -71,7 +71,8 @@ use psx_level::{
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
     LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
-    STREAMED_ROOM_CHUNK_HEADER_BYTES, STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION,
+    STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW, STREAMED_ROOM_CHUNK_HEADER_BYTES,
+    STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION, streamed_room_chunk_header,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
 
@@ -3411,9 +3412,13 @@ fn parse_streamed_runtime_room(slot: usize, index: RoomIndex) -> Option<RuntimeR
         let byte_count = ROOM_STREAM_SCHEDULER.resident_byte_count(resident_slot)?;
         let bytes = streamed_room_slot_bytes(resident_slot, byte_count)?;
         let view = streamed_room_chunk_view(bytes, index)?;
-        let psxw = bytes.get(view.psxw_offset..view.psxw_offset + view.psxw_bytes)?;
+        if view.flags & STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW == 0 {
+            return None;
+        }
+        let collision =
+            bytes.get(view.collision_offset..view.collision_offset + view.collision_bytes)?;
         telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_HITS, 1);
-        RuntimeRoom::from_bytes(psxw).ok()
+        RuntimeRoom::from_bytes(collision).ok()
     }
 }
 
@@ -3421,14 +3426,15 @@ fn parse_streamed_runtime_room(slot: usize, index: RoomIndex) -> Option<RuntimeR
 #[derive(Copy, Clone)]
 struct StreamedRoomChunkView {
     total_bytes: usize,
-    psxw_offset: usize,
-    psxw_bytes: usize,
+    collision_offset: usize,
+    collision_bytes: usize,
     cells_offset: usize,
     cell_count: usize,
     vertices_offset: usize,
     vertex_count: usize,
     surfaces_offset: usize,
     surface_count: usize,
+    flags: u32,
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -3455,25 +3461,39 @@ fn streamed_room_chunk_view(
     if bytes.get(0..8)? != STREAMED_ROOM_CHUNK_MAGIC.as_slice() {
         return None;
     }
-    if read_streamed_chunk_u32(bytes, 8)? != STREAMED_ROOM_CHUNK_VERSION {
+    if read_streamed_chunk_u32(bytes, streamed_room_chunk_header::VERSION)?
+        != STREAMED_ROOM_CHUNK_VERSION
+    {
         return None;
     }
-    if read_streamed_chunk_u32(bytes, 12)? != u32::from(expected_room.raw()) {
+    if read_streamed_chunk_u32(bytes, streamed_room_chunk_header::ROOM)?
+        != u32::from(expected_room.raw())
+    {
         return None;
     }
-    let total_bytes = read_streamed_chunk_u32(bytes, 16)? as usize;
+    let total_bytes = read_streamed_chunk_u32(bytes, streamed_room_chunk_header::TOTAL_BYTES)?
+        as usize;
     if total_bytes < STREAMED_ROOM_CHUNK_HEADER_BYTES || total_bytes > bytes.len() {
         return None;
     }
-    let psxw_offset = read_streamed_chunk_u32(bytes, 20)? as usize;
-    let psxw_bytes = read_streamed_chunk_u32(bytes, 24)? as usize;
-    let cells_offset = read_streamed_chunk_u32(bytes, 28)? as usize;
-    let cell_count = read_streamed_chunk_u32(bytes, 32)? as usize;
-    let vertices_offset = read_streamed_chunk_u32(bytes, 36)? as usize;
-    let vertex_count = read_streamed_chunk_u32(bytes, 40)? as usize;
-    let surfaces_offset = read_streamed_chunk_u32(bytes, 44)? as usize;
-    let surface_count = read_streamed_chunk_u32(bytes, 48)? as usize;
-    if !streamed_chunk_range_valid::<u8>(total_bytes, psxw_offset, psxw_bytes)
+    let collision_offset =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::COLLISION_OFFSET)? as usize;
+    let collision_bytes =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::COLLISION_BYTES)? as usize;
+    let cells_offset =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::CELLS_OFFSET)? as usize;
+    let cell_count =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::CELL_COUNT)? as usize;
+    let vertices_offset =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::VERTICES_OFFSET)? as usize;
+    let vertex_count =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::VERTEX_COUNT)? as usize;
+    let surfaces_offset =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::SURFACES_OFFSET)? as usize;
+    let surface_count =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::SURFACE_COUNT)? as usize;
+    let flags = read_streamed_chunk_u32(bytes, streamed_room_chunk_header::FLAGS)?;
+    if !streamed_chunk_range_valid::<u8>(total_bytes, collision_offset, collision_bytes)
         || !streamed_chunk_range_valid::<LevelCachedRoomCellRecord>(
             total_bytes,
             cells_offset,
@@ -3494,14 +3514,15 @@ fn streamed_room_chunk_view(
     }
     Some(StreamedRoomChunkView {
         total_bytes,
-        psxw_offset,
-        psxw_bytes,
+        collision_offset,
+        collision_bytes,
         cells_offset,
         cell_count,
         vertices_offset,
         vertex_count,
         surfaces_offset,
         surface_count,
+        flags,
     })
 }
 
@@ -3847,7 +3868,13 @@ fn write_visible_cell_candidate(
     if *written >= out.len() {
         return;
     }
-    out[*written] = GridVisibleCell::new(cell.x, cell.z, cell.min_y, cell.max_y);
+    out[*written] = GridVisibleCell::with_cache_cell_index(
+        cell.x,
+        cell.z,
+        cell.min_y,
+        cell.max_y,
+        cell.cache_cell_index,
+    );
     *written += 1;
 }
 
@@ -5126,6 +5153,10 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
 
     fn uses_vertex_depths(&self) -> bool {
         self.fog_enabled && self.fog_far > self.fog_near
+    }
+
+    fn uses_direct_baked_vertex_rgb(&self) -> bool {
+        !self.fog_enabled || self.fog_far <= self.fog_near
     }
 
     fn prepare_vertex_depth(&self, depth: i32) -> i32 {

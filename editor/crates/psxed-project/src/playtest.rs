@@ -58,7 +58,10 @@ use assets::{
     sanitise_model_dirname,
 };
 
-pub use manifest::{cook_to_dir, default_generated_dir, render_manifest_source, write_package};
+pub use manifest::{
+    cook_to_dir, default_generated_dir, render_manifest_source, streamed_room_chunk_memory_report,
+    write_package,
+};
 pub use schema::*;
 
 const PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
@@ -938,6 +941,13 @@ pub fn build_package(
             report.error(msg);
             return (None, report);
         }
+        assign_visibility_cache_cell_indices(
+            room.room_index,
+            &room_visibility,
+            &mut visibility_cells,
+            &room_surface_caches,
+            &room_cache_cells,
+        );
         if let Some(asset) = assets.get_mut(room.world_asset_index) {
             asset.bytes = bytes;
         }
@@ -2747,6 +2757,69 @@ fn append_room_surface_cache(
     Ok(())
 }
 
+fn assign_visibility_cache_cell_indices(
+    room_index: u16,
+    room_visibility: &[PlaytestRoomVisibility],
+    visibility_cells: &mut [PlaytestVisibilityCell],
+    room_surface_caches: &[PlaytestRoomSurfaceCache],
+    room_cache_cells: &[PlaytestCachedRoomCell],
+) {
+    let Some(visibility) = room_visibility
+        .iter()
+        .find(|visibility| visibility.room == room_index)
+    else {
+        return;
+    };
+    let Some(cache) = room_surface_caches
+        .iter()
+        .find(|cache| cache.room == room_index)
+    else {
+        return;
+    };
+    let visible_first = visibility.cell_first as usize;
+    let visible_end = visible_first.saturating_add(visibility.cell_count as usize);
+    let cache_first = cache.cell_first as usize;
+    let cache_end = cache_first.saturating_add(cache.cell_count as usize);
+    let Some(visible_cells) = visibility_cells.get_mut(visible_first..visible_end) else {
+        return;
+    };
+    let Some(cache_cells) = room_cache_cells.get(cache_first..cache_end) else {
+        return;
+    };
+    for cell in visible_cells {
+        cell.cache_cell_index =
+            cached_room_cell_index_for_coord(cache_cells, cell.x, cell.z).unwrap_or(u16::MAX);
+    }
+}
+
+fn cached_room_cell_index_for_coord(
+    cells: &[PlaytestCachedRoomCell],
+    x: u16,
+    z: u16,
+) -> Option<u16> {
+    let key = cached_room_cell_key(x, z);
+    let mut low = 0usize;
+    let mut high = cells.len();
+    while low < high {
+        let mid = (low + high) / 2;
+        let cell = cells[mid];
+        let cell_key = cached_room_cell_key(cell.x, cell.z);
+        if cell_key < key {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let cell = cells.get(low)?;
+    (cached_room_cell_key(cell.x, cell.z) == key)
+        .then(|| u16::try_from(low).ok())
+        .flatten()
+}
+
+const fn cached_room_cell_key(x: u16, z: u16) -> u32 {
+    ((x as u32) << 16) | z as u32
+}
+
 fn cache_materials_for_room(
     room_index: u16,
     materials: &[PlaytestMaterial],
@@ -2853,6 +2926,7 @@ fn build_visibility_cells(
                 max_y,
                 portal_mask: 0,
                 blocker_mask: blocker_mask_for_sector(sector, cooked.sector_size),
+                cache_cell_index: u16::MAX,
                 flags: visibility_cell_flags::HAS_GEOMETRY,
             });
         }
@@ -3496,6 +3570,7 @@ mod tests {
             max_y: crate::DEFAULT_WORLD_SECTOR_SIZE,
             portal_mask: 0,
             blocker_mask,
+            cache_cell_index: u16::MAX,
             flags: visibility_cell_flags::HAS_GEOMETRY,
         }
     }
@@ -3769,6 +3844,19 @@ mod tests {
         assert!(!package.room_cache_cells.is_empty());
         assert!(!package.room_cache_vertices.is_empty());
         assert!(!package.room_cache_surfaces.is_empty());
+        let cache = package.room_surface_caches[0];
+        let cache_first = cache.cell_first as usize;
+        let cache_end = cache_first + cache.cell_count as usize;
+        let cache_cells = &package.room_cache_cells[cache_first..cache_end];
+        for cell in package
+            .visibility_cells
+            .iter()
+            .filter(|cell| cell.room == cache.room)
+        {
+            assert_ne!(cell.cache_cell_index, u16::MAX);
+            let cached = cache_cells[cell.cache_cell_index as usize];
+            assert_eq!((cached.x, cached.z), (cell.x, cell.z));
+        }
         assert!(package.spawn.is_some());
     }
 

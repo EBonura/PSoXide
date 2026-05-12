@@ -311,7 +311,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for cell in &package.visibility_cells {
         let _ = writeln!(
             out,
-            "    LevelVisibilityCellRecord {{ room: RoomIndex({}), x: {}, z: {}, min_y: {}, max_y: {}, portal_mask: {}, blocker_mask: {}, flags: {} }},",
+            "    LevelVisibilityCellRecord {{ room: RoomIndex({}), x: {}, z: {}, min_y: {}, max_y: {}, portal_mask: {}, blocker_mask: {}, cache_cell_index: {}, flags: {} }},",
             cell.room,
             cell.x,
             cell.z,
@@ -319,6 +319,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             cell.max_y,
             cell.portal_mask,
             cell.blocker_mask,
+            cell.cache_cell_index,
             cell.flags,
         );
     }
@@ -808,7 +809,88 @@ fn streamed_room_chunk_filename(room: u16) -> String {
     format!("room_{room:03}.psxc")
 }
 
-fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<Vec<u8>, String> {
+pub fn streamed_room_chunk_memory_report(
+    package: &PlaytestPackage,
+) -> Result<PlaytestStreamMemoryReport, String> {
+    let mut report = PlaytestStreamMemoryReport::default();
+    let room_count = package.rooms.len().min(u16::MAX as usize + 1);
+    for room in 0..room_count {
+        let memory = streamed_room_chunk_memory(package, room as u16)?;
+        report.totals.sector_count += memory.sector_count;
+        report.totals.payload_bytes += memory.payload_bytes;
+        report.totals.stream_bytes += memory.stream_bytes;
+        report.totals.header_bytes += memory.header_bytes;
+        report.totals.collision_bytes += memory.collision_bytes;
+        report.totals.render_cell_bytes += memory.render_cell_bytes;
+        report.totals.render_vertex_bytes += memory.render_vertex_bytes;
+        report.totals.render_surface_bytes += memory.render_surface_bytes;
+        report.totals.render_cache_bytes += memory.render_cache_bytes;
+        report.totals.alignment_padding_bytes += memory.alignment_padding_bytes;
+        report.totals.sector_padding_bytes += memory.sector_padding_bytes;
+        if report
+            .largest_chunk
+            .map(|largest| memory.stream_bytes > largest.stream_bytes)
+            .unwrap_or(true)
+        {
+            report.largest_chunk = Some(memory);
+        }
+        report.chunks.push(memory);
+    }
+    Ok(report)
+}
+
+fn streamed_room_chunk_memory(
+    package: &PlaytestPackage,
+    room: u16,
+) -> Result<PlaytestStreamChunkMemory, String> {
+    let layout = streamed_room_chunk_layout(package, room)?;
+    let payload = streamed_room_chunk_payload(package, room)?;
+    let payload_bytes = payload.len();
+    let sector_size = psx_iso::SECTOR_USER_DATA_BYTES;
+    let sector_count = payload_bytes.saturating_add(sector_size - 1) / sector_size;
+    let stream_bytes = sector_count.saturating_mul(sector_size);
+    let render_cell_bytes =
+        layout.cell_count * std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>();
+    let render_vertex_bytes =
+        layout.vertex_count * std::mem::size_of::<psx_level::LevelCachedRoomVertexRecord>();
+    let render_surface_bytes =
+        layout.surface_count * std::mem::size_of::<psx_level::LevelCachedRoomSurfaceRecord>();
+    let render_cache_bytes = render_cell_bytes + render_vertex_bytes + render_surface_bytes;
+    let accounted_bytes = psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES
+        + layout.collision_payload.len()
+        + render_cache_bytes;
+    let alignment_padding_bytes = payload_bytes.saturating_sub(accounted_bytes);
+    Ok(PlaytestStreamChunkMemory {
+        room,
+        sector_count,
+        payload_bytes,
+        stream_bytes,
+        header_bytes: psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES,
+        collision_bytes: layout.collision_payload.len(),
+        render_cell_bytes,
+        render_vertex_bytes,
+        render_surface_bytes,
+        render_cache_bytes,
+        alignment_padding_bytes,
+        sector_padding_bytes: stream_bytes.saturating_sub(payload_bytes),
+    })
+}
+
+#[derive(Clone)]
+struct StreamedRoomChunkLayout<'a> {
+    collision_payload: Vec<u8>,
+    cell_slice: &'a [PlaytestCachedRoomCell],
+    vertex_slice: &'a [PlaytestCachedRoomVertex],
+    surface_slice: &'a [PlaytestCachedRoomSurface],
+    cell_count: usize,
+    vertex_count: usize,
+    surface_count: usize,
+}
+
+fn streamed_room_chunk_layout(
+    package: &PlaytestPackage,
+    room: u16,
+) -> Result<StreamedRoomChunkLayout<'_>, String> {
     let room_record = package
         .rooms
         .get(room as usize)
@@ -819,7 +901,7 @@ fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<V
         .ok_or_else(|| format!("room {room} references missing world asset"))?;
     if asset.kind != PlaytestAssetKind::RoomWorld {
         return Err(format!(
-            "room {room} world asset '{}' is not a room payload",
+            "room {room} world asset '{}' is not a collision room payload",
             asset.source_label
         ));
     }
@@ -857,10 +939,27 @@ fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<V
         })
         .unwrap_or(&[]);
 
+    Ok(StreamedRoomChunkLayout {
+        collision_payload: streamed_collision_payload(&asset.bytes),
+        cell_slice,
+        vertex_slice,
+        surface_slice,
+        cell_count: cell_slice.len(),
+        vertex_count: vertex_slice.len(),
+        surface_count: surface_slice.len(),
+    })
+}
+
+fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<Vec<u8>, String> {
+    let layout = streamed_room_chunk_layout(package, room)?;
+    let cell_slice = layout.cell_slice;
+    let vertex_slice = layout.vertex_slice;
+    let surface_slice = layout.surface_slice;
+
     let mut out = vec![0u8; psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES];
     align_vec(&mut out, 4);
-    let psxw_offset = out.len();
-    out.extend_from_slice(&asset.bytes);
+    let collision_offset = out.len();
+    out.extend_from_slice(&layout.collision_payload);
     align_vec(&mut out, 4);
     let cells_offset = out.len();
     append_cached_room_cells(&mut out, cell_slice);
@@ -873,55 +972,127 @@ fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<V
     align_vec(&mut out, 4);
 
     out[..8].copy_from_slice(&psx_level::STREAMED_ROOM_CHUNK_MAGIC);
-    write_u32_le(&mut out, 8, psx_level::STREAMED_ROOM_CHUNK_VERSION)?;
-    write_u32_le(&mut out, 12, u32::from(room))?;
+    write_u32_le(
+        &mut out,
+        psx_level::streamed_room_chunk_header::VERSION,
+        psx_level::STREAMED_ROOM_CHUNK_VERSION,
+    )?;
+    write_u32_le(
+        &mut out,
+        psx_level::streamed_room_chunk_header::ROOM,
+        u32::from(room),
+    )?;
     let total_len = out.len();
     write_u32_le(
         &mut out,
-        16,
+        psx_level::streamed_room_chunk_header::TOTAL_BYTES,
         checked_u32(total_len, "streamed room chunk size")?,
     )?;
     write_u32_le(
         &mut out,
-        20,
-        checked_u32(psxw_offset, "streamed room psxw offset")?,
+        psx_level::streamed_room_chunk_header::COLLISION_OFFSET,
+        checked_u32(collision_offset, "streamed room collision offset")?,
     )?;
     write_u32_le(
         &mut out,
-        24,
-        checked_u32(asset.bytes.len(), "streamed room psxw byte count")?,
+        psx_level::streamed_room_chunk_header::COLLISION_BYTES,
+        checked_u32(
+            layout.collision_payload.len(),
+            "streamed room collision byte count",
+        )?,
     )?;
     write_u32_le(
         &mut out,
-        28,
+        psx_level::streamed_room_chunk_header::CELLS_OFFSET,
         checked_u32(cells_offset, "streamed room cells offset")?,
     )?;
     write_u32_le(
         &mut out,
-        32,
+        psx_level::streamed_room_chunk_header::CELL_COUNT,
         checked_u32(cell_slice.len(), "streamed room cell count")?,
     )?;
     write_u32_le(
         &mut out,
-        36,
+        psx_level::streamed_room_chunk_header::VERTICES_OFFSET,
         checked_u32(vertices_offset, "streamed room vertices offset")?,
     )?;
     write_u32_le(
         &mut out,
-        40,
+        psx_level::streamed_room_chunk_header::VERTEX_COUNT,
         checked_u32(vertex_slice.len(), "streamed room vertex count")?,
     )?;
     write_u32_le(
         &mut out,
-        44,
+        psx_level::streamed_room_chunk_header::SURFACES_OFFSET,
         checked_u32(surfaces_offset, "streamed room surfaces offset")?,
     )?;
     write_u32_le(
         &mut out,
-        48,
+        psx_level::streamed_room_chunk_header::SURFACE_COUNT,
         checked_u32(surface_slice.len(), "streamed room surface count")?,
     )?;
+    write_u32_le(
+        &mut out,
+        psx_level::streamed_room_chunk_header::FLAGS,
+        psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW
+            | psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_STRIPPED_LIGHTS,
+    )?;
     Ok(out)
+}
+
+fn streamed_collision_payload(bytes: &[u8]) -> Vec<u8> {
+    stripped_collision_psxw_payload(bytes).unwrap_or_else(|| bytes.to_vec())
+}
+
+fn stripped_collision_psxw_payload(bytes: &[u8]) -> Option<Vec<u8>> {
+    use psxed_format::world::{world_flags, WorldHeader, MAGIC, VERSION};
+
+    let asset_header = psxed_format::AssetHeader::SIZE;
+    let world_header = WorldHeader::SIZE;
+    if bytes.len() < asset_header.checked_add(world_header)? {
+        return None;
+    }
+    if bytes.get(0..4)? != MAGIC.as_slice() {
+        return None;
+    }
+    let version = u16::from_le_bytes([*bytes.get(4)?, *bytes.get(5)?]);
+    if version != VERSION {
+        return None;
+    }
+    let payload_len = read_u32_le(bytes, 8)? as usize;
+    if payload_len != bytes.len().checked_sub(asset_header)? {
+        return None;
+    }
+    let wh = bytes.get(asset_header..asset_header.checked_add(world_header)?)?;
+    let sector_count = read_u16_le(wh, 8)? as usize;
+    let wall_count = read_u16_le(wh, 12)? as usize;
+    let flags = *wh.get(17)?;
+    let surface_light_count = read_u16_le(wh, 18)? as usize;
+    if flags & world_flags::STATIC_VERTEX_LIGHTING == 0 && surface_light_count == 0 {
+        return Some(bytes.to_vec());
+    }
+    let horizontal_override_count = read_u16_le(wh, 20)? as usize;
+    let mut keep_len = asset_header.checked_add(world_header)?;
+    keep_len =
+        keep_len.checked_add(sector_count.checked_mul(psxed_format::world::SectorRecord::SIZE)?)?;
+    keep_len =
+        keep_len.checked_add(wall_count.checked_mul(psxed_format::world::WallRecord::SIZE)?)?;
+    keep_len = keep_len.checked_add(
+        horizontal_override_count
+            .checked_mul(psxed_format::world::HorizontalOverrideRecord::SIZE)?,
+    )?;
+    let light_bytes =
+        surface_light_count.checked_mul(psxed_format::world::SurfaceLightRecord::SIZE)?;
+    if keep_len.checked_add(light_bytes)? != bytes.len() {
+        return None;
+    }
+
+    let mut out = bytes[..keep_len].to_vec();
+    let new_payload_len = (keep_len - asset_header) as u32;
+    out[8..12].copy_from_slice(&new_payload_len.to_le_bytes());
+    out[asset_header + 17] = flags & !world_flags::STATIC_VERTEX_LIGHTING;
+    out[asset_header + 18..asset_header + 20].copy_from_slice(&0u16.to_le_bytes());
+    Some(out)
 }
 
 fn checked_slice<T>(items: &[T], first: usize, count: usize) -> Option<&[T]> {
@@ -940,6 +1111,16 @@ fn write_u32_le(out: &mut [u8], offset: usize, value: u32) -> Result<(), String>
         .ok_or_else(|| format!("streamed chunk header write out of bounds at {offset}"))?;
     dst.copy_from_slice(&value.to_le_bytes());
     Ok(())
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let raw = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([raw[0], raw[1]]))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let raw = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
 }
 
 fn append_u16_le(out: &mut Vec<u8>, value: u16) {
@@ -1603,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn streamed_room_chunk_payload_embeds_room_and_cache_records() {
+    fn streamed_room_chunk_payload_splits_collision_and_render_cache_records() {
         let mut package = PlaytestPackage::default();
         package.assets = vec![test_room_asset(vec![0xaa, 0xbb, 0xcc], 0)];
         package.rooms = vec![test_room(0)];
@@ -1661,12 +1842,123 @@ mod tests {
         assert_eq!(u32_at(&payload, 40), 1);
         assert_eq!(u32_at(&payload, 44), 112);
         assert_eq!(u32_at(&payload, 48), 1);
+        assert_eq!(
+            u32_at(&payload, 60),
+            psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW
+                | psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_STRIPPED_LIGHTS
+        );
         assert_eq!(&payload[64..67], &[0xaa, 0xbb, 0xcc]);
         assert_eq!(u16_at(&payload, 68), 2);
         assert_eq!(i32_at(&payload, 72), -4);
         assert_eq!(i32_at(&payload, 100), 12);
         assert_eq!(u16_at(&payload, 112), 15);
         assert_eq!(payload[151], 42);
+    }
+
+    #[test]
+    fn streamed_room_chunk_memory_report_accounts_for_collision_render_and_padding() {
+        let mut package = PlaytestPackage::default();
+        package.assets = vec![test_room_asset(vec![0xaa, 0xbb, 0xcc], 0)];
+        package.rooms = vec![test_room(0)];
+        package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
+            room: 0,
+            cell_first: 0,
+            cell_count: 1,
+            vertex_first: 0,
+            vertex_count: 1,
+            surface_first: 0,
+            surface_count: 1,
+        }];
+        package.room_cache_cells = vec![PlaytestCachedRoomCell {
+            x: 2,
+            z: 3,
+            min_y: -4,
+            max_y: 5,
+            visibility_center: [6, 7, 8],
+            visibility_radius: 9,
+            surface_first: 10,
+            surface_count: 11,
+        }];
+        package.room_cache_vertices = vec![PlaytestCachedRoomVertex {
+            x: 12,
+            y: 13,
+            z: 14,
+        }];
+        package.room_cache_surfaces = vec![PlaytestCachedRoomSurface {
+            material_slot: 15,
+            vertex_indices: [0, 1, 2, 3],
+            sample_sx: 16,
+            sample_sz: 17,
+            sample_ordinal: 18,
+            uvs: [(19, 20), (21, 22), (23, 24), (25, 26)],
+            baked_vertex_rgb: [(27, 28, 29), (30, 31, 32), (33, 34, 35), (36, 37, 38)],
+            kind_flags: 39,
+            wall_direction: 40,
+            split: 41,
+            triangle_index: 42,
+        }];
+
+        let report = streamed_room_chunk_memory_report(&package).unwrap();
+        assert_eq!(report.chunks.len(), 1);
+        let chunk = report.chunks[0];
+        assert_eq!(chunk.room, 0);
+        assert_eq!(
+            chunk.payload_bytes,
+            streamed_room_chunk_payload(&package, 0).unwrap().len()
+        );
+        assert_eq!(chunk.collision_bytes, 3);
+        assert_eq!(chunk.render_cell_bytes, 32);
+        assert_eq!(chunk.render_vertex_bytes, 12);
+        assert_eq!(chunk.render_surface_bytes, 40);
+        assert_eq!(chunk.render_cache_bytes, 84);
+        assert_eq!(chunk.alignment_padding_bytes, 1);
+        assert_eq!(chunk.sector_count, 1);
+        assert_eq!(chunk.stream_bytes, psx_iso::SECTOR_USER_DATA_BYTES);
+        assert_eq!(
+            chunk.sector_padding_bytes,
+            psx_iso::SECTOR_USER_DATA_BYTES - chunk.payload_bytes
+        );
+        assert_eq!(
+            report.totals,
+            PlaytestStreamMemoryTotals {
+                sector_count: chunk.sector_count,
+                payload_bytes: chunk.payload_bytes,
+                stream_bytes: chunk.stream_bytes,
+                header_bytes: chunk.header_bytes,
+                collision_bytes: chunk.collision_bytes,
+                render_cell_bytes: chunk.render_cell_bytes,
+                render_vertex_bytes: chunk.render_vertex_bytes,
+                render_surface_bytes: chunk.render_surface_bytes,
+                render_cache_bytes: chunk.render_cache_bytes,
+                alignment_padding_bytes: chunk.alignment_padding_bytes,
+                sector_padding_bytes: chunk.sector_padding_bytes,
+            }
+        );
+    }
+
+    #[test]
+    fn streamed_collision_payload_strips_static_lighting_table() {
+        let bytes = static_lit_test_room_bytes();
+        let stripped = stripped_collision_psxw_payload(&bytes).unwrap();
+        assert_eq!(
+            stripped.len(),
+            bytes.len() - 2 * psxed_format::world::SurfaceLightRecord::SIZE
+        );
+        assert_eq!(
+            u32_at(&stripped, 8),
+            (psxed_format::world::WorldHeader::SIZE + psxed_format::world::SectorRecord::SIZE)
+                as u32
+        );
+        let header = psxed_format::AssetHeader::SIZE;
+        assert_eq!(
+            stripped[header + 17] & psxed_format::world::world_flags::STATIC_VERTEX_LIGHTING,
+            0
+        );
+        assert_eq!(u16_at(&stripped, header + 18), 0);
+        let room = psx_engine::RuntimeRoom::from_bytes(&stripped).unwrap();
+        assert_eq!(room.width(), 1);
+        assert_eq!(room.depth(), 1);
+        assert!(!room.render().static_vertex_lighting());
     }
 
     fn test_room_asset(bytes: Vec<u8>, index: usize) -> PlaytestAsset {
@@ -1715,6 +2007,32 @@ mod tests {
             },
             flags: 0,
         }
+    }
+
+    fn static_lit_test_room_bytes() -> Vec<u8> {
+        let asset_header = psxed_format::AssetHeader::SIZE;
+        let world_header = psxed_format::world::WorldHeader::SIZE;
+        let sector_bytes = psxed_format::world::SectorRecord::SIZE;
+        let light_bytes = 2 * psxed_format::world::SurfaceLightRecord::SIZE;
+        let payload_len = world_header + sector_bytes + light_bytes;
+        let mut out = vec![0u8; asset_header + payload_len];
+        out[0..4].copy_from_slice(&psxed_format::world::MAGIC);
+        out[4..6].copy_from_slice(&psxed_format::world::VERSION.to_le_bytes());
+        out[8..12].copy_from_slice(&(payload_len as u32).to_le_bytes());
+
+        let wh = asset_header;
+        out[wh..wh + 2].copy_from_slice(&1u16.to_le_bytes());
+        out[wh + 2..wh + 4].copy_from_slice(&1u16.to_le_bytes());
+        out[wh + 4..wh + 8].copy_from_slice(&1024i32.to_le_bytes());
+        out[wh + 8..wh + 10].copy_from_slice(&1u16.to_le_bytes());
+        out[wh + 14..wh + 17].copy_from_slice(&[7, 8, 9]);
+        out[wh + 17] = psxed_format::world::world_flags::STATIC_VERTEX_LIGHTING;
+        out[wh + 18..wh + 20].copy_from_slice(&2u16.to_le_bytes());
+
+        let sector = wh + world_header;
+        out[sector] = psxed_format::world::sector_flags::HAS_FLOOR
+            | psxed_format::world::sector_flags::FLOOR_WALKABLE;
+        out
     }
 
     fn test_chunk(
