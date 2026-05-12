@@ -472,17 +472,59 @@ pub struct LevelWorldPackEntryRecord {
 
 /// Magic at the start of a streamed room chunk payload.
 ///
-/// A streamed chunk embeds the original cooked `.psxw` room plus
-/// renderer-native cache records. The fixed header lets the runtime
-/// recover both views directly from the CD-loaded slot without
-/// rebuilding geometry or carrying a second global cache copy.
+/// A streamed chunk stores a collision payload plus renderer-native
+/// cache records. The fixed header lets the runtime recover both
+/// views directly from the CD-loaded slot without rebuilding geometry
+/// or carrying a second global cache copy.
 pub const STREAMED_ROOM_CHUNK_MAGIC: [u8; 8] = *b"PSXCHNK\0";
 
-/// Version of the streamed room chunk header.
-pub const STREAMED_ROOM_CHUNK_VERSION: u32 = 1;
+/// Streamed room chunk header version with explicit render and
+/// collision payload boundaries.
+pub const STREAMED_ROOM_CHUNK_VERSION: u32 = 2;
 
 /// Byte length of the streamed room chunk header.
 pub const STREAMED_ROOM_CHUNK_HEADER_BYTES: usize = 64;
+
+/// Header offsets for a streamed room chunk payload.
+///
+/// The render path consumes the cache table ranges directly; the
+/// collision path consumes `COLLISION_OFFSET/COLLISION_BYTES`.
+pub mod streamed_room_chunk_header {
+    /// Header format version.
+    pub const VERSION: usize = 8;
+    /// Cooked room/chunk id.
+    pub const ROOM: usize = 12;
+    /// Unpadded payload byte count.
+    pub const TOTAL_BYTES: usize = 16;
+    /// Offset of the collision payload.
+    pub const COLLISION_OFFSET: usize = 20;
+    /// Collision payload byte count.
+    pub const COLLISION_BYTES: usize = 24;
+    /// Offset of the cached room-cell table.
+    pub const CELLS_OFFSET: usize = 28;
+    /// Number of cached room-cell records.
+    pub const CELL_COUNT: usize = 32;
+    /// Offset of the cached vertex table.
+    pub const VERTICES_OFFSET: usize = 36;
+    /// Number of cached vertex records.
+    pub const VERTEX_COUNT: usize = 40;
+    /// Offset of the cached surface table.
+    pub const SURFACES_OFFSET: usize = 44;
+    /// Number of cached surface records.
+    pub const SURFACE_COUNT: usize = 48;
+    /// Reserved V2 header word.
+    pub const RESERVED_0: usize = 52;
+    /// Reserved V2 header word.
+    pub const RESERVED_1: usize = 56;
+    /// Payload format flags.
+    pub const FLAGS: usize = 60;
+}
+
+/// The collision payload is the cooked `.psxw` room format.
+pub const STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW: u32 = 1 << 0;
+
+/// The collision `.psxw` payload has render-only static-light records stripped.
+pub const STREAMED_ROOM_CHUNK_FLAG_COLLISION_STRIPPED_LIGHTS: u32 = 1 << 1;
 
 /// Visibility metadata for one cooked room/chunk. Points into the
 /// generated compact cell table and the cooked position-cell PVS table.
@@ -560,6 +602,9 @@ pub struct LevelVisibilityCellRecord {
     /// Cardinal edges that contain a conservative full-height solid
     /// blocker.
     pub blocker_mask: u8,
+    /// Room-local index into the matching `ROOM_CACHE_CELLS` slice,
+    /// or `u16::MAX` when no generated render-cache cell exists.
+    pub cache_cell_index: u16,
     /// Reserved.
     pub flags: u16,
 }
@@ -1416,8 +1461,10 @@ mod tests {
     #[test]
     fn streamed_room_chunk_schema_sizes_are_stable() {
         assert_eq!(STREAMED_ROOM_CHUNK_MAGIC, *b"PSXCHNK\0");
-        assert_eq!(STREAMED_ROOM_CHUNK_VERSION, 1);
+        assert_eq!(STREAMED_ROOM_CHUNK_VERSION, 2);
         assert_eq!(STREAMED_ROOM_CHUNK_HEADER_BYTES, 64);
+        assert_eq!(streamed_room_chunk_header::COLLISION_OFFSET, 20);
+        assert_eq!(streamed_room_chunk_header::FLAGS, 60);
         assert_eq!(core::mem::size_of::<LevelCachedRoomCellRecord>(), 32);
         assert_eq!(core::mem::size_of::<LevelCachedRoomVertexRecord>(), 12);
         assert_eq!(core::mem::size_of::<LevelCachedRoomSurfaceRecord>(), 40);
