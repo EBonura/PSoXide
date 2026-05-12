@@ -6,12 +6,15 @@ use super::*;
 
 pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io::Result<()> {
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
+    let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
     let textures_dir = generated_dir.join(TEXTURES_DIRNAME);
     let models_dir = generated_dir.join(MODELS_DIRNAME);
     std::fs::create_dir_all(&rooms_dir)?;
+    std::fs::create_dir_all(&stream_chunks_dir)?;
     std::fs::create_dir_all(&textures_dir)?;
     std::fs::create_dir_all(&models_dir)?;
     purge_directory_files(&rooms_dir, "psxw")?;
+    purge_directory_files(&stream_chunks_dir, "psxc")?;
     purge_directory_files(&textures_dir, "psxt")?;
     // Models live in per-model subfolders so the recursive
     // purge needs to traverse one level deeper than rooms /
@@ -38,9 +41,21 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         }
         std::fs::write(&target, &asset.bytes)?;
     }
+    for room_index in 0..package.rooms.len().min(u16::MAX as usize + 1) {
+        let payload = streamed_room_chunk_payload(package, room_index as u16)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(
+            stream_chunks_dir.join(streamed_room_chunk_filename(room_index as u16)),
+            payload,
+        )?;
+    }
 
     let manifest = render_manifest_source(package);
     std::fs::write(generated_dir.join(COOKED_MANIFEST_FILENAME), manifest)?;
+    std::fs::write(
+        generated_dir.join(WORLD_PACK_ORDER_FILENAME),
+        render_world_pack_order(package),
+    )?;
     Ok(())
 }
 
@@ -70,11 +85,26 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             asset_static_name(asset, i),
             asset.source_label,
         );
-        let _ = writeln!(
-            out,
-            "pub static {}: &[u8] = include_bytes!(\"{include_path}\");",
-            asset_static_name(asset, i),
-        );
+        if asset.kind == PlaytestAssetKind::RoomWorld {
+            let _ = writeln!(out, "#[cfg(feature = \"cd-stream-bench\")]");
+            let _ = writeln!(
+                out,
+                "pub static {}: &[u8] = &[];",
+                asset_static_name(asset, i)
+            );
+            let _ = writeln!(out, "#[cfg(not(feature = \"cd-stream-bench\"))]");
+            let _ = writeln!(
+                out,
+                "pub static {}: &[u8] = include_bytes!(\"{include_path}\");",
+                asset_static_name(asset, i),
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "pub static {}: &[u8] = include_bytes!(\"{include_path}\");",
+                asset_static_name(asset, i),
+            );
+        }
     }
     out.push('\n');
 
@@ -218,6 +248,31 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Absolute disc LBA where WORLD.PAK starts in the playtest ISO layout.\n");
+    let _ = writeln!(
+        out,
+        "pub const WORLD_PACK_START_LBA: u32 = {};",
+        psx_iso::WORLD_PACK_DEFAULT_START_LBA
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/// Cooked WORLD.PAK room table generated from the same layout as the ISO packer.\n",
+    );
+    out.push_str("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[\n");
+    for entry in world_pack_toc(package) {
+        let _ = writeln!(
+            out,
+            "    LevelWorldPackEntryRecord {{ room: RoomIndex({}), sector_offset: {}, sector_count: {}, byte_size: {}, checksum: {} }},",
+            entry.chunk_id,
+            entry.sector_offset,
+            entry.sector_count,
+            entry.byte_size,
+            entry.checksum,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Per-room visibility slices.\n");
     out.push_str("pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[\n");
     for visibility in &package.room_visibility {
@@ -269,6 +324,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
+    out.push_str("/// Stream builds read room-surface cache slices from `.psxc` chunks.\n");
+    out.push_str("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];\n\n");
+    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
     out.push_str("/// Per-room generated room-surface cache slices.\n");
     out.push_str("pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[\n");
     for cache in &package.room_surface_caches {
@@ -286,6 +345,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
+    out.push_str("/// Stream builds read cached room cells from `.psxc` chunks.\n");
+    out.push_str("pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];\n\n");
+    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
     out.push_str("/// Generated cached room cells.\n");
     out.push_str("pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[\n");
     for cell in &package.room_cache_cells {
@@ -306,6 +369,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
+    out.push_str("/// Stream builds read cached room vertices from `.psxc` chunks.\n");
+    out.push_str("pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];\n\n");
+    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
     out.push_str("/// Generated cached room vertices.\n");
     out.push_str("pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[\n");
     for vertex in &package.room_cache_vertices {
@@ -317,6 +384,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
+    out.push_str("/// Stream builds read cached room surfaces from `.psxc` chunks.\n");
+    out.push_str("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];\n\n");
+    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
     out.push_str("/// Generated cached room surfaces.\n");
     out.push_str("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[\n");
     for surface in &package.room_cache_surfaces {
@@ -708,6 +779,377 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out
 }
 
+fn render_world_pack_order(package: &PlaytestPackage) -> String {
+    let mut out = String::from(
+        "# PSoXide WORLD.PAK room order\n\
+         # One cooked room id per line. Generated by cook-playtest.\n",
+    );
+    for room in world_pack_order(package) {
+        let _ = writeln!(out, "{room}");
+    }
+    out
+}
+
+fn world_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
+    let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
+    for room in world_pack_order(package) {
+        let payload =
+            streamed_room_chunk_payload(package, room).expect("valid streamed room chunk payload");
+        chunks.push((room as u32, payload));
+    }
+    let refs = chunks
+        .iter()
+        .map(|(room, bytes)| (*room, bytes.as_slice()))
+        .collect::<Vec<_>>();
+    psx_iso::build_world_pack_layout(&refs).entries
+}
+
+fn streamed_room_chunk_filename(room: u16) -> String {
+    format!("room_{room:03}.psxc")
+}
+
+fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<Vec<u8>, String> {
+    let room_record = package
+        .rooms
+        .get(room as usize)
+        .ok_or_else(|| format!("missing room record {room}"))?;
+    let asset = package
+        .assets
+        .get(room_record.world_asset_index)
+        .ok_or_else(|| format!("room {room} references missing world asset"))?;
+    if asset.kind != PlaytestAssetKind::RoomWorld {
+        return Err(format!(
+            "room {room} world asset '{}' is not a room payload",
+            asset.source_label
+        ));
+    }
+
+    let cache = package
+        .room_surface_caches
+        .iter()
+        .find(|cache| cache.room == room)
+        .copied();
+    let cell_slice = cache
+        .and_then(|cache| {
+            checked_slice(
+                &package.room_cache_cells,
+                cache.cell_first as usize,
+                cache.cell_count as usize,
+            )
+        })
+        .unwrap_or(&[]);
+    let vertex_slice = cache
+        .and_then(|cache| {
+            checked_slice(
+                &package.room_cache_vertices,
+                cache.vertex_first as usize,
+                cache.vertex_count as usize,
+            )
+        })
+        .unwrap_or(&[]);
+    let surface_slice = cache
+        .and_then(|cache| {
+            checked_slice(
+                &package.room_cache_surfaces,
+                cache.surface_first as usize,
+                cache.surface_count as usize,
+            )
+        })
+        .unwrap_or(&[]);
+
+    let mut out = vec![0u8; psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES];
+    align_vec(&mut out, 4);
+    let psxw_offset = out.len();
+    out.extend_from_slice(&asset.bytes);
+    align_vec(&mut out, 4);
+    let cells_offset = out.len();
+    append_cached_room_cells(&mut out, cell_slice);
+    align_vec(&mut out, 4);
+    let vertices_offset = out.len();
+    append_cached_room_vertices(&mut out, vertex_slice);
+    align_vec(&mut out, 4);
+    let surfaces_offset = out.len();
+    append_cached_room_surfaces(&mut out, surface_slice);
+    align_vec(&mut out, 4);
+
+    out[..8].copy_from_slice(&psx_level::STREAMED_ROOM_CHUNK_MAGIC);
+    write_u32_le(&mut out, 8, psx_level::STREAMED_ROOM_CHUNK_VERSION)?;
+    write_u32_le(&mut out, 12, u32::from(room))?;
+    let total_len = out.len();
+    write_u32_le(
+        &mut out,
+        16,
+        checked_u32(total_len, "streamed room chunk size")?,
+    )?;
+    write_u32_le(
+        &mut out,
+        20,
+        checked_u32(psxw_offset, "streamed room psxw offset")?,
+    )?;
+    write_u32_le(
+        &mut out,
+        24,
+        checked_u32(asset.bytes.len(), "streamed room psxw byte count")?,
+    )?;
+    write_u32_le(
+        &mut out,
+        28,
+        checked_u32(cells_offset, "streamed room cells offset")?,
+    )?;
+    write_u32_le(
+        &mut out,
+        32,
+        checked_u32(cell_slice.len(), "streamed room cell count")?,
+    )?;
+    write_u32_le(
+        &mut out,
+        36,
+        checked_u32(vertices_offset, "streamed room vertices offset")?,
+    )?;
+    write_u32_le(
+        &mut out,
+        40,
+        checked_u32(vertex_slice.len(), "streamed room vertex count")?,
+    )?;
+    write_u32_le(
+        &mut out,
+        44,
+        checked_u32(surfaces_offset, "streamed room surfaces offset")?,
+    )?;
+    write_u32_le(
+        &mut out,
+        48,
+        checked_u32(surface_slice.len(), "streamed room surface count")?,
+    )?;
+    Ok(out)
+}
+
+fn checked_slice<T>(items: &[T], first: usize, count: usize) -> Option<&[T]> {
+    let end = first.checked_add(count)?;
+    items.get(first..end)
+}
+
+fn align_vec(out: &mut Vec<u8>, align: usize) {
+    let padding = (align - (out.len() % align)) % align;
+    out.resize(out.len() + padding, 0);
+}
+
+fn write_u32_le(out: &mut [u8], offset: usize, value: u32) -> Result<(), String> {
+    let dst = out
+        .get_mut(offset..offset + 4)
+        .ok_or_else(|| format!("streamed chunk header write out of bounds at {offset}"))?;
+    dst.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn append_u16_le(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn append_i32_le(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn append_cached_room_cells(out: &mut Vec<u8>, cells: &[PlaytestCachedRoomCell]) {
+    debug_assert_eq!(
+        std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>(),
+        32
+    );
+    for cell in cells {
+        append_u16_le(out, cell.x);
+        append_u16_le(out, cell.z);
+        append_i32_le(out, cell.min_y);
+        append_i32_le(out, cell.max_y);
+        for value in cell.visibility_center {
+            append_i32_le(out, value);
+        }
+        append_i32_le(out, cell.visibility_radius);
+        append_u16_le(out, cell.surface_first);
+        append_u16_le(out, cell.surface_count);
+    }
+}
+
+fn append_cached_room_vertices(out: &mut Vec<u8>, vertices: &[PlaytestCachedRoomVertex]) {
+    debug_assert_eq!(
+        std::mem::size_of::<psx_level::LevelCachedRoomVertexRecord>(),
+        12
+    );
+    for vertex in vertices {
+        append_i32_le(out, vertex.x);
+        append_i32_le(out, vertex.y);
+        append_i32_le(out, vertex.z);
+    }
+}
+
+fn append_cached_room_surfaces(out: &mut Vec<u8>, surfaces: &[PlaytestCachedRoomSurface]) {
+    debug_assert_eq!(
+        std::mem::size_of::<psx_level::LevelCachedRoomSurfaceRecord>(),
+        40
+    );
+    for surface in surfaces {
+        append_u16_le(out, surface.material_slot);
+        for index in surface.vertex_indices {
+            append_u16_le(out, index);
+        }
+        append_u16_le(out, surface.sample_sx);
+        append_u16_le(out, surface.sample_sz);
+        append_u16_le(out, surface.sample_ordinal);
+        for (u, v) in surface.uvs {
+            out.push(u);
+            out.push(v);
+        }
+        for (r, g, b) in surface.baked_vertex_rgb {
+            out.push(r);
+            out.push(g);
+            out.push(b);
+        }
+        out.push(surface.kind_flags);
+        out.push(surface.wall_direction);
+        out.push(surface.split);
+        out.push(surface.triangle_index);
+    }
+}
+
+fn world_pack_order(package: &PlaytestPackage) -> Vec<u16> {
+    world_pack_order_from_chunks(
+        package.rooms.len(),
+        package.spawn.map(|spawn| spawn.room),
+        &package.chunks,
+    )
+}
+
+fn world_pack_order_from_chunks(
+    room_count: usize,
+    spawn_room: Option<u16>,
+    chunks: &[PlaytestChunk],
+) -> Vec<u16> {
+    let room_count = room_count.min(u16::MAX as usize + 1);
+    let mut order = Vec::with_capacity(room_count);
+    if room_count == 0 {
+        return order;
+    }
+
+    let mut visited = vec![false; room_count];
+    let mut current = spawn_room
+        .filter(|room| (*room as usize) < room_count)
+        .unwrap_or(0);
+
+    loop {
+        append_world_pack_component(current, chunks, &mut visited, &mut order);
+        if order.len() >= room_count {
+            break;
+        }
+        let Some(next) = nearest_unvisited_pack_room(current, room_count, chunks, &visited) else {
+            break;
+        };
+        current = next;
+    }
+
+    let mut room = 0usize;
+    while room < room_count {
+        if !visited[room] {
+            visited[room] = true;
+            order.push(room as u16);
+        }
+        room += 1;
+    }
+    order
+}
+
+fn append_world_pack_component(
+    start_room: u16,
+    chunks: &[PlaytestChunk],
+    visited: &mut [bool],
+    order: &mut Vec<u16>,
+) {
+    let start = start_room as usize;
+    if start >= visited.len() || visited[start] {
+        return;
+    }
+
+    let mut queue = Vec::new();
+    queue.push(start_room);
+    visited[start] = true;
+    let mut head = 0usize;
+    while head < queue.len() {
+        let room = queue[head];
+        head += 1;
+        order.push(room);
+
+        let Some(chunk) = chunk_for_pack_room(chunks, room) else {
+            continue;
+        };
+        let mut neighbours = [(u8::MAX, u16::MAX); 4];
+        let mut neighbour_count = 0usize;
+        for (direction, neighbour) in chunk.neighbours.iter().enumerate() {
+            let Some(neighbour) = *neighbour else {
+                continue;
+            };
+            if neighbour as usize >= visited.len() || visited[neighbour as usize] {
+                continue;
+            }
+            let same_authored = chunk_for_pack_room(chunks, neighbour)
+                .is_some_and(|other| other.authored_room == chunk.authored_room);
+            let tier = if same_authored { 0 } else { 1 };
+            neighbours[neighbour_count] = (tier * 4 + direction as u8, neighbour);
+            neighbour_count += 1;
+        }
+        neighbours[..neighbour_count].sort_by_key(|(score, room)| (*score, *room));
+        let mut i = 0usize;
+        while i < neighbour_count {
+            let neighbour = neighbours[i].1;
+            if (neighbour as usize) < visited.len() && !visited[neighbour as usize] {
+                visited[neighbour as usize] = true;
+                queue.push(neighbour);
+            }
+            i += 1;
+        }
+    }
+}
+
+fn nearest_unvisited_pack_room(
+    anchor_room: u16,
+    room_count: usize,
+    chunks: &[PlaytestChunk],
+    visited: &[bool],
+) -> Option<u16> {
+    let (anchor_x, anchor_z) = pack_room_center(chunks, anchor_room);
+    let mut best_room = None;
+    let mut best_distance = i128::MAX;
+    let mut room = 0usize;
+    while room < room_count {
+        if visited.get(room).copied().unwrap_or(true) {
+            room += 1;
+            continue;
+        }
+        let (x, z) = pack_room_center(chunks, room as u16);
+        let dx = x as i128 - anchor_x as i128;
+        let dz = z as i128 - anchor_z as i128;
+        let distance = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
+        if best_room.is_none() || distance < best_distance {
+            best_room = Some(room as u16);
+            best_distance = distance;
+        }
+        room += 1;
+    }
+    best_room
+}
+
+fn pack_room_center(chunks: &[PlaytestChunk], room: u16) -> (i64, i64) {
+    chunk_for_pack_room(chunks, room)
+        .map(|chunk| {
+            (
+                chunk.origin_x as i64 * 2 + chunk.width as i64,
+                chunk.origin_z as i64 * 2 + chunk.depth as i64,
+            )
+        })
+        .unwrap_or((room as i64 * 2, 0))
+}
+
+fn chunk_for_pack_room(chunks: &[PlaytestChunk], room: u16) -> Option<&PlaytestChunk> {
+    chunks.iter().find(|chunk| chunk.room == room)
+}
+
 fn asset_vram_bytes(asset: &PlaytestAsset) -> usize {
     match asset.kind {
         PlaytestAssetKind::RoomWorld
@@ -1057,6 +1499,269 @@ mod tests {
 
         assert_eq!(asset_vram_bytes(&asset), 64 * 128 * 2 + 256 * 2);
     }
+
+    #[test]
+    fn world_pack_order_starts_at_spawn_and_walks_chunk_neighbours() {
+        let chunks = [
+            test_chunk(0, 0, 0, 0, [None, Some(1), Some(2), None]),
+            test_chunk(1, 0, 1, 0, [None, None, Some(3), Some(0)]),
+            test_chunk(2, 0, 0, 1, [Some(0), Some(3), None, None]),
+            test_chunk(3, 0, 1, 1, [Some(1), None, None, Some(2)]),
+        ];
+
+        assert_eq!(
+            world_pack_order_from_chunks(4, Some(2), &chunks),
+            vec![2, 0, 3, 1]
+        );
+    }
+
+    #[test]
+    fn world_pack_order_appends_disconnected_chunks_by_proximity() {
+        let chunks = [
+            test_chunk(0, 10, 0, 0, [None; 4]),
+            test_chunk(1, 11, 50, 0, [None; 4]),
+            test_chunk(2, 12, 5, 0, [None; 4]),
+        ];
+
+        assert_eq!(
+            world_pack_order_from_chunks(3, Some(0), &chunks),
+            vec![0, 2, 1]
+        );
+    }
+
+    #[test]
+    fn world_pack_toc_uses_same_layout_as_pack_builder() {
+        let mut package = PlaytestPackage::default();
+        package.assets = vec![
+            test_room_asset(vec![0x11; 3000], 0),
+            test_room_asset(vec![0x22; 100], 1),
+            test_room_asset(vec![0x33; 4097], 2),
+        ];
+        package.rooms = vec![test_room(0), test_room(1), test_room(2)];
+        package.chunks = vec![
+            test_chunk(0, 0, 0, 0, [None, Some(1), Some(2), None]),
+            test_chunk(1, 0, 1, 0, [None, None, None, Some(0)]),
+            test_chunk(2, 0, 0, 1, [Some(0), None, None, None]),
+        ];
+        package.spawn = Some(PlaytestSpawn {
+            room: 2,
+            x: 0,
+            y: 0,
+            z: 0,
+            yaw: 0,
+            flags: 1,
+        });
+
+        let order = world_pack_order(&package);
+        assert_eq!(order, vec![2, 0, 1]);
+        let refs = order
+            .iter()
+            .map(|room| {
+                (
+                    *room as u32,
+                    streamed_room_chunk_payload(&package, *room).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let refs = refs
+            .iter()
+            .map(|(room, bytes)| (*room, bytes.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            world_pack_toc(&package),
+            psx_iso::build_world_pack_layout(&refs).entries
+        );
+
+        let manifest = render_manifest_source(&package);
+        assert!(manifest.contains("pub const WORLD_PACK_START_LBA: u32 = 54;"));
+        assert!(manifest.contains("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord]"));
+        assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 3, byte_size: 4164"));
+    }
+
+    #[test]
+    fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
+        let mut package = PlaytestPackage::default();
+        package.assets = vec![test_room_asset(vec![0x11; 32], 0)];
+        package.rooms = vec![test_room(0)];
+        package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
+            room: 0,
+            cell_first: 0,
+            cell_count: 0,
+            vertex_first: 0,
+            vertex_count: 0,
+            surface_first: 0,
+            surface_count: 0,
+        }];
+
+        let src = render_manifest_source(&package);
+        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = &[];"));
+        assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = include_bytes!(\"rooms/room_000.psxw\");"));
+        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read room-surface cache slices from `.psxc` chunks.\npub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
+        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room cells from `.psxc` chunks.\npub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];"));
+        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room vertices from `.psxc` chunks.\npub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];"));
+        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room surfaces from `.psxc` chunks.\npub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];"));
+    }
+
+    #[test]
+    fn streamed_room_chunk_payload_embeds_room_and_cache_records() {
+        let mut package = PlaytestPackage::default();
+        package.assets = vec![test_room_asset(vec![0xaa, 0xbb, 0xcc], 0)];
+        package.rooms = vec![test_room(0)];
+        package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
+            room: 0,
+            cell_first: 0,
+            cell_count: 1,
+            vertex_first: 0,
+            vertex_count: 1,
+            surface_first: 0,
+            surface_count: 1,
+        }];
+        package.room_cache_cells = vec![PlaytestCachedRoomCell {
+            x: 2,
+            z: 3,
+            min_y: -4,
+            max_y: 5,
+            visibility_center: [6, 7, 8],
+            visibility_radius: 9,
+            surface_first: 10,
+            surface_count: 11,
+        }];
+        package.room_cache_vertices = vec![PlaytestCachedRoomVertex {
+            x: 12,
+            y: 13,
+            z: 14,
+        }];
+        package.room_cache_surfaces = vec![PlaytestCachedRoomSurface {
+            material_slot: 15,
+            vertex_indices: [0, 1, 2, 3],
+            sample_sx: 16,
+            sample_sz: 17,
+            sample_ordinal: 18,
+            uvs: [(19, 20), (21, 22), (23, 24), (25, 26)],
+            baked_vertex_rgb: [(27, 28, 29), (30, 31, 32), (33, 34, 35), (36, 37, 38)],
+            kind_flags: 39,
+            wall_direction: 40,
+            split: 41,
+            triangle_index: 42,
+        }];
+
+        let payload = streamed_room_chunk_payload(&package, 0).unwrap();
+        assert_eq!(
+            &payload[..8],
+            psx_level::STREAMED_ROOM_CHUNK_MAGIC.as_slice()
+        );
+        assert_eq!(u32_at(&payload, 8), psx_level::STREAMED_ROOM_CHUNK_VERSION);
+        assert_eq!(u32_at(&payload, 12), 0);
+        assert_eq!(u32_at(&payload, 16), payload.len() as u32);
+        assert_eq!(u32_at(&payload, 20), 64);
+        assert_eq!(u32_at(&payload, 24), 3);
+        assert_eq!(u32_at(&payload, 28), 68);
+        assert_eq!(u32_at(&payload, 32), 1);
+        assert_eq!(u32_at(&payload, 36), 100);
+        assert_eq!(u32_at(&payload, 40), 1);
+        assert_eq!(u32_at(&payload, 44), 112);
+        assert_eq!(u32_at(&payload, 48), 1);
+        assert_eq!(&payload[64..67], &[0xaa, 0xbb, 0xcc]);
+        assert_eq!(u16_at(&payload, 68), 2);
+        assert_eq!(i32_at(&payload, 72), -4);
+        assert_eq!(i32_at(&payload, 100), 12);
+        assert_eq!(u16_at(&payload, 112), 15);
+        assert_eq!(payload[151], 42);
+    }
+
+    fn test_room_asset(bytes: Vec<u8>, index: usize) -> PlaytestAsset {
+        PlaytestAsset {
+            kind: PlaytestAssetKind::RoomWorld,
+            bytes,
+            filename: format!("room_{index:03}.psxw"),
+            source_label: format!("Room {index}"),
+        }
+    }
+
+    fn test_room(world_asset_index: usize) -> PlaytestRoom {
+        PlaytestRoom {
+            name: format!("Room {world_asset_index}"),
+            world_asset_index,
+            origin_x: 0,
+            origin_z: 0,
+            sector_size: 1024,
+            material_first: 0,
+            material_count: 0,
+            fog_rgb: [0, 0, 0],
+            fog_near: 0,
+            fog_far: 0,
+            sky: PlaytestSky {
+                top_rgb: [0, 0, 0],
+                horizon_rgb: [0, 0, 0],
+                bottom_rgb: [0, 0, 0],
+                horizon_percent: 50,
+                flags: 0,
+            },
+            far_vista: PlaytestFarVista {
+                texture_asset_indices: Vec::new(),
+                radius: 0,
+                height: 0,
+                vertical_offset: 0,
+                segments: 0,
+                rotation_degrees: 0,
+                tint_rgb: [0, 0, 0],
+                flags: 0,
+            },
+            camera: PlaytestCamera {
+                distance: 0,
+                height: 0,
+                target_height: 0,
+                min_floor_clearance: 0,
+            },
+            flags: 0,
+        }
+    }
+
+    fn test_chunk(
+        room: u16,
+        authored_room: u32,
+        origin_x: i32,
+        origin_z: i32,
+        neighbours: [Option<u16>; 4],
+    ) -> PlaytestChunk {
+        PlaytestChunk {
+            room,
+            authored_room,
+            chunk_index: room,
+            origin_x,
+            origin_z,
+            width: 1,
+            depth: 1,
+            neighbours,
+            triangles: 0,
+            psxw_bytes: 0,
+            static_lit_bytes: 0,
+            populated_cells: 0,
+            flags: 0,
+        }
+    }
+
+    fn u16_at(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
+
+    fn i32_at(bytes: &[u8], offset: usize) -> i32 {
+        i32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
 }
 
 /// Header emitted at the top of every generated manifest. The
@@ -1101,6 +1806,7 @@ use psx_level::{
     LevelVisibilityCellRecord,
     LevelVisibilityPvsRecord,
     LevelWeaponRecord,
+    LevelWorldPackEntryRecord,
     MaterialIndex,
     MaterialSlot,
     MODEL_CLIP_INHERIT,

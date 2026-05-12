@@ -342,8 +342,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             // editor-playtest runtime also gates on analog mode, so keep
             // headless parity with embedded Play by forcing it here.
             bus.enable_hle_bios();
-            bus.attach_digital_pad_port1();
-            let _ = bus.force_port1_analog_mode();
+            attach_headless_playtest_pad(&mut bus);
             eprintln!(
                 "[cli] side-loaded {} — entry=0x{:08x} payload={}B",
                 game_path.display(),
@@ -362,6 +361,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
                 settings.emulator.fast_boot_disc && !args.bios_boot,
             );
             bus.cdrom.insert_disc(Some(disc));
+            attach_headless_playtest_pad(&mut bus);
             eprintln!("[cli] mounted disc {}", game_path.display());
         }
         "cue" => {
@@ -374,6 +374,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
                 settings.emulator.fast_boot_disc && !args.bios_boot,
             );
             bus.cdrom.insert_disc(Some(disc));
+            attach_headless_playtest_pad(&mut bus);
             eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
         }
         "ccd" => {
@@ -386,6 +387,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
                 settings.emulator.fast_boot_disc && !args.bios_boot,
             );
             bus.cdrom.insert_disc(Some(disc));
+            attach_headless_playtest_pad(&mut bus);
             eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
         }
         other => {
@@ -498,6 +500,11 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn attach_headless_playtest_pad(bus: &mut Bus) {
+    bus.attach_digital_pad_port1();
+    let _ = bus.force_port1_analog_mode();
 }
 
 fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
