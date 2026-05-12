@@ -16,7 +16,7 @@ codegen-units = 1
 lto           = true
 
 [features]
-default = ["world-order-bucketed", "world-grid-visible", "ot-2048"]
+default = ["cd-stream-bench", "world-order-bucketed", "world-grid-visible", "ot-2048"]
 cd-stream-bench = ["dep:psx-io"]
 cd-stream-benchmark = ["cd-stream-bench"]
 world-order-global = []
