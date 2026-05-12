@@ -557,6 +557,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-iso"
+version = "0.1.0"
+
+[[package]]
 name = "psx-level"
 version = "0.1.0"
 
@@ -635,6 +639,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-engine",
+ "psx-iso",
  "psx-level",
  "psxed-format",
  "psxed-gltf",
