@@ -6,6 +6,8 @@
 # stays as a buildable placeholder with no references to these
 # ignored files.
 level_manifest.cooked.rs
+world_pack_order.txt
 rooms/*.psxw
+stream_chunks/*.psxc
 textures/*.psxt
 models/
