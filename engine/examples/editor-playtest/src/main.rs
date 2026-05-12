@@ -31,6 +31,8 @@
 extern crate psx_rt;
 
 use psx_asset::{Animation, Model, Texture};
+#[cfg(feature = "cd-stream-bench")]
+use psx_engine::CompactCollisionRoom;
 use psx_engine::{
     button, compute_joint_world_transform, telemetry, Angle, App, CachedRoomCell,
     CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder, CharacterCollisionRoom,
@@ -38,10 +40,11 @@ use psx_engine::{
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitivePacketArena,
     PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender,
-    RuntimeRoom, Scene, TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing,
-    WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
-    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
+    RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelRenderFace, TexturedModelRenderStats,
+    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, VisualPacing, WorldCamera, WorldProjection, WorldRenderMaterial,
+    WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions, WorldSurfaceSample,
+    WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -70,9 +73,9 @@ use psx_level::{
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
-    LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
-    STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW, STREAMED_ROOM_CHUNK_HEADER_BYTES,
-    STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION, streamed_room_chunk_header,
+    streamed_room_chunk_header, LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord,
+    LevelCachedRoomVertexRecord, STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
+    STREAMED_ROOM_CHUNK_HEADER_BYTES, STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION,
 };
 use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
 
@@ -270,6 +273,10 @@ const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
 /// the previous window without reserving a second full window.
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_SLOT_COUNT: usize = 6;
+#[cfg(feature = "cd-stream-bench")]
+const MAX_COLLISION_ROOMS: usize = STREAMED_ROOM_SLOT_COUNT;
+#[cfg(not(feature = "cd-stream-bench"))]
+const MAX_COLLISION_ROOMS: usize = MAX_ACTIVE_ROOMS;
 /// Opportunistic lookahead for CD-backed rooms. Prefetch is only allowed when
 /// WORLD.PAK metadata proves the extra read span is tiny, so it cannot turn a
 /// local active-window read into a broad sector sweep.
@@ -1044,7 +1051,12 @@ impl<const N: usize> RoomStreamScheduler<N> {
 #[derive(Copy, Clone)]
 struct ActiveRuntimeRoom {
     index: RoomIndex,
-    room: RuntimeRoom<'static>,
+    render_room: Option<RuntimeRoom<'static>>,
+    collision_room: RuntimeCollisionRoom<'static>,
+    width: u16,
+    depth: u16,
+    sector_size: i32,
+    ambient_rgb: [u8; 3],
     materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
     material_count: usize,
     /// Offset from the current chunk's origin to this chunk's
@@ -1052,6 +1064,12 @@ struct ActiveRuntimeRoom {
     offset_x: i32,
     offset_z: i32,
     surface_cache: ActiveRoomSurfaceCache,
+}
+
+impl ActiveRuntimeRoom {
+    fn render(&self) -> Option<RoomRender<'static, '_>> {
+        self.render_room.as_ref().map(|room| room.render())
+    }
 }
 
 #[cfg(feature = "world-grid-visible")]
@@ -1088,6 +1106,11 @@ struct Playtest {
     /// when the manifest had at least one room and its bytes
     /// parsed.
     room: Option<RuntimeRoom<'static>>,
+    /// Active collision room. Streamed builds use a compact
+    /// collision-only payload here instead of a full `.psxw`.
+    current_collision_room: Option<RuntimeCollisionRoom<'static>>,
+    /// Ambient RGB for the room containing the player.
+    current_ambient_rgb: [u8; 3],
     /// Cache-budgeted draw chunks, all expressed relative to
     /// `room_index`.
     active_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
@@ -1166,6 +1189,8 @@ impl Playtest {
     const fn new() -> Self {
         Self {
             room: None,
+            current_collision_room: None,
+            current_ambient_rgb: [0x80, 0x80, 0x80],
             active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
             #[cfg(feature = "world-grid-visible")]
             visible_cell_caches: [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS],
@@ -1323,7 +1348,7 @@ impl Scene for Playtest {
 
         let input = motor_input(ctx, self.camera.yaw());
         let config = self.motor_config();
-        let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_ACTIVE_ROOMS];
+        let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
         let collision_room_count = if self.chunked_level() {
             let catchup = delta_vblanks.min(4) as i32;
             let margin = config
@@ -1339,7 +1364,10 @@ impl Scene for Playtest {
             None
         };
         let room_collision = match collision_room_count {
-            0 => self.room.as_ref().map(|room| room.collision()),
+            0 => self
+                .current_collision_room
+                .as_ref()
+                .map(|room| room.collision()),
             1 => single_collision_room.as_ref().map(|room| room.collision()),
             _ => None,
         };
@@ -1413,7 +1441,7 @@ impl Scene for Playtest {
             );
         }
 
-        if self.room.is_some() {
+        if self.current_collision_room.is_some() {
             let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let actor_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let mut total_instance_stats = ModelInstanceDrawStats::default();
@@ -1457,7 +1485,7 @@ impl Scene for Playtest {
                 let room_camera = camera_for_room(camera, active);
                 let lighting = RuntimeRoomLighting {
                     room_index: active.index,
-                    ambient: Rgb8::from_array(active.room.render().ambient_color()),
+                    ambient: Rgb8::from_array(active.ambient_rgb),
                     camera: room_camera,
                     fog_enabled: room_record.flags & room_flags::FOG_ENABLED != 0,
                     fog_rgb: Rgb8::from_array(room_record.fog_rgb),
@@ -1482,7 +1510,9 @@ impl Scene for Playtest {
                         .cached_precomputed_visible_cells(
                             active_slot,
                             active.index,
-                            active.room.render(),
+                            active.width,
+                            active.depth,
+                            active.sector_size,
                             visibility_anchor,
                             active.offset_x,
                             active.offset_z,
@@ -1511,8 +1541,8 @@ impl Scene for Playtest {
                                     projected_vertices,
                                     projected_valid,
                                     projected_depths,
-                                    active.room.render().depth(),
-                                    active.room.render().sector_size(),
+                                    active.depth,
+                                    active.sector_size,
                                     materials,
                                     &lighting,
                                     &room_camera,
@@ -1524,8 +1554,31 @@ impl Scene for Playtest {
                                 )
                             } else {
                                 room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                if let Some(render_room) = active.render() {
+                                    draw_room_vertex_lit_visible_cells(
+                                        render_room,
+                                        materials,
+                                        &lighting,
+                                        &room_camera,
+                                        room_options,
+                                        cells,
+                                        visibility.screen_margin,
+                                        &mut primitive_packets,
+                                        &mut world,
+                                    )
+                                } else {
+                                    GridVisibilityStats::default()
+                                }
+                            }
+                        } else {
+                            room_uncached_draws = room_uncached_draws.saturating_add(1);
+                            if active_surface_cache_failed(active.surface_cache) {
+                                room_cache_fallback_draws =
+                                    room_cache_fallback_draws.saturating_add(1);
+                            }
+                            if let Some(render_room) = active.render() {
                                 draw_room_vertex_lit_visible_cells(
-                                    active.room.render(),
+                                    render_room,
                                     materials,
                                     &lighting,
                                     &room_camera,
@@ -1535,38 +1588,25 @@ impl Scene for Playtest {
                                     &mut primitive_packets,
                                     &mut world,
                                 )
+                            } else {
+                                GridVisibilityStats::default()
                             }
-                        } else {
-                            room_uncached_draws = room_uncached_draws.saturating_add(1);
-                            if active_surface_cache_failed(active.surface_cache) {
-                                room_cache_fallback_draws =
-                                    room_cache_fallback_draws.saturating_add(1);
-                            }
-                            draw_room_vertex_lit_visible_cells(
-                                active.room.render(),
-                                materials,
-                                &lighting,
-                                &room_camera,
-                                room_options,
-                                cells,
-                                visibility.screen_margin,
-                                &mut primitive_packets,
-                                &mut world,
-                            )
                         }
                     } else {
                         room_uncached_draws = room_uncached_draws.saturating_add(1);
                         room_visibility_fallback_draws =
                             room_visibility_fallback_draws.saturating_add(1);
-                        draw_room_vertex_lit(
-                            active.room.render(),
-                            materials,
-                            &lighting,
-                            &room_camera,
-                            room_options,
-                            &mut primitive_packets,
-                            &mut world,
-                        );
+                        if let Some(render_room) = active.render() {
+                            draw_room_vertex_lit(
+                                render_room,
+                                materials,
+                                &lighting,
+                                &room_camera,
+                                room_options,
+                                &mut primitive_packets,
+                                &mut world,
+                            );
+                        }
                         GridVisibilityStats::default()
                     };
                     accumulate_grid_visibility_stats(&mut room_stats_total, stats);
@@ -1577,15 +1617,17 @@ impl Scene for Playtest {
                     if active_surface_cache_failed(active.surface_cache) {
                         room_cache_fallback_draws = room_cache_fallback_draws.saturating_add(1);
                     }
-                    draw_room_vertex_lit(
-                        active.room.render(),
-                        materials,
-                        &lighting,
-                        &room_camera,
-                        room_options,
-                        &mut primitive_packets,
-                        &mut world,
-                    );
+                    if let Some(render_room) = active.render() {
+                        draw_room_vertex_lit(
+                            render_room,
+                            materials,
+                            &lighting,
+                            &room_camera,
+                            room_options,
+                            &mut primitive_packets,
+                            &mut world,
+                        );
+                    }
                 }
                 telemetry::stage_end(telemetry::stage::ROOM);
                 telemetry::stage_begin(telemetry::stage::ENTITY_MARKERS);
@@ -1775,7 +1817,7 @@ impl Scene for Playtest {
                     };
                     let lighting = RuntimeRoomLighting {
                         room_index: active.index,
-                        ambient: Rgb8::from_array(active.room.render().ambient_color()),
+                        ambient: Rgb8::from_array(active.ambient_rgb),
                         camera: room_camera,
                         fog_enabled: room_record.flags & room_flags::FOG_ENABLED != 0,
                         fog_rgb: Rgb8::from_array(room_record.fog_rgb),
@@ -2028,7 +2070,7 @@ impl Playtest {
         &self,
         anchor: RoomPoint,
         margin: i32,
-        out: &mut [CharacterCollisionRoom<'static>; MAX_ACTIVE_ROOMS],
+        out: &mut [CharacterCollisionRoom<'static>],
     ) -> usize {
         let mut count = 0usize;
         let current_authored = authored_room_for_chunk(self.room_index);
@@ -2044,7 +2086,67 @@ impl Playtest {
             if !active_room_overlaps_collision_window(*active, anchor, margin) {
                 continue;
             }
-            out[count] = CharacterCollisionRoom::new(active.room, active.offset_x, active.offset_z);
+            out[count] = CharacterCollisionRoom::from_collision(
+                active.collision_room,
+                active.offset_x,
+                active.offset_z,
+            );
+            count += 1;
+        }
+        #[cfg(feature = "cd-stream-bench")]
+        {
+            count = self.collect_resident_streamed_collision_rooms(
+                current_authored,
+                anchor,
+                margin,
+                out,
+                count,
+            );
+        }
+        count
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn collect_resident_streamed_collision_rooms(
+        &self,
+        current_authored: Option<u32>,
+        anchor: RoomPoint,
+        margin: i32,
+        out: &mut [CharacterCollisionRoom<'static>],
+        mut count: usize,
+    ) -> usize {
+        let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
+            return count;
+        };
+        for chunk in ROOM_CHUNKS {
+            if count >= out.len() {
+                break;
+            }
+            if chunk.room == self.room_index
+                || active_room_window_contains(&self.active_rooms, chunk.room)
+            {
+                continue;
+            }
+            if current_authored.is_some() && Some(chunk.authored_room) != current_authored {
+                continue;
+            }
+            if !streamed_room_is_resident(chunk.room) {
+                continue;
+            }
+            let Some(record) = ROOMS.get(chunk.room.to_usize()) else {
+                continue;
+            };
+            if !chunk_overlaps_collision_window(*chunk, current_record, record, anchor, margin) {
+                continue;
+            }
+            let Some(room) = parse_streamed_compact_collision_room(0, chunk.room) else {
+                continue;
+            };
+            out[count] = CharacterCollisionRoom::from_collision(
+                RuntimeCollisionRoom::Compact(room),
+                room_origin_x(record).saturating_sub(room_origin_x(current_record)),
+                room_origin_z(record).saturating_sub(room_origin_z(current_record)),
+            );
             count += 1;
         }
         count
@@ -2110,11 +2212,11 @@ impl Playtest {
     }
 
     fn current_room_lighting(&self, camera: WorldCamera) -> Option<RuntimeRoomLighting> {
-        let room = self.room?;
+        self.current_collision_room?;
         let room_record = ROOMS.get(self.room_index.to_usize())?;
         Some(RuntimeRoomLighting {
             room_index: self.room_index,
-            ambient: Rgb8::from_array(room.render().ambient_color()),
+            ambient: Rgb8::from_array(self.current_ambient_rgb),
             camera,
             fog_enabled: room_record.flags & room_flags::FOG_ENABLED != 0,
             fog_rgb: Rgb8::from_array(room_record.fog_rgb),
@@ -2149,7 +2251,8 @@ impl Playtest {
         let target = self.camera_target(lock_target, self.anim_state != PlayerAnim::Idle);
         let config = self.camera_config();
         if CAMERA_COLLISION_ENABLED && self.chunked_level() {
-            let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_ACTIVE_ROOMS];
+            let mut collision_rooms =
+                [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
             let margin = config
                 .distance
                 .saturating_add(config.collision_margin)
@@ -2169,7 +2272,9 @@ impl Playtest {
                 .camera;
         }
         let collision = if CAMERA_COLLISION_ENABLED {
-            self.room.as_ref().map(|room| room.collision())
+            self.current_collision_room
+                .as_ref()
+                .map(|room| room.collision())
         } else {
             None
         };
@@ -2214,6 +2319,8 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
         telemetry::counter(telemetry::counter::ROOM_WINDOW_REBUILDS, 1);
         self.room = None;
+        self.current_collision_room = None;
+        self.current_ambient_rgb = [0x80, 0x80, 0x80];
         self.materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
         self.material_count = 0;
         self.active_rooms = [const { None }; MAX_ACTIVE_ROOMS];
@@ -2229,7 +2336,10 @@ impl Playtest {
             telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
             return;
         };
-        let current_room = parse_runtime_room_for_slot(0, current_index, current_record);
+        #[cfg(not(feature = "cd-stream-bench"))]
+        let current_room = parse_runtime_room(current_record);
+        #[cfg(feature = "cd-stream-bench")]
+        let current_room: Option<RuntimeRoom<'static>> = None;
         #[cfg(not(feature = "cd-stream-bench"))]
         let Some(current_room) = current_room
         else {
@@ -2250,7 +2360,9 @@ impl Playtest {
         if let Some(active) =
             build_active_room(next_slot, current_index, current_record, current_record)
         {
-            self.room = Some(active.room);
+            self.room = active.render_room;
+            self.current_collision_room = Some(active.collision_room);
+            self.current_ambient_rgb = active.ambient_rgb;
             self.materials = active.materials;
             self.material_count = active.material_count;
             self.active_rooms[next_slot] = Some(active);
@@ -2361,6 +2473,8 @@ impl Playtest {
             requested_rooms[requested_count] = self.room_index;
             requested_count += 1;
         }
+        requested_count =
+            self.append_current_collision_neighbour_requests(&mut requested_rooms, requested_count);
         let mut skipped = 0usize;
         while skipped < skipped_count
             && requested_count < STREAMED_ROOM_SLOT_COUNT
@@ -2369,13 +2483,7 @@ impl Playtest {
             let room = skipped_rooms[skipped];
             if room != INVALID_ROOM_INDEX
                 && !room_requested(room, &requested_rooms, requested_count)
-                && cd_stream::world_room_chunk_info(room.raw(), WORLD_PACK_TOC).is_some_and(
-                    |info| {
-                        info.sector_count > 0
-                            && info.byte_size > 0
-                            && info.byte_size <= STREAMED_ROOM_SLOT_BYTES
-                    },
-                )
+                && streamed_room_chunk_loadable(room)
             {
                 requested_rooms[requested_count] = room;
                 requested_count += 1;
@@ -2399,10 +2507,33 @@ impl Playtest {
         }
         self.active_rooms = rebuilt;
         if let Some(active) = self.active_rooms[0] {
-            self.room = Some(active.room);
+            self.room = active.render_room;
+            self.current_collision_room = Some(active.collision_room);
+            self.current_ambient_rgb = active.ambient_rgb;
             self.materials = active.materials;
             self.material_count = active.material_count;
         }
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn append_current_collision_neighbour_requests(
+        &self,
+        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        requested_count: usize,
+    ) -> usize {
+        let Some(chunk) = chunk_record_for_room(self.room_index) else {
+            return requested_count.min(STREAMED_ROOM_SLOT_COUNT);
+        };
+        let mut count = requested_count.min(STREAMED_ROOM_SLOT_COUNT);
+        for room in [
+            chunk.neighbours.north,
+            chunk.neighbours.east,
+            chunk.neighbours.south,
+            chunk.neighbours.west,
+        ] {
+            count = append_streamed_room_request(requested_rooms, count, room);
+        }
+        count
     }
 
     #[cfg(feature = "cd-stream-bench")]
@@ -2539,7 +2670,7 @@ impl Playtest {
             }
             pumps += 1;
         }
-        if self.room.is_none() {
+        if self.current_collision_room.is_none() {
             self.load_active_room_window();
         }
     }
@@ -3390,35 +3521,70 @@ fn parse_runtime_room(record: &LevelRoomRecord) -> Option<RuntimeRoom<'static>> 
     RuntimeRoom::from_bytes(asset.bytes).ok()
 }
 
-fn parse_runtime_room_for_slot(
+#[derive(Copy, Clone)]
+struct ParsedActiveRoomPayload {
+    render_room: Option<RuntimeRoom<'static>>,
+    collision_room: RuntimeCollisionRoom<'static>,
+    width: u16,
+    depth: u16,
+    sector_size: i32,
+    ambient_rgb: [u8; 3],
+}
+
+fn parse_active_room_payload(
     slot: usize,
     index: RoomIndex,
     record: &LevelRoomRecord,
-) -> Option<RuntimeRoom<'static>> {
+) -> Option<ParsedActiveRoomPayload> {
     #[cfg(feature = "cd-stream-bench")]
-    if let Some(room) = parse_streamed_runtime_room(slot, index) {
-        return Some(room);
+    if let Some(room) = parse_streamed_compact_collision_room(slot, index) {
+        return Some(ParsedActiveRoomPayload {
+            render_room: None,
+            collision_room: RuntimeCollisionRoom::Compact(room),
+            width: room.width(),
+            depth: room.depth(),
+            sector_size: room.sector_size(),
+            ambient_rgb: room.ambient_color(),
+        });
     }
     #[cfg(not(feature = "cd-stream-bench"))]
-    let _ = (slot, index);
-    parse_runtime_room(record)
+    {
+        let _ = (slot, index);
+        let room = parse_runtime_room(record)?;
+        Some(ParsedActiveRoomPayload {
+            render_room: Some(room),
+            collision_room: RuntimeCollisionRoom::Runtime(room),
+            width: room.width(),
+            depth: room.depth(),
+            sector_size: room.sector_size(),
+            ambient_rgb: room.render().ambient_color(),
+        })
+    }
+    #[cfg(feature = "cd-stream-bench")]
+    {
+        let _ = record;
+        None
+    }
 }
 
 #[cfg(feature = "cd-stream-bench")]
-fn parse_streamed_runtime_room(slot: usize, index: RoomIndex) -> Option<RuntimeRoom<'static>> {
+fn parse_streamed_compact_collision_room(
+    slot: usize,
+    index: RoomIndex,
+) -> Option<CompactCollisionRoom<'static>> {
     let _ = slot;
     unsafe {
         let resident_slot = ROOM_STREAM_SCHEDULER.resident_slot_for(index)?;
         let byte_count = ROOM_STREAM_SCHEDULER.resident_byte_count(resident_slot)?;
         let bytes = streamed_room_slot_bytes(resident_slot, byte_count)?;
         let view = streamed_room_chunk_view(bytes, index)?;
-        if view.flags & STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW == 0 {
+        if view.flags & STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT == 0 {
             return None;
         }
         let collision =
             bytes.get(view.collision_offset..view.collision_offset + view.collision_bytes)?;
         telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_HITS, 1);
-        RuntimeRoom::from_bytes(collision).ok()
+        CompactCollisionRoom::from_bytes(collision).ok()
     }
 }
 
@@ -3471,8 +3637,8 @@ fn streamed_room_chunk_view(
     {
         return None;
     }
-    let total_bytes = read_streamed_chunk_u32(bytes, streamed_room_chunk_header::TOTAL_BYTES)?
-        as usize;
+    let total_bytes =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::TOTAL_BYTES)? as usize;
     if total_bytes < STREAMED_ROOM_CHUNK_HEADER_BYTES || total_bytes > bytes.len() {
         return None;
     }
@@ -3554,6 +3720,13 @@ fn streamed_room_is_resident(index: RoomIndex) -> bool {
 }
 
 #[cfg(feature = "cd-stream-bench")]
+fn streamed_room_chunk_loadable(room: RoomIndex) -> bool {
+    cd_stream::world_room_chunk_info(room.raw(), WORLD_PACK_TOC).is_some_and(|info| {
+        info.sector_count > 0 && info.byte_size > 0 && info.byte_size <= STREAMED_ROOM_SLOT_BYTES
+    })
+}
+
+#[cfg(feature = "cd-stream-bench")]
 fn streamed_room_stream_active() -> bool {
     unsafe { ROOM_STREAM_SCHEDULER.job.is_active() }
 }
@@ -3584,6 +3757,23 @@ fn room_requested(
         i += 1;
     }
     false
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn append_streamed_room_request(
+    requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    requested_count: usize,
+    room: RoomIndex,
+) -> usize {
+    if requested_count >= STREAMED_ROOM_SLOT_COUNT
+        || room == INVALID_ROOM_INDEX
+        || room_requested(room, requested_rooms, requested_count)
+        || !streamed_room_chunk_loadable(room)
+    {
+        return requested_count.min(STREAMED_ROOM_SLOT_COUNT);
+    }
+    requested_rooms[requested_count] = room;
+    requested_count + 1
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -3635,16 +3825,18 @@ impl Playtest {
         &mut self,
         active_slot: usize,
         room_index: RoomIndex,
-        room: RoomRender<'_, '_>,
+        room_width: u16,
+        room_depth: u16,
+        room_sector_size: i32,
         anchor: RoomPoint,
         room_offset_x: i32,
         room_offset_z: i32,
         global_anchor: RoomPoint,
         camera: WorldCamera,
     ) -> Option<(&[GridVisibleCell], u16)> {
-        let sector_size = room.sector_size().max(1);
-        let anchor_x = grid_cell_for_room(anchor.x, sector_size).clamp(0, room.width() as i32 - 1);
-        let anchor_z = grid_cell_for_room(anchor.z, sector_size).clamp(0, room.depth() as i32 - 1);
+        let sector_size = room_sector_size.max(1);
+        let anchor_x = grid_cell_for_room(anchor.x, sector_size).clamp(0, room_width as i32 - 1);
+        let anchor_z = grid_cell_for_room(anchor.z, sector_size).clamp(0, room_depth as i32 - 1);
         let (view_sin_key, view_cos_key) = visible_cell_view_keys(camera);
         let cache = *self.visible_cell_caches.get(active_slot)?;
         if cache.ready
@@ -4167,14 +4359,13 @@ fn active_room_draw_order(
 }
 
 fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32 {
-    let room = active.room.render();
-    let sector_size = room.sector_size().max(1);
+    let sector_size = active.sector_size.max(1);
     let center_x = active
         .offset_x
-        .saturating_add((room.width() as i32).saturating_mul(sector_size) / 2);
+        .saturating_add((active.width as i32).saturating_mul(sector_size) / 2);
     let center_z = active
         .offset_z
-        .saturating_add((room.depth() as i32).saturating_mul(sector_size) / 2);
+        .saturating_add((active.depth as i32).saturating_mul(sector_size) / 2);
     camera
         .view_vertex(WorldVertex::new(center_x, 0, center_z))
         .z
@@ -4217,12 +4408,17 @@ fn build_active_room(
     if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
         let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
     }
-    let room = parse_runtime_room_for_slot(slot, index, record)?;
+    let payload = parse_active_room_payload(slot, index, record)?;
     let (materials, material_count) = build_runtime_room_material_table(record);
     let surface_cache = active_room_surface_cache_for(index);
     Some(ActiveRuntimeRoom {
         index,
-        room,
+        render_room: payload.render_room,
+        collision_room: payload.collision_room,
+        width: payload.width,
+        depth: payload.depth,
+        sector_size: payload.sector_size,
+        ambient_rgb: payload.ambient_rgb,
         materials,
         material_count,
         offset_x: room_origin_x(record).saturating_sub(room_origin_x(current_record)),
@@ -4647,10 +4843,11 @@ fn chunk_view_score_current_space(
 }
 
 fn authored_room_for_chunk(index: RoomIndex) -> Option<u32> {
-    ROOM_CHUNKS
-        .iter()
-        .find(|chunk| chunk.room == index)
-        .map(|chunk| chunk.authored_room)
+    chunk_record_for_room(index).map(|chunk| chunk.authored_room)
+}
+
+fn chunk_record_for_room(index: RoomIndex) -> Option<&'static LevelChunkRecord> {
+    ROOM_CHUNKS.iter().find(|chunk| chunk.room == index)
 }
 
 fn authored_bounds_current_space(
@@ -4715,6 +4912,26 @@ fn chunk_bounds_current_space(
     let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector_size));
     let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector_size));
     (x0, x1, z0, z1)
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn chunk_overlaps_collision_window(
+    chunk: LevelChunkRecord,
+    current_record: &LevelRoomRecord,
+    chunk_record: &LevelRoomRecord,
+    anchor: RoomPoint,
+    margin: i32,
+) -> bool {
+    let sector_size = chunk_record.sector_size.max(1);
+    let x0 = room_origin_x(chunk_record).saturating_sub(room_origin_x(current_record));
+    let z0 = room_origin_z(chunk_record).saturating_sub(room_origin_z(current_record));
+    let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector_size));
+    let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector_size));
+    let margin = margin.max(0);
+    anchor.x.saturating_add(margin) >= x0
+        && anchor.x.saturating_sub(margin) < x1
+        && anchor.z.saturating_add(margin) >= z0
+        && anchor.z.saturating_sub(margin) < z1
 }
 
 fn rect_distance_sq(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u64 {
@@ -4820,6 +5037,22 @@ fn room_center_distance_sq(
 }
 
 fn room_index_containing_global(point: RoomPoint) -> Option<RoomIndex> {
+    if !ROOM_CHUNKS.is_empty() {
+        for chunk in ROOM_CHUNKS {
+            let Some(record) = ROOMS.get(chunk.room.to_usize()) else {
+                continue;
+            };
+            let sector_size = record.sector_size.max(1);
+            let x0 = room_origin_x(record);
+            let z0 = room_origin_z(record);
+            let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector_size));
+            let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector_size));
+            if point.x >= x0 && point.x < x1 && point.z >= z0 && point.z < z1 {
+                return Some(chunk.room);
+            }
+        }
+        return None;
+    }
     for (raw_index, record) in ROOMS.iter().enumerate() {
         let Some(room) = parse_runtime_room(record) else {
             continue;
@@ -4874,11 +5107,11 @@ fn active_room_overlaps_collision_window(
     anchor: RoomPoint,
     margin: i32,
 ) -> bool {
-    let sector_size = active.room.sector_size().max(1);
+    let sector_size = active.sector_size.max(1);
     let x0 = active.offset_x;
     let z0 = active.offset_z;
-    let x1 = x0.saturating_add((active.room.width() as i32).saturating_mul(sector_size));
-    let z1 = z0.saturating_add((active.room.depth() as i32).saturating_mul(sector_size));
+    let x1 = x0.saturating_add((active.width as i32).saturating_mul(sector_size));
+    let z1 = z0.saturating_add((active.depth as i32).saturating_mul(sector_size));
     let margin = margin.max(0);
     anchor.x.saturating_add(margin) >= x0
         && anchor.x.saturating_sub(margin) < x1
