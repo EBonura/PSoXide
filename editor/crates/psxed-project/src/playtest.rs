@@ -2659,8 +2659,8 @@ fn append_room_visibility(
         visibility_pvs,
         visibility_pvs_bits,
     );
-    let pvs_count = u16::try_from(visibility_pvs.len().saturating_sub(pvs_first as usize))
-        .unwrap_or(u16::MAX);
+    let pvs_count =
+        u16::try_from(visibility_pvs.len().saturating_sub(pvs_first as usize)).unwrap_or(u16::MAX);
 
     visibility_cells.extend(local_cells);
     room_visibility.push(PlaytestRoomVisibility {
@@ -2915,24 +2915,14 @@ fn append_visibility_pvs(
     let mut bits = vec![0u8; bitset_bytes];
     for anchor_index in 0..cells.len() {
         bits.fill(0);
-        fill_visibility_pvs_bits(
-            anchor_index,
-            width,
-            depth,
-            cells,
-            index_by_coord,
-            &mut bits,
-        );
-        let byte_first = find_existing_visibility_pvs_bits(
-            visibility_pvs,
-            visibility_pvs_bits,
-            &bits,
-        )
-        .unwrap_or_else(|| {
-            let byte_first = u32::try_from(visibility_pvs_bits.len()).unwrap_or(u32::MAX);
-            visibility_pvs_bits.extend_from_slice(&bits);
-            byte_first
-        });
+        fill_visibility_pvs_bits(anchor_index, width, depth, cells, index_by_coord, &mut bits);
+        let byte_first =
+            find_existing_visibility_pvs_bits(visibility_pvs, visibility_pvs_bits, &bits)
+                .unwrap_or_else(|| {
+                    let byte_first = u32::try_from(visibility_pvs_bits.len()).unwrap_or(u32::MAX);
+                    visibility_pvs_bits.extend_from_slice(&bits);
+                    byte_first
+                });
         visibility_pvs.push(PlaytestVisibilityPvs {
             byte_first,
             byte_count: u16::try_from(bitset_bytes).unwrap_or(u16::MAX),
@@ -4449,6 +4439,9 @@ mod tests {
             !dir.join(MANIFEST_FILENAME).exists(),
             "cook should not overwrite the tracked placeholder manifest"
         );
+        let world_pack_order = std::fs::read_to_string(dir.join(WORLD_PACK_ORDER_FILENAME))
+            .expect("world pack order written");
+        assert!(world_pack_order.lines().any(|line| line.trim() == "0"));
 
         let blob = std::fs::read(dir.join(ROOMS_DIRNAME).join("room_000.psxw"))
             .expect("room blob written");
