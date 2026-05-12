@@ -164,8 +164,8 @@ Editor Play workflow:
 3. Click Play in the editor controls.
 4. The frontend saves the project, cooks generated assets into
    `engine/examples/editor-playtest/generated/`, runs
-   `make build-editor-playtest`, and side-loads
-   `build/examples/mipsel-sony-psx/release/editor-playtest.exe`.
+   `make build-editor-playtest`, builds a playtest disc image, and boots
+   `build/examples/mipsel-sony-psx/release/editor-playtest.bin`.
 5. The editor 3D viewport switches from editable preview to the live PSX
    framebuffer.
 6. Click the viewport to capture input for the game.
