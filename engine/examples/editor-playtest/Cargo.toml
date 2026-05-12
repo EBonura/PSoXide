@@ -17,6 +17,8 @@ lto           = true
 
 [features]
 default = ["world-order-bucketed", "world-grid-visible", "ot-2048"]
+cd-stream-bench = ["dep:psx-io"]
+cd-stream-benchmark = ["cd-stream-bench"]
 world-order-global = []
 world-order-slot = []
 world-order-linked = []
@@ -31,6 +33,7 @@ psx-engine = { path = "../../crates/psx-engine" }
 psx-font   = { path = "../../../sdk/crates/psx-font" }
 psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte    = { path = "../../../sdk/crates/psx-gte" }
+psx-io     = { path = "../../../sdk/crates/psx-io", optional = true }
 psx-level  = { path = "../../crates/psx-level" }
 psx-math   = { path = "../../../sdk/crates/psx-math" }
 psx-rt     = { path = "../../../sdk/crates/psx-rt" }

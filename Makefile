@@ -31,7 +31,8 @@
         hello-engine run-hello-engine \
         showcase-room run-showcase-room \
         cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
-        profile-demo3-paced20 profile-demo3-paced20-forward
+        profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
+        profile-demo3-disc-stream-forward validate-demo3-disc-stream
 
 help:
 	@echo "PSoXide targets:"
@@ -58,6 +59,9 @@ help:
 	@echo "    make profile-demo3-forward - profile demo3 while holding forward"
 	@echo "    make profile-demo3-paced20 - profile demo3 20Hz visual cadence telemetry"
 	@echo "    make profile-demo3-paced20-forward - paced20 profile while holding forward"
+	@echo "    make profile-demo3-disc-stream - build/play demo3 from BIN and measure CD streaming"
+	@echo "    make profile-demo3-disc-stream-forward - same, while holding forward"
+	@echo "    make validate-demo3-disc-stream - run demo3 disc-stream budget/hash gates"
 	@echo ""
 	@echo "  SDK examples (build mipsel-sony-psx binaries):"
 	@echo "    make examples     - build every example"
@@ -219,6 +223,18 @@ PROFILE_DEMO3_PACED20_FORWARD_VISUAL_FRAMES ?= 80
 PROFILE_DEMO3_PACED20_FORWARD_GUEST_FRAMES ?= 1200
 PROFILE_DEMO3_PACED20_FORWARD_STEPS ?= 480000000
 PROFILE_DEMO3_PACED20_FORWARD_HW ?= /tmp/psoxide-demo3-paced20-forward-hw-$(PROFILE_DEMO3_PACED20_FORWARD_VISUAL_FRAMES).ppm
+PROFILE_DEMO3_DISC_STREAM_VISUAL_FRAMES ?= 60
+PROFILE_DEMO3_DISC_STREAM_GUEST_FRAMES ?= 720
+PROFILE_DEMO3_DISC_STREAM_STEPS ?= 360000000
+PROFILE_DEMO3_DISC_STREAM_HW ?= /tmp/psoxide-demo3-disc-stream-hw.ppm
+PROFILE_DEMO3_DISC_STREAM_FORWARD_VISUAL_FRAMES ?= 80
+PROFILE_DEMO3_DISC_STREAM_FORWARD_GUEST_FRAMES ?= 1200
+PROFILE_DEMO3_DISC_STREAM_FORWARD_STEPS ?= 600000000
+PROFILE_DEMO3_DISC_STREAM_FORWARD_HW ?= /tmp/psoxide-demo3-disc-stream-forward-hw.ppm
+VALIDATE_DEMO3_DISC_STREAM_LOG ?= /tmp/psoxide-demo3-disc-stream-profile.log
+VALIDATE_DEMO3_DISC_STREAM_FORWARD_LOG ?= /tmp/psoxide-demo3-disc-stream-forward-profile.log
+VALIDATE_DEMO3_DISC_STREAM_HW ?= /tmp/psoxide-demo3-disc-stream-validate.ppm
+VALIDATE_DEMO3_DISC_STREAM_FORWARD_HW ?= /tmp/psoxide-demo3-disc-stream-forward-validate.ppm
 
 hello-tri:
 	cd sdk/examples/hello-tri && cargo build --release
@@ -342,6 +358,69 @@ profile-demo3-paced20-forward:
 		--dump-hw $(PROFILE_DEMO3_PACED20_FORWARD_HW) \
 		--dump-hash \
 		--dump-guest-profile
+
+profile-demo3-disc-stream:
+	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
+	cd engine/examples/editor-playtest && cargo build --release --features cd-stream-bench
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--out ../../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--volume PSOXIDE \
+		--cdtest-sectors 32 \
+		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
+		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--guest-visual-frames $(PROFILE_DEMO3_DISC_STREAM_VISUAL_FRAMES) \
+		--guest-frames $(PROFILE_DEMO3_DISC_STREAM_GUEST_FRAMES) \
+		--steps $(PROFILE_DEMO3_DISC_STREAM_STEPS) \
+		--dump-hw $(PROFILE_DEMO3_DISC_STREAM_HW) \
+		--dump-hash \
+		--dump-guest-profile
+
+profile-demo3-disc-stream-forward:
+	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
+	cd engine/examples/editor-playtest && cargo build --release --features cd-stream-bench
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--out ../../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--volume PSOXIDE \
+		--cdtest-sectors 32 \
+		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
+		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--guest-visual-frames $(PROFILE_DEMO3_DISC_STREAM_FORWARD_VISUAL_FRAMES) \
+		--guest-frames $(PROFILE_DEMO3_DISC_STREAM_FORWARD_GUEST_FRAMES) \
+		--steps $(PROFILE_DEMO3_DISC_STREAM_FORWARD_STEPS) \
+		--hold-forward \
+		--dump-hw $(PROFILE_DEMO3_DISC_STREAM_FORWARD_HW) \
+		--dump-hash \
+		--dump-guest-profile
+
+validate-demo3-disc-stream:
+	bash -o pipefail -c '$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(VALIDATE_DEMO3_DISC_STREAM_HW) 2>&1 | tee $(VALIDATE_DEMO3_DISC_STREAM_LOG)'
+	python3 tools/validate_demo3_stream_profile.py \
+		--profile $(VALIDATE_DEMO3_DISC_STREAM_LOG) \
+		--generated-dir engine/examples/editor-playtest/generated \
+		--exe $(EXAMPLE_OUT)/editor-playtest.exe \
+		--bin $(EXAMPLE_OUT)/editor-playtest.bin \
+		--label "demo3 disc stream default" \
+		--expected-display-hash 0x807c5debd2e9bf8a \
+		--expected-vram-hash 0xa5c5a996b781b8b0 \
+		--min-visual-frames $(PROFILE_DEMO3_DISC_STREAM_VISUAL_FRAMES) \
+		--min-room-cached-draws 120
+	bash -o pipefail -c '$(MAKE) profile-demo3-disc-stream-forward PROFILE_DEMO3_DISC_STREAM_FORWARD_HW=$(VALIDATE_DEMO3_DISC_STREAM_FORWARD_HW) 2>&1 | tee $(VALIDATE_DEMO3_DISC_STREAM_FORWARD_LOG)'
+	python3 tools/validate_demo3_stream_profile.py \
+		--profile $(VALIDATE_DEMO3_DISC_STREAM_FORWARD_LOG) \
+		--generated-dir engine/examples/editor-playtest/generated \
+		--exe $(EXAMPLE_OUT)/editor-playtest.exe \
+		--bin $(EXAMPLE_OUT)/editor-playtest.bin \
+		--label "demo3 disc stream forward" \
+		--expected-display-hash 0x648cb083e5c8c364 \
+		--expected-vram-hash 0x796eb705705230bc \
+		--min-visual-frames $(PROFILE_DEMO3_DISC_STREAM_FORWARD_VISUAL_FRAMES) \
+		--min-room-cached-draws 180
 
 # --- Content pipeline (host-side editor tooling) ------------------------
 
