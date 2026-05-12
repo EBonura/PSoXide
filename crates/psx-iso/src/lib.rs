@@ -45,6 +45,31 @@ pub const SECTOR_USER_DATA_OFFSET: usize = 24;
 /// User-data size per sector.
 pub const SECTOR_USER_DATA_BYTES: usize = 2048;
 
+/// Root-directory file used by the editor-playtest CD streaming probe.
+pub const CD_STREAM_BENCH_FILE_NAME: &str = "CDTEST.BIN";
+/// The editor-playtest disc layout writes SYSTEM.CNF first, then this
+/// file, then PSX.EXE. SYSTEM.CNF fits in one sector, so the probe
+/// payload starts at LBA 22.
+pub const CD_STREAM_BENCH_START_LBA: u32 = 22;
+/// Default payload size for the editor-playtest CD streaming probe.
+pub const CD_STREAM_BENCH_DEFAULT_SECTORS: usize = 32;
+/// Header signature at the start of the streaming probe payload.
+pub const CD_STREAM_BENCH_MAGIC: [u8; 8] = *b"PSOXSTRM";
+/// Root-directory file used for the first real streamed world package.
+pub const WORLD_PACK_FILE_NAME: &str = "WORLD.PAK";
+/// Header signature at the start of [`WORLD_PACK_FILE_NAME`].
+pub const WORLD_PACK_MAGIC: [u8; 8] = *b"PSOXWPAK";
+/// Current on-disc world-pack format version.
+pub const WORLD_PACK_VERSION: u32 = 1;
+/// Bytes in the fixed world-pack header.
+pub const WORLD_PACK_HEADER_BYTES: usize = 28;
+/// Bytes per world-pack chunk-table entry.
+pub const WORLD_PACK_ENTRY_BYTES: usize = 24;
+/// Default start LBA when SYSTEM.CNF and the default CD stream-test
+/// file precede WORLD.PAK in the root directory.
+pub const WORLD_PACK_DEFAULT_START_LBA: u32 =
+    CD_STREAM_BENCH_START_LBA + CD_STREAM_BENCH_DEFAULT_SECTORS as u32;
+
 /// PS1 track type from a CUE sheet / disc TOC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrackType {
@@ -86,6 +111,154 @@ pub struct TrackPosition {
     pub relative_msf: (u8, u8, u8),
     /// Absolute disc position in binary MSF.
     pub absolute_msf: (u8, u8, u8),
+}
+
+/// Deterministic byte pattern for the editor-playtest streaming
+/// probe payload. Shared by the GUI disc builder and `mkisopsx` so
+/// the guest can validate it with a tiny no-alloc mirror.
+pub fn cd_stream_bench_payload(sectors: usize) -> Vec<u8> {
+    let sectors = sectors.max(1);
+    let len = sectors.saturating_mul(SECTOR_USER_DATA_BYTES);
+    let mut payload = vec![0u8; len];
+    for (i, byte) in payload.iter_mut().enumerate() {
+        *byte = cd_stream_bench_expected_byte(i, sectors);
+    }
+    payload
+}
+
+/// Expected byte at `index` for [`cd_stream_bench_payload`].
+pub const fn cd_stream_bench_expected_byte(index: usize, sectors: usize) -> u8 {
+    if index < CD_STREAM_BENCH_MAGIC.len() {
+        CD_STREAM_BENCH_MAGIC[index]
+    } else if index < 12 {
+        ((sectors as u32).to_le_bytes())[index - 8]
+    } else {
+        let mixed = (index as u32)
+            .wrapping_mul(37)
+            .wrapping_add((index as u32) >> 3)
+            .wrapping_add(0x5D);
+        mixed as u8
+    }
+}
+
+/// FNV-1a checksum over the expected streaming probe payload.
+pub fn cd_stream_bench_expected_checksum(sectors: usize) -> u32 {
+    let sectors = sectors.max(1);
+    let len = sectors.saturating_mul(SECTOR_USER_DATA_BYTES);
+    let mut hash = 0x811C_9DC5u32;
+    let mut i = 0usize;
+    while i < len {
+        hash ^= cd_stream_bench_expected_byte(i, sectors) as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+        i += 1;
+    }
+    hash
+}
+
+/// Build a sector-aligned world package from already-cooked chunks.
+///
+/// Format:
+/// - fixed header: magic, version, chunk count, total sectors,
+///   header sectors, table bytes;
+/// - one 24-byte entry per chunk: id, sector offset, sector count,
+///   byte size, FNV checksum, reserved;
+/// - each chunk payload starts on a 2048-byte sector.
+pub fn build_world_pack(chunks: &[(u32, &[u8])]) -> Vec<u8> {
+    let layout = build_world_pack_layout(chunks);
+    let total_sectors = layout.total_sectors as usize;
+    let mut out = vec![0u8; total_sectors.saturating_mul(SECTOR_USER_DATA_BYTES)];
+    out[..WORLD_PACK_MAGIC.len()].copy_from_slice(&WORLD_PACK_MAGIC);
+    write_le_u32_at(&mut out, 8, WORLD_PACK_VERSION);
+    write_le_u32_at(&mut out, 12, chunks.len() as u32);
+    write_le_u32_at(&mut out, 16, layout.total_sectors);
+    write_le_u32_at(&mut out, 20, layout.header_sectors);
+    write_le_u32_at(&mut out, 24, layout.table_bytes);
+
+    let mut entry_offset = WORLD_PACK_HEADER_BYTES;
+    for entry in &layout.entries {
+        write_le_u32_at(&mut out, entry_offset, entry.chunk_id);
+        write_le_u32_at(&mut out, entry_offset + 4, entry.sector_offset);
+        write_le_u32_at(&mut out, entry_offset + 8, entry.sector_count);
+        write_le_u32_at(&mut out, entry_offset + 12, entry.byte_size);
+        write_le_u32_at(&mut out, entry_offset + 16, entry.checksum);
+        write_le_u32_at(&mut out, entry_offset + 20, 0);
+        entry_offset += WORLD_PACK_ENTRY_BYTES;
+    }
+
+    for ((_, bytes), entry) in chunks.iter().zip(layout.entries.iter()) {
+        let start = entry.sector_offset as usize * SECTOR_USER_DATA_BYTES;
+        let end = start + bytes.len();
+        out[start..end].copy_from_slice(bytes);
+    }
+    out
+}
+
+/// Cooked placement metadata for one [`WORLD_PACK_FILE_NAME`] chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldPackBuildEntry {
+    /// Chunk id supplied to [`build_world_pack`].
+    pub chunk_id: u32,
+    /// Payload start sector relative to the beginning of `WORLD.PAK`.
+    pub sector_offset: u32,
+    /// Sector-aligned payload length.
+    pub sector_count: u32,
+    /// Original unpadded byte size.
+    pub byte_size: u32,
+    /// FNV-1a checksum of the unpadded payload.
+    pub checksum: u32,
+}
+
+/// Full cooked layout for a [`WORLD_PACK_FILE_NAME`] payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldPackLayout {
+    /// Per-chunk placement entries in payload order.
+    pub entries: Vec<WorldPackBuildEntry>,
+    /// Header/table sector count.
+    pub header_sectors: u32,
+    /// Total pack sector count, including header/table.
+    pub total_sectors: u32,
+    /// Chunk table byte size.
+    pub table_bytes: u32,
+}
+
+/// Compute the exact [`WORLD_PACK_FILE_NAME`] layout without
+/// materialising the full pack bytes.
+pub fn build_world_pack_layout(chunks: &[(u32, &[u8])]) -> WorldPackLayout {
+    let table_bytes = chunks.len().saturating_mul(WORLD_PACK_ENTRY_BYTES);
+    let header_bytes = WORLD_PACK_HEADER_BYTES.saturating_add(table_bytes);
+    let header_sectors = header_bytes.div_ceil(SECTOR_USER_DATA_BYTES).max(1) as u32;
+    let mut next_sector = header_sectors;
+    let mut entries = Vec::with_capacity(chunks.len());
+    for &(chunk_id, bytes) in chunks {
+        let sector_count = bytes.len().div_ceil(SECTOR_USER_DATA_BYTES).max(1) as u32;
+        entries.push(WorldPackBuildEntry {
+            chunk_id,
+            sector_offset: next_sector,
+            sector_count,
+            byte_size: bytes.len() as u32,
+            checksum: fnv1a32(bytes),
+        });
+        next_sector = next_sector.saturating_add(sector_count);
+    }
+    WorldPackLayout {
+        entries,
+        header_sectors,
+        total_sectors: next_sector,
+        table_bytes: table_bytes as u32,
+    }
+}
+
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    let mut hash = 0x811C_9DC5u32;
+    for &byte in bytes {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+fn write_le_u32_at(dst: &mut [u8], offset: usize, value: u32) {
+    dst[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 /// A loaded disc image. Holds the raw sector data plus enough TOC
@@ -485,5 +658,50 @@ mod tests {
         ]);
         assert!(disc.read_sector_raw(10).is_none());
         assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xCD);
+    }
+
+    #[test]
+    fn cd_stream_bench_payload_is_deterministic() {
+        let payload = cd_stream_bench_payload(2);
+        assert_eq!(payload.len(), SECTOR_USER_DATA_BYTES * 2);
+        assert_eq!(&payload[..8], &CD_STREAM_BENCH_MAGIC);
+        assert_eq!(&payload[8..12], &2u32.to_le_bytes());
+        assert_eq!(payload[12], cd_stream_bench_expected_byte(12, 2));
+        assert_eq!(
+            cd_stream_bench_expected_checksum(2),
+            payload.iter().fold(0x811C_9DC5u32, |hash, byte| {
+                (hash ^ (*byte as u32)).wrapping_mul(0x0100_0193)
+            })
+        );
+    }
+
+    #[test]
+    fn world_pack_aligns_chunk_payloads_to_sectors() {
+        let first = vec![0x11; 3000];
+        let second = vec![0x22; 17];
+        let pack = build_world_pack(&[(7, &first), (9, &second)]);
+        assert_eq!(&pack[..8], &WORLD_PACK_MAGIC);
+        assert_eq!(le_u32(&pack[8..12]), WORLD_PACK_VERSION);
+        assert_eq!(le_u32(&pack[12..16]), 2);
+        assert_eq!(le_u32(&pack[20..24]), 1);
+        assert_eq!(le_u32(&pack[24..28]), (WORLD_PACK_ENTRY_BYTES * 2) as u32);
+
+        let first_entry = WORLD_PACK_HEADER_BYTES;
+        let second_entry = WORLD_PACK_HEADER_BYTES + WORLD_PACK_ENTRY_BYTES;
+        assert_eq!(le_u32(&pack[first_entry..first_entry + 4]), 7);
+        assert_eq!(le_u32(&pack[first_entry + 4..first_entry + 8]), 1);
+        assert_eq!(le_u32(&pack[first_entry + 8..first_entry + 12]), 2);
+        assert_eq!(le_u32(&pack[second_entry..second_entry + 4]), 9);
+        assert_eq!(le_u32(&pack[second_entry + 4..second_entry + 8]), 3);
+        assert_eq!(le_u32(&pack[second_entry + 8..second_entry + 12]), 1);
+
+        let first_start = SECTOR_USER_DATA_BYTES;
+        let second_start = 3 * SECTOR_USER_DATA_BYTES;
+        assert_eq!(&pack[first_start..first_start + first.len()], &first);
+        assert_eq!(&pack[second_start..second_start + second.len()], &second);
+    }
+
+    fn le_u32(bytes: &[u8]) -> u32 {
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 }

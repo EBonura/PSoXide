@@ -12,7 +12,7 @@ use emulator_core::{
 };
 use psoxide_settings::library::{GameKind, Region};
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
-use psx_iso::{default_system_cnf, Disc, Exe, IsoBuilder, SECTOR_BYTES};
+use psx_iso::{build_world_pack, default_system_cnf, Disc, Exe, IsoBuilder, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
@@ -21,6 +21,8 @@ use crate::ui;
 use crate::ui::hud::HudState;
 use crate::ui::memory::MemoryView;
 use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState};
+
+const WORLD_PACK_ORDER_FILE_NAME: &str = "world_pack_order.txt";
 
 /// Ring-buffer capacity for the execution-history panel. 16 rows is
 /// the "what just ran" context window -- enough to spot a tight loop
@@ -1588,7 +1590,8 @@ fn editor_playtest_disc_path() -> PathBuf {
 fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
     let exe_path = editor_playtest_exe_path();
     let exe_bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
-    let image = embedded_playtest_disc_image(exe_bytes)?;
+    let world_pack = embedded_world_pack_payload()?;
+    let image = embedded_playtest_disc_image(exe_bytes, world_pack)?;
 
     let disc_path = editor_playtest_disc_path();
     let dir = disc_path
@@ -1599,12 +1602,130 @@ fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
     Ok(disc_path)
 }
 
-fn embedded_playtest_disc_image(exe_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+fn embedded_playtest_disc_image(
+    exe_bytes: Vec<u8>,
+    world_pack: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
     Exe::parse(&exe_bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
     let mut builder = IsoBuilder::new().volume_id("PSOXIDE");
     builder.add_file("SYSTEM.CNF", default_system_cnf());
+    builder.add_file(
+        psx_iso::CD_STREAM_BENCH_FILE_NAME,
+        psx_iso::cd_stream_bench_payload(psx_iso::CD_STREAM_BENCH_DEFAULT_SECTORS),
+    );
+    if let Some(world_pack) = world_pack {
+        builder.add_file(psx_iso::WORLD_PACK_FILE_NAME, world_pack);
+    }
     builder.add_file("PSX.EXE", exe_bytes);
     Ok(builder.build_bin())
+}
+
+fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
+    let generated_dir = repo_root_dir()
+        .join("engine")
+        .join("examples")
+        .join("editor-playtest")
+        .join("generated");
+    let rooms_dir = generated_dir.join("rooms");
+    if !rooms_dir.is_dir() {
+        return Ok(None);
+    }
+    let mut rooms = Vec::new();
+    for entry in
+        std::fs::read_dir(&rooms_dir).map_err(|e| format!("read {}: {e}", rooms_dir.display()))?
+    {
+        let entry = entry.map_err(|e| format!("read {}: {e}", rooms_dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("psxw") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(raw_index) = stem.strip_prefix("room_") else {
+            continue;
+        };
+        let chunk_id = raw_index
+            .parse::<u32>()
+            .map_err(|_| format!("invalid room chunk filename: {}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        rooms.push((chunk_id, bytes));
+    }
+    if rooms.is_empty() {
+        return Ok(None);
+    }
+    rooms.sort_by_key(|(chunk_id, _)| *chunk_id);
+    let order_file = generated_dir.join(WORLD_PACK_ORDER_FILE_NAME);
+    if order_file.is_file() {
+        let order = read_embedded_world_pack_order(&order_file)?;
+        apply_embedded_world_pack_order(&mut rooms, &order, &order_file)?;
+    }
+    let refs: Vec<(u32, &[u8])> = rooms
+        .iter()
+        .map(|(chunk_id, bytes)| (*chunk_id, bytes.as_slice()))
+        .collect();
+    Ok(Some(build_world_pack(&refs)))
+}
+
+fn read_embedded_world_pack_order(path: &Path) -> Result<Vec<u32>, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut order = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let trimmed = line.split('#').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let room = trimmed
+            .parse::<u32>()
+            .map_err(|_| format!("{}:{} invalid room id", path.display(), line_index + 1))?;
+        if !seen.insert(room) {
+            return Err(format!(
+                "{}:{} duplicate room id {room}",
+                path.display(),
+                line_index + 1
+            ));
+        }
+        order.push(room);
+    }
+    Ok(order)
+}
+
+fn apply_embedded_world_pack_order(
+    rooms: &mut Vec<(u32, Vec<u8>)>,
+    order: &[u32],
+    order_file: &Path,
+) -> Result<(), String> {
+    if order.is_empty() {
+        return Err(format!(
+            "{}: world pack order is empty",
+            order_file.display()
+        ));
+    }
+    let mut ordered = Vec::with_capacity(rooms.len());
+    for &chunk_id in order {
+        let Some(index) = rooms.iter().position(|(room, _)| *room == chunk_id) else {
+            return Err(format!(
+                "{}: room id {chunk_id} has no matching room_{chunk_id:03}.psxw",
+                order_file.display()
+            ));
+        };
+        ordered.push(rooms.remove(index));
+    }
+    if !rooms.is_empty() {
+        let missing = rooms
+            .iter()
+            .map(|(chunk_id, _)| chunk_id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{}: order file missing room ids {missing}",
+            order_file.display()
+        ));
+    }
+    *rooms = ordered;
+    Ok(())
 }
 
 fn project_baked_exe_path(project_dir: &Path, project_name: &str) -> PathBuf {
@@ -1798,13 +1919,28 @@ mod tests {
         exe[0x1C..0x20].copy_from_slice(&4u32.to_le_bytes());
         exe.extend_from_slice(&[1, 2, 3, 4]);
 
-        let image = embedded_playtest_disc_image(exe).expect("disc image builds");
+        let world_pack = psx_iso::build_world_pack(&[(0, b"room-zero".as_slice())]);
+        let image = embedded_playtest_disc_image(exe, Some(world_pack)).expect("disc image builds");
         let disc = Disc::from_bin(image);
         let boot = psx_iso::load_boot_exe_from_disc(&disc).expect("disc boots");
+        let stream_sector = disc
+            .read_sector_user(psx_iso::CD_STREAM_BENCH_START_LBA)
+            .expect("stream bench sector exists");
+        let world_pack_sector = disc
+            .read_sector_user(psx_iso::WORLD_PACK_DEFAULT_START_LBA)
+            .expect("world pack sector exists");
 
         assert_eq!(boot.boot_path, "PSX.EXE;1");
         assert_eq!(boot.exe.initial_pc, 0x8001_2340);
         assert_eq!(boot.exe.payload, vec![1, 2, 3, 4]);
+        assert_eq!(
+            &stream_sector[..psx_iso::CD_STREAM_BENCH_MAGIC.len()],
+            &psx_iso::CD_STREAM_BENCH_MAGIC
+        );
+        assert_eq!(
+            &world_pack_sector[..psx_iso::WORLD_PACK_MAGIC.len()],
+            &psx_iso::WORLD_PACK_MAGIC
+        );
     }
 
     #[test]

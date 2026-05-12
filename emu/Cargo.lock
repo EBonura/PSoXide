@@ -3000,6 +3000,7 @@ version = "0.1.0"
 dependencies = [
  "psx-asset",
  "psx-engine",
+ "psx-iso",
  "psx-level",
  "psxed-format",
  "psxed-gltf",

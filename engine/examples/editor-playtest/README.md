@@ -12,8 +12,11 @@ into this crate's `generated/` directory:
 generated/
   level_manifest.rs              tracked placeholder manifest
   level_manifest.cooked.rs       ignored cooked manifest -- psx_level records + include_bytes!
+  world_pack_order.txt           ignored WORLD.PAK payload order hint
   rooms/
     room_NNN.psxw                cooked room geometry (one per Room node)
+  stream_chunks/
+    room_NNN.psxc                CD-streamable room geometry + render cache
   textures/
     texture_NNN.psxt             cooked texture blobs (one per unique texture)
 ```
@@ -82,8 +85,11 @@ so cooks don't churn diffs or dirty the tracked manifest:
 generated/
   level_manifest.rs              tracked placeholder
   level_manifest.cooked.rs       gitignored cooked manifest
+  world_pack_order.txt           gitignored WORLD.PAK payload order hint
   rooms/
     room_NNN.psxw                gitignored
+  stream_chunks/
+    room_NNN.psxc                gitignored CD-streamable room + cache payload
   textures/
     texture_NNN.psxt             gitignored
   models/
@@ -143,7 +149,9 @@ What it *does* render:
 - `.cargo/config.toml` -- pins `target = "mipsel-sony-psx"`.
 - `generated/level_manifest.rs` -- tracked placeholder; keep free of `include_bytes!`.
 - `generated/level_manifest.cooked.rs` -- generated; do not edit; gitignored.
+- `generated/world_pack_order.txt` -- generated CD streaming order hint; do not edit; gitignored.
 - `generated/rooms/*.psxw` -- generated; do not edit; gitignored.
+- `generated/stream_chunks/*.psxc` -- generated CD-streamable room/cache payloads; do not edit; gitignored.
 - `generated/textures/*.psxt` -- generated; do not edit; gitignored.
 - `generated/models/model_NNN_*/` -- per-model folders carrying
   cooked `.psxmdl` + `.psxt` + `.psxanim`; do not edit; gitignored.

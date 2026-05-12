@@ -15,9 +15,17 @@ pub const MANIFEST_FILENAME: &str = "level_manifest.rs";
 /// `make cook-playtest`.
 pub const COOKED_MANIFEST_FILENAME: &str = "level_manifest.cooked.rs";
 
+/// Cooked WORLD.PAK room ordering hint consumed by disc builders.
+pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
+
 /// Subdirectory inside `generated/` that holds cooked `.psxw`
 /// blobs.
 pub const ROOMS_DIRNAME: &str = "rooms";
+
+/// Subdirectory inside `generated/` that holds CD-streamable room
+/// chunks. Each `.psxc` contains the matching `.psxw` plus the
+/// cooked render cache for that room.
+pub const STREAM_CHUNKS_DIRNAME: &str = "stream_chunks";
 
 /// Subdirectory inside `generated/` that holds copied `.psxt`
 /// texture blobs.
