@@ -18,7 +18,9 @@ use std::process::ExitCode;
 
 use psxed_project::{
     default_project_dir,
-    playtest::{build_package, cook_to_dir, default_generated_dir},
+    playtest::{
+        build_package, cook_to_dir, default_generated_dir, streamed_room_chunk_memory_report,
+    },
     ProjectDocument,
 };
 
@@ -162,6 +164,35 @@ fn main() -> ExitCode {
                         largest.static_lit_bytes,
                     );
                 }
+                if let Ok(stream) = streamed_room_chunk_memory_report(&package) {
+                    let total = stream.totals.payload_bytes.max(1);
+                    println!(
+                        "[cook-playtest] Stream memory: payload={}B sectors={} stream={}B collision={}B ({:.1}%) render-cache={}B ({:.1}%) [cells={}B vertices={}B surfaces={}B] align-pad={}B sector-pad={}B",
+                        stream.totals.payload_bytes,
+                        stream.totals.sector_count,
+                        stream.totals.stream_bytes,
+                        stream.totals.collision_bytes,
+                        percent(stream.totals.collision_bytes, total),
+                        stream.totals.render_cache_bytes,
+                        percent(stream.totals.render_cache_bytes, total),
+                        stream.totals.render_cell_bytes,
+                        stream.totals.render_vertex_bytes,
+                        stream.totals.render_surface_bytes,
+                        stream.totals.alignment_padding_bytes,
+                        stream.totals.sector_padding_bytes,
+                    );
+                    if let Some(largest) = stream.largest_chunk {
+                        println!(
+                            "[cook-playtest] Stream largest: room {} payload={}B stream={}B sectors={} collision={}B render-cache={}B",
+                            largest.room,
+                            largest.payload_bytes,
+                            largest.stream_bytes,
+                            largest.sector_count,
+                            largest.collision_bytes,
+                            largest.render_cache_bytes,
+                        );
+                    }
+                }
             }
             println!("[cook-playtest] wrote → {}", dir.display());
             println!("[cook-playtest] Build: make build-editor-playtest");
@@ -172,4 +203,8 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn percent(part: usize, total: usize) -> f64 {
+    (part as f64) * 100.0 / (total.max(1) as f64)
 }
