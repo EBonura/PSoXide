@@ -6,6 +6,12 @@
 //! borrowed slice suitable for cooked, ROM-backed data.
 
 use crate::WorldVertex;
+use psx_level::{
+    compact_collision_header, compact_collision_sector_flags, compact_collision_surface,
+    compact_collision_triangle_flags, compact_collision_wall_flags, COMPACT_COLLISION_HEADER_BYTES,
+    COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES, COMPACT_COLLISION_MAGIC,
+    COMPACT_COLLISION_SECTOR_BYTES, COMPACT_COLLISION_VERSION, COMPACT_COLLISION_WALL_BYTES,
+};
 
 /// World units per grid sector.
 ///
@@ -528,7 +534,393 @@ impl<'a> RuntimeRoom<'a> {
 
     /// Collision-side facade, see [`RoomCollision`].
     pub const fn collision(&self) -> RoomCollision<'a, '_> {
-        RoomCollision { room: self }
+        RoomCollision::Runtime(self)
+    }
+}
+
+/// Parse error for compact collision-only room payloads.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CompactCollisionParseError {
+    /// Payload ended before a required header/table field.
+    Truncated,
+    /// Payload magic did not match the compact collision format.
+    WrongMagic,
+    /// Payload version is unknown to this runtime.
+    UnsupportedVersion(u32),
+    /// Header counts or table ranges are inconsistent.
+    InvalidLayout,
+}
+
+/// Compact collision-only room view.
+///
+/// This is the streamed-room collision payload: no materials, no UVs,
+/// no lighting. It keeps only the data consumed by character/camera
+/// collision.
+#[derive(Copy, Clone, Debug)]
+pub struct CompactCollisionRoom<'a> {
+    sectors: &'a [u8],
+    walls: &'a [u8],
+    height_overrides: &'a [u8],
+    width: u16,
+    depth: u16,
+    sector_size: i32,
+    wall_count: u16,
+    height_override_count: u16,
+    ambient_rgb: [u8; 3],
+}
+
+impl<'a> CompactCollisionRoom<'a> {
+    /// Parse a compact collision-only room payload.
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, CompactCollisionParseError> {
+        if bytes.len() < COMPACT_COLLISION_HEADER_BYTES {
+            return Err(CompactCollisionParseError::Truncated);
+        }
+        if bytes.get(0..8) != Some(COMPACT_COLLISION_MAGIC.as_slice()) {
+            return Err(CompactCollisionParseError::WrongMagic);
+        }
+        let version = read_u32(bytes, compact_collision_header::VERSION)
+            .ok_or(CompactCollisionParseError::Truncated)?;
+        if version != COMPACT_COLLISION_VERSION {
+            return Err(CompactCollisionParseError::UnsupportedVersion(version));
+        }
+        let width = read_u16(bytes, compact_collision_header::WIDTH)
+            .ok_or(CompactCollisionParseError::Truncated)?;
+        let depth = read_u16(bytes, compact_collision_header::DEPTH)
+            .ok_or(CompactCollisionParseError::Truncated)?;
+        let sector_size = read_i32(bytes, compact_collision_header::SECTOR_SIZE)
+            .ok_or(CompactCollisionParseError::Truncated)?;
+        let sector_count = read_u16(bytes, compact_collision_header::SECTOR_COUNT)
+            .ok_or(CompactCollisionParseError::Truncated)?;
+        let wall_count = read_u16(bytes, compact_collision_header::WALL_COUNT)
+            .ok_or(CompactCollisionParseError::Truncated)?;
+        let height_override_count =
+            read_u16(bytes, compact_collision_header::HEIGHT_OVERRIDE_COUNT)
+                .ok_or(CompactCollisionParseError::Truncated)?;
+        let ambient = bytes
+            .get(compact_collision_header::AMBIENT_RGB..compact_collision_header::AMBIENT_RGB + 3)
+            .ok_or(CompactCollisionParseError::Truncated)?;
+        let expected_sectors = (width as usize)
+            .checked_mul(depth as usize)
+            .ok_or(CompactCollisionParseError::InvalidLayout)?;
+        if expected_sectors != sector_count as usize {
+            return Err(CompactCollisionParseError::InvalidLayout);
+        }
+
+        let mut offset = COMPACT_COLLISION_HEADER_BYTES;
+        let sector_bytes = checked_table_len(sector_count, COMPACT_COLLISION_SECTOR_BYTES)?;
+        let sectors = take_bytes(bytes, &mut offset, sector_bytes)?;
+        let wall_bytes = checked_table_len(wall_count, COMPACT_COLLISION_WALL_BYTES)?;
+        let walls = take_bytes(bytes, &mut offset, wall_bytes)?;
+        let override_bytes = checked_table_len(
+            height_override_count,
+            COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES,
+        )?;
+        let height_overrides = take_bytes(bytes, &mut offset, override_bytes)?;
+        if offset != bytes.len() {
+            return Err(CompactCollisionParseError::InvalidLayout);
+        }
+
+        let room = Self {
+            sectors,
+            walls,
+            height_overrides,
+            width,
+            depth,
+            sector_size,
+            wall_count,
+            height_override_count,
+            ambient_rgb: [ambient[0], ambient[1], ambient[2]],
+        };
+        if !room.validate_sector_wall_ranges() {
+            return Err(CompactCollisionParseError::InvalidLayout);
+        }
+        Ok(room)
+    }
+
+    /// Collision-side facade.
+    pub const fn collision(&self) -> RoomCollision<'a, '_> {
+        RoomCollision::Compact(self)
+    }
+
+    /// Width in grid sectors.
+    pub const fn width(self) -> u16 {
+        self.width
+    }
+
+    /// Depth in grid sectors.
+    pub const fn depth(self) -> u16 {
+        self.depth
+    }
+
+    /// Engine units per sector.
+    pub const fn sector_size(self) -> i32 {
+        self.sector_size
+    }
+
+    /// Ambient room RGB used for actor lighting while this chunk is active.
+    pub const fn ambient_color(self) -> [u8; 3] {
+        self.ambient_rgb
+    }
+
+    fn sector(self, x: u16, z: u16) -> Option<CompactSectorCollision> {
+        let sector = self.sector_record(x, z)?;
+        sector.has_geometry().then_some(sector)
+    }
+
+    fn sector_probe(self, x: u16, z: u16) -> Option<CompactSectorCollisionProbe> {
+        let sector = self.sector_record(x, z)?;
+        sector.has_geometry().then_some(CompactSectorCollisionProbe {
+            flags: sector.flags,
+            first_wall: sector.first_wall,
+            wall_count: sector.wall_count,
+        })
+    }
+
+    fn sector_wall(
+        self,
+        sector: CompactSectorCollision,
+        local_index: u16,
+    ) -> Option<CompactWallCollision> {
+        if local_index >= sector.wall_count {
+            return None;
+        }
+        self.wall(sector.first_wall.checked_add(local_index)?)
+    }
+
+    fn sector_probe_wall(
+        self,
+        sector: CompactSectorCollisionProbe,
+        local_index: u16,
+    ) -> Option<CompactWallCollision> {
+        if local_index >= sector.wall_count {
+            return None;
+        }
+        self.wall(sector.first_wall.checked_add(local_index)?)
+    }
+
+    fn wall(self, index: u16) -> Option<CompactWallCollision> {
+        if index >= self.wall_count {
+            return None;
+        }
+        let base = (index as usize).checked_mul(COMPACT_COLLISION_WALL_BYTES)?;
+        let bytes = self
+            .walls
+            .get(base..base.checked_add(COMPACT_COLLISION_WALL_BYTES)?)?;
+        Some(CompactWallCollision {
+            direction: *bytes.first()?,
+            flags: *bytes.get(1)?,
+            shape: read_u16(bytes, 2)?,
+            heights: read_i32x4(bytes, 4)?,
+        })
+    }
+
+    fn sector_record(self, x: u16, z: u16) -> Option<CompactSectorCollision> {
+        if x >= self.width || z >= self.depth {
+            return None;
+        }
+        let index = (x as usize)
+            .checked_mul(self.depth as usize)?
+            .checked_add(z as usize)?;
+        let base = index.checked_mul(COMPACT_COLLISION_SECTOR_BYTES)?;
+        let bytes = self
+            .sectors
+            .get(base..base.checked_add(COMPACT_COLLISION_SECTOR_BYTES)?)?;
+        let sector_index = u16::try_from(index).ok()?;
+        let floor_heights = read_i32x4(bytes, 12)?;
+        let ceiling_heights = read_i32x4(bytes, 28)?;
+        Some(CompactSectorCollision {
+            flags: *bytes.first()?,
+            floor_split: *bytes.get(1)?,
+            ceiling_split: *bytes.get(2)?,
+            floor_triangle_flags: *bytes.get(3)?,
+            ceiling_triangle_flags: *bytes.get(4)?,
+            first_wall: read_u16(bytes, 6)?,
+            wall_count: read_u16(bytes, 8)?,
+            floor_heights,
+            ceiling_heights,
+            floor_triangle_heights: self
+                .height_override(sector_index, compact_collision_surface::FLOOR)
+                .unwrap_or_else(|| {
+                    [
+                        horizontal_triangle_heights(floor_heights, *bytes.get(1).unwrap_or(&0), 0),
+                        horizontal_triangle_heights(floor_heights, *bytes.get(1).unwrap_or(&0), 1),
+                    ]
+                }),
+            ceiling_triangle_heights: self
+                .height_override(sector_index, compact_collision_surface::CEILING)
+                .unwrap_or_else(|| {
+                    [
+                        horizontal_triangle_heights(
+                            ceiling_heights,
+                            *bytes.get(2).unwrap_or(&0),
+                            0,
+                        ),
+                        horizontal_triangle_heights(
+                            ceiling_heights,
+                            *bytes.get(2).unwrap_or(&0),
+                            1,
+                        ),
+                    ]
+                }),
+        })
+    }
+
+    fn height_override(self, sector_index: u16, surface: u8) -> Option<[[i32; 3]; 2]> {
+        let mut index = 0usize;
+        while index < self.height_override_count as usize {
+            let base = index.checked_mul(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES)?;
+            let bytes = self
+                .height_overrides
+                .get(base..base.checked_add(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES)?)?;
+            if read_u16(bytes, 0)? == sector_index && *bytes.get(2)? == surface {
+                return Some([
+                    [read_i32(bytes, 4)?, read_i32(bytes, 8)?, read_i32(bytes, 12)?],
+                    [
+                        read_i32(bytes, 16)?,
+                        read_i32(bytes, 20)?,
+                        read_i32(bytes, 24)?,
+                    ],
+                ]);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    fn validate_sector_wall_ranges(self) -> bool {
+        let mut index = 0usize;
+        let sector_count = self.width as usize * self.depth as usize;
+        while index < sector_count {
+            let base = match index.checked_mul(COMPACT_COLLISION_SECTOR_BYTES) {
+                Some(base) => base,
+                None => return false,
+            };
+            let Some(bytes) = self
+                .sectors
+                .get(base..base.saturating_add(COMPACT_COLLISION_SECTOR_BYTES))
+            else {
+                return false;
+            };
+            let Some(first) = read_u16(bytes, 6) else {
+                return false;
+            };
+            let Some(count) = read_u16(bytes, 8) else {
+                return false;
+            };
+            if first.checked_add(count).is_none_or(|end| end > self.wall_count) {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+/// Collision-side projection of one compact decoded sector.
+pub struct CompactSectorCollision {
+    flags: u8,
+    floor_split: u8,
+    ceiling_split: u8,
+    floor_triangle_flags: u8,
+    ceiling_triangle_flags: u8,
+    first_wall: u16,
+    wall_count: u16,
+    floor_heights: [i32; 4],
+    ceiling_heights: [i32; 4],
+    floor_triangle_heights: [[i32; 3]; 2],
+    ceiling_triangle_heights: [[i32; 3]; 2],
+}
+
+impl CompactSectorCollision {
+    fn has_geometry(self) -> bool {
+        self.has_floor() || self.has_ceiling() || self.wall_count != 0
+    }
+
+    fn has_floor(self) -> bool {
+        self.flags & compact_collision_sector_flags::HAS_FLOOR != 0
+            && (horizontal_triangle_present(self.floor_triangle_flags, 0)
+                || horizontal_triangle_present(self.floor_triangle_flags, 1))
+    }
+
+    fn has_ceiling(self) -> bool {
+        self.flags & compact_collision_sector_flags::HAS_CEILING != 0
+            && (horizontal_triangle_present(self.ceiling_triangle_flags, 0)
+                || horizontal_triangle_present(self.ceiling_triangle_flags, 1))
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+/// Collision probe projection of one compact decoded sector.
+pub struct CompactSectorCollisionProbe {
+    flags: u8,
+    first_wall: u16,
+    wall_count: u16,
+}
+
+impl CompactSectorCollisionProbe {
+    fn has_floor(self) -> bool {
+        self.flags & compact_collision_sector_flags::HAS_FLOOR != 0
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+/// Collision-side projection of one compact decoded wall.
+pub struct CompactWallCollision {
+    direction: u8,
+    flags: u8,
+    shape: u16,
+    heights: [i32; 4],
+}
+
+/// Runtime collision room source.
+#[derive(Copy, Clone, Debug)]
+pub enum RuntimeCollisionRoom<'a> {
+    /// Full `.psxw` runtime room.
+    Runtime(RuntimeRoom<'a>),
+    /// Compact collision-only room.
+    Compact(CompactCollisionRoom<'a>),
+}
+
+impl<'a> RuntimeCollisionRoom<'a> {
+    /// Collision-side facade.
+    pub fn collision(&self) -> RoomCollision<'a, '_> {
+        match self {
+            Self::Runtime(room) => room.collision(),
+            Self::Compact(room) => room.collision(),
+        }
+    }
+
+    /// Width in grid sectors.
+    pub fn width(self) -> u16 {
+        match self {
+            Self::Runtime(room) => room.width(),
+            Self::Compact(room) => room.width(),
+        }
+    }
+
+    /// Depth in grid sectors.
+    pub fn depth(self) -> u16 {
+        match self {
+            Self::Runtime(room) => room.depth(),
+            Self::Compact(room) => room.depth(),
+        }
+    }
+
+    /// Engine units per sector.
+    pub fn sector_size(self) -> i32 {
+        match self {
+            Self::Runtime(room) => room.sector_size(),
+            Self::Compact(room) => room.sector_size(),
+        }
+    }
+
+    /// Ambient room RGB used for actor lighting while this room is active.
+    pub fn ambient_color(self) -> [u8; 3] {
+        match self {
+            Self::Runtime(room) => room.render().ambient_color(),
+            Self::Compact(room) => room.ambient_color(),
+        }
     }
 }
 
@@ -641,55 +1033,82 @@ impl<'a, 'b> RoomRender<'a, 'b> {
 /// lighting, fog) is intentionally **not** reachable through
 /// this view.
 #[derive(Copy, Clone, Debug)]
-pub struct RoomCollision<'a, 'b> {
-    room: &'b RuntimeRoom<'a>,
+pub enum RoomCollision<'a, 'b> {
+    /// Collision view over a full runtime room.
+    Runtime(&'b RuntimeRoom<'a>),
+    /// Collision view over a compact collision-only room.
+    Compact(&'b CompactCollisionRoom<'a>),
 }
 
 impl<'a, 'b> RoomCollision<'a, 'b> {
     /// Width in grid sectors.
     pub fn width(self) -> u16 {
-        self.room.width()
+        match self {
+            Self::Runtime(room) => room.width(),
+            Self::Compact(room) => room.width(),
+        }
     }
 
     /// Depth in grid sectors.
     pub fn depth(self) -> u16 {
-        self.room.depth()
+        match self {
+            Self::Runtime(room) => room.depth(),
+            Self::Compact(room) => room.depth(),
+        }
     }
 
     /// Engine units per sector.
     pub fn sector_size(self) -> i32 {
-        self.room.sector_size()
+        match self {
+            Self::Runtime(room) => room.sector_size(),
+            Self::Compact(room) => room.sector_size(),
+        }
     }
 
     /// Sector at `(x, z)` for collision purposes, or `None` for
     /// empty cells.
     pub fn sector(self, x: u16, z: u16) -> Option<SectorCollision> {
-        self.room.sector(x, z).map(SectorCollision)
+        match self {
+            Self::Runtime(room) => room.sector(x, z).map(SectorCollision::Runtime),
+            Self::Compact(room) => room.sector(x, z).map(SectorCollision::Compact),
+        }
     }
 
     /// Sector at `(x, z)` without applying render-side horizontal
     /// override records. Camera wall probes use this cheaper path
     /// because they only need floor presence and wall ranges.
     pub fn sector_without_horizontal_overrides(self, x: u16, z: u16) -> Option<SectorCollision> {
-        self.room
-            .world()
-            .sector_without_horizontal_overrides(x, z)
-            .map(SectorCollision)
+        match self {
+            Self::Runtime(room) => room
+                .world()
+                .sector_without_horizontal_overrides(x, z)
+                .map(SectorCollision::Runtime),
+            Self::Compact(room) => room.sector(x, z).map(SectorCollision::Compact),
+        }
     }
 
     /// Minimal sector header for camera wall probes.
     pub fn sector_probe(self, x: u16, z: u16) -> Option<SectorCollisionProbe> {
-        self.room
-            .world()
-            .sector_collision_probe(x, z)
-            .map(SectorCollisionProbe)
+        match self {
+            Self::Runtime(room) => room
+                .world()
+                .sector_collision_probe(x, z)
+                .map(SectorCollisionProbe::Runtime),
+            Self::Compact(room) => room.sector_probe(x, z).map(SectorCollisionProbe::Compact),
+        }
     }
 
     /// Wall record by sector-local index, collision view.
     pub fn sector_wall(self, sector: SectorCollision, local_index: u16) -> Option<WallCollision> {
-        self.room
-            .sector_wall(sector.0, local_index)
-            .map(WallCollision)
+        match (self, sector) {
+            (Self::Runtime(room), SectorCollision::Runtime(sector)) => room
+                .sector_wall(sector, local_index)
+                .map(WallCollision::Runtime),
+            (Self::Compact(room), SectorCollision::Compact(sector)) => room
+                .sector_wall(sector, local_index)
+                .map(WallCollision::Compact),
+            _ => None,
+        }
     }
 
     /// Wall record by sector-local index for a minimal probe sector.
@@ -698,13 +1117,20 @@ impl<'a, 'b> RoomCollision<'a, 'b> {
         sector: SectorCollisionProbe,
         local_index: u16,
     ) -> Option<WallCollision> {
-        if local_index >= sector.wall_count() {
-            return None;
+        match (self, sector) {
+            (Self::Runtime(room), SectorCollisionProbe::Runtime(sector)) => {
+                if local_index >= sector.wall_count() {
+                    return None;
+                }
+                room.world()
+                    .wall(sector.first_wall().checked_add(local_index)?)
+                    .map(WallCollision::Runtime)
+            }
+            (Self::Compact(room), SectorCollisionProbe::Compact(sector)) => room
+                .sector_probe_wall(sector, local_index)
+                .map(WallCollision::Compact),
+            _ => None,
         }
-        self.room
-            .world()
-            .wall(sector.first_wall().checked_add(local_index)?)
-            .map(WallCollision)
     }
 }
 
@@ -816,94 +1242,157 @@ impl SectorRender {
 
 /// Collision-side projection of one decoded sector.
 #[derive(Copy, Clone, Debug)]
-pub struct SectorCollision(psx_asset::WorldSector);
+pub enum SectorCollision {
+    /// Sector decoded from a full runtime room.
+    Runtime(psx_asset::WorldSector),
+    /// Sector decoded from a compact collision-only room.
+    Compact(CompactSectorCollision),
+}
 
 impl SectorCollision {
     /// `true` if this sector has a floor surface to sample.
     pub fn has_floor(self) -> bool {
-        self.0.has_floor()
+        match self {
+            Self::Runtime(sector) => sector.has_floor(),
+            Self::Compact(sector) => sector.has_floor(),
+        }
     }
 
     /// `true` if this sector has a ceiling surface for clearance.
     pub fn has_ceiling(self) -> bool {
-        self.0.has_ceiling()
+        match self {
+            Self::Runtime(sector) => sector.has_ceiling(),
+            Self::Compact(sector) => sector.has_ceiling(),
+        }
     }
 
     /// `true` if the floor face is walkable.
     pub fn floor_walkable(self) -> bool {
-        self.0.floor_walkable()
+        match self {
+            Self::Runtime(sector) => sector.floor_walkable(),
+            Self::Compact(sector) => {
+                sector.flags & compact_collision_sector_flags::FLOOR_WALKABLE != 0
+            }
+        }
     }
 
     /// `true` if the floor split triangle is present and walkable.
     pub fn floor_triangle_walkable(self, index: usize) -> bool {
-        self.0.floor_triangle_walkable(index)
+        match self {
+            Self::Runtime(sector) => sector.floor_triangle_walkable(index),
+            Self::Compact(sector) => {
+                horizontal_triangle_present(sector.floor_triangle_flags, index)
+                    && horizontal_triangle_walkable(sector.floor_triangle_flags, index)
+            }
+        }
     }
 
     /// `true` if the floor split triangle is present.
     pub fn floor_triangle_present(self, index: usize) -> bool {
-        self.0.floor_triangle_present(index)
+        match self {
+            Self::Runtime(sector) => sector.floor_triangle_present(index),
+            Self::Compact(sector) => horizontal_triangle_present(sector.floor_triangle_flags, index),
+        }
     }
 
     /// Floor diagonal split id (decides the triangulation used
     /// to interpolate height samples).
     pub fn floor_split(self) -> u8 {
-        self.0.floor_split()
+        match self {
+            Self::Runtime(sector) => sector.floor_split(),
+            Self::Compact(sector) => sector.floor_split,
+        }
     }
 
     /// Ceiling diagonal split id.
     pub fn ceiling_split(self) -> u8 {
-        self.0.ceiling_split()
+        match self {
+            Self::Runtime(sector) => sector.ceiling_split(),
+            Self::Compact(sector) => sector.ceiling_split,
+        }
     }
 
     /// Floor corner heights `[NW, NE, SE, SW]`.
     pub fn floor_heights(self) -> [i32; 4] {
-        self.0.floor_heights()
+        match self {
+            Self::Runtime(sector) => sector.floor_heights(),
+            Self::Compact(sector) => sector.floor_heights,
+        }
     }
 
     /// Floor split-triangle heights in that triangle's corner order.
     pub fn floor_triangle_heights(self, index: usize) -> [i32; 3] {
-        self.0.floor_triangle_heights(index)
+        match self {
+            Self::Runtime(sector) => sector.floor_triangle_heights(index),
+            Self::Compact(sector) => sector.floor_triangle_heights[index.min(1)],
+        }
     }
 
     /// Ceiling corner heights `[NW, NE, SE, SW]`.
     pub fn ceiling_heights(self) -> [i32; 4] {
-        self.0.ceiling_heights()
+        match self {
+            Self::Runtime(sector) => sector.ceiling_heights(),
+            Self::Compact(sector) => sector.ceiling_heights,
+        }
     }
 
     /// Ceiling split-triangle heights in that triangle's corner order.
     pub fn ceiling_triangle_heights(self, index: usize) -> [i32; 3] {
-        self.0.ceiling_triangle_heights(index)
+        match self {
+            Self::Runtime(sector) => sector.ceiling_triangle_heights(index),
+            Self::Compact(sector) => sector.ceiling_triangle_heights[index.min(1)],
+        }
     }
 
     /// First global wall index for this sector.
     pub fn first_wall(self) -> u16 {
-        self.0.first_wall()
+        match self {
+            Self::Runtime(sector) => sector.first_wall(),
+            Self::Compact(sector) => sector.first_wall,
+        }
     }
 
     /// Number of walls belonging to this sector.
     pub fn wall_count(self) -> u16 {
-        self.0.wall_count()
+        match self {
+            Self::Runtime(sector) => sector.wall_count(),
+            Self::Compact(sector) => sector.wall_count,
+        }
     }
 }
 
 /// Collision probe projection of one decoded sector header.
 #[derive(Copy, Clone, Debug)]
-pub struct SectorCollisionProbe(psx_asset::WorldSectorCollisionProbe);
+pub enum SectorCollisionProbe {
+    /// Probe decoded from a full runtime room.
+    Runtime(psx_asset::WorldSectorCollisionProbe),
+    /// Probe decoded from a compact collision-only room.
+    Compact(CompactSectorCollisionProbe),
+}
 
 impl SectorCollisionProbe {
     /// `true` if this sector has a floor surface to sample.
     pub fn has_floor(self) -> bool {
-        self.0.has_floor()
+        match self {
+            Self::Runtime(sector) => sector.has_floor(),
+            Self::Compact(sector) => sector.has_floor(),
+        }
     }
 
     /// First global wall index for this sector.
     pub fn first_wall(self) -> u16 {
-        self.0.first_wall()
+        match self {
+            Self::Runtime(sector) => sector.first_wall(),
+            Self::Compact(sector) => sector.first_wall,
+        }
     }
 
     /// Number of walls belonging to this sector.
     pub fn wall_count(self) -> u16 {
-        self.0.wall_count()
+        match self {
+            Self::Runtime(sector) => sector.wall_count(),
+            Self::Compact(sector) => sector.wall_count,
+        }
     }
 }
 
@@ -944,29 +1433,121 @@ fn surface_light_sector_index(depth: u16, sx: u16, sz: u16) -> Option<u16> {
 
 /// Collision-side projection of one decoded wall.
 #[derive(Copy, Clone, Debug)]
-pub struct WallCollision(psx_asset::WorldWall);
+pub enum WallCollision {
+    /// Wall decoded from a full runtime room.
+    Runtime(psx_asset::WorldWall),
+    /// Wall decoded from a compact collision-only room.
+    Compact(CompactWallCollision),
+}
 
 impl WallCollision {
     /// Direction id.
     pub fn direction(self) -> u8 {
-        self.0.direction()
+        match self {
+            Self::Runtime(wall) => wall.direction(),
+            Self::Compact(wall) => wall.direction,
+        }
     }
 
     /// `true` when this wall blocks character movement.
     pub fn solid(self) -> bool {
-        self.0.solid()
+        match self {
+            Self::Runtime(wall) => wall.solid(),
+            Self::Compact(wall) => wall.flags & compact_collision_wall_flags::SOLID != 0,
+        }
     }
 
     /// Wall shape id, see `psxed_format::world::wall_shape`.
     pub fn shape(self) -> u16 {
-        self.0.shape()
+        match self {
+            Self::Runtime(wall) => wall.shape(),
+            Self::Compact(wall) => wall.shape,
+        }
     }
 
     /// Wall heights `[bottom-left, bottom-right, top-right, top-left]`
     /// for slab-vs-character clearance checks.
     pub fn heights(self) -> [i32; 4] {
-        self.0.heights()
+        match self {
+            Self::Runtime(wall) => wall.heights(),
+            Self::Compact(wall) => wall.heights,
+        }
     }
+}
+
+fn checked_table_len(
+    count: u16,
+    stride: usize,
+) -> Result<usize, CompactCollisionParseError> {
+    (count as usize)
+        .checked_mul(stride)
+        .ok_or(CompactCollisionParseError::InvalidLayout)
+}
+
+fn take_bytes<'a>(
+    bytes: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+) -> Result<&'a [u8], CompactCollisionParseError> {
+    let end = offset
+        .checked_add(len)
+        .ok_or(CompactCollisionParseError::InvalidLayout)?;
+    let slice = bytes
+        .get(*offset..end)
+        .ok_or(CompactCollisionParseError::Truncated)?;
+    *offset = end;
+    Ok(slice)
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let raw = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([raw[0], raw[1]]))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let raw = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+fn read_i32(bytes: &[u8], offset: usize) -> Option<i32> {
+    let raw = bytes.get(offset..offset + 4)?;
+    Some(i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+fn read_i32x4(bytes: &[u8], offset: usize) -> Option<[i32; 4]> {
+    Some([
+        read_i32(bytes, offset)?,
+        read_i32(bytes, offset + 4)?,
+        read_i32(bytes, offset + 8)?,
+        read_i32(bytes, offset + 12)?,
+    ])
+}
+
+const fn horizontal_triangle_present(flags: u8, index: usize) -> bool {
+    let bit = if index == 0 {
+        compact_collision_triangle_flags::TRI_A_PRESENT
+    } else {
+        compact_collision_triangle_flags::TRI_B_PRESENT
+    };
+    flags & bit != 0
+}
+
+const fn horizontal_triangle_walkable(flags: u8, index: usize) -> bool {
+    let bit = if index == 0 {
+        compact_collision_triangle_flags::TRI_A_WALKABLE
+    } else {
+        compact_collision_triangle_flags::TRI_B_WALKABLE
+    };
+    flags & bit != 0
+}
+
+fn horizontal_triangle_heights(heights: [i32; 4], split: u8, index: usize) -> [i32; 3] {
+    let corners = psx_asset::world_topology::split_triangle(split, index);
+    [
+        heights[corners[0]],
+        heights[corners[1]],
+        heights[corners[2]],
+    ]
 }
 
 // Compile-time guarantee that `RuntimeRoom` and its render /
@@ -976,6 +1557,8 @@ impl WallCollision {
 const _: () = {
     const fn _assert_copy<T: Copy>() {}
     _assert_copy::<RuntimeRoom<'static>>();
+    _assert_copy::<CompactCollisionRoom<'static>>();
+    _assert_copy::<RuntimeCollisionRoom<'static>>();
     _assert_copy::<RoomRender<'static, 'static>>();
     _assert_copy::<RoomCollision<'static, 'static>>();
     _assert_copy::<SectorRender>();

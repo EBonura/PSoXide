@@ -37,14 +37,20 @@ The render path reads only:
 - `LevelCachedRoomVertexRecord`
 - `LevelCachedRoomSurfaceRecord`
 
-The collision path reads only the collision payload range. Today that payload
-is a stripped `.psxw` room blob: it keeps the exact sector, wall, and horizontal
-override collision data, but drops the render-only static surface-light table.
-It is flagged with `STREAMED_ROOM_CHUNK_FLAG_COLLISION_PSXW` and
-`STREAMED_ROOM_CHUNK_FLAG_COLLISION_STRIPPED_LIGHTS`.
+The collision path reads only the collision payload range. That payload is the
+compact `PSXCOLL\0` collision-only format, flagged with
+`STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT`. It stores:
 
-The point of V2 is that the collision payload can become an even smaller
-collision-only blob later without changing render cache readers.
+- a 36-byte header with room dimensions, sector size, table counts, and ambient
+  RGB for actor lighting
+- one 44-byte sector record per grid cell
+- one 20-byte wall record per collision wall
+- optional 28-byte height-override records only when split-triangle heights
+  differ from the corner-derived default
+
+It does not contain materials, UVs, static-light records, render geometry, or
+any full `.psxw` payload duplication. Render cache readers consume their own
+tables and never parse collision bytes.
 
 ## Cook Report
 
