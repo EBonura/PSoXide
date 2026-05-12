@@ -1185,6 +1185,44 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    /// Submit a projected textured Gouraud triangle after the caller has
+    /// already applied the desired winding/cull policy.
+    pub fn submit_textured_gouraud_triangle_prescreened(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let textured = [
+            ProjectedTexturedGouraudVertex::new(
+                verts[0],
+                uvs[0].0 as i32,
+                uvs[0].1 as i32,
+                colors[0],
+            ),
+            ProjectedTexturedGouraudVertex::new(
+                verts[1],
+                uvs[1].0 as i32,
+                uvs[1].1 as i32,
+                colors[1],
+            ),
+            ProjectedTexturedGouraudVertex::new(
+                verts[2],
+                uvs[2].0 as i32,
+                uvs[2].1 as i32,
+                colors[2],
+            ),
+        ];
+        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+            return self
+                .submit_textured_gouraud_triangle_leaf(triangles, textured, material, options);
+        }
+        self.submit_textured_gouraud_triangle_split(triangles, textured, material, options, 0)
+    }
+
     fn submit_textured_gouraud_triangle_split(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
@@ -4174,6 +4212,55 @@ mod tests {
             commands[0].render_layer,
             world_render_layer_code(WorldRenderLayer::Transparent)
         );
+    }
+
+    #[test]
+    fn prescreened_gouraud_submit_matches_unculled_submit_depth() {
+        const ZERO: TriTexturedGouraud = TriTexturedGouraud::new(
+            [(0, 0), (0, 0), (0, 0)],
+            [(0, 0), (0, 0), (0, 0)],
+            [(0, 0, 0), (0, 0, 0), (0, 0, 0)],
+            0,
+            0,
+        );
+        let material = TextureMaterial::opaque(0, 0, (128, 128, 128));
+        let verts = [
+            ProjectedVertex::new(0, 0, 100),
+            ProjectedVertex::new(16, 0, 120),
+            ProjectedVertex::new(0, 16, 140),
+        ];
+        let uvs = [(0, 0), (15, 0), (0, 15)];
+        let colors = [(128, 128, 128), (96, 96, 96), (64, 64, 64)];
+        let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000))
+            .with_cull_mode(CullMode::None);
+
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut triangle_storage = [const { ZERO }; 2];
+        let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 2];
+        let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+
+        let regular = pass.submit_textured_gouraud_triangle(
+            &mut triangles,
+            verts,
+            uvs,
+            colors,
+            material,
+            options,
+        );
+        let prescreened = pass.submit_textured_gouraud_triangle_prescreened(
+            &mut triangles,
+            verts,
+            uvs,
+            colors,
+            material,
+            options,
+        );
+
+        assert_eq!(regular.submitted_triangles, 1);
+        assert_eq!(prescreened.submitted_triangles, 1);
+        assert_eq!(commands[0].depth_raw(), commands[1].depth_raw());
     }
 
     #[test]
