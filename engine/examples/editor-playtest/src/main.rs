@@ -99,9 +99,9 @@ mod generated {
 use generated::{
     ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
     MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
-    PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS,
-    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, VISIBILITY_CELLS, VISIBILITY_PVS,
-    VISIBILITY_PVS_BITS, WEAPONS, WEAPON_HITBOXES,
+    PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
+    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY,
+    VISIBILITY_CELLS, VISIBILITY_PVS, VISIBILITY_PVS_BITS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{WORLD_PACK_START_LBA, WORLD_PACK_TOC};
@@ -340,6 +340,10 @@ static mut WORLD_COMMANDS: [WorldTriCommand; MAX_TEXTURED_TRIS] =
     [WorldTriCommand::EMPTY; MAX_TEXTURED_TRIS];
 static mut CACHED_ROOM_PROJECTED_VERTICES: [ProjectedVertex; MAX_CACHED_ROOM_VERTICES] =
     [ProjectedVertex::new(0, 0, 0); MAX_CACHED_ROOM_VERTICES];
+static mut CACHED_ROOM_PROJECTED_INDICES: [u16; MAX_CACHED_ROOM_VERTICES] =
+    [0; MAX_CACHED_ROOM_VERTICES];
+static mut CACHED_ROOM_PROJECTED_READY: [bool; MAX_CACHED_ROOM_VERTICES] =
+    [false; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_VALID: [bool; MAX_CACHED_ROOM_VERTICES] =
     [false; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_DEPTHS: [i32; MAX_CACHED_ROOM_VERTICES] =
@@ -637,6 +641,8 @@ fn runtime_model_faces<'a>(
 struct ActiveRoomSurfaceCache {
     cell_first: usize,
     cell_count: usize,
+    cell_vertex_first: usize,
+    cell_vertex_count: usize,
     vertex_first: usize,
     vertex_count: usize,
     surface_first: usize,
@@ -649,6 +655,8 @@ impl ActiveRoomSurfaceCache {
     const EMPTY: Self = Self {
         cell_first: 0,
         cell_count: 0,
+        cell_vertex_first: 0,
+        cell_vertex_count: 0,
         vertex_first: 0,
         vertex_count: 0,
         surface_first: 0,
@@ -1524,21 +1532,32 @@ impl Scene for Playtest {
                         room_visible_cells = room_visible_cells.saturating_add(cells.len() as u32);
                         if active.surface_cache.ready {
                             room_cached_draws = room_cached_draws.saturating_add(1);
-                            if let Some((cached_cells, cached_vertices, cached_surfaces)) =
-                                room_surface_cache_slices(active.index, active.surface_cache)
+                            if let Some((
+                                cached_cells,
+                                cached_cell_vertices,
+                                cached_vertices,
+                                cached_surfaces,
+                            )) = room_surface_cache_slices(active.index, active.surface_cache)
                             {
                                 let vertex_count = cached_vertices.len();
+                                let projected_indices =
+                                    unsafe { &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count] };
                                 let projected_vertices =
                                     unsafe { &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count] };
+                                let projected_ready =
+                                    unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
                                 let projected_valid =
                                     unsafe { &mut CACHED_ROOM_PROJECTED_VALID[..vertex_count] };
                                 let projected_depths =
                                     unsafe { &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count] };
                                 draw_indexed_cached_room_vertex_lit_visible_cells(
                                     cached_cells,
+                                    cached_cell_vertices,
                                     cached_vertices,
                                     cached_surfaces,
+                                    projected_indices,
                                     projected_vertices,
+                                    projected_ready,
                                     projected_valid,
                                     projected_depths,
                                     active.depth,
@@ -3596,6 +3615,8 @@ struct StreamedRoomChunkView {
     collision_bytes: usize,
     cells_offset: usize,
     cell_count: usize,
+    cell_vertices_offset: usize,
+    cell_vertex_count: usize,
     vertices_offset: usize,
     vertex_count: usize,
     surfaces_offset: usize,
@@ -3650,6 +3671,10 @@ fn streamed_room_chunk_view(
         read_streamed_chunk_u32(bytes, streamed_room_chunk_header::CELLS_OFFSET)? as usize;
     let cell_count =
         read_streamed_chunk_u32(bytes, streamed_room_chunk_header::CELL_COUNT)? as usize;
+    let cell_vertices_offset =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::CELL_VERTICES_OFFSET)? as usize;
+    let cell_vertex_count =
+        read_streamed_chunk_u32(bytes, streamed_room_chunk_header::CELL_VERTEX_COUNT)? as usize;
     let vertices_offset =
         read_streamed_chunk_u32(bytes, streamed_room_chunk_header::VERTICES_OFFSET)? as usize;
     let vertex_count =
@@ -3665,6 +3690,7 @@ fn streamed_room_chunk_view(
             cells_offset,
             cell_count,
         )
+        || !streamed_chunk_range_valid::<u16>(total_bytes, cell_vertices_offset, cell_vertex_count)
         || !streamed_chunk_range_valid::<LevelCachedRoomVertexRecord>(
             total_bytes,
             vertices_offset,
@@ -3684,6 +3710,8 @@ fn streamed_room_chunk_view(
         collision_bytes,
         cells_offset,
         cell_count,
+        cell_vertices_offset,
+        cell_vertex_count,
         vertices_offset,
         vertex_count,
         surfaces_offset,
@@ -4452,12 +4480,15 @@ fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfaceCache {
     };
     let cell_first = cache.cell_first as usize;
     let cell_count = cache.cell_count as usize;
+    let cell_vertex_first = cache.cell_vertex_first as usize;
+    let cell_vertex_count = cache.cell_vertex_count as usize;
     let vertex_first = cache.vertex_first as usize;
     let vertex_count = cache.vertex_count as usize;
     let surface_first = cache.surface_first as usize;
     let surface_count = cache.surface_count as usize;
     if vertex_count > MAX_CACHED_ROOM_VERTICES
         || cell_first.saturating_add(cell_count) > ROOM_CACHE_CELLS.len()
+        || cell_vertex_first.saturating_add(cell_vertex_count) > ROOM_CACHE_CELL_VERTICES.len()
         || vertex_first.saturating_add(vertex_count) > ROOM_CACHE_VERTICES.len()
         || surface_first.saturating_add(surface_count) > ROOM_CACHE_SURFACES.len()
     {
@@ -4475,6 +4506,8 @@ fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfaceCache {
     ActiveRoomSurfaceCache {
         cell_first,
         cell_count,
+        cell_vertex_first,
+        cell_vertex_count,
         vertex_first,
         vertex_count,
         surface_first,
@@ -4506,6 +4539,8 @@ fn streamed_active_room_surface_cache_for(index: RoomIndex) -> Option<ActiveRoom
         Some(ActiveRoomSurfaceCache {
             cell_first: view.cells_offset,
             cell_count: view.cell_count,
+            cell_vertex_first: view.cell_vertices_offset,
+            cell_vertex_count: view.cell_vertex_count,
             vertex_first: view.vertices_offset,
             vertex_count: view.vertex_count,
             surface_first: view.surfaces_offset,
@@ -4521,6 +4556,7 @@ fn room_surface_cache_slices(
     cache: ActiveRoomSurfaceCache,
 ) -> Option<(
     &'static [CachedRoomCell],
+    &'static [u16],
     &'static [WorldVertex],
     &'static [CachedRoomSurface],
 )> {
@@ -4538,6 +4574,7 @@ fn generated_room_surface_cache_slices(
     cache: ActiveRoomSurfaceCache,
 ) -> Option<(
     &'static [CachedRoomCell],
+    &'static [u16],
     &'static [WorldVertex],
     &'static [CachedRoomSurface],
 )> {
@@ -4545,13 +4582,18 @@ fn generated_room_surface_cache_slices(
         return None;
     }
     let cell_end = cache.cell_first.checked_add(cache.cell_count)?;
+    let cell_vertex_end = cache
+        .cell_vertex_first
+        .checked_add(cache.cell_vertex_count)?;
     let vertex_end = cache.vertex_first.checked_add(cache.vertex_count)?;
     let surface_end = cache.surface_first.checked_add(cache.surface_count)?;
     let cells = ROOM_CACHE_CELLS.get(cache.cell_first..cell_end)?;
+    let cell_vertices = ROOM_CACHE_CELL_VERTICES.get(cache.cell_vertex_first..cell_vertex_end)?;
     let vertices = ROOM_CACHE_VERTICES.get(cache.vertex_first..vertex_end)?;
     let surfaces = ROOM_CACHE_SURFACES.get(cache.surface_first..surface_end)?;
     Some((
         cached_room_cells_from_level_records(cells),
+        cell_vertices,
         cached_room_vertices_from_level_records(vertices),
         cached_room_surfaces_from_level_records(surfaces),
     ))
@@ -4563,6 +4605,7 @@ fn streamed_room_surface_cache_slices(
     cache: ActiveRoomSurfaceCache,
 ) -> Option<(
     &'static [CachedRoomCell],
+    &'static [u16],
     &'static [WorldVertex],
     &'static [CachedRoomSurface],
 )> {
@@ -4576,6 +4619,8 @@ fn streamed_room_surface_cache_slices(
         let view = streamed_room_chunk_view(bytes, index)?;
         if cache.cell_first != view.cells_offset
             || cache.cell_count != view.cell_count
+            || cache.cell_vertex_first != view.cell_vertices_offset
+            || cache.cell_vertex_count != view.cell_vertex_count
             || cache.vertex_first != view.vertices_offset
             || cache.vertex_count != view.vertex_count
             || cache.surface_first != view.surfaces_offset
@@ -4588,6 +4633,12 @@ fn streamed_room_surface_cache_slices(
             view.total_bytes,
             view.cells_offset,
             view.cell_count,
+        )?;
+        let cell_vertices = streamed_record_slice::<u16>(
+            bytes,
+            view.total_bytes,
+            view.cell_vertices_offset,
+            view.cell_vertex_count,
         )?;
         let vertices = streamed_record_slice::<LevelCachedRoomVertexRecord>(
             bytes,
@@ -4603,6 +4654,7 @@ fn streamed_room_surface_cache_slices(
         )?;
         Some((
             cached_room_cells_from_level_records(cells),
+            cell_vertices,
             cached_room_vertices_from_level_records(vertices),
             cached_room_surfaces_from_level_records(surfaces),
         ))

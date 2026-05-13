@@ -548,41 +548,97 @@ impl WorldCamera {
     }
 }
 
-pub(crate) fn project_world_vertices_gte(
+pub(crate) fn project_world_vertex_indices_gte(
     camera: WorldCamera,
     vertices: &[WorldVertex],
+    indices: &[u16],
     projected_vertices: &mut [ProjectedVertex],
     projected_valid: &mut [bool],
 ) {
     load_world_camera_gte(camera);
     let near_z = camera.projection.near_z;
-    let count = vertices
+    let limit = vertices
         .len()
         .min(projected_vertices.len())
         .min(projected_valid.len());
-    let mut i = 0usize;
-    while i + 2 < count {
-        let a = world_vertex_gte_input(vertices[i]);
-        let b = world_vertex_gte_input(vertices[i + 1]);
-        let c = world_vertex_gte_input(vertices[i + 2]);
-        if let (Some(a), Some(b), Some(c)) = (a, b, c) {
-            let projected = scene::project_triangle(a, b, c);
-            projected_vertices[i] = projected_from_gte(projected[0]);
-            projected_vertices[i + 1] = projected_from_gte(projected[1]);
-            projected_vertices[i + 2] = projected_from_gte(projected[2]);
-            projected_valid[i] = (projected[0].sz as i32) >= near_z;
-            projected_valid[i + 1] = (projected[1].sz as i32) >= near_z;
-            projected_valid[i + 2] = (projected[2].sz as i32) >= near_z;
-        } else {
-            project_world_vertex_cpu(camera, vertices, projected_vertices, projected_valid, i);
-            project_world_vertex_cpu(camera, vertices, projected_vertices, projected_valid, i + 1);
-            project_world_vertex_cpu(camera, vertices, projected_vertices, projected_valid, i + 2);
+    let mut group = [0usize; 3];
+    let mut group_count = 0usize;
+    for raw_index in indices {
+        let index = *raw_index as usize;
+        if index >= limit {
+            continue;
         }
-        i += 3;
+        group[group_count] = index;
+        group_count += 1;
+        if group_count == 3 {
+            project_world_index_group_gte(
+                camera,
+                vertices,
+                projected_vertices,
+                projected_valid,
+                near_z,
+                group,
+            );
+            group_count = 0;
+        }
     }
-    while i < count {
-        project_world_vertex_cpu(camera, vertices, projected_vertices, projected_valid, i);
+    let mut i = 0usize;
+    while i < group_count {
+        project_world_vertex_cpu(
+            camera,
+            vertices,
+            projected_vertices,
+            projected_valid,
+            group[i],
+        );
         i += 1;
+    }
+}
+
+fn project_world_index_group_gte(
+    camera: WorldCamera,
+    vertices: &[WorldVertex],
+    projected_vertices: &mut [ProjectedVertex],
+    projected_valid: &mut [bool],
+    near_z: i32,
+    indices: [usize; 3],
+) {
+    let a_index = indices[0];
+    let b_index = indices[1];
+    let c_index = indices[2];
+    let a = world_vertex_gte_input(vertices[a_index]);
+    let b = world_vertex_gte_input(vertices[b_index]);
+    let c = world_vertex_gte_input(vertices[c_index]);
+    if let (Some(a), Some(b), Some(c)) = (a, b, c) {
+        let projected = scene::project_triangle(a, b, c);
+        projected_vertices[a_index] = projected_from_gte(projected[0]);
+        projected_vertices[b_index] = projected_from_gte(projected[1]);
+        projected_vertices[c_index] = projected_from_gte(projected[2]);
+        projected_valid[a_index] = (projected[0].sz as i32) >= near_z;
+        projected_valid[b_index] = (projected[1].sz as i32) >= near_z;
+        projected_valid[c_index] = (projected[2].sz as i32) >= near_z;
+    } else {
+        project_world_vertex_cpu(
+            camera,
+            vertices,
+            projected_vertices,
+            projected_valid,
+            a_index,
+        );
+        project_world_vertex_cpu(
+            camera,
+            vertices,
+            projected_vertices,
+            projected_valid,
+            b_index,
+        );
+        project_world_vertex_cpu(
+            camera,
+            vertices,
+            projected_vertices,
+            projected_valid,
+            c_index,
+        );
     }
 }
 

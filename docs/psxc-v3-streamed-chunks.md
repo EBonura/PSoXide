@@ -1,8 +1,8 @@
-# PSXC V2 Streamed Room Chunks
+# PSXC V3 Streamed Room Chunks
 
-`.psxc` is the CD-streamable room chunk container. Version 2 has one job:
-keep the runtime collision payload and render payloads separate in the file
-and in the runtime reader.
+`.psxc` is the CD-streamable room chunk container. Version 3 keeps runtime
+collision data, render surfaces, and optional per-cell render vertex lists
+separate in the file and in the runtime reader.
 
 There is no V1 compatibility path. Cooked play/build output should be rebuilt
 when this format changes.
@@ -14,7 +14,7 @@ The header is 64 bytes.
 | Offset | Field | Meaning |
 |---:|---|---|
 | 0 | magic | `PSXCHNK\0` |
-| 8 | version | `2` |
+| 8 | version | `3` |
 | 12 | room | generated room/chunk id |
 | 16 | total bytes | unpadded payload length |
 | 20 | collision offset | start of collision payload |
@@ -25,8 +25,8 @@ The header is 64 bytes.
 | 40 | vertex count | number of render-vertex records |
 | 44 | surfaces offset | cached render-surface table |
 | 48 | surface count | number of render-surface records |
-| 52 | reserved | zero |
-| 56 | reserved | zero |
+| 52 | cell vertices offset | `u16` cached vertex-index table grouped by cell |
+| 56 | cell vertex count | number of `u16` cell vertex indices |
 | 60 | flags | payload format flags |
 
 ## Payloads
@@ -34,8 +34,15 @@ The header is 64 bytes.
 The render path reads only:
 
 - `LevelCachedRoomCellRecord`
+- optional `u16` per-cell cached vertex indices
 - `LevelCachedRoomVertexRecord`
 - `LevelCachedRoomSurfaceRecord`
+
+Cells always point at their surface range. They may also point at a unique
+vertex-index range. When that range is empty, the runtime derives the visible
+vertex set from the accepted cell's surfaces, keeping streamed chunks smaller
+while still projecting only vertices referenced by visible, frustum-accepted
+cells.
 
 The collision path reads only the collision payload range. That payload is the
 compact `PSXCOLL\0` collision-only format, flagged with
@@ -58,7 +65,7 @@ tables and never parse collision bytes.
 
 - collision bytes
 - render cache bytes
-- render cells / vertices / surfaces
+- render cells / cell vertex indices / vertices / surfaces
 - alignment padding
 - CD sector padding
 
