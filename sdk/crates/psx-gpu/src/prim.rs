@@ -8,7 +8,7 @@
 //! Builders (`new` constructors) zero the tag; [`crate::ot::OrderingTable::add`]
 //! fills it in during insertion with `(words_after_tag << 24) | next`.
 
-use crate::material::TextureMaterial;
+use crate::material::{TextureMaterial, TexturedGouraudPacketMaterial};
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 
 const fn pack_packet_texcoord(u: u8, v: u8, extra: u16) -> u32 {
@@ -466,6 +466,60 @@ impl TriTexturedGouraud {
             color2: pack_color(r2, g2, b2),
             v2: pack_vertex(verts[2].0, verts[2].1),
             uv2: pack_packet_texcoord(u2, v2, 0),
+        }
+    }
+
+    /// Build a textured Gouraud triangle from UV words that already
+    /// contain the low `(u, v)` packet bytes.
+    pub const fn with_material_packed_uv_words(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+    ) -> Self {
+        let (r0, g0, b0) = colors[0];
+        let (r1, g1, b1) = colors[1];
+        let (r2, g2, b2) = colors[2];
+        let clut = material.clut_word();
+        let tpage = material.tpage_word();
+        Self {
+            tag: 0,
+            tex_window: material.texture_window_word(),
+            color0_cmd: material.textured_polygon_command(true, false) | pack_color(r0, g0, b0),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: (uv_words[0] as u32) | ((clut as u32) << 16),
+            color1: pack_color(r1, g1, b1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: (uv_words[1] as u32) | ((tpage as u32) << 16),
+            color2: pack_color(r2, g2, b2),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+        }
+    }
+
+    /// Build a textured Gouraud triangle from UV words and material
+    /// packet words that were precomputed once for a hot material.
+    pub const fn with_packet_material_packed_uv_words(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        colors: [(u8, u8, u8); 3],
+        material: TexturedGouraudPacketMaterial,
+    ) -> Self {
+        let (r0, g0, b0) = colors[0];
+        let (r1, g1, b1) = colors[1];
+        let (r2, g2, b2) = colors[2];
+        Self {
+            tag: 0,
+            tex_window: material.tex_window_word,
+            color0_cmd: material.color0_command_word | pack_color(r0, g0, b0),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: (uv_words[0] as u32) | material.clut_high_word,
+            color1: pack_color(r1, g1, b1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: (uv_words[1] as u32) | material.tpage_high_word,
+            color2: pack_color(r2, g2, b2),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
         }
     }
 }
