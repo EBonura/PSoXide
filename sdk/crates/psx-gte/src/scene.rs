@@ -26,6 +26,8 @@ use crate::math::{Mat3I16, Vec3I16, Vec3I32};
 use crate::ops;
 use crate::regs::pack_xy;
 use crate::{cfc2, ctc2, mfc2, mtc2};
+#[cfg(target_arch = "mips")]
+use core::arch::asm;
 
 /// Result of a single perspective-projected vertex -- screen-space
 /// (x, y) in pixels plus the MAC3 depth used for ordering-table
@@ -182,6 +184,193 @@ pub fn project_triangle(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3]
     ]
 }
 
+/// Transform one vertex by the currently loaded RT/TR matrix without
+/// perspective projection. Returns MAC1/2/3 in view-space units.
+///
+/// Assumes the rotation matrix and translation have already been set.
+pub fn transform_vertex(v: Vec3I16) -> Vec3I32 {
+    mtc2!(0, v.xy_packed());
+    mtc2!(1, v.z_packed());
+    // SAFETY: V0 has just been loaded; RT/TR are set by scene setup.
+    unsafe { ops::mvmva_rt_v0_tr_sf1() };
+    Vec3I32::new(mfc2!(25) as i32, mfc2!(26) as i32, mfc2!(27) as i32)
+}
+
+/// Transform one vertex with a lower-overhead MIPS register schedule.
+///
+/// Keep the default helper compact; use this variant in measured hot
+/// paths that already keep the relevant GTE camera matrix loaded.
+#[inline(always)]
+pub fn transform_vertex_scheduled(v: Vec3I16) -> Vec3I32 {
+    #[cfg(target_arch = "mips")]
+    {
+        transform_vertex_mips(v)
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        transform_vertex(v)
+    }
+}
+
+/// Project one vertex with a lower-overhead MIPS register schedule.
+///
+/// This is intended for very hot batched paths that have been benchmarked
+/// with the larger inlined code shape. The portable path delegates to
+/// [`project_vertex`] so host preview/emulator tests remain identical.
+#[inline(always)]
+pub fn project_vertex_scheduled(v: Vec3I16) -> Projected {
+    #[cfg(target_arch = "mips")]
+    {
+        project_vertex_mips(v)
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        project_vertex(v)
+    }
+}
+
+/// Project three vertices with a lower-overhead MIPS register schedule.
+///
+/// The normal [`project_triangle`] helper stays compact for general users;
+/// this variant is used only by renderer loops where profiling shows that
+/// shaving COP2 register wrapper overhead pays for the extra code size.
+#[inline(always)]
+pub fn project_triangle_scheduled(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3] {
+    #[cfg(target_arch = "mips")]
+    {
+        project_triangle_mips(v0, v1, v2)
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        project_triangle(v0, v1, v2)
+    }
+}
+
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn project_vertex_mips(v: Vec3I16) -> Projected {
+    let mut sxy = v.xy_packed();
+    let mut sz = v.z_packed();
+    unsafe {
+        asm!(
+            // MTC2 $8,VXY0 and $9,VZ0.
+            ".word 0x48880000",
+            ".word 0x48890800",
+            // RTPS.
+            ".word 0x4a080001",
+            // Read SXY2 and SZ3. Two MFC2s can share one final
+            // load-delay NOP instead of one NOP per wrapper call.
+            ".word 0x48087000",
+            ".word 0x48099800",
+            ".word 0",
+            inlateout("$8") sxy,
+            inlateout("$9") sz,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    Projected {
+        sx: sxy as i16,
+        sy: (sxy >> 16) as i16,
+        sz: sz as u16,
+    }
+}
+
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn project_triangle_mips(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Projected; 3] {
+    let v0_xy = v0.xy_packed();
+    let v0_z = v0.z_packed();
+    let v1_xy = v1.xy_packed();
+    let v1_z = v1.z_packed();
+    let v2_xy = v2.xy_packed();
+    let v2_z = v2.z_packed();
+    let sxy0: u32;
+    let sxy1: u32;
+    let sxy2: u32;
+    let sz1: u32;
+    let sz2: u32;
+    let sz3: u32;
+    unsafe {
+        asm!(
+            // MTC2 $8..$13 into V0/V1/V2 input registers.
+            ".word 0x48880000",
+            ".word 0x48890800",
+            ".word 0x488a1000",
+            ".word 0x488b1800",
+            ".word 0x488c2000",
+            ".word 0x488d2800",
+            // RTPT.
+            ".word 0x4a080030",
+            // Read SXY0/SXY1/SXY2/SZ1/SZ2/SZ3. Each MFC2's
+            // load-delay slot is filled by the next MFC2, so only the
+            // final read needs an explicit NOP before Rust observes
+            // the output registers.
+            ".word 0x48086000",
+            ".word 0x48096800",
+            ".word 0x480a7000",
+            ".word 0x480b8800",
+            ".word 0x480c9000",
+            ".word 0x480d9800",
+            ".word 0",
+            inlateout("$8") v0_xy => sxy0,
+            inlateout("$9") v0_z => sxy1,
+            inlateout("$10") v1_xy => sxy2,
+            inlateout("$11") v1_z => sz1,
+            inlateout("$12") v2_xy => sz2,
+            inlateout("$13") v2_z => sz3,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    [
+        Projected {
+            sx: sxy0 as i16,
+            sy: (sxy0 >> 16) as i16,
+            sz: sz1 as u16,
+        },
+        Projected {
+            sx: sxy1 as i16,
+            sy: (sxy1 >> 16) as i16,
+            sz: sz2 as u16,
+        },
+        Projected {
+            sx: sxy2 as i16,
+            sy: (sxy2 >> 16) as i16,
+            sz: sz3 as u16,
+        },
+    ]
+}
+
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn transform_vertex_mips(v: Vec3I16) -> Vec3I32 {
+    let xy = v.xy_packed();
+    let z = v.z_packed();
+    let mac1: u32;
+    let mac2: u32;
+    let mac3: u32;
+    unsafe {
+        asm!(
+            // MTC2 $8,VXY0 and $9,VZ0.
+            ".word 0x48880000",
+            ".word 0x48890800",
+            // MVMVA RT,V0,TR,sf=1.
+            ".word 0x4a080012",
+            // Read MAC1/MAC2/MAC3. Consecutive MFC2 instructions fill
+            // each other's load-delay slot; only the final read needs
+            // an explicit NOP before Rust observes the outputs.
+            ".word 0x4808c800",
+            ".word 0x4809d000",
+            ".word 0x480ad800",
+            ".word 0",
+            inlateout("$8") xy => mac1,
+            inlateout("$9") z => mac2,
+            lateout("$10") mac3,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    Vec3I32::new(mac1 as i32, mac2 as i32, mac3 as i32)
+}
+
 /// Read the last three projected Z values and compute their average
 /// via AVSZ3 (weighted by ZSF3). Returns OTZ -- the depth key most
 /// renderers use for ordering-table inserts.
@@ -267,5 +456,16 @@ mod host_smoke {
         assert_eq!(batch[0], p_a);
         assert_eq!(batch[1], p_b);
         assert_eq!(batch[2], p_c);
+    }
+
+    #[test]
+    fn mvmva_transform_through_host_shim_applies_rt_and_tr() {
+        host::reset();
+        load_rotation(&Mat3I16::IDENTITY);
+        load_translation(Vec3I32::new(10, -20, 30));
+
+        let transformed = transform_vertex(Vec3I16::new(100, 200, 300));
+
+        assert_eq!(transformed, Vec3I32::new(110, 180, 330));
     }
 }
