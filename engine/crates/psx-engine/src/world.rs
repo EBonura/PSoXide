@@ -669,11 +669,13 @@ impl<'a> CompactCollisionRoom<'a> {
 
     fn sector_probe(self, x: u16, z: u16) -> Option<CompactSectorCollisionProbe> {
         let sector = self.sector_record(x, z)?;
-        sector.has_geometry().then_some(CompactSectorCollisionProbe {
-            flags: sector.flags,
-            first_wall: sector.first_wall,
-            wall_count: sector.wall_count,
-        })
+        sector
+            .has_geometry()
+            .then_some(CompactSectorCollisionProbe {
+                flags: sector.flags,
+                first_wall: sector.first_wall,
+                wall_count: sector.wall_count,
+            })
     }
 
     fn sector_wall(
@@ -774,7 +776,11 @@ impl<'a> CompactCollisionRoom<'a> {
                 .get(base..base.checked_add(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES)?)?;
             if read_u16(bytes, 0)? == sector_index && *bytes.get(2)? == surface {
                 return Some([
-                    [read_i32(bytes, 4)?, read_i32(bytes, 8)?, read_i32(bytes, 12)?],
+                    [
+                        read_i32(bytes, 4)?,
+                        read_i32(bytes, 8)?,
+                        read_i32(bytes, 12)?,
+                    ],
                     [
                         read_i32(bytes, 16)?,
                         read_i32(bytes, 20)?,
@@ -807,7 +813,10 @@ impl<'a> CompactCollisionRoom<'a> {
             let Some(count) = read_u16(bytes, 8) else {
                 return false;
             };
-            if first.checked_add(count).is_none_or(|end| end > self.wall_count) {
+            if first
+                .checked_add(count)
+                .is_none_or(|end| end > self.wall_count)
+            {
                 return false;
             }
             index += 1;
@@ -1291,7 +1300,9 @@ impl SectorCollision {
     pub fn floor_triangle_present(self, index: usize) -> bool {
         match self {
             Self::Runtime(sector) => sector.floor_triangle_present(index),
-            Self::Compact(sector) => horizontal_triangle_present(sector.floor_triangle_flags, index),
+            Self::Compact(sector) => {
+                horizontal_triangle_present(sector.floor_triangle_flags, index)
+            }
         }
     }
 
@@ -1475,10 +1486,7 @@ impl WallCollision {
     }
 }
 
-fn checked_table_len(
-    count: u16,
-    stride: usize,
-) -> Result<usize, CompactCollisionParseError> {
+fn checked_table_len(count: u16, stride: usize) -> Result<usize, CompactCollisionParseError> {
     (count as usize)
         .checked_mul(stride)
         .ok_or(CompactCollisionParseError::InvalidLayout)

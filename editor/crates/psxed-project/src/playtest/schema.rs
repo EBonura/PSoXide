@@ -250,6 +250,12 @@ pub struct PlaytestRoomSurfaceCache {
     pub cell_first: u32,
     /// Number of cached cell records for this room.
     pub cell_count: u16,
+    /// First index into [`PlaytestPackage::room_cache_cell_vertices`].
+    /// A zero count means runtime derives the visible vertex set
+    /// from each cell's surface range.
+    pub cell_vertex_first: u32,
+    /// Number of per-cell cached vertex indices for this room.
+    pub cell_vertex_count: u16,
     /// First index into [`PlaytestPackage::room_cache_vertices`].
     pub vertex_first: u32,
     /// Number of cached vertex records for this room.
@@ -279,6 +285,10 @@ pub struct PlaytestCachedRoomCell {
     pub surface_first: u16,
     /// Number of cached surfaces in this cell.
     pub surface_count: u16,
+    /// First room-local vertex index entry for this cell.
+    pub vertex_first: u16,
+    /// Number of unique cached vertices referenced by this cell.
+    pub vertex_count: u16,
 }
 
 /// Cached deduplicated room vertex generated for editor-playtest.
@@ -717,6 +727,8 @@ pub struct PlaytestPackage {
     pub room_surface_caches: Vec<PlaytestRoomSurfaceCache>,
     /// Flattened cached room cell records.
     pub room_cache_cells: Vec<PlaytestCachedRoomCell>,
+    /// Flattened room-local vertex-index lists per cached cell.
+    pub room_cache_cell_vertices: Vec<u16>,
     /// Flattened cached room vertex records.
     pub room_cache_vertices: Vec<PlaytestCachedRoomVertex>,
     /// Flattened cached room surface records.
@@ -812,6 +824,8 @@ pub struct PlaytestStreamChunkMemory {
     pub render_cell_bytes: usize,
     /// Cached vertex table bytes consumed by the render path.
     pub render_vertex_bytes: usize,
+    /// Per-cell cached vertex-index bytes consumed by the render path.
+    pub render_cell_vertex_bytes: usize,
     /// Cached surface table bytes consumed by the render path.
     pub render_surface_bytes: usize,
     /// Total render-cache bytes.
@@ -832,6 +846,7 @@ pub struct PlaytestStreamMemoryTotals {
     pub collision_bytes: usize,
     pub render_cell_bytes: usize,
     pub render_vertex_bytes: usize,
+    pub render_cell_vertex_bytes: usize,
     pub render_surface_bytes: usize,
     pub render_cache_bytes: usize,
     pub alignment_padding_bytes: usize,
