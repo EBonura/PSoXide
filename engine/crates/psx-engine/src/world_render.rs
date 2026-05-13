@@ -21,7 +21,7 @@ use crate::render3d::TexturedGouraudSubmitMicroProfile;
 use crate::{
     render3d::{
         project_world_vertex_indices_gte, CullMode, DepthPolicy, PreparedTriangleDepth,
-        ProjectedVertex,
+        ProjectedVertex, ViewVertex,
     },
     PrimitiveSink, RoomPoint, RoomRender, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
     WorldVertex,
@@ -1021,6 +1021,11 @@ fn tile_depth_options(
     )))
 }
 
+#[inline(always)]
+fn tile_depth_options_from_depth(options: WorldSurfaceOptions, depth: i32) -> WorldSurfaceOptions {
+    options.with_depth_policy(DepthPolicy::Fixed(depth))
+}
+
 fn tile_camera_depth(camera: &WorldCamera, cell: GridVisibleCell, sector_size: i32) -> i32 {
     let sector_size = sector_size.max(1);
     let half = sector_size / 2;
@@ -1821,10 +1826,10 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     projected_ready: &mut [bool],
     projected_valid: &mut [bool],
     projected_depths: &mut [i32],
-    accepted_visible_indices: &mut [u16],
     accepted_cell_indices: &mut [u16],
+    accepted_cell_depths: &mut [i32],
     _room_depth: u16,
-    sector_size: i32,
+    _sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
     camera: &WorldCamera,
@@ -1840,8 +1845,8 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         || projected_ready.len() < cached_vertices.len()
         || projected_valid.len() < cached_vertices.len()
         || projected_depths.len() < cached_vertices.len()
-        || accepted_visible_indices.len() < visible_cells.len()
         || accepted_cell_indices.len() < visible_cells.len()
+        || accepted_cell_depths.len() < visible_cells.len()
     {
         return stats;
     }
@@ -1862,7 +1867,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     let mut projected_index_count = 0usize;
     let mut accepted_cell_count = 0usize;
 
-    for (visible_index, visible) in visible_cells.iter().copied().enumerate() {
+    for visible in visible_cells.iter().copied() {
         let Some(cell_index) = cached_room_cell_index_for_visible(cached_cells, visible) else {
             continue;
         };
@@ -1876,10 +1881,11 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             cell.visibility_center[1],
             cell.visibility_center[2],
         );
-        if !cell_visibility_visible_to_camera(
+        let visibility_view = camera.view_vertex(visibility_center);
+        if !cell_visibility_view_visible_to_camera(
             camera,
             options,
-            visibility_center,
+            visibility_view,
             cell.visibility_radius,
             screen_margin,
         ) {
@@ -1888,8 +1894,8 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         }
 
         stats.cells_drawn = stats.cells_drawn.saturating_add(1);
-        accepted_visible_indices[accepted_cell_count] = visible_index as u16;
         accepted_cell_indices[accepted_cell_count] = cell_index as u16;
+        accepted_cell_depths[accepted_cell_count] = visibility_view.z;
         accepted_cell_count += 1;
         projected_index_count = collect_cached_cell_vertex_indices(
             cell,
@@ -1925,19 +1931,16 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     let mut surface_profile = RoomSurfaceMicroProfile::default();
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_SURFACE_DRAW);
     for accepted_index in 0..accepted_cell_count {
-        let Some(&visible_index) = accepted_visible_indices.get(accepted_index) else {
-            continue;
-        };
         let Some(&cell_index) = accepted_cell_indices.get(accepted_index) else {
             continue;
         };
-        let Some(visible) = visible_cells.get(visible_index as usize).copied() else {
+        let Some(&cell_depth) = accepted_cell_depths.get(accepted_index) else {
             continue;
         };
         let Some(cell) = cached_cells.get(cell_index as usize).copied() else {
             continue;
         };
-        let cell_options = tile_depth_options(options, camera, visible, sector_size);
+        let cell_options = tile_depth_options_from_depth(options, cell_depth);
         let submit_depths = CachedRoomSubmitDepths::from_cell_options::<OT>(cell_options);
         let first = cell.surface_first as usize;
         let end = first
@@ -3246,6 +3249,17 @@ fn cell_visibility_visible_to_camera(
     screen_margin: i32,
 ) -> bool {
     let view = camera.view_vertex(center);
+    cell_visibility_view_visible_to_camera(camera, options, view, radius, screen_margin)
+}
+
+#[inline(always)]
+fn cell_visibility_view_visible_to_camera(
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    view: ViewVertex,
+    radius: i32,
+    screen_margin: i32,
+) -> bool {
     let near = camera.projection.near_z.max(1);
     let far = options.depth_range.far().max(near);
     if view.z < near.saturating_sub(radius) || view.z > far.saturating_add(radius) {
@@ -4914,8 +4928,8 @@ mod tests {
         let mut projected_ready = [false; 4];
         let mut projected_valid = [false; 4];
         let mut projected_depths = [0; 4];
-        let mut accepted_visible_indices = [0u16; 1];
         let mut accepted_cell_indices = [0u16; 1];
+        let mut accepted_cell_depths = [0; 1];
 
         let stats = draw_indexed_cached_room_vertex_lit_visible_cells(
             &cells,
@@ -4927,8 +4941,8 @@ mod tests {
             &mut projected_ready,
             &mut projected_valid,
             &mut projected_depths,
-            &mut accepted_visible_indices,
             &mut accepted_cell_indices,
+            &mut accepted_cell_depths,
             1,
             1024,
             &[WorldRenderMaterial::front(TextureMaterial::opaque(
