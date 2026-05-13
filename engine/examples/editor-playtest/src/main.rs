@@ -508,6 +508,7 @@ struct RuntimeModelAsset {
     socket_count: u16,
     face_first: u16,
     face_count: u16,
+    requires_cpu_blend: bool,
     world_height: u16,
     collision_radius: u16,
     local_to_world: LocalToWorldScale,
@@ -548,6 +549,7 @@ impl RuntimeModelAsset {
             socket_count: record.socket_count,
             face_first: face_first as u16,
             face_count: face_count as u16,
+            requires_cpu_blend: model_requires_cpu_blend(model),
             world_height: record.world_height,
             collision_radius: record.collision_radius,
             local_to_world: LocalToWorldScale::from_q12(model.local_to_world_q12()),
@@ -573,6 +575,20 @@ impl RuntimeModelAsset {
     }
 }
 
+fn model_requires_cpu_blend(model: Model<'_>) -> bool {
+    let joint_count = model.joint_count() as usize;
+    let mut i = 0u16;
+    while i < model.vertex_count() {
+        if let Some(vertex) = model.vertex(i) {
+            if vertex.is_blend() && (vertex.joint1 as usize) < joint_count {
+                return true;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    false
+}
+
 fn decode_model_render_faces(
     model: Model<'_>,
     texture_width: u16,
@@ -589,18 +605,18 @@ fn decode_model_render_faces(
     let mut i = 0usize;
     while i < face_count {
         let face = model.face(i as u16)?;
-        face_pool[*face_cursor + i] = TexturedModelRenderFace {
-            vertex_indices: [
+        face_pool[*face_cursor + i] = TexturedModelRenderFace::new(
+            [
                 face.corners[0].vertex_index,
                 face.corners[1].vertex_index,
                 face.corners[2].vertex_index,
             ],
-            uvs: [
+            [
                 clamp_model_render_uv(face.corners[0].uv, max_u, max_v),
                 clamp_model_render_uv(face.corners[1].uv, max_u, max_v),
                 clamp_model_render_uv(face.corners[2].uv, max_u, max_v),
             ],
-        };
+        );
         i += 1;
     }
     *face_cursor += face_count;
@@ -1784,6 +1800,7 @@ impl Scene for Playtest {
                             self.room_index,
                             character,
                             &self.models,
+                            &self.model_faces[..self.model_face_count],
                             &self.clips,
                             player.x,
                             player.y,
@@ -3067,16 +3084,15 @@ fn draw_player(
 
     telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
     let faces = runtime_model_faces(runtime_model, model_faces);
-    let stats = world.submit_textured_model_predecoded_faces(
+    let stats = submit_runtime_model_predecoded(
+        world,
         triangles,
-        runtime_model.model,
+        runtime_model,
         anim,
         phase,
         *camera,
         origin,
         instance_rotation,
-        unsafe { &mut MODEL_VERTICES },
-        unsafe { &mut JOINT_VIEW_TRANSFORMS },
         material,
         model_options,
         faces,
@@ -3086,6 +3102,54 @@ fn draw_player(
         stats,
         bounds_tests: 1,
         bounds_culled: 0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn submit_runtime_model_predecoded(
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    triangles: &mut impl PrimitiveSink<TriTextured>,
+    runtime_model: RuntimeModelAsset,
+    anim: Animation<'static>,
+    phase: u32,
+    camera: WorldCamera,
+    origin: WorldVertex,
+    rotation: Mat3I16,
+    material: TextureMaterial,
+    options: WorldSurfaceOptions,
+    faces: &[TexturedModelRenderFace],
+) -> TexturedModelRenderStats {
+    if runtime_model.requires_cpu_blend {
+        world.submit_textured_model_predecoded_faces(
+            triangles,
+            runtime_model.model,
+            anim,
+            phase,
+            camera,
+            origin,
+            rotation,
+            unsafe { &mut MODEL_VERTICES },
+            unsafe { &mut JOINT_VIEW_TRANSFORMS },
+            material,
+            options,
+            faces,
+        )
+    } else {
+        world.submit_textured_model_primary_joints_predecoded_faces(
+            triangles,
+            runtime_model.model,
+            anim,
+            phase,
+            camera,
+            origin,
+            rotation,
+            unsafe { &mut MODEL_VERTICES },
+            unsafe { &mut JOINT_VIEW_TRANSFORMS },
+            material,
+            options,
+            faces,
+        )
     }
 }
 
@@ -3108,6 +3172,7 @@ fn draw_player_equipment(
     current_room: RoomIndex,
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    model_faces: &[TexturedModelRenderFace],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     x: i32,
     y: i32,
@@ -3188,18 +3253,19 @@ fn draw_player_equipment(
                         .with_material_layer(material)
                         .with_textured_triangle_splitting(true)
                         .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);
-                    let stats = world.submit_textured_model(
+                    let faces = runtime_model_faces(weapon_model, model_faces);
+                    let stats = submit_runtime_model_predecoded(
+                        world,
                         triangles,
-                        weapon_model.model,
+                        weapon_model,
                         anim,
                         phase,
                         *camera,
                         origin,
                         weapon_rotation,
-                        unsafe { &mut MODEL_VERTICES },
-                        unsafe { &mut JOINT_VIEW_TRANSFORMS },
                         material,
                         model_options,
+                        faces,
                     );
                     accumulate_model_stats(&mut out.stats, stats);
                     if stats.primitive_overflow || stats.command_overflow {
@@ -6024,16 +6090,15 @@ fn draw_model_instances(
 
         telemetry::stage_begin(telemetry::stage::MODEL_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
-        let stats = world.submit_textured_model_predecoded_faces(
+        let stats = submit_runtime_model_predecoded(
+            world,
             triangles,
-            runtime_model.model,
+            runtime_model,
             anim,
             phase,
             *camera,
             origin,
             instance_rotation,
-            unsafe { &mut MODEL_VERTICES },
-            unsafe { &mut JOINT_VIEW_TRANSFORMS },
             material,
             model_options,
             faces,
