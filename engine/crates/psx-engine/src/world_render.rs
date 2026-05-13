@@ -8,7 +8,7 @@
 //! format that will let this helper resolve materials itself.
 
 use psx_gpu::{
-    material::TextureMaterial,
+    material::{TextureMaterial, TexturedGouraudPacketMaterial},
     prim::{TriTextured, TriTexturedGouraud},
 };
 use psx_level::{
@@ -43,6 +43,8 @@ pub enum SurfaceSidedness {
 pub struct WorldRenderMaterial {
     /// GPU texture/material state.
     pub texture: TextureMaterial,
+    /// Prepacked textured-Gouraud packet state derived from `texture`.
+    pub gouraud_packet: TexturedGouraudPacketMaterial,
     /// Face-sidedness policy.
     pub sidedness: SurfaceSidedness,
     /// Texture-window width that maps the authored 64-texel face UV domain.
@@ -56,6 +58,7 @@ impl WorldRenderMaterial {
     pub const fn front(texture: TextureMaterial) -> Self {
         Self {
             texture,
+            gouraud_packet: texture.textured_gouraud_packet_material(),
             sidedness: SurfaceSidedness::Front,
             texture_width: ROOM_TEXTURE_UV_SIZE,
             texture_height: ROOM_TEXTURE_UV_SIZE,
@@ -66,6 +69,7 @@ impl WorldRenderMaterial {
     pub const fn back(texture: TextureMaterial) -> Self {
         Self {
             texture,
+            gouraud_packet: texture.textured_gouraud_packet_material(),
             sidedness: SurfaceSidedness::Back,
             texture_width: ROOM_TEXTURE_UV_SIZE,
             texture_height: ROOM_TEXTURE_UV_SIZE,
@@ -76,6 +80,7 @@ impl WorldRenderMaterial {
     pub const fn both(texture: TextureMaterial) -> Self {
         Self {
             texture,
+            gouraud_packet: texture.textured_gouraud_packet_material(),
             sidedness: SurfaceSidedness::Both,
             texture_width: ROOM_TEXTURE_UV_SIZE,
             texture_height: ROOM_TEXTURE_UV_SIZE,
@@ -86,6 +91,7 @@ impl WorldRenderMaterial {
     /// a different flat RGB tint.
     pub const fn with_tint(mut self, tint: (u8, u8, u8)) -> Self {
         self.texture = self.texture.with_tint(tint);
+        self.gouraud_packet = self.texture.textured_gouraud_packet_material();
         self
     }
 
@@ -672,8 +678,8 @@ pub struct CachedRoomSurface {
     pub sample_sz: u16,
     /// Surface ordinal for the reconstructed lighting sample.
     pub sample_ordinal: u16,
-    /// Texture-page-relative UVs matching `vertices`.
-    pub uvs: [(u8, u8); 4],
+    /// Packed low 16 bits of each packet UV word: `u | v << 8`.
+    pub uv_words: [u16; 4],
     /// Cached baked RGB values. Valid when `kind_flags` carries
     /// [`CACHED_SURFACE_HAS_BAKED_RGB`].
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
@@ -696,7 +702,7 @@ impl CachedRoomSurface {
         sample_sx: 0,
         sample_sz: 0,
         sample_ordinal: 0,
-        uvs: [(0, 0); 4],
+        uv_words: [0; 4],
         baked_vertex_rgb: [(0, 0, 0); 4],
         kind_flags: CACHED_SURFACE_KIND_FLOOR,
         wall_direction: 0,
@@ -725,7 +731,7 @@ impl CachedRoomSurface {
             sample_sx: sample.sx,
             sample_sz: sample.sz,
             sample_ordinal: sample.ordinal,
-            uvs,
+            uv_words: cached_surface_uv_words(uvs),
             baked_vertex_rgb,
             kind_flags,
             wall_direction,
@@ -775,6 +781,34 @@ impl CachedRoomSurface {
     const fn has_baked_rgb(self) -> bool {
         self.kind_flags & CACHED_SURFACE_HAS_BAKED_RGB != 0
     }
+
+    #[cfg(test)]
+    const fn uvs(self) -> [(u8, u8); 4] {
+        [
+            cached_surface_uv_pair(self.uv_words[0]),
+            cached_surface_uv_pair(self.uv_words[1]),
+            cached_surface_uv_pair(self.uv_words[2]),
+            cached_surface_uv_pair(self.uv_words[3]),
+        ]
+    }
+}
+
+const fn cached_surface_uv_words(uvs: [(u8, u8); 4]) -> [u16; 4] {
+    [
+        cached_surface_uv_word(uvs[0]),
+        cached_surface_uv_word(uvs[1]),
+        cached_surface_uv_word(uvs[2]),
+        cached_surface_uv_word(uvs[3]),
+    ]
+}
+
+const fn cached_surface_uv_word(uv: (u8, u8)) -> u16 {
+    (uv.0 as u16) | ((uv.1 as u16) << 8)
+}
+
+#[cfg(test)]
+const fn cached_surface_uv_pair(word: u16) -> (u8, u8) {
+    (word as u8, (word >> 8) as u8)
 }
 
 const CACHED_SURFACE_KIND_MASK: u8 = 0b0000_0011;
@@ -1955,7 +1989,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         cached_surfaces[i],
                         cached_vertices,
                         projected_vertices,
-                        projected_ready,
                         projected_valid,
                         projected_depths,
                         use_vertex_depths,
@@ -2224,7 +2257,6 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
     cached_vertices: &[WorldVertex],
     projected_vertices: &[ProjectedVertex],
-    projected_ready: &[bool],
     projected_valid: &[bool],
     projected_depths: &[i32],
     use_vertex_depths: bool,
@@ -2242,9 +2274,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     profile.count_shape(surface.triangle_index);
     let projected_start = RoomSurfaceMicroProfile::cycle();
     let ids = surface.vertex_indices;
-    let Some(projected) =
-        indexed_projected_quad(projected_vertices, projected_ready, projected_valid, ids)
-    else {
+    let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
         profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
         profile.count_projected_reject();
         return 0;
@@ -2304,9 +2334,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
-                submit_projected_split_triangle_vertex_lit_cached_uvs(
+                submit_projected_split_triangle_vertex_lit_cached_uv_words(
                     projected,
-                    surface.uvs,
+                    surface.uv_words,
                     colors,
                     material,
                     horizontal_depth_options(options),
@@ -2354,21 +2384,21 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     return 0;
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
-                let (projected, uvs, colors) = if is_ceiling {
+                let (projected, uv_words, colors) = if is_ceiling {
                     (
                         reverse_quad_winding(projected),
-                        reverse_quad_winding(surface.uvs),
+                        reverse_quad_winding(surface.uv_words),
                         reverse_quad_winding(colors),
                     )
                 } else {
-                    (projected, surface.uvs, colors)
+                    (projected, surface.uv_words, colors)
                 };
                 let submit_start = RoomSurfaceMicroProfile::cycle();
-                submit_sided_projected_gouraud_quad_cached_uvs(
+                submit_sided_projected_gouraud_quad_cached_uv_words(
                     world,
                     triangles,
                     projected,
-                    uvs,
+                    uv_words,
                     colors,
                     material,
                     horizontal_depth_options(options),
@@ -2414,9 +2444,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
-                submit_projected_split_triangle_vertex_lit_cached_uvs(
+                submit_projected_split_triangle_vertex_lit_cached_uv_words(
                     projected,
-                    surface.uvs,
+                    surface.uv_words,
                     colors,
                     wall_material,
                     options,
@@ -2460,11 +2490,11 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
-                submit_sided_projected_gouraud_quad_cached_uvs(
+                submit_sided_projected_gouraud_quad_cached_uv_words(
                     world,
                     triangles,
                     projected,
-                    surface.uvs,
+                    surface.uv_words,
                     colors,
                     wall_material,
                     options,
@@ -2562,7 +2592,6 @@ fn projected_quad_outside_screen(
 #[inline(always)]
 fn indexed_projected_quad(
     projected_vertices: &[ProjectedVertex],
-    projected_ready: &[bool],
     projected_valid: &[bool],
     ids: [u16; 4],
 ) -> Option<[ProjectedVertex; 4]> {
@@ -2570,15 +2599,9 @@ fn indexed_projected_quad(
     let b = ids[1] as usize;
     let c = ids[2] as usize;
     let d = ids[3] as usize;
-    let limit = projected_vertices
-        .len()
-        .min(projected_ready.len())
-        .min(projected_valid.len());
+    let limit = projected_vertices.len().min(projected_valid.len());
     let max_index = a.max(b).max(c).max(d);
     if max_index >= limit {
-        return None;
-    }
-    if !projected_ready[a] || !projected_ready[b] || !projected_ready[c] || !projected_ready[d] {
         return None;
     }
     if !projected_valid[a] || !projected_valid[b] || !projected_valid[c] || !projected_valid[d] {
@@ -3898,9 +3921,9 @@ fn submit_split_triangle_vertex_lit<const OT: usize>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn submit_projected_split_triangle_vertex_lit_cached_uvs<const OT: usize>(
+fn submit_projected_split_triangle_vertex_lit_cached_uv_words<const OT: usize>(
     projected: [crate::render3d::ProjectedVertex; 4],
-    uvs: [(u8, u8); 4],
+    uv_words: [u16; 4],
     colors: [(u8, u8, u8); 4],
     material: WorldRenderMaterial,
     options: WorldSurfaceOptions,
@@ -3920,27 +3943,28 @@ fn submit_projected_split_triangle_vertex_lit_cached_uvs<const OT: usize>(
     }
     let (a, b, c) = tri;
     let tri_verts = [projected[a], projected[b], projected[c]];
-    let tri_uvs = [uvs[a], uvs[b], uvs[c]];
+    let tri_uv_words = [uv_words[a], uv_words[b], uv_words[c]];
     let tri_colors = [colors[a], colors[b], colors[c]];
     if let Some(prepared_depth) = prepared_depth {
         #[cfg(feature = "room-surface-profile")]
-        let _ = world.submit_textured_gouraud_triangle_prescreened_u8_prepared_depth_profiled(
-            triangles,
-            tri_verts,
-            tri_uvs,
-            tri_colors,
-            material.texture,
-            opts,
-            prepared_depth,
-            profile.submit_profile(),
-        );
+        let _ = world
+            .submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
+                triangles,
+                tri_verts,
+                tri_uv_words,
+                tri_colors,
+                material.gouraud_packet,
+                opts,
+                prepared_depth,
+                profile.submit_profile(),
+            );
         #[cfg(not(feature = "room-surface-profile"))]
-        let _ = world.submit_textured_gouraud_triangle_prescreened_u8_prepared_depth(
+        let _ = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
             triangles,
             tri_verts,
-            tri_uvs,
+            tri_uv_words,
             tri_colors,
-            material.texture,
+            material.gouraud_packet,
             opts,
             prepared_depth,
         );
@@ -3949,20 +3973,20 @@ fn submit_projected_split_triangle_vertex_lit_cached_uvs<const OT: usize>(
         return;
     }
     #[cfg(feature = "room-surface-profile")]
-    let _ = world.submit_textured_gouraud_triangle_prescreened_u8_profiled(
+    let _ = world.submit_textured_gouraud_triangle_prescreened_uv_words_profiled(
         triangles,
         tri_verts,
-        tri_uvs,
+        tri_uv_words,
         tri_colors,
         material.texture,
         opts,
         profile.submit_profile(),
     );
     #[cfg(not(feature = "room-surface-profile"))]
-    let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
+    let _ = world.submit_textured_gouraud_triangle_prescreened_uv_words(
         triangles,
         tri_verts,
-        tri_uvs,
+        tri_uv_words,
         tri_colors,
         material.texture,
         opts,
@@ -3973,11 +3997,11 @@ fn submit_projected_split_triangle_vertex_lit_cached_uvs<const OT: usize>(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
+fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     world: &mut WorldRenderPass<'_, '_, OT>,
     triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     verts: [crate::render3d::ProjectedVertex; 4],
-    uvs: [(u8, u8); 4],
+    uv_words: [u16; 4],
     colors: [(u8, u8, u8); 4],
     material: WorldRenderMaterial,
     options: WorldSurfaceOptions,
@@ -3986,35 +4010,36 @@ fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
     split_triangles: [(usize, usize, usize); 2],
     profile: &mut RoomSurfaceMicroProfile,
 ) {
-    let (verts, uvs, colors) = match material.sidedness {
+    let (verts, uv_words, colors) = match material.sidedness {
         SurfaceSidedness::Back => (
             reverse_quad_winding(verts),
-            reverse_quad_winding(uvs),
+            reverse_quad_winding(uv_words),
             reverse_quad_winding(colors),
         ),
-        SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uvs, colors),
+        SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uv_words, colors),
     };
     let opts = options.with_material_layer(material.texture);
     let [(a, b, c), (d, e, f)] = split_triangles;
     if let Some(prepared_depth) = prepared_depth {
         #[cfg(feature = "room-surface-profile")]
-        let stats = world.submit_textured_gouraud_triangle_prescreened_u8_prepared_depth_profiled(
-            triangles,
-            [verts[a], verts[b], verts[c]],
-            [uvs[a], uvs[b], uvs[c]],
-            [colors[a], colors[b], colors[c]],
-            material.texture,
-            opts,
-            prepared_depth,
-            profile.submit_profile(),
-        );
+        let stats = world
+            .submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
+                triangles,
+                [verts[a], verts[b], verts[c]],
+                [uv_words[a], uv_words[b], uv_words[c]],
+                [colors[a], colors[b], colors[c]],
+                material.gouraud_packet,
+                opts,
+                prepared_depth,
+                profile.submit_profile(),
+            );
         #[cfg(not(feature = "room-surface-profile"))]
-        let stats = world.submit_textured_gouraud_triangle_prescreened_u8_prepared_depth(
+        let stats = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
             triangles,
             [verts[a], verts[b], verts[c]],
-            [uvs[a], uvs[b], uvs[c]],
+            [uv_words[a], uv_words[b], uv_words[c]],
             [colors[a], colors[b], colors[c]],
-            material.texture,
+            material.gouraud_packet,
             opts,
             prepared_depth,
         );
@@ -4022,23 +4047,24 @@ fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
             return;
         }
         #[cfg(feature = "room-surface-profile")]
-        let _ = world.submit_textured_gouraud_triangle_prescreened_u8_prepared_depth_profiled(
-            triangles,
-            [verts[d], verts[e], verts[f]],
-            [uvs[d], uvs[e], uvs[f]],
-            [colors[d], colors[e], colors[f]],
-            material.texture,
-            opts,
-            prepared_depth,
-            profile.submit_profile(),
-        );
+        let _ = world
+            .submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
+                triangles,
+                [verts[d], verts[e], verts[f]],
+                [uv_words[d], uv_words[e], uv_words[f]],
+                [colors[d], colors[e], colors[f]],
+                material.gouraud_packet,
+                opts,
+                prepared_depth,
+                profile.submit_profile(),
+            );
         #[cfg(not(feature = "room-surface-profile"))]
-        let _ = world.submit_textured_gouraud_triangle_prescreened_u8_prepared_depth(
+        let _ = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
             triangles,
             [verts[d], verts[e], verts[f]],
-            [uvs[d], uvs[e], uvs[f]],
+            [uv_words[d], uv_words[e], uv_words[f]],
             [colors[d], colors[e], colors[f]],
-            material.texture,
+            material.gouraud_packet,
             opts,
             prepared_depth,
         );
@@ -4047,20 +4073,20 @@ fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
         return;
     }
     #[cfg(feature = "room-surface-profile")]
-    let stats = world.submit_textured_gouraud_triangle_prescreened_u8_profiled(
+    let stats = world.submit_textured_gouraud_triangle_prescreened_uv_words_profiled(
         triangles,
         [verts[a], verts[b], verts[c]],
-        [uvs[a], uvs[b], uvs[c]],
+        [uv_words[a], uv_words[b], uv_words[c]],
         [colors[a], colors[b], colors[c]],
         material.texture,
         opts,
         profile.submit_profile(),
     );
     #[cfg(not(feature = "room-surface-profile"))]
-    let stats = world.submit_textured_gouraud_triangle_prescreened_u8(
+    let stats = world.submit_textured_gouraud_triangle_prescreened_uv_words(
         triangles,
         [verts[a], verts[b], verts[c]],
-        [uvs[a], uvs[b], uvs[c]],
+        [uv_words[a], uv_words[b], uv_words[c]],
         [colors[a], colors[b], colors[c]],
         material.texture,
         opts,
@@ -4069,20 +4095,20 @@ fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
         return;
     }
     #[cfg(feature = "room-surface-profile")]
-    let _ = world.submit_textured_gouraud_triangle_prescreened_u8_profiled(
+    let _ = world.submit_textured_gouraud_triangle_prescreened_uv_words_profiled(
         triangles,
         [verts[d], verts[e], verts[f]],
-        [uvs[d], uvs[e], uvs[f]],
+        [uv_words[d], uv_words[e], uv_words[f]],
         [colors[d], colors[e], colors[f]],
         material.texture,
         opts,
         profile.submit_profile(),
     );
     #[cfg(not(feature = "room-surface-profile"))]
-    let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
+    let _ = world.submit_textured_gouraud_triangle_prescreened_uv_words(
         triangles,
         [verts[d], verts[e], verts[f]],
-        [uvs[d], uvs[e], uvs[f]],
+        [uv_words[d], uv_words[e], uv_words[f]],
         [colors[d], colors[e], colors[f]],
         material.texture,
         opts,
@@ -4794,7 +4820,7 @@ mod tests {
             sample_sx: surface.sample_sx,
             sample_sz: surface.sample_sz,
             sample_ordinal: surface.sample_ordinal,
-            uvs: surface.uvs,
+            uv_words: surface.uv_words,
             baked_vertex_rgb: surface.baked_vertex_rgb,
             kind_flags: surface.kind_flags,
             wall_direction: surface.wall_direction,
@@ -4803,6 +4829,7 @@ mod tests {
         }];
         let surfaces = cached_room_surfaces_from_level_records(&surface_records);
         assert_eq!(surfaces[0], surface);
+        assert_eq!(surfaces[0].uvs(), [(0, 0), (32, 0), (32, 64), (0, 64)]);
         let sample = surfaces[0].sample_with_center(vertices, true);
         assert_eq!(
             sample.kind,
