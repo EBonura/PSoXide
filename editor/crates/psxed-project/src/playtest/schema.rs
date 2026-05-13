@@ -315,8 +315,8 @@ pub struct PlaytestCachedRoomSurface {
     pub sample_sz: u16,
     /// Surface ordinal for lighting-sample reconstruction.
     pub sample_ordinal: u16,
-    /// Texture-page-relative UVs matching vertex order.
-    pub uvs: [(u8, u8); 4],
+    /// Packed low 16 bits of each packet UV word: `u | v << 8`.
+    pub uv_words: [u16; 4],
     /// Cached baked RGB values.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
     /// Packed surface kind plus baked-light flag.
