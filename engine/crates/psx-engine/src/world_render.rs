@@ -3509,7 +3509,7 @@ fn submit_projected_split_triangle_vertex_lit_cached_uvs<const OT: usize>(
         tri = (tri.0, tri.2, tri.1);
     }
     let (a, b, c) = tri;
-    let _ = world.submit_textured_gouraud_triangle_prescreened(
+    let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
         triangles,
         [projected[a], projected[b], projected[c]],
         [uvs[a], uvs[b], uvs[c]],
@@ -3542,7 +3542,7 @@ fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
     };
     let opts = options.with_material_layer(material.texture);
     let [(a, b, c), (d, e, f)] = split_triangles;
-    let stats = world.submit_textured_gouraud_triangle_prescreened(
+    let stats = world.submit_textured_gouraud_triangle_prescreened_u8(
         triangles,
         [verts[a], verts[b], verts[c]],
         [uvs[a], uvs[b], uvs[c]],
@@ -3553,7 +3553,7 @@ fn submit_sided_projected_gouraud_quad_cached_uvs<const OT: usize>(
     if stats.primitive_overflow || stats.command_overflow {
         return;
     }
-    let _ = world.submit_textured_gouraud_triangle_prescreened(
+    let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
         triangles,
         [verts[d], verts[e], verts[f]],
         [uvs[d], uvs[e], uvs[f]],
