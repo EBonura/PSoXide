@@ -478,9 +478,9 @@ pub struct LevelWorldPackEntryRecord {
 /// or carrying a second global cache copy.
 pub const STREAMED_ROOM_CHUNK_MAGIC: [u8; 8] = *b"PSXCHNK\0";
 
-/// Streamed room chunk header version with explicit render and
-/// collision payload boundaries.
-pub const STREAMED_ROOM_CHUNK_VERSION: u32 = 2;
+/// Streamed room chunk header version with explicit render,
+/// per-cell vertex-list, and collision payload boundaries.
+pub const STREAMED_ROOM_CHUNK_VERSION: u32 = 3;
 
 /// Byte length of the streamed room chunk header.
 pub const STREAMED_ROOM_CHUNK_HEADER_BYTES: usize = 64;
@@ -512,10 +512,10 @@ pub mod streamed_room_chunk_header {
     pub const SURFACES_OFFSET: usize = 44;
     /// Number of cached surface records.
     pub const SURFACE_COUNT: usize = 48;
-    /// Reserved V2 header word.
-    pub const RESERVED_0: usize = 52;
-    /// Reserved V2 header word.
-    pub const RESERVED_1: usize = 56;
+    /// Offset of the per-cell cached vertex-index table.
+    pub const CELL_VERTICES_OFFSET: usize = 52;
+    /// Number of per-cell cached vertex indices.
+    pub const CELL_VERTEX_COUNT: usize = 56;
     /// Payload format flags.
     pub const FLAGS: usize = 60;
 }
@@ -700,6 +700,12 @@ pub struct LevelRoomSurfaceCacheRecord {
     pub cell_first: u32,
     /// Number of cached cell records for this room.
     pub cell_count: u16,
+    /// First per-cell vertex index for this room in
+    /// `ROOM_CACHE_CELL_VERTICES`. A zero count means the runtime
+    /// derives the visible vertex set from cell surface ranges.
+    pub cell_vertex_first: u32,
+    /// Number of per-cell vertex indices for this room.
+    pub cell_vertex_count: u16,
     /// First vertex record for this room in `ROOM_CACHE_VERTICES`.
     pub vertex_first: u32,
     /// Number of cached vertex records for this room.
@@ -732,6 +738,11 @@ pub struct LevelCachedRoomCellRecord {
     pub surface_first: u16,
     /// Number of cached surfaces in this cell.
     pub surface_count: u16,
+    /// First cached vertex index in this cell's room-local
+    /// cell-vertex slice.
+    pub vertex_first: u16,
+    /// Number of unique cached vertices referenced by this cell.
+    pub vertex_count: u16,
 }
 
 /// Generated cached room vertex.
@@ -1538,9 +1549,11 @@ mod tests {
     #[test]
     fn streamed_room_chunk_schema_sizes_are_stable() {
         assert_eq!(STREAMED_ROOM_CHUNK_MAGIC, *b"PSXCHNK\0");
-        assert_eq!(STREAMED_ROOM_CHUNK_VERSION, 2);
+        assert_eq!(STREAMED_ROOM_CHUNK_VERSION, 3);
         assert_eq!(STREAMED_ROOM_CHUNK_HEADER_BYTES, 64);
         assert_eq!(streamed_room_chunk_header::COLLISION_OFFSET, 20);
+        assert_eq!(streamed_room_chunk_header::CELL_VERTICES_OFFSET, 52);
+        assert_eq!(streamed_room_chunk_header::CELL_VERTEX_COUNT, 56);
         assert_eq!(streamed_room_chunk_header::FLAGS, 60);
         assert_eq!(STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT, 1);
         assert_eq!(COMPACT_COLLISION_MAGIC, *b"PSXCOLL\0");
@@ -1549,7 +1562,7 @@ mod tests {
         assert_eq!(COMPACT_COLLISION_SECTOR_BYTES, 44);
         assert_eq!(COMPACT_COLLISION_WALL_BYTES, 20);
         assert_eq!(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES, 28);
-        assert_eq!(core::mem::size_of::<LevelCachedRoomCellRecord>(), 32);
+        assert_eq!(core::mem::size_of::<LevelCachedRoomCellRecord>(), 36);
         assert_eq!(core::mem::size_of::<LevelCachedRoomVertexRecord>(), 12);
         assert_eq!(core::mem::size_of::<LevelCachedRoomSurfaceRecord>(), 40);
         assert_eq!(core::mem::align_of::<LevelCachedRoomCellRecord>(), 4);
