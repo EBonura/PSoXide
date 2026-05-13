@@ -351,16 +351,45 @@ impl ProjectedTexturedGouraudVertex {
 pub struct TexturedModelRenderFace {
     /// Projected-vertex indices for the triangle corners.
     pub vertex_indices: [u16; 3],
-    /// Texture coordinates for the triangle corners.
-    pub uvs: [(u8, u8); 3],
+    /// Packed low 16 bits of each packet UV word: `u | v << 8`.
+    pub uv_words: [u16; 3],
 }
 
 impl TexturedModelRenderFace {
     /// Empty face record used for fixed-size static arrays.
     pub const ZERO: Self = Self {
         vertex_indices: [0; 3],
-        uvs: [(0, 0); 3],
+        uv_words: [0; 3],
     };
+
+    /// Build a predecoded face from canonical `(u, v)` pairs.
+    pub const fn new(vertex_indices: [u16; 3], uvs: [(u8, u8); 3]) -> Self {
+        Self {
+            vertex_indices,
+            uv_words: [
+                model_uv_word(uvs[0]),
+                model_uv_word(uvs[1]),
+                model_uv_word(uvs[2]),
+            ],
+        }
+    }
+
+    /// Return canonical `(u, v)` pairs for fallback paths and tests.
+    pub const fn uvs(self) -> [(u8, u8); 3] {
+        [
+            model_uv_pair(self.uv_words[0]),
+            model_uv_pair(self.uv_words[1]),
+            model_uv_pair(self.uv_words[2]),
+        ]
+    }
+}
+
+const fn model_uv_word(uv: (u8, u8)) -> u16 {
+    (uv.0 as u16) | ((uv.1 as u16) << 8)
+}
+
+const fn model_uv_pair(word: u16) -> (u8, u8) {
+    (word as u8, (word >> 8) as u8)
 }
 
 fn model_uv_limits(model: Model<'_>) -> (i32, i32) {
@@ -1143,6 +1172,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         self.submit_textured_triangle_leaf(triangles, verts, material, options)
     }
 
+    #[cfg(test)]
     fn submit_textured_triangle_split_leaf_fast(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -2401,7 +2431,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     continue;
                 }
 
-                if projected_culled_gte(projected, options.cull_mode) {
+                if projected_culled(projected, options.cull_mode) {
                     stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
                     face_index += 1;
                     continue;
@@ -2412,34 +2442,41 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     clamp_projected_vertex(projected[1]),
                     clamp_projected_vertex(projected[2]),
                 ];
-                let textured = [
-                    ProjectedTexturedVertex::new(
-                        projected[0],
-                        face.uvs[0].0 as i32,
-                        face.uvs[0].1 as i32,
-                    ),
-                    ProjectedTexturedVertex::new(
-                        projected[1],
-                        face.uvs[1].0 as i32,
-                        face.uvs[1].1 as i32,
-                    ),
-                    ProjectedTexturedVertex::new(
-                        projected[2],
-                        face.uvs[2].0 as i32,
-                        face.uvs[2].1 as i32,
-                    ),
-                ];
 
                 if options.split_textured_triangles {
-                    let tri_stats = self
-                        .submit_textured_triangle_split_leaf_fast(
-                            triangles, textured, material, options,
+                    let tri_stats = if options.textured_split_max_edge == 0
+                        && projected_triangle_hw_safe(projected)
+                    {
+                        self.submit_projected_model_triangle_preclamped_packed_fast(
+                            triangles,
+                            projected,
+                            face.uv_words,
+                            material,
+                            options,
                         )
-                        .unwrap_or_else(|| {
-                            self.submit_textured_triangle_split(
-                                triangles, textured, material, options, 0,
-                            )
-                        });
+                    } else {
+                        let uvs = face.uvs();
+                        let textured = [
+                            ProjectedTexturedVertex::new(
+                                projected[0],
+                                uvs[0].0 as i32,
+                                uvs[0].1 as i32,
+                            ),
+                            ProjectedTexturedVertex::new(
+                                projected[1],
+                                uvs[1].0 as i32,
+                                uvs[1].1 as i32,
+                            ),
+                            ProjectedTexturedVertex::new(
+                                projected[2],
+                                uvs[2].0 as i32,
+                                uvs[2].1 as i32,
+                            ),
+                        ];
+                        self.submit_textured_triangle_split(
+                            triangles, textured, material, options, 0,
+                        )
+                    };
                     merge_textured_model_stats(&mut stats, tri_stats);
                     if stats.primitive_overflow || stats.command_overflow {
                         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
@@ -2452,7 +2489,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         return stats;
                     }
                 } else if self.submit_projected_model_triangle_preclamped_fast(
-                    triangles, projected, face.uvs, material, options, &mut stats,
+                    triangles,
+                    projected,
+                    face.uvs(),
+                    material,
+                    options,
+                    &mut stats,
                 ) {
                     crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
                     emit_textured_model_detail_counters(
@@ -2566,6 +2608,52 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             faces_considered,
         );
 
+        stats
+    }
+
+    fn submit_projected_model_triangle_preclamped_packed_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+
+        let Some(tri) = triangles.push(TriTextured::with_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uv_words,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+
+        let depth = CameraDepth::new(
+            options
+                .depth_policy
+                .depth_values(verts[0].sz, verts[1].sz, verts[2].sz)
+                .saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        stats.submitted_triangles = 1;
         stats
     }
 
@@ -3792,22 +3880,6 @@ fn projected_culled(verts: [ProjectedVertex; 3], cull_mode: CullMode) -> bool {
     }
 }
 
-fn projected_back_facing_gte(verts: [ProjectedVertex; 3]) -> bool {
-    scene::screen_triangle_back_facing([
-        (verts[0].sx, verts[0].sy),
-        (verts[1].sx, verts[1].sy),
-        (verts[2].sx, verts[2].sy),
-    ])
-}
-
-fn projected_culled_gte(verts: [ProjectedVertex; 3], cull_mode: CullMode) -> bool {
-    match cull_mode {
-        CullMode::None => false,
-        CullMode::Back => projected_back_facing_gte(verts),
-        CullMode::Front => !projected_back_facing_gte(verts),
-    }
-}
-
 fn clamp_projected_textured_vertex(vertex: ProjectedTexturedVertex) -> ProjectedTexturedVertex {
     ProjectedTexturedVertex::new(
         ProjectedVertex::new(
@@ -4421,6 +4493,28 @@ mod tests {
         assert_eq!(model_uv_max(128), 127);
         assert_eq!(model_uv_max(256), 255);
         assert_eq!(model_uv_max(512), 255);
+    }
+
+    #[test]
+    fn model_face_packed_uv_words_match_packet_texcoords() {
+        let material = TextureMaterial::opaque(0x1234, 0x0160, (96, 128, 160));
+        let verts = [(12, 34), (56, 78), (90, 123)];
+        let uvs = [(3, 5), (17, 7), (11, 29)];
+        let face = TexturedModelRenderFace::new([0, 1, 2], uvs);
+
+        let tuple_packet = TriTextured::with_material_packet_texcoords(verts, uvs, material);
+        let packed_packet =
+            TriTextured::with_material_packed_uv_words(verts, face.uv_words, material);
+
+        assert_eq!(face.uvs(), uvs);
+        assert_eq!(tuple_packet.tex_window, packed_packet.tex_window);
+        assert_eq!(tuple_packet.color_cmd, packed_packet.color_cmd);
+        assert_eq!(tuple_packet.v0, packed_packet.v0);
+        assert_eq!(tuple_packet.uv0_clut, packed_packet.uv0_clut);
+        assert_eq!(tuple_packet.v1, packed_packet.v1);
+        assert_eq!(tuple_packet.uv1_tpage, packed_packet.uv1_tpage);
+        assert_eq!(tuple_packet.v2, packed_packet.v2);
+        assert_eq!(tuple_packet.uv2, packed_packet.uv2);
     }
 
     #[test]
