@@ -343,8 +343,6 @@ static mut CACHED_ROOM_PROJECTED_INDICES: [u16; MAX_CACHED_ROOM_VERTICES] =
     [0; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_READY: [bool; MAX_CACHED_ROOM_VERTICES] =
     [false; MAX_CACHED_ROOM_VERTICES];
-static mut CACHED_ROOM_PROJECTED_VALID: [bool; MAX_CACHED_ROOM_VERTICES] =
-    [false; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_DEPTHS: [i32; MAX_CACHED_ROOM_VERTICES] =
     [0; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_ACCEPTED_CELL_INDICES: [u16; MAX_PRECOMPUTED_VISIBLE_CELLS] =
@@ -1567,8 +1565,6 @@ impl Scene for Playtest {
                                     unsafe { &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count] };
                                 let projected_ready =
                                     unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
-                                let projected_valid =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_VALID[..vertex_count] };
                                 let projected_depths =
                                     unsafe { &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count] };
                                 let accepted_cell_indices =
@@ -1583,7 +1579,6 @@ impl Scene for Playtest {
                                     projected_indices,
                                     projected_vertices,
                                     projected_ready,
-                                    projected_valid,
                                     projected_depths,
                                     accepted_cell_indices,
                                     accepted_cell_depths,
@@ -4082,7 +4077,8 @@ fn fill_precomputed_visible_cells(
         }
         cell_index += 1;
     }
-    sort_visible_cells_for_camera(&mut out[..written], camera, sector_size);
+    let sort_depths = unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..written] };
+    sort_visible_cells_for_camera(&mut out[..written], sort_depths, camera, sector_size);
     Some((written, rejected_global))
 }
 
@@ -4097,22 +4093,32 @@ fn visible_cell_view_keys(camera: WorldCamera) -> (i16, i16) {
 #[cfg(feature = "world-grid-visible")]
 fn sort_visible_cells_for_camera(
     cells: &mut [GridVisibleCell],
+    depths: &mut [i32],
     camera: WorldCamera,
     sector_size: i32,
 ) {
+    if cells.len() > depths.len() {
+        return;
+    }
+    let mut i = 0usize;
+    while i < cells.len() {
+        depths[i] = visible_cell_camera_depth(cells[i], camera, sector_size);
+        i += 1;
+    }
     let mut gap = cells.len() / 2;
     while gap > 0 {
         let mut i = gap;
         while i < cells.len() {
             let cell = cells[i];
-            let depth = visible_cell_camera_depth(cell, camera, sector_size);
+            let depth = depths[i];
             let mut j = i;
-            while j >= gap && visible_cell_camera_depth(cells[j - gap], camera, sector_size) < depth
-            {
+            while j >= gap && depths[j - gap] < depth {
                 cells[j] = cells[j - gap];
+                depths[j] = depths[j - gap];
                 j -= gap;
             }
             cells[j] = cell;
+            depths[j] = depth;
             i += 1;
         }
         gap /= 2;
