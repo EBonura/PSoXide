@@ -2938,7 +2938,7 @@ fn playtest_cached_room_surface(surface: CachedRoomSurface) -> PlaytestCachedRoo
         sample_sx: surface.sample_sx,
         sample_sz: surface.sample_sz,
         sample_ordinal: surface.sample_ordinal,
-        uvs: surface.uvs,
+        uv_words: surface.uv_words,
         baked_vertex_rgb: surface.baked_vertex_rgb,
         kind_flags: surface.kind_flags,
         wall_direction: surface.wall_direction,
