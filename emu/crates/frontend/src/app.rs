@@ -106,6 +106,12 @@ pub struct AppState {
     pub editor: EditorWorkspace,
     /// In-process playtest launched from the editor viewport.
     pub embedded_playtest: EmbeddedPlaytestState,
+    /// Editor project directory observed at the last
+    /// [`AppState::sync_embedded_playtest_with_editor_project`]
+    /// call. When the editor's current project_dir diverges, the
+    /// embedded playtest belongs to a different project and gets
+    /// stopped so the viewport doesn't keep showing stale output.
+    editor_project_dir_seen: PathBuf,
     /// Deferred action attached to the currently running editor build.
     editor_build_completion: Option<EditorBuildCompletion>,
     pub panels: PanelVisibility,
@@ -268,10 +274,12 @@ impl AppState {
         });
 
         let initial_gpu_resync_generation = if bus.is_some() { 1 } else { 0 };
+        let editor_project_dir_seen = editor.project_dir().to_path_buf();
         let mut out = Self {
             workspace: Workspace::Emulator,
             editor,
             embedded_playtest: EmbeddedPlaytestState::default(),
+            editor_project_dir_seen,
             editor_build_completion: None,
             panels: PanelVisibility::default(),
             scale_mode: ScaleMode::default(),
@@ -1096,6 +1104,29 @@ impl AppState {
         self.embedded_playtest.stop();
         self.running = false;
         self.menu.sync_run_label(false);
+    }
+
+    /// Reconcile the embedded playtest with the editor's current
+    /// project directory. Called once per frame after the editor UI
+    /// runs so that switching project from the editor menu
+    /// implicitly stops a play session that belongs to the previous
+    /// project, instead of letting the viewport keep rendering it
+    /// against the wrong assets.
+    pub fn sync_embedded_playtest_with_editor_project(&mut self) {
+        let current = self.editor.project_dir();
+        if current == self.editor_project_dir_seen {
+            return;
+        }
+        self.editor_project_dir_seen = current.to_path_buf();
+        let status = self.editor_playtest_status();
+        if status == EditorPlaytestStatus::Idle {
+            return;
+        }
+        let was_active = status.is_active();
+        self.stop_embedded_playtest();
+        if was_active {
+            self.status_message_set("Embedded play stopped: project changed");
+        }
     }
 
     /// Capture input for the embedded game and resume emulation.
