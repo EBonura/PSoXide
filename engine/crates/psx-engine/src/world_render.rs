@@ -2545,7 +2545,15 @@ fn indexed_world_quad(vertices: &[WorldVertex], ids: [u16; 4]) -> Option<[WorldV
     if max_index >= vertices.len() {
         return None;
     }
-    Some([vertices[a], vertices[b], vertices[c], vertices[d]])
+    // SAFETY: `max_index < vertices.len()` proves every id is in range.
+    unsafe {
+        Some([
+            *vertices.get_unchecked(a),
+            *vertices.get_unchecked(b),
+            *vertices.get_unchecked(c),
+            *vertices.get_unchecked(d),
+        ])
+    }
 }
 
 fn cached_surface_center(vertices: [WorldVertex; 4], split: u8, triangle_index: u8) -> RoomPoint {
@@ -2623,15 +2631,19 @@ fn indexed_projected_quad(
     let b = ids[1] as usize;
     let c = ids[2] as usize;
     let d = ids[3] as usize;
-    if a.max(b).max(c).max(d) >= projected_vertices.len() {
+    let max_index = a.max(b).max(c).max(d);
+    if max_index >= projected_vertices.len() {
         return None;
     }
-    let projected = [
-        projected_vertices[a],
-        projected_vertices[b],
-        projected_vertices[c],
-        projected_vertices[d],
-    ];
+    // SAFETY: `max_index < projected_vertices.len()` proves every id is in range.
+    let projected = unsafe {
+        [
+            *projected_vertices.get_unchecked(a),
+            *projected_vertices.get_unchecked(b),
+            *projected_vertices.get_unchecked(c),
+            *projected_vertices.get_unchecked(d),
+        ]
+    };
     if !projected[0].is_valid()
         || !projected[1].is_valid()
         || !projected[2].is_valid()
@@ -2648,10 +2660,19 @@ fn indexed_quad_depths(depths: &[i32], ids: [u16; 4]) -> Option<[i32; 4]> {
     let b = ids[1] as usize;
     let c = ids[2] as usize;
     let d = ids[3] as usize;
-    if a >= depths.len() || b >= depths.len() || c >= depths.len() || d >= depths.len() {
+    let max_index = a.max(b).max(c).max(d);
+    if max_index >= depths.len() {
         return None;
     }
-    Some([depths[a], depths[b], depths[c], depths[d]])
+    // SAFETY: `max_index < depths.len()` proves every id is in range.
+    unsafe {
+        Some([
+            *depths.get_unchecked(a),
+            *depths.get_unchecked(b),
+            *depths.get_unchecked(c),
+            *depths.get_unchecked(d),
+        ])
+    }
 }
 
 #[inline(always)]
@@ -2669,12 +2690,12 @@ fn indexed_vertex_lighting_colors<L: WorldSurfaceLighting>(
         return Some(surface.baked_vertex_rgb);
     }
     if surface.has_baked_rgb() {
-        let sample = surface.sample_without_center();
         let prepared_depths = if use_vertex_depths {
             Some(indexed_quad_depths(depths, ids)?)
         } else {
             None
         };
+        let sample = surface.sample_without_center();
         if let Some(colors) =
             lighting.shade_cached_baked_vertices(sample, prepared_depths, material)
         {
