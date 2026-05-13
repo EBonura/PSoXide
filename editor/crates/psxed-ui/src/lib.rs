@@ -26254,30 +26254,15 @@ mod tests {
 
     #[test]
     fn ctrl_selected_sector_delete_removes_all_selected_tiles() {
-        let mut workspace =
-            EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
-        let room = workspace.active_room_id().expect("starter has room");
-        let coords: Vec<(u16, u16)> = {
-            let scene = workspace.project.active_scene();
-            let node = scene.node(room).expect("room node exists");
-            let NodeKind::Room { grid } = &node.kind else {
-                panic!("active room is a room node");
-            };
-            grid.sectors
-                .iter()
-                .enumerate()
-                .filter(|(_, sector)| sector.is_some())
-                .take(2)
-                .map(|(index, _)| {
-                    let index = index as u16;
-                    (index / grid.depth, index % grid.depth)
-                })
-                .collect()
-        };
-        assert!(
-            coords.len() >= 2,
-            "starter has at least two populated sectors"
-        );
+        let mut project = ProjectDocument::new("ctrl-delete");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 0, None);
+        let room = project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        let coords = [(0u16, 0u16), (1u16, 0u16)];
 
         let mut ctrl = egui::Modifiers::NONE;
         ctrl.ctrl = true;
@@ -27724,9 +27709,9 @@ mod tests {
         assert_eq!(budget.room_textures, 1);
         assert_eq!(budget.model_textures, 1);
         assert_eq!(budget.missing, 0);
-        assert_eq!(budget.room_bytes, 16 * 64 * 2 + 16 * 2);
+        assert_eq!(budget.room_bytes, 8 * 32 * 2 + 16 * 2);
         assert_eq!(budget.model_bytes, 64 * 128 * 2 + 256 * 2);
-        assert_eq!(budget.bytes, 16 * 64 * 2 + 16 * 2 + 64 * 128 * 2 + 256 * 2);
+        assert_eq!(budget.bytes, 8 * 32 * 2 + 16 * 2 + 64 * 128 * 2 + 256 * 2);
     }
 
     #[test]
