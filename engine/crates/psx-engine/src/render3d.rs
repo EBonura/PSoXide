@@ -202,9 +202,23 @@ pub struct ProjectedVertex {
 }
 
 impl ProjectedVertex {
+    /// Sentinel used by indexed room projection caches when a vertex
+    /// falls behind the near plane.
+    pub const INVALID: Self = Self {
+        sx: 0,
+        sy: 0,
+        sz: i32::MIN,
+    };
+
     /// Build a projected vertex.
     pub const fn new(sx: i16, sy: i16, sz: i32) -> Self {
         Self { sx, sy, sz }
+    }
+
+    /// Return whether this projection can be consumed by a textured
+    /// primitive.
+    pub const fn is_valid(self) -> bool {
+        self.sz != i32::MIN
     }
 }
 
@@ -669,14 +683,10 @@ pub(crate) fn project_world_vertex_indices_gte(
     vertices: &[WorldVertex],
     indices: &[u16],
     projected_vertices: &mut [ProjectedVertex],
-    projected_valid: &mut [bool],
 ) {
     load_world_camera_gte(camera);
     let near_z = camera.projection.near_z;
-    let limit = vertices
-        .len()
-        .min(projected_vertices.len())
-        .min(projected_valid.len());
+    let limit = vertices.len().min(projected_vertices.len());
     let mut group = [0usize; 3];
     let mut group_count = 0usize;
     for raw_index in indices {
@@ -691,7 +701,6 @@ pub(crate) fn project_world_vertex_indices_gte(
                 camera,
                 vertices,
                 projected_vertices,
-                projected_valid,
                 near_z,
                 group,
             );
@@ -700,13 +709,7 @@ pub(crate) fn project_world_vertex_indices_gte(
     }
     let mut i = 0usize;
     while i < group_count {
-        project_world_vertex_cpu(
-            camera,
-            vertices,
-            projected_vertices,
-            projected_valid,
-            group[i],
-        );
+        project_world_vertex_cpu(camera, vertices, projected_vertices, group[i]);
         i += 1;
     }
 }
@@ -715,7 +718,6 @@ fn project_world_index_group_gte(
     camera: WorldCamera,
     vertices: &[WorldVertex],
     projected_vertices: &mut [ProjectedVertex],
-    projected_valid: &mut [bool],
     near_z: i32,
     indices: [usize; 3],
 ) {
@@ -727,34 +729,13 @@ fn project_world_index_group_gte(
     let c = world_vertex_gte_input(vertices[c_index]);
     if let (Some(a), Some(b), Some(c)) = (a, b, c) {
         let projected = scene::project_triangle(a, b, c);
-        projected_vertices[a_index] = projected_from_gte(projected[0]);
-        projected_vertices[b_index] = projected_from_gte(projected[1]);
-        projected_vertices[c_index] = projected_from_gte(projected[2]);
-        projected_valid[a_index] = (projected[0].sz as i32) >= near_z;
-        projected_valid[b_index] = (projected[1].sz as i32) >= near_z;
-        projected_valid[c_index] = (projected[2].sz as i32) >= near_z;
+        projected_vertices[a_index] = valid_projected_from_gte(projected[0], near_z);
+        projected_vertices[b_index] = valid_projected_from_gte(projected[1], near_z);
+        projected_vertices[c_index] = valid_projected_from_gte(projected[2], near_z);
     } else {
-        project_world_vertex_cpu(
-            camera,
-            vertices,
-            projected_vertices,
-            projected_valid,
-            a_index,
-        );
-        project_world_vertex_cpu(
-            camera,
-            vertices,
-            projected_vertices,
-            projected_valid,
-            b_index,
-        );
-        project_world_vertex_cpu(
-            camera,
-            vertices,
-            projected_vertices,
-            projected_valid,
-            c_index,
-        );
+        project_world_vertex_cpu(camera, vertices, projected_vertices, a_index);
+        project_world_vertex_cpu(camera, vertices, projected_vertices, b_index);
+        project_world_vertex_cpu(camera, vertices, projected_vertices, c_index);
     }
 }
 
@@ -3937,14 +3918,12 @@ fn project_world_vertex_cpu(
     camera: WorldCamera,
     vertices: &[WorldVertex],
     projected_vertices: &mut [ProjectedVertex],
-    projected_valid: &mut [bool],
     index: usize,
 ) {
     if let Some(projected) = camera.project_world(vertices[index]) {
         projected_vertices[index] = projected;
-        projected_valid[index] = true;
     } else {
-        projected_valid[index] = false;
+        projected_vertices[index] = ProjectedVertex::INVALID;
     }
 }
 
@@ -4204,6 +4183,15 @@ fn project_gte_model_vertex(vertex: ModelVertex) -> ProjectedVertex {
 #[inline]
 fn projected_from_gte(projected: scene::Projected) -> ProjectedVertex {
     ProjectedVertex::new(projected.sx, projected.sy, projected.sz as i32)
+}
+
+#[inline]
+fn valid_projected_from_gte(projected: scene::Projected, near_z: i32) -> ProjectedVertex {
+    if (projected.sz as i32) >= near_z {
+        projected_from_gte(projected)
+    } else {
+        ProjectedVertex::INVALID
+    }
 }
 
 #[inline]
@@ -4735,6 +4723,12 @@ mod tests {
             render_layer: world_render_layer_code(render_layer),
             words: 0,
         }
+    }
+
+    #[test]
+    fn projected_vertex_invalid_sentinel_is_not_renderable() {
+        assert!(!ProjectedVertex::INVALID.is_valid());
+        assert!(ProjectedVertex::new(0, 0, 16).is_valid());
     }
 
     #[test]
