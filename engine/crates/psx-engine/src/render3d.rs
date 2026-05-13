@@ -1279,6 +1279,32 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         self.submit_textured_gouraud_triangle_split(triangles, textured, material, options, 0)
     }
 
+    /// Submit a projected textured Gouraud triangle whose UVs are already
+    /// clamped to packet-space bytes.
+    ///
+    /// Cached room surfaces store PS1-ready UVs, so the common hardware-safe
+    /// case can skip the intermediate `ProjectedTexturedGouraudVertex`
+    /// construction and per-component UV clamping used by the general path.
+    #[inline(always)]
+    pub fn submit_textured_gouraud_triangle_prescreened_u8(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+            return self.submit_textured_gouraud_triangle_leaf_u8(
+                triangles, verts, uvs, colors, material, options,
+            );
+        }
+        self.submit_textured_gouraud_triangle_prescreened(
+            triangles, verts, uvs, colors, material, options,
+        )
+    }
+
     fn submit_textured_gouraud_triangle_split(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
@@ -1408,6 +1434,59 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     verts[1].projected.sz,
                     verts[2].projected.sz,
                 )
+                .saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            if material.is_translucent() {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            tri as *mut TriTexturedGouraud as *mut u32,
+            TriTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        stats
+    }
+
+    #[inline(always)]
+    fn submit_textured_gouraud_triangle_leaf_u8(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+
+        let Some(tri) = triangles.push(TriTexturedGouraud::with_material_packet_texcoords(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uvs,
+            colors,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+
+        let depth = CameraDepth::new(
+            options
+                .depth_policy
+                .depth_values(verts[0].sz, verts[1].sz, verts[2].sz)
                 .saturating_add(options.depth_bias),
         );
         self.push_command(
