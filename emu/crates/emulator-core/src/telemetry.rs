@@ -15,6 +15,8 @@ pub const BASE_PHYS: u32 = memory::expansion2::BASE + 0x0F00;
 pub const EVENT_PHYS: u32 = BASE_PHYS;
 /// Event value register. The next command write snapshots this value.
 pub const VALUE_PHYS: u32 = BASE_PHYS + 4;
+/// Read-only low 32 bits of the emulator-observed guest cycle counter.
+pub const CYCLE_PHYS: u32 = BASE_PHYS + 8;
 
 const EVENT_CAP: usize = 65_536;
 const KIND_SHIFT: u32 = 24;
@@ -69,6 +71,16 @@ pub mod stage {
     pub const CD_WORLD_PACK_STREAM: u16 = 25;
     /// Synchronous read of one streamed room chunk from WORLD.PAK.
     pub const CD_ROOM_CHUNK_LOAD: u16 = 26;
+    /// Cached-room visible-cell/PVS list lookup.
+    pub const ROOM_VISIBLE_LIST: u16 = 27;
+    /// Cached-room visible-cell lookup and vertex-index gathering.
+    pub const ROOM_CELL_SELECT: u16 = 28;
+    /// Cached-room GTE/CPU vertex projection.
+    pub const ROOM_PROJECT: u16 = 29;
+    /// Cached-room per-vertex depth/fog preparation.
+    pub const ROOM_DEPTH_PREP: u16 = 30;
+    /// Cached-room surface culling, lighting, packet build, and command enqueue.
+    pub const ROOM_SURFACE_DRAW: u16 = 31;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -78,7 +90,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 27;
+pub const STAGE_COUNT: usize = 32;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -248,10 +260,68 @@ pub mod counter {
     pub const ROOM_STREAM_FAILED_LOADS: u16 = 82;
     /// Stream slot loads scheduled by the current window refresh.
     pub const ROOM_STREAM_PENDING_LOADS: u16 = 83;
+    /// Unique cached room vertices projected by visible cells.
+    pub const ROOM_PROJECTED_VERTICES: u16 = 84;
+    /// Cycles spent on room-surface material lookup/setup.
+    pub const ROOM_SURF_MATERIAL_CYCLES: u16 = 85;
+    /// Cycles spent fetching/validating projected room-surface quads.
+    pub const ROOM_SURF_PROJECTED_CYCLES: u16 = 86;
+    /// Cycles spent on room-surface screen culling.
+    pub const ROOM_SURF_SCREEN_CYCLES: u16 = 87;
+    /// Cycles spent classifying room-surface kind.
+    pub const ROOM_SURF_KIND_CYCLES: u16 = 88;
+    /// Cycles spent on room-surface backface culling.
+    pub const ROOM_SURF_BACKFACE_CYCLES: u16 = 89;
+    /// Cycles spent selecting baked/lit room-surface vertex colors.
+    pub const ROOM_SURF_LIGHTING_CYCLES: u16 = 90;
+    /// Cycles spent submitting room-surface packets/commands.
+    pub const ROOM_SURF_SUBMIT_CYCLES: u16 = 91;
+    /// Room surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_PROFILED: u16 = 92;
+    /// Room surfaces with missing material records.
+    pub const ROOM_SURF_MATERIAL_MISSES: u16 = 93;
+    /// Room surfaces rejected by projected-quad validity checks.
+    pub const ROOM_SURF_PROJECTED_REJECTS: u16 = 94;
+    /// Room surfaces culled by screen bounds.
+    pub const ROOM_SURF_SCREEN_CULLED: u16 = 95;
+    /// Room surfaces culled by backface tests.
+    pub const ROOM_SURF_BACKFACE_CULLED: u16 = 96;
+    /// Room floor surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_FLOORS: u16 = 97;
+    /// Room ceiling surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_CEILINGS: u16 = 98;
+    /// Room wall surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_WALLS: u16 = 99;
+    /// Whole-quad room surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_WHOLE_QUADS: u16 = 100;
+    /// Split-triangle room surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_SPLIT_TRIS: u16 = 101;
+    /// Room surfaces where color selection returned no drawable colors.
+    pub const ROOM_SURF_LIGHTING_REJECTS: u16 = 102;
+    /// Cycles spent checking cached room triangle hardware safety.
+    pub const ROOM_SUBMIT_HW_SAFE_TEST_CYCLES: u16 = 103;
+    /// Cycles spent building cached room triangle packet values.
+    pub const ROOM_SUBMIT_PACKET_FILL_CYCLES: u16 = 104;
+    /// Cycles spent pushing cached room triangle packets into primitive storage.
+    pub const ROOM_SUBMIT_PRIMITIVE_PUSH_CYCLES: u16 = 105;
+    /// Cycles spent calculating cached room triangle depth/order keys.
+    pub const ROOM_SUBMIT_DEPTH_CYCLES: u16 = 106;
+    /// Cycles spent pushing cached room triangle world commands.
+    pub const ROOM_SUBMIT_COMMAND_CYCLES: u16 = 107;
+    /// Cycles spent in cached room triangle fallback split/general path.
+    pub const ROOM_SUBMIT_FALLBACK_CYCLES: u16 = 108;
+    /// Cached room triangle submits that used the hardware-safe fast path.
+    pub const ROOM_SUBMIT_HW_SAFE_CALLS: u16 = 109;
+    /// Cached room triangle submits that used the split/general fallback path.
+    pub const ROOM_SUBMIT_FALLBACK_CALLS: u16 = 110;
+    /// Cached room triangle submits rejected by command-buffer capacity.
+    pub const ROOM_SUBMIT_COMMAND_OVERFLOWS: u16 = 111;
+    /// Cached room triangle submits rejected by primitive-buffer capacity.
+    pub const ROOM_SUBMIT_PRIMITIVE_OVERFLOWS: u16 = 112;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 84;
+pub const COUNTER_COUNT: usize = 113;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -322,7 +392,15 @@ impl GuestTelemetry {
 
     /// True if `phys` lands inside the telemetry port.
     pub const fn contains(phys: u32) -> bool {
-        phys == EVENT_PHYS || phys == VALUE_PHYS
+        phys == EVENT_PHYS || phys == VALUE_PHYS || phys == CYCLE_PHYS
+    }
+
+    /// Observe a 32-bit read. Returns a value if the telemetry port consumed it.
+    pub const fn observe_read32(&self, phys: u32, cycles: u64) -> Option<u32> {
+        match phys {
+            CYCLE_PHYS => Some(cycles as u32),
+            _ => None,
+        }
     }
 
     /// Observe a 32-bit write. Returns true if the telemetry port consumed it.
@@ -514,6 +592,11 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::CD_STREAM_STEADY => "cd stream steady",
         stage::CD_WORLD_PACK_STREAM => "cd world pack",
         stage::CD_ROOM_CHUNK_LOAD => "cd room chunk load",
+        stage::ROOM_VISIBLE_LIST => "room visible list",
+        stage::ROOM_CELL_SELECT => "room cell select",
+        stage::ROOM_PROJECT => "room project",
+        stage::ROOM_DEPTH_PREP => "room depth prep",
+        stage::ROOM_SURFACE_DRAW => "room surface draw",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
@@ -607,6 +690,35 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_STREAM_EVICTIONS => "room stream evictions",
         counter::ROOM_STREAM_FAILED_LOADS => "room stream failed loads",
         counter::ROOM_STREAM_PENDING_LOADS => "room stream pending loads",
+        counter::ROOM_PROJECTED_VERTICES => "room projected verts",
+        counter::ROOM_SURF_MATERIAL_CYCLES => "room surf material cyc",
+        counter::ROOM_SURF_PROJECTED_CYCLES => "room surf projected cyc",
+        counter::ROOM_SURF_SCREEN_CYCLES => "room surf screen cyc",
+        counter::ROOM_SURF_KIND_CYCLES => "room surf kind cyc",
+        counter::ROOM_SURF_BACKFACE_CYCLES => "room surf backface cyc",
+        counter::ROOM_SURF_LIGHTING_CYCLES => "room surf lighting cyc",
+        counter::ROOM_SURF_SUBMIT_CYCLES => "room surf submit cyc",
+        counter::ROOM_SURF_PROFILED => "room surf profiled",
+        counter::ROOM_SURF_MATERIAL_MISSES => "room surf material misses",
+        counter::ROOM_SURF_PROJECTED_REJECTS => "room surf projected rejects",
+        counter::ROOM_SURF_SCREEN_CULLED => "room surf screen culled",
+        counter::ROOM_SURF_BACKFACE_CULLED => "room surf backface culled",
+        counter::ROOM_SURF_FLOORS => "room surf floors",
+        counter::ROOM_SURF_CEILINGS => "room surf ceilings",
+        counter::ROOM_SURF_WALLS => "room surf walls",
+        counter::ROOM_SURF_WHOLE_QUADS => "room surf whole quads",
+        counter::ROOM_SURF_SPLIT_TRIS => "room surf split tris",
+        counter::ROOM_SURF_LIGHTING_REJECTS => "room surf lighting rejects",
+        counter::ROOM_SUBMIT_HW_SAFE_TEST_CYCLES => "room submit hw-safe cyc",
+        counter::ROOM_SUBMIT_PACKET_FILL_CYCLES => "room submit packet cyc",
+        counter::ROOM_SUBMIT_PRIMITIVE_PUSH_CYCLES => "room submit prim push cyc",
+        counter::ROOM_SUBMIT_DEPTH_CYCLES => "room submit depth cyc",
+        counter::ROOM_SUBMIT_COMMAND_CYCLES => "room submit command cyc",
+        counter::ROOM_SUBMIT_FALLBACK_CYCLES => "room submit fallback cyc",
+        counter::ROOM_SUBMIT_HW_SAFE_CALLS => "room submit hw-safe calls",
+        counter::ROOM_SUBMIT_FALLBACK_CALLS => "room submit fallback calls",
+        counter::ROOM_SUBMIT_COMMAND_OVERFLOWS => "room submit command overflows",
+        counter::ROOM_SUBMIT_PRIMITIVE_OVERFLOWS => "room submit prim overflows",
         _ => "unknown",
     }
 }
@@ -634,6 +746,7 @@ mod tests {
         assert_eq!(telemetry.frames_seen(), 0);
         assert_eq!(telemetry.counter_total(counter::WORLD_COMMANDS), 42);
         assert_eq!(telemetry.counter_max_value(counter::WORLD_COMMANDS), 42);
+        assert_eq!(telemetry.observe_read32(CYCLE_PHYS, 1234), Some(1234));
         assert_eq!(
             events,
             [GuestTelemetryEvent {
@@ -712,6 +825,9 @@ mod tests {
         assert_eq!(stage_name(stage::CD_STREAM_STEADY), "cd stream steady");
         assert_eq!(stage_name(stage::CD_WORLD_PACK_STREAM), "cd world pack");
         assert_eq!(stage_name(stage::CD_ROOM_CHUNK_LOAD), "cd room chunk load");
+        assert_eq!(stage_name(stage::ROOM_VISIBLE_LIST), "room visible list");
+        assert_eq!(stage_name(stage::ROOM_CELL_SELECT), "room cell select");
+        assert_eq!(stage_name(stage::ROOM_SURFACE_DRAW), "room surface draw");
         assert_eq!(
             counter_name(counter::CD_STREAM_BENCH_STATUS),
             "cd stream status"
@@ -723,6 +839,22 @@ mod tests {
         assert_eq!(
             counter_name(counter::ROOM_STREAM_RESIDENT_SLOTS),
             "room stream resident slots"
+        );
+        assert_eq!(
+            counter_name(counter::ROOM_PROJECTED_VERTICES),
+            "room projected verts"
+        );
+        assert_eq!(
+            counter_name(counter::ROOM_SURF_SUBMIT_CYCLES),
+            "room surf submit cyc"
+        );
+        assert_eq!(
+            counter_name(counter::ROOM_SURF_BACKFACE_CULLED),
+            "room surf backface culled"
+        );
+        assert_eq!(
+            counter_name(counter::ROOM_SUBMIT_PACKET_FILL_CYCLES),
+            "room submit packet cyc"
         );
     }
 }
