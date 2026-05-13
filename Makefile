@@ -309,8 +309,10 @@ cook-playtest:
 # the tracked placeholder. Does NOT recook — that's the editor's
 # job (or `make cook-playtest` if you want the starter). The playtest runtime is
 # streaming-only, so the default build includes the CD streaming reader.
+EDITOR_PLAYTEST_FEATURES ?= cd-stream-bench
+
 build-editor-playtest:
-	cd engine/examples/editor-playtest && cargo build --release --features cd-stream-bench
+	cd engine/examples/editor-playtest && cargo build --release --features "$(EDITOR_PLAYTEST_FEATURES)"
 
 profile-demo3:
 	$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(PROFILE_DEMO3_HW)
