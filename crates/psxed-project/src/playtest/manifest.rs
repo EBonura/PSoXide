@@ -411,7 +411,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for surface in &package.room_cache_surfaces {
         let _ = writeln!(
             out,
-            "    LevelCachedRoomSurfaceRecord {{ material_slot: {}, vertex_indices: [{}, {}, {}, {}], sample_sx: {}, sample_sz: {}, sample_ordinal: {}, uvs: [({}, {}), ({}, {}), ({}, {}), ({}, {})], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], kind_flags: {}, wall_direction: {}, split: {}, triangle_index: {} }},",
+            "    LevelCachedRoomSurfaceRecord {{ material_slot: {}, vertex_indices: [{}, {}, {}, {}], sample_sx: {}, sample_sz: {}, sample_ordinal: {}, uv_words: [{}, {}, {}, {}], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], kind_flags: {}, wall_direction: {}, split: {}, triangle_index: {} }},",
             surface.material_slot,
             surface.vertex_indices[0],
             surface.vertex_indices[1],
@@ -420,14 +420,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             surface.sample_sx,
             surface.sample_sz,
             surface.sample_ordinal,
-            surface.uvs[0].0,
-            surface.uvs[0].1,
-            surface.uvs[1].0,
-            surface.uvs[1].1,
-            surface.uvs[2].0,
-            surface.uvs[2].1,
-            surface.uvs[3].0,
-            surface.uvs[3].1,
+            surface.uv_words[0],
+            surface.uv_words[1],
+            surface.uv_words[2],
+            surface.uv_words[3],
             surface.baked_vertex_rgb[0].0,
             surface.baked_vertex_rgb[0].1,
             surface.baked_vertex_rgb[0].2,
@@ -1541,9 +1537,8 @@ fn append_cached_room_surfaces(out: &mut Vec<u8>, surfaces: &[PlaytestCachedRoom
         append_u16_le(out, surface.sample_sx);
         append_u16_le(out, surface.sample_sz);
         append_u16_le(out, surface.sample_ordinal);
-        for (u, v) in surface.uvs {
-            out.push(u);
-            out.push(v);
+        for uv_word in surface.uv_words {
+            append_u16_le(out, uv_word);
         }
         for (r, g, b) in surface.baked_vertex_rgb {
             out.push(r);
@@ -2192,7 +2187,7 @@ mod tests {
             sample_sx: 16,
             sample_sz: 17,
             sample_ordinal: 18,
-            uvs: [(19, 20), (21, 22), (23, 24), (25, 26)],
+            uv_words: [0x1413, 0x1615, 0x1817, 0x1a19],
             baked_vertex_rgb: [(27, 28, 29), (30, 31, 32), (33, 34, 35), (36, 37, 38)],
             kind_flags: 39,
             wall_direction: 40,
@@ -2276,7 +2271,7 @@ mod tests {
             sample_sx: 16,
             sample_sz: 17,
             sample_ordinal: 18,
-            uvs: [(19, 20), (21, 22), (23, 24), (25, 26)],
+            uv_words: [0x1413, 0x1615, 0x1817, 0x1a19],
             baked_vertex_rgb: [(27, 28, 29), (30, 31, 32), (33, 34, 35), (36, 37, 38)],
             kind_flags: 39,
             wall_direction: 40,
