@@ -728,7 +728,7 @@ fn project_world_index_group_gte(
     let b = world_vertex_gte_input(vertices[b_index]);
     let c = world_vertex_gte_input(vertices[c_index]);
     if let (Some(a), Some(b), Some(c)) = (a, b, c) {
-        let projected = scene::project_triangle(a, b, c);
+        let projected = scene::project_triangle_scheduled(a, b, c);
         projected_vertices[a_index] = valid_projected_from_gte(projected[0], near_z);
         projected_vertices[b_index] = valid_projected_from_gte(projected[1], near_z);
         projected_vertices[c_index] = valid_projected_from_gte(projected[2], near_z);

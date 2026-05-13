@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use emulator_core::{
     button, fast_boot_disc_with_hle, spu::SAMPLE_CYCLES, telemetry, warm_bios_for_disc_fast_boot,
-    Bus, ButtonState, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
+    Bus, ButtonState, Cpu, GteProfileSnapshot, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use psoxide_settings::{
     library::{GameKind, LibraryEntry},
@@ -410,6 +410,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
     // "we hit an unimplemented instruction" and worth surfacing.
     let mut stopped_at: Option<u64> = None;
     let mut audio_cycle_accum = 0u64;
+    let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
         let cycles_before = bus.cycles();
         if let Err(e) = cpu.step(&mut bus) {
@@ -454,6 +455,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             None => String::new(),
         }
     );
+    let gte_profile_after = cpu.cop2().profile_snapshot();
 
     if args.dump_hash {
         let mut h = 0xCBF2_9CE4_8422_2325u64;
@@ -476,6 +478,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
         summary.counters = counter_totals;
         summary.counter_max_values = counter_max_values;
         print_guest_profile(&summary);
+        print_gte_profile(&gte_profile_before, &gte_profile_after, summary.frames.max(1));
     }
 
     if let Some(path) = args.dump_vram {
@@ -505,6 +508,64 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
 fn attach_headless_playtest_pad(bus: &mut Bus) {
     bus.attach_digital_pad_port1();
     let _ = bus.force_port1_analog_mode();
+}
+
+fn print_gte_profile(before: &GteProfileSnapshot, after: &GteProfileSnapshot, frames: u64) {
+    let ops = after.ops.saturating_sub(before.ops);
+    let cycles = after.estimated_cycles.saturating_sub(before.estimated_cycles);
+    let frames = frames.max(1);
+    println!("gte_profile:");
+    println!(
+        "  ops={}  per_frame={:.0}",
+        ops,
+        ops as f64 / frames as f64
+    );
+    println!(
+        "  estimated_cycles={}  per_frame={:.0}",
+        cycles,
+        cycles as f64 / frames as f64
+    );
+    println!("  opcodes:");
+    for opcode in 0..after.opcode_counts.len() {
+        let count = after.opcode_counts[opcode].saturating_sub(before.opcode_counts[opcode]);
+        if count == 0 {
+            continue;
+        }
+        println!(
+            "    0x{opcode:02x} {:<6} count={:<10} per_frame={:.0}",
+            gte_opcode_name(opcode as u8),
+            count,
+            count as f64 / frames as f64
+        );
+    }
+}
+
+fn gte_opcode_name(opcode: u8) -> &'static str {
+    match opcode {
+        0x01 => "RTPS",
+        0x06 => "NCLIP",
+        0x0c => "OP",
+        0x10 => "DPCS",
+        0x11 => "INTPL",
+        0x12 => "MVMVA",
+        0x13 => "NCDS",
+        0x14 => "CDP",
+        0x16 => "NCDT",
+        0x1b => "NCCS",
+        0x1c => "CC",
+        0x1e => "NCS",
+        0x20 => "NCT",
+        0x28 => "SQR",
+        0x29 => "DCPL",
+        0x2a => "DPCT",
+        0x2d => "AVSZ3",
+        0x2e => "AVSZ4",
+        0x30 => "RTPT",
+        0x3d => "GPF",
+        0x3e => "GPL",
+        0x3f => "NCCT",
+        _ => "UNKNOWN",
+    }
 }
 
 fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
