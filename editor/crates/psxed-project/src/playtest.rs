@@ -4393,11 +4393,11 @@ mod tests {
 
     #[test]
     fn starter_project_emits_expected_texture_assets() {
-        // Starter cooks two room textures and the player atlas.
+        // Starter cooks one room floor texture and the player atlas.
         let project = project_with_one_room();
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
-        assert_eq!(package.texture_asset_count(), 3);
+        assert_eq!(package.texture_asset_count(), 2);
     }
 
     #[test]
@@ -4687,18 +4687,18 @@ mod tests {
             .expect("starter has a room");
         if let Some(node) = scene.node_mut(room_id) {
             if let NodeKind::Room { grid } = &mut node.kind {
-                for (index, sector) in grid.sectors.iter_mut().flatten().enumerate() {
-                    if index % 2 == 0 {
-                        if let Some(floor) = &mut sector.floor {
-                            floor.material = Some(new_material_id);
-                        }
-                    }
-                    for dir in crate::GridDirection::CARDINAL {
-                        for wall in sector.walls.get_mut(dir).iter_mut() {
-                            wall.material = Some(new_material_id);
-                        }
-                    }
-                }
+                // The minimal starter is a single floor tile with
+                // no walls. Grow to a 2x1 grid and add a north wall
+                // on the new cell so the test has a wall material
+                // alongside the floor. The original cell keeps its
+                // starter Floor material; the new cell's floor and
+                // wall both use new_material_id, giving the cooker
+                // two distinct material slots that both share the
+                // floor.psxt texture.
+                let sector_size = grid.sector_size;
+                let (sx, sz) = grid.extend_to_include(grid.origin[0] + grid.width as i32, grid.origin[1]);
+                grid.set_floor(sx, sz, 0, Some(new_material_id));
+                grid.add_wall(sx, sz, crate::GridDirection::North, 0, sector_size, Some(new_material_id));
             }
         }
 
@@ -5566,7 +5566,7 @@ mod tests {
             .unwrap();
         let enemy = scene.add_node(room_id, "Facing Enemy", NodeKind::Entity);
         if let Some(node) = scene.node_mut(enemy) {
-            node.transform.translation = [0.5, 0.0, 0.5];
+            node.transform.translation = [0.0, 0.0, 0.0];
             node.transform.rotation_degrees[1] = 180.0;
         }
         scene.add_node(
@@ -5723,6 +5723,23 @@ mod tests {
             .find(|resource| matches!(resource.data, ResourceData::Material(_)))
             .expect("starter has a room material")
             .id;
+
+        // The minimal starter is a single floor tile, so editor
+        // (-1, 0) is outside the original grid. Pre-grow the grid
+        // to contain the spawn so the pre/post comparison is well
+        // defined; the test still exercises the -X grow path below.
+        if let Some(node) = project.active_scene_mut().node_mut(room_id) {
+            if let crate::NodeKind::Room { grid } = &mut node.kind {
+                if let Some(initial) = grid.editor_cells_to_array([-1.0, 0.0]) {
+                    let _ = initial;
+                } else {
+                    let world_cells = grid.editor_to_world_cells([-1.0, 0.0]);
+                    let (sx, sz) =
+                        grid.extend_to_include(world_cells[0].floor() as i32, world_cells[1].floor() as i32);
+                    grid.set_floor(sx, sz, 0, Some(floor_material));
+                }
+            }
+        }
 
         let (pre, _) = build_package(&project, &starter_project_root());
         let pre = pre.unwrap();
