@@ -4,6 +4,8 @@ use std::fmt::Write as _;
 
 use super::*;
 
+const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
+
 pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io::Result<()> {
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
     let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
@@ -901,6 +903,7 @@ struct StreamedRoomChunkLayout<'a> {
     collision_flags: u32,
     cell_slice: &'a [PlaytestCachedRoomCell],
     cell_vertex_slice: &'a [u16],
+    include_cell_vertices: bool,
     vertex_slice: &'a [PlaytestCachedRoomVertex],
     surface_slice: &'a [PlaytestCachedRoomSurface],
     cell_count: usize,
@@ -970,11 +973,27 @@ fn streamed_room_chunk_layout(
         })
         .unwrap_or(&[]);
 
+    let collision_payload = compact_collision_payload(&asset.bytes)?;
+    let include_cell_vertices = !cell_vertex_slice.is_empty()
+        && streamed_room_chunk_payload_len(
+            collision_payload.len(),
+            cell_slice.len(),
+            cell_vertex_slice.len(),
+            vertex_slice.len(),
+            surface_slice.len(),
+        ) <= STREAMED_ROOM_SLOT_BYTES;
+    let cell_vertex_slice = if include_cell_vertices {
+        cell_vertex_slice
+    } else {
+        &[]
+    };
+
     Ok(StreamedRoomChunkLayout {
-        collision_payload: compact_collision_payload(&asset.bytes)?,
+        collision_payload,
         collision_flags: psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
         cell_slice,
         cell_vertex_slice,
+        include_cell_vertices,
         vertex_slice,
         surface_slice,
         cell_count: cell_slice.len(),
@@ -997,7 +1016,7 @@ fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<V
     out.extend_from_slice(&layout.collision_payload);
     align_vec(&mut out, 4);
     let cells_offset = out.len();
-    append_cached_room_cells(&mut out, cell_slice);
+    append_cached_room_cells(&mut out, cell_slice, layout.include_cell_vertices);
     align_vec(&mut out, 2);
     let cell_vertices_offset = out.len();
     append_cached_room_cell_vertices(&mut out, cell_vertex_slice);
@@ -1091,6 +1110,46 @@ fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<V
         layout.collision_flags,
     )?;
     Ok(out)
+}
+
+fn streamed_room_chunk_payload_len(
+    collision_bytes: usize,
+    cell_count: usize,
+    cell_vertex_count: usize,
+    vertex_count: usize,
+    surface_count: usize,
+) -> usize {
+    let mut len = psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES;
+    len = align_usize(len, 4);
+    len = len.saturating_add(collision_bytes);
+    len = align_usize(len, 4);
+    len = len.saturating_add(
+        cell_count.saturating_mul(std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>()),
+    );
+    len = align_usize(len, 2);
+    len = len.saturating_add(cell_vertex_count.saturating_mul(std::mem::size_of::<u16>()));
+    len = align_usize(len, 4);
+    len = len.saturating_add(
+        vertex_count.saturating_mul(std::mem::size_of::<psx_level::LevelCachedRoomVertexRecord>()),
+    );
+    len = align_usize(len, 4);
+    len = len.saturating_add(
+        surface_count
+            .saturating_mul(std::mem::size_of::<psx_level::LevelCachedRoomSurfaceRecord>()),
+    );
+    align_usize(len, 4)
+}
+
+fn align_usize(value: usize, align: usize) -> usize {
+    if align <= 1 {
+        return value;
+    }
+    let rem = value % align;
+    if rem == 0 {
+        value
+    } else {
+        value.saturating_add(align - rem)
+    }
 }
 
 fn compact_collision_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -1421,7 +1480,11 @@ fn append_i32_le(out: &mut Vec<u8>, value: i32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn append_cached_room_cells(out: &mut Vec<u8>, cells: &[PlaytestCachedRoomCell]) {
+fn append_cached_room_cells(
+    out: &mut Vec<u8>,
+    cells: &[PlaytestCachedRoomCell],
+    include_cell_vertices: bool,
+) {
     debug_assert_eq!(
         std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>(),
         36
@@ -1437,8 +1500,13 @@ fn append_cached_room_cells(out: &mut Vec<u8>, cells: &[PlaytestCachedRoomCell])
         append_i32_le(out, cell.visibility_radius);
         append_u16_le(out, cell.surface_first);
         append_u16_le(out, cell.surface_count);
-        append_u16_le(out, cell.vertex_first);
-        append_u16_le(out, cell.vertex_count);
+        if include_cell_vertices {
+            append_u16_le(out, cell.vertex_first);
+            append_u16_le(out, cell.vertex_count);
+        } else {
+            append_u16_le(out, 0);
+            append_u16_le(out, 0);
+        }
     }
 }
 
