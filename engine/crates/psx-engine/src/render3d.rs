@@ -43,6 +43,85 @@ enum WorldCommandOrdering {
     Bucketed,
 }
 
+/// Aggregated micro-profile for cached textured-Gouraud triangle submission.
+#[cfg(feature = "room-surface-profile")]
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct TexturedGouraudSubmitMicroProfile {
+    pub(crate) hw_safe_test_cycles: u32,
+    pub(crate) packet_fill_cycles: u32,
+    pub(crate) primitive_push_cycles: u32,
+    pub(crate) depth_cycles: u32,
+    pub(crate) command_cycles: u32,
+    pub(crate) fallback_cycles: u32,
+    pub(crate) hw_safe_calls: u32,
+    pub(crate) fallback_calls: u32,
+    pub(crate) command_overflows: u32,
+    pub(crate) primitive_overflows: u32,
+}
+
+#[cfg(feature = "room-surface-profile")]
+impl TexturedGouraudSubmitMicroProfile {
+    #[inline(always)]
+    fn cycle() -> u32 {
+        crate::telemetry::cycle_counter()
+    }
+
+    #[inline(always)]
+    fn elapsed(start: u32) -> u32 {
+        Self::cycle().wrapping_sub(start)
+    }
+
+    #[inline(always)]
+    fn add_hw_safe_test(&mut self, cycles: u32) {
+        self.hw_safe_test_cycles = self.hw_safe_test_cycles.saturating_add(cycles);
+    }
+
+    #[inline(always)]
+    fn add_packet_fill(&mut self, cycles: u32) {
+        self.packet_fill_cycles = self.packet_fill_cycles.saturating_add(cycles);
+    }
+
+    #[inline(always)]
+    fn add_primitive_push(&mut self, cycles: u32) {
+        self.primitive_push_cycles = self.primitive_push_cycles.saturating_add(cycles);
+    }
+
+    #[inline(always)]
+    fn add_depth(&mut self, cycles: u32) {
+        self.depth_cycles = self.depth_cycles.saturating_add(cycles);
+    }
+
+    #[inline(always)]
+    fn add_command(&mut self, cycles: u32) {
+        self.command_cycles = self.command_cycles.saturating_add(cycles);
+    }
+
+    #[inline(always)]
+    fn add_fallback(&mut self, cycles: u32) {
+        self.fallback_cycles = self.fallback_cycles.saturating_add(cycles);
+    }
+
+    #[inline(always)]
+    fn count_hw_safe(&mut self) {
+        self.hw_safe_calls = self.hw_safe_calls.saturating_add(1);
+    }
+
+    #[inline(always)]
+    fn count_fallback(&mut self) {
+        self.fallback_calls = self.fallback_calls.saturating_add(1);
+    }
+
+    #[inline(always)]
+    fn count_command_overflow(&mut self) {
+        self.command_overflows = self.command_overflows.saturating_add(1);
+    }
+
+    #[inline(always)]
+    fn count_primitive_overflow(&mut self) {
+        self.primitive_overflows = self.primitive_overflows.saturating_add(1);
+    }
+}
+
 /// Canonical quad → triangle split.
 ///
 /// Quad corners arrive in perimeter order `[0, 1, 2, 3]`:
@@ -762,6 +841,37 @@ impl WorldSurfaceOptions {
     }
 }
 
+/// Prepared ordering-table depth for cached room triangles.
+///
+/// Grid-visible room rendering already sorts by quantised tile cell, so every
+/// triangle submitted for that cell shares the same fixed scalar depth. Keeping
+/// the mapped OT slot beside the raw depth lets the hot cached path avoid
+/// recomputing the same depth key for every triangle packet.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedTriangleDepth {
+    slot: DepthSlot,
+    depth: i32,
+}
+
+impl PreparedTriangleDepth {
+    /// Build a prepared depth from fixed-depth world surface options.
+    #[inline(always)]
+    pub(crate) fn from_fixed_options<const OT_DEPTH: usize>(
+        options: WorldSurfaceOptions,
+    ) -> Option<Self> {
+        let DepthPolicy::Fixed(depth) = options.depth_policy else {
+            return None;
+        };
+        let depth = CameraDepth::new(depth.saturating_add(options.depth_bias));
+        Some(Self {
+            slot: options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth: depth.raw(),
+        })
+    }
+}
+
 /// Scratch command for a mixed world render pass.
 ///
 /// Commands hold raw packet pointers so one pass can sort and submit
@@ -1031,6 +1141,30 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         }
 
         self.submit_textured_triangle_leaf(triangles, verts, material, options)
+    }
+
+    fn submit_textured_triangle_split_leaf_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedTexturedVertex; 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> Option<WorldRenderStats> {
+        if !options.split_textured_triangles {
+            return Some(self.submit_textured_triangle_leaf(triangles, verts, material, options));
+        }
+
+        let verts = [
+            clamp_projected_textured_vertex(verts[0]),
+            clamp_projected_textured_vertex(verts[1]),
+            clamp_projected_textured_vertex(verts[2]),
+        ];
+
+        if projected_textured_needs_split(verts, options) {
+            return None;
+        }
+
+        Some(self.submit_textured_triangle_leaf(triangles, verts, material, options))
     }
 
     fn submit_split_textured_triangle(
@@ -1305,6 +1439,114 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         )
     }
 
+    /// Submit a projected textured Gouraud triangle with fixed depth already
+    /// prepared by the caller.
+    ///
+    /// Cached room rendering sorts by tile cell, so depth mapping is shared by
+    /// all triangles in the cell. This keeps the normal hardware-extent guard
+    /// and splitter fallback while avoiding repeated depth-key work on the
+    /// common hardware-safe leaf path.
+    #[cfg(not(feature = "room-surface-profile"))]
+    #[inline(always)]
+    pub(crate) fn submit_textured_gouraud_triangle_prescreened_u8_prepared_depth(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+    ) -> WorldRenderStats {
+        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+            return self.submit_textured_gouraud_triangle_leaf_u8_prepared_depth(
+                triangles,
+                verts,
+                uvs,
+                colors,
+                material,
+                options,
+                prepared_depth,
+            );
+        }
+        self.submit_textured_gouraud_triangle_prescreened(
+            triangles, verts, uvs, colors, material, options,
+        )
+    }
+
+    /// Profiled variant of [`submit_textured_gouraud_triangle_prescreened_u8`].
+    #[cfg(feature = "room-surface-profile")]
+    #[inline(always)]
+    pub(crate) fn submit_textured_gouraud_triangle_prescreened_u8_profiled(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        profile: &mut TexturedGouraudSubmitMicroProfile,
+    ) -> WorldRenderStats {
+        let hw_safe_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let hardware_safe = options.split_textured_triangles && projected_triangle_hw_safe(verts);
+        profile.add_hw_safe_test(TexturedGouraudSubmitMicroProfile::elapsed(hw_safe_start));
+        if hardware_safe {
+            profile.count_hw_safe();
+            return self.submit_textured_gouraud_triangle_leaf_u8_profiled(
+                triangles, verts, uvs, colors, material, options, profile,
+            );
+        }
+
+        profile.count_fallback();
+        let fallback_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let stats = self.submit_textured_gouraud_triangle_prescreened(
+            triangles, verts, uvs, colors, material, options,
+        );
+        profile.add_fallback(TexturedGouraudSubmitMicroProfile::elapsed(fallback_start));
+        stats
+    }
+
+    /// Profiled variant of
+    /// [`submit_textured_gouraud_triangle_prescreened_u8_prepared_depth`].
+    #[cfg(feature = "room-surface-profile")]
+    #[inline(always)]
+    pub(crate) fn submit_textured_gouraud_triangle_prescreened_u8_prepared_depth_profiled(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+        profile: &mut TexturedGouraudSubmitMicroProfile,
+    ) -> WorldRenderStats {
+        let hw_safe_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let hardware_safe = options.split_textured_triangles && projected_triangle_hw_safe(verts);
+        profile.add_hw_safe_test(TexturedGouraudSubmitMicroProfile::elapsed(hw_safe_start));
+        if hardware_safe {
+            profile.count_hw_safe();
+            return self.submit_textured_gouraud_triangle_leaf_u8_prepared_depth_profiled(
+                triangles,
+                verts,
+                uvs,
+                colors,
+                material,
+                options,
+                prepared_depth,
+                profile,
+            );
+        }
+
+        profile.count_fallback();
+        let fallback_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let stats = self.submit_textured_gouraud_triangle_prescreened(
+            triangles, verts, uvs, colors, material, options,
+        );
+        profile.add_fallback(TexturedGouraudSubmitMicroProfile::elapsed(fallback_start));
+        stats
+    }
+
     fn submit_textured_gouraud_triangle_split(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
@@ -1502,6 +1744,189 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             tri as *mut TriTexturedGouraud as *mut u32,
             TriTexturedGouraud::WORDS,
         );
+        stats.submitted_triangles = 1;
+        stats
+    }
+
+    /// Submit a cached room triangle using a caller-prepared fixed depth.
+    ///
+    /// This path intentionally skips the projected hardware-extent check used
+    /// by the general prescreened submitter. Cooked cached-room cells are
+    /// already clipped/projected by the caller, and the normal demo3 cache
+    /// profiling shows this path never falls back to CPU triangle splitting.
+    #[cfg(any(not(feature = "room-surface-profile"), test))]
+    #[inline(always)]
+    pub(crate) fn submit_textured_gouraud_triangle_leaf_u8_prepared_depth(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+
+        let Some(tri) = triangles.push(TriTexturedGouraud::with_material_packet_texcoords(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uvs,
+            colors,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+
+        self.push_command(
+            prepared_depth.slot,
+            prepared_depth.depth,
+            if material.is_translucent() {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            tri as *mut TriTexturedGouraud as *mut u32,
+            TriTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        stats
+    }
+
+    #[cfg(feature = "room-surface-profile")]
+    #[inline(always)]
+    fn submit_textured_gouraud_triangle_leaf_u8_profiled(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        profile: &mut TexturedGouraudSubmitMicroProfile,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            profile.count_command_overflow();
+            return stats;
+        }
+
+        let packet_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let packet = TriTexturedGouraud::with_material_packet_texcoords(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uvs,
+            colors,
+            material,
+        );
+        profile.add_packet_fill(TexturedGouraudSubmitMicroProfile::elapsed(packet_start));
+
+        let push_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let Some(tri) = triangles.push(packet) else {
+            profile.add_primitive_push(TexturedGouraudSubmitMicroProfile::elapsed(push_start));
+            stats.primitive_overflow = true;
+            profile.count_primitive_overflow();
+            return stats;
+        };
+        profile.add_primitive_push(TexturedGouraudSubmitMicroProfile::elapsed(push_start));
+
+        let depth_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let depth = CameraDepth::new(
+            options
+                .depth_policy
+                .depth_values(verts[0].sz, verts[1].sz, verts[2].sz)
+                .saturating_add(options.depth_bias),
+        );
+        let slot = options
+            .depth_band
+            .slot_depth::<OT_DEPTH>(options.depth_range, depth);
+        let render_layer = if material.is_translucent() {
+            WorldRenderLayer::Transparent
+        } else {
+            options.render_layer
+        };
+        profile.add_depth(TexturedGouraudSubmitMicroProfile::elapsed(depth_start));
+
+        let command_start = TexturedGouraudSubmitMicroProfile::cycle();
+        self.push_command(
+            slot,
+            depth.raw(),
+            render_layer,
+            tri as *mut TriTexturedGouraud as *mut u32,
+            TriTexturedGouraud::WORDS,
+        );
+        profile.add_command(TexturedGouraudSubmitMicroProfile::elapsed(command_start));
+        stats.submitted_triangles = 1;
+        stats
+    }
+
+    #[cfg(feature = "room-surface-profile")]
+    #[inline(always)]
+    pub(crate) fn submit_textured_gouraud_triangle_leaf_u8_prepared_depth_profiled(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        verts: [ProjectedVertex; 3],
+        uvs: [(u8, u8); 3],
+        colors: [(u8, u8, u8); 3],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+        profile: &mut TexturedGouraudSubmitMicroProfile,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            profile.count_command_overflow();
+            return stats;
+        }
+
+        let packet_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let packet = TriTexturedGouraud::with_material_packet_texcoords(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uvs,
+            colors,
+            material,
+        );
+        profile.add_packet_fill(TexturedGouraudSubmitMicroProfile::elapsed(packet_start));
+
+        let push_start = TexturedGouraudSubmitMicroProfile::cycle();
+        let Some(tri) = triangles.push(packet) else {
+            profile.add_primitive_push(TexturedGouraudSubmitMicroProfile::elapsed(push_start));
+            stats.primitive_overflow = true;
+            profile.count_primitive_overflow();
+            return stats;
+        };
+        profile.add_primitive_push(TexturedGouraudSubmitMicroProfile::elapsed(push_start));
+
+        let command_start = TexturedGouraudSubmitMicroProfile::cycle();
+        self.push_command(
+            prepared_depth.slot,
+            prepared_depth.depth,
+            if material.is_translucent() {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            tri as *mut TriTexturedGouraud as *mut u32,
+            TriTexturedGouraud::WORDS,
+        );
+        profile.add_command(TexturedGouraudSubmitMicroProfile::elapsed(command_start));
         stats.submitted_triangles = 1;
         stats
     }
@@ -2007,7 +2432,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
                 if options.split_textured_triangles {
                     let tri_stats = self
-                        .submit_textured_triangle_split(triangles, textured, material, options, 0);
+                        .submit_textured_triangle_split_leaf_fast(
+                            triangles, textured, material, options,
+                        )
+                        .unwrap_or_else(|| {
+                            self.submit_textured_triangle_split(
+                                triangles, textured, material, options, 0,
+                            )
+                        });
                     merge_textured_model_stats(&mut stats, tri_stats);
                     if stats.primitive_overflow || stats.command_overflow {
                         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
@@ -4350,6 +4782,103 @@ mod tests {
     }
 
     #[test]
+    fn textured_split_leaf_fast_matches_recursive_leaf_packet() {
+        const ZERO: TriTextured = TriTextured::new(
+            [(0, 0), (0, 0), (0, 0)],
+            [(0, 0), (0, 0), (0, 0)],
+            0,
+            0,
+            (0, 0, 0),
+        );
+        let material = TextureMaterial::opaque(7, 11, (96, 128, 160));
+        let options = WorldSurfaceOptions::new(DepthBand::new(1, 6), DepthRange::new(0, 1000))
+            .with_depth_policy(DepthPolicy::Average)
+            .with_depth_bias(9)
+            .with_cull_mode(CullMode::None)
+            .with_textured_triangle_splitting(true);
+        let verts = [
+            ProjectedTexturedVertex::new(ProjectedVertex::new(1040, 20, 100), 3, 5),
+            ProjectedTexturedVertex::new(ProjectedVertex::new(1010, 80, 120), 17, 7),
+            ProjectedTexturedVertex::new(ProjectedVertex::new(990, 30, 140), 11, 29),
+        ];
+
+        let mut old_ot_storage = OrderingTable::<8>::new();
+        let mut old_ot = OtFrame::begin(&mut old_ot_storage);
+        let mut old_storage = [const { ZERO }; 1];
+        let mut old_triangles = PrimitiveArena::new(&mut old_storage);
+        let mut old_commands = [WorldTriCommand::EMPTY; 1];
+        let old_stats = {
+            let mut pass = WorldRenderPass::new(&mut old_ot, &mut old_commands);
+            pass.submit_textured_triangle_split(&mut old_triangles, verts, material, options, 0)
+        };
+
+        let mut fast_ot_storage = OrderingTable::<8>::new();
+        let mut fast_ot = OtFrame::begin(&mut fast_ot_storage);
+        let mut fast_storage = [const { ZERO }; 1];
+        let mut fast_triangles = PrimitiveArena::new(&mut fast_storage);
+        let mut fast_commands = [WorldTriCommand::EMPTY; 1];
+        let fast_stats = {
+            let mut pass = WorldRenderPass::new(&mut fast_ot, &mut fast_commands);
+            pass.submit_textured_triangle_split_leaf_fast(
+                &mut fast_triangles,
+                verts,
+                material,
+                options,
+            )
+            .expect("triangle should not need recursive splitting")
+        };
+
+        assert_eq!(old_stats, fast_stats);
+        assert_eq!(old_stats.submitted_triangles, 1);
+        assert_eq!(old_storage[0].tex_window, fast_storage[0].tex_window);
+        assert_eq!(old_storage[0].color_cmd, fast_storage[0].color_cmd);
+        assert_eq!(old_storage[0].v0, fast_storage[0].v0);
+        assert_eq!(old_storage[0].uv0_clut, fast_storage[0].uv0_clut);
+        assert_eq!(old_storage[0].v1, fast_storage[0].v1);
+        assert_eq!(old_storage[0].uv1_tpage, fast_storage[0].uv1_tpage);
+        assert_eq!(old_storage[0].v2, fast_storage[0].v2);
+        assert_eq!(old_storage[0].uv2, fast_storage[0].uv2);
+        assert_eq!(old_commands[0].slot, fast_commands[0].slot);
+        assert_eq!(old_commands[0].depth, fast_commands[0].depth);
+        assert_eq!(old_commands[0].render_layer, fast_commands[0].render_layer);
+        assert_eq!(old_commands[0].words, fast_commands[0].words);
+    }
+
+    #[test]
+    fn textured_split_leaf_fast_preserves_quality_split_fallback() {
+        const ZERO: TriTextured = TriTextured::new(
+            [(0, 0), (0, 0), (0, 0)],
+            [(0, 0), (0, 0), (0, 0)],
+            0,
+            0,
+            (0, 0, 0),
+        );
+        let material = TextureMaterial::opaque(0, 0, (128, 128, 128));
+        let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000))
+            .with_cull_mode(CullMode::None)
+            .with_textured_triangle_splitting(true)
+            .with_textured_triangle_max_edge(16);
+        let verts = [
+            ProjectedTexturedVertex::new(ProjectedVertex::new(0, 0, 100), 0, 0),
+            ProjectedTexturedVertex::new(ProjectedVertex::new(64, 0, 100), 63, 0),
+            ProjectedTexturedVertex::new(ProjectedVertex::new(0, 16, 100), 0, 15),
+        ];
+
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut triangle_storage = [const { ZERO }; 1];
+        let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 1];
+        let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+
+        assert!(pass
+            .submit_textured_triangle_split_leaf_fast(&mut triangles, verts, material, options)
+            .is_none());
+        assert_eq!(triangles.len(), 0);
+        assert_eq!(pass.command_len, 0);
+    }
+
+    #[test]
     fn prescreened_gouraud_submit_matches_unculled_submit_depth() {
         const ZERO: TriTexturedGouraud = TriTexturedGouraud::new(
             [(0, 0), (0, 0), (0, 0)],
@@ -4396,6 +4925,90 @@ mod tests {
         assert_eq!(regular.submitted_triangles, 1);
         assert_eq!(prescreened.submitted_triangles, 1);
         assert_eq!(commands[0].depth_raw(), commands[1].depth_raw());
+    }
+
+    #[test]
+    fn prepared_depth_gouraud_submit_matches_fixed_depth_leaf() {
+        const ZERO: TriTexturedGouraud = TriTexturedGouraud::new(
+            [(0, 0), (0, 0), (0, 0)],
+            [(0, 0), (0, 0), (0, 0)],
+            [(0, 0, 0), (0, 0, 0), (0, 0, 0)],
+            0,
+            0,
+        );
+        let material = TextureMaterial::opaque(2, 4, (128, 128, 128));
+        let verts = [
+            ProjectedVertex::new(8, 4, 100),
+            ProjectedVertex::new(32, 6, 120),
+            ProjectedVertex::new(14, 36, 140),
+        ];
+        let uvs = [(3, 5), (17, 7), (11, 29)];
+        let colors = [(128, 96, 64), (80, 120, 160), (32, 48, 96)];
+        let options = WorldSurfaceOptions::new(DepthBand::new(1, 6), DepthRange::new(0, 1000))
+            .with_depth_policy(DepthPolicy::Fixed(320))
+            .with_depth_bias(13);
+        let prepared = PreparedTriangleDepth::from_fixed_options::<8>(options).unwrap();
+
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut regular_storage = [const { ZERO }; 1];
+        let mut regular_triangles = PrimitiveArena::new(&mut regular_storage);
+        let mut regular_commands = [WorldTriCommand::EMPTY; 1];
+        let regular = {
+            let mut pass = WorldRenderPass::new(&mut ot, &mut regular_commands);
+            pass.submit_textured_gouraud_triangle_prescreened_u8(
+                &mut regular_triangles,
+                verts,
+                uvs,
+                colors,
+                material,
+                options,
+            )
+        };
+
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut prepared_storage = [const { ZERO }; 1];
+        let mut prepared_triangles = PrimitiveArena::new(&mut prepared_storage);
+        let mut prepared_commands = [WorldTriCommand::EMPTY; 1];
+        let prepared_stats = {
+            let mut pass = WorldRenderPass::new(&mut ot, &mut prepared_commands);
+            pass.submit_textured_gouraud_triangle_leaf_u8_prepared_depth(
+                &mut prepared_triangles,
+                verts,
+                uvs,
+                colors,
+                material,
+                options,
+                prepared,
+            )
+        };
+
+        assert_eq!(regular.submitted_triangles, 1);
+        assert_eq!(prepared_stats.submitted_triangles, 1);
+        assert_eq!(
+            regular_storage[0].tex_window,
+            prepared_storage[0].tex_window
+        );
+        assert_eq!(
+            regular_storage[0].color0_cmd,
+            prepared_storage[0].color0_cmd
+        );
+        assert_eq!(regular_storage[0].v0, prepared_storage[0].v0);
+        assert_eq!(regular_storage[0].uv0_clut, prepared_storage[0].uv0_clut);
+        assert_eq!(regular_storage[0].color1, prepared_storage[0].color1);
+        assert_eq!(regular_storage[0].v1, prepared_storage[0].v1);
+        assert_eq!(regular_storage[0].uv1_tpage, prepared_storage[0].uv1_tpage);
+        assert_eq!(regular_storage[0].color2, prepared_storage[0].color2);
+        assert_eq!(regular_storage[0].v2, prepared_storage[0].v2);
+        assert_eq!(regular_storage[0].uv2, prepared_storage[0].uv2);
+        assert_eq!(regular_commands[0].slot, prepared_commands[0].slot);
+        assert_eq!(regular_commands[0].depth, prepared_commands[0].depth);
+        assert_eq!(
+            regular_commands[0].render_layer,
+            prepared_commands[0].render_layer
+        );
+        assert_eq!(regular_commands[0].words, prepared_commands[0].words);
     }
 
     #[test]
