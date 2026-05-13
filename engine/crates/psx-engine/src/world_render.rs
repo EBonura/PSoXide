@@ -2715,11 +2715,11 @@ fn projected_quad_triangle_back_facing(
 
 #[inline(always)]
 fn projected_triangle_back_facing(verts: [ProjectedVertex; 3]) -> bool {
-    let ax = (verts[1].sx as i32) - (verts[0].sx as i32);
-    let ay = (verts[1].sy as i32) - (verts[0].sy as i32);
-    let bx = (verts[2].sx as i32) - (verts[0].sx as i32);
-    let by = (verts[2].sy as i32) - (verts[0].sy as i32);
-    (ax * by - ay * bx) <= 0
+    psx_gte::scene::screen_triangle_back_facing([
+        (verts[0].sx, verts[0].sy),
+        (verts[1].sx, verts[1].sy),
+        (verts[2].sx, verts[2].sy),
+    ])
 }
 
 const fn cached_uv_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial {
