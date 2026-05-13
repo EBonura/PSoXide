@@ -1782,6 +1782,9 @@ impl Bus {
     }
 
     fn read32_impl(&mut self, virt: u32, phys: u32) -> u32 {
+        if let Some(value) = self.telemetry.observe_read32(phys, self.cycles) {
+            return value;
+        }
         if phys < memory::ram::MIRROR_END {
             let offset = (phys as usize) % memory::ram::SIZE;
             return read_u32_le(&self.ram[offset..]);
