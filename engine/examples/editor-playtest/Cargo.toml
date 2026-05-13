@@ -24,6 +24,7 @@ world-order-slot = []
 world-order-linked = []
 world-order-bucketed = []
 world-grid-visible = []
+room-surface-profile = ["psx-engine/room-surface-profile"]
 ot-1024 = []
 ot-2048 = []
 
