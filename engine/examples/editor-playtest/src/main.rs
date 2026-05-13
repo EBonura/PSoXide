@@ -3969,6 +3969,7 @@ impl Playtest {
         }
         let (mut count, mut rejected_global) = {
             let cells = self.visible_cell_cache_cells.get_mut(first..)?;
+            let depths = unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
             fill_precomputed_visible_cells(
                 room_index,
                 anchor_x,
@@ -3979,6 +3980,7 @@ impl Playtest {
                 global_anchor,
                 camera,
                 cells,
+                depths,
             )
         }?;
 
@@ -3987,6 +3989,7 @@ impl Playtest {
             first = 0;
             (count, rejected_global) = {
                 let cells = self.visible_cell_cache_cells.get_mut(first..)?;
+                let depths = unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
                 fill_precomputed_visible_cells(
                     room_index,
                     anchor_x,
@@ -3997,6 +4000,7 @@ impl Playtest {
                     global_anchor,
                     camera,
                     cells,
+                    depths,
                 )
             }?;
             if count > MAX_ACTIVE_VISIBLE_CELLS || count > u16::MAX as usize {
@@ -4033,13 +4037,14 @@ fn fill_precomputed_visible_cells(
     global_anchor: RoomPoint,
     camera: WorldCamera,
     out: &mut [GridVisibleCell],
+    depths: &mut [i32],
 ) -> Option<(usize, u16)> {
     let room_visibility = ROOM_VISIBILITY
         .iter()
         .find(|visibility| visibility.room == room_index)?;
     let first = room_visibility.cell_first.to_usize();
     let count = room_visibility.cell_count as usize;
-    if count > out.len() || count > MAX_PRECOMPUTED_VISIBLE_CELLS {
+    if count > out.len() || count > depths.len() || count > MAX_PRECOMPUTED_VISIBLE_CELLS {
         return None;
     }
     let room_cells = VISIBILITY_CELLS.get(first..first.checked_add(count)?)?;
@@ -4071,14 +4076,14 @@ fn fill_precomputed_visible_cells(
                 room_cells[cell_index],
                 filter,
                 out,
+                depths,
                 &mut written,
                 &mut rejected_global,
             );
         }
         cell_index += 1;
     }
-    let sort_depths = unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..written] };
-    sort_visible_cells_for_camera(&mut out[..written], sort_depths, camera, sector_size);
+    sort_visible_cells_for_camera(&mut out[..written], &mut depths[..written]);
     Some((written, rejected_global))
 }
 
@@ -4091,19 +4096,9 @@ fn visible_cell_view_keys(camera: WorldCamera) -> (i16, i16) {
 }
 
 #[cfg(feature = "world-grid-visible")]
-fn sort_visible_cells_for_camera(
-    cells: &mut [GridVisibleCell],
-    depths: &mut [i32],
-    camera: WorldCamera,
-    sector_size: i32,
-) {
+fn sort_visible_cells_for_camera(cells: &mut [GridVisibleCell], depths: &mut [i32]) {
     if cells.len() > depths.len() {
         return;
-    }
-    let mut i = 0usize;
-    while i < cells.len() {
-        depths[i] = visible_cell_camera_depth(cells[i], camera, sector_size);
-        i += 1;
     }
     let mut gap = cells.len() / 2;
     while gap > 0 {
@@ -4126,7 +4121,12 @@ fn sort_visible_cells_for_camera(
 }
 
 #[cfg(feature = "world-grid-visible")]
-fn visible_cell_camera_depth(cell: GridVisibleCell, camera: WorldCamera, sector_size: i32) -> i32 {
+fn visible_cell_camera_depth_if_sphere_visible(
+    cell: psx_level::LevelVisibilityCellRecord,
+    camera: WorldCamera,
+    sector_size: i32,
+) -> Option<i32> {
+    let sector_size = sector_size.max(1);
     let half = sector_size / 2;
     let center = WorldVertex::new(
         (cell.x as i32)
@@ -4137,7 +4137,29 @@ fn visible_cell_camera_depth(cell: GridVisibleCell, camera: WorldCamera, sector_
             .saturating_mul(sector_size)
             .saturating_add(half),
     );
-    camera.view_vertex(center).z
+    let half_height = ((cell.max_y - cell.min_y).abs() / 2).max(half);
+    let radius = sector_size.saturating_add(half_height);
+    let view = camera.view_vertex(center);
+    let near = camera.projection.near_z.max(1);
+    let far = FAR_Z.max(near);
+    if view.z < near.saturating_sub(radius) || view.z > far.saturating_add(radius) {
+        return None;
+    }
+
+    let z = view.z.max(near);
+    let focal = camera.projection.focal_length.max(1);
+    let half_w = (camera.projection.screen_x as i32)
+        .saturating_add(ROOM_VISIBLE_CELL_SCREEN_MARGIN)
+        .max(1);
+    let half_h = (camera.projection.screen_y as i32)
+        .saturating_add(ROOM_VISIBLE_CELL_SCREEN_MARGIN)
+        .max(1);
+    let projected_x = view.x.abs().saturating_sub(radius).saturating_mul(focal);
+    let projected_y = view.y.abs().saturating_sub(radius).saturating_mul(focal);
+    if projected_x > half_w.saturating_mul(z) || projected_y > half_h.saturating_mul(z) {
+        return None;
+    }
+    Some(view.z)
 }
 
 #[cfg(feature = "world-grid-visible")]
@@ -4164,6 +4186,7 @@ fn write_visible_cell_candidate(
     cell: psx_level::LevelVisibilityCellRecord,
     filter: VisibleCellFilter,
     out: &mut [GridVisibleCell],
+    depths: &mut [i32],
     written: &mut usize,
     rejected_global: &mut u16,
 ) {
@@ -4178,13 +4201,20 @@ fn write_visible_cell_candidate(
     if *written >= out.len() {
         return;
     }
+    let Some(depth) =
+        visible_cell_camera_depth_if_sphere_visible(cell, filter.camera, filter.sector_size)
+    else {
+        return;
+    };
     out[*written] = GridVisibleCell::with_cache_cell_index(
         cell.x,
         cell.z,
         cell.min_y,
         cell.max_y,
         cell.cache_cell_index,
-    );
+    )
+    .with_camera_depth(GridVisibleCell::CAMERA_DEPTH_PRECULLED);
+    depths[*written] = depth;
     *written += 1;
 }
 
