@@ -53,6 +53,16 @@ pub mod stage {
     pub const CD_WORLD_PACK_STREAM: u16 = 25;
     /// Synchronous read of one streamed room chunk from WORLD.PAK.
     pub const CD_ROOM_CHUNK_LOAD: u16 = 26;
+    /// Cached-room visible-cell/PVS list lookup.
+    pub const ROOM_VISIBLE_LIST: u16 = 27;
+    /// Cached-room visible-cell lookup and vertex-index gathering.
+    pub const ROOM_CELL_SELECT: u16 = 28;
+    /// Cached-room GTE/CPU vertex projection.
+    pub const ROOM_PROJECT: u16 = 29;
+    /// Cached-room per-vertex depth/fog preparation.
+    pub const ROOM_DEPTH_PREP: u16 = 30;
+    /// Cached-room surface culling, lighting, packet build, and command enqueue.
+    pub const ROOM_SURFACE_DRAW: u16 = 31;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -229,6 +239,64 @@ pub mod counter {
     pub const ROOM_STREAM_FAILED_LOADS: u16 = 82;
     /// Stream slot loads scheduled by the current window refresh.
     pub const ROOM_STREAM_PENDING_LOADS: u16 = 83;
+    /// Unique cached room vertices projected by visible cells.
+    pub const ROOM_PROJECTED_VERTICES: u16 = 84;
+    /// Cycles spent on room-surface material lookup/setup.
+    pub const ROOM_SURF_MATERIAL_CYCLES: u16 = 85;
+    /// Cycles spent fetching/validating projected room-surface quads.
+    pub const ROOM_SURF_PROJECTED_CYCLES: u16 = 86;
+    /// Cycles spent on room-surface screen culling.
+    pub const ROOM_SURF_SCREEN_CYCLES: u16 = 87;
+    /// Cycles spent classifying room-surface kind.
+    pub const ROOM_SURF_KIND_CYCLES: u16 = 88;
+    /// Cycles spent on room-surface backface culling.
+    pub const ROOM_SURF_BACKFACE_CYCLES: u16 = 89;
+    /// Cycles spent selecting baked/lit room-surface vertex colors.
+    pub const ROOM_SURF_LIGHTING_CYCLES: u16 = 90;
+    /// Cycles spent submitting room-surface packets/commands.
+    pub const ROOM_SURF_SUBMIT_CYCLES: u16 = 91;
+    /// Room surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_PROFILED: u16 = 92;
+    /// Room surfaces with missing material records.
+    pub const ROOM_SURF_MATERIAL_MISSES: u16 = 93;
+    /// Room surfaces rejected by projected-quad validity checks.
+    pub const ROOM_SURF_PROJECTED_REJECTS: u16 = 94;
+    /// Room surfaces culled by screen bounds.
+    pub const ROOM_SURF_SCREEN_CULLED: u16 = 95;
+    /// Room surfaces culled by backface tests.
+    pub const ROOM_SURF_BACKFACE_CULLED: u16 = 96;
+    /// Room floor surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_FLOORS: u16 = 97;
+    /// Room ceiling surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_CEILINGS: u16 = 98;
+    /// Room wall surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_WALLS: u16 = 99;
+    /// Whole-quad room surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_WHOLE_QUADS: u16 = 100;
+    /// Split-triangle room surfaces sampled by the micro-profiler.
+    pub const ROOM_SURF_SPLIT_TRIS: u16 = 101;
+    /// Room surfaces where color selection returned no drawable colors.
+    pub const ROOM_SURF_LIGHTING_REJECTS: u16 = 102;
+    /// Cycles spent checking cached room triangle hardware safety.
+    pub const ROOM_SUBMIT_HW_SAFE_TEST_CYCLES: u16 = 103;
+    /// Cycles spent building cached room triangle packet values.
+    pub const ROOM_SUBMIT_PACKET_FILL_CYCLES: u16 = 104;
+    /// Cycles spent pushing cached room triangle packets into primitive storage.
+    pub const ROOM_SUBMIT_PRIMITIVE_PUSH_CYCLES: u16 = 105;
+    /// Cycles spent calculating cached room triangle depth/order keys.
+    pub const ROOM_SUBMIT_DEPTH_CYCLES: u16 = 106;
+    /// Cycles spent pushing cached room triangle world commands.
+    pub const ROOM_SUBMIT_COMMAND_CYCLES: u16 = 107;
+    /// Cycles spent in cached room triangle fallback split/general path.
+    pub const ROOM_SUBMIT_FALLBACK_CYCLES: u16 = 108;
+    /// Cached room triangle submits that used the hardware-safe fast path.
+    pub const ROOM_SUBMIT_HW_SAFE_CALLS: u16 = 109;
+    /// Cached room triangle submits that used the split/general fallback path.
+    pub const ROOM_SUBMIT_FALLBACK_CALLS: u16 = 110;
+    /// Cached room triangle submits rejected by command-buffer capacity.
+    pub const ROOM_SUBMIT_COMMAND_OVERFLOWS: u16 = 111;
+    /// Cached room triangle submits rejected by primitive-buffer capacity.
+    pub const ROOM_SUBMIT_PRIMITIVE_OVERFLOWS: u16 = 112;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
@@ -240,6 +308,8 @@ const EVENT_KIND_COUNTER: u8 = 4;
 const EVENT_ADDR: *mut u32 = 0xBF80_2F00 as *mut u32;
 #[cfg(target_arch = "mips")]
 const VALUE_ADDR: *mut u32 = 0xBF80_2F04 as *mut u32;
+#[cfg(target_arch = "mips")]
+const CYCLE_ADDR: *const u32 = 0xBF80_2F08 as *const u32;
 
 /// Mark the start of a guest frame.
 #[inline(always)]
@@ -267,6 +337,16 @@ pub fn counter(counter_id: u16, value: u32) {
     emit_event(EVENT_KIND_COUNTER, counter_id);
 }
 
+/// Read the emulator-observed guest cycle counter.
+///
+/// This is only meaningful under PSoXide's emulator telemetry port. On
+/// hardware, and on host builds, it is a profiling-only helper and returns
+/// zero unless the emulator provides the Expansion 2 cycle register.
+#[inline(always)]
+pub fn cycle_counter() -> u32 {
+    read_cycle_counter()
+}
+
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 fn encode_event(kind: u8, id: u16) -> u32 {
@@ -284,6 +364,18 @@ fn emit_value(value: u32) {
 #[cfg(not(target_arch = "mips"))]
 #[inline(always)]
 fn emit_value(_value: u32) {}
+
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn read_cycle_counter() -> u32 {
+    unsafe { core::ptr::read_volatile(CYCLE_ADDR) }
+}
+
+#[cfg(not(target_arch = "mips"))]
+#[inline(always)]
+fn read_cycle_counter() -> u32 {
+    0
+}
 
 #[cfg(target_arch = "mips")]
 #[inline(always)]
