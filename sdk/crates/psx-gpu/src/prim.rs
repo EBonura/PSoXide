@@ -329,6 +329,29 @@ impl TriTextured {
             uv2: pack_packet_texcoord(u2, v2, 0),
         }
     }
+
+    /// Build a textured triangle from UV words that already contain
+    /// the low `(u, v)` bytes in packet layout. The material still
+    /// supplies CLUT, tpage, tint, blend, and texture-window state.
+    pub const fn with_material_packed_uv_words(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        material: TextureMaterial,
+    ) -> Self {
+        let clut = material.clut_word();
+        let tpage = material.tpage_word();
+        Self {
+            tag: 0,
+            tex_window: material.texture_window_word(),
+            color_cmd: material.flat_textured_polygon_header(false),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: (uv_words[0] as u32) | ((clut as u32) << 16),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: (uv_words[1] as u32) | ((tpage as u32) << 16),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+        }
+    }
 }
 
 /// Textured **Gouraud-shaded** triangle. 11 words (tag + 10 data).
