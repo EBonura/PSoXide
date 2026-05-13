@@ -22,5 +22,9 @@ psx-vram  = { path = "../../../sdk/crates/psx-vram" }
 [target.'cfg(target_arch = "mips")'.dependencies]
 psx-rt = { path = "../../../sdk/crates/psx-rt" }
 
+[features]
+default = []
+room-surface-profile = []
+
 [lints.rust]
 missing_docs = "warn"

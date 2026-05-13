@@ -347,6 +347,10 @@ static mut CACHED_ROOM_PROJECTED_VALID: [bool; MAX_CACHED_ROOM_VERTICES] =
     [false; MAX_CACHED_ROOM_VERTICES];
 static mut CACHED_ROOM_PROJECTED_DEPTHS: [i32; MAX_CACHED_ROOM_VERTICES] =
     [0; MAX_CACHED_ROOM_VERTICES];
+static mut CACHED_ROOM_ACCEPTED_VISIBLE_INDICES: [u16; MAX_PRECOMPUTED_VISIBLE_CELLS] =
+    [0; MAX_PRECOMPUTED_VISIBLE_CELLS];
+static mut CACHED_ROOM_ACCEPTED_CELL_INDICES: [u16; MAX_PRECOMPUTED_VISIBLE_CELLS] =
+    [0; MAX_PRECOMPUTED_VISIBLE_CELLS];
 #[cfg(feature = "cd-stream-bench")]
 static mut STREAMED_ROOM_WORDS: [[u32; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT] =
     [[0; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT];
@@ -1513,19 +1517,21 @@ impl Scene for Playtest {
                     let visibility =
                         GridVisibility::around(visibility_anchor, ROOM_GRID_VISIBILITY_RADIUS)
                             .with_screen_margin(ROOM_VISIBLE_CELL_SCREEN_MARGIN);
-                    let stats = if let Some((cells, range_culled)) = self
-                        .cached_precomputed_visible_cells(
-                            active_slot,
-                            active.index,
-                            active.width,
-                            active.depth,
-                            active.sector_size,
-                            visibility_anchor,
-                            active.offset_x,
-                            active.offset_z,
-                            global_visibility_anchor,
-                            room_camera,
-                        ) {
+                    telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
+                    let visible_cells_result = self.cached_precomputed_visible_cells(
+                        active_slot,
+                        active.index,
+                        active.width,
+                        active.depth,
+                        active.sector_size,
+                        visibility_anchor,
+                        active.offset_x,
+                        active.offset_z,
+                        global_visibility_anchor,
+                        room_camera,
+                    );
+                    telemetry::stage_end(telemetry::stage::ROOM_VISIBLE_LIST);
+                    let stats = if let Some((cells, range_culled)) = visible_cells_result {
                         room_range_culled_cells =
                             room_range_culled_cells.saturating_add(range_culled as u32);
                         room_visible_cells = room_visible_cells.saturating_add(cells.len() as u32);
@@ -1549,6 +1555,10 @@ impl Scene for Playtest {
                                     unsafe { &mut CACHED_ROOM_PROJECTED_VALID[..vertex_count] };
                                 let projected_depths =
                                     unsafe { &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count] };
+                                let accepted_visible_indices =
+                                    unsafe { &mut CACHED_ROOM_ACCEPTED_VISIBLE_INDICES[..] };
+                                let accepted_cell_indices =
+                                    unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
                                 draw_indexed_cached_room_vertex_lit_visible_cells(
                                     cached_cells,
                                     cached_cell_vertices,
@@ -1559,6 +1569,8 @@ impl Scene for Playtest {
                                     projected_ready,
                                     projected_valid,
                                     projected_depths,
+                                    accepted_visible_indices,
+                                    accepted_cell_indices,
                                     active.depth,
                                     active.sector_size,
                                     materials,
@@ -1906,6 +1918,10 @@ impl Scene for Playtest {
                 telemetry::counter(
                     telemetry::counter::ROOM_SURFACES_CONSIDERED,
                     room_stats_total.surfaces_considered as u32,
+                );
+                telemetry::counter(
+                    telemetry::counter::ROOM_PROJECTED_VERTICES,
+                    room_stats_total.projected_vertices as u32,
                 );
             }
             telemetry::counter(
@@ -3414,6 +3430,9 @@ fn accumulate_grid_visibility_stats(total: &mut GridVisibilityStats, stats: Grid
     total.surfaces_considered = total
         .surfaces_considered
         .saturating_add(stats.surfaces_considered);
+    total.projected_vertices = total
+        .projected_vertices
+        .saturating_add(stats.projected_vertices);
 }
 
 fn draw_sky_gradient(sky: LevelSkyRecord) {
