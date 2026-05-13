@@ -334,10 +334,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for cache in &package.room_surface_caches {
         let _ = writeln!(
             out,
-            "    LevelRoomSurfaceCacheRecord {{ room: RoomIndex({}), cell_first: {}, cell_count: {}, vertex_first: {}, vertex_count: {}, surface_first: {}, surface_count: {}, flags: 0 }},",
+            "    LevelRoomSurfaceCacheRecord {{ room: RoomIndex({}), cell_first: {}, cell_count: {}, cell_vertex_first: {}, cell_vertex_count: {}, vertex_first: {}, vertex_count: {}, surface_first: {}, surface_count: {}, flags: 0 }},",
             cache.room,
             cache.cell_first,
             cache.cell_count,
+            cache.cell_vertex_first,
+            cache.cell_vertex_count,
             cache.vertex_first,
             cache.vertex_count,
             cache.surface_first,
@@ -355,7 +357,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for cell in &package.room_cache_cells {
         let _ = writeln!(
             out,
-            "    LevelCachedRoomCellRecord {{ x: {}, z: {}, min_y: {}, max_y: {}, visibility_center: [{}, {}, {}], visibility_radius: {}, surface_first: {}, surface_count: {} }},",
+            "    LevelCachedRoomCellRecord {{ x: {}, z: {}, min_y: {}, max_y: {}, visibility_center: [{}, {}, {}], visibility_radius: {}, surface_first: {}, surface_count: {}, vertex_first: {}, vertex_count: {} }},",
             cell.x,
             cell.z,
             cell.min_y,
@@ -366,7 +368,20 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             cell.visibility_radius,
             cell.surface_first,
             cell.surface_count,
+            cell.vertex_first,
+            cell.vertex_count,
         );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("#[cfg(feature = \"cd-stream-bench\")]\n");
+    out.push_str("/// Stream builds read cached cell vertex indices from `.psxc` chunks.\n");
+    out.push_str("pub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];\n\n");
+    out.push_str("#[cfg(not(feature = \"cd-stream-bench\"))]\n");
+    out.push_str("/// Generated cached cell vertex indices.\n");
+    out.push_str("pub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[\n");
+    for vertex_index in &package.room_cache_cell_vertices {
+        let _ = writeln!(out, "    {},", vertex_index);
     }
     out.push_str("];\n\n");
 
@@ -822,6 +837,7 @@ pub fn streamed_room_chunk_memory_report(
         report.totals.header_bytes += memory.header_bytes;
         report.totals.collision_bytes += memory.collision_bytes;
         report.totals.render_cell_bytes += memory.render_cell_bytes;
+        report.totals.render_cell_vertex_bytes += memory.render_cell_vertex_bytes;
         report.totals.render_vertex_bytes += memory.render_vertex_bytes;
         report.totals.render_surface_bytes += memory.render_surface_bytes;
         report.totals.render_cache_bytes += memory.render_cache_bytes;
@@ -853,9 +869,11 @@ fn streamed_room_chunk_memory(
         layout.cell_count * std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>();
     let render_vertex_bytes =
         layout.vertex_count * std::mem::size_of::<psx_level::LevelCachedRoomVertexRecord>();
+    let render_cell_vertex_bytes = layout.cell_vertex_count * std::mem::size_of::<u16>();
     let render_surface_bytes =
         layout.surface_count * std::mem::size_of::<psx_level::LevelCachedRoomSurfaceRecord>();
-    let render_cache_bytes = render_cell_bytes + render_vertex_bytes + render_surface_bytes;
+    let render_cache_bytes =
+        render_cell_bytes + render_cell_vertex_bytes + render_vertex_bytes + render_surface_bytes;
     let accounted_bytes = psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES
         + layout.collision_payload.len()
         + render_cache_bytes;
@@ -868,6 +886,7 @@ fn streamed_room_chunk_memory(
         header_bytes: psx_level::STREAMED_ROOM_CHUNK_HEADER_BYTES,
         collision_bytes: layout.collision_payload.len(),
         render_cell_bytes,
+        render_cell_vertex_bytes,
         render_vertex_bytes,
         render_surface_bytes,
         render_cache_bytes,
@@ -881,9 +900,11 @@ struct StreamedRoomChunkLayout<'a> {
     collision_payload: Vec<u8>,
     collision_flags: u32,
     cell_slice: &'a [PlaytestCachedRoomCell],
+    cell_vertex_slice: &'a [u16],
     vertex_slice: &'a [PlaytestCachedRoomVertex],
     surface_slice: &'a [PlaytestCachedRoomSurface],
     cell_count: usize,
+    cell_vertex_count: usize,
     vertex_count: usize,
     surface_count: usize,
 }
@@ -930,6 +951,15 @@ fn streamed_room_chunk_layout(
             )
         })
         .unwrap_or(&[]);
+    let cell_vertex_slice = cache
+        .and_then(|cache| {
+            checked_slice(
+                &package.room_cache_cell_vertices,
+                cache.cell_vertex_first as usize,
+                cache.cell_vertex_count as usize,
+            )
+        })
+        .unwrap_or(&[]);
     let surface_slice = cache
         .and_then(|cache| {
             checked_slice(
@@ -944,9 +974,11 @@ fn streamed_room_chunk_layout(
         collision_payload: compact_collision_payload(&asset.bytes)?,
         collision_flags: psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
         cell_slice,
+        cell_vertex_slice,
         vertex_slice,
         surface_slice,
         cell_count: cell_slice.len(),
+        cell_vertex_count: cell_vertex_slice.len(),
         vertex_count: vertex_slice.len(),
         surface_count: surface_slice.len(),
     })
@@ -955,6 +987,7 @@ fn streamed_room_chunk_layout(
 fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<Vec<u8>, String> {
     let layout = streamed_room_chunk_layout(package, room)?;
     let cell_slice = layout.cell_slice;
+    let cell_vertex_slice = layout.cell_vertex_slice;
     let vertex_slice = layout.vertex_slice;
     let surface_slice = layout.surface_slice;
 
@@ -965,6 +998,9 @@ fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<V
     align_vec(&mut out, 4);
     let cells_offset = out.len();
     append_cached_room_cells(&mut out, cell_slice);
+    align_vec(&mut out, 2);
+    let cell_vertices_offset = out.len();
+    append_cached_room_cell_vertices(&mut out, cell_vertex_slice);
     align_vec(&mut out, 4);
     let vertices_offset = out.len();
     append_cached_room_vertices(&mut out, vertex_slice);
@@ -1035,6 +1071,22 @@ fn streamed_room_chunk_payload(package: &PlaytestPackage, room: u16) -> Result<V
     )?;
     write_u32_le(
         &mut out,
+        psx_level::streamed_room_chunk_header::CELL_VERTICES_OFFSET,
+        checked_u32(
+            cell_vertices_offset,
+            "streamed room cell vertex indices offset",
+        )?,
+    )?;
+    write_u32_le(
+        &mut out,
+        psx_level::streamed_room_chunk_header::CELL_VERTEX_COUNT,
+        checked_u32(
+            cell_vertex_slice.len(),
+            "streamed room cell vertex index count",
+        )?,
+    )?;
+    write_u32_le(
+        &mut out,
         psx_level::streamed_room_chunk_header::FLAGS,
         layout.collision_flags,
     )?;
@@ -1050,9 +1102,8 @@ fn compact_collision_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
         .checked_mul(depth)
         .ok_or_else(|| "room collision sector count overflowed u16".to_string())?;
     let wall_count = room.world().wall_count();
-    let mut sectors = Vec::with_capacity(
-        sector_count as usize * psx_level::COMPACT_COLLISION_SECTOR_BYTES,
-    );
+    let mut sectors =
+        Vec::with_capacity(sector_count as usize * psx_level::COMPACT_COLLISION_SECTOR_BYTES);
     let mut height_overrides = Vec::new();
 
     let render = room.render();
@@ -1089,7 +1140,8 @@ fn compact_collision_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
         wall_index += 1;
     }
 
-    let override_count = height_overrides.len() / psx_level::COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES;
+    let override_count =
+        height_overrides.len() / psx_level::COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES;
     if override_count > u16::MAX as usize {
         return Err("room collision height override count overflowed u16".to_string());
     }
@@ -1144,7 +1196,9 @@ fn append_compact_collision_sector(
     let mut flags = 0u8;
     let mut floor_triangle_flags = 0u8;
     let mut ceiling_triangle_flags = 0u8;
-    let floor_split = render_sector.map(|sector| sector.floor_split()).unwrap_or(0);
+    let floor_split = render_sector
+        .map(|sector| sector.floor_split())
+        .unwrap_or(0);
     let ceiling_split = render_sector
         .map(|sector| sector.ceiling_split())
         .unwrap_or(0);
@@ -1164,8 +1218,7 @@ fn append_compact_collision_sector(
         if render_sector.has_ceiling() {
             flags |= psx_level::compact_collision_sector_flags::HAS_CEILING;
         }
-        floor_triangle_flags =
-            compact_floor_triangle_flags(render_sector, collision_sector);
+        floor_triangle_flags = compact_floor_triangle_flags(render_sector, collision_sector);
         ceiling_triangle_flags = compact_ceiling_triangle_flags(render_sector);
         if collision_sector
             .map(|sector| sector.floor_walkable())
@@ -1371,7 +1424,7 @@ fn append_i32_le(out: &mut Vec<u8>, value: i32) {
 fn append_cached_room_cells(out: &mut Vec<u8>, cells: &[PlaytestCachedRoomCell]) {
     debug_assert_eq!(
         std::mem::size_of::<psx_level::LevelCachedRoomCellRecord>(),
-        32
+        36
     );
     for cell in cells {
         append_u16_le(out, cell.x);
@@ -1384,6 +1437,8 @@ fn append_cached_room_cells(out: &mut Vec<u8>, cells: &[PlaytestCachedRoomCell])
         append_i32_le(out, cell.visibility_radius);
         append_u16_le(out, cell.surface_first);
         append_u16_le(out, cell.surface_count);
+        append_u16_le(out, cell.vertex_first);
+        append_u16_le(out, cell.vertex_count);
     }
 }
 
@@ -1396,6 +1451,12 @@ fn append_cached_room_vertices(out: &mut Vec<u8>, vertices: &[PlaytestCachedRoom
         append_i32_le(out, vertex.x);
         append_i32_le(out, vertex.y);
         append_i32_le(out, vertex.z);
+    }
+}
+
+fn append_cached_room_cell_vertices(out: &mut Vec<u8>, vertices: &[u16]) {
+    for vertex in vertices {
+        append_u16_le(out, *vertex);
     }
 }
 
@@ -2005,6 +2066,8 @@ mod tests {
             room: 0,
             cell_first: 0,
             cell_count: 0,
+            cell_vertex_first: 0,
+            cell_vertex_count: 0,
             vertex_first: 0,
             vertex_count: 0,
             surface_first: 0,
@@ -2016,6 +2079,7 @@ mod tests {
         assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = include_bytes!(\"rooms/room_000.psxw\");"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read room-surface cache slices from `.psxc` chunks.\npub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room cells from `.psxc` chunks.\npub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];"));
+        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached cell vertex indices from `.psxc` chunks.\npub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room vertices from `.psxc` chunks.\npub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room surfaces from `.psxc` chunks.\npub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];"));
     }
@@ -2029,6 +2093,8 @@ mod tests {
             room: 0,
             cell_first: 0,
             cell_count: 1,
+            cell_vertex_first: 0,
+            cell_vertex_count: 4,
             vertex_first: 0,
             vertex_count: 1,
             surface_first: 0,
@@ -2043,7 +2109,10 @@ mod tests {
             visibility_radius: 9,
             surface_first: 10,
             surface_count: 11,
+            vertex_first: 0,
+            vertex_count: 4,
         }];
+        package.room_cache_cell_vertices = vec![0, 1, 2, 3];
         package.room_cache_vertices = vec![PlaytestCachedRoomVertex {
             x: 12,
             y: 13,
@@ -2075,10 +2144,12 @@ mod tests {
         assert_eq!(u32_at(&payload, 24), 80);
         assert_eq!(u32_at(&payload, 28), 144);
         assert_eq!(u32_at(&payload, 32), 1);
-        assert_eq!(u32_at(&payload, 36), 176);
+        assert_eq!(u32_at(&payload, 36), 188);
         assert_eq!(u32_at(&payload, 40), 1);
-        assert_eq!(u32_at(&payload, 44), 188);
+        assert_eq!(u32_at(&payload, 44), 200);
         assert_eq!(u32_at(&payload, 48), 1);
+        assert_eq!(u32_at(&payload, 52), 180);
+        assert_eq!(u32_at(&payload, 56), 4);
         assert_eq!(
             u32_at(&payload, 60),
             psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT
@@ -2089,9 +2160,12 @@ mod tests {
         );
         assert_eq!(u16_at(&payload, 144), 2);
         assert_eq!(i32_at(&payload, 148), -4);
-        assert_eq!(i32_at(&payload, 176), 12);
-        assert_eq!(u16_at(&payload, 188), 15);
-        assert_eq!(payload[227], 42);
+        assert_eq!(u16_at(&payload, 176), 0);
+        assert_eq!(u16_at(&payload, 180), 0);
+        assert_eq!(u16_at(&payload, 186), 3);
+        assert_eq!(i32_at(&payload, 188), 12);
+        assert_eq!(u16_at(&payload, 200), 15);
+        assert_eq!(payload[239], 42);
     }
 
     #[test]
@@ -2103,6 +2177,8 @@ mod tests {
             room: 0,
             cell_first: 0,
             cell_count: 1,
+            cell_vertex_first: 0,
+            cell_vertex_count: 4,
             vertex_first: 0,
             vertex_count: 1,
             surface_first: 0,
@@ -2117,7 +2193,10 @@ mod tests {
             visibility_radius: 9,
             surface_first: 10,
             surface_count: 11,
+            vertex_first: 0,
+            vertex_count: 4,
         }];
+        package.room_cache_cell_vertices = vec![0, 1, 2, 3];
         package.room_cache_vertices = vec![PlaytestCachedRoomVertex {
             x: 12,
             y: 13,
@@ -2146,10 +2225,11 @@ mod tests {
             streamed_room_chunk_payload(&package, 0).unwrap().len()
         );
         assert_eq!(chunk.collision_bytes, 80);
-        assert_eq!(chunk.render_cell_bytes, 32);
+        assert_eq!(chunk.render_cell_bytes, 36);
+        assert_eq!(chunk.render_cell_vertex_bytes, 8);
         assert_eq!(chunk.render_vertex_bytes, 12);
         assert_eq!(chunk.render_surface_bytes, 40);
-        assert_eq!(chunk.render_cache_bytes, 84);
+        assert_eq!(chunk.render_cache_bytes, 96);
         assert_eq!(chunk.alignment_padding_bytes, 0);
         assert_eq!(chunk.sector_count, 1);
         assert_eq!(chunk.stream_bytes, psx_iso::SECTOR_USER_DATA_BYTES);
@@ -2166,6 +2246,7 @@ mod tests {
                 header_bytes: chunk.header_bytes,
                 collision_bytes: chunk.collision_bytes,
                 render_cell_bytes: chunk.render_cell_bytes,
+                render_cell_vertex_bytes: chunk.render_cell_vertex_bytes,
                 render_vertex_bytes: chunk.render_vertex_bytes,
                 render_surface_bytes: chunk.render_surface_bytes,
                 render_cache_bytes: chunk.render_cache_bytes,
@@ -2183,16 +2264,19 @@ mod tests {
             payload.len(),
             psx_level::COMPACT_COLLISION_HEADER_BYTES + psx_level::COMPACT_COLLISION_SECTOR_BYTES
         );
-        assert_eq!(
-            &payload[..8],
-            psx_level::COMPACT_COLLISION_MAGIC.as_slice()
-        );
+        assert_eq!(&payload[..8], psx_level::COMPACT_COLLISION_MAGIC.as_slice());
         assert_eq!(
             u32_at(&payload, psx_level::compact_collision_header::VERSION),
             psx_level::COMPACT_COLLISION_VERSION
         );
-        assert_eq!(u16_at(&payload, psx_level::compact_collision_header::WIDTH), 1);
-        assert_eq!(u16_at(&payload, psx_level::compact_collision_header::DEPTH), 1);
+        assert_eq!(
+            u16_at(&payload, psx_level::compact_collision_header::WIDTH),
+            1
+        );
+        assert_eq!(
+            u16_at(&payload, psx_level::compact_collision_header::DEPTH),
+            1
+        );
         assert_eq!(
             i32_at(&payload, psx_level::compact_collision_header::SECTOR_SIZE),
             1024
