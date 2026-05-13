@@ -1858,7 +1858,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     projected_indices: &mut [u16],
     projected_vertices: &mut [crate::render3d::ProjectedVertex],
     projected_ready: &mut [bool],
-    projected_valid: &mut [bool],
     projected_depths: &mut [i32],
     accepted_cell_indices: &mut [u16],
     accepted_cell_depths: &mut [i32],
@@ -1877,7 +1876,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     if projected_indices.len() < cached_vertices.len()
         || projected_vertices.len() < cached_vertices.len()
         || projected_ready.len() < cached_vertices.len()
-        || projected_valid.len() < cached_vertices.len()
         || projected_depths.len() < cached_vertices.len()
         || accepted_cell_indices.len() < visible_cells.len()
         || accepted_cell_depths.len() < visible_cells.len()
@@ -1892,12 +1890,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     let use_direct_baked_rgb = lighting.uses_direct_baked_vertex_rgb();
     let screen_bounds = projected_screen_bounds(camera, screen_margin);
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_CELL_SELECT);
-    let mut vertex_index = 0usize;
-    while vertex_index < cached_vertices.len() {
-        projected_ready[vertex_index] = false;
-        vertex_index += 1;
-    }
-
     let mut projected_index_count = 0usize;
     let mut accepted_cell_count = 0usize;
 
@@ -1950,7 +1942,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         cached_vertices,
         projected_indices,
         projected_vertices,
-        projected_valid,
     );
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_PROJECT);
     if use_vertex_depths {
@@ -1989,7 +1980,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         cached_surfaces[i],
                         cached_vertices,
                         projected_vertices,
-                        projected_valid,
                         projected_depths,
                         use_vertex_depths,
                         use_direct_baked_rgb,
@@ -2007,6 +1997,11 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     }
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_SURFACE_DRAW);
     surface_profile.emit();
+    for raw_index in projected_indices {
+        if let Some(ready) = projected_ready.get_mut(*raw_index as usize) {
+            *ready = false;
+        }
+    }
     stats
 }
 
@@ -2257,7 +2252,6 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
     cached_vertices: &[WorldVertex],
     projected_vertices: &[ProjectedVertex],
-    projected_valid: &[bool],
     projected_depths: &[i32],
     use_vertex_depths: bool,
     use_direct_baked_rgb: bool,
@@ -2274,7 +2268,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     profile.count_shape(surface.triangle_index);
     let projected_start = RoomSurfaceMicroProfile::cycle();
     let ids = surface.vertex_indices;
-    let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
+    let Some(projected) = indexed_projected_quad(projected_vertices, ids) else {
         profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
         profile.count_projected_reject();
         return 0;
@@ -2592,27 +2586,29 @@ fn projected_quad_outside_screen(
 #[inline(always)]
 fn indexed_projected_quad(
     projected_vertices: &[ProjectedVertex],
-    projected_valid: &[bool],
     ids: [u16; 4],
 ) -> Option<[ProjectedVertex; 4]> {
     let a = ids[0] as usize;
     let b = ids[1] as usize;
     let c = ids[2] as usize;
     let d = ids[3] as usize;
-    let limit = projected_vertices.len().min(projected_valid.len());
-    let max_index = a.max(b).max(c).max(d);
-    if max_index >= limit {
+    if a.max(b).max(c).max(d) >= projected_vertices.len() {
         return None;
     }
-    if !projected_valid[a] || !projected_valid[b] || !projected_valid[c] || !projected_valid[d] {
-        return None;
-    }
-    Some([
+    let projected = [
         projected_vertices[a],
         projected_vertices[b],
         projected_vertices[c],
         projected_vertices[d],
-    ])
+    ];
+    if !projected[0].is_valid()
+        || !projected[1].is_valid()
+        || !projected[2].is_valid()
+        || !projected[3].is_valid()
+    {
+        return None;
+    }
+    Some(projected)
 }
 
 #[inline(always)]
@@ -4953,7 +4949,6 @@ mod tests {
         let mut projected_indices = [0u16; 4];
         let mut projected = [ProjectedVertex::new(0, 0, 0); 4];
         let mut projected_ready = [false; 4];
-        let mut projected_valid = [false; 4];
         let mut projected_depths = [0; 4];
         let mut accepted_cell_indices = [0u16; 1];
         let mut accepted_cell_depths = [0; 1];
@@ -4966,7 +4961,6 @@ mod tests {
             &mut projected_indices,
             &mut projected,
             &mut projected_ready,
-            &mut projected_valid,
             &mut projected_depths,
             &mut accepted_cell_indices,
             &mut accepted_cell_depths,
@@ -4986,6 +4980,7 @@ mod tests {
             &mut pass,
         );
         assert_eq!(stats.surfaces_considered, 1);
+        assert_eq!(projected_ready, [false; 4]);
         assert_eq!(pass.command_len(), 2);
         drop(pass);
 
