@@ -224,7 +224,6 @@ const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
 const ROOM_GRID_VISIBILITY_RADIUS: u16 = 32;
-#[cfg(feature = "world-grid-visible")]
 const ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS: i32 = 64;
 #[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;

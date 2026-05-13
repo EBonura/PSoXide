@@ -2734,13 +2734,37 @@ fn append_room_surface_cache(
     let cell_count = checked_u16(stats.cell_count, "room cache cell count")?;
     let vertex_count = checked_u16(stats.vertex_count, "room cache vertex count")?;
     let surface_count = checked_u16(stats.surface_count, "room cache surface count")?;
+    let mut local_cell_vertices = Vec::new();
     let mut playtest_cells = Vec::with_capacity(stats.cell_count);
     for cell in &cells[..stats.cell_count] {
-        playtest_cells.push(playtest_cached_room_cell(*cell, 0, 0));
+        let local_vertex_first = checked_u16(
+            local_cell_vertices.len(),
+            "room cache local cell vertex start",
+        )?;
+        let first = cell.surface_first as usize;
+        let end = first
+            .saturating_add(cell.surface_count as usize)
+            .min(stats.surface_count);
+        let mut unique = Vec::new();
+        for surface in &surfaces[first..end] {
+            for vertex_index in surface.vertex_indices {
+                if (vertex_index as usize) < stats.vertex_count && !unique.contains(&vertex_index) {
+                    unique.push(vertex_index);
+                }
+            }
+        }
+        let local_vertex_count = checked_u16(unique.len(), "room cache local cell vertex count")?;
+        local_cell_vertices.extend(unique);
+        playtest_cells.push(playtest_cached_room_cell(
+            *cell,
+            local_vertex_first,
+            local_vertex_count,
+        ));
     }
-    let cell_vertex_count = 0;
+    let cell_vertex_count = checked_u16(local_cell_vertices.len(), "room cache cell vertex count")?;
 
     room_cache_cells.extend(playtest_cells);
+    room_cache_cell_vertices.extend(local_cell_vertices);
     room_cache_vertices.extend(
         vertices[..stats.vertex_count]
             .iter()
@@ -3883,8 +3907,8 @@ mod tests {
         assert!(report.is_ok(), "{report:?}");
         let package = package.expect("package");
         let cache = package.room_surface_caches[0];
-        assert_eq!(cache.cell_vertex_count, 0);
-        assert!(package.room_cache_cell_vertices.is_empty());
+        assert!(cache.cell_vertex_count > 0);
+        assert!(!package.room_cache_cell_vertices.is_empty());
         let room_record = &package.rooms[cache.room as usize];
         let room_asset = &package.assets[room_record.world_asset_index];
         let room = RuntimeRoom::from_bytes(&room_asset.bytes).expect("room parses");
@@ -3906,7 +3930,11 @@ mod tests {
         assert_eq!(stats.surface_count, cache.surface_count as usize);
         assert_eq!(
             package.room_cache_cells[cache.cell_first as usize],
-            playtest_cached_room_cell(cells[0], 0, 0)
+            playtest_cached_room_cell(
+                cells[0],
+                package.room_cache_cells[cache.cell_first as usize].vertex_first,
+                package.room_cache_cells[cache.cell_first as usize].vertex_count,
+            )
         );
         assert_eq!(
             package.room_cache_vertices[cache.vertex_first as usize],
