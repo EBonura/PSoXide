@@ -525,11 +525,20 @@ pub struct GridVisibleCell {
     /// callers can leave this as `u16::MAX` and use the coordinate
     /// fallback.
     pub cache_cell_index: u16,
+    /// Optional camera-space depth hint. Negative sentinel values
+    /// encode whether the renderer still needs to run the camera
+    /// cull. This lives in the struct's natural tail padding.
+    pub camera_depth: i16,
 }
 
 impl GridVisibleCell {
     /// Sentinel used when no direct generated cache-cell index is known.
     pub const CACHE_CELL_INDEX_UNKNOWN: u16 = u16::MAX;
+    /// Sentinel used when no precomputed camera depth is known.
+    pub const CAMERA_DEPTH_UNKNOWN: i16 = i16::MIN;
+    /// Sentinel used when the caller has already camera-culled this
+    /// cell, but exact `i32` depth still needs to be computed.
+    pub const CAMERA_DEPTH_PRECULLED: i16 = i16::MIN + 1;
 
     /// Empty placeholder for fixed runtime scratch arrays.
     pub const EMPTY: Self = Self {
@@ -538,6 +547,7 @@ impl GridVisibleCell {
         min_y: 0,
         max_y: 0,
         cache_cell_index: Self::CACHE_CELL_INDEX_UNKNOWN,
+        camera_depth: Self::CAMERA_DEPTH_UNKNOWN,
     };
 
     /// Build one visible-cell draw record.
@@ -548,6 +558,7 @@ impl GridVisibleCell {
             min_y,
             max_y,
             cache_cell_index: Self::CACHE_CELL_INDEX_UNKNOWN,
+            camera_depth: Self::CAMERA_DEPTH_UNKNOWN,
         }
     }
 
@@ -566,7 +577,15 @@ impl GridVisibleCell {
             min_y,
             max_y,
             cache_cell_index,
+            camera_depth: Self::CAMERA_DEPTH_UNKNOWN,
         }
+    }
+
+    /// Return a copy carrying a caller-provided camera-space depth
+    /// hint or cull-state sentinel.
+    pub const fn with_camera_depth(mut self, camera_depth: i16) -> Self {
+        self.camera_depth = camera_depth;
+        self
     }
 }
 
@@ -1902,26 +1921,38 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         };
 
         stats.cells_considered = stats.cells_considered.saturating_add(1);
-        let visibility_center = WorldVertex::new(
-            cell.visibility_center[0],
-            cell.visibility_center[1],
-            cell.visibility_center[2],
-        );
-        let visibility_view = camera.view_vertex(visibility_center);
-        if !cell_visibility_view_visible_to_camera(
-            camera,
-            options,
-            visibility_view,
-            cell.visibility_radius,
-            screen_margin,
-        ) {
-            stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
-            continue;
-        }
+        let cell_depth = if visible.camera_depth == GridVisibleCell::CAMERA_DEPTH_PRECULLED {
+            let visibility_center = WorldVertex::new(
+                cell.visibility_center[0],
+                cell.visibility_center[1],
+                cell.visibility_center[2],
+            );
+            camera.view_vertex(visibility_center).z
+        } else if visible.camera_depth == GridVisibleCell::CAMERA_DEPTH_UNKNOWN {
+            let visibility_center = WorldVertex::new(
+                cell.visibility_center[0],
+                cell.visibility_center[1],
+                cell.visibility_center[2],
+            );
+            let visibility_view = camera.view_vertex(visibility_center);
+            if !cell_visibility_view_visible_to_camera(
+                camera,
+                options,
+                visibility_view,
+                cell.visibility_radius,
+                screen_margin,
+            ) {
+                stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
+                continue;
+            }
+            visibility_view.z
+        } else {
+            visible.camera_depth as i32
+        };
 
         stats.cells_drawn = stats.cells_drawn.saturating_add(1);
         accepted_cell_indices[accepted_cell_count] = cell_index as u16;
-        accepted_cell_depths[accepted_cell_count] = visibility_view.z;
+        accepted_cell_depths[accepted_cell_count] = cell_depth;
         accepted_cell_count += 1;
         projected_index_count = collect_cached_cell_vertex_indices(
             cell,
@@ -4996,6 +5027,11 @@ mod tests {
             horizontal_face_center(2, 3, 1024, [0, 512, 1024, 512]),
             RoomPoint::new(2560, 512, 3584)
         );
+    }
+
+    #[test]
+    fn grid_visible_cell_camera_depth_fits_existing_padding() {
+        assert_eq!(core::mem::size_of::<GridVisibleCell>(), 16);
     }
 
     #[test]
