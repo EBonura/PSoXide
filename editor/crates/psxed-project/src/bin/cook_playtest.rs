@@ -167,7 +167,7 @@ fn main() -> ExitCode {
                 if let Ok(stream) = streamed_room_chunk_memory_report(&package) {
                     let total = stream.totals.payload_bytes.max(1);
                     println!(
-                        "[cook-playtest] Stream memory: payload={}B sectors={} stream={}B collision={}B ({:.1}%) render-cache={}B ({:.1}%) [cells={}B vertices={}B surfaces={}B] align-pad={}B sector-pad={}B",
+                        "[cook-playtest] Stream memory: payload={}B sectors={} stream={}B collision={}B ({:.1}%) render-cache={}B ({:.1}%) [cells={}B cell-verts={}B vertices={}B surfaces={}B] align-pad={}B sector-pad={}B",
                         stream.totals.payload_bytes,
                         stream.totals.sector_count,
                         stream.totals.stream_bytes,
@@ -176,6 +176,7 @@ fn main() -> ExitCode {
                         stream.totals.render_cache_bytes,
                         percent(stream.totals.render_cache_bytes, total),
                         stream.totals.render_cell_bytes,
+                        stream.totals.render_cell_vertex_bytes,
                         stream.totals.render_vertex_bytes,
                         stream.totals.render_surface_bytes,
                         stream.totals.alignment_padding_bytes,

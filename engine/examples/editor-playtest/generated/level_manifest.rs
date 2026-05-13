@@ -27,6 +27,7 @@ pub static VISIBILITY_PVS_BITS: &[u8] = &[];
 pub static VISIBILITY_CELLS: &[LevelVisibilityCellRecord] = &[];
 pub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];
 pub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];
+pub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];
 pub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];
 pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];
 pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[];
