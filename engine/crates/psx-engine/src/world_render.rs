@@ -16,7 +16,7 @@ use psx_level::{
 };
 
 use crate::{
-    render3d::{project_world_vertices_gte, CullMode, DepthPolicy, ProjectedVertex},
+    render3d::{project_world_vertex_indices_gte, CullMode, DepthPolicy, ProjectedVertex},
     PrimitiveSink, RoomPoint, RoomRender, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
     WorldVertex,
 };
@@ -302,6 +302,10 @@ pub struct CachedRoomCell {
     pub surface_first: u16,
     /// Number of cached floor/ceiling/wall surfaces in this cell.
     pub surface_count: u16,
+    /// First room-local cached vertex index for this cell.
+    pub vertex_first: u16,
+    /// Number of unique cached vertices referenced by this cell.
+    pub vertex_count: u16,
 }
 
 impl CachedRoomCell {
@@ -315,6 +319,8 @@ impl CachedRoomCell {
         visibility_radius: 0,
         surface_first: 0,
         surface_count: 0,
+        vertex_first: 0,
+        vertex_count: 0,
     };
 
     fn new(
@@ -325,6 +331,8 @@ impl CachedRoomCell {
         max_y: i32,
         surface_first: u16,
         surface_count: u16,
+        vertex_first: u16,
+        vertex_count: u16,
     ) -> Self {
         let (visibility_center, visibility_radius) =
             cell_visibility_bounds(x, z, sector_size, min_y, max_y);
@@ -337,6 +345,8 @@ impl CachedRoomCell {
             visibility_radius,
             surface_first,
             surface_count,
+            vertex_first,
+            vertex_count,
         }
     }
 }
@@ -1469,6 +1479,8 @@ pub fn cache_room_vertex_lit_surfaces(
                     max_y,
                     surface_first as u16,
                     surface_len as u16,
+                    0,
+                    0,
                 );
                 cell_count += 1;
             }
@@ -1495,9 +1507,12 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     L: WorldSurfaceLighting,
 >(
     cached_cells: &[CachedRoomCell],
+    cached_cell_vertices: &[u16],
     cached_vertices: &[WorldVertex],
     cached_surfaces: &[CachedRoomSurface],
+    projected_indices: &mut [u16],
     projected_vertices: &mut [crate::render3d::ProjectedVertex],
+    projected_ready: &mut [bool],
     projected_valid: &mut [bool],
     projected_depths: &mut [i32],
     _room_depth: u16,
@@ -1512,7 +1527,9 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
     let mut stats = GridVisibilityStats::default();
-    if projected_vertices.len() < cached_vertices.len()
+    if projected_indices.len() < cached_vertices.len()
+        || projected_vertices.len() < cached_vertices.len()
+        || projected_ready.len() < cached_vertices.len()
         || projected_valid.len() < cached_vertices.len()
         || projected_depths.len() < cached_vertices.len()
     {
@@ -1522,23 +1539,16 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         return stats;
     }
 
-    project_world_vertices_gte(
-        *camera,
-        cached_vertices,
-        projected_vertices,
-        projected_valid,
-    );
     let use_vertex_depths = lighting.uses_vertex_depths();
     let use_direct_baked_rgb = lighting.uses_direct_baked_vertex_rgb();
-    if use_vertex_depths {
-        let mut vertex_index = 0usize;
-        while vertex_index < cached_vertices.len() {
-            projected_depths[vertex_index] =
-                lighting.prepare_vertex_depth(projected_vertices[vertex_index].sz);
-            vertex_index += 1;
-        }
-    }
     let screen_bounds = projected_screen_bounds(camera, screen_margin);
+    let mut vertex_index = 0usize;
+    while vertex_index < cached_vertices.len() {
+        projected_ready[vertex_index] = false;
+        vertex_index += 1;
+    }
+
+    let mut projected_index_count = 0usize;
 
     for visible in visible_cells {
         let Some(cell) = cached_room_cell_for_visible(cached_cells, *visible) else {
@@ -1563,6 +1573,49 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         }
 
         stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        projected_index_count = collect_cached_cell_vertex_indices(
+            cell,
+            cached_cell_vertices,
+            cached_surfaces,
+            projected_ready,
+            projected_indices,
+            projected_index_count,
+        );
+    }
+
+    let projected_indices = &projected_indices[..projected_index_count];
+    project_world_vertex_indices_gte(
+        *camera,
+        cached_vertices,
+        projected_indices,
+        projected_vertices,
+        projected_valid,
+    );
+    if use_vertex_depths {
+        for raw_index in projected_indices {
+            let index = *raw_index as usize;
+            projected_depths[index] = lighting.prepare_vertex_depth(projected_vertices[index].sz);
+        }
+    }
+
+    for visible in visible_cells {
+        let Some(cell) = cached_room_cell_for_visible(cached_cells, *visible) else {
+            continue;
+        };
+        let visibility_center = WorldVertex::new(
+            cell.visibility_center[0],
+            cell.visibility_center[1],
+            cell.visibility_center[2],
+        );
+        if !cell_visibility_visible_to_camera(
+            camera,
+            options,
+            visibility_center,
+            cell.visibility_radius,
+            screen_margin,
+        ) {
+            continue;
+        }
         let cell_options = tile_depth_options(options, camera, *visible, sector_size);
         let first = cell.surface_first as usize;
         let end = first
@@ -1577,6 +1630,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         cached_surfaces[i],
                         cached_vertices,
                         projected_vertices,
+                        projected_ready,
                         projected_valid,
                         projected_depths,
                         use_vertex_depths,
@@ -1624,6 +1678,69 @@ fn cached_room_cell_for_visible(
         }
     }
     cached_room_cell(cells, visible.x, visible.z)
+}
+
+fn collect_cached_cell_vertex_indices(
+    cell: CachedRoomCell,
+    cached_cell_vertices: &[u16],
+    cached_surfaces: &[CachedRoomSurface],
+    projected_ready: &mut [bool],
+    projected_indices: &mut [u16],
+    mut projected_index_count: usize,
+) -> usize {
+    if cell.vertex_count == 0 {
+        let first = cell.surface_first as usize;
+        let end = first
+            .saturating_add(cell.surface_count as usize)
+            .min(cached_surfaces.len());
+        let mut surface_index = first;
+        while surface_index < end {
+            for raw_index in cached_surfaces[surface_index].vertex_indices {
+                projected_index_count = push_unique_projected_index(
+                    raw_index,
+                    projected_ready,
+                    projected_indices,
+                    projected_index_count,
+                );
+            }
+            surface_index += 1;
+        }
+        return projected_index_count;
+    }
+    let first = cell.vertex_first as usize;
+    let end = first
+        .saturating_add(cell.vertex_count as usize)
+        .min(cached_cell_vertices.len());
+    let mut i = first;
+    while i < end {
+        projected_index_count = push_unique_projected_index(
+            cached_cell_vertices[i],
+            projected_ready,
+            projected_indices,
+            projected_index_count,
+        );
+        i += 1;
+    }
+    projected_index_count
+}
+
+fn push_unique_projected_index(
+    raw_index: u16,
+    projected_ready: &mut [bool],
+    projected_indices: &mut [u16],
+    projected_index_count: usize,
+) -> usize {
+    let vertex_index = raw_index as usize;
+    if vertex_index < projected_ready.len()
+        && !projected_ready[vertex_index]
+        && projected_index_count < projected_indices.len()
+    {
+        projected_ready[vertex_index] = true;
+        projected_indices[projected_index_count] = raw_index;
+        projected_index_count + 1
+    } else {
+        projected_index_count
+    }
 }
 
 const fn cached_room_cell_key(x: u16, z: u16) -> u32 {
@@ -1777,6 +1894,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
     cached_vertices: &[WorldVertex],
     projected_vertices: &[ProjectedVertex],
+    projected_ready: &[bool],
     projected_valid: &[bool],
     projected_depths: &[i32],
     use_vertex_depths: bool,
@@ -1793,7 +1911,9 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     };
     let material = cached_uv_material(material);
     let ids = surface.vertex_indices;
-    let Some(projected) = indexed_projected_quad(projected_vertices, projected_valid, ids) else {
+    let Some(projected) =
+        indexed_projected_quad(projected_vertices, projected_ready, projected_valid, ids)
+    else {
         return 0;
     };
     if projected_quad_outside_screen(projected, screen_bounds) {
@@ -2045,6 +2165,7 @@ fn projected_quad_outside_screen(
 #[inline(always)]
 fn indexed_projected_quad(
     projected_vertices: &[ProjectedVertex],
+    projected_ready: &[bool],
     projected_valid: &[bool],
     ids: [u16; 4],
 ) -> Option<[ProjectedVertex; 4]> {
@@ -2052,9 +2173,15 @@ fn indexed_projected_quad(
     let b = ids[1] as usize;
     let c = ids[2] as usize;
     let d = ids[3] as usize;
-    let limit = projected_vertices.len().min(projected_valid.len());
+    let limit = projected_vertices
+        .len()
+        .min(projected_ready.len())
+        .min(projected_valid.len());
     let max_index = a.max(b).max(c).max(d);
     if max_index >= limit {
+        return None;
+    }
+    if !projected_ready[a] || !projected_ready[b] || !projected_ready[c] || !projected_ready[d] {
         return None;
     }
     if !projected_valid[a] || !projected_valid[b] || !projected_valid[c] || !projected_valid[d] {
@@ -4106,11 +4233,14 @@ mod tests {
             visibility_radius: 1040,
             surface_first: 7,
             surface_count: 1,
+            vertex_first: 2,
+            vertex_count: 4,
         }];
         let cells = cached_room_cells_from_level_records(&cell_records);
         assert_eq!(cells[0].x, 3);
         assert_eq!(cells[0].visibility_center, [512, 25, 512]);
         assert_eq!(cells[0].surface_first, 7);
+        assert_eq!(cells[0].vertex_first, 2);
 
         let baked = [(1, 2, 3), (4, 5, 6), (7, 8, 9), (10, 11, 12)];
         let surface = CachedRoomSurface::new(
@@ -4246,7 +4376,7 @@ mod tests {
                 .with_textured_triangle_splitting(false);
         let uvs = [(0, 0), (TILE_UV, 0), (TILE_UV, TILE_UV), (0, TILE_UV)];
         let vertices = horizontal_vertices(0, 0, 1024, [1024, 1024, 1024, 1024]);
-        let cells = [CachedRoomCell::new(0, 0, 1024, 1024, 1024, 0, 1)];
+        let cells = [CachedRoomCell::new(0, 0, 1024, 1024, 1024, 0, 1, 0, 4)];
         let surface = CachedRoomSurface::new(
             0,
             [0, 1, 2, 3],
@@ -4264,15 +4394,21 @@ mod tests {
         );
         let surfaces = [surface];
         let visible_cells = [GridVisibleCell::new(0, 0, 1024, 1024)];
+        let cell_vertices = [0u16, 1, 2, 3];
+        let mut projected_indices = [0u16; 4];
         let mut projected = [ProjectedVertex::new(0, 0, 0); 4];
+        let mut projected_ready = [false; 4];
         let mut projected_valid = [false; 4];
         let mut projected_depths = [0; 4];
 
         let stats = draw_indexed_cached_room_vertex_lit_visible_cells(
             &cells,
+            &cell_vertices,
             &vertices,
             &surfaces,
+            &mut projected_indices,
             &mut projected,
+            &mut projected_ready,
             &mut projected_valid,
             &mut projected_depths,
             1,
