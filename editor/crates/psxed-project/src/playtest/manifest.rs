@@ -2022,7 +2022,7 @@ mod tests {
             source_label: "Floor".to_string(),
         };
 
-        assert_eq!(asset_vram_bytes(&asset), 16 * 64 * 2 + 16 * 2);
+        assert_eq!(asset_vram_bytes(&asset), 8 * 32 * 2 + 16 * 2);
     }
 
     #[test]
