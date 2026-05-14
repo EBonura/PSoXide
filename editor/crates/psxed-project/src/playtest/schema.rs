@@ -161,6 +161,10 @@ pub struct PlaytestSky {
 /// Resolved cloud-layer values written into one runtime room record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestCloudLayer {
+    /// Index into [`PlaytestPackage::assets`] for the baked Perlin
+    /// cloud texture. `None` when the layer is disabled or wasn't
+    /// baked.
+    pub texture_asset_index: Option<usize>,
     /// Cloud highlight colour.
     pub color_rgb: [u8; 3],
     /// CLUT pivot density 0..=255.
