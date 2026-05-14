@@ -3568,29 +3568,30 @@ fn draw_cloud_layer(
     ) else {
         return;
     };
-    // Each tile covers a 64-pixel UV range; cap so the total UV
-    // span stays inside u8 (texture-window wraps the rest).
-    let tile_count = cloud.tile_count.clamp(1, 4) as u16;
-    let uv_max = (tile_count.saturating_mul(64).saturating_sub(1)).min(255) as u8;
-
-    // Scroll: PSX angle units cycle every 4096; mod into u8 UV space
-    // so the texture window wraps seamlessly.
-    let scroll_u = (((elapsed_vblanks as i32 * cloud.scroll_speed[0] as i32) >> 6) & 0xff) as u8;
-    let scroll_v = (((elapsed_vblanks as i32 * cloud.scroll_speed[1] as i32) >> 6) & 0xff) as u8;
-    let uv_lo = (scroll_u, scroll_v);
-    let uv_hi_u = scroll_u.wrapping_add(uv_max);
-    let uv_hi_v = scroll_v.wrapping_add(uv_max);
-
-    // World-fixed plane: corners are at ±extent in world coords,
-    // *not* anchored to the camera. As the camera moves around the
-    // level the plane stays put, which is what gives the parallax-
-    // with-camera-rotation effect from the Dark Souls reference.
+    // World-fixed plane split into a `tile_count × tile_count` grid
+    // of sub-quads. The split is essential: a single quad covering
+    // the whole plane would straddle the near plane in front of the
+    // camera, and `project_world_quad` drops any quad with even one
+    // corner behind. Splitting lets sub-quads behind the camera
+    // silently fail their projection while the visible sub-quads
+    // in front render correctly.
+    //
+    // Each sub-quad shows one full 64-pixel tile of the cloud
+    // texture (UV 0..=63); the texture is tileable so adjacent
+    // sub-quads blend at edges into a continuous cover.
+    let tile_count = cloud.tile_count.clamp(1, 8) as i32;
     let altitude = cloud.altitude as i32;
     let extent = cloud.extent.max(1024) as i32;
-    let xlo = -extent;
-    let xhi = extent;
-    let zlo = -extent;
-    let zhi = extent;
+    let plane_size = extent.saturating_mul(2);
+    let tile_world = plane_size / tile_count;
+
+    // Scroll: cumulative offset in PSX UV units. Modulo 64 so the
+    // texture-window wraparound keeps everything inside u8 range.
+    let scroll_u = (((elapsed_vblanks as i32 * cloud.scroll_speed[0] as i32) >> 6) & 63) as u8;
+    let scroll_v = (((elapsed_vblanks as i32 * cloud.scroll_speed[1] as i32) >> 6) & 63) as u8;
+    let uv_lo = (scroll_u, scroll_v);
+    let uv_hi_u = scroll_u.wrapping_add(63);
+    let uv_hi_v = scroll_v.wrapping_add(63);
 
     let material =
         TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb_tuple(cloud.color_rgb))
@@ -3600,24 +3601,32 @@ fn draw_cloud_layer(
         .with_cull_mode(CullMode::None)
         .with_material_layer(material);
 
-    let _ = world.submit_textured_world_quad(
-        triangles,
-        camera,
-        [
-            WorldVertex::new(xlo, altitude, zhi),
-            WorldVertex::new(xhi, altitude, zhi),
-            WorldVertex::new(xhi, altitude, zlo),
-            WorldVertex::new(xlo, altitude, zlo),
-        ],
-        [
-            uv_lo,
-            (uv_hi_u, scroll_v),
-            (uv_hi_u, uv_hi_v),
-            (scroll_u, uv_hi_v),
-        ],
-        material,
-        options,
-    );
+    for tile_z in 0..tile_count {
+        let zlo = -extent + tile_z * tile_world;
+        let zhi = zlo + tile_world;
+        for tile_x in 0..tile_count {
+            let xlo = -extent + tile_x * tile_world;
+            let xhi = xlo + tile_world;
+            let _ = world.submit_textured_world_quad(
+                triangles,
+                camera,
+                [
+                    WorldVertex::new(xlo, altitude, zhi),
+                    WorldVertex::new(xhi, altitude, zhi),
+                    WorldVertex::new(xhi, altitude, zlo),
+                    WorldVertex::new(xlo, altitude, zlo),
+                ],
+                [
+                    uv_lo,
+                    (uv_hi_u, scroll_v),
+                    (uv_hi_u, uv_hi_v),
+                    (scroll_u, uv_hi_v),
+                ],
+                material,
+                options,
+            );
+        }
+    }
 }
 
 fn draw_far_vista_ring(
