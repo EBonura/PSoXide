@@ -478,7 +478,11 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
         summary.counters = counter_totals;
         summary.counter_max_values = counter_max_values;
         print_guest_profile(&summary);
-        print_gte_profile(&gte_profile_before, &gte_profile_after, summary.frames.max(1));
+        print_gte_profile(
+            &gte_profile_before,
+            &gte_profile_after,
+            summary.frames.max(1),
+        );
     }
 
     if let Some(path) = args.dump_vram {
@@ -512,14 +516,12 @@ fn attach_headless_playtest_pad(bus: &mut Bus) {
 
 fn print_gte_profile(before: &GteProfileSnapshot, after: &GteProfileSnapshot, frames: u64) {
     let ops = after.ops.saturating_sub(before.ops);
-    let cycles = after.estimated_cycles.saturating_sub(before.estimated_cycles);
+    let cycles = after
+        .estimated_cycles
+        .saturating_sub(before.estimated_cycles);
     let frames = frames.max(1);
     println!("gte_profile:");
-    println!(
-        "  ops={}  per_frame={:.0}",
-        ops,
-        ops as f64 / frames as f64
-    );
+    println!("  ops={}  per_frame={:.0}", ops, ops as f64 / frames as f64);
     println!(
         "  estimated_cycles={}  per_frame={:.0}",
         cycles,

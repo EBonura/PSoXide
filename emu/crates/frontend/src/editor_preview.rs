@@ -266,6 +266,8 @@ pub fn build_phase1_frame(
         textures,
         world_camera,
         hidden_scene_nodes,
+        selected,
+        hovered_entity_node,
         &mut scratch,
     );
     if show_grid {
@@ -328,7 +330,9 @@ pub fn build_phase1_frame(
     let _ = setup_gte_for_camera(camera);
     walk_entity_bounds(entity_bounds, selected, hovered_entity_node, &mut scratch);
     if let Some((center, half_extents)) = selected_bounds {
-        push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
+        if !selected_node_is_image_prop(project, selected) {
+            push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
+        }
     }
     for selection in validation_issue_primitives {
         if selection.room() == room_id {
@@ -1596,6 +1600,8 @@ fn walk_image_props(
     textures: &EditorTextures,
     camera: psx_engine::WorldCamera,
     hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+    hovered: Option<NodeId>,
     scratch: &mut PreviewScratch,
 ) {
     let scene = project.active_scene();
@@ -1662,23 +1668,27 @@ fn walk_image_props(
             material,
             room_depth_slot(projected_avg_sz([p[0], p[2], p[3]])),
         );
+        let is_selected = node.id == selected;
+        let is_hovered = hovered == Some(node.id);
+        push_world_quad_wireframe(
+            scratch,
+            verts,
+            entity_bound_style(
+                psxed_ui::EntityBoundKind::ImageProp,
+                is_selected,
+                is_hovered,
+            ),
+        );
         if *collision_enabled {
-            // Center the AABB on the visible plane's center: bottom-
-            // center anchor + half the height stands the box upright
-            // around the prop. half_extents are `collision_size / 2`
-            // so the user-facing field stays as full width / height /
-            // depth in engine units.
-            let center = [
-                origin.x as f32,
-                (origin.y + (*height as i32) / 2) as f32,
-                origin.z as f32,
-            ];
-            let half_extents = [
-                (collision_size[0] / 2) as f32,
-                (collision_size[1] / 2) as f32,
-                (collision_size[2] / 2) as f32,
-            ];
-            push_aabb_wireframe(scratch, center, half_extents, IMAGE_PROP_COLLISION_BOX);
+            push_image_prop_collision_wireframe(
+                scratch,
+                origin,
+                *height,
+                *collision_size,
+                node.transform.rotation_degrees,
+                *cylindrical_billboard,
+                IMAGE_PROP_COLLISION_BOX,
+            );
         }
     }
 }
@@ -1724,13 +1734,7 @@ fn image_prop_vertices(
     let roll_q12 = yaw_to_q12(rotation_degrees[2]);
     let mut out = [psx_engine::WorldVertex::new(0, 0, 0); 4];
     for (i, local) in locals.iter().enumerate() {
-        // Apply X (pitch) → Y (yaw) → Z (roll) so a user dragging
-        // each gizmo ring sees the result they'd expect: yaw spins
-        // the standing card, pitch tilts it, roll spins it in plane.
-        let rotated = rotate_z_q12(
-            rotate_y_q12(rotate_x_q12(*local, pitch_q12), yaw_q12),
-            roll_q12,
-        );
+        let rotated = rotate_image_prop_local(*local, [pitch_q12, yaw_q12, roll_q12]);
         out[i] = psx_engine::WorldVertex::new(
             origin.x.saturating_add(rotated[0]),
             origin.y.saturating_add(rotated[1]),
@@ -1738,6 +1742,82 @@ fn image_prop_vertices(
         );
     }
     out
+}
+
+fn rotate_image_prop_local(v: [i32; 3], rotation_q12: [u16; 3]) -> [i32; 3] {
+    // Apply X (pitch) -> Y (yaw) -> Z (roll) so the editor
+    // card, selection outline, and runtime draw path agree.
+    rotate_z_q12(
+        rotate_y_q12(rotate_x_q12(v, rotation_q12[0]), rotation_q12[1]),
+        rotation_q12[2],
+    )
+}
+
+fn push_world_quad_wireframe(
+    scratch: &mut PreviewScratch,
+    verts: [psx_engine::WorldVertex; 4],
+    style: FaceOutlineStyle,
+) {
+    let projected = verts.map(|v| gte_scene::project_vertex(world_to_view([v.x, v.y, v.z])));
+    if projected.iter().any(|p| p.sz == 0) {
+        return;
+    }
+    for (a, b) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
+        push_screen_line(scratch, projected[a], projected[b], style);
+    }
+}
+
+fn push_image_prop_collision_wireframe(
+    scratch: &mut PreviewScratch,
+    origin: psx_engine::WorldVertex,
+    visual_height: u16,
+    collision_size: [u16; 3],
+    rotation_degrees: [f32; 3],
+    cylindrical_billboard: bool,
+    style: FaceOutlineStyle,
+) {
+    let half = [
+        ((collision_size[0] as i32) / 2).max(1),
+        ((collision_size[1] as i32) / 2).max(1),
+        ((collision_size[2] as i32) / 2).max(1),
+    ];
+    let center_y = (visual_height as i32) / 2;
+    if cylindrical_billboard {
+        let center = [
+            origin.x as f32,
+            (origin.y + center_y) as f32,
+            origin.z as f32,
+        ];
+        push_aabb_wireframe(
+            scratch,
+            center,
+            [half[0] as f32, half[1] as f32, half[2] as f32],
+            style,
+        );
+        return;
+    }
+
+    let rotation = [
+        yaw_to_q12(rotation_degrees[0]),
+        yaw_to_q12(rotation_degrees[1]),
+        yaw_to_q12(rotation_degrees[2]),
+    ];
+    let mut verts = [[0, 0, 0]; 8];
+    let mut i = 0usize;
+    for z in [-half[2], half[2]] {
+        for y in [center_y - half[1], center_y + half[1]] {
+            for x in [-half[0], half[0]] {
+                let rotated = rotate_image_prop_local([x, y, z], rotation);
+                verts[i] = [
+                    origin.x.saturating_add(rotated[0]),
+                    origin.y.saturating_add(rotated[1]),
+                    origin.z.saturating_add(rotated[2]),
+                ];
+                i += 1;
+            }
+        }
+    }
+    push_world_box_wireframe(scratch, verts, style);
 }
 
 fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
@@ -2499,7 +2579,10 @@ fn walk_entity_bounds(
     scratch: &mut PreviewScratch,
 ) {
     for b in bounds {
-        if matches!(b.kind, psxed_ui::EntityBoundKind::PointLight) {
+        if matches!(
+            b.kind,
+            psxed_ui::EntityBoundKind::PointLight | psxed_ui::EntityBoundKind::ImageProp
+        ) {
             continue;
         }
         let is_selected = b.node == selected;
@@ -2582,7 +2665,16 @@ fn push_aabb_wireframe(
             if i & 4 != 0 { hi[2] } else { lo[2] },
         ]
     };
-    let p: [_; 8] = std::array::from_fn(|i| gte_scene::project_vertex(world_to_view(corner(i))));
+    let corners: [_; 8] = std::array::from_fn(corner);
+    push_world_box_wireframe(scratch, corners, style);
+}
+
+fn push_world_box_wireframe(
+    scratch: &mut PreviewScratch,
+    corners: [[i32; 3]; 8],
+    style: FaceOutlineStyle,
+) {
+    let p = corners.map(|corner| gte_scene::project_vertex(world_to_view(corner)));
     // 12 edges of a box: 4 along X, 4 along Y, 4 along Z. Pairs
     // of corners that differ in exactly one bit.
     const EDGES: [(usize, usize); 12] = [
@@ -2605,6 +2697,13 @@ fn push_aabb_wireframe(
         }
         push_screen_line(scratch, p[a], p[b], style);
     }
+}
+
+fn selected_node_is_image_prop(project: &ProjectDocument, selected: NodeId) -> bool {
+    project
+        .active_scene()
+        .node(selected)
+        .is_some_and(|node| matches!(node.kind, NodeKind::ImageProp { .. }))
 }
 
 /// Draw a forward-pointing arrow from the bound centre out
@@ -4058,12 +4157,12 @@ mod tests {
         light_face, material_sized_uvs, material_texture_tint, node_room_local_origin,
         preview_lights, preview_model_reference, preview_player_reference,
         preview_projected_triangle_hw_safe, preview_shadow_radius, preview_static_model_reference,
-        preview_vertices_in_front, push_wall_face, room_depth_slot, setup_gte_for_camera,
-        shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
-        wall_side_visible, FaceShade, MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV,
-        PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
-        PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
-        PREVIEW_WALL_UVS, SCRATCH,
+        preview_vertices_in_front, push_wall_face, room_depth_slot, rotate_image_prop_local,
+        setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline,
+        wall_material_sidedness_for_edge, wall_side_visible, FaceShade, MaterialSlot, PreviewFog,
+        WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
+        PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
+        PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -4101,6 +4200,12 @@ mod tests {
             near,
             far,
         }
+    }
+
+    #[test]
+    fn image_prop_overlay_rotation_applies_roll() {
+        let rotated = rotate_image_prop_local([0, 512, 0], [0, 0, 64]);
+        assert_eq!(rotated, [-512, 0, 0]);
     }
 
     fn projected(sx: i16, sy: i16) -> Projected {
