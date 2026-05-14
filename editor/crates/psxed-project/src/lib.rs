@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
+pub mod cloud_bake;
 pub mod model_import;
 pub mod playtest;
 pub mod resolve;
