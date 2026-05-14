@@ -1469,7 +1469,7 @@ impl Scene for Playtest {
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            draw_sky_cube(room_record.sky, camera);
+            draw_sky_gradient(room_record.sky);
             draw_cloud_layer(
                 camera,
                 room_record.sky.cloud_layer,
@@ -3515,103 +3515,27 @@ fn accumulate_grid_visibility_stats(total: &mut GridVisibilityStats, stats: Grid
         .saturating_add(stats.projected_vertices);
 }
 
-/// World-space sky cube. Five gouraud quads (top + 4 sides; bottom
-/// omitted) anchored at the camera position so the cube envelops
-/// the view. The cube translates with the camera but doesn't
-/// rotate — that's what makes turning the camera reveal different
-/// parts of the gradient instead of dragging it with the screen.
-///
-/// Drawn immediate-mode before the world OT flushes, so room
-/// geometry painted later correctly overdraws the sky.
-fn draw_sky_cube(sky: LevelSkyRecord, camera: WorldCamera) {
+fn draw_sky_gradient(sky: LevelSkyRecord) {
     if sky.flags & sky_flags::ENABLED == 0 {
         return;
     }
-    // Half-extent sized to safely fit inside the GTE's i16 vertex
-    // budget after the camera transform. Cube envelops a `≈12k unit`
-    // sphere around the camera, which is many sectors of world for
-    // any reasonable `sector_size`.
-    const HALF: i32 = 12_288;
-    let c = camera.position;
-    let xlo = c.x - HALF;
-    let xhi = c.x + HALF;
-    let ylo = c.y - HALF;
-    let yhi = c.y + HALF;
-    let zlo = c.z - HALF;
-    let zhi = c.z + HALF;
-    let top = sky.top_rgb;
-    let horizon = sky.horizon_rgb;
-    // Top face (camera looking straight up sees this).
-    draw_sky_face(
-        camera,
-        [
-            WorldVertex::new(xlo, yhi, zlo),
-            WorldVertex::new(xhi, yhi, zlo),
-            WorldVertex::new(xlo, yhi, zhi),
-            WorldVertex::new(xhi, yhi, zhi),
-        ],
-        [top, top, top, top],
-    );
-    // +Z side.
-    draw_sky_face(
-        camera,
-        [
-            WorldVertex::new(xlo, yhi, zhi),
-            WorldVertex::new(xhi, yhi, zhi),
-            WorldVertex::new(xlo, ylo, zhi),
-            WorldVertex::new(xhi, ylo, zhi),
-        ],
-        [top, top, horizon, horizon],
-    );
-    // -Z side.
-    draw_sky_face(
-        camera,
-        [
-            WorldVertex::new(xhi, yhi, zlo),
-            WorldVertex::new(xlo, yhi, zlo),
-            WorldVertex::new(xhi, ylo, zlo),
-            WorldVertex::new(xlo, ylo, zlo),
-        ],
-        [top, top, horizon, horizon],
-    );
-    // +X side.
-    draw_sky_face(
-        camera,
-        [
-            WorldVertex::new(xhi, yhi, zhi),
-            WorldVertex::new(xhi, yhi, zlo),
-            WorldVertex::new(xhi, ylo, zhi),
-            WorldVertex::new(xhi, ylo, zlo),
-        ],
-        [top, top, horizon, horizon],
-    );
-    // -X side.
-    draw_sky_face(
-        camera,
-        [
-            WorldVertex::new(xlo, yhi, zlo),
-            WorldVertex::new(xlo, yhi, zhi),
-            WorldVertex::new(xlo, ylo, zlo),
-            WorldVertex::new(xlo, ylo, zhi),
-        ],
-        [top, top, horizon, horizon],
-    );
+    let horizon_y = ((SCREEN_H as i32 * sky.horizon_percent.clamp(5, 95) as i32) / 100) as i16;
+    let horizon_y = horizon_y.clamp(1, SCREEN_H - 1);
+    draw_sky_gradient_quad(0, horizon_y, sky.top_rgb, sky.horizon_rgb);
+    draw_sky_gradient_quad(horizon_y, SCREEN_H, sky.horizon_rgb, sky.bottom_rgb);
 }
 
-fn draw_sky_face(camera: WorldCamera, verts: [WorldVertex; 4], colors: [[u8; 3]; 4]) {
-    let Some(projected) = camera.project_world_quad(verts) else {
+fn draw_sky_gradient_quad(y0: i16, y1: i16, top_rgb: [u8; 3], bottom_rgb: [u8; 3]) {
+    if y1 <= y0 {
         return;
-    };
-    let p0 = (projected[0].sx, projected[0].sy);
-    let p1 = (projected[1].sx, projected[1].sy);
-    let p2 = (projected[2].sx, projected[2].sy);
-    let p3 = (projected[3].sx, projected[3].sy);
-    let c0 = (colors[0][0], colors[0][1], colors[0][2]);
-    let c1 = (colors[1][0], colors[1][1], colors[1][2]);
-    let c2 = (colors[2][0], colors[2][1], colors[2][2]);
-    let c3 = (colors[3][0], colors[3][1], colors[3][2]);
-    draw_tri_gouraud([p0, p1, p2], [c0, c1, c2]);
-    draw_tri_gouraud([p1, p2, p3], [c1, c2, c3]);
+    }
+    let top = (top_rgb[0], top_rgb[1], top_rgb[2]);
+    let bottom = (bottom_rgb[0], bottom_rgb[1], bottom_rgb[2]);
+    draw_tri_gouraud([(0, y0), (SCREEN_W, y0), (0, y1)], [top, top, bottom]);
+    draw_tri_gouraud(
+        [(SCREEN_W, y0), (0, y1), (SCREEN_W, y1)],
+        [top, bottom, bottom],
+    );
 }
 
 /// World-fixed cloud plane. One textured quad anchored at world
@@ -3657,12 +3581,16 @@ fn draw_cloud_layer(
     let uv_hi_u = scroll_u.wrapping_add(uv_max);
     let uv_hi_v = scroll_v.wrapping_add(uv_max);
 
+    // World-fixed plane: corners are at ±extent in world coords,
+    // *not* anchored to the camera. As the camera moves around the
+    // level the plane stays put, which is what gives the parallax-
+    // with-camera-rotation effect from the Dark Souls reference.
     let altitude = cloud.altitude as i32;
     let extent = cloud.extent.max(1024) as i32;
-    let xlo = camera.position.x.saturating_sub(extent);
-    let xhi = camera.position.x.saturating_add(extent);
-    let zlo = camera.position.z.saturating_sub(extent);
-    let zhi = camera.position.z.saturating_add(extent);
+    let xlo = -extent;
+    let xhi = extent;
+    let zlo = -extent;
+    let zhi = extent;
 
     let material =
         TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb_tuple(cloud.color_rgb))
