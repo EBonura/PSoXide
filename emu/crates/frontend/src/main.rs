@@ -782,6 +782,7 @@ impl ApplicationHandler for Shell {
                     let editor_preview_fog = state.editor.preview_fog_enabled();
                     let editor_preview_backface_wireframe =
                         state.editor.preview_backface_wireframe_enabled();
+                    let editor_show_grid = state.editor.show_grid_enabled();
                     let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
                     let editor_selected = state.editor.selected_node_id();
                     let editor_root = state.editor.project_root();
@@ -802,6 +803,7 @@ impl ApplicationHandler for Shell {
                         editor_camera,
                         editor_preview_fog,
                         editor_preview_backface_wireframe,
+                        editor_show_grid,
                         editor_hidden_scene_nodes,
                         editor_selected,
                         editor_hover,

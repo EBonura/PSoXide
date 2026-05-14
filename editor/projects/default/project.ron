@@ -8,7 +8,7 @@
             nodes: [
                 /*[0]*/ (id: (1), name: "Root", kind: Node3D, transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: None, children: [(2)]),
                 /*[1]*/ (id: (2), name: "World", kind: World(sector_size: 1024, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640, min_floor_clearance: 64)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((1)), children: [(18)]),
-                /*[2]*/ (id: (18), name: "Room", kind: Room(grid: (width: 1, depth: 1, sector_size: 896, sectors: [Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((3)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: [])))], origin: (0, 0), ambient_color: (48, 48, 48), fog_enabled: false, fog_color: (24, 28, 34), fog_near: 4096, fog_far: 16384)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((2)), children: [(19), (28)]),
+                /*[2]*/ (id: (18), name: "Room", kind: Room(grid: (width: 1, depth: 1, sector_size: 1024, sectors: [Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((133)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: [])))], origin: (0, 0), ambient_color: (48, 48, 48), fog_enabled: false, fog_color: (24, 28, 34), fog_near: 4096, fog_far: 16384)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((2)), children: [(19), (28)]),
                 /*[3]*/ (id: (19), name: "Point Light", kind: PointLight(color: (255, 240, 200), intensity: 1.0, radius: 6.0), transform: (translation: (0.0, 2.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((18)), children: []),
                 /*[4]*/ (id: (28), name: "Player", kind: Entity, transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((18)), children: [(29), (30), (31), (32)]),
                 /*[5]*/ (id: (29), name: "Model Renderer", kind: ModelRenderer(model: Some((25)), material: None), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
@@ -19,42 +19,6 @@
         ),
     ],
     resources: [
-        /*[0]*/ (
-            id: (1),
-            name: "floor.psxt",
-            data: Texture(
-                psxt_path: "assets/textures/floor.psxt",
-            ),
-        ),
-        /*[1]*/ (
-            id: (2),
-            name: "brick-wall.psxt",
-            data: Texture(
-                psxt_path: "assets/textures/brick-wall.psxt",
-            ),
-        ),
-        /*[2]*/ (
-            id: (3),
-            name: "Floor",
-            data: Material((
-                texture: Some((1)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Both,
-                double_sided: false,
-            )),
-        ),
-        /*[3]*/ (
-            id: (4),
-            name: "Brick",
-            data: Material((
-                texture: Some((2)),
-                blend_mode: Opaque,
-                tint: (128, 128, 128),
-                face_sidedness: Back,
-                double_sided: false,
-            )),
-        ),
         /*[4]*/ (
             id: (5),
             name: "Obsidian Wraith",
@@ -356,6 +320,744 @@
                 tags: ["standalone", "attack"],
             )),
         ),
+        /*[26]*/ (
+            id: (132),
+            name: "Delven slateflr1a q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_01_slateflr1a_q2.psxt",
+            ),
+        ),
+        /*[27]*/ (
+            id: (133),
+            name: "Delven slateflr1a q2",
+            data: Material((
+                texture: Some((132)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[28]*/ (
+            id: (134),
+            name: "Delven slateflr1b q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_02_slateflr1b_q2.psxt",
+            ),
+        ),
+        /*[29]*/ (
+            id: (135),
+            name: "Delven slateflr1b q2",
+            data: Material((
+                texture: Some((134)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[30]*/ (
+            id: (136),
+            name: "Delven slateflr1e q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_03_slateflr1e_q0.psxt",
+            ),
+        ),
+        /*[31]*/ (
+            id: (137),
+            name: "Delven slateflr1e q0",
+            data: Material((
+                texture: Some((136)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[32]*/ (
+            id: (138),
+            name: "Delven slateflr2a q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_04_slateflr2a_q2.psxt",
+            ),
+        ),
+        /*[33]*/ (
+            id: (139),
+            name: "Delven slateflr2a q2",
+            data: Material((
+                texture: Some((138)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Front,
+                double_sided: false,
+            )),
+        ),
+        /*[34]*/ (
+            id: (140),
+            name: "Delven slateflr4a q1",
+            data: Texture(
+                psxt_path: "assets/textures/delven_05_slateflr4a_q1.psxt",
+            ),
+        ),
+        /*[35]*/ (
+            id: (141),
+            name: "Delven slateflr4a q1",
+            data: Material((
+                texture: Some((140)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[36]*/ (
+            id: (142),
+            name: "Delven stonebrk1b q3",
+            data: Texture(
+                psxt_path: "assets/textures/delven_06_stonebrk1b_q3.psxt",
+            ),
+        ),
+        /*[37]*/ (
+            id: (143),
+            name: "Delven stonebrk1b q3",
+            data: Material((
+                texture: Some((142)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[38]*/ (
+            id: (144),
+            name: "Delven stonebrk4a q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_07_stonebrk4a_q0.psxt",
+            ),
+        ),
+        /*[39]*/ (
+            id: (145),
+            name: "Delven stonebrk4a q0",
+            data: Material((
+                texture: Some((144)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[40]*/ (
+            id: (146),
+            name: "Delven stonebrk4b q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_08_stonebrk4b_q2.psxt",
+            ),
+        ),
+        /*[41]*/ (
+            id: (147),
+            name: "Delven stonebrk4b q2",
+            data: Material((
+                texture: Some((146)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[42]*/ (
+            id: (148),
+            name: "Delven stonebrk4c q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_09_stonebrk4c_q0.psxt",
+            ),
+        ),
+        /*[43]*/ (
+            id: (149),
+            name: "Delven stonebrk4c q0",
+            data: Material((
+                texture: Some((148)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[44]*/ (
+            id: (150),
+            name: "Delven stonebrk4d q1",
+            data: Texture(
+                psxt_path: "assets/textures/delven_10_stonebrk4d_q1.psxt",
+            ),
+        ),
+        /*[45]*/ (
+            id: (151),
+            name: "Delven stonebrk4d q1",
+            data: Material((
+                texture: Some((150)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[46]*/ (
+            id: (152),
+            name: "Delven stonebrk5a q3",
+            data: Texture(
+                psxt_path: "assets/textures/delven_11_stonebrk5a_q3.psxt",
+            ),
+        ),
+        /*[47]*/ (
+            id: (153),
+            name: "Delven stonebrk5a q3",
+            data: Material((
+                texture: Some((152)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[48]*/ (
+            id: (154),
+            name: "Delven stoneflr1c q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_12_stoneflr1c_q2.psxt",
+            ),
+        ),
+        /*[49]*/ (
+            id: (155),
+            name: "Delven stoneflr1c q2",
+            data: Material((
+                texture: Some((154)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[50]*/ (
+            id: (156),
+            name: "Delven stoneflr2a q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_13_stoneflr2a_q2.psxt",
+            ),
+        ),
+        /*[51]*/ (
+            id: (157),
+            name: "Delven stoneflr2a q2",
+            data: Material((
+                texture: Some((156)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[52]*/ (
+            id: (158),
+            name: "Delven stoneflr2c q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_14_stoneflr2c_q2.psxt",
+            ),
+        ),
+        /*[53]*/ (
+            id: (159),
+            name: "Delven stoneflr2c q2",
+            data: Material((
+                texture: Some((158)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[54]*/ (
+            id: (160),
+            name: "Delven stoneflr3a q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_15_stoneflr3a_q2.psxt",
+            ),
+        ),
+        /*[55]*/ (
+            id: (161),
+            name: "Delven stoneflr3a q2",
+            data: Material((
+                texture: Some((160)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Front,
+                double_sided: false,
+            )),
+        ),
+        /*[56]*/ (
+            id: (162),
+            name: "Delven stoneflr3c q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_16_stoneflr3c_q2.psxt",
+            ),
+        ),
+        /*[57]*/ (
+            id: (163),
+            name: "Delven stoneflr3c q2",
+            data: Material((
+                texture: Some((162)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[58]*/ (
+            id: (164),
+            name: "Delven stoneflr3c q3",
+            data: Texture(
+                psxt_path: "assets/textures/delven_17_stoneflr3c_q3.psxt",
+            ),
+        ),
+        /*[59]*/ (
+            id: (165),
+            name: "Delven stoneflr3c q3",
+            data: Material((
+                texture: Some((164)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[60]*/ (
+            id: (166),
+            name: "Delven stoneflr4c q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_18_stoneflr4c_q2.psxt",
+            ),
+        ),
+        /*[61]*/ (
+            id: (167),
+            name: "Delven stoneflr4c q2",
+            data: Material((
+                texture: Some((166)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[62]*/ (
+            id: (168),
+            name: "Delven stoneflr4c q3",
+            data: Texture(
+                psxt_path: "assets/textures/delven_19_stoneflr4c_q3.psxt",
+            ),
+        ),
+        /*[63]*/ (
+            id: (169),
+            name: "Delven stoneflr4c q3",
+            data: Material((
+                texture: Some((168)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[64]*/ (
+            id: (170),
+            name: "Delven stoneflr5a q3",
+            data: Texture(
+                psxt_path: "assets/textures/delven_20_stoneflr5a_q3.psxt",
+            ),
+        ),
+        /*[65]*/ (
+            id: (171),
+            name: "Delven stoneflr5a q3",
+            data: Material((
+                texture: Some((170)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[66]*/ (
+            id: (172),
+            name: "Delven stoneflr6a q3",
+            data: Texture(
+                psxt_path: "assets/textures/delven_21_stoneflr6a_q3.psxt",
+            ),
+        ),
+        /*[67]*/ (
+            id: (173),
+            name: "Delven stoneflr6a q3",
+            data: Material((
+                texture: Some((172)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[68]*/ (
+            id: (174),
+            name: "Delven stonegen1 q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_22_stonegen1_q2.psxt",
+            ),
+        ),
+        /*[69]*/ (
+            id: (175),
+            name: "Delven stonegen1 q2",
+            data: Material((
+                texture: Some((174)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Front,
+                double_sided: false,
+            )),
+        ),
+        /*[70]*/ (
+            id: (176),
+            name: "Delven stonetrm1b q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_23_stonetrm1b_q2.psxt",
+            ),
+        ),
+        /*[71]*/ (
+            id: (177),
+            name: "Delven stonetrm1b q2",
+            data: Material((
+                texture: Some((176)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[72]*/ (
+            id: (178),
+            name: "Delven stonetrm1c q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_24_stonetrm1c_q2.psxt",
+            ),
+        ),
+        /*[73]*/ (
+            id: (179),
+            name: "Delven stonetrm1c q2",
+            data: Material((
+                texture: Some((178)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Front,
+                double_sided: false,
+            )),
+        ),
+        /*[74]*/ (
+            id: (180),
+            name: "Delven stonetrm3b q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_25_stonetrm3b_q0.psxt",
+            ),
+        ),
+        /*[75]*/ (
+            id: (181),
+            name: "Delven stonetrm3b q0",
+            data: Material((
+                texture: Some((180)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[76]*/ (
+            id: (182),
+            name: "Delven stonetrm4b q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_26_stonetrm4b_q0.psxt",
+            ),
+        ),
+        /*[77]*/ (
+            id: (183),
+            name: "Delven stonetrm4b q0",
+            data: Material((
+                texture: Some((182)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[78]*/ (
+            id: (184),
+            name: "Delven stonetrm5 q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_27_stonetrm5_q0.psxt",
+            ),
+        ),
+        /*[79]*/ (
+            id: (185),
+            name: "Delven stonetrm5 q0",
+            data: Material((
+                texture: Some((184)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[80]*/ (
+            id: (186),
+            name: "Delven stonetrm5 q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_28_stonetrm5_q2.psxt",
+            ),
+        ),
+        /*[81]*/ (
+            id: (187),
+            name: "Delven stonetrm5 q2",
+            data: Material((
+                texture: Some((186)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[82]*/ (
+            id: (188),
+            name: "Delven ground1b q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_29_ground1b_q2.psxt",
+            ),
+        ),
+        /*[83]*/ (
+            id: (189),
+            name: "Delven ground1b q2",
+            data: Material((
+                texture: Some((188)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Front,
+                double_sided: false,
+            )),
+        ),
+        /*[84]*/ (
+            id: (190),
+            name: "Delven ground1c q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_30_ground1c_q0.psxt",
+            ),
+        ),
+        /*[85]*/ (
+            id: (191),
+            name: "Delven ground1c q0",
+            data: Material((
+                texture: Some((190)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[86]*/ (
+            id: (192),
+            name: "Delven ground1c q2",
+            data: Texture(
+                psxt_path: "assets/textures/delven_31_ground1c_q2.psxt",
+            ),
+        ),
+        /*[87]*/ (
+            id: (193),
+            name: "Delven ground1c q2",
+            data: Material((
+                texture: Some((192)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[88]*/ (
+            id: (194),
+            name: "Delven ground1c q3",
+            data: Texture(
+                psxt_path: "assets/textures/delven_32_ground1c_q3.psxt",
+            ),
+        ),
+        /*[89]*/ (
+            id: (195),
+            name: "Delven ground1c q3",
+            data: Material((
+                texture: Some((194)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[90]*/ (
+            id: (196),
+            name: "Delven ground2a q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_33_ground2a_q0.psxt",
+            ),
+        ),
+        /*[91]*/ (
+            id: (197),
+            name: "Delven ground2a q0",
+            data: Material((
+                texture: Some((196)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[92]*/ (
+            id: (198),
+            name: "Delven ground2a q1",
+            data: Texture(
+                psxt_path: "assets/textures/delven_34_ground2a_q1.psxt",
+            ),
+        ),
+        /*[93]*/ (
+            id: (199),
+            name: "Delven ground2a q1",
+            data: Material((
+                texture: Some((198)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[94]*/ (
+            id: (200),
+            name: "Delven ground2a q3",
+            data: Texture(
+                psxt_path: "assets/textures/delven_35_ground2a_q3.psxt",
+            ),
+        ),
+        /*[95]*/ (
+            id: (201),
+            name: "Delven ground2a q3",
+            data: Material((
+                texture: Some((200)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[96]*/ (
+            id: (202),
+            name: "Delven ground3a q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_36_ground3a_q0.psxt",
+            ),
+        ),
+        /*[97]*/ (
+            id: (203),
+            name: "Delven ground3a q0",
+            data: Material((
+                texture: Some((202)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[98]*/ (
+            id: (204),
+            name: "Delven ground3a q1",
+            data: Texture(
+                psxt_path: "assets/textures/delven_37_ground3a_q1.psxt",
+            ),
+        ),
+        /*[99]*/ (
+            id: (205),
+            name: "Delven ground3a q1",
+            data: Material((
+                texture: Some((204)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[100]*/ (
+            id: (206),
+            name: "Delven ground4b q0",
+            data: Texture(
+                psxt_path: "assets/textures/delven_38_ground4b_q0.psxt",
+            ),
+        ),
+        /*[101]*/ (
+            id: (207),
+            name: "Delven ground4b q0",
+            data: Material((
+                texture: Some((206)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[102]*/ (
+            id: (208),
+            name: "Tomb 1",
+            data: Texture(
+                psxt_path: "assets/textures/tomb1.psxt",
+            ),
+        ),
+        /*[103]*/ (
+            id: (209),
+            name: "Tomb 1",
+            data: Material((
+                texture: Some((208)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[104]*/ (
+            id: (210),
+            name: "Tomb 2",
+            data: Texture(
+                psxt_path: "assets/textures/tomb2.psxt",
+            ),
+        ),
+        /*[105]*/ (
+            id: (211),
+            name: "Tomb 2",
+            data: Material((
+                texture: Some((210)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
+        /*[106]*/ (
+            id: (212),
+            name: "Tomb 3",
+            data: Texture(
+                psxt_path: "assets/textures/tomb3.psxt",
+            ),
+        ),
+        /*[107]*/ (
+            id: (213),
+            name: "Tomb 3",
+            data: Material((
+                texture: Some((212)),
+                blend_mode: Opaque,
+                tint: (128, 128, 128),
+                face_sidedness: Both,
+                double_sided: true,
+            )),
+        ),
     ],
-    next_resource_id: 132,
+    next_resource_id: 214,
 )

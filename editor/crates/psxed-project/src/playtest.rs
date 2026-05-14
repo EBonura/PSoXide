@@ -36,7 +36,8 @@ use psx_engine::{
     WorldRenderMaterial, WorldVertex,
 };
 use psx_level::{
-    far_vista_flags, image_prop_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
+    cloud_layer_flags, far_vista_flags, image_prop_flags, sky_flags, visibility_cell_flags,
+    visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
@@ -390,6 +391,22 @@ pub fn build_package(
                     } else {
                         0
                     },
+                    cloud_layer: PlaytestCloudLayer {
+                        color_rgb: resolved_sky.cloud_layer.color,
+                        density: resolved_sky.cloud_layer.density,
+                        altitude: resolved_sky.cloud_layer.altitude,
+                        extent: resolved_sky.cloud_layer.extent,
+                        tile_count: resolved_sky.cloud_layer.tile_count,
+                        scroll_speed: resolved_sky.cloud_layer.scroll_speed,
+                        noise_seed: resolved_sky.cloud_layer.noise_seed,
+                        flags: if resolved_sky.cloud_layer.enabled
+                            && resolved_sky.enabled
+                        {
+                            cloud_layer_flags::ENABLED
+                        } else {
+                            0
+                        },
+                    },
                 },
                 far_vista: PlaytestFarVista {
                     texture_asset_indices: far_vista_texture_asset_indices,
@@ -499,7 +516,9 @@ pub fn build_package(
         let room_index = chunk.room_index;
         let raw_pos = node_chunk_local_position(node, grid, chunk);
         let floor_pos = floor_anchored_node_chunk_local_position(node, grid, chunk);
+        let pitch = angle_from_degrees(node.transform.rotation_degrees[0]);
         let yaw = yaw_from_degrees(node.transform.rotation_degrees[1]);
+        let roll = angle_from_degrees(node.transform.rotation_degrees[2]);
 
         match &node.kind {
             NodeKind::Entity => {
@@ -731,6 +750,8 @@ pub fn build_package(
                 width,
                 height,
                 cylindrical_billboard,
+                collision_enabled: _,
+                collision_size: _,
             } => {
                 if !push_image_prop(
                     project,
@@ -738,7 +759,9 @@ pub fn build_package(
                     node.name.as_str(),
                     room_index,
                     raw_pos,
+                    pitch,
                     yaw,
+                    roll,
                     *material,
                     *width,
                     *height,
@@ -2212,7 +2235,9 @@ fn push_image_prop(
     node_name: &str,
     room_index: u16,
     pos: [i32; 3],
+    pitch: i16,
     yaw: i16,
+    roll: i16,
     material: Option<ResourceId>,
     width: u16,
     height: u16,
@@ -2288,7 +2313,9 @@ fn push_image_prop(
         x: pos[0],
         y: pos[1],
         z: pos[2],
+        pitch,
         yaw,
+        roll,
         width: width.max(1),
         height: height.max(1),
         tint_rgb: material.tint,
@@ -3580,6 +3607,11 @@ fn floor_anchored_node_chunk_local_position(
 /// Convert an editor euler-degrees-Y rotation to a PSX angle
 /// unit (`0..4096`).
 fn yaw_from_degrees(degrees: f32) -> i16 {
+    angle_from_degrees(degrees)
+}
+
+/// Convert editor Euler degrees to PSX angle units (`0..4096`).
+fn angle_from_degrees(degrees: f32) -> i16 {
     let normalised = degrees.rem_euclid(360.0);
     let units = normalised * (4096.0 / 360.0);
     units as i16
@@ -4393,7 +4425,7 @@ mod tests {
 
     #[test]
     fn starter_project_emits_expected_texture_assets() {
-        // Starter cooks one room floor texture and the player atlas.
+        // Starter cooks one room texture and the player atlas.
         let project = project_with_one_room();
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
@@ -4651,32 +4683,34 @@ mod tests {
 
     #[test]
     fn texture_shared_across_materials_emits_single_asset() {
-        // Two materials in the starter both use the floor texture.
+        // Two materials in the starter both use the first Delven texture.
         // After cook + package the texture should appear once in
         // ASSETS even though both materials reference it.
         let mut project = ProjectDocument::starter();
-        // Find the floor texture id and an existing material to
+        // Find the starter room texture id and an existing material to
         // clone-and-retint as a second material referencing the
         // same texture.
-        let floor_texture_id = project
+        let room_texture_id = project
             .resources
             .iter()
             .find_map(|r| match &r.data {
-                ResourceData::Texture { psxt_path } if psxt_path.ends_with("floor.psxt") => {
+                ResourceData::Texture { psxt_path }
+                    if psxt_path.ends_with("delven_01_slateflr1a_q2.psxt") =>
+                {
                     Some(r.id)
                 }
                 _ => None,
             })
-            .expect("starter has floor.psxt");
+            .expect("starter has first Delven texture");
 
         // Reassign every wall material in the room to a new
-        // material that *also* points at the floor texture. After
+        // material that *also* points at the same room texture. After
         // cook the world has 2 cooker material slots (floor + the
         // new wall material) but both resolve to the same texture,
         // so playtest should emit 1 texture asset.
         let new_material_id = project.add_resource(
-            "FloorOnWalls",
-            ResourceData::Material(crate::MaterialResource::opaque(Some(floor_texture_id))),
+            "DelvenOnWalls",
+            ResourceData::Material(crate::MaterialResource::opaque(Some(room_texture_id))),
         );
         let scene = project.active_scene_mut();
         let room_id = scene
@@ -4691,14 +4725,22 @@ mod tests {
                 // no walls. Grow to a 2x1 grid and add a north wall
                 // on the new cell so the test has a wall material
                 // alongside the floor. The original cell keeps its
-                // starter Floor material; the new cell's floor and
+                // starter Delven material; the new cell's floor and
                 // wall both use new_material_id, giving the cooker
                 // two distinct material slots that both share the
-                // floor.psxt texture.
+                // same Delven texture.
                 let sector_size = grid.sector_size;
-                let (sx, sz) = grid.extend_to_include(grid.origin[0] + grid.width as i32, grid.origin[1]);
+                let (sx, sz) =
+                    grid.extend_to_include(grid.origin[0] + grid.width as i32, grid.origin[1]);
                 grid.set_floor(sx, sz, 0, Some(new_material_id));
-                grid.add_wall(sx, sz, crate::GridDirection::North, 0, sector_size, Some(new_material_id));
+                grid.add_wall(
+                    sx,
+                    sz,
+                    crate::GridDirection::North,
+                    0,
+                    sector_size,
+                    Some(new_material_id),
+                );
             }
         }
 
@@ -4709,8 +4751,8 @@ mod tests {
         // texture (room material dedup); the model atlas adds
         // one more texture so the total is 2 -- what we're
         // testing here is that walls don't double-count their
-        // shared floor texture, not the absolute count.
-        let floor_texture_slots: Vec<_> = package
+        // shared room texture, not the absolute count.
+        let room_texture_slots: Vec<_> = package
             .materials
             .iter()
             .filter(|material| {
@@ -4719,13 +4761,13 @@ mod tests {
             })
             .collect();
         assert!(
-            floor_texture_slots.len() >= 2,
-            "expected at least two cooked material slots to share floor.psxt"
+            room_texture_slots.len() >= 2,
+            "expected at least two cooked material slots to share the first Delven texture"
         );
-        let first_floor_asset = floor_texture_slots[0].texture_asset_index;
-        assert!(floor_texture_slots
+        let first_room_asset = room_texture_slots[0].texture_asset_index;
+        assert!(room_texture_slots
             .iter()
-            .all(|material| material.texture_asset_index == first_floor_asset));
+            .all(|material| material.texture_asset_index == first_room_asset));
     }
 
     #[test]
@@ -5228,7 +5270,7 @@ mod tests {
         let texture = project.add_resource(
             "Floor Texture",
             ResourceData::Texture {
-                psxt_path: "assets/textures/floor.psxt".to_string(),
+                psxt_path: "assets/textures/delven_01_slateflr1a_q2.psxt".to_string(),
             },
         );
         let material = project.add_resource(
@@ -5434,7 +5476,8 @@ mod tests {
                 let ResourceData::Model(model) = &mut resource.data else {
                     continue;
                 };
-                model.texture_path = Some("assets/textures/floor.psxt".to_string());
+                model.texture_path =
+                    Some("assets/textures/delven_01_slateflr1a_q2.psxt".to_string());
                 break;
             }
         }
@@ -5551,6 +5594,51 @@ mod tests {
         let package = package.expect("cooks");
         assert_eq!(package.model_instances.len(), 1);
         assert_eq!(package.model_instances[0].yaw, 1024);
+    }
+
+    #[test]
+    fn image_prop_preserves_authored_pitch_yaw_roll() {
+        let mut project = ProjectDocument::starter();
+        let material_id = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a material")
+            .id;
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        let prop_id = scene.add_node(
+            room_id,
+            "Rotated Image Prop",
+            NodeKind::ImageProp {
+                material: Some(material_id),
+                width: 256,
+                height: 512,
+                cylindrical_billboard: false,
+                collision_enabled: false,
+                collision_size: [256, 512, 64],
+            },
+        );
+        if let Some(node) = scene.node_mut(prop_id) {
+            node.transform.rotation_degrees = [45.0, 90.0, 270.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        let prop = package
+            .image_props
+            .iter()
+            .find(|prop| prop.width == 256 && prop.height == 512)
+            .expect("image prop cooks");
+        assert_eq!(prop.pitch, 512);
+        assert_eq!(prop.yaw, 1024);
+        assert_eq!(prop.roll, 3072);
     }
 
     #[test]
@@ -5734,8 +5822,10 @@ mod tests {
                     let _ = initial;
                 } else {
                     let world_cells = grid.editor_to_world_cells([-1.0, 0.0]);
-                    let (sx, sz) =
-                        grid.extend_to_include(world_cells[0].floor() as i32, world_cells[1].floor() as i32);
+                    let (sx, sz) = grid.extend_to_include(
+                        world_cells[0].floor() as i32,
+                        world_cells[1].floor() as i32,
+                    );
                     grid.set_floor(sx, sz, 0, Some(floor_material));
                 }
             }
