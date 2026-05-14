@@ -261,36 +261,36 @@ the emulator frontend.
 
 ## Examples
 
-The repo ships 18 runnable examples that double as the de-facto test
-suite for the SDK and engine. Each builds for `mipsel-sony-psx` and
-runs end-to-end through the emulator frontend (`make <name>` to build,
+The repo ships runnable examples that double as the de-facto test suite
+for the SDK and engine. Each builds for `mipsel-sony-psx` and runs
+end-to-end through the emulator frontend (`make <name>` to build,
 `make run-<name>` where supported).
 
 | `hello-tri` | `hello-tex` | `hello-input` |
 | --- | --- | --- |
 | ![hello-tri screenshot](assets/media/readme/examples/hello-tri.png) | ![hello-tex screenshot](assets/media/readme/examples/hello-tex.png) | ![hello-input screenshot](assets/media/readme/examples/hello-input.png) |
 
-| `hello-audio` | `hello-ot` | `hello-gte` |
+| `hello-audio` | `hello-ot` | `showcase-3d` |
 | --- | --- | --- |
-| ![hello-audio screenshot](assets/media/readme/examples/hello-audio.png) | ![hello-ot screenshot](assets/media/readme/examples/hello-ot.png) | ![hello-gte screenshot](assets/media/readme/examples/hello-gte.png) |
+| ![hello-audio screenshot](assets/media/readme/examples/hello-audio.png) | ![hello-ot screenshot](assets/media/readme/examples/hello-ot.png) | ![showcase-3d screenshot](assets/media/readme/examples/showcase-3d.png) |
 
-| `hello-engine` | `showcase-3d` | `showcase-fog` |
+| `showcase-fog` | `showcase-lights` | `showcase-model` |
 | --- | --- | --- |
-| ![hello-engine screenshot](assets/media/readme/examples/hello-engine.png) | ![showcase-3d screenshot](assets/media/readme/examples/showcase-3d.png) | ![showcase-fog screenshot](assets/media/readme/examples/showcase-fog.png) |
+| ![showcase-fog screenshot](assets/media/readme/examples/showcase-fog.png) | ![showcase-lights screenshot](assets/media/readme/examples/showcase-lights.png) | ![showcase-model screenshot](assets/media/readme/examples/showcase-model.png) |
 
-| `showcase-lights` | `showcase-model` | `showcase-particles` |
+| `showcase-particles` | `showcase-room` | `showcase-text` |
 | --- | --- | --- |
-| ![showcase-lights screenshot](assets/media/readme/examples/showcase-lights.png) | ![showcase-model screenshot](assets/media/readme/examples/showcase-model.png) | ![showcase-particles screenshot](assets/media/readme/examples/showcase-particles.png) |
+| ![showcase-particles screenshot](assets/media/readme/examples/showcase-particles.png) | ![showcase-room screenshot](assets/media/readme/examples/showcase-room.png) | ![showcase-text screenshot](assets/media/readme/examples/showcase-text.png) |
 
-| `showcase-room` | `showcase-text` | `showcase-textured-sprite` |
+| `showcase-textured-sprite` | `game-pong` | `game-breakout` |
 | --- | --- | --- |
-| ![showcase-room screenshot](assets/media/readme/examples/showcase-room.png) | ![showcase-text screenshot](assets/media/readme/examples/showcase-text.png) | ![showcase-textured-sprite screenshot](assets/media/readme/examples/showcase-textured-sprite.png) |
+| ![showcase-textured-sprite screenshot](assets/media/readme/examples/showcase-textured-sprite.png) | ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) |
 
-| `game-pong` | `game-breakout` | `game-invaders` |
-| --- | --- | --- |
-| ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) | ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
+| `game-invaders` |
+| --- |
+| ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
 
-### SDK examples — bare-metal MIPS, no engine framework
+### SDK examples - bare-metal MIPS, no engine framework
 
 | Example | What it demonstrates |
 | --- | --- |
@@ -298,16 +298,9 @@ runs end-to-end through the emulator frontend (`make <name>` to build,
 | `hello-tex` | 4bpp CLUT texture upload + animated bouncing sprites. Exercises the full texture pipeline: editor cooker (`psxed tex`) → cooked `.psxt` blobs → VRAM upload → sprite render. |
 | `hello-input` | Polls the port-1 pad every frame and renders feedback that reacts to held buttons. Proves SIO0 + pad and ASCII text rendering through `psx-font`. |
 | `hello-audio` | Four face buttons trigger four SPU voices with different built-in waveforms and pitches. Smallest end-to-end SPU demo. |
-| `hello-ot` | Three overlapping Gouraud triangles depth-sorted via an ordering table and DMA channel 2 in linked-list mode — the same path commercial games use. |
-| `hello-gte` | 3D cube spinning via the GTE: rotation matrix, vertex projection, edge drawing. The smallest GTE-based 3D demo. |
+| `hello-ot` | Three overlapping Gouraud triangles depth-sorted via an ordering table and DMA channel 2 in linked-list mode, the same path commercial games use. |
 
-### Engine examples — built on the `psx-engine` Scene/App framework
-
-**Starter**
-
-| Example | What it demonstrates |
-| --- | --- |
-| `hello-engine` | Smallest engine demo. Single bouncing Gouraud square driven by a sine wave on `Angle`. Proves the `Scene` / `App::run` plumbing. |
+### Engine examples - built on the `psx-engine` Scene/App framework
 
 **Showcases**
 
@@ -315,7 +308,7 @@ runs end-to-end through the emulator frontend (`make <name>` to build,
 | --- | --- |
 | `showcase-3d` | Flagship 3D demo. Suzanne (decimated to ~180 tris) and Utah teapot rendered with GTE NCCS hardware lighting under three directional lights. |
 | `showcase-fog` | Full PS1-commercial GTE + textured-poly pipeline: per-vertex RTPS projection, NCLIP back-face cull, AVSZ3 ordering-table insertion, and depth-cue fog. |
-| `showcase-lights` | Four coloured moving point lights illuminating scaled cubes. Complementary to `showcase-3d` — point-light path vs. directional. |
+| `showcase-lights` | Four coloured moving point lights illuminating scaled cubes. Complementary to `showcase-3d`, point-light path vs. directional. |
 | `showcase-model` | Animated-model demo. Two characters sharing a 24-joint biped rig; D-pad orbits the camera, Square/Circle steps through animation clips, Select swaps character. |
 | `showcase-particles` | Fixed-pool particle effects through the engine's ordering-table helpers. Routes `psx-fx` simulations through the same render path as the GTE-heavy showcases. |
 | `showcase-room` | Renders a cooked `.psxw` room on PS1 hardware. End-to-end validation of cooker → asset → runtime: `build.rs` cooks the editor's starter room, the binary parses it through `RuntimeRoom`, and `draw_room` walks every sector. |
