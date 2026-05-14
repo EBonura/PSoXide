@@ -306,6 +306,10 @@ impl LevelSkyRecord {
 /// Resolved cloud-layer settings for one cooked room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelCloudLayerRecord {
+    /// Cooked PSXT texture (4bpp Perlin gradient) baked at cook
+    /// time. `AssetId(u16::MAX)` when the layer is disabled or no
+    /// texture was generated.
+    pub texture_asset: AssetId,
     /// Cloud highlight colour blended through the bake CLUT.
     pub color_rgb: [u8; 3],
     /// CLUT-ramp threshold pivot, 0..=255.
@@ -327,6 +331,7 @@ pub struct LevelCloudLayerRecord {
 impl LevelCloudLayerRecord {
     /// Disabled-by-default placeholder.
     pub const DEFAULT: Self = Self {
+        texture_asset: AssetId(u16::MAX),
         color_rgb: [220, 220, 232],
         density: 128,
         altitude: 6_144,
