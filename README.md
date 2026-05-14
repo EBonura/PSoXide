@@ -17,10 +17,10 @@ all three pieces in one repository:
 - a PS1 homebrew SDK and runtime engine,
 - an editor plus a playable PSX game prototype.
 
-The through-line is consistency: the editor cooks the same asset
-formats that the runtime reads, the runtime runs inside the same
-emulator frontend used for debugging, and the emulator is tested
-against real BIOS and disc behavior.
+The through-line is consistency. The editor cooks the same asset
+formats that the runtime reads, Play builds the same PSX executable
+and streamed disc image that headless tests boot, and the emulator
+frontend is both the development debugger and the game test harness.
 
 This is research-grade software. It is useful, hackable, and moving
 fast, but it is not a polished emulator release, not a stable public
@@ -28,14 +28,15 @@ SDK, and not a finished game editor yet.
 
 ## Media
 
-Current editor build, captured from the bundled default project:
+Fresh captures from the current editor/playtest pipeline:
 
-| Editor 3D View | Embedded Play Mode |
+| Editor Preview | Demo 3 In-Game |
 | --- | --- |
-| ![Editor 3D view](docs/media/editor-3d-view.png) | ![Embedded play mode](docs/media/embedded-play-mode.png) |
+| ![Editor 3D preview](assets/media/readme/editor-preview.png) | ![Demo 3 streamed playtest](assets/media/readme/demo3-playtest.png) |
 
-A short editor/play-mode walkthrough video is still on the release
-checklist.
+| Demo 4 In-Game | Demo 5 In-Game |
+| --- | --- |
+| ![Demo 4 streamed playtest](assets/media/readme/demo4-playtest.png) | ![Demo 5 streamed playtest](assets/media/readme/demo5-playtest.png) |
 
 ## Current Status
 
@@ -51,15 +52,22 @@ What works today:
 - MIPS Rust SDK examples targeting `mipsel-sony-psx`.
 - Runtime engine examples for sprites, text, 3D meshes, lighting, fog,
   particles, rooms, and small games.
+- A streamed room runtime for editor playtests: compact collision
+  payloads, prebuilt room render caches, room-chunk residency,
+  CD-sector packing, and 60 Hz simulation with paced visual frames.
 - `psxed` content pipeline for cooked texture, mesh, model, animation,
   and room/world artifacts.
 - Editor project model with scene tree, resources, inspectors, 2D/3D
   viewports, room-grid authoring, materials, lights, model placement,
   and a playable character resource.
-- Embedded editor Play mode: the editor cooks the active project, builds
-  the internal `editor-playtest` PSX EXE, side-loads it into the current
-  frontend, and displays the live game framebuffer inside the editor's
-  3D viewport.
+- One-click editor Play mode: the editor saves and cooks the active
+  project, builds the internal `editor-playtest` PSX EXE, packages a
+  raw disc image with streamed room chunks, boots that disc in the
+  current frontend, and displays the live game framebuffer inside the
+  editor's 3D viewport.
+- Headless profiling and screenshot capture for geometry-heavy
+  playtests, including streamed demo3 frame pacing and CD-room-load
+  telemetry.
 
 What is not done:
 
@@ -71,10 +79,6 @@ What is not done:
   needs project templates, import UX, richer validation, undo depth,
   packaging, and more stable authoring ergonomics.
 - The SDK and engine APIs are not semver-stable.
-- Cross-cutting finalisation work is tracked in
-  [docs/finalisation-log.md](docs/finalisation-log.md).
-- Public release legal cleanup is not finished. See
-  [docs/license-audit.md](docs/license-audit.md).
 - No release binaries are published. Build from source.
 
 ## First Clone Path
@@ -113,8 +117,6 @@ make test
 
 The fast defaults do not require commercial games or PCSX-Redux.
 Canaries and parity tests are ignored by default.
-Patched PCSX-Redux setup for oracle tests is documented in
-[`docs/redux-oracle.md`](docs/redux-oracle.md).
 
 ### 3. Configure a BIOS
 
@@ -128,9 +130,9 @@ export PSOXIDE_BIOS=/absolute/path/to/SCPH1001.BIN
 or set `paths.bios` in the frontend's `settings.ron`.
 
 The GUI can open without a BIOS for UI work, but launching discs and
-embedded editor Play currently require a configured BIOS path. Embedded
-Play side-loads the generated EXE through HLE BIOS after the bus is
-created.
+editor Play currently require a configured BIOS path. Play builds a
+disc image and boots it through the same frontend path used by the
+headless profile targets.
 
 ### 4. Launch the frontend
 
@@ -222,11 +224,17 @@ Editor/playtest internals:
 ```bash
 make cook-playtest          # cook starter or PROJECT=/path/project.ron
 make build-editor-playtest  # build whatever is currently generated
+make profile-demo3          # cook/build/boot streamed demo3, dump screenshot/profile
+make profile-demo3-forward  # same, while holding forward
+make profile-demo3-paced20  # paced visual telemetry alias for streamed demo3
+make profile-demo3-disc-stream # explicit CD-stream benchmark path
 ```
 
 `make cook-playtest` is destructive for
 `engine/examples/editor-playtest/generated/`; the editor Play action
-normally owns that directory.
+normally owns that directory. The profile targets additionally build a
+raw `.bin` disc image through `tools/mkisopsx` and boot that image in
+the emulator frontend.
 
 ## Examples
 
@@ -280,7 +288,6 @@ runs end-to-end through the emulator frontend (`make <name>` to build,
 ```text
 .
 ├── crates/                 shared no_std-compatible PSX primitives
-├── docs/                   architecture notes, hardware references, audits
 ├── editor/                 editor UI, project model, cook pipeline, psxed CLI
 ├── emu/                    emulator core, frontend, settings, parity oracle
 ├── engine/                 PSX runtime engine crates and examples
@@ -306,7 +313,7 @@ Not included:
 - Commercial game disc images.
 - PCSX-Redux binaries or source trees.
 - Large original texture/model sources beyond the small committed demo
-  inputs described in the license audit.
+  inputs.
 
 Ignored tests and parity tools may require:
 
@@ -327,5 +334,4 @@ as a parity oracle and reference, and PCSX-Redux is GPL-2.0-or-later.
 Releasing PSoXide under the same license keeps the lineage clean.
 
 Outstanding non-license release items (asset provenance, BIOS-output
-goldens, README media) are tracked in
-[docs/license-audit.md](docs/license-audit.md).
+goldens, and public packaging) are still in progress.
