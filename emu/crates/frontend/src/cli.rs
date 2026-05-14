@@ -21,18 +21,21 @@
 //! returns -- `main()` never spins up winit/wgpu. Without a
 //! subcommand, the GUI runs as normal.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use emulator_core::{
     button, fast_boot_disc_with_hle, spu::SAMPLE_CYCLES, telemetry, warm_bios_for_disc_fast_boot,
-    Bus, ButtonState, Cpu, GteProfileSnapshot, DISC_FAST_BOOT_WARMUP_STEPS,
+    Bus, ButtonState, Cpu, Gpu, GteProfileSnapshot, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use psoxide_settings::{
     library::{GameKind, LibraryEntry},
     ConfigPaths, Library, Settings,
 };
 use psx_iso::{Disc, Exe};
+use psxed_project::{NodeId, ProjectDocument};
+use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
 use crate::app::resolve_bios_path;
 
@@ -88,6 +91,8 @@ pub enum Command {
     /// Run the emulator headlessly on a specific game or EXE and
     /// emit final state info.
     Launch(LaunchArgs),
+    /// Render an editor 3D preview screenshot without opening the GUI.
+    DumpEditorPreview(DumpEditorPreviewArgs),
 }
 
 /// Arguments for `scan`.
@@ -153,6 +158,38 @@ pub struct LaunchArgs {
     pub hold_run: bool,
 }
 
+/// Arguments for `dump-editor-preview`.
+#[derive(Debug, Args)]
+pub struct DumpEditorPreviewArgs {
+    /// Project directory containing `project.ron`, or a direct path to a project file.
+    #[arg(long, default_value = "editor/projects/default")]
+    pub project: PathBuf,
+    /// Output PPM path.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Orbit camera yaw in editor 4096-units-per-turn convention.
+    #[arg(long, default_value_t = 320)]
+    pub yaw: u16,
+    /// Orbit camera pitch in editor 4096-units-per-turn convention.
+    #[arg(long, default_value_t = 300)]
+    pub pitch: u16,
+    /// Orbit camera distance in editor/world units.
+    #[arg(long, default_value_t = 8192)]
+    pub radius: i32,
+    /// Orbit target X in editor/world units.
+    #[arg(long, default_value_t = 2048)]
+    pub target_x: i32,
+    /// Orbit target Y in editor/world units.
+    #[arg(long, default_value_t = 512)]
+    pub target_y: i32,
+    /// Orbit target Z in editor/world units.
+    #[arg(long, default_value_t = 2048)]
+    pub target_z: i32,
+    /// Hide the streaming grid overlay.
+    #[arg(long)]
+    pub no_grid: bool,
+}
+
 /// Entry point. Dispatches on `cli.command`; returns `Ok(())` on
 /// success, `Err` with a user-visible message on failure. `main()`
 /// prints the error and exits non-zero.
@@ -163,6 +200,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::Scan(args) => cmd_scan(&paths, args),
         Command::List => cmd_list(&paths),
         Command::Launch(args) => cmd_launch(&paths, args),
+        Command::DumpEditorPreview(args) => cmd_dump_editor_preview(args),
     }
 }
 
@@ -514,6 +552,72 @@ fn attach_headless_playtest_pad(bus: &mut Bus) {
     let _ = bus.force_port1_analog_mode();
 }
 
+fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
+    let (project_root, project_file) = resolve_project_arg(&args.project);
+    let project = ProjectDocument::load_from_path(&project_file)
+        .map_err(|e| format!("load {}: {e}", project_file.display()))?;
+
+    let camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: args.yaw,
+        pitch_q12: args.pitch,
+        radius: args.radius,
+        target: [args.target_x, args.target_y, args.target_z],
+        position: [0, 0, 0],
+    };
+
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &project_root);
+    textures.refresh_models(&project, &project_root);
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&project, &project_root);
+
+    let empty_hidden: HashSet<NodeId> = HashSet::new();
+    let frame = crate::editor_preview::build_phase1_frame(
+        &project,
+        camera,
+        true,
+        true,
+        !args.no_grid,
+        &empty_hidden,
+        NodeId::ROOT,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        None,
+        &textures,
+        &assets,
+    );
+
+    let (device, queue) = headless_wgpu_device()?;
+    let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
+    let _ = hw.set_internal_scale(2, None);
+    hw.render_frame(&Gpu::new(), &frame.cmd_log, textures.vram_words());
+
+    let scale = hw.internal_scale();
+    let (w, h, rgba) = hw.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+    write_rgb_ppm_from_rgba(&args.out, w, h, &rgba)?;
+    eprintln!("[cli] editor preview -> {}", args.out.display());
+    Ok(())
+}
+
+fn resolve_project_arg(path: &Path) -> (PathBuf, PathBuf) {
+    if path.is_dir() {
+        (path.to_path_buf(), path.join("project.ron"))
+    } else {
+        let root = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        (root, path.to_path_buf())
+    }
+}
+
 fn print_gte_profile(before: &GteProfileSnapshot, after: &GteProfileSnapshot, frames: u64) {
     let ops = after.ops.saturating_sub(before.ops);
     let cycles = after
@@ -804,26 +908,7 @@ fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<bool, String> {
         return Ok(true);
     }
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::PRIMARY,
-        ..Default::default()
-    });
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .ok_or_else(|| "no compatible wgpu adapter".to_string())?;
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("psoxide-hw-dump-device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
-        },
-        None,
-    ))
-    .map_err(|e| format!("request device: {e:?}"))?;
+    let (device, queue) = headless_wgpu_device()?;
 
     let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
     let initial_vram =
@@ -839,6 +924,29 @@ fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<bool, String> {
     );
     write_rgb_ppm_from_rgba(path, w, h, &rgba)?;
     Ok(false)
+}
+
+fn headless_wgpu_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .ok_or_else(|| "no compatible wgpu adapter".to_string())?;
+    pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("psoxide-hw-dump-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+        },
+        None,
+    ))
+    .map_err(|e| format!("request device: {e:?}"))
 }
 
 fn write_rgb_ppm_from_rgba(
