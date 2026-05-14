@@ -27,17 +27,14 @@ falls back to the placeholder manifest on a fresh clone.
 the schema defined in
 [`engine/crates/psx-level`](../../crates/psx-level/), which is
 shared between the editor's playtest compiler and this runtime
-example. See
-[`docs/level-residency.md`](../../../docs/level-residency.md)
-for the full contract.
+example.
 
-The runtime walks the manifest's `ROOM_RESIDENCY` for the
-current room, resolves the room's world asset through `ASSETS`,
-parses it via [`psx_asset::World::from_bytes`], wraps it in a
-[`psx_engine::RuntimeRoom`], and uploads the room's texture
-assets through a tiny no-alloc [`psx_level::ResidencyManager`].
-Materials are built from `MATERIALS` records -- the runtime no
-longer hardcodes any starter texture binding; `local_slot →
+The runtime walks the generated world pack, keeps a small window of
+streamed room chunks resident, and draws the chunks from compact
+cooked render-cache records. Collision uses a separate compact
+collision payload, so streamed builds do not need the full editor-room
+shape in RAM. Materials are built from `MATERIALS` records -- the
+runtime no longer hardcodes any starter texture binding; `local_slot →
 texture_asset` is the source of truth.
 
 The player starts at `generated::PLAYER_SPAWN`. Left stick
@@ -50,11 +47,12 @@ authored room.
 ## Embedded Play
 
 The editor's **Play** button is one-click: it cooks the active
-project, runs `make build-editor-playtest`, side-loads the built
-EXE into the already-running frontend emulator, and paints the
-live framebuffer into the editor's 3D viewport. No second window
-or child frontend is launched. The toolbar swaps to `Stop` while
-embedded play mode is active.
+project, runs `make build-editor-playtest`, packages the built EXE
+plus streamed room chunks into a raw disc image, boots that disc in
+the already-running frontend emulator, and paints the live framebuffer
+into the editor's 3D viewport. No second window or child frontend is
+launched. The toolbar swaps to `Stop` while embedded play mode is
+active.
 
 For headless / CI workflows, these Make targets remain:
 
@@ -100,23 +98,21 @@ From a fresh clone:
 
 1. `make build-editor-playtest` -- works from the placeholder.
 2. Editor -> "Play" -- cooks your current scene into the ignored
-   cooked manifest, builds, and runs inside the editor 3D viewport
-   until you press Stop.
+   cooked manifest, builds the PSX EXE, builds a streamed disc image,
+   and runs inside the editor 3D viewport until you press Stop.
 
 ## Scope
 
-This is a vertical slice. It uses `.psxw` v1, has *coarse*
-sector-walkability collision, no portal traversal, no CD
-streaming, no enemies, no AI, and no entity scripting.
-Triggers / Portals / AudioSources surface as warnings during
-cook and are skipped from the runtime manifest.
+This is a vertical slice. It uses streamed room chunks with compact
+collision and cached render payloads, but still has no portal
+traversal, no AI, and no entity scripting. Triggers / Portals /
+AudioSources surface as warnings during cook and are skipped from the
+runtime manifest.
 
 The runtime renders a player character at the spawn -- driven
 by the Character resource the Player Spawn references. The
 camera follows behind, and analog movement + Circle drive
-idle / walk / run animations on the character's authored
-clips. See [`docs/playable-character.md`](../../../docs/playable-character.md)
-for the full Character → cook → runtime contract.
+idle / walk / run animations on the character's authored clips.
 
 What it *does* render:
 
@@ -129,16 +125,14 @@ What it *does* render:
   references a `ResourceData::Model` produces a
   `LevelModelInstanceRecord`; the runtime parses the cooked
   `.psxmdl` + `.psxt` + `.psxanim`, uploads the atlas, and
-  draws the textured animated model. See
-  [`docs/editor-model-authoring.md`](../../../docs/editor-model-authoring.md).
+  draws the textured animated model.
 - **Static lighting** -- every `PointLight` node cooks into a
   `PointLightRecord`; room surfaces also cook into the `.psxw` v3
   static-light table, so embedded play can render textured
   Gouraud-lit rooms without re-accumulating every light per surface
   at runtime. Player, model instances, and equipment still sample
   point lights dynamically at their current origin. Linear falloff,
-  no shadows. See
-  [`docs/editor-lighting.md`](../../../docs/editor-lighting.md).
+  no shadows.
 - **Entity markers** for legacy `MeshInstance` nodes that
   don't reference a Model (debug cubes, same as before).
 
@@ -158,8 +152,6 @@ What it *does* render:
 
 ## See also
 
-- [`docs/level-residency.md`](../../../docs/level-residency.md) --
-  the full contract: schema, writer, reader, future backing stores.
 - [`engine/crates/psx-level`](../../crates/psx-level/) -- shared
   no_std schema crate.
 - `editor/crates/psxed-project/src/playtest.rs` -- manifest types,
