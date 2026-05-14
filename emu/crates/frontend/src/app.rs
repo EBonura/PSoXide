@@ -716,6 +716,11 @@ impl AppState {
                 // CCDs are shown directly because their `.img`
                 // sidecar is not a separate library entry.
                 GameKind::DiscCue => continue,
+                GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd
+                    if is_internal_example_artifact(&e.path) =>
+                {
+                    continue;
+                }
                 GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd => {
                     if let Some(root) = project_root
                         .as_ref()
@@ -752,7 +757,7 @@ impl AppState {
                         subtitle: format_subtitle(e),
                     });
                 }
-                GameKind::Exe if is_internal_example_exe(&e.path) => continue,
+                GameKind::Exe if is_internal_example_artifact(&e.path) => continue,
                 GameKind::Exe => {
                     if let Some(root) = project_root
                         .as_ref()
@@ -1397,10 +1402,42 @@ fn format_subtitle(e: &LibraryEntry) -> String {
     }
 }
 
-fn is_internal_example_exe(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n == "editor-playtest.exe")
+fn is_internal_example_artifact(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !matches!(
+        file_name,
+        "editor-playtest.exe"
+            | "editor-playtest.bin"
+            | "editor-playtest.cue"
+            | "editor-playtest.iso"
+    ) {
+        return false;
+    }
+
+    let mut parts = path.components().rev().filter_map(|component| {
+        let std::path::Component::Normal(part) = component else {
+            return None;
+        };
+        part.to_str()
+    });
+    matches!(
+        (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next()
+        ),
+        (
+            Some(_file),
+            Some("release"),
+            Some("mipsel-sony-psx"),
+            Some("examples"),
+            Some("build")
+        )
+    )
 }
 
 fn path_is_under(path: &Path, root: &Path) -> bool {
@@ -2010,12 +2047,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn internal_editor_playtest_exe_is_hidden_from_menu_examples() {
-        assert!(is_internal_example_exe(Path::new(
+    fn internal_editor_playtest_artifacts_are_hidden_from_menu() {
+        assert!(is_internal_example_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/editor-playtest.exe"
         )));
-        assert!(!is_internal_example_exe(Path::new(
+        assert!(is_internal_example_artifact(Path::new(
+            "build/examples/mipsel-sony-psx/release/editor-playtest.bin"
+        )));
+        assert!(is_internal_example_artifact(Path::new(
+            "build/examples/mipsel-sony-psx/release/editor-playtest.cue"
+        )));
+        assert!(is_internal_example_artifact(Path::new(
+            "build/examples/mipsel-sony-psx/release/editor-playtest.iso"
+        )));
+        assert!(!is_internal_example_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/showcase-room.exe"
+        )));
+        assert!(!is_internal_example_artifact(Path::new(
+            "/games/editor-playtest.bin"
         )));
     }
 
