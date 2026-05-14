@@ -308,6 +308,18 @@ const fn default_image_prop_size() -> u16 {
     DEFAULT_IMAGE_PROP_SIZE
 }
 
+/// Default authored collision-box full-size (width / height / depth)
+/// for an image prop. Sized to match `DEFAULT_IMAGE_PROP_SIZE` so a
+/// fresh prop with collision toggled on has a sensible cube around
+/// its visible plane.
+const fn default_image_prop_collision_size() -> [u16; 3] {
+    [
+        DEFAULT_IMAGE_PROP_SIZE,
+        DEFAULT_IMAGE_PROP_SIZE,
+        DEFAULT_IMAGE_PROP_SIZE,
+    ]
+}
+
 impl MaterialResource {
     /// Build an opaque neutral material.
     pub const fn opaque(texture: Option<ResourceId>) -> Self {
@@ -1681,6 +1693,14 @@ pub const MIN_WORLD_SECTOR_SIZE: i32 = WORLD_SECTOR_SIZE_QUANTUM;
 /// Maximum authored sector size. This is an authoring sanity cap,
 /// not a PSX wire-format limit.
 pub const MAX_WORLD_SECTOR_SIZE: i32 = 8192;
+/// Curated dropdown choices for the World inspector's Sector Size
+/// editor. Covers every value used by shipped demo projects
+/// (`512, 640, 768, 896, 1024`) plus smaller and larger options.
+/// Trades the full `WORLD_SECTOR_SIZE_QUANTUM` granularity for a
+/// shorter pick list. Loading a project whose sector_size isn't in
+/// this list still works -- the existing value displays, and the
+/// dropdown only replaces it when the user picks an entry.
+pub const WORLD_SECTOR_SIZE_PRESETS: &[i32] = &[256, 512, 640, 768, 896, 1024, 1536, 2048, 4096];
 /// Fixed-point one for authored model resource scale.
 pub const MODEL_SCALE_ONE_Q8: u16 = 256;
 
@@ -1925,6 +1945,93 @@ pub struct SkySettings {
     /// fog is enabled.
     #[serde(default = "default_sky_match_room_fog")]
     pub match_room_fog: bool,
+    /// Optional cloud-layer baked at runtime from a Perlin noise
+    /// texture and drawn as a world-fixed horizontal plane above
+    /// the camera.
+    #[serde(default)]
+    pub cloud_layer: CloudLayerSettings,
+}
+
+/// Cloud-layer authoring fields. The runtime bakes a tileable
+/// Perlin noise texture once at scene load (using `noise_seed`),
+/// uploads it to a reserved VRAM slot, builds a CLUT that ramps
+/// from `horizon_color` to `color`, and draws the layer as a world-
+/// fixed plane at `altitude` above world Y = 0 with `scroll_speed`
+/// applied to UVs per second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudLayerSettings {
+    /// Whether the cloud layer is drawn at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Cloud highlight colour. Blended against the room horizon
+    /// colour through the CLUT to produce the baked gradient.
+    #[serde(default = "default_cloud_color")]
+    pub color: [u8; 3],
+    /// 0 = fully horizon-color (no clouds), 255 = fully covered.
+    /// Controls where the CLUT ramp pivots between horizon and
+    /// cloud color.
+    #[serde(default = "default_cloud_density")]
+    pub density: u8,
+    /// Altitude of the cloud plane above world Y = 0, in engine
+    /// units. The plane is horizontal and world-fixed, so this
+    /// directly controls how close clouds feel to the camera.
+    #[serde(default = "default_cloud_altitude")]
+    pub altitude: u16,
+    /// Half-extent of the plane on each of X / Z in engine units.
+    /// Larger values stretch the visible cloud band further toward
+    /// the horizon at the cost of more world-space rasterization.
+    #[serde(default = "default_cloud_extent")]
+    pub extent: u16,
+    /// UV scroll speed per second along X / Z in PSX angle units
+    /// (4096 = full wrap). Positive = clouds drift in the +axis
+    /// direction relative to the world.
+    #[serde(default = "default_cloud_scroll_speed")]
+    pub scroll_speed: [i16; 2],
+    /// Number of texture-tile repeats across the plane. More tiles
+    /// = denser-looking cover but smaller-feeling clouds.
+    #[serde(default = "default_cloud_tile_count")]
+    pub tile_count: u8,
+    /// Seed for the runtime Perlin generator. Change to get a
+    /// different cloud pattern without re-cooking textures.
+    #[serde(default = "default_cloud_noise_seed")]
+    pub noise_seed: u32,
+}
+
+fn default_cloud_color() -> [u8; 3] {
+    [220, 220, 232]
+}
+const fn default_cloud_density() -> u8 {
+    128
+}
+const fn default_cloud_altitude() -> u16 {
+    6144
+}
+const fn default_cloud_extent() -> u16 {
+    24_576
+}
+const fn default_cloud_scroll_speed() -> [i16; 2] {
+    [4, 0]
+}
+const fn default_cloud_tile_count() -> u8 {
+    4
+}
+const fn default_cloud_noise_seed() -> u32 {
+    0x5a7b_c91d
+}
+
+impl Default for CloudLayerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: default_cloud_color(),
+            density: default_cloud_density(),
+            altitude: default_cloud_altitude(),
+            extent: default_cloud_extent(),
+            scroll_speed: default_cloud_scroll_speed(),
+            tile_count: default_cloud_tile_count(),
+            noise_seed: default_cloud_noise_seed(),
+        }
+    }
 }
 
 impl SkySettings {
@@ -1942,6 +2049,7 @@ impl SkySettings {
             horizon_color,
             lower_color,
             horizon_percent: self.horizon_percent.clamp(5, 95),
+            cloud_layer: self.cloud_layer,
         }
     }
 }
@@ -1955,6 +2063,7 @@ impl Default for SkySettings {
             lower_color: default_sky_lower_color(),
             horizon_percent: default_sky_horizon_percent(),
             match_room_fog: default_sky_match_room_fog(),
+            cloud_layer: CloudLayerSettings::default(),
         }
     }
 }
@@ -1972,6 +2081,9 @@ pub struct ResolvedSkySettings {
     pub lower_color: [u8; 3],
     /// Horizon line as a percentage of screen height.
     pub horizon_percent: u8,
+    /// Resolved cloud layer authoring values (still in authoring
+    /// units; runtime/preview consume them via cooked records).
+    pub cloud_layer: CloudLayerSettings,
 }
 
 fn blend_rgb(a: [u8; 3], b: [u8; 3], b_weight_256: u16) -> [u8; 3] {
@@ -4079,6 +4191,19 @@ pub enum NodeKind {
         /// while staying upright.
         #[serde(default)]
         cylindrical_billboard: bool,
+        /// Toggle the authored AABB collision box around the prop.
+        /// Disabled by default so legacy props (and freshly placed
+        /// ones) keep the "decorative-only" semantics they had
+        /// before collision was opt-in.
+        #[serde(default)]
+        collision_enabled: bool,
+        /// Full size (width / height / depth) of the AABB collision
+        /// box in engine units, centered on the visible plane.
+        /// Ignored when [`collision_enabled`](Self::ImageProp) is
+        /// `false`, but kept around so toggling it back on restores
+        /// the user's last size instead of snapping to a default.
+        #[serde(default = "default_image_prop_collision_size")]
+        collision_size: [u16; 3],
     },
     /// Render a cooked [`ResourceData::Model`] from the transform
     /// on the nearest entity ancestor. This is the component form of
@@ -6473,11 +6598,17 @@ mod tests {
         let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
         assert!(project.resources.iter().any(|r| matches!(
             &r.data,
-            ResourceData::Texture { psxt_path } if psxt_path.ends_with("floor.psxt")
+            ResourceData::Texture { psxt_path } if psxt_path.ends_with("delven_01_slateflr1a_q2.psxt")
         )));
         assert!(project.resources.iter().any(|r| matches!(
             &r.data,
-            ResourceData::Texture { psxt_path } if psxt_path.ends_with("brick-wall.psxt")
+            ResourceData::Texture { psxt_path } if psxt_path.ends_with("delven_38_ground4b_q0.psxt")
+        )));
+        assert!(!project.resources.iter().any(|r| matches!(
+            &r.data,
+            ResourceData::Texture { psxt_path }
+                if psxt_path.ends_with("floor.psxt")
+                    || psxt_path.ends_with("brick-wall.psxt")
         )));
         // Starter ships the obsidian wraith model plus a shared
         // standalone FBX animation library, so characters are
@@ -6563,11 +6694,17 @@ mod tests {
         assert!(projects_dir().is_dir(), "{}", projects_dir().display());
         assert!(default_project_dir().join("project.ron").is_file());
         assert!(default_project_dir()
-            .join("assets/textures/brick-wall.psxt")
+            .join("assets/textures/delven_01_slateflr1a_q2.psxt")
             .is_file());
         assert!(default_project_dir()
-            .join("assets/textures/floor.psxt")
+            .join("assets/textures/delven_38_ground4b_q0.psxt")
             .is_file());
+        assert!(!default_project_dir()
+            .join("assets/textures/floor.psxt")
+            .exists());
+        assert!(!default_project_dir()
+            .join("assets/textures/brick-wall.psxt")
+            .exists());
     }
 
     #[test]
@@ -6585,7 +6722,7 @@ mod tests {
         let project = ProjectDocument::starter();
 
         assert_eq!(project.scenes.len(), 1);
-        // Starter includes room textures/materials plus gameplay
+        // Starter includes the Delven room texture/material set plus gameplay
         // resources for the animated character and weapon path.
         assert!(project.resources.len() >= 10);
         assert!(project
