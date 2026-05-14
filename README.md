@@ -202,30 +202,39 @@ best current input path. Circle is run.
 
 ## Build Targets
 
-Quality gates:
+The Makefile is the source of truth; run `make help` for the exhaustive
+list. The main public targets are:
 
 ```bash
 make check      # cargo check across root/editor/emu/engine/sdk/tools
 make test       # fast non-ignored tests
 make fmt        # rustfmt across every workspace/tool
 make lint       # clippy -D warnings across every workspace/tool
-make canaries   # ignored BIOS/commercial-game canaries
-make commercial-visual-guards # all local commercial visual guards
-make tekken-mode-guard # Tekken 3 mode-select visual guard
-make tekken-vs-guard # Tekken 3 VS portrait visual guard
-make tekken-fight-guard # Tekken 3 early-fight visual guard
-make tekken-late-fight-guard # Tekken 3 late-fight visual guard
+make clean      # cargo clean across workspaces/tools and remove build/
 ```
 
-SDK and engine examples:
+Optional emulator parity and compatibility checks:
 
 ```bash
-make examples
-make hello-tri
-make showcase-model
-make game-pong
-make run-tri
-make run-showcase-model
+make canaries                 # ignored BIOS/commercial-disc canaries
+make commercial-visual-guards # local visual guards for owned disc images
+make parity                   # compare trace output against the oracle path
+make oracle-smoke             # verify the parity oracle can run
+make oracle-side-load         # compare SDK side-loaded EXEs against oracle
+make oracle-disc-smoke        # compare a local disc checkpoint against oracle
+```
+
+SDK, engine, and demo builds:
+
+```bash
+make examples      # build every SDK/engine example
+make test-sdk      # build SDK examples and run SDK regression coverage
+make psxed         # build the content-pipeline CLI
+make assets        # cook shared source assets via psxed
+make hello-tri     # build one SDK example
+make showcase-model # build one engine showcase
+make game-pong     # build one mini-game
+make run-tri       # build and side-load an example into the frontend
 ```
 
 Editor/playtest internals:
