@@ -37,6 +37,8 @@ use image::{imageops, DynamicImage, GenericImageView};
 use psxed_format::texture::{Depth, TextureHeader, MAGIC, VERSION};
 use psxed_format::AssetHeader;
 
+pub use psxed_format::texture::Depth as PsxtDepth;
+
 const TRANSPARENT_ALPHA_THRESHOLD: u8 = 128;
 
 /// Rectangle into the source image, pre-resize.
@@ -140,6 +142,9 @@ pub enum Error {
     },
     /// Target dimensions are zero.
     ZeroSize,
+    /// Indexed-bake input length doesn't match `width * height`, or
+    /// the requested depth has no CLUT (e.g. Bit15).
+    InvalidIndexedInput,
 }
 
 impl core::fmt::Display for Error {
@@ -156,11 +161,66 @@ impl core::fmt::Display for Error {
                 source.1,
             ),
             Error::ZeroSize => write!(f, "target width/height is zero"),
+            Error::InvalidIndexedInput => {
+                write!(f, "indexed bake: index buffer or depth is invalid")
+            }
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// Encode an indexed-color image (4bpp or 8bpp) into a PSXT blob
+/// without going through PNG / median-cut quantization. Lets callers
+/// that already know their palette (procedural noise bakes, palette
+/// transcoders, etc.) skip the lossy image-to-indexed step.
+///
+/// `indices` must contain `width * height` palette indices, each
+/// `< palette.len()`. `palette` must hold at most `depth.clut_entries()`
+/// entries; missing entries are padded as black (transparent).
+pub fn encode_indexed_psxt(
+    width: u16,
+    height: u16,
+    depth: Depth,
+    indices: &[u8],
+    palette: &[[u8; 3]],
+    transparent_index_zero: bool,
+) -> Result<Vec<u8>, Error> {
+    if width == 0 || height == 0 {
+        return Err(Error::ZeroSize);
+    }
+    let Some(n_entries) = depth.clut_entries() else {
+        // Bit15 has no CLUT — caller should use `convert` for direct
+        // 15bpp instead.
+        return Err(Error::InvalidIndexedInput);
+    };
+    let n_entries = n_entries as usize;
+    let pixel_count = (width as usize) * (height as usize);
+    if indices.len() != pixel_count {
+        return Err(Error::InvalidIndexedInput);
+    }
+    let mut padded_palette: Vec<[u8; 3]> = Vec::with_capacity(n_entries);
+    padded_palette.extend(palette.iter().take(n_entries).copied());
+    while padded_palette.len() < n_entries {
+        padded_palette.push([0, 0, 0]);
+    }
+    let pixel_halfwords = pack_indices(indices, width, height, depth);
+    let clut_halfwords = encode_clut(&padded_palette, n_entries);
+    let flags = if transparent_index_zero {
+        psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT
+    } else {
+        0
+    };
+    Ok(assemble_blob(
+        width,
+        height,
+        depth,
+        flags,
+        n_entries as u16,
+        &pixel_halfwords,
+        &clut_halfwords,
+    ))
+}
 
 /// End-to-end convert: bytes of a PNG/JPG/BMP → bytes of a PSXT
 /// blob. The returned `Vec<u8>` is ready to write to disk and
