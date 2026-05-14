@@ -210,6 +210,17 @@ impl Bus {
         })
     }
 
+    /// Build a deterministic bus for HLE-BIOS side-loaded homebrew.
+    ///
+    /// The BIOS ROM is zero-filled because execution is expected to
+    /// start from a PSX-EXE entry point, not the reset vector. Callers
+    /// must enable HLE BIOS dispatch before running guests that use the
+    /// `0xA0` / `0xB0` / `0xC0` syscall tables. Do not use this for
+    /// retail disc boot or parity checks against a real BIOS.
+    pub fn new_without_bios() -> Self {
+        Self::new(vec![0u8; memory::bios::SIZE]).expect("synthetic BIOS size is fixed")
+    }
+
     /// Switch to PAL video timing: 50 Hz refresh, 314-scanline
     /// frames, 2157 HSync cycles. Resets the VBlank scheduler to
     /// the PAL first-VBlank cycle + period, and reconfigures the
@@ -2222,6 +2233,12 @@ mod tests {
             Bus::new(vec![0u8; 1024]),
             Err(BusError::BiosSize { .. })
         ));
+    }
+
+    #[test]
+    fn new_without_bios_builds_zero_filled_bios_bus() {
+        let mut bus = Bus::new_without_bios();
+        assert_eq!(bus.read32(0xBFC0_0000), 0);
     }
 
     #[test]
