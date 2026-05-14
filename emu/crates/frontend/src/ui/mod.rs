@@ -139,6 +139,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             }
             MenuOutcome::None
         }
+        BuildExamples => {
+            state.start_examples_build();
+            MenuOutcome::None
+        }
         ToggleEditorWorkspace => {
             state.toggle_editor_workspace();
             state.menu.open = false;

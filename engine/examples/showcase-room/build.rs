@@ -1,19 +1,16 @@
 //! Cooks the editor's starter room into `OUT_DIR/room.psxw` so
 //! the example can `include_bytes!` it at compile time.
 //!
-//! Also pins the slot-ordering invariant the runtime side bakes
-//! in -- slot 0 must be the floor material, slot 1 the brick-wall
-//! material. If a future cooker reshape flips the order, this
-//! build fails loud and the runtime swap is a one-line patch.
+//! Also pins the minimal material invariant the runtime side bakes
+//! in -- slot 0 must exist because the example provides a slot-0
+//! fallback material at runtime.
 
 use psxed_project::{
     world_cook::{cook_world_grid, encode_world_grid_psxw},
-    NodeKind, ProjectDocument, ResourceData,
+    NodeKind, ProjectDocument,
 };
 
 const ROOM_PSXW: &str = "room.psxw";
-const FLOOR_PSXT_SUFFIX: &str = "floor.psxt";
-const BRICK_PSXT_SUFFIX: &str = "brick-wall.psxt";
 
 fn main() {
     // The starter is baked into psxed-project at compile time
@@ -43,44 +40,17 @@ fn main() {
     std::fs::write(&out_path, bytes).expect("write room.psxw to OUT_DIR");
 }
 
-/// The runtime-side example expects slot 0 = floor texture,
-/// slot 1 = brick-wall texture. The cooker assigns slots in
-/// first-use order while iterating sectors `[x * depth + z]`,
-/// so the starter (floor first, walls second) yields exactly
-/// that order. Pin it.
+/// The runtime-side example supplies material slot 0. The default
+/// starter project is intentionally tiny now, so don't pin the old
+/// floor+wall texture set here.
 fn assert_slot_ordering(
-    project: &ProjectDocument,
+    _project: &ProjectDocument,
     cooked: &psxed_project::world_cook::CookedWorldGrid,
 ) {
-    assert_eq!(
-        cooked.materials.len(),
-        2,
-        "starter cook must yield exactly 2 material slots, got {}",
-        cooked.materials.len()
-    );
-    expect_slot_texture(project, cooked, 0, FLOOR_PSXT_SUFFIX);
-    expect_slot_texture(project, cooked, 1, BRICK_PSXT_SUFFIX);
-}
-
-fn expect_slot_texture(
-    project: &ProjectDocument,
-    cooked: &psxed_project::world_cook::CookedWorldGrid,
-    slot: u16,
-    suffix: &str,
-) {
-    let entry = &cooked.materials[slot as usize];
-    assert_eq!(entry.slot, slot, "cooked material[{slot}].slot drifted");
-    let texture_id = entry
-        .texture
-        .unwrap_or_else(|| panic!("slot {slot} material has no texture"));
-    let texture = project
-        .resource(texture_id)
-        .unwrap_or_else(|| panic!("slot {slot} texture id missing from resources"));
-    let ResourceData::Texture { psxt_path } = &texture.data else {
-        panic!("slot {slot} resource is not a Texture");
-    };
-    assert!(
-        psxt_path.ends_with(suffix),
-        "slot {slot} expected texture ending with {suffix}, got {psxt_path}"
-    );
+    let entry = cooked
+        .materials
+        .first()
+        .unwrap_or_else(|| panic!("starter cook must yield at least one material slot"));
+    assert_eq!(entry.slot, 0, "first cooked material slot drifted");
+    assert!(entry.texture.is_some(), "slot 0 material has no texture");
 }
