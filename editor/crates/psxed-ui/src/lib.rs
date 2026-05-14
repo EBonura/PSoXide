@@ -39,8 +39,7 @@ use psxed_project::{
     WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
     HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
     MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-    MAX_WORLD_SECTOR_SIZE, MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_SECTOR_SIZE, MODEL_SCALE_ONE_Q8,
-    WORLD_SECTOR_SIZE_QUANTUM,
+    MIN_WORLD_CAMERA_DISTANCE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_PRESETS,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -273,11 +272,10 @@ pub struct EditorWorkspace {
     /// resource browser selection so repeated placement doesn't lose
     /// the chosen Model/Profile/Image after each click.
     place_resource: Option<ResourceId>,
-    /// Material the next Floor / Wall / Ceiling paint will use, when
-    /// set. `None` means "fall back to the name-based heuristic
-    /// (`floor → first 'floor' material, brick → first 'brick' …`)" --
-    /// which is also what fresh projects start with so painting works
-    /// before any material is hand-picked.
+    /// Material the next Floor / Wall / Ceiling paint will use when
+    /// pinned. `None` means Auto: use the selected Material resource
+    /// if one is active, otherwise fall back to a tool-specific
+    /// material name hint.
     brush_material: Option<ResourceId>,
     snap_to_grid: bool,
     snap_units: u16,
@@ -1373,6 +1371,7 @@ struct PrimitiveGizmoScreenAxis {
 
 #[derive(Debug, Clone)]
 struct NodeRotationGizmoScreenRing {
+    axis: PrimitiveGizmoAxis,
     center: Pos2,
     points: Vec<Pos2>,
 }
@@ -4315,6 +4314,14 @@ impl EditorWorkspace {
         self.preview_backface_wireframe
     }
 
+    /// Whether the Grid toolbar toggle is currently on. In 2D this
+    /// controls the editor's world-grid overlay; in 3D the frontend
+    /// uses it to gate the streaming chunk-boundary overlay so the
+    /// same button hides both grid-style affordances at once.
+    pub fn show_grid_enabled(&self) -> bool {
+        self.show_grid
+    }
+
     /// Currently-selected scene node. The frontend reads this so the
     /// 3D preview can highlight the selected entity.
     pub fn selected_node_id(&self) -> NodeId {
@@ -4984,7 +4991,11 @@ impl EditorWorkspace {
                 PrimitiveGizmoAxis::Y,
                 PrimitiveGizmoAxis::Z,
             ],
-            TransformGizmoMode::Rotate => &[PrimitiveGizmoAxis::Y],
+            TransformGizmoMode::Rotate => &[
+                PrimitiveGizmoAxis::X,
+                PrimitiveGizmoAxis::Y,
+                PrimitiveGizmoAxis::Z,
+            ],
             TransformGizmoMode::Scale => &[
                 PrimitiveGizmoAxis::X,
                 PrimitiveGizmoAxis::Y,
@@ -5054,7 +5065,11 @@ impl EditorWorkspace {
         DEFAULT_WORLD_SECTOR_SIZE
     }
 
-    fn node_rotation_gizmo_screen_ring(&self, rect: Rect) -> Option<NodeRotationGizmoScreenRing> {
+    fn node_rotation_gizmo_screen_ring_for_axis(
+        &self,
+        rect: Rect,
+        axis: PrimitiveGizmoAxis,
+    ) -> Option<NodeRotationGizmoScreenRing> {
         let targets = self.selected_node_gizmo_targets();
         if targets.is_empty() {
             return None;
@@ -5063,35 +5078,86 @@ impl EditorWorkspace {
         let camera = self.viewport_3d_camera();
         let center = project_world_to_viewport_screen(camera, rect, pivot)?;
         let base_radius = self.node_gizmo_axis_world_length(&targets) as f32 * 0.65;
-        let bound_radius = half[0].max(half[2]) * 1.35;
+        let bound_radius = half[0].max(half[1]).max(half[2]) * 1.35;
         let radius = base_radius.max(bound_radius).max(128.0);
         let mut points = Vec::with_capacity(49);
         for step in 0..=48 {
             let angle = step as f32 / 48.0 * std::f32::consts::TAU;
-            let world = [
-                pivot[0] + angle.cos() * radius,
-                pivot[1],
-                pivot[2] + angle.sin() * radius,
-            ];
+            // Ring lies in the plane perpendicular to `axis`. The
+            // ring's two basis vectors are the world axes that the
+            // chosen rotation keeps fixed.
+            let world = match axis {
+                PrimitiveGizmoAxis::X => [
+                    pivot[0],
+                    pivot[1] + angle.cos() * radius,
+                    pivot[2] + angle.sin() * radius,
+                ],
+                PrimitiveGizmoAxis::Y => [
+                    pivot[0] + angle.cos() * radius,
+                    pivot[1],
+                    pivot[2] + angle.sin() * radius,
+                ],
+                PrimitiveGizmoAxis::Z => [
+                    pivot[0] + angle.cos() * radius,
+                    pivot[1] + angle.sin() * radius,
+                    pivot[2],
+                ],
+            };
             if let Some(screen) = project_world_to_viewport_screen(camera, rect, world) {
                 points.push(screen);
             }
         }
-        (points.len() >= 8).then_some(NodeRotationGizmoScreenRing { center, points })
+        (points.len() >= 8).then_some(NodeRotationGizmoScreenRing {
+            axis,
+            center,
+            points,
+        })
+    }
+
+    fn node_rotation_gizmo_screen_rings(&self, rect: Rect) -> Vec<NodeRotationGizmoScreenRing> {
+        self.selected_node_rotation_axes()
+            .into_iter()
+            .filter_map(|axis| self.node_rotation_gizmo_screen_ring_for_axis(rect, axis))
+            .collect()
+    }
+
+    fn selected_node_rotation_axes(&self) -> Vec<PrimitiveGizmoAxis> {
+        let scene = self.project.active_scene();
+        let targets = self.selected_node_gizmo_targets();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let all_axes = [
+            PrimitiveGizmoAxis::X,
+            PrimitiveGizmoAxis::Y,
+            PrimitiveGizmoAxis::Z,
+        ];
+        let mut axes: Vec<PrimitiveGizmoAxis> = all_axes.to_vec();
+        for id in &targets {
+            let Some(node) = scene.node(*id) else {
+                continue;
+            };
+            let supported = node_rotation_axes(&node.kind);
+            axes.retain(|axis| supported.contains(axis));
+        }
+        axes
     }
 
     fn pick_node_gizmo_axis(&self, rect: Rect, pointer: Pos2) -> Option<PrimitiveGizmoAxis> {
         if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
             return self
-                .node_rotation_gizmo_screen_ring(rect)
-                .and_then(|ring| {
+                .node_rotation_gizmo_screen_rings(rect)
+                .into_iter()
+                .filter_map(|ring| {
                     ring.points
                         .windows(2)
                         .map(|pair| distance_to_segment_2d(pointer, pair[0], pair[1]))
                         .min_by(|a, b| a.total_cmp(b))
+                        .map(|distance| (distance, ring.axis))
                 })
-                .filter(|distance| *distance <= 12.0)
-                .map(|_| PrimitiveGizmoAxis::Y);
+                .filter(|(distance, _)| *distance <= 12.0)
+                .min_by(|(a, _), (b, _)| a.total_cmp(b))
+                .map(|(_, axis)| axis);
         }
         self.node_gizmo_screen_axes(rect)
             .into_iter()
@@ -5106,25 +5172,29 @@ impl EditorWorkspace {
 
     fn draw_node_gizmo(&self, painter: &egui::Painter, rect: Rect) {
         if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
-            let Some(ring) = self.node_rotation_gizmo_screen_ring(rect) else {
+            let rings = self.node_rotation_gizmo_screen_rings(rect);
+            if rings.is_empty() {
                 return;
-            };
-            let active = self.node_gizmo_drag.is_some();
-            let color = PrimitiveGizmoAxis::Y.color();
-            let stroke_width = if active { 4.0 } else { 2.5 };
-            painter.circle_filled(ring.center, 4.0, Color32::from_rgb(235, 242, 248));
-            for pair in ring.points.windows(2) {
-                painter.line_segment([pair[0], pair[1]], Stroke::new(stroke_width, color));
             }
-            if let Some(label_pos) = ring.points.first().copied() {
-                painter.circle_filled(label_pos, if active { 6.0 } else { 5.0 }, color);
-                painter.text(
-                    label_pos + Vec2::new(14.0, 0.0),
-                    Align2::CENTER_CENTER,
-                    "Y",
-                    FontId::monospace(12.0),
-                    color,
-                );
+            let active_axis = self.node_gizmo_drag.as_ref().map(|drag| drag.axis);
+            painter.circle_filled(rings[0].center, 4.0, Color32::from_rgb(235, 242, 248));
+            for ring in &rings {
+                let active = active_axis == Some(ring.axis);
+                let color = ring.axis.color();
+                let stroke_width = if active { 4.0 } else { 2.5 };
+                for pair in ring.points.windows(2) {
+                    painter.line_segment([pair[0], pair[1]], Stroke::new(stroke_width, color));
+                }
+                if let Some(label_pos) = ring.points.first().copied() {
+                    painter.circle_filled(label_pos, if active { 6.0 } else { 5.0 }, color);
+                    painter.text(
+                        label_pos + Vec2::new(14.0, 0.0),
+                        Align2::CENTER_CENTER,
+                        ring.axis.label(),
+                        FontId::monospace(12.0),
+                        color,
+                    );
+                }
             }
             return;
         }
@@ -5406,7 +5476,9 @@ impl EditorWorkspace {
             return false;
         }
         let screen_axis_delta = if mode == TransformGizmoMode::Rotate {
-            let Some(ring) = self.node_rotation_gizmo_screen_ring(rect) else {
+            let Some(ring) = self
+                .node_rotation_gizmo_screen_ring_for_axis(rect, axis)
+            else {
                 return false;
             };
             ring.points
@@ -5470,7 +5542,12 @@ impl EditorWorkspace {
         }
         let pixels_per_step = match drag.mode {
             TransformGizmoMode::Move | TransformGizmoMode::Scale => 8.0,
-            TransformGizmoMode::Rotate => 4.0,
+            // Rotation steps are 1° each, so a low pixels-per-step
+            // makes the ring feel hair-trigger. 12 px / ° (a full
+            // 360° revolution costs roughly screen-width of drag)
+            // matches the editor's expectation that fine prop
+            // alignment is doable without modifier keys.
+            TransformGizmoMode::Rotate => 12.0,
         };
         let pointer_delta = pointer - drag.start_pointer;
         let unit = drag.screen_axis / axis_len_sq.sqrt();
@@ -5522,7 +5599,7 @@ impl EditorWorkspace {
                 }
                 TransformGizmoMode::Rotate => {
                     node.transform.rotation_degrees =
-                        node_gizmo_rotation(node, target.start_rotation_degrees, steps);
+                        node_gizmo_rotation(node, target.start_rotation_degrees, axis, steps);
                 }
                 TransformGizmoMode::Scale => {
                     apply_node_gizmo_scale(node, target.start_image_prop_size, axis, steps);
@@ -6598,13 +6675,8 @@ impl EditorWorkspace {
         picked_face: Option<FaceRef>,
         hit_world: [f32; 3],
     ) {
-        let floor_mat = self
-            .brush_material
-            .or_else(|| self.default_brush_material("floor"));
-        let wall_mat = self
-            .brush_material
-            .or_else(|| self.default_brush_material("brick"))
-            .or(floor_mat);
+        let floor_mat = self.paint_material_for("floor");
+        let wall_mat = self.paint_material_for("brick").or(floor_mat);
         let sector_size_i = self.room_sector_size(room_id).unwrap_or(1024);
         let sector_size = sector_size_i as f32;
         let cell_center = self
@@ -6711,6 +6783,8 @@ impl EditorWorkspace {
                                 width: size,
                                 height: size,
                                 cylindrical_billboard: false,
+                                collision_enabled: false,
+                                collision_size: [size, size, size],
                             },
                         )
                     }
@@ -10814,10 +10888,10 @@ impl EditorWorkspace {
     }
 
     /// Toolbar combobox for the active brush material. Selecting
-    /// "Auto" leaves `brush_material = None` so paint falls back to
-    /// the per-tool name heuristic (`floor → "floor" material,
-    /// brick → "brick" material`); picking a specific entry pins
-    /// every Floor / Wall / Ceiling stroke to that material.
+    /// "Auto" leaves `brush_material = None` so paint can use the
+    /// selected Material resource first, then a per-tool name hint;
+    /// picking a specific entry pins every Floor / Wall / Ceiling
+    /// stroke to that material.
     /// Toolbar selector for the Place tool's node kind. Shown
     /// only while `active_tool == Place` -- otherwise the brush
     /// material picker takes the same slot.
@@ -11152,9 +11226,7 @@ impl EditorWorkspace {
             .selected_text(label)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.brush_material, None, "Auto")
-                    .on_hover_text(
-                    "Pick by tool: Floor uses the first 'floor' material, Wall the first 'brick'.",
-                );
+                    .on_hover_text("Use the selected material, then fall back by tool.");
                 for (id, name) in &materials {
                     ui.selectable_value(&mut self.brush_material, Some(*id), name);
                 }
@@ -11332,6 +11404,21 @@ impl EditorWorkspace {
             .find(|(_, name)| name.to_ascii_lowercase().contains(&lower))
             .or_else(|| materials.first())
             .map(|(id, _)| *id)
+    }
+
+    fn selected_material_resource(&self) -> Option<ResourceId> {
+        let id = self.selected_resource?;
+        matches!(
+            self.project.resource(id).map(|resource| &resource.data),
+            Some(ResourceData::Material(_))
+        )
+        .then_some(id)
+    }
+
+    fn paint_material_for(&self, default_name_hint: &str) -> Option<ResourceId> {
+        self.brush_material
+            .or_else(|| self.selected_material_resource())
+            .or_else(|| self.default_brush_material(default_name_hint))
     }
 
     fn first_material(&self) -> Option<ResourceId> {
@@ -14408,11 +14495,16 @@ fn draw_transform_policy_editor(
         kind if kind.is_component() => false,
         NodeKind::Entity | NodeKind::ImageProp { .. } => {
             let mut changed = false;
+            let allow_full_rotation = matches!(node.kind, NodeKind::ImageProp { .. });
             egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
                 .default_open(true)
                 .show(ui, |ui| {
-                    changed |=
-                        entity_transform_editor(ui, &mut node.transform, inherited_sector_size);
+                    changed |= entity_transform_editor(
+                        ui,
+                        &mut node.transform,
+                        inherited_sector_size,
+                        allow_full_rotation,
+                    );
                 });
             changed
         }
@@ -14448,16 +14540,16 @@ fn draw_world_grid_settings(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Sector Size").color(STUDIO_TEXT_WEAK));
-                let mut value = sector_size;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut value)
-                            .speed(WORLD_SECTOR_SIZE_QUANTUM as f64)
-                            .range(MIN_WORLD_SECTOR_SIZE..=MAX_WORLD_SECTOR_SIZE),
-                    )
-                    .changed()
-                {
-                    *world_sector_size_change = Some(psxed_project::snap_world_sector_size(value));
+                let mut next = sector_size;
+                egui::ComboBox::from_id_salt("world-sector-size")
+                    .selected_text(sector_size.to_string())
+                    .show_ui(ui, |ui| {
+                        for &preset in WORLD_SECTOR_SIZE_PRESETS {
+                            ui.selectable_value(&mut next, preset, preset.to_string());
+                        }
+                    });
+                if next != sector_size {
+                    *world_sector_size_change = Some(psxed_project::snap_world_sector_size(next));
                     changed = true;
                 }
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
@@ -14493,6 +14585,80 @@ fn draw_world_grid_settings(
                 changed |= ui
                     .checkbox(&mut sky.match_room_fog, "Match room fog")
                     .changed();
+                ui.separator();
+                let cloud = &mut sky.cloud_layer;
+                changed |= ui.checkbox(&mut cloud.enabled, "Cloud Layer").changed();
+                ui.add_enabled_ui(cloud.enabled, |ui| {
+                    changed |= color_editor(ui, "Cloud Color", &mut cloud.color);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Density").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(egui::Slider::new(&mut cloud.density, 0..=255))
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Altitude").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cloud.altitude)
+                                    .speed(64.0)
+                                    .range(64..=u16::MAX as i32),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Extent").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cloud.extent)
+                                    .speed(256.0)
+                                    .range(1024..=u16::MAX as i32),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Tiles").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(egui::Slider::new(&mut cloud.tile_count, 1..=8))
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Scroll").color(STUDIO_TEXT_WEAK));
+                        let mut sx = cloud.scroll_speed[0];
+                        let mut sz = cloud.scroll_speed[1];
+                        let sx_changed = ui
+                            .add(
+                                egui::DragValue::new(&mut sx)
+                                    .speed(1.0)
+                                    .range(-256..=256)
+                                    .prefix("X "),
+                            )
+                            .changed();
+                        let sz_changed = ui
+                            .add(
+                                egui::DragValue::new(&mut sz)
+                                    .speed(1.0)
+                                    .range(-256..=256)
+                                    .prefix("Z "),
+                            )
+                            .changed();
+                        if sx_changed || sz_changed {
+                            cloud.scroll_speed = [sx, sz];
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Noise Seed").color(STUDIO_TEXT_WEAK));
+                        let mut seed = cloud.noise_seed;
+                        if ui
+                            .add(egui::DragValue::new(&mut seed).speed(1.0).hexadecimal(8, false, true))
+                            .changed()
+                        {
+                            cloud.noise_seed = seed;
+                            changed = true;
+                        }
+                    });
+                });
             }
         });
     egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Camera"))
@@ -14670,6 +14836,7 @@ fn entity_transform_editor(
     ui: &mut egui::Ui,
     transform: &mut psxed_project::Transform3,
     sector_size: i32,
+    allow_full_rotation: bool,
 ) -> bool {
     let mut changed = false;
     let sector_size = sector_size.max(1);
@@ -14710,23 +14877,60 @@ fn entity_transform_editor(
 
     ui.horizontal(|ui| {
         ui.label(icons::text(icons::ROTATE_3D, 12.0).color(STUDIO_TEXT_WEAK));
-        ui.label("Y Rotation");
-        let mut yaw = transform.rotation_degrees[1].rem_euclid(360.0);
-        if ui
+        ui.label("Rotation");
+        let mut x_rot = transform.rotation_degrees[0].rem_euclid(360.0);
+        let mut y_rot = transform.rotation_degrees[1].rem_euclid(360.0);
+        let mut z_rot = transform.rotation_degrees[2].rem_euclid(360.0);
+        let mut rot_changed = false;
+        if allow_full_rotation {
+            rot_changed |= ui
+                .add(
+                    egui::DragValue::new(&mut x_rot)
+                        .prefix("X ")
+                        .speed(1.0)
+                        .range(0.0..=359.0),
+                )
+                .changed();
+        }
+        rot_changed |= ui
             .add(
-                egui::DragValue::new(&mut yaw)
+                egui::DragValue::new(&mut y_rot)
                     .prefix("Y ")
                     .speed(1.0)
                     .range(0.0..=359.0),
             )
-            .changed()
-        {
-            transform.rotation_degrees = [0.0, yaw.round().rem_euclid(360.0), 0.0];
+            .changed();
+        if allow_full_rotation {
+            rot_changed |= ui
+                .add(
+                    egui::DragValue::new(&mut z_rot)
+                        .prefix("Z ")
+                        .speed(1.0)
+                        .range(0.0..=359.0),
+                )
+                .changed();
+        }
+        if rot_changed {
+            transform.rotation_degrees = [
+                if allow_full_rotation {
+                    x_rot.round().rem_euclid(360.0)
+                } else {
+                    0.0
+                },
+                y_rot.round().rem_euclid(360.0),
+                if allow_full_rotation {
+                    z_rot.round().rem_euclid(360.0)
+                } else {
+                    0.0
+                },
+            ];
             changed = true;
         }
     });
 
-    if transform.rotation_degrees[0] != 0.0 || transform.rotation_degrees[2] != 0.0 {
+    if !allow_full_rotation
+        && (transform.rotation_degrees[0] != 0.0 || transform.rotation_degrees[2] != 0.0)
+    {
         transform.rotation_degrees[0] = 0.0;
         transform.rotation_degrees[2] = 0.0;
         changed = true;
@@ -14816,11 +15020,55 @@ fn node_gizmo_translation(
     }
 }
 
-fn node_gizmo_rotation(node: &psxed_project::SceneNode, start: [f32; 3], steps: i32) -> [f32; 3] {
+fn node_gizmo_rotation(
+    node: &psxed_project::SceneNode,
+    start: [f32; 3],
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+) -> [f32; 3] {
     if !node_kind_supports_transform_gizmo(&node.kind, TransformGizmoMode::Rotate) {
         return start;
     }
-    [0.0, (start[1] + steps as f32).rem_euclid(360.0), 0.0]
+    let supported = node_rotation_axes(&node.kind);
+    if !supported.contains(&axis) {
+        return start;
+    }
+    let idx = match axis {
+        PrimitiveGizmoAxis::X => 0,
+        PrimitiveGizmoAxis::Y => 1,
+        PrimitiveGizmoAxis::Z => 2,
+    };
+    let mut result = start;
+    result[idx] = (start[idx] + steps as f32).rem_euclid(360.0);
+    // Force any unsupported axes back to zero so node kinds with
+    // legacy yaw-only semantics don't accumulate stale roll/pitch.
+    for (i, _) in [
+        PrimitiveGizmoAxis::X,
+        PrimitiveGizmoAxis::Y,
+        PrimitiveGizmoAxis::Z,
+    ]
+    .iter()
+    .enumerate()
+    .filter(|(_, a)| !supported.contains(a))
+    {
+        result[i] = 0.0;
+    }
+    result
+}
+
+/// Rotation axes supported by `kind`'s transform gizmo. ImageProps
+/// rotate freely around all three world axes; every other gizmo
+/// target keeps the legacy yaw-only behavior so entity / spawn /
+/// trigger transforms stay flat without stray pitch / roll.
+fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
+    match kind {
+        NodeKind::ImageProp { .. } => &[
+            PrimitiveGizmoAxis::X,
+            PrimitiveGizmoAxis::Y,
+            PrimitiveGizmoAxis::Z,
+        ],
+        _ => &[PrimitiveGizmoAxis::Y],
+    }
 }
 
 fn apply_node_gizmo_scale(
@@ -15175,6 +15423,8 @@ fn draw_node_kind_editor(
             width,
             height,
             cylindrical_billboard,
+            collision_enabled,
+            collision_size,
         } => {
             ui.weak(
                 "Flat material-backed image plane. Transform position is the bottom-center anchor.",
@@ -15209,6 +15459,46 @@ fn draw_node_kind_editor(
             changed |= ui
                 .checkbox(cylindrical_billboard, "Face camera cylindrically")
                 .changed();
+            ui.separator();
+            changed |= ui.checkbox(collision_enabled, "Collision").changed();
+            ui.add_enabled_ui(*collision_enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Box Size").color(STUDIO_TEXT_WEAK));
+                    let mut box_x = i32::from(collision_size[0]);
+                    let mut box_y = i32::from(collision_size[1]);
+                    let mut box_z = i32::from(collision_size[2]);
+                    let box_changed = ui
+                        .add(
+                            egui::DragValue::new(&mut box_x)
+                                .speed(1.0)
+                                .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
+                                .prefix("X "),
+                        )
+                        .changed()
+                        | ui.add(
+                            egui::DragValue::new(&mut box_y)
+                                .speed(1.0)
+                                .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
+                                .prefix("Y "),
+                        )
+                        .changed()
+                        | ui.add(
+                            egui::DragValue::new(&mut box_z)
+                                .speed(1.0)
+                                .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
+                                .prefix("Z "),
+                        )
+                        .changed();
+                    if box_changed {
+                        *collision_size = [
+                            box_x.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16,
+                            box_y.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16,
+                            box_z.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16,
+                        ];
+                        changed = true;
+                    }
+                });
+            });
         }
         NodeKind::ModelRenderer { model, material: _ } => {
             ui.weak("Component: renders a Model from the parent Entity transform.");
@@ -26258,9 +26548,10 @@ mod tests {
         let mut grid = WorldGrid::empty(2, 1, 1024);
         grid.set_floor(0, 0, 0, None);
         grid.set_floor(1, 0, 0, None);
-        let room = project
-            .active_scene_mut()
-            .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
         let coords = [(0u16, 0u16), (1u16, 0u16)];
 
@@ -27542,6 +27833,8 @@ mod tests {
                 width: 1024,
                 height: 1024,
                 cylindrical_billboard: false,
+                collision_enabled: false,
+                collision_size: [1024, 1024, 1024],
             },
         );
         let mut workspace =
@@ -27552,12 +27845,12 @@ mod tests {
 
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
         let ring = workspace
-            .node_rotation_gizmo_screen_ring(viewport)
+            .node_rotation_gizmo_screen_ring_for_axis(viewport, PrimitiveGizmoAxis::Y)
             .expect("rotation ring projects");
         let start = ring.points[0];
         let unit = (start - ring.center).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, start));
-        workspace.update_node_gizmo_drag(start + unit * 8.0);
+        workspace.update_node_gizmo_drag(start + unit * 24.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(prop).unwrap();
@@ -27587,6 +27880,8 @@ mod tests {
                 width: 1024,
                 height: 1024,
                 cylindrical_billboard: false,
+                collision_enabled: false,
+                collision_size: [1024, 1024, 1024],
             },
         );
         let mut workspace =
@@ -27673,7 +27968,7 @@ mod tests {
         let floor = project.add_resource(
             "Floor Texture",
             ResourceData::Texture {
-                psxt_path: "assets/textures/floor.psxt".to_string(),
+                psxt_path: "assets/textures/delven_01_slateflr1a_q2.psxt".to_string(),
             },
         );
         let model = project.add_resource(
@@ -27783,6 +28078,63 @@ mod tests {
     }
 
     #[test]
+    fn selected_material_resource_paints_new_floor_ceiling_and_wall() {
+        let mut project = ProjectDocument::new("paint-selected-material");
+        project.add_resource(
+            "Other",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let selected = project.add_resource(
+            "Selected",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_resource_selection(selected);
+
+        workspace.run_paint_action(ViewTool::PaintFloor, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        workspace.run_paint_action(
+            ViewTool::PaintCeiling,
+            room,
+            0,
+            0,
+            None,
+            [512.0, 1024.0, 512.0],
+        );
+        workspace.run_paint_action(
+            ViewTool::PaintWall,
+            room,
+            0,
+            0,
+            Some(FaceRef {
+                room,
+                sx: 0,
+                sz: 0,
+                kind: FaceKind::Wall {
+                    dir: GridDirection::North,
+                    stack: 0,
+                },
+            }),
+            [512.0, 0.0, 1024.0],
+        );
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let sector = grid.sector(0, 0).unwrap();
+        assert_eq!(sector.floor.as_ref().unwrap().material, Some(selected));
+        assert_eq!(sector.ceiling.as_ref().unwrap().material, Some(selected));
+        assert_eq!(
+            sector.walls.get(GridDirection::North)[0].material,
+            Some(selected)
+        );
+    }
+
+    #[test]
     fn place_image_prop_with_selected_material_creates_node() {
         let mut project = ProjectDocument::new("image-prop-material-place");
         let material = project.add_resource(
@@ -27814,6 +28166,7 @@ mod tests {
             width,
             height,
             cylindrical_billboard,
+            ..
         } = &node.kind
         else {
             panic!("expected image prop node");
@@ -28911,8 +29264,12 @@ mod tests {
 
         assert!(rows.iter().any(|row| row.name == "res://"));
         assert!(rows.iter().any(|row| row.name == "main.room"));
-        assert!(rows.iter().any(|row| row.name == "floor.psxt"));
-        assert!(rows.iter().any(|row| row.name == "brick_wall.psxt"));
+        assert!(rows
+            .iter()
+            .any(|row| row.name == "delven_01_slateflr1a_q2.psxt"));
+        assert!(rows
+            .iter()
+            .any(|row| row.name == "delven_38_ground4b_q0.psxt"));
         assert!(rows.iter().any(|row| row.name == "characters"));
         assert!(
             rows.iter()
@@ -28921,7 +29278,7 @@ mod tests {
         );
         assert!(rows
             .iter()
-            .any(|row| row.name == "brick.mat" && row.resource.is_some()));
+            .any(|row| row.name == "delven_slateflr1a_q2.mat" && row.resource.is_some()));
     }
 
     #[test]
@@ -28938,31 +29295,37 @@ mod tests {
     #[test]
     fn resource_filter_and_search_match_expected_resources() {
         let project = ProjectDocument::starter();
-        let floor_texture = project
+        let delven_texture = project
             .resources
             .iter()
-            .find(|resource| resource.name == "floor.psxt")
+            .find(|resource| {
+                resource.name == "Delven slateflr1a q2"
+                    && matches!(resource.data, ResourceData::Texture { .. })
+            })
             .unwrap();
-        let brick_material = project
+        let delven_material = project
             .resources
             .iter()
-            .find(|resource| resource.name == "Brick")
+            .find(|resource| {
+                resource.name == "Delven stonebrk1b q3"
+                    && matches!(resource.data, ResourceData::Material(_))
+            })
             .unwrap();
 
         assert!(resource_matches_filter(
-            floor_texture,
+            delven_texture,
             ResourceFilter::Texture,
-            "floor"
+            "slate"
         ));
         assert!(!resource_matches_filter(
-            floor_texture,
+            delven_texture,
             ResourceFilter::Material,
-            "floor"
+            "slate"
         ));
         assert!(resource_matches_filter(
-            brick_material,
+            delven_material,
             ResourceFilter::Material,
-            "brick"
+            "stonebrk"
         ));
     }
 
