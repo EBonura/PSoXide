@@ -37,7 +37,7 @@ use psx_iso::{Disc, Exe};
 use psxed_project::{NodeId, ProjectDocument};
 use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
-use crate::app::resolve_bios_path;
+use crate::app::bus_from_configured_bios;
 
 const NTSC_CPU_CYCLES_PER_VBLANK: u64 = 33_868_800 / 60;
 const PACED20_INTERVAL_VBLANKS: u64 = 3;
@@ -347,19 +347,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
         }
     };
 
-    // BIOS: settings override if set, else PSOXIDE_BIOS.
-    let bios_path = resolve_bios_path(&settings)?;
-
-    let bios =
-        std::fs::read(&bios_path).map_err(|e| format!("BIOS {}: {e}", bios_path.display()))?;
-    let mut bus = Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))?;
     let mut cpu = Cpu::new();
-
-    // `--dump-hw` needs the GP0 packet log armed; it stays off by
-    // default to avoid the per-instruction push cost.
-    if args.dump_hw.is_some() {
-        bus.gpu.enable_cmd_log();
-    }
 
     // Dispatch on extension: .bin = disc, .exe = homebrew side-load.
     let ext = game_path
@@ -367,18 +355,21 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
-    match ext.as_str() {
+    let mut bus = match ext.as_str() {
         "exe" => {
+            let mut bus = Bus::new_without_bios();
+            if args.dump_hw.is_some() {
+                bus.gpu.enable_cmd_log();
+            }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
             let exe = Exe::parse(&bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
             bus.load_exe_payload(exe.load_addr, &exe.payload);
             bus.clear_exe_bss(exe.bss_addr, exe.bss_size);
             cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
             // Match the GUI launch path: side-loaded EXEs need the
-            // HLE syscall tables even for users with old settings.ron
-            // files where the former preference is still false. The
-            // editor-playtest runtime also gates on analog mode, so keep
-            // headless parity with embedded Play by forcing it here.
+            // HLE syscall tables. No user BIOS is needed because the CPU
+            // starts in the homebrew payload and BIOS table calls are
+            // intercepted by HLE dispatch.
             bus.enable_hle_bios();
             attach_headless_playtest_pad(&mut bus);
             eprintln!(
@@ -387,8 +378,13 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
                 exe.initial_pc,
                 exe.payload.len()
             );
+            bus
         }
         "bin" | "iso" => {
+            let mut bus = bus_from_configured_bios(&settings)?;
+            if args.dump_hw.is_some() {
+                bus.gpu.enable_cmd_log();
+            }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
             let disc = Disc::from_bin(bytes);
             maybe_fast_boot_disc(
@@ -401,8 +397,13 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus);
             eprintln!("[cli] mounted disc {}", game_path.display());
+            bus
         }
         "cue" => {
+            let mut bus = bus_from_configured_bios(&settings)?;
+            if args.dump_hw.is_some() {
+                bus.gpu.enable_cmd_log();
+            }
             let disc = psoxide_settings::library::load_disc_from_cue(&game_path)?;
             maybe_fast_boot_disc(
                 &mut bus,
@@ -414,8 +415,13 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus);
             eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
+            bus
         }
         "ccd" => {
+            let mut bus = bus_from_configured_bios(&settings)?;
+            if args.dump_hw.is_some() {
+                bus.gpu.enable_cmd_log();
+            }
             let disc = psoxide_settings::library::load_disc_from_ccd(&game_path)?;
             maybe_fast_boot_disc(
                 &mut bus,
@@ -427,11 +433,12 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus);
             eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
+            bus
         }
         other => {
             return Err(format!("unsupported file extension: .{other}"));
         }
-    }
+    };
 
     if args.hold_forward || args.hold_run {
         let mut buttons = ButtonState::NONE;

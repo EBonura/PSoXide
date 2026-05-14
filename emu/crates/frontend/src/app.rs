@@ -256,24 +256,11 @@ impl AppState {
 
         // Legacy env-var side-load path: if PSOXIDE_EXE or
         // PSOXIDE_DISC is set, honour it so existing developer
-        // workflows keep working. The library UI is the
-        // forward path for everyone else.
+        // workflows keep working. The library UI is the forward path
+        // for everyone else. Homebrew EXE side-loads use the same
+        // synthetic/HLE BIOS path as the Menu and editor Play flows.
         let mut cpu = Cpu::new();
-        let bus = load_bus(&settings).map(|mut bus| {
-            if let Some(exe) = load_exe() {
-                bus.load_exe_payload(exe.load_addr, &exe.payload);
-                bus.clear_exe_bss(exe.bss_addr, exe.bss_size);
-                cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
-                bus.enable_hle_bios();
-                bus.attach_digital_pad_port1();
-                eprintln!(
-                    "[frontend] side-loaded EXE: entry=0x{:08x} payload={}B (hle-bios + pad1)",
-                    exe.initial_pc,
-                    exe.payload.len()
-                );
-            }
-            bus
-        });
+        let bus = load_initial_bus(&settings, &mut cpu);
 
         let initial_gpu_resync_generation = if bus.is_some() { 1 } else { 0 };
         let editor_project_dir_seen = editor.project_dir().to_path_buf();
@@ -337,17 +324,15 @@ impl AppState {
             .sync_fast_boot_label(out.settings.emulator.fast_boot_disc);
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
-        if settings_setup_incomplete(&out.settings) {
-            out.select_settings_category();
-        }
         out
     }
 }
 
 impl AppState {
     /// Rebuild the emulator state around `entry`. Same flow the
-    /// headless `launch` CLI runs: load BIOS, mount the disc or
-    /// side-load the EXE, plug a pad into port 1. On success the
+    /// headless `launch` CLI runs: mount the disc or side-load the
+    /// EXE, plug a pad into port 1, and use a real BIOS only for
+    /// retail disc paths. On success the
     /// emulator is paused at the reset vector (or the EXE entry
     /// point); the user clicks Run to start stepping.
     pub fn launch_entry(&mut self, entry: &LibraryEntry) -> Result<(), String> {
@@ -357,15 +342,12 @@ impl AppState {
         if let Err(e) = self.flush_memcard_port1() {
             eprintln!("[frontend] memcard flush before launch: {e}");
         }
-        let bios_path = resolve_bios_path(&self.settings)?;
-        let bios =
-            std::fs::read(&bios_path).map_err(|e| format!("BIOS {}: {e}", bios_path.display()))?;
-        let mut bus = Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))?;
         let mut cpu = Cpu::new();
         let mut boot_mode = "EXE";
 
-        match entry.kind {
+        let bus = match entry.kind {
             GameKind::Exe => {
+                let mut bus = Bus::new_without_bios();
                 let bytes = std::fs::read(&entry.path)
                     .map_err(|e| format!("{}: {e}", entry.path.display()))?;
                 let exe = Exe::parse(&bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
@@ -375,18 +357,16 @@ impl AppState {
                 // HLE BIOS is effectively mandatory for side-loaded
                 // EXEs: the kernel's syscall tables (A0 / B0 / C0)
                 // + cold-init state aren't populated when we jump
-                // straight to the EXE entry instead of the reset
-                // vector. Previously gated on
-                // `settings.emulator.hle_bios_for_side_load` -- the
-                // gate stayed on `false` (derived Default) for
-                // users with a pre-existing settings.ron, which
-                // made EXEs launched from the Menu render blank
-                // while the env-var path `PSOXIDE_EXE=…` (HLE
-                // unconditional) worked. Both paths now match.
+                // straight to the EXE entry instead of the reset vector.
+                // A zero-filled synthetic BIOS is enough because CPU
+                // execution starts in the homebrew payload and BIOS
+                // table calls are intercepted by HLE dispatch.
                 bus.enable_hle_bios();
                 bus.attach_digital_pad_port1();
+                bus
             }
             GameKind::DiscBin | GameKind::DiscIso => {
+                let mut bus = bus_from_configured_bios(&self.settings)?;
                 let bytes = std::fs::read(&entry.path)
                     .map_err(|e| format!("{}: {e}", entry.path.display()))?;
                 if bytes.len() < SECTOR_BYTES {
@@ -414,8 +394,10 @@ impl AppState {
                 let mc_path = self.paths.memcard_file(&entry.id, 1);
                 let mc_bytes = std::fs::read(&mc_path).unwrap_or_default();
                 bus.attach_memcard_port1(mc_bytes);
+                bus
             }
             GameKind::DiscCue | GameKind::DiscCcd => {
+                let mut bus = bus_from_configured_bios(&self.settings)?;
                 let disc = match entry.kind {
                     GameKind::DiscCue => psoxide_settings::library::load_disc_from_cue(&entry.path),
                     GameKind::DiscCcd => psoxide_settings::library::load_disc_from_ccd(&entry.path),
@@ -436,6 +418,7 @@ impl AppState {
                 let mc_path = self.paths.memcard_file(&entry.id, 1);
                 let mc_bytes = std::fs::read(&mc_path).unwrap_or_default();
                 bus.attach_memcard_port1(mc_bytes);
+                bus
             }
             GameKind::Unknown => {
                 return Err(format!(
@@ -443,7 +426,7 @@ impl AppState {
                     entry.path.display()
                 ));
             }
-        }
+        };
 
         // Swap everything at once -- no half-loaded state. Start in
         // the running state so the user sees the game boot
@@ -806,11 +789,6 @@ impl AppState {
             .map_err(|e| format!("save settings.ron: {e}"))
     }
 
-    /// True when no BIOS can be resolved from settings or env.
-    pub fn bios_path_missing(&self) -> bool {
-        !effective_bios_configured(&self.settings)
-    }
-
     /// True when the user game-library path is blank.
     pub fn games_path_missing(&self) -> bool {
         self.settings.paths.game_library.trim().is_empty()
@@ -818,10 +796,8 @@ impl AppState {
 
     /// Warning banner to show at the top of the Menu, if any.
     pub fn menu_setup_warning(&self) -> Option<&'static str> {
-        if self.bios_path_missing() {
-            Some("please chose a bios path")
-        } else if self.games_path_missing() {
-            Some("please chose a games path")
+        if self.games_path_missing() {
+            Some("choose a games path to scan retail discs")
         } else {
             None
         }
@@ -1251,10 +1227,7 @@ impl AppState {
     }
 
     fn load_embedded_playtest_disc(&mut self) -> Result<(), String> {
-        let bios_path = resolve_bios_path(&self.settings)?;
-        let bios =
-            std::fs::read(&bios_path).map_err(|e| format!("BIOS {}: {e}", bios_path.display()))?;
-        let mut bus = Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))?;
+        let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
 
         let disc_path = build_embedded_playtest_disc()?;
@@ -1267,9 +1240,10 @@ impl AppState {
             ));
         }
         let disc = Disc::from_bin(disc_bytes);
-        // Embedded Play should feel like the old side-load path: no BIOS
-        // logo wait, but the game still runs from a mounted disc image so
-        // future CD streaming code has a real disc available.
+        // Embedded Play is PSoXide-authored homebrew: no user BIOS is
+        // required. The runtime fast-boots with HLE BIOS dispatch, while
+        // still mounting a real disc image so CD streaming exercises the
+        // same path as exported project builds.
         fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &disc_path);
         bus.cdrom.insert_disc(Some(disc));
         bus.attach_digital_pad_port1();
@@ -1469,12 +1443,11 @@ pub(crate) fn resolve_bios_path(settings: &Settings) -> Result<PathBuf, String> 
     }
 }
 
-fn effective_bios_configured(settings: &Settings) -> bool {
-    !settings.paths.bios.trim().is_empty() || std::env::var_os("PSOXIDE_BIOS").is_some()
-}
-
-fn settings_setup_incomplete(settings: &Settings) -> bool {
-    !effective_bios_configured(settings) || settings.paths.game_library.trim().is_empty()
+pub(crate) fn bus_from_configured_bios(settings: &Settings) -> Result<Bus, String> {
+    let bios_path = resolve_bios_path(settings)?;
+    let bios =
+        std::fs::read(&bios_path).map_err(|e| format!("BIOS {}: {e}", bios_path.display()))?;
+    Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))
 }
 
 fn path_parent_or_self(value: &str) -> Option<PathBuf> {
@@ -1663,6 +1636,27 @@ fn maybe_fast_boot_disc_path(
             "BIOS boot"
         }
     }
+}
+
+fn load_initial_bus(settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
+    if let Some(exe) = load_exe() {
+        let mut bus = Bus::new_without_bios();
+        bus.load_exe_payload(exe.load_addr, &exe.payload);
+        bus.clear_exe_bss(exe.bss_addr, exe.bss_size);
+        cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
+        bus.enable_hle_bios();
+        bus.attach_digital_pad_port1();
+        if let Some(disc) = load_disc() {
+            bus.cdrom.insert_disc(Some(disc));
+        }
+        eprintln!(
+            "[frontend] side-loaded EXE: entry=0x{:08x} payload={}B (hle-bios + pad1)",
+            exe.initial_pc,
+            exe.payload.len()
+        );
+        return Some(bus);
+    }
+    load_bus(settings)
 }
 
 fn load_bus(settings: &Settings) -> Option<Bus> {
