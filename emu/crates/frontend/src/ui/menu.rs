@@ -53,6 +53,9 @@ pub enum MenuAction {
     /// the Games / Examples categories so users can trigger a
     /// rescan without leaving the Menu.
     RescanLibrary,
+    /// Build all public SDK/engine examples, then rescan the
+    /// library once the background make job completes.
+    BuildExamples,
     /// Enter or leave the host-side editor workspace.
     ToggleEditorWorkspace,
     /// Pick and persist the BIOS image path.
@@ -666,9 +669,14 @@ fn build_examples_category(examples: &[LibraryItem]) -> Category {
     let mut items = Vec::with_capacity(examples.len() + 1);
     if examples.is_empty() {
         items.push(MenuItem {
-            label: "No homebrew EXEs found".into(),
+            label: "Build public examples".into(),
+            action: MenuAction::BuildExamples,
+            value: Some("make examples".into()),
+        });
+        items.push(MenuItem {
+            label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
-            value: Some("Refresh".into()),
+            value: Some("↻".into()),
         });
     } else {
         for e in examples {
@@ -847,6 +855,8 @@ mod tests {
         let s = MenuState::new();
         let first = s.categories[0].items.first().unwrap();
         assert_eq!(first.action, MenuAction::RescanLibrary);
+        let first_example = s.categories[1].items.first().unwrap();
+        assert_eq!(first_example.action, MenuAction::BuildExamples);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
@@ -114,6 +114,8 @@ pub struct AppState {
     editor_project_dir_seen: PathBuf,
     /// Deferred action attached to the currently running editor build.
     editor_build_completion: Option<EditorBuildCompletion>,
+    /// Background `make examples` job launched from the Examples menu.
+    examples_build_child: Option<Child>,
     pub panels: PanelVisibility,
     /// Framebuffer mode -- shared HW renderer at native scale vs
     /// window-fitted high resolution. Toggled via the debug toolbar.
@@ -281,6 +283,7 @@ impl AppState {
             embedded_playtest: EmbeddedPlaytestState::default(),
             editor_project_dir_seen,
             editor_build_completion: None,
+            examples_build_child: None,
             panels: PanelVisibility::default(),
             scale_mode: ScaleMode::default(),
             framebuffer_present_size_px: (320, 240),
@@ -545,6 +548,78 @@ impl AppState {
             STATUS_MESSAGE_TTL_SECS,
         ));
         Ok(changed)
+    }
+
+    /// Build the public SDK/engine examples in the background so the
+    /// Examples menu can populate a fresh clone without blocking UI
+    /// frames. Completion is handled by [`Self::poll_examples_build`].
+    pub fn start_examples_build(&mut self) {
+        if self.examples_build_child.is_some() {
+            self.status_message_set("Examples build already running");
+            return;
+        }
+
+        let workspace_root = repo_root_dir();
+        let mut command = Command::new("make");
+        command
+            .arg("examples")
+            .current_dir(&workspace_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match command.spawn() {
+            Ok(child) => {
+                self.examples_build_child = Some(child);
+                self.status_message_set("Building public examples");
+            }
+            Err(error) => {
+                let message = format!("Build examples failed to start: {error}");
+                eprintln!("[frontend] {message}");
+                self.status_message_set(message);
+            }
+        }
+    }
+
+    /// Poll a background examples build. On success, rescan the
+    /// library so the newly-created `.exe` files appear immediately.
+    pub fn poll_examples_build(&mut self) {
+        let Some(child) = self.examples_build_child.as_mut() else {
+            return;
+        };
+        let status = match child.try_wait() {
+            Ok(Some(status)) => status,
+            Ok(None) => return,
+            Err(error) => {
+                self.examples_build_child = None;
+                let message = format!("Examples build poll failed: {error}");
+                eprintln!("[frontend] {message}");
+                self.status_message_set(message);
+                return;
+            }
+        };
+
+        self.examples_build_child = None;
+        if !status.success() {
+            let message = format!("Examples build failed: {status}");
+            eprintln!("[frontend] {message}; run `make examples` for full logs");
+            self.status_message_set(message);
+            return;
+        }
+
+        match self.rescan_library() {
+            Ok(_) => self.status_message_set("Examples built and library refreshed"),
+            Err(error) => {
+                let message = format!("Examples built; refresh failed: {error}");
+                eprintln!("[frontend] {message}");
+                self.status_message_set(message);
+            }
+        }
+    }
+
+    pub fn stop_examples_build(&mut self) {
+        if let Some(mut child) = self.examples_build_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     /// Resolve where to look for SDK-built example `.exe`s. Honours

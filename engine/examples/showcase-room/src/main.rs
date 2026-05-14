@@ -1,8 +1,7 @@
 //! `showcase-room` -- render a cooked `.psxw` on PS1 hardware.
 //!
 //! End-to-end validation of the cooker → asset → runtime path:
-//! `build.rs` cooks the editor's starter room (3×3 stone room
-//! with floor + brick textures) into `OUT_DIR/room.psxw`, this
+//! `build.rs` cooks the editor's starter room into `OUT_DIR/room.psxw`, this
 //! binary parses it through `psx_engine::RuntimeRoom`, and
 //! `psx_engine::draw_room` walks every populated sector through
 //! `WorldRenderPass::submit_textured_quad`.
@@ -26,8 +25,7 @@ use psx_gpu::{material::TextureMaterial, ot::OrderingTable, prim::TriTextured};
 use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
 
 // `room.psxw` is produced by build.rs from the starter project.
-// Slot 0 = floor.psxt, slot 1 = brick-wall.psxt -- pinned by the
-// build-time assertion next to the cook call.
+// Slot 0 is guaranteed by the build-time assertion next to the cook call.
 static ROOM_PSXW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/room.psxw"));
 static FLOOR_BLOB: &[u8] = include_bytes!("../../../../assets/textures/floor.psxt");
 static BRICK_BLOB: &[u8] = include_bytes!("../../../../assets/textures/brick-wall.psxt");
