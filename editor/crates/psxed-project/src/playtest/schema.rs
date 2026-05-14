@@ -154,6 +154,29 @@ pub struct PlaytestSky {
     pub horizon_percent: u8,
     /// Runtime sky flags.
     pub flags: u16,
+    /// Cloud-layer parameters (baked at scene init by the runtime).
+    pub cloud_layer: PlaytestCloudLayer,
+}
+
+/// Resolved cloud-layer values written into one runtime room record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCloudLayer {
+    /// Cloud highlight colour.
+    pub color_rgb: [u8; 3],
+    /// CLUT pivot density 0..=255.
+    pub density: u8,
+    /// Plane altitude above world Y = 0 in engine units.
+    pub altitude: u16,
+    /// Plane half-extent on each of X / Z in engine units.
+    pub extent: u16,
+    /// Tile-repeats across the plane on each axis.
+    pub tile_count: u8,
+    /// UV scroll speed per second on X / Z in PSX angle units.
+    pub scroll_speed: [i16; 2],
+    /// Perlin generator seed.
+    pub noise_seed: u32,
+    /// Runtime cloud-layer flags.
+    pub flags: u16,
 }
 
 /// Resolved far-vista values written into one runtime room record.
@@ -483,8 +506,12 @@ pub struct PlaytestImageProp {
     pub y: i32,
     /// Bottom-center room-local Z.
     pub z: i32,
+    /// Static pitch, PSX angle units.
+    pub pitch: i16,
     /// Static yaw, PSX angle units.
     pub yaw: i16,
+    /// Static roll, PSX angle units.
+    pub roll: i16,
     /// Quad width in engine units.
     pub width: u16,
     /// Quad height in engine units.
