@@ -31,7 +31,8 @@
         hello-engine run-hello-engine \
         showcase-room run-showcase-room \
         cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
-        profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
+        profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-repeat \
+        profile-demo3-disc-stream \
         profile-demo3-disc-stream-forward validate-demo3-disc-stream
 
 help:
@@ -59,6 +60,7 @@ help:
 	@echo "    make profile-demo3-forward - streamed demo3 profile while holding forward"
 	@echo "    make profile-demo3-paced20 - alias for streamed 20Hz visual cadence telemetry"
 	@echo "    make profile-demo3-paced20-forward - streamed paced20 profile while holding forward"
+	@echo "    make profile-demo3-repeat - run repeated demo3 profiles and print medians"
 	@echo "    make profile-demo3-disc-stream - build/play demo3 from BIN and measure CD streaming"
 	@echo "    make profile-demo3-disc-stream-forward - same, while holding forward"
 	@echo "    make validate-demo3-disc-stream - run demo3 disc-stream budget/hash gates"
@@ -231,6 +233,17 @@ PROFILE_DEMO3_DISC_STREAM_FORWARD_VISUAL_FRAMES ?= 80
 PROFILE_DEMO3_DISC_STREAM_FORWARD_GUEST_FRAMES ?= 1200
 PROFILE_DEMO3_DISC_STREAM_FORWARD_STEPS ?= 600000000
 PROFILE_DEMO3_DISC_STREAM_FORWARD_HW ?= /tmp/psoxide-demo3-disc-stream-forward-hw.ppm
+PROFILE_DEMO3_REPEAT_RUNS ?= 3
+PROFILE_DEMO3_REPEAT_DIR ?= /tmp/psoxide-demo3-repeat
+PROFILE_DEMO3_REPEAT_MODE ?= both
+PROFILE_DEMO3_REPEAT_FRONTEND_BIN ?= emu/target/release/frontend
+PROFILE_DEMO3_REPEAT_SKIP_BUILD ?= 0
+PROFILE_DEMO3_REPEAT_SKIP_BUILD_ARG := $(if $(filter 1 true yes,$(PROFILE_DEMO3_REPEAT_SKIP_BUILD)),--skip-build,)
+PROFILE_DEMO3_REPEAT_EXTRA_ARGS ?=
+PROFILE_DEMO3_REPEAT_DEFAULT_DISPLAY_HASH ?= 0x807c5debd2e9bf8a
+PROFILE_DEMO3_REPEAT_DEFAULT_VRAM_HASH ?= 0xa5c5a996b781b8b0
+PROFILE_DEMO3_REPEAT_FORWARD_DISPLAY_HASH ?= 0xc10fd4b6892df758
+PROFILE_DEMO3_REPEAT_FORWARD_VRAM_HASH ?= 0x736412dbc4da1148
 VALIDATE_DEMO3_DISC_STREAM_LOG ?= /tmp/psoxide-demo3-disc-stream-profile.log
 VALIDATE_DEMO3_DISC_STREAM_FORWARD_LOG ?= /tmp/psoxide-demo3-disc-stream-forward-profile.log
 VALIDATE_DEMO3_DISC_STREAM_HW ?= /tmp/psoxide-demo3-disc-stream-validate.ppm
@@ -325,6 +338,19 @@ profile-demo3-paced20:
 
 profile-demo3-paced20-forward:
 	$(MAKE) profile-demo3-disc-stream-forward PROFILE_DEMO3_DISC_STREAM_FORWARD_HW=$(PROFILE_DEMO3_PACED20_FORWARD_HW)
+
+profile-demo3-repeat:
+	python3 tools/repeat_demo3_profile.py \
+		--runs $(PROFILE_DEMO3_REPEAT_RUNS) \
+		--out-dir $(PROFILE_DEMO3_REPEAT_DIR) \
+		--mode $(PROFILE_DEMO3_REPEAT_MODE) \
+		--frontend-bin $(PROFILE_DEMO3_REPEAT_FRONTEND_BIN) \
+		$(PROFILE_DEMO3_REPEAT_SKIP_BUILD_ARG) \
+		--expected-default-display-hash $(PROFILE_DEMO3_REPEAT_DEFAULT_DISPLAY_HASH) \
+		--expected-default-vram-hash $(PROFILE_DEMO3_REPEAT_DEFAULT_VRAM_HASH) \
+		--expected-forward-display-hash $(PROFILE_DEMO3_REPEAT_FORWARD_DISPLAY_HASH) \
+		--expected-forward-vram-hash $(PROFILE_DEMO3_REPEAT_FORWARD_VRAM_HASH) \
+		$(PROFILE_DEMO3_REPEAT_EXTRA_ARGS)
 
 profile-demo3-disc-stream:
 	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
