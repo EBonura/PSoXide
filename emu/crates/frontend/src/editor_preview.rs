@@ -197,6 +197,7 @@ pub fn build_phase1_frame(
     camera: ViewportCameraState,
     preview_fog: bool,
     preview_backface_wireframe: bool,
+    show_grid: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
     hovered_primitive: Option<psxed_ui::Selection>,
@@ -267,7 +268,9 @@ pub fn build_phase1_frame(
         hidden_scene_nodes,
         &mut scratch,
     );
-    push_streaming_chunk_boundaries(grid, &mut scratch);
+    if show_grid {
+        push_streaming_chunk_boundaries(grid, &mut scratch);
+    }
     walk_entities(project, grid, hidden_scene_nodes, selected, &mut scratch);
     walk_light_gizmos(
         project,
@@ -1607,6 +1610,8 @@ fn walk_image_props(
             width,
             height,
             cylindrical_billboard,
+            collision_enabled,
+            collision_size,
         } = &node.kind
         else {
             continue;
@@ -1629,7 +1634,7 @@ fn walk_image_props(
             origin,
             *width,
             *height,
-            node.transform.rotation_degrees[1],
+            node.transform.rotation_degrees,
             *cylindrical_billboard,
             camera,
         );
@@ -1657,6 +1662,24 @@ fn walk_image_props(
             material,
             room_depth_slot(projected_avg_sz([p[0], p[2], p[3]])),
         );
+        if *collision_enabled {
+            // Center the AABB on the visible plane's center: bottom-
+            // center anchor + half the height stands the box upright
+            // around the prop. half_extents are `collision_size / 2`
+            // so the user-facing field stays as full width / height /
+            // depth in engine units.
+            let center = [
+                origin.x as f32,
+                (origin.y + (*height as i32) / 2) as f32,
+                origin.z as f32,
+            ];
+            let half_extents = [
+                (collision_size[0] / 2) as f32,
+                (collision_size[1] / 2) as f32,
+                (collision_size[2] / 2) as f32,
+            ];
+            push_aabb_wireframe(scratch, center, half_extents, IMAGE_PROP_COLLISION_BOX);
+        }
     }
 }
 
@@ -1664,28 +1687,86 @@ fn image_prop_vertices(
     origin: psx_engine::WorldVertex,
     width: u16,
     height: u16,
-    yaw_degrees: f32,
+    rotation_degrees: [f32; 3],
     cylindrical_billboard: bool,
     camera: psx_engine::WorldCamera,
 ) -> [psx_engine::WorldVertex; 4] {
-    let (sin_yaw, cos_yaw) = if cylindrical_billboard {
-        (camera.sin_yaw.raw(), camera.cos_yaw.raw())
-    } else {
-        let yaw = yaw_to_q12(yaw_degrees);
-        (
-            psx_gte::transform::sin_1_3_12(yaw) as i32,
-            psx_gte::transform::cos_1_3_12(yaw) as i32,
-        )
-    };
+    // Cylindrical billboarding overrides any authored rotation: the
+    // card always faces the camera and stays upright, so pitch / roll
+    // are ignored.
+    if cylindrical_billboard {
+        let sin_yaw = camera.sin_yaw.raw();
+        let cos_yaw = camera.cos_yaw.raw();
+        let half_width = (width as i32) / 2;
+        let right_x = mul_q12_i32(half_width, cos_yaw);
+        let right_z = -mul_q12_i32(half_width, sin_yaw);
+        let top_y = origin.y.saturating_add(height as i32);
+        return [
+            psx_engine::WorldVertex::new(origin.x - right_x, top_y, origin.z - right_z),
+            psx_engine::WorldVertex::new(origin.x + right_x, top_y, origin.z + right_z),
+            psx_engine::WorldVertex::new(origin.x + right_x, origin.y, origin.z + right_z),
+            psx_engine::WorldVertex::new(origin.x - right_x, origin.y, origin.z - right_z),
+        ];
+    }
     let half_width = (width as i32) / 2;
-    let right_x = mul_q12_i32(half_width, cos_yaw);
-    let right_z = -mul_q12_i32(half_width, sin_yaw);
-    let top_y = origin.y.saturating_add(height as i32);
+    let h = height as i32;
+    // Local quad anchored at bottom-center, lying in the X-Y plane,
+    // facing +Z before rotation. Top edge runs from (-w/2, h, 0) to
+    // (+w/2, h, 0); bottom edge runs along Y = 0.
+    let locals: [[i32; 3]; 4] = [
+        [-half_width, h, 0],
+        [half_width, h, 0],
+        [half_width, 0, 0],
+        [-half_width, 0, 0],
+    ];
+    let pitch_q12 = yaw_to_q12(rotation_degrees[0]);
+    let yaw_q12 = yaw_to_q12(rotation_degrees[1]);
+    let roll_q12 = yaw_to_q12(rotation_degrees[2]);
+    let mut out = [psx_engine::WorldVertex::new(0, 0, 0); 4];
+    for (i, local) in locals.iter().enumerate() {
+        // Apply X (pitch) → Y (yaw) → Z (roll) so a user dragging
+        // each gizmo ring sees the result they'd expect: yaw spins
+        // the standing card, pitch tilts it, roll spins it in plane.
+        let rotated = rotate_z_q12(
+            rotate_y_q12(rotate_x_q12(*local, pitch_q12), yaw_q12),
+            roll_q12,
+        );
+        out[i] = psx_engine::WorldVertex::new(
+            origin.x.saturating_add(rotated[0]),
+            origin.y.saturating_add(rotated[1]),
+            origin.z.saturating_add(rotated[2]),
+        );
+    }
+    out
+}
+
+fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
+    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
     [
-        psx_engine::WorldVertex::new(origin.x - right_x, top_y, origin.z - right_z),
-        psx_engine::WorldVertex::new(origin.x + right_x, top_y, origin.z + right_z),
-        psx_engine::WorldVertex::new(origin.x + right_x, origin.y, origin.z + right_z),
-        psx_engine::WorldVertex::new(origin.x - right_x, origin.y, origin.z - right_z),
+        v[0],
+        mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
+        mul_q12_i32(v[1], s) + mul_q12_i32(v[2], c),
+    ]
+}
+
+fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
+    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+    [
+        mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
+        v[1],
+        -mul_q12_i32(v[0], s) + mul_q12_i32(v[2], c),
+    ]
+}
+
+fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
+    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+    [
+        mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
+        mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
+        v[2],
     ]
 }
 
@@ -2978,6 +3059,13 @@ const ENTITY_BOUND_HOVER: FaceOutlineStyle = FaceOutlineStyle {
 const ENTITY_BOUND_SELECTED: FaceOutlineStyle = FaceOutlineStyle {
     rgb: (0x60, 0xC8, 0xFF),
     thickness_px: EDITOR_PREVIEW_SELECTED_STROKE_WIDTH,
+};
+/// Wireframe outline drawn around an image prop's authored
+/// collision AABB. Distinct warm orange to read as "collision /
+/// physics" against the cooler selection / hover palette.
+const IMAGE_PROP_COLLISION_BOX: FaceOutlineStyle = FaceOutlineStyle {
+    rgb: (0xFF, 0xA0, 0x40),
+    thickness_px: 1.5,
 };
 /// PaintWall hover preview -- green for "this would be added /
 /// replaced". Slightly stronger than hover, but still thin enough
