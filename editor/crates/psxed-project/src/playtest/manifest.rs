@@ -184,7 +184,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {}, cloud_layer: LevelCloudLayerRecord {{ color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -208,6 +208,17 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.sky.bottom_rgb[2],
             room.sky.horizon_percent,
             room.sky.flags,
+            room.sky.cloud_layer.color_rgb[0],
+            room.sky.cloud_layer.color_rgb[1],
+            room.sky.cloud_layer.color_rgb[2],
+            room.sky.cloud_layer.density,
+            room.sky.cloud_layer.altitude,
+            room.sky.cloud_layer.extent,
+            room.sky.cloud_layer.tile_count,
+            room.sky.cloud_layer.scroll_speed[0],
+            room.sky.cloud_layer.scroll_speed[1],
+            room.sky.cloud_layer.noise_seed,
+            room.sky.cloud_layer.flags,
             far_vista_texture_assets,
             room.far_vista.radius,
             room.far_vista.height,
@@ -637,13 +648,15 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for prop in &package.image_props {
         let _ = writeln!(
             out,
-            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, yaw: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], flags: {} }},",
+            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], flags: {} }},",
             prop.room,
             prop.texture_asset_index,
             prop.x,
             prop.y,
             prop.z,
+            prop.pitch,
             prop.yaw,
+            prop.roll,
             prop.width,
             prop.height,
             prop.tint_rgb[0],
@@ -2013,13 +2026,15 @@ mod tests {
 
     #[test]
     fn room_texture_vram_bytes_match_runtime_compact_tile_upload() {
-        let bytes = std::fs::read(crate::default_project_dir().join("assets/textures/floor.psxt"))
-            .expect("starter floor texture exists");
+        let bytes = std::fs::read(
+            crate::default_project_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
+        )
+        .expect("starter Delven texture exists");
         let asset = PlaytestAsset {
             kind: PlaytestAssetKind::Texture,
             bytes,
             filename: "texture_000.psxt".to_string(),
-            source_label: "Floor".to_string(),
+            source_label: "Delven slateflr1a q2".to_string(),
         };
 
         assert_eq!(asset_vram_bytes(&asset), 8 * 32 * 2 + 16 * 2);
@@ -2390,6 +2405,16 @@ mod tests {
                 bottom_rgb: [0, 0, 0],
                 horizon_percent: 50,
                 flags: 0,
+                cloud_layer: PlaytestCloudLayer {
+                    color_rgb: [0, 0, 0],
+                    density: 0,
+                    altitude: 0,
+                    extent: 0,
+                    tile_count: 0,
+                    scroll_speed: [0, 0],
+                    noise_seed: 0,
+                    flags: 0,
+                },
             },
             far_vista: PlaytestFarVista {
                 texture_asset_indices: Vec::new(),
@@ -2507,6 +2532,7 @@ use psx_level::{
     LevelCachedRoomVertexRecord,
     LevelAssetRecord,
     LevelCameraRecord,
+    LevelCloudLayerRecord,
     LevelCharacterRecord,
     LevelChunkNeighbours,
     LevelChunkRecord,
