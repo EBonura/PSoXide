@@ -47,7 +47,9 @@ use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
 /// 4096-cap caps the per-frame primitive count at a comfortable
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
-const SKY_QUAD_CAP: usize = 2;
+// Sky cube emits 5 gouraud quads (top + 4 sides; bottom omitted).
+// Bumped from the legacy 2-quad screen-aligned gradient.
+const SKY_QUAD_CAP: usize = 5;
 const FAR_VISTA_QUAD_CAP: usize = 16;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
 /// editor preview exercises the same overflow behavior.
@@ -233,8 +235,8 @@ pub fn build_phase1_frame(
         .unwrap_or_default()
         .resolved_for_room(grid.fog_enabled && preview_fog, grid.fog_color);
     push_clear(&mut scratch, resolved_sky.lower_color);
-    push_sky_gradient(&mut scratch, resolved_sky);
     let world_camera = setup_gte_for_camera(camera);
+    push_sky_cube(&mut scratch, camera.position_i32(), resolved_sky);
     let resolved_far_vista = project
         .active_scene()
         .world_far_vista_for_node(room_id)
@@ -3628,43 +3630,134 @@ fn push_clear(scratch: &mut PreviewScratch, color: [u8; 3]) {
     }
 }
 
-fn push_sky_gradient(scratch: &mut PreviewScratch, sky: psxed_project::ResolvedSkySettings) {
+/// World-space sky cube: 5 gouraud quads (top + 4 sides) centered
+/// on the camera position. Top corners are `top_color`, side
+/// quads' bottom corners are `horizon_color` so each side reads as
+/// a top→horizon gradient. The cube translates with the camera (so
+/// it always envelops the view) but does *not* rotate, which is
+/// what makes turning the camera reveal different patches of sky
+/// instead of dragging the gradient with the screen.
+///
+/// Bottom face is intentionally absent: the clear color paints any
+/// pixel the cube doesn't cover, and that happens to be exactly
+/// "below the horizon" when the camera tilts down. Adding a bottom
+/// face would just hide world geometry the moment the camera
+/// dipped past level.
+fn push_sky_cube(
+    scratch: &mut PreviewScratch,
+    camera_world: [i32; 3],
+    sky: psxed_project::ResolvedSkySettings,
+) {
     if !sky.enabled {
         return;
     }
-    let horizon_y = ((SCREEN_H * sky.horizon_percent as i32) / 100).clamp(1, SCREEN_H - 1) as i16;
-    push_sky_quad(scratch, 0, horizon_y, sky.top_color, sky.horizon_color);
-    push_sky_quad(
+    // Cube half-extent. Picked to (a) sit safely inside i16 after
+    // `world_to_view` subtracts the camera anchor and (b) project
+    // big enough on screen that even at sector_size 4096 worlds
+    // the horizon line never crosses the cube's far edge.
+    const HALF_EXTENT: i32 = 12_288;
+    let cx = camera_world[0];
+    let cy = camera_world[1];
+    let cz = camera_world[2];
+    let xlo = cx - HALF_EXTENT;
+    let xhi = cx + HALF_EXTENT;
+    let ylo = cy - HALF_EXTENT;
+    let yhi = cy + HALF_EXTENT;
+    let zlo = cz - HALF_EXTENT;
+    let zhi = cz + HALF_EXTENT;
+    let top = sky.top_color;
+    let horizon = sky.horizon_color;
+    // Top face (camera looking straight up sees this): solid top.
+    push_sky_world_quad(
         scratch,
-        horizon_y,
-        SCREEN_H as i16,
-        sky.horizon_color,
-        sky.lower_color,
+        [
+            [xlo, yhi, zlo],
+            [xhi, yhi, zlo],
+            [xlo, yhi, zhi],
+            [xhi, yhi, zhi],
+        ],
+        [top, top, top, top],
+    );
+    // +Z side (looking toward +Z).
+    push_sky_world_quad(
+        scratch,
+        [
+            [xlo, yhi, zhi],
+            [xhi, yhi, zhi],
+            [xlo, ylo, zhi],
+            [xhi, ylo, zhi],
+        ],
+        [top, top, horizon, horizon],
+    );
+    // -Z side.
+    push_sky_world_quad(
+        scratch,
+        [
+            [xhi, yhi, zlo],
+            [xlo, yhi, zlo],
+            [xhi, ylo, zlo],
+            [xlo, ylo, zlo],
+        ],
+        [top, top, horizon, horizon],
+    );
+    // +X side.
+    push_sky_world_quad(
+        scratch,
+        [
+            [xhi, yhi, zhi],
+            [xhi, yhi, zlo],
+            [xhi, ylo, zhi],
+            [xhi, ylo, zlo],
+        ],
+        [top, top, horizon, horizon],
+    );
+    // -X side.
+    push_sky_world_quad(
+        scratch,
+        [
+            [xlo, yhi, zlo],
+            [xlo, yhi, zhi],
+            [xlo, ylo, zlo],
+            [xlo, ylo, zhi],
+        ],
+        [top, top, horizon, horizon],
     );
 }
 
-fn push_sky_quad(
+fn push_sky_world_quad(
     scratch: &mut PreviewScratch,
-    y0: i16,
-    y1: i16,
-    top_color: [u8; 3],
-    bottom_color: [u8; 3],
+    corners: [[i32; 3]; 4],
+    colors: [[u8; 3]; 4],
 ) {
-    if y1 <= y0 || scratch.sky_used >= scratch.sky_quads.len() {
+    if scratch.sky_used >= scratch.sky_quads.len() {
+        return;
+    }
+    let projected = [
+        gte_scene::project_vertex(world_to_view(corners[0])),
+        gte_scene::project_vertex(world_to_view(corners[1])),
+        gte_scene::project_vertex(world_to_view(corners[2])),
+        gte_scene::project_vertex(world_to_view(corners[3])),
+    ];
+    // Any corner clipped by the near plane drops the whole face —
+    // partial-clip handling would need a manual triangle split.
+    // The cube is so much larger than the near plane that this only
+    // fires when the user buries the camera inside a wall, which is
+    // already a degenerate view.
+    if projected.iter().any(|p| p.sz == 0) {
         return;
     }
     let quad = QuadGouraud::new(
         [
-            (0, y0),
-            (SCREEN_W as i16, y0),
-            (0, y1),
-            (SCREEN_W as i16, y1),
+            (projected[0].sx, projected[0].sy),
+            (projected[1].sx, projected[1].sy),
+            (projected[2].sx, projected[2].sy),
+            (projected[3].sx, projected[3].sy),
         ],
         [
-            (top_color[0], top_color[1], top_color[2]),
-            (top_color[0], top_color[1], top_color[2]),
-            (bottom_color[0], bottom_color[1], bottom_color[2]),
-            (bottom_color[0], bottom_color[1], bottom_color[2]),
+            (colors[0][0], colors[0][1], colors[0][2]),
+            (colors[1][0], colors[1][1], colors[1][2]),
+            (colors[2][0], colors[2][1], colors[2][2]),
+            (colors[3][0], colors[3][1], colors[3][2]),
         ],
     );
     let idx = scratch.sky_used;
