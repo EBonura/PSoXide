@@ -1676,8 +1676,8 @@ fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
         return Ok(None);
     }
     let mut rooms = Vec::new();
-    for entry in std::fs::read_dir(&chunks_dir)
-        .map_err(|e| format!("read {}: {e}", chunks_dir.display()))?
+    for entry in
+        std::fs::read_dir(&chunks_dir).map_err(|e| format!("read {}: {e}", chunks_dir.display()))?
     {
         let entry = entry.map_err(|e| format!("read {}: {e}", chunks_dir.display()))?;
         let path = entry.path();
