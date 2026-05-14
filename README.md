@@ -28,7 +28,7 @@ SDK, and not a finished game editor yet.
 
 ## Media
 
-Fresh captures from the current editor/playtest pipeline:
+Editor and demos:
 
 ![PSoXide editor tool](assets/media/readme/editor-preview.png)
 
@@ -265,6 +265,30 @@ The repo ships 18 runnable examples that double as the de-facto test
 suite for the SDK and engine. Each builds for `mipsel-sony-psx` and
 runs end-to-end through the emulator frontend (`make <name>` to build,
 `make run-<name>` where supported).
+
+| `hello-tri` | `hello-tex` | `hello-input` |
+| --- | --- | --- |
+| ![hello-tri screenshot](assets/media/readme/examples/hello-tri.png) | ![hello-tex screenshot](assets/media/readme/examples/hello-tex.png) | ![hello-input screenshot](assets/media/readme/examples/hello-input.png) |
+
+| `hello-audio` | `hello-ot` | `hello-gte` |
+| --- | --- | --- |
+| ![hello-audio screenshot](assets/media/readme/examples/hello-audio.png) | ![hello-ot screenshot](assets/media/readme/examples/hello-ot.png) | ![hello-gte screenshot](assets/media/readme/examples/hello-gte.png) |
+
+| `hello-engine` | `showcase-3d` | `showcase-fog` |
+| --- | --- | --- |
+| ![hello-engine screenshot](assets/media/readme/examples/hello-engine.png) | ![showcase-3d screenshot](assets/media/readme/examples/showcase-3d.png) | ![showcase-fog screenshot](assets/media/readme/examples/showcase-fog.png) |
+
+| `showcase-lights` | `showcase-model` | `showcase-particles` |
+| --- | --- | --- |
+| ![showcase-lights screenshot](assets/media/readme/examples/showcase-lights.png) | ![showcase-model screenshot](assets/media/readme/examples/showcase-model.png) | ![showcase-particles screenshot](assets/media/readme/examples/showcase-particles.png) |
+
+| `showcase-room` | `showcase-text` | `showcase-textured-sprite` |
+| --- | --- | --- |
+| ![showcase-room screenshot](assets/media/readme/examples/showcase-room.png) | ![showcase-text screenshot](assets/media/readme/examples/showcase-text.png) | ![showcase-textured-sprite screenshot](assets/media/readme/examples/showcase-textured-sprite.png) |
+
+| `game-pong` | `game-breakout` | `game-invaders` |
+| --- | --- | --- |
+| ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) | ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
 
 ### SDK examples — bare-metal MIPS, no engine framework
 
