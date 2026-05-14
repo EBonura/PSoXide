@@ -135,7 +135,9 @@ well-documented in their file headers, listed here for completeness.
 
 The following categories are deliberately not tracked or distributed:
 
-- PlayStation BIOS images (users supply their own; see [README](../README.md)).
+- PlayStation BIOS images, required only for retail/commercial disc boot
+  and BIOS/parity canaries (users supply their own; see
+  [README](../README.md)).
 - Commercial game disc images.
 - PCSX-Redux binaries or source.
 - Direct renders of Sony's BIOS firmware output (logos, splashes, shell)

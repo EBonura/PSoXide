@@ -64,9 +64,9 @@ What works today:
   and a playable character resource.
 - One-click editor Play mode: the editor saves and cooks the active
   project, builds the internal `editor-playtest` PSX EXE, packages a
-  raw disc image with streamed room chunks, boots that disc in the
-  current frontend, and displays the live game framebuffer inside the
-  editor's 3D viewport.
+  raw disc image with streamed room chunks, boots that disc through the
+  HLE BIOS path without requiring a user BIOS, and displays the live
+  game framebuffer inside the editor's 3D viewport.
 - Headless profiling and screenshot capture for geometry-heavy
   playtests, including streamed demo3 frame pacing and CD-room-load
   telemetry.
@@ -122,10 +122,16 @@ make test
 The fast defaults do not require commercial games or PCSX-Redux.
 Canaries and parity tests are ignored by default.
 
-### 3. Configure a BIOS
+### 3. Configure a BIOS For Retail Discs
 
 PSoXide does not include a PlayStation BIOS and will not download one
-for you. Dump your own BIOS image, then configure it in either place:
+for you. The bundled homebrew examples and editor Play flow do not need
+a user BIOS; they use PSoXide's HLE BIOS path and can run from a fresh
+checkout once built.
+
+A real BIOS is still required for retail/commercial disc boot, BIOS boot
+canaries, and parity work against PCSX-Redux. Dump your own BIOS image,
+then configure it in either place:
 
 - In the frontend UI, open the Menu Settings column and use
   **Choose BIOS path**. This persists `paths.bios` in `settings.ron`.
@@ -137,11 +143,6 @@ export PSOXIDE_BIOS=/absolute/path/to/SCPH1001.BIN
 
 When both are set, the saved `settings.ron` path takes precedence over
 the environment variable.
-
-The GUI can open without a BIOS for UI work, but launching discs and
-editor Play currently require a configured BIOS path. Play builds a
-disc image and boots it through the same frontend path used by the
-headless profile targets.
 
 ### 4. Launch the frontend
 
@@ -257,7 +258,8 @@ make profile-demo3-disc-stream # explicit CD-stream benchmark path
 `engine/examples/editor-playtest/generated/`; the editor Play action
 normally owns that directory. The profile targets additionally build a
 raw `.bin` disc image through `tools/mkisopsx` and boot that image in
-the emulator frontend.
+the emulator frontend. Editor Play uses PSoXide's HLE BIOS path, so it
+does not require a configured user BIOS.
 
 ## Examples
 
@@ -349,7 +351,8 @@ Generated contract:
 
 Not included:
 
-- PlayStation BIOS images.
+- PlayStation BIOS images, required only for retail/commercial disc boot
+  and BIOS/parity canaries.
 - Commercial game disc images.
 - PCSX-Redux binaries or source trees.
 - Large original texture/model sources beyond the small committed demo
