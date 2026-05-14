@@ -1268,10 +1268,10 @@ mod tests {
         // cooker reported. Regresses the v1 byte layout against
         // both producer and consumer in one assertion.
         let mut project = ProjectDocument::starter();
-        let floor_texture = texture_named(&project, "floor.psxt");
-        let brick_texture = texture_named(&project, "brick-wall.psxt");
+        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
+        let wall_texture = texture_named(&project, "delven_06_stonebrk1b_q3.psxt");
         let floor = material_for_texture(&mut project, "Floor Slot", floor_texture);
-        let wall = material_for_texture(&mut project, "Brick Slot", brick_texture);
+        let wall = material_for_texture(&mut project, "Wall Slot", wall_texture);
         let grid = WorldGrid::stone_room(2, 2, 1024, Some(floor), Some(wall));
         let cooked = cook_world_grid(&project, &grid).unwrap();
         let bytes = encode_world_grid_psxw(&project, &grid).unwrap();
@@ -1305,18 +1305,15 @@ mod tests {
     }
 
     #[test]
-    fn starter_cook_pins_floor_to_slot_zero_and_brick_to_slot_one() {
-        // The runtime side of `engine/examples/showcase-room`
-        // bakes in slot 0 = floor texture, slot 1 = brick-wall
-        // texture. The cooker assigns slots in first-use order
-        // while iterating sectors `[x * depth + z]`. If a future
-        // reshape flips that order, both this test and the
-        // example's build.rs assertion fail loud.
+    fn starter_cook_pins_first_used_material_slots() {
+        // The cooker assigns slots in first-use order while iterating
+        // sectors `[x * depth + z]`. If a future reshape flips that
+        // order, the runtime package contract changes.
         let mut project = ProjectDocument::starter();
-        let floor_texture = texture_named(&project, "floor.psxt");
-        let brick_texture = texture_named(&project, "brick-wall.psxt");
+        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
+        let wall_texture = texture_named(&project, "delven_06_stonebrk1b_q3.psxt");
         let floor = material_for_texture(&mut project, "Floor Slot", floor_texture);
-        let wall = material_for_texture(&mut project, "Brick Slot", brick_texture);
+        let wall = material_for_texture(&mut project, "Wall Slot", wall_texture);
         let grid = WorldGrid::stone_room(2, 2, 1024, Some(floor), Some(wall));
         let cooked = cook_world_grid(&project, &grid).unwrap();
 
@@ -1333,8 +1330,8 @@ mod tests {
             }
         };
 
-        assert!(psxt_path_for_slot(0).ends_with("floor.psxt"));
-        assert!(psxt_path_for_slot(1).ends_with("brick-wall.psxt"));
+        assert!(psxt_path_for_slot(0).ends_with("delven_01_slateflr1a_q2.psxt"));
+        assert!(psxt_path_for_slot(1).ends_with("delven_06_stonebrk1b_q3.psxt"));
     }
 
     #[test]
@@ -1502,7 +1499,7 @@ mod tests {
     fn cooks_horizontal_triangle_material_uv_and_walkable_overrides() {
         let mut project = ProjectDocument::starter();
         let base = first_floor_material(&starter_grid(&project));
-        let floor_texture = texture_named(&project, "floor.psxt");
+        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
         let override_material = material_for_texture(&mut project, "Triangle Slot", floor_texture);
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.set_floor(0, 0, 0, Some(base));
