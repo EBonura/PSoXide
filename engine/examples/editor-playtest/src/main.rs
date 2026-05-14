@@ -3568,27 +3568,45 @@ fn draw_cloud_layer(
     ) else {
         return;
     };
-    // World-fixed plane split into a `tile_count × tile_count` grid
-    // of sub-quads. The split is essential: a single quad covering
-    // the whole plane would straddle the near plane in front of the
-    // camera, and `project_world_quad` drops any quad with even one
-    // corner behind. Splitting lets sub-quads behind the camera
-    // silently fail their projection while the visible sub-quads
-    // in front render correctly.
+    // Camera-position-anchored plane + world-derived UV offset.
     //
-    // Each sub-quad shows one full 64-pixel tile of the cloud
-    // texture (UV 0..=63); the texture is tileable so adjacent
-    // sub-quads blend at edges into a continuous cover.
+    // The plane geometry hugs the camera (each sub-quad sits at
+    // `camera.x + Δx`, `camera.z + Δz`) so most corners stay in
+    // front of the near plane regardless of where the player is or
+    // which way they look. A horizontal world-fixed plane can't
+    // give that guarantee — back-half corners always straddle the
+    // near plane when the player looks forward.
+    //
+    // To preserve the *visual* world-fixed feel, the UV offset is
+    // derived from the camera's world position: as the player
+    // walks +X by `UV_WORLD_SCALE` units the texture scrolls -1 UV
+    // pixel. The cloud cover looks stationary in the world even
+    // though the geometry is following the camera. This is the
+    // Mario 64 / Crash Bandicoot sky trick; the perspective math
+    // is just a UV-scroll, but the eye reads it as parallax.
+    //
+    // Sub-quad split is still essential: the camera sits at the
+    // *centre* of the plane, so sub-quads behind the camera in the
+    // current view direction project with corners behind the near
+    // plane and `project_world_quad` drops them. Sub-quads in
+    // front render normally. As the camera yaws, "in front" rotates
+    // and a different patch of sub-quads becomes visible — that's
+    // the camera-rotation response that the screen-aligned
+    // gradient couldn't give.
+    const UV_WORLD_SCALE_SHIFT: i32 = 6; // 64 world units per UV pixel.
     let tile_count = cloud.tile_count.clamp(1, 8) as i32;
     let altitude = cloud.altitude as i32;
     let extent = cloud.extent.max(1024) as i32;
-    let plane_size = extent.saturating_mul(2);
-    let tile_world = plane_size / tile_count;
+    let tile_world = (extent.saturating_mul(2) / tile_count).max(1);
 
-    // Scroll: cumulative offset in PSX UV units. Modulo 64 so the
-    // texture-window wraparound keeps everything inside u8 range.
-    let scroll_u = (((elapsed_vblanks as i32 * cloud.scroll_speed[0] as i32) >> 6) & 63) as u8;
-    let scroll_v = (((elapsed_vblanks as i32 * cloud.scroll_speed[1] as i32) >> 6) & 63) as u8;
+    let cam_uv_x = (camera.position.x >> UV_WORLD_SCALE_SHIFT) & 63;
+    let cam_uv_z = (camera.position.z >> UV_WORLD_SCALE_SHIFT) & 63;
+    let time_scroll_u = (elapsed_vblanks as i32 * cloud.scroll_speed[0] as i32) >> 6;
+    let time_scroll_v = (elapsed_vblanks as i32 * cloud.scroll_speed[1] as i32) >> 6;
+    // World-derived offset *subtracts* so the texture appears to
+    // stay put as the player moves into it.
+    let scroll_u = ((time_scroll_u - cam_uv_x) & 63) as u8;
+    let scroll_v = ((time_scroll_v - cam_uv_z) & 63) as u8;
     let uv_lo = (scroll_u, scroll_v);
     let uv_hi_u = scroll_u.wrapping_add(63);
     let uv_hi_v = scroll_v.wrapping_add(63);
@@ -3601,11 +3619,13 @@ fn draw_cloud_layer(
         .with_cull_mode(CullMode::None)
         .with_material_layer(material);
 
+    let cx = camera.position.x;
+    let cz = camera.position.z;
     for tile_z in 0..tile_count {
-        let zlo = -extent + tile_z * tile_world;
+        let zlo = cz - extent + tile_z * tile_world;
         let zhi = zlo + tile_world;
         for tile_x in 0..tile_count {
-            let xlo = -extent + tile_x * tile_world;
+            let xlo = cx - extent + tile_x * tile_world;
             let xhi = xlo + tile_world;
             let _ = world.submit_textured_world_quad(
                 triangles,
