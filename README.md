@@ -96,12 +96,14 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 Then open a new shell. The repo's `rust-toolchain.toml` pins nightly and
 asks rustup for `rustfmt`, `clippy`, `rust-src`, and `llvm-tools`.
+The top-level workflow uses `make`; on macOS the Command Line Tools
+install `/usr/bin/make`.
 
 On Debian/Ubuntu-style Linux hosts, install the native packages the
 frontend stack usually needs:
 
 ```bash
-sudo apt install build-essential pkg-config libasound2-dev libudev-dev \
+sudo apt install build-essential make pkg-config libasound2-dev libudev-dev \
   libx11-dev libxi-dev libxrandr-dev libxinerama-dev libxcursor-dev \
   libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
 ```
@@ -123,13 +125,18 @@ Canaries and parity tests are ignored by default.
 ### 3. Configure a BIOS
 
 PSoXide does not include a PlayStation BIOS and will not download one
-for you. Dump your own BIOS image, then either export it:
+for you. Dump your own BIOS image, then configure it in either place:
+
+- In the frontend UI, open the Menu Settings column and use
+  **Choose BIOS path**. This persists `paths.bios` in `settings.ron`.
+- For headless or shell-only workflows, export `PSOXIDE_BIOS`:
 
 ```bash
 export PSOXIDE_BIOS=/absolute/path/to/SCPH1001.BIN
 ```
 
-or set `paths.bios` in the frontend's `settings.ron`.
+When both are set, the saved `settings.ron` path takes precedence over
+the environment variable.
 
 The GUI can open without a BIOS for UI work, but launching discs and
 editor Play currently require a configured BIOS path. Play builds a
