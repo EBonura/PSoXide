@@ -237,6 +237,11 @@ make game-pong     # build one mini-game
 make run-tri       # build and side-load an example into the frontend
 ```
 
+The frontend's Examples menu lists built `.exe` files from
+`build/examples/mipsel-sony-psx/release/`. On a fresh clone, use
+`make examples` or choose **Build public examples** in the Examples
+menu, then the launcher will rescan and populate the list.
+
 Editor/playtest internals:
 
 ```bash
