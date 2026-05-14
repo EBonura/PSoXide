@@ -176,6 +176,7 @@ const SHADOW_RADIUS_SCALE_NUM: i32 = 5;
 const SHADOW_RADIUS_SCALE_DEN: i32 = 4;
 const SHADOW_RADIUS_MIN: i32 = 160;
 const SHADOW_RADIUS_MAX: i32 = 320;
+const IMAGE_PROP_DEPTH_BIAS: i32 = 256;
 const COLLISION_DEBUG_BUTTON: u16 = button::L3;
 const COLLISION_DEBUG_SEGMENTS: usize = 8;
 const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
@@ -373,6 +374,7 @@ static mut RESIDENCY: ResidencyManager<MAX_RESIDENT_RAM_ASSETS, MAX_RESIDENT_VRA
 #[derive(Copy, Clone)]
 struct VramSlot {
     asset: AssetId,
+    clut_mode: VramSlotClutMode,
     clut_word: u16,
     tpage_word: u16,
     texture_window: TextureWindow,
@@ -380,13 +382,22 @@ struct VramSlot {
     texture_height: u16,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum VramSlotClutMode {
+    OpaqueZero,
+    TransparentZero,
+    ModelAtlas,
+}
+
 const VRAM_SLOT_EMPTY: Option<VramSlot> = None;
 static mut VRAM_SLOTS: [Option<VramSlot>; MAX_RESIDENT_VRAM_ASSETS] =
     [VRAM_SLOT_EMPTY; MAX_RESIDENT_VRAM_ASSETS];
 /// Number of VRAM slots used so far across room textures and model atlases.
 static mut VRAM_SLOT_COUNT: usize = 0;
-/// Number of room material textures uploaded. Drives the per-material
-/// CLUT row; placement is tracked by `ROOM_TEXTURE_ALLOCATOR`.
+/// Number of room texture CLUT slots uploaded. A texture may consume
+/// two CLUT slots when used both as opaque room geometry and as a
+/// zero-transparent image prop, while sharing one pixel upload.
+/// Pixel placement is tracked by `ROOM_TEXTURE_ALLOCATOR`.
 /// Kept separate from `VRAM_SLOT_COUNT` so model atlas uploads cannot
 /// shift room texture addressing.
 static mut ROOM_TEXTURE_COUNT: usize = 0;
@@ -3601,7 +3612,11 @@ fn far_vista_texture_material(
     tint_rgb: [u8; 3],
 ) -> Option<(TextureMaterial, u8, u8)> {
     let asset = find_asset_of_kind(ASSETS, asset_id?, AssetKind::Texture)?;
-    let slot = ensure_texture_uploaded_with_clut_mode(asset.id, asset.bytes, false)?;
+    let slot = ensure_texture_uploaded_with_clut_mode(
+        asset.id,
+        asset.bytes,
+        VramSlotClutMode::TransparentZero,
+    )?;
     Some((
         TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb_tuple(tint_rgb))
             .with_texture_window(slot.texture_window),
@@ -5639,30 +5654,42 @@ fn upload_shadow_texture() -> Option<TextureMaterial> {
 /// VRAM_SLOTS is the source of truth -- `RESIDENCY` only tracks
 /// the *contract*, which is pre-marked by `ensure_room_resident`
 /// before any actual upload runs.
-fn find_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
+fn find_vram_slot(asset_id: AssetId, clut_mode: VramSlotClutMode) -> Option<VramSlot> {
     unsafe {
         VRAM_SLOTS
             .iter()
             .filter_map(|s| *s)
-            .find(|s| s.asset == asset_id)
+            .find(|s| s.asset == asset_id && s.clut_mode == clut_mode)
+    }
+}
+
+fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
+    unsafe {
+        VRAM_SLOTS.iter().filter_map(|s| *s).find(|s| {
+            s.asset == asset_id
+                && matches!(
+                    s.clut_mode,
+                    VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
+                )
+        })
     }
 }
 
 fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<VramSlot> {
-    ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, true)
+    ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, VramSlotClutMode::OpaqueZero)
 }
 
 fn ensure_texture_uploaded_with_clut_mode(
     asset_id: AssetId,
     asset_bytes: &[u8],
-    force_zero_opaque: bool,
+    clut_mode: VramSlotClutMode,
 ) -> Option<VramSlot> {
     // VRAM_SLOTS is the source of truth for "have we actually
     // uploaded this asset". `RESIDENCY` is the *contract* -- it's
     // pre-marked by `ensure_room_resident` before any upload runs,
     // so reading it here would falsely report assets as uploaded
     // and skip the upload entirely.
-    if let Some(slot) = find_vram_slot(asset_id) {
+    if let Some(slot) = find_vram_slot(asset_id, clut_mode) {
         return Some(slot);
     }
 
@@ -5705,6 +5732,35 @@ fn ensure_texture_uploaded_with_clut_mode(
         return None;
     }
 
+    if let Some(shared_texture) = find_room_texture_vram_slot(asset_id) {
+        telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
+        telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
+        let clut_rect = VramRect::new(clut_x, ROOM_CLUT_Y, texture.clut_entries(), 1);
+        if clut_mode == VramSlotClutMode::OpaqueZero {
+            upload_opaque_clut(clut_rect, texture.clut_bytes());
+        } else {
+            upload_clut(clut_rect, texture.clut_bytes());
+        }
+        telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
+
+        let slot = VramSlot {
+            asset: asset_id,
+            clut_mode,
+            clut_word: Clut::new(clut_x, ROOM_CLUT_Y).uv_clut_word(),
+            tpage_word: shared_texture.tpage_word,
+            texture_window: shared_texture.texture_window,
+            texture_width: shared_texture.texture_width,
+            texture_height: shared_texture.texture_height,
+        };
+        unsafe {
+            VRAM_SLOTS[count] = Some(slot);
+            VRAM_SLOT_COUNT = count + 1;
+            ROOM_TEXTURE_COUNT = room_count + 1;
+            let _ = RESIDENCY.mark_vram_resident(asset_id);
+        }
+        return Some(slot);
+    }
+
     // Pack room materials on the GP0(E2) 8-texel grid inside 4bpp
     // tpages. A 32x32 texture now consumes a 32x32 window instead of
     // burning a whole old 64x64 cell.
@@ -5737,7 +5793,7 @@ fn ensure_texture_uploaded_with_clut_mode(
     }
 
     let clut_rect = VramRect::new(clut_x, ROOM_CLUT_Y, texture.clut_entries(), 1);
-    if force_zero_opaque {
+    if clut_mode == VramSlotClutMode::OpaqueZero {
         upload_opaque_clut(clut_rect, texture.clut_bytes());
     } else {
         upload_clut(clut_rect, texture.clut_bytes());
@@ -5747,6 +5803,7 @@ fn ensure_texture_uploaded_with_clut_mode(
     let clut = Clut::new(clut_x, ROOM_CLUT_Y);
     let slot = VramSlot {
         asset: asset_id,
+        clut_mode,
         clut_word: clut.uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::power_of_two_tile(
@@ -5790,7 +5847,7 @@ fn room_texture_window_size(size: u16) -> Option<u8> {
 fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<VramSlot> {
     // Same caveat as `ensure_texture_uploaded`: VRAM_SLOTS is
     // the source of truth, not the residency tracker.
-    if let Some(slot) = find_vram_slot(asset_id) {
+    if let Some(slot) = find_vram_slot(asset_id, VramSlotClutMode::ModelAtlas) {
         return Some(slot);
     }
     let texture = Texture::from_bytes(asset_bytes).ok()?;
@@ -5855,6 +5912,7 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
 
     let slot = VramSlot {
         asset: asset_id,
+        clut_mode: VramSlotClutMode::ModelAtlas,
         clut_word: Clut::new(0, clut_y).uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::NONE,
@@ -6293,8 +6351,11 @@ fn draw_image_props(
         let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
             continue;
         };
-        let Some(slot) = ensure_texture_uploaded_with_clut_mode(asset.id, asset.bytes, false)
-        else {
+        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
+            asset.id,
+            asset.bytes,
+            VramSlotClutMode::TransparentZero,
+        ) else {
             continue;
         };
         let origin = WorldVertex::new(prop.x, prop.y, prop.z);
@@ -6307,17 +6368,17 @@ fn draw_image_props(
         if !sphere_visible_to_camera(camera, options, center, radius, 96) {
             continue;
         }
+        let sort_depth = camera.view_vertex(center).z;
         let verts = image_prop_vertices(
             origin,
             prop.width,
             prop.height,
+            prop.pitch,
             prop.yaw,
+            prop.roll,
             prop.flags,
             *camera,
         );
-        let Some(projected) = camera.project_world_quad(verts) else {
-            continue;
-        };
         let tint = lighting.shade_tint_at(
             RoomPoint::new(prop.x, prop.y, prop.z),
             rgb_tuple(prop.tint_rgb),
@@ -6328,10 +6389,13 @@ fn draw_image_props(
         let v_max = model_render_uv_max(slot.texture_height);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
         let opts = options
+            .with_depth_policy(DepthPolicy::Fixed(sort_depth))
+            .with_depth_bias(options.depth_bias.saturating_sub(IMAGE_PROP_DEPTH_BIAS))
             .with_cull_mode(CullMode::None)
             .with_material_layer(material)
-            .with_textured_triangle_splitting(false);
-        let _ = world.submit_textured_quad(triangles, projected, uvs, material, opts);
+            .with_textured_triangle_splitting(true)
+            .with_textured_triangle_max_edge(0);
+        let _ = world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, opts);
     }
 }
 
@@ -6339,25 +6403,80 @@ fn image_prop_vertices(
     origin: WorldVertex,
     width: u16,
     height: u16,
+    pitch: i16,
     yaw: i16,
+    roll: i16,
     flags: u16,
     camera: WorldCamera,
 ) -> [WorldVertex; 4] {
-    let (sin_yaw, cos_yaw) = if flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0 {
-        (camera.sin_yaw.raw(), camera.cos_yaw.raw())
-    } else {
-        let angle = Angle::from_q12(yaw as u16);
-        (angle.sin().raw(), angle.cos().raw())
-    };
+    if flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0 {
+        let half_width = (width as i32) / 2;
+        let right_x = mul_q12_i32(half_width, camera.cos_yaw.raw());
+        let right_z = -mul_q12_i32(half_width, camera.sin_yaw.raw());
+        let top_y = origin.y.saturating_add(height as i32);
+        return [
+            WorldVertex::new(origin.x - right_x, top_y, origin.z - right_z),
+            WorldVertex::new(origin.x + right_x, top_y, origin.z + right_z),
+            WorldVertex::new(origin.x + right_x, origin.y, origin.z + right_z),
+            WorldVertex::new(origin.x - right_x, origin.y, origin.z - right_z),
+        ];
+    }
+
     let half_width = (width as i32) / 2;
-    let right_x = mul_q12_i32(half_width, cos_yaw);
-    let right_z = -mul_q12_i32(half_width, sin_yaw);
-    let top_y = origin.y.saturating_add(height as i32);
+    let h = height as i32;
+    let locals = [
+        [-half_width, h, 0],
+        [half_width, h, 0],
+        [half_width, 0, 0],
+        [-half_width, 0, 0],
+    ];
+    let mut out = [WorldVertex::new(0, 0, 0); 4];
+    let mut i = 0usize;
+    while i < locals.len() {
+        let rotated = rotate_z_q12(
+            rotate_y_q12(rotate_x_q12(locals[i], pitch as u16), yaw as u16),
+            roll as u16,
+        );
+        out[i] = WorldVertex::new(
+            origin.x.saturating_add(rotated[0]),
+            origin.y.saturating_add(rotated[1]),
+            origin.z.saturating_add(rotated[2]),
+        );
+        i += 1;
+    }
+    out
+}
+
+fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
     [
-        WorldVertex::new(origin.x - right_x, top_y, origin.z - right_z),
-        WorldVertex::new(origin.x + right_x, top_y, origin.z + right_z),
-        WorldVertex::new(origin.x + right_x, origin.y, origin.z + right_z),
-        WorldVertex::new(origin.x - right_x, origin.y, origin.z - right_z),
+        v[0],
+        mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
+        mul_q12_i32(v[1], s) + mul_q12_i32(v[2], c),
+    ]
+}
+
+fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
+    [
+        mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
+        v[1],
+        -mul_q12_i32(v[0], s) + mul_q12_i32(v[2], c),
+    ]
+}
+
+fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
+    [
+        mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
+        mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
+        v[2],
     ]
 }
 
