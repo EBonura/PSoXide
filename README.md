@@ -30,13 +30,15 @@ SDK, and not a finished game editor yet.
 
 Fresh captures from the current editor/playtest pipeline:
 
-| Editor Preview | Demo 2 In-Game | Demo 3 In-Game |
-| --- | --- | --- |
-| ![Editor 3D preview](assets/media/readme/editor-preview.png) | ![Demo 2 streamed playtest](assets/media/readme/demo2-playtest.png) | ![Demo 3 streamed playtest](assets/media/readme/demo3-playtest.png) |
+![PSoXide editor tool](assets/media/readme/editor-preview.png)
 
-| Demo 4 In-Game | Demo 5 In-Game | Demo 6 In-Game |
-| --- | --- | --- |
-| ![Demo 4 streamed playtest](assets/media/readme/demo4-playtest.png) | ![Demo 5 streamed playtest](assets/media/readme/demo5-playtest.png) | ![Demo 6 streamed playtest](assets/media/readme/demo6-playtest.png) |
+| Demo 2 In-Game | Demo 3 In-Game |
+| --- | --- |
+| ![Demo 2 streamed playtest](assets/media/readme/demo2-playtest.png) | ![Demo 3 streamed playtest](assets/media/readme/demo3-playtest.png) |
+
+| Demo 4 In-Game | Demo 5 In-Game |
+| --- | --- |
+| ![Demo 4 streamed playtest](assets/media/readme/demo4-playtest.png) | ![Demo 5 streamed playtest](assets/media/readme/demo5-playtest.png) |
 
 ## Current Status
 
