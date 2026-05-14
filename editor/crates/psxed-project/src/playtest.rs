@@ -143,6 +143,8 @@ pub fn build_package(
     // only use it for presence tests.
     let mut texture_asset_for_resource: std::collections::HashMap<ResourceId, usize> =
         std::collections::HashMap::new();
+    let mut cloud_asset_cache: std::collections::HashMap<(u32, [u8; 3], [u8; 3], u8), usize> =
+        std::collections::HashMap::new();
     let mut room_chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
     let mut room_bake_inputs: Vec<CookedRoomBakeInput> = Vec::new();
     let mut room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
@@ -370,6 +372,16 @@ pub fn build_package(
             };
             let far_vista_has_texture = far_vista_texture_asset_indices.iter().any(Option::is_some);
 
+            let cloud_texture_asset_index = cook_cloud_texture_asset(
+                &resolved_sky.cloud_layer,
+                resolved_sky.enabled,
+                resolved_sky.horizon_color,
+                &format!("Room '{}' cloud layer", room_node.name),
+                &mut cloud_asset_cache,
+                &mut assets,
+                &mut report,
+            );
+
             rooms.push(PlaytestRoom {
                 name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
                 world_asset_index,
@@ -392,6 +404,7 @@ pub fn build_package(
                         0
                     },
                     cloud_layer: PlaytestCloudLayer {
+                        texture_asset_index: cloud_texture_asset_index,
                         color_rgb: resolved_sky.cloud_layer.color,
                         density: resolved_sky.cloud_layer.density,
                         altitude: resolved_sky.cloud_layer.altitude,
@@ -401,6 +414,7 @@ pub fn build_package(
                         noise_seed: resolved_sky.cloud_layer.noise_seed,
                         flags: if resolved_sky.cloud_layer.enabled
                             && resolved_sky.enabled
+                            && cloud_texture_asset_index.is_some()
                         {
                             cloud_layer_flags::ENABLED
                         } else {
@@ -1030,6 +1044,55 @@ fn active_far_vista_panel_count(
         .unwrap_or(0)
         .min(segments as usize)
         .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
+}
+
+/// Bake the room's cloud texture (Perlin gradient → 4bpp PSXT) and
+/// register it as a regular `Texture` asset so the runtime can
+/// upload it through the same VRAM slot path as authored room
+/// materials. Returns the asset index, or `None` when the layer is
+/// disabled or the bake fails.
+///
+/// Identical `(seed, horizon, cloud, density)` tuples across rooms
+/// share one cooked texture entry, so a world with many rooms set
+/// to the same cloud preset doesn't bloat the asset table.
+fn cook_cloud_texture_asset(
+    cloud: &crate::CloudLayerSettings,
+    sky_enabled: bool,
+    horizon_rgb: [u8; 3],
+    context: &str,
+    cloud_asset_cache: &mut HashMap<(u32, [u8; 3], [u8; 3], u8), usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<usize> {
+    if !cloud.enabled || !sky_enabled {
+        return None;
+    }
+    let key = (cloud.noise_seed, horizon_rgb, cloud.color, cloud.density);
+    if let Some(&existing) = cloud_asset_cache.get(&key) {
+        return Some(existing);
+    }
+    let bytes = match crate::cloud_bake::bake_cloud_texture_psxt(
+        cloud.noise_seed,
+        horizon_rgb,
+        cloud.color,
+        cloud.density,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            report.warn(format!("{context}: cloud-layer bake failed: {error}"));
+            return None;
+        }
+    };
+    let new_index = assets.len();
+    let label_index = cloud_asset_cache.len();
+    assets.push(PlaytestAsset {
+        kind: PlaytestAssetKind::Texture,
+        bytes,
+        filename: format!("cloud_{label_index:03}.psxt"),
+        source_label: format!("Cloud Layer (seed 0x{:08x})", cloud.noise_seed),
+    });
+    cloud_asset_cache.insert(key, new_index);
+    Some(new_index)
 }
 
 fn cook_far_vista_texture_asset(
