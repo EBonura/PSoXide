@@ -115,6 +115,12 @@ pub mod sky_flags {
     pub const ENABLED: u16 = 1 << 0;
 }
 
+/// Cloud-layer record flags.
+pub mod cloud_layer_flags {
+    /// Cloud layer should be baked and drawn.
+    pub const ENABLED: u16 = 1 << 0;
+}
+
 /// Far-vista record flags.
 pub mod far_vista_flags {
     /// A far-vista ring should be drawn between sky and room geometry.
@@ -281,6 +287,8 @@ pub struct LevelSkyRecord {
     pub horizon_percent: u8,
     /// Sky flags.
     pub flags: u16,
+    /// Optional cloud layer baked from Perlin noise at scene init.
+    pub cloud_layer: LevelCloudLayerRecord,
 }
 
 impl LevelSkyRecord {
@@ -291,6 +299,42 @@ impl LevelSkyRecord {
         bottom_rgb: [5, 7, 12],
         horizon_percent: 58,
         flags: sky_flags::ENABLED,
+        cloud_layer: LevelCloudLayerRecord::DEFAULT,
+    };
+}
+
+/// Resolved cloud-layer settings for one cooked room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCloudLayerRecord {
+    /// Cloud highlight colour blended through the bake CLUT.
+    pub color_rgb: [u8; 3],
+    /// CLUT-ramp threshold pivot, 0..=255.
+    pub density: u8,
+    /// Plane altitude above world Y = 0, in engine units.
+    pub altitude: u16,
+    /// Plane half-extent on each of X / Z in engine units.
+    pub extent: u16,
+    /// Texture tile-repeats across the plane on each axis.
+    pub tile_count: u8,
+    /// UV scroll speed per second in PSX angle units.
+    pub scroll_speed: [i16; 2],
+    /// Perlin generator seed used at bake time.
+    pub noise_seed: u32,
+    /// Cloud-layer flags.
+    pub flags: u16,
+}
+
+impl LevelCloudLayerRecord {
+    /// Disabled-by-default placeholder.
+    pub const DEFAULT: Self = Self {
+        color_rgb: [220, 220, 232],
+        density: 128,
+        altitude: 6_144,
+        extent: 24_576,
+        tile_count: 4,
+        scroll_speed: [4, 0],
+        noise_seed: 0x5a7b_c91d,
+        flags: 0,
     };
 }
 
@@ -1064,9 +1108,15 @@ pub struct LevelImagePropRecord {
     pub y: i32,
     /// Bottom-center room-local Z.
     pub z: i32,
+    /// Static pitch in PSX angle units. Ignored when
+    /// [`image_prop_flags::CYLINDRICAL_BILLBOARD`] is set.
+    pub pitch: i16,
     /// Static yaw in PSX angle units. Ignored when
     /// [`image_prop_flags::CYLINDRICAL_BILLBOARD`] is set.
     pub yaw: i16,
+    /// Static roll in PSX angle units. Ignored when
+    /// [`image_prop_flags::CYLINDRICAL_BILLBOARD`] is set.
+    pub roll: i16,
     /// Quad width in engine units.
     pub width: u16,
     /// Quad height in engine units.
