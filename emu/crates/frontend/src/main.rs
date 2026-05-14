@@ -328,6 +328,7 @@ impl ApplicationHandler for Shell {
         match event {
             WindowEvent::CloseRequested => {
                 self.state.stop_embedded_playtest();
+                self.state.stop_examples_build();
                 // Flush any dirty memory card so save progress
                 // survives a window-close. A hard crash still
                 // loses whatever hasn't been flushed -- the run
@@ -508,6 +509,7 @@ impl ApplicationHandler for Shell {
                 if let Some(action) = self.state.menu.update(&input) {
                     if ui::apply_menu_action(&mut self.state, action) == MenuOutcome::Quit {
                         self.state.stop_embedded_playtest();
+                        self.state.stop_examples_build();
                         if let Err(e) = self.state.flush_memcard_port1() {
                             eprintln!("[frontend] memcard flush on quit: {e}");
                         }
@@ -522,6 +524,7 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 self.state.poll_embedded_playtest_build();
+                self.state.poll_examples_build();
                 profile.input_ms = elapsed_ms(input_start);
 
                 // Arm GPU command capture before stepping so the HW /
