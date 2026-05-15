@@ -57,7 +57,7 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
-    draw_line_mono, draw_tri_flat_blended, draw_tri_gouraud,
+    draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::TriTextured,
@@ -66,10 +66,10 @@ use psx_gpu::{
 use psx_level::{
     equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, room_flags, sky_flags,
     AssetId, AssetKind, EntityRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
-    LevelCycloramaQuadRecord, LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord,
-    LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord,
-    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
-    ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
+    LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness,
+    LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
+    LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
+    OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
@@ -146,6 +146,20 @@ const MODEL_TPAGE_MAX_HALFWORDS: u16 = 128;
 /// a single row; we step one row down per uploaded atlas, so
 /// `MODEL_CLUT_BASE_Y + n` is the row for the n-th atlas.
 const MODEL_CLUT_BASE_Y: u16 = 484;
+
+/// Cooked sky panoramas occupy one fixed 8bpp page. The pixels and
+/// CLUT are outside the double-buffered framebuffer and disjoint from
+/// room-material and model-atlas upload regions.
+const SKY_PANORAMA_TPAGE: Tpage = Tpage::new(896, 256, TexDepth::Bit8);
+const SKY_PANORAMA_CLUT: Clut = Clut::new(0, 481);
+const SKY_PANORAMA_WIDTH: u16 = 256;
+const SKY_PANORAMA_HEIGHT: u16 = 128;
+/// Model atlases pack left-to-right until the reserved sky page.
+const MODEL_TPAGE_LIMIT_X: u16 = SKY_PANORAMA_TPAGE.x();
+const SKY_CYCLORAMA_COLUMNS_MIN: u8 = 8;
+const SKY_CYCLORAMA_COLUMNS_MAX: u8 = 24;
+const SKY_CYCLORAMA_ROWS_MIN: u8 = 4;
+const SKY_CYCLORAMA_ROWS_MAX: u8 = 8;
 
 /// 4bpp 8x8 BIOS-style font atlas for the analog-mode gate prompt.
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -387,6 +401,7 @@ enum VramSlotClutMode {
     OpaqueZero,
     TransparentZero,
     ModelAtlas,
+    SkyPanorama,
 }
 
 const VRAM_SLOT_EMPTY: Option<VramSlot> = None;
@@ -1468,13 +1483,17 @@ impl Scene for Playtest {
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            draw_cyclorama(room_record.sky, camera, ctx.time.elapsed_vblanks());
+            telemetry::stage_begin(telemetry::stage::SKY);
+            draw_sky_panorama(room_record.sky, camera);
+            telemetry::stage_end(telemetry::stage::SKY);
+            telemetry::stage_begin(telemetry::stage::FAR_VISTA);
             draw_far_vista_ring(
                 camera,
                 room_record.far_vista,
                 &mut primitive_packets,
                 &mut world,
             );
+            telemetry::stage_end(telemetry::stage::FAR_VISTA);
         }
 
         if self.current_collision_room.is_some() {
@@ -1693,6 +1712,7 @@ impl Scene for Playtest {
                     &mut world,
                 );
                 telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
+                telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
                 draw_image_props(
                     IMAGE_PROPS,
                     active.index,
@@ -1702,6 +1722,7 @@ impl Scene for Playtest {
                     &mut primitive_packets,
                     &mut world,
                 );
+                telemetry::stage_end(telemetry::stage::IMAGE_PROPS);
                 telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                 let player = self.motor.position();
                 let instance_depth_pass = player_actor_depth_for_room(
@@ -3507,54 +3528,85 @@ fn accumulate_grid_visibility_stats(total: &mut GridVisibilityStats, stats: Grid
         .saturating_add(stats.projected_vertices);
 }
 
-/// Cooked cyclorama backdrop. The manifest stores explicit angular
-/// geometry and colours; runtime applies camera rotation only, matching
-/// the classic PS1 panorama/cyclorama approach.
-fn draw_cyclorama(sky: LevelSkyRecord, camera: WorldCamera, _elapsed_vblanks: u32) {
+/// Cooked cyclorama backdrop. The expensive authored sky art is
+/// rasterized into a panorama texture by the editor cooker; runtime
+/// wraps that texture over a small camera-centred dome so translation
+/// is ignored but yaw/pitch still feel like surrounding scenery.
+fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
     if sky.flags & sky_flags::ENABLED == 0 {
         return;
     }
-    for quad in sky.cyclorama_quads {
-        draw_cyclorama_quad(*quad, camera);
-    }
-}
-
-fn draw_cyclorama_quad(quad: LevelCycloramaQuadRecord, camera: WorldCamera) {
-    let Some(projected) = project_cyclorama_quad(quad.direction_q12, camera) else {
+    let Some(asset) = find_asset_of_kind(ASSETS, sky.cloud_layer.texture_asset, AssetKind::Texture)
+    else {
         return;
     };
-    if cyclorama_quad_outside_screen(projected) {
+    let Some(slot) = ensure_sky_panorama_uploaded(asset.id, asset.bytes) else {
         return;
+    };
+    let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
+        .with_raw_texture(true)
+        .with_dither(true);
+
+    let columns = sky
+        .skybox_columns
+        .clamp(SKY_CYCLORAMA_COLUMNS_MIN, SKY_CYCLORAMA_COLUMNS_MAX) as usize;
+    let rows = sky
+        .skybox_rows
+        .clamp(SKY_CYCLORAMA_ROWS_MIN, SKY_CYCLORAMA_ROWS_MAX) as usize;
+    let horizon_pitch = sky_horizon_pitch_degrees_i32(sky.horizon_percent);
+    let top_pitch = (horizon_pitch + 58).min(78);
+    let bottom_pitch = (horizon_pitch - 46).max(-72);
+
+    for row in 0..rows {
+        let pitch_top = sky_lerp_i32(top_pitch, bottom_pitch, row, rows);
+        let pitch_bottom = sky_lerp_i32(top_pitch, bottom_pitch, row + 1, rows);
+        let v0 = sky_uv_for_step(row, rows, SKY_PANORAMA_HEIGHT);
+        let v1 = sky_uv_for_step(row + 1, rows, SKY_PANORAMA_HEIGHT);
+        for column in 0..columns {
+            let yaw0 = sky_yaw_degrees_for_column(column, columns);
+            let yaw1 = sky_yaw_degrees_for_column(column + 1, columns);
+            let u0 = sky_uv_for_step(column, columns, SKY_PANORAMA_WIDTH);
+            let u1 = sky_uv_for_step(column + 1, columns, SKY_PANORAMA_WIDTH);
+            draw_sky_cyclorama_quad(
+                camera,
+                material,
+                [
+                    sky_direction_q12(yaw0, pitch_top),
+                    sky_direction_q12(yaw1, pitch_top),
+                    sky_direction_q12(yaw0, pitch_bottom),
+                    sky_direction_q12(yaw1, pitch_bottom),
+                ],
+                [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
+            );
+        }
     }
-    let c = [
-        (quad.rgb[0][0], quad.rgb[0][1], quad.rgb[0][2]),
-        (quad.rgb[1][0], quad.rgb[1][1], quad.rgb[1][2]),
-        (quad.rgb[2][0], quad.rgb[2][1], quad.rgb[2][2]),
-        (quad.rgb[3][0], quad.rgb[3][1], quad.rgb[3][2]),
-    ];
-    draw_tri_gouraud(
-        [projected[0], projected[1], projected[2]],
-        [c[0], c[1], c[2]],
-    );
-    draw_tri_gouraud(
-        [projected[1], projected[2], projected[3]],
-        [c[1], c[2], c[3]],
-    );
 }
 
-fn project_cyclorama_quad(
-    dirs: [[i16; 3]; 4],
+fn draw_sky_cyclorama_quad(
     camera: WorldCamera,
-) -> Option<[(i16, i16); 4]> {
+    material: TextureMaterial,
+    dirs: [[i16; 3]; 4],
+    uvs: [(u8, u8); 4],
+) {
+    let Some(projected) = project_sky_quad(dirs, camera) else {
+        return;
+    };
+    if sky_quad_outside_screen(projected) {
+        return;
+    }
+    draw_quad_textured_material(projected, uvs, material);
+}
+
+fn project_sky_quad(dirs: [[i16; 3]; 4], camera: WorldCamera) -> Option<[(i16, i16); 4]> {
     Some([
-        project_cyclorama_direction(dirs[0], camera)?,
-        project_cyclorama_direction(dirs[1], camera)?,
-        project_cyclorama_direction(dirs[2], camera)?,
-        project_cyclorama_direction(dirs[3], camera)?,
+        project_sky_direction(dirs[0], camera)?,
+        project_sky_direction(dirs[1], camera)?,
+        project_sky_direction(dirs[2], camera)?,
+        project_sky_direction(dirs[3], camera)?,
     ])
 }
 
-fn project_cyclorama_direction(dir: [i16; 3], camera: WorldCamera) -> Option<(i16, i16)> {
+fn project_sky_direction(dir: [i16; 3], camera: WorldCamera) -> Option<(i16, i16)> {
     let x = i32::from(dir[0]);
     let y = i32::from(dir[1]);
     let z = i32::from(dir[2]);
@@ -3571,15 +3623,57 @@ fn project_cyclorama_direction(dir: [i16; 3], camera: WorldCamera) -> Option<(i1
     }
     let sx = SCREEN_CX as i32 + (x1 * FOCAL) / z2;
     let sy = SCREEN_CY as i32 - (y2 * FOCAL) / z2;
-    Some((clamp_i16(sx.clamp(-512, 831)), clamp_i16(sy.clamp(-256, 495))))
+    Some((
+        clamp_i16(sx.clamp(-512, 831)),
+        clamp_i16(sy.clamp(-256, 495)),
+    ))
 }
 
-fn cyclorama_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
+fn sky_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
     let min_x = points.iter().map(|p| p.0).min().unwrap_or(0);
     let max_x = points.iter().map(|p| p.0).max().unwrap_or(0);
     let min_y = points.iter().map(|p| p.1).min().unwrap_or(0);
     let max_y = points.iter().map(|p| p.1).max().unwrap_or(0);
     max_x < 0 || min_x >= SCREEN_W || max_y < 0 || min_y >= SCREEN_H
+}
+
+fn sky_direction_q12(yaw_degrees: i32, pitch_degrees: i32) -> [i16; 3] {
+    let yaw = angle_from_degrees_i32(yaw_degrees);
+    let pitch = angle_from_degrees_i32(pitch_degrees.clamp(-82, 82));
+    let yaw_sin = yaw.sin().raw();
+    let yaw_cos = yaw.cos().raw();
+    let pitch_sin = pitch.sin().raw();
+    let pitch_cos = pitch.cos().raw();
+    [
+        clamp_i16(-mul_q12_i32(yaw_sin, pitch_cos)),
+        clamp_i16(pitch_sin),
+        clamp_i16(-mul_q12_i32(yaw_cos, pitch_cos)),
+    ]
+}
+
+fn angle_from_degrees_i32(degrees: i32) -> Angle {
+    Angle::from_q12(((degrees.saturating_mul(4096) / 360) & 0x0fff) as u16)
+}
+
+fn sky_horizon_pitch_degrees_i32(horizon_percent: u8) -> i32 {
+    let y = 120 - 240 * i32::from(horizon_percent.clamp(5, 95)) / 100;
+    y.saturating_mul(57) / FOCAL
+}
+
+fn sky_yaw_degrees_for_column(column: usize, columns: usize) -> i32 {
+    -180 + (360 * column as i32) / columns.max(1) as i32
+}
+
+fn sky_lerp_i32(a: i32, b: i32, index: usize, count: usize) -> i32 {
+    let count = count.max(1) as i32;
+    a + (b - a) * index as i32 / count
+}
+
+fn sky_uv_for_step(step: usize, steps: usize, size: u16) -> u8 {
+    if step >= steps {
+        return size.saturating_sub(1).min(255) as u8;
+    }
+    ((step as u32 * u32::from(size)) / steps.max(1) as u32).min(u32::from(size - 1)) as u8
 }
 
 fn draw_far_vista_ring(
@@ -5888,6 +5982,68 @@ fn room_texture_window_size(size: u16) -> Option<u8> {
     u8::try_from(size).ok()
 }
 
+fn ensure_sky_panorama_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<VramSlot> {
+    if let Some(slot) = find_vram_slot(asset_id, VramSlotClutMode::SkyPanorama) {
+        return Some(slot);
+    }
+    let texture = Texture::from_bytes(asset_bytes).ok()?;
+    if texture.clut_entries() != 256
+        || texture.width() != SKY_PANORAMA_WIDTH
+        || texture.height() != SKY_PANORAMA_HEIGHT
+    {
+        return None;
+    }
+    let count = unsafe { VRAM_SLOT_COUNT };
+    if count >= MAX_RESIDENT_VRAM_ASSETS {
+        return None;
+    }
+    let expected_pixel_bytes = (texture.halfwords_per_row() as usize)
+        .saturating_mul(texture.height() as usize)
+        .saturating_mul(2);
+    if texture.pixel_bytes().len() != expected_pixel_bytes {
+        return None;
+    }
+
+    telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
+    telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
+    upload_bytes(
+        VramRect::new(
+            SKY_PANORAMA_TPAGE.x(),
+            SKY_PANORAMA_TPAGE.y(),
+            texture.halfwords_per_row(),
+            texture.height(),
+        ),
+        texture.pixel_bytes(),
+    );
+    upload_model_clut(
+        VramRect::new(
+            SKY_PANORAMA_CLUT.x(),
+            SKY_PANORAMA_CLUT.y(),
+            texture.clut_entries(),
+            1,
+        ),
+        texture.clut_bytes(),
+        texture.index_zero_transparent(),
+    );
+    telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
+
+    let slot = VramSlot {
+        asset: asset_id,
+        clut_mode: VramSlotClutMode::SkyPanorama,
+        clut_word: SKY_PANORAMA_CLUT.uv_clut_word(),
+        tpage_word: SKY_PANORAMA_TPAGE.uv_tpage_word(0),
+        texture_window: TextureWindow::NONE,
+        texture_width: texture.width(),
+        texture_height: texture.height(),
+    };
+    unsafe {
+        VRAM_SLOTS[count] = Some(slot);
+        VRAM_SLOT_COUNT = count + 1;
+        let _ = RESIDENCY.mark_vram_resident(asset_id);
+    }
+    Some(slot)
+}
+
 /// Upload an 8bpp model atlas to the dedicated model VRAM
 /// region. Returns a `VramSlot` carrying the 8bpp tpage word
 /// and the atlas's CLUT word. Reuses an existing slot when the
@@ -5938,7 +6094,7 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     } else {
         MODEL_TPAGE_MAX_HALFWORDS
     };
-    if tpage_x.checked_add(slot_halfwords)? > 1024 {
+    if tpage_x.checked_add(slot_halfwords)? > MODEL_TPAGE_LIMIT_X {
         return None;
     }
     telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
