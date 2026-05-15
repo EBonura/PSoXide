@@ -174,6 +174,63 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out.push('\n');
     }
 
+    let mut sky_cyclorama_defs: Vec<&[crate::SkyCycloramaQuad]> = Vec::new();
+    let mut sky_cyclorama_refs: Vec<String> = Vec::with_capacity(package.rooms.len());
+    for room in &package.rooms {
+        if room.sky.cyclorama_quads.is_empty() {
+            sky_cyclorama_refs.push("&[]".to_string());
+        } else if let Some(index) = sky_cyclorama_defs
+            .iter()
+            .position(|quads| *quads == room.sky.cyclorama_quads.as_slice())
+        {
+            sky_cyclorama_refs.push(format!("SKY_CYCLORAMA_QUADS_{index}"));
+        } else {
+            let index = sky_cyclorama_defs.len();
+            sky_cyclorama_defs.push(room.sky.cyclorama_quads.as_slice());
+            sky_cyclorama_refs.push(format!("SKY_CYCLORAMA_QUADS_{index}"));
+        }
+    }
+    for (cyclorama_index, quads) in sky_cyclorama_defs.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "static SKY_CYCLORAMA_QUADS_{cyclorama_index}: &[LevelCycloramaQuadRecord] = &["
+        );
+        for quad in *quads {
+            let _ = writeln!(
+                out,
+                "    LevelCycloramaQuadRecord {{ direction_q12: [[{}, {}, {}], [{}, {}, {}], [{}, {}, {}], [{}, {}, {}]], rgb: [[{}, {}, {}], [{}, {}, {}], [{}, {}, {}], [{}, {}, {}]], flags: 0 }},",
+                quad.direction_q12[0][0],
+                quad.direction_q12[0][1],
+                quad.direction_q12[0][2],
+                quad.direction_q12[1][0],
+                quad.direction_q12[1][1],
+                quad.direction_q12[1][2],
+                quad.direction_q12[2][0],
+                quad.direction_q12[2][1],
+                quad.direction_q12[2][2],
+                quad.direction_q12[3][0],
+                quad.direction_q12[3][1],
+                quad.direction_q12[3][2],
+                quad.rgb[0][0],
+                quad.rgb[0][1],
+                quad.rgb[0][2],
+                quad.rgb[1][0],
+                quad.rgb[1][1],
+                quad.rgb[1][2],
+                quad.rgb[2][0],
+                quad.rgb[2][1],
+                quad.rgb[2][2],
+                quad.rgb[3][0],
+                quad.rgb[3][1],
+                quad.rgb[3][2],
+            );
+        }
+        out.push_str("];\n");
+    }
+    if !sky_cyclorama_defs.is_empty() {
+        out.push('\n');
+    }
+
     out.push_str("/// Rooms with material-slice metadata.\n");
     out.push_str("pub static ROOMS: &[LevelRoomRecord] = &[\n");
     for (room_index, room) in package.rooms.iter().enumerate() {
@@ -182,9 +239,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         } else {
             format!("FAR_VISTA_TEXTURES_{room_index}")
         };
+        let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -207,7 +265,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.sky.bottom_rgb[1],
             room.sky.bottom_rgb[2],
             room.sky.horizon_percent,
+            room.sky.horizon_thickness_percent,
+            room.sky.skybox_columns,
+            room.sky.skybox_rows,
             room.sky.flags,
+            sky_cyclorama_quads,
             room.sky
                 .cloud_layer
                 .texture_asset_index
@@ -2409,7 +2471,11 @@ mod tests {
                 horizon_rgb: [0, 0, 0],
                 bottom_rgb: [0, 0, 0],
                 horizon_percent: 50,
+                horizon_thickness_percent: 8,
+                skybox_columns: 16,
+                skybox_rows: 10,
                 flags: 0,
+                cyclorama_quads: Vec::new(),
                 cloud_layer: PlaytestCloudLayer {
                     texture_asset_index: None,
                     color_rgb: [0, 0, 0],
@@ -2542,6 +2608,7 @@ use psx_level::{
     LevelCharacterRecord,
     LevelChunkNeighbours,
     LevelChunkRecord,
+    LevelCycloramaQuadRecord,
     LevelFarVistaRecord,
     LevelImagePropRecord,
     LevelMaterialRecord,

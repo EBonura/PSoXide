@@ -47,7 +47,7 @@ use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
 /// 4096-cap caps the per-frame primitive count at a comfortable
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
-const SKY_QUAD_CAP: usize = 2;
+const SKY_QUAD_CAP: usize = psxed_project::SKY_CYCLORAMA_QUAD_MAX;
 const FAR_VISTA_QUAD_CAP: usize = 16;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
 /// editor preview exercises the same overflow behavior.
@@ -88,6 +88,7 @@ const SCREEN_CX: i32 = SCREEN_W / 2;
 const SCREEN_CY: i32 = SCREEN_H / 2;
 /// Projection-plane distance (focal length). Bigger = narrower FOV.
 const PROJ_H: i32 = 320;
+const NEAR_Z: i32 = 64;
 const PSX_VERTEX_MIN: i16 = -1024;
 const PSX_VERTEX_MAX: i16 = 1023;
 const PSX_TRI_MAX_DX: i32 = 1023;
@@ -227,14 +228,14 @@ pub fn build_phase1_frame(
     scratch.overlay_lines.clear();
     scratch.ot.clear();
 
+    let world_camera = setup_gte_for_camera(camera);
     let resolved_sky = project
         .active_scene()
         .world_sky_for_node(room_id)
         .unwrap_or_default()
         .resolved_for_room(grid.fog_enabled && preview_fog, grid.fog_color);
     push_clear(&mut scratch, resolved_sky.lower_color);
-    push_sky_gradient(&mut scratch, resolved_sky);
-    let world_camera = setup_gte_for_camera(camera);
+    push_cyclorama(&mut scratch, resolved_sky, world_camera);
     let resolved_far_vista = project
         .active_scene()
         .world_far_vista_for_node(room_id)
@@ -3628,43 +3629,83 @@ fn push_clear(scratch: &mut PreviewScratch, color: [u8; 3]) {
     }
 }
 
-fn push_sky_gradient(scratch: &mut PreviewScratch, sky: psxed_project::ResolvedSkySettings) {
+fn push_cyclorama(
+    scratch: &mut PreviewScratch,
+    sky: psxed_project::ResolvedSkySettings,
+    camera: psx_engine::WorldCamera,
+) {
     if !sky.enabled {
         return;
     }
-    let horizon_y = ((SCREEN_H * sky.horizon_percent as i32) / 100).clamp(1, SCREEN_H - 1) as i16;
-    push_sky_quad(scratch, 0, horizon_y, sky.top_color, sky.horizon_color);
-    push_sky_quad(
-        scratch,
-        horizon_y,
-        SCREEN_H as i16,
-        sky.horizon_color,
-        sky.lower_color,
-    );
+    for quad in psxed_project::generate_sky_cyclorama(sky).into_iter().rev() {
+        let Some(projected) = preview_project_cyclorama_quad(quad.direction_q12, camera) else {
+            continue;
+        };
+        if preview_cyclorama_quad_outside_screen(projected) {
+            continue;
+        }
+        push_sky_quad_corners(scratch, projected, quad.rgb);
+    }
 }
 
-fn push_sky_quad(
+fn preview_project_cyclorama_quad(
+    dirs: [[i16; 3]; 4],
+    camera: psx_engine::WorldCamera,
+) -> Option<[(i16, i16); 4]> {
+    Some([
+        preview_project_cyclorama_direction(dirs[0], camera)?,
+        preview_project_cyclorama_direction(dirs[1], camera)?,
+        preview_project_cyclorama_direction(dirs[2], camera)?,
+        preview_project_cyclorama_direction(dirs[3], camera)?,
+    ])
+}
+
+fn preview_project_cyclorama_direction(
+    dir: [i16; 3],
+    camera: psx_engine::WorldCamera,
+) -> Option<(i16, i16)> {
+    let x = i32::from(dir[0]);
+    let y = i32::from(dir[1]);
+    let z = i32::from(dir[2]);
+    let sin_yaw = camera.sin_yaw.raw();
+    let cos_yaw = camera.cos_yaw.raw();
+    let sin_pitch = camera.sin_pitch.raw();
+    let cos_pitch = camera.cos_pitch.raw();
+    let x1 = mul_q12_i32(x, cos_yaw) - mul_q12_i32(z, sin_yaw);
+    let z1 = -mul_q12_i32(x, sin_yaw) - mul_q12_i32(z, cos_yaw);
+    let y2 = mul_q12_i32(y, cos_pitch) - mul_q12_i32(z1, sin_pitch);
+    let z2 = mul_q12_i32(y, sin_pitch) + mul_q12_i32(z1, cos_pitch);
+    if z2 <= NEAR_Z {
+        return None;
+    }
+    let sx = SCREEN_CX + (x1 * PROJ_H) / z2;
+    let sy = SCREEN_CY - (y2 * PROJ_H) / z2;
+    Some((sx.clamp(-512, 831) as i16, sy.clamp(-256, 495) as i16))
+}
+
+fn preview_cyclorama_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
+    let min_x = points.iter().map(|p| p.0).min().unwrap_or(0);
+    let max_x = points.iter().map(|p| p.0).max().unwrap_or(0);
+    let min_y = points.iter().map(|p| p.1).min().unwrap_or(0);
+    let max_y = points.iter().map(|p| p.1).max().unwrap_or(0);
+    max_x < 0 || min_x >= SCREEN_W as i16 || max_y < 0 || min_y >= SCREEN_H as i16
+}
+
+fn push_sky_quad_corners(
     scratch: &mut PreviewScratch,
-    y0: i16,
-    y1: i16,
-    top_color: [u8; 3],
-    bottom_color: [u8; 3],
+    points: [(i16, i16); 4],
+    colors: [[u8; 3]; 4],
 ) {
-    if y1 <= y0 || scratch.sky_used >= scratch.sky_quads.len() {
+    if scratch.sky_used >= scratch.sky_quads.len() {
         return;
     }
     let quad = QuadGouraud::new(
+        points,
         [
-            (0, y0),
-            (SCREEN_W as i16, y0),
-            (0, y1),
-            (SCREEN_W as i16, y1),
-        ],
-        [
-            (top_color[0], top_color[1], top_color[2]),
-            (top_color[0], top_color[1], top_color[2]),
-            (bottom_color[0], bottom_color[1], bottom_color[2]),
-            (bottom_color[0], bottom_color[1], bottom_color[2]),
+            (colors[0][0], colors[0][1], colors[0][2]),
+            (colors[1][0], colors[1][1], colors[1][2]),
+            (colors[2][0], colors[2][1], colors[2][2]),
+            (colors[3][0], colors[3][1], colors[3][2]),
         ],
     );
     let idx = scratch.sky_used;
