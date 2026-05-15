@@ -1869,6 +1869,9 @@ fn room_required_assets(
     for asset_index in room.far_vista.texture_asset_indices.iter().flatten() {
         push_unique(&mut required_vram, *asset_index);
     }
+    if let Some(asset_index) = room.sky.cloud_layer.texture_asset_index {
+        push_unique(&mut required_vram, asset_index);
+    }
     for prop in &package.image_props {
         if prop.room == room_index as u16 {
             push_unique(&mut required_vram, prop.texture_asset_index);
