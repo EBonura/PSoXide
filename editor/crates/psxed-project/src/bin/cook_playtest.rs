@@ -85,6 +85,11 @@ fn main() -> ExitCode {
                             vram_seen.push(m.texture_asset_index);
                         }
                     }
+                    if let Some(sky_texture) = r.sky.cloud_layer.texture_asset_index {
+                        if !vram_seen.contains(&sky_texture) {
+                            vram_seen.push(sky_texture);
+                        }
+                    }
                     let i_u16 = i as u16;
                     let mut seen_models: Vec<u16> = Vec::new();
                     for inst in &package.model_instances {

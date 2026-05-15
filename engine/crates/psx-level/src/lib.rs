@@ -331,8 +331,7 @@ impl LevelSkyRecord {
 /// Resolved cloud-layer settings for one cooked room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelCloudLayerRecord {
-    /// Reserved texture slot. `AssetId(u16::MAX)` for the current
-    /// cyclorama sky path.
+    /// Cooked 8bpp sky panorama texture, or `AssetId(u16::MAX)`.
     pub texture_asset: AssetId,
     /// Cloud highlight colour used by cyclorama cloud streaks.
     pub color_rgb: [u8; 3],

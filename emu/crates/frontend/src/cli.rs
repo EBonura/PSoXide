@@ -42,6 +42,18 @@ use crate::app::bus_from_configured_bios;
 const NTSC_CPU_CYCLES_PER_VBLANK: u64 = 33_868_800 / 60;
 const PACED20_INTERVAL_VBLANKS: u64 = 3;
 const PACED20_VISUAL_BUDGET_CYCLES: u64 = NTSC_CPU_CYCLES_PER_VBLANK * PACED20_INTERVAL_VBLANKS;
+const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
+    (telemetry::stage::SKY, "sky"),
+    (telemetry::stage::FAR_VISTA, "far vista"),
+    (telemetry::stage::ROOM, "room"),
+    (telemetry::stage::ENTITY_MARKERS, "markers"),
+    (telemetry::stage::IMAGE_PROPS, "image props"),
+    (telemetry::stage::MODEL_INSTANCES, "models"),
+    (telemetry::stage::PLAYER, "player"),
+    (telemetry::stage::EQUIPMENT, "equipment"),
+    (telemetry::stage::WORLD_FLUSH, "flush/sort"),
+    (telemetry::stage::OT_SUBMIT, "ot submit"),
+];
 
 /// Top-level argument parser. Passed to `clap::Parser::parse()`
 /// from `main.rs`.
@@ -691,6 +703,7 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
     println!("guest_profile_frames={}", summary.frames);
     println!("guest_profile_frame_meaning=frame_begin_markers");
     print_guest_pacing_profile(summary);
+    print_guest_render_breakdown(summary);
     println!("guest_profile_stages:");
     for id in 1..telemetry::STAGE_COUNT {
         let cycles = summary.stage_cycles[id];
@@ -720,6 +733,47 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
             value as f32 / frames,
         );
     }
+}
+
+fn print_guest_render_breakdown(summary: &telemetry::GuestTelemetrySummary) {
+    let render_cycles = summary.stage_cycles[telemetry::stage::RENDER as usize];
+    if render_cycles == 0 {
+        println!("guest_profile_render_breakdown=not_emitted");
+        return;
+    }
+
+    let render_hits = summary.stage_hits[telemetry::stage::RENDER as usize].max(1);
+    let mut accounted = 0u64;
+    println!("guest_profile_render_breakdown:");
+    for &(stage_id, label) in GUEST_RENDER_BREAKDOWN_STAGES {
+        let cycles = summary.stage_cycles[stage_id as usize];
+        if cycles == 0 {
+            continue;
+        }
+        accounted = accounted.saturating_add(cycles);
+        println!(
+            "  {:<18} pct={:>5.1} per_render={:.0} cycles={}",
+            label,
+            percent_u64(cycles, render_cycles),
+            cycles as f64 / render_hits as f64,
+            cycles,
+        );
+    }
+
+    let other = render_cycles.saturating_sub(accounted);
+    if other > render_cycles / 200 {
+        println!(
+            "  {:<18} pct={:>5.1} per_render={:.0} cycles={}",
+            "other",
+            percent_u64(other, render_cycles),
+            other as f64 / render_hits as f64,
+            other,
+        );
+    }
+}
+
+fn percent_u64(part: u64, total: u64) -> f64 {
+    (part as f64) * 100.0 / total.max(1) as f64
 }
 
 fn print_guest_pacing_profile(summary: &telemetry::GuestTelemetrySummary) {

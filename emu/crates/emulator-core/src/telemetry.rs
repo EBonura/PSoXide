@@ -81,6 +81,12 @@ pub mod stage {
     pub const ROOM_DEPTH_PREP: u16 = 30;
     /// Cached-room surface culling, lighting, packet build, and command enqueue.
     pub const ROOM_SURFACE_DRAW: u16 = 31;
+    /// Cooked sky/cyclorama backdrop rendering.
+    pub const SKY: u16 = 32;
+    /// Distant far-vista ring rendering.
+    pub const FAR_VISTA: u16 = 33;
+    /// Editor-authored image/card prop rendering.
+    pub const IMAGE_PROPS: u16 = 34;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -90,7 +96,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 32;
+pub const STAGE_COUNT: usize = 35;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -597,6 +603,9 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::ROOM_PROJECT => "room project",
         stage::ROOM_DEPTH_PREP => "room depth prep",
         stage::ROOM_SURFACE_DRAW => "room surface draw",
+        stage::SKY => "sky",
+        stage::FAR_VISTA => "far vista",
+        stage::IMAGE_PROPS => "image props",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
@@ -828,6 +837,9 @@ mod tests {
         assert_eq!(stage_name(stage::ROOM_VISIBLE_LIST), "room visible list");
         assert_eq!(stage_name(stage::ROOM_CELL_SELECT), "room cell select");
         assert_eq!(stage_name(stage::ROOM_SURFACE_DRAW), "room surface draw");
+        assert_eq!(stage_name(stage::SKY), "sky");
+        assert_eq!(stage_name(stage::FAR_VISTA), "far vista");
+        assert_eq!(stage_name(stage::IMAGE_PROPS), "image props");
         assert_eq!(
             counter_name(counter::CD_STREAM_BENCH_STATUS),
             "cd stream status"
