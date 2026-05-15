@@ -147,19 +147,23 @@ const MODEL_TPAGE_MAX_HALFWORDS: u16 = 128;
 /// `MODEL_CLUT_BASE_Y + n` is the row for the n-th atlas.
 const MODEL_CLUT_BASE_Y: u16 = 484;
 
-/// Cooked sky panoramas occupy one fixed 8bpp page. The pixels and
-/// CLUT are outside the double-buffered framebuffer and disjoint from
-/// room-material and model-atlas upload regions.
-const SKY_PANORAMA_TPAGE: Tpage = Tpage::new(896, 256, TexDepth::Bit8);
-const SKY_PANORAMA_CLUT: Clut = Clut::new(0, 481);
-const SKY_PANORAMA_WIDTH: u16 = 256;
-const SKY_PANORAMA_HEIGHT: u16 = 128;
+/// Cooked sky panoramas occupy two side-by-side 4bpp pages. The
+/// texture pixels are outside the double-buffered framebuffer and
+/// model-atlas upload regions; each horizontal band gets a dedicated
+/// CLUT row so the sky can spend 16 colours per altitude range.
+const SKY_PANORAMA_LEFT_TPAGE: Tpage = Tpage::new(896, 256, TexDepth::Bit4);
+const SKY_PANORAMA_RIGHT_TPAGE: Tpage = Tpage::new(960, 256, TexDepth::Bit4);
+const SKY_PANORAMA_CLUT_X: u16 = 320;
+const SKY_PANORAMA_CLUT_Y: u16 = 481;
+const SKY_PANORAMA_CLUT_ENTRIES: u16 = 16;
+const SKY_PANORAMA_PALETTE_BANDS: usize = 8;
+const SKY_PANORAMA_WIDTH: u16 = 512;
+const SKY_PANORAMA_HEIGHT: u16 = 256;
+const SKY_PANORAMA_PAGE_WIDTH: u16 = 256;
 /// Model atlases pack left-to-right until the reserved sky page.
-const MODEL_TPAGE_LIMIT_X: u16 = SKY_PANORAMA_TPAGE.x();
+const MODEL_TPAGE_LIMIT_X: u16 = SKY_PANORAMA_LEFT_TPAGE.x();
 const SKY_CYCLORAMA_COLUMNS_MIN: u8 = 8;
-const SKY_CYCLORAMA_COLUMNS_MAX: u8 = 24;
-const SKY_CYCLORAMA_ROWS_MIN: u8 = 4;
-const SKY_CYCLORAMA_ROWS_MAX: u8 = 8;
+const SKY_CYCLORAMA_COLUMNS_MAX: u8 = 12;
 
 /// 4bpp 8x8 BIOS-style font atlas for the analog-mode gate prompt.
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -173,7 +177,7 @@ static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.ps
 const SHADOW_TPAGE: Tpage = Tpage::new(576, 0, TexDepth::Bit4);
 const SHADOW_TEXEL_U: u8 = 64;
 const SHADOW_TEXTURE_X: u16 = SHADOW_TPAGE.x() + ((SHADOW_TEXEL_U as u16) / 4);
-const SHADOW_CLUT: Clut = Clut::new(976, 480);
+const SHADOW_CLUT: Clut = Clut::new(336, 481);
 const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
 
 const SCREEN_W: i16 = 320;
@@ -3540,19 +3544,17 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
     else {
         return;
     };
-    let Some(slot) = ensure_sky_panorama_uploaded(asset.id, asset.bytes) else {
+    if ensure_sky_panorama_uploaded(asset.id, asset.bytes).is_none() {
         return;
-    };
-    let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
-        .with_raw_texture(true)
-        .with_dither(true);
+    }
 
-    let columns = sky
+    let mut columns = sky
         .skybox_columns
         .clamp(SKY_CYCLORAMA_COLUMNS_MIN, SKY_CYCLORAMA_COLUMNS_MAX) as usize;
-    let rows = sky
-        .skybox_rows
-        .clamp(SKY_CYCLORAMA_ROWS_MIN, SKY_CYCLORAMA_ROWS_MAX) as usize;
+    if columns % 2 != 0 {
+        columns += 1;
+    }
+    let rows = SKY_PANORAMA_PALETTE_BANDS;
     let horizon_pitch = sky_horizon_pitch_degrees_i32(sky.horizon_percent);
     let top_pitch = (horizon_pitch + 58).min(78);
     let bottom_pitch = (horizon_pitch - 46).max(-72);
@@ -3562,11 +3564,26 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
         let pitch_bottom = sky_lerp_i32(top_pitch, bottom_pitch, row + 1, rows);
         let v0 = sky_uv_for_step(row, rows, SKY_PANORAMA_HEIGHT);
         let v1 = sky_uv_for_step(row + 1, rows, SKY_PANORAMA_HEIGHT);
+        let clut_word = sky_panorama_clut_word(row);
         for column in 0..columns {
             let yaw0 = sky_yaw_degrees_for_column(column, columns);
             let yaw1 = sky_yaw_degrees_for_column(column + 1, columns);
-            let u0 = sky_uv_for_step(column, columns, SKY_PANORAMA_WIDTH);
-            let u1 = sky_uv_for_step(column + 1, columns, SKY_PANORAMA_WIDTH);
+            let page = sky_panorama_page_for_column(column, columns);
+            let material = TextureMaterial::opaque(
+                clut_word,
+                sky_panorama_tpage_word(page),
+                (0x80, 0x80, 0x80),
+            )
+            .with_raw_texture(true)
+            .with_dither(true);
+            let u0 = sky_panorama_local_u(
+                sky_coord_for_step(column, columns, SKY_PANORAMA_WIDTH),
+                page,
+            );
+            let u1 = sky_panorama_local_u(
+                sky_coord_for_step(column + 1, columns, SKY_PANORAMA_WIDTH),
+                page,
+            );
             draw_sky_cyclorama_quad(
                 camera,
                 material,
@@ -3669,11 +3686,50 @@ fn sky_lerp_i32(a: i32, b: i32, index: usize, count: usize) -> i32 {
     a + (b - a) * index as i32 / count
 }
 
-fn sky_uv_for_step(step: usize, steps: usize, size: u16) -> u8 {
+fn sky_coord_for_step(step: usize, steps: usize, size: u16) -> u16 {
     if step >= steps {
-        return size.saturating_sub(1).min(255) as u8;
+        return size.saturating_sub(1);
     }
-    ((step as u32 * u32::from(size)) / steps.max(1) as u32).min(u32::from(size - 1)) as u8
+    ((step as u32 * u32::from(size)) / steps.max(1) as u32).min(u32::from(size - 1)) as u16
+}
+
+fn sky_uv_for_step(step: usize, steps: usize, size: u16) -> u8 {
+    sky_coord_for_step(step, steps, size).min(255) as u8
+}
+
+fn sky_panorama_page_for_column(column: usize, columns: usize) -> usize {
+    if column < columns / 2 {
+        0
+    } else {
+        1
+    }
+}
+
+fn sky_panorama_local_u(global_u: u16, page: usize) -> u8 {
+    let page_u = if page == 0 {
+        global_u.min(SKY_PANORAMA_PAGE_WIDTH - 1)
+    } else {
+        global_u
+            .saturating_sub(SKY_PANORAMA_PAGE_WIDTH)
+            .min(SKY_PANORAMA_PAGE_WIDTH - 1)
+    };
+    page_u as u8
+}
+
+fn sky_panorama_tpage_word(page: usize) -> u16 {
+    if page == 0 {
+        SKY_PANORAMA_LEFT_TPAGE.uv_tpage_word(0)
+    } else {
+        SKY_PANORAMA_RIGHT_TPAGE.uv_tpage_word(0)
+    }
+}
+
+fn sky_panorama_clut_word(band: usize) -> u16 {
+    Clut::new(
+        SKY_PANORAMA_CLUT_X,
+        SKY_PANORAMA_CLUT_Y + band.min(SKY_PANORAMA_PALETTE_BANDS - 1) as u16,
+    )
+    .uv_clut_word()
 }
 
 fn draw_far_vista_ring(
@@ -5987,9 +6043,10 @@ fn ensure_sky_panorama_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option
         return Some(slot);
     }
     let texture = Texture::from_bytes(asset_bytes).ok()?;
-    if texture.clut_entries() != 256
+    if texture.clut_entries() != SKY_PANORAMA_CLUT_ENTRIES * SKY_PANORAMA_PALETTE_BANDS as u16
         || texture.width() != SKY_PANORAMA_WIDTH
         || texture.height() != SKY_PANORAMA_HEIGHT
+        || texture.halfwords_per_row() != SKY_PANORAMA_WIDTH / 4
     {
         return None;
     }
@@ -6008,30 +6065,38 @@ fn ensure_sky_panorama_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option
     telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
     upload_bytes(
         VramRect::new(
-            SKY_PANORAMA_TPAGE.x(),
-            SKY_PANORAMA_TPAGE.y(),
+            SKY_PANORAMA_LEFT_TPAGE.x(),
+            SKY_PANORAMA_LEFT_TPAGE.y(),
             texture.halfwords_per_row(),
             texture.height(),
         ),
         texture.pixel_bytes(),
     );
-    upload_model_clut(
-        VramRect::new(
-            SKY_PANORAMA_CLUT.x(),
-            SKY_PANORAMA_CLUT.y(),
-            texture.clut_entries(),
-            1,
-        ),
-        texture.clut_bytes(),
-        texture.index_zero_transparent(),
-    );
+    let clut_row_bytes = usize::from(SKY_PANORAMA_CLUT_ENTRIES) * 2;
+    if texture.clut_bytes().len() != clut_row_bytes * SKY_PANORAMA_PALETTE_BANDS {
+        telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
+        return None;
+    }
+    for band in 0..SKY_PANORAMA_PALETTE_BANDS {
+        let offset = band * clut_row_bytes;
+        upload_model_clut(
+            VramRect::new(
+                SKY_PANORAMA_CLUT_X,
+                SKY_PANORAMA_CLUT_Y + band as u16,
+                SKY_PANORAMA_CLUT_ENTRIES,
+                1,
+            ),
+            &texture.clut_bytes()[offset..offset + clut_row_bytes],
+            texture.index_zero_transparent(),
+        );
+    }
     telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
 
     let slot = VramSlot {
         asset: asset_id,
         clut_mode: VramSlotClutMode::SkyPanorama,
-        clut_word: SKY_PANORAMA_CLUT.uv_clut_word(),
-        tpage_word: SKY_PANORAMA_TPAGE.uv_tpage_word(0),
+        clut_word: sky_panorama_clut_word(0),
+        tpage_word: SKY_PANORAMA_LEFT_TPAGE.uv_tpage_word(0),
         texture_window: TextureWindow::NONE,
         texture_width: texture.width(),
         texture_height: texture.height(),
