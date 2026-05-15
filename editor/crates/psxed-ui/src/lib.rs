@@ -14625,6 +14625,38 @@ fn draw_world_grid_settings(
                         changed = true;
                     }
                 });
+                changed |= color_editor(ui, "Mountain Peak", &mut sky.mountain_top_color);
+                changed |= color_editor(ui, "Mountain Base", &mut sky.mountain_base_color);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mountain Gap").color(STUDIO_TEXT_WEAK));
+                    let mut gap = sky.mountain_gap_percent.clamp(0, 100);
+                    if ui
+                        .add(egui::Slider::new(&mut gap, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        sky.mountain_gap_percent = gap;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mountain Shape").color(STUDIO_TEXT_WEAK));
+                    let mut roughness = sky.mountain_roughness_percent.clamp(0, 100);
+                    if ui
+                        .add(egui::Slider::new(&mut roughness, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        sky.mountain_roughness_percent = roughness;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mountain Layers").color(STUDIO_TEXT_WEAK));
+                    let mut layers = sky.mountain_layer_count.clamp(1, 3);
+                    if ui.add(egui::Slider::new(&mut layers, 1..=3)).changed() {
+                        sky.mountain_layer_count = layers;
+                        changed = true;
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Cyclorama Columns").color(STUDIO_TEXT_WEAK));
                     let mut columns = sky
