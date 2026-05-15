@@ -1872,6 +1872,34 @@ const fn default_sky_horizon_glow_yaw_degrees() -> i16 {
     72
 }
 
+const fn default_sky_sun_enabled() -> bool {
+    false
+}
+
+fn default_sky_sun_color() -> [u8; 3] {
+    [255, 218, 150]
+}
+
+const fn default_sky_sun_yaw_degrees() -> i16 {
+    72
+}
+
+const fn default_sky_sun_pitch_degrees() -> i16 {
+    22
+}
+
+const fn default_sky_sun_size_percent() -> u8 {
+    18
+}
+
+const fn default_sky_sun_glow_percent() -> u8 {
+    72
+}
+
+const fn default_sky_sun_glow_size_percent() -> u8 {
+    64
+}
+
 const fn default_sky_mountain_height_percent() -> u8 {
     55
 }
@@ -2009,6 +2037,27 @@ pub struct SkySettings {
     /// Direction of the warm horizon glow in cyclorama yaw degrees.
     #[serde(default = "default_sky_horizon_glow_yaw_degrees")]
     pub horizon_glow_yaw_degrees: i16,
+    /// Whether a cooked sun disc/glow is drawn into the cyclorama.
+    #[serde(default = "default_sky_sun_enabled")]
+    pub sun_enabled: bool,
+    /// Sun disc and glow colour.
+    #[serde(default = "default_sky_sun_color")]
+    pub sun_color: [u8; 3],
+    /// Sun direction in cyclorama yaw degrees.
+    #[serde(default = "default_sky_sun_yaw_degrees")]
+    pub sun_yaw_degrees: i16,
+    /// Sun height in cyclorama pitch degrees.
+    #[serde(default = "default_sky_sun_pitch_degrees")]
+    pub sun_pitch_degrees: i16,
+    /// Cooked sun disc radius.
+    #[serde(default = "default_sky_sun_size_percent")]
+    pub sun_size_percent: u8,
+    /// Strength of the soft glow around the sun disc.
+    #[serde(default = "default_sky_sun_glow_percent")]
+    pub sun_glow_percent: u8,
+    /// Angular spread of the sun glow.
+    #[serde(default = "default_sky_sun_glow_size_percent")]
+    pub sun_glow_size_percent: u8,
     /// Height/intensity of cooked distant mountain silhouettes.
     #[serde(default = "default_sky_mountain_height_percent")]
     pub mountain_height_percent: u8,
@@ -2133,6 +2182,13 @@ impl SkySettings {
             horizon_thickness_percent: self.horizon_thickness_percent.clamp(0, 80),
             horizon_glow_percent: self.horizon_glow_percent.clamp(0, 100),
             horizon_glow_yaw_degrees: self.horizon_glow_yaw_degrees.clamp(-180, 180),
+            sun_enabled: self.sun_enabled,
+            sun_color: self.sun_color,
+            sun_yaw_degrees: self.sun_yaw_degrees.clamp(-180, 180),
+            sun_pitch_degrees: self.sun_pitch_degrees.clamp(-30, 75),
+            sun_size_percent: self.sun_size_percent.clamp(1, 100),
+            sun_glow_percent: self.sun_glow_percent.clamp(0, 100),
+            sun_glow_size_percent: self.sun_glow_size_percent.clamp(0, 100),
             mountain_height_percent: self.mountain_height_percent.clamp(0, 100),
             mountain_top_color: self.mountain_top_color,
             mountain_base_color: self.mountain_base_color,
@@ -2159,6 +2215,13 @@ impl Default for SkySettings {
             horizon_thickness_percent: default_sky_horizon_thickness_percent(),
             horizon_glow_percent: default_sky_horizon_glow_percent(),
             horizon_glow_yaw_degrees: default_sky_horizon_glow_yaw_degrees(),
+            sun_enabled: default_sky_sun_enabled(),
+            sun_color: default_sky_sun_color(),
+            sun_yaw_degrees: default_sky_sun_yaw_degrees(),
+            sun_pitch_degrees: default_sky_sun_pitch_degrees(),
+            sun_size_percent: default_sky_sun_size_percent(),
+            sun_glow_percent: default_sky_sun_glow_percent(),
+            sun_glow_size_percent: default_sky_sun_glow_size_percent(),
             mountain_height_percent: default_sky_mountain_height_percent(),
             mountain_top_color: default_sky_mountain_top_color(),
             mountain_base_color: default_sky_mountain_base_color(),
@@ -2192,6 +2255,20 @@ pub struct ResolvedSkySettings {
     pub horizon_glow_percent: u8,
     /// Direction of the warm horizon glow in cyclorama yaw degrees.
     pub horizon_glow_yaw_degrees: i16,
+    /// Whether a cooked sun disc/glow is drawn.
+    pub sun_enabled: bool,
+    /// Sun disc and glow colour.
+    pub sun_color: [u8; 3],
+    /// Sun direction in cyclorama yaw degrees.
+    pub sun_yaw_degrees: i16,
+    /// Sun height in cyclorama pitch degrees.
+    pub sun_pitch_degrees: i16,
+    /// Cooked sun disc radius.
+    pub sun_size_percent: u8,
+    /// Strength of the soft glow around the sun disc.
+    pub sun_glow_percent: u8,
+    /// Angular spread of the sun glow.
+    pub sun_glow_size_percent: u8,
     /// Height/intensity of cooked distant mountain silhouettes.
     pub mountain_height_percent: u8,
     /// Tint used near distant mountain peaks.
@@ -2233,6 +2310,13 @@ const SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX: usize = 16;
 const SKY_CYCLORAMA_CLOUD_RIBBONS: usize = 3;
 const SKY_CYCLORAMA_CLOUD_RIBBON_QUADS: usize = 2;
 const SKY_CYCLORAMA_STAR_COUNT_MAX: usize = 64;
+const SKY_CYCLORAMA_SUN_GLOW_COLUMNS: usize = 14;
+const SKY_CYCLORAMA_SUN_GLOW_ROWS: usize = 10;
+const SKY_CYCLORAMA_SUN_DISC_COLUMNS: usize = 8;
+const SKY_CYCLORAMA_SUN_DISC_ROWS: usize = 6;
+const SKY_CYCLORAMA_SUN_QUAD_MAX: usize = SKY_CYCLORAMA_SUN_GLOW_COLUMNS
+    * SKY_CYCLORAMA_SUN_GLOW_ROWS
+    + SKY_CYCLORAMA_SUN_DISC_COLUMNS * SKY_CYCLORAMA_SUN_DISC_ROWS;
 
 /// Maximum number of quads generated by [`generate_sky_cyclorama`].
 pub const SKY_CYCLORAMA_QUAD_MAX: usize = SKYBOX_COLUMNS_MAX as usize * SKYBOX_ROWS_MAX as usize
@@ -2241,7 +2325,8 @@ pub const SKY_CYCLORAMA_QUAD_MAX: usize = SKYBOX_COLUMNS_MAX as usize * SKYBOX_R
         * (SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX + 1)
         * SKY_CYCLORAMA_CLOUD_RIBBONS
         * SKY_CYCLORAMA_CLOUD_RIBBON_QUADS
-    + SKY_CYCLORAMA_STAR_COUNT_MAX;
+    + SKY_CYCLORAMA_STAR_COUNT_MAX
+    + SKY_CYCLORAMA_SUN_QUAD_MAX;
 
 /// Build a Spyro-style cyclorama from authored sky settings.
 ///
@@ -2314,11 +2399,153 @@ pub fn generate_sky_cyclorama(sky: ResolvedSkySettings) -> Vec<SkyCycloramaQuad>
         }
     }
 
+    push_sun_cyclorama(&mut out, sky, horizon_pitch, top_pitch, bottom_pitch);
     push_star_cyclorama(&mut out, sky, horizon_pitch, top_pitch, bottom_pitch);
     push_mountain_cyclorama(&mut out, sky, columns, horizon_pitch);
     push_cloud_streak_cyclorama(&mut out, sky, horizon_pitch, top_pitch, bottom_pitch);
     out.truncate(SKY_CYCLORAMA_QUAD_MAX);
     out
+}
+
+fn push_sun_cyclorama(
+    out: &mut Vec<SkyCycloramaQuad>,
+    sky: ResolvedSkySettings,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) {
+    if !sky.sun_enabled {
+        return;
+    }
+
+    let yaw = sky.sun_yaw_degrees as f32;
+    let pitch = (sky.sun_pitch_degrees as f32).clamp(bottom_pitch + 2.0, top_pitch - 2.0);
+    let size_t = sky.sun_size_percent.clamp(1, 100) as f32 / 100.0;
+    let glow_t = sky.sun_glow_percent.clamp(0, 100) as f32 / 100.0;
+    let glow_size_t = sky.sun_glow_size_percent.clamp(0, 100) as f32 / 100.0;
+    let disc_radius = lerp_f32(0.75, 5.2, size_t);
+
+    if glow_t > 0.0 && glow_size_t > 0.0 {
+        let glow_radius = disc_radius + lerp_f32(4.0, 30.0, glow_size_t);
+        let glow_color = brighten_rgb(cyclorama_lerp_rgb(sky.sun_color, [255, 174, 92], 84), 10);
+        push_sun_radial_patch(
+            out,
+            sky,
+            yaw,
+            pitch,
+            glow_radius,
+            glow_radius * 0.72,
+            SKY_CYCLORAMA_SUN_GLOW_COLUMNS,
+            SKY_CYCLORAMA_SUN_GLOW_ROWS,
+            glow_color,
+            92.0 + glow_t * 126.0,
+            0.0,
+            1.25,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+    }
+
+    let core_color = brighten_rgb(cyclorama_lerp_rgb(sky.sun_color, [255, 244, 208], 112), 18);
+    push_sun_radial_patch(
+        out,
+        sky,
+        yaw,
+        pitch,
+        disc_radius,
+        disc_radius,
+        SKY_CYCLORAMA_SUN_DISC_COLUMNS,
+        SKY_CYCLORAMA_SUN_DISC_ROWS,
+        core_color,
+        255.0,
+        0.58,
+        0.55,
+        horizon_pitch,
+        top_pitch,
+        bottom_pitch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_sun_radial_patch(
+    out: &mut Vec<SkyCycloramaQuad>,
+    sky: ResolvedSkySettings,
+    center_yaw: f32,
+    center_pitch: f32,
+    yaw_radius: f32,
+    pitch_radius: f32,
+    columns: usize,
+    rows: usize,
+    tint: [u8; 3],
+    alpha_center: f32,
+    core_fraction: f32,
+    falloff_power: f32,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) {
+    let columns = columns.max(1);
+    let rows = rows.max(1);
+    for row in 0..rows {
+        let y_top = 1.0 - 2.0 * row as f32 / rows as f32;
+        let y_bottom = 1.0 - 2.0 * (row + 1) as f32 / rows as f32;
+        for column in 0..columns {
+            let x_left = -1.0 + 2.0 * column as f32 / columns as f32;
+            let x_right = -1.0 + 2.0 * (column + 1) as f32 / columns as f32;
+            let corners = [
+                (x_left, y_top),
+                (x_right, y_top),
+                (x_left, y_bottom),
+                (x_right, y_bottom),
+            ];
+            let mut rgb = [[0; 3]; 4];
+            let mut max_alpha = 0.0_f32;
+            for (index, (x, y)) in corners.into_iter().enumerate() {
+                let yaw = center_yaw + x * yaw_radius;
+                let pitch = center_pitch + y * pitch_radius;
+                let dist = (x * x + y * y).sqrt();
+                let alpha = sun_radial_alpha(dist, alpha_center, core_fraction, falloff_power);
+                max_alpha = max_alpha.max(alpha);
+                let base =
+                    sky_color_for_pitch_yaw_core(sky, pitch, yaw, horizon_pitch, top_pitch, bottom_pitch);
+                rgb[index] = cyclorama_lerp_rgb(base, tint, alpha.clamp(0.0, 255.0) as u8);
+            }
+            if max_alpha <= 0.0 {
+                continue;
+            }
+            push_sky_cyclorama_quad_corners(
+                out,
+                center_yaw + x_left * yaw_radius,
+                center_yaw + x_right * yaw_radius,
+                center_pitch + y_top * pitch_radius,
+                center_pitch + y_top * pitch_radius,
+                center_pitch + y_bottom * pitch_radius,
+                center_pitch + y_bottom * pitch_radius,
+                rgb,
+            );
+        }
+    }
+}
+
+fn sun_radial_alpha(
+    dist: f32,
+    alpha_center: f32,
+    core_fraction: f32,
+    falloff_power: f32,
+) -> f32 {
+    if dist >= 1.0 {
+        return 0.0;
+    }
+    let core_fraction = core_fraction.clamp(0.0, 0.95);
+    let t = if core_fraction > 0.0 && dist > core_fraction {
+        1.0 - (dist - core_fraction) / (1.0 - core_fraction)
+    } else if core_fraction > 0.0 {
+        1.0
+    } else {
+        1.0 - dist
+    };
+    alpha_center * smooth_step(t.clamp(0.0, 1.0)).powf(falloff_power.max(0.01))
 }
 
 fn push_star_cyclorama(
@@ -6050,6 +6277,11 @@ impl ProjectDocument {
                         sky.horizon_glow_percent = sky.horizon_glow_percent.clamp(0, 100);
                         sky.horizon_glow_yaw_degrees =
                             sky.horizon_glow_yaw_degrees.clamp(-180, 180);
+                        sky.sun_yaw_degrees = sky.sun_yaw_degrees.clamp(-180, 180);
+                        sky.sun_pitch_degrees = sky.sun_pitch_degrees.clamp(-30, 75);
+                        sky.sun_size_percent = sky.sun_size_percent.clamp(1, 100);
+                        sky.sun_glow_percent = sky.sun_glow_percent.clamp(0, 100);
+                        sky.sun_glow_size_percent = sky.sun_glow_size_percent.clamp(0, 100);
                         sky.mountain_height_percent = sky.mountain_height_percent.clamp(0, 100);
                         sky.mountain_gap_percent = sky.mountain_gap_percent.clamp(0, 100);
                         sky.mountain_roughness_percent =
@@ -6838,6 +7070,25 @@ mod tests {
             default_sky.horizon_glow_yaw_degrees,
             default_sky_horizon_glow_yaw_degrees()
         );
+        assert_eq!(default_sky.sun_enabled, default_sky_sun_enabled());
+        assert_eq!(default_sky.sun_color, default_sky_sun_color());
+        assert_eq!(default_sky.sun_yaw_degrees, default_sky_sun_yaw_degrees());
+        assert_eq!(
+            default_sky.sun_pitch_degrees,
+            default_sky_sun_pitch_degrees()
+        );
+        assert_eq!(
+            default_sky.sun_size_percent,
+            default_sky_sun_size_percent()
+        );
+        assert_eq!(
+            default_sky.sun_glow_percent,
+            default_sky_sun_glow_percent()
+        );
+        assert_eq!(
+            default_sky.sun_glow_size_percent,
+            default_sky_sun_glow_size_percent()
+        );
         assert_eq!(
             default_sky.mountain_height_percent,
             default_sky_mountain_height_percent()
@@ -6863,6 +7114,11 @@ mod tests {
         let mut sky = SkySettings::default();
         sky.horizon_glow_percent = 240;
         sky.horizon_glow_yaw_degrees = 720;
+        sky.sun_yaw_degrees = -720;
+        sky.sun_pitch_degrees = 120;
+        sky.sun_size_percent = 0;
+        sky.sun_glow_percent = 240;
+        sky.sun_glow_size_percent = 240;
         sky.mountain_height_percent = 240;
         sky.mountain_gap_percent = 240;
         sky.mountain_roughness_percent = 240;
@@ -6872,6 +7128,11 @@ mod tests {
         let resolved = sky.resolved_for_room(false, [0, 0, 0]);
         assert_eq!(resolved.horizon_glow_percent, 100);
         assert_eq!(resolved.horizon_glow_yaw_degrees, 180);
+        assert_eq!(resolved.sun_yaw_degrees, -180);
+        assert_eq!(resolved.sun_pitch_degrees, 75);
+        assert_eq!(resolved.sun_size_percent, 1);
+        assert_eq!(resolved.sun_glow_percent, 100);
+        assert_eq!(resolved.sun_glow_size_percent, 100);
         assert_eq!(resolved.mountain_height_percent, 100);
         assert_eq!(resolved.mountain_gap_percent, 100);
         assert_eq!(resolved.mountain_roughness_percent, 100);
