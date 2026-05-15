@@ -64,13 +64,12 @@ use psx_gpu::{
     VideoMode,
 };
 use psx_level::{
-    cloud_layer_flags, equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags,
-    room_flags, sky_flags, AssetId, AssetKind, EntityRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelCloudLayerRecord, LevelFarVistaRecord,
-    LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord,
-    LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex,
-    ModelClipTableIndex, ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager,
-    RoomIndex, WeaponHitShapeRecord,
+    equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, room_flags, sky_flags,
+    AssetId, AssetKind, EntityRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
+    LevelCycloramaQuadRecord, LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord,
+    LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord,
+    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
+    ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
@@ -1469,14 +1468,7 @@ impl Scene for Playtest {
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            draw_sky_gradient(room_record.sky);
-            draw_cloud_layer(
-                camera,
-                room_record.sky.cloud_layer,
-                ctx.time.elapsed_vblanks(),
-                &mut primitive_packets,
-                &mut world,
-            );
+            draw_cyclorama(room_record.sky, camera, ctx.time.elapsed_vblanks());
             draw_far_vista_ring(
                 camera,
                 room_record.far_vista,
@@ -3515,138 +3507,79 @@ fn accumulate_grid_visibility_stats(total: &mut GridVisibilityStats, stats: Grid
         .saturating_add(stats.projected_vertices);
 }
 
-fn draw_sky_gradient(sky: LevelSkyRecord) {
+/// Cooked cyclorama backdrop. The manifest stores explicit angular
+/// geometry and colours; runtime applies camera rotation only, matching
+/// the classic PS1 panorama/cyclorama approach.
+fn draw_cyclorama(sky: LevelSkyRecord, camera: WorldCamera, _elapsed_vblanks: u32) {
     if sky.flags & sky_flags::ENABLED == 0 {
         return;
     }
-    let horizon_y = ((SCREEN_H as i32 * sky.horizon_percent.clamp(5, 95) as i32) / 100) as i16;
-    let horizon_y = horizon_y.clamp(1, SCREEN_H - 1);
-    draw_sky_gradient_quad(0, horizon_y, sky.top_rgb, sky.horizon_rgb);
-    draw_sky_gradient_quad(horizon_y, SCREEN_H, sky.horizon_rgb, sky.bottom_rgb);
+    for quad in sky.cyclorama_quads {
+        draw_cyclorama_quad(*quad, camera);
+    }
 }
 
-fn draw_sky_gradient_quad(y0: i16, y1: i16, top_rgb: [u8; 3], bottom_rgb: [u8; 3]) {
-    if y1 <= y0 {
+fn draw_cyclorama_quad(quad: LevelCycloramaQuadRecord, camera: WorldCamera) {
+    let Some(projected) = project_cyclorama_quad(quad.direction_q12, camera) else {
+        return;
+    };
+    if cyclorama_quad_outside_screen(projected) {
         return;
     }
-    let top = (top_rgb[0], top_rgb[1], top_rgb[2]);
-    let bottom = (bottom_rgb[0], bottom_rgb[1], bottom_rgb[2]);
-    draw_tri_gouraud([(0, y0), (SCREEN_W, y0), (0, y1)], [top, top, bottom]);
+    let c = [
+        (quad.rgb[0][0], quad.rgb[0][1], quad.rgb[0][2]),
+        (quad.rgb[1][0], quad.rgb[1][1], quad.rgb[1][2]),
+        (quad.rgb[2][0], quad.rgb[2][1], quad.rgb[2][2]),
+        (quad.rgb[3][0], quad.rgb[3][1], quad.rgb[3][2]),
+    ];
     draw_tri_gouraud(
-        [(SCREEN_W, y0), (0, y1), (SCREEN_W, y1)],
-        [top, bottom, bottom],
+        [projected[0], projected[1], projected[2]],
+        [c[0], c[1], c[2]],
+    );
+    draw_tri_gouraud(
+        [projected[1], projected[2], projected[3]],
+        [c[1], c[2], c[3]],
     );
 }
 
-/// World-fixed cloud plane. One textured quad anchored at world
-/// origin sitting at `cloud.altitude`, drawn at the deepest OT
-/// slot so it always sits behind the room. UVs tile via
-/// `tile_count` (1..=4 effective; the PSX texture-window wraps at
-/// 64px) and scroll over time at `scroll_speed` PSX-angle units per
-/// second.
-///
-/// Because the plane is world-fixed, walking through the level
-/// gives real parallax against the clouds — exactly the Dark
-/// Souls-style "distant sky" feel.
-fn draw_cloud_layer(
+fn project_cyclorama_quad(
+    dirs: [[i16; 3]; 4],
     camera: WorldCamera,
-    cloud: LevelCloudLayerRecord,
-    elapsed_vblanks: u32,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
-    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-) {
-    if cloud.flags & cloud_layer_flags::ENABLED == 0 {
-        return;
+) -> Option<[(i16, i16); 4]> {
+    Some([
+        project_cyclorama_direction(dirs[0], camera)?,
+        project_cyclorama_direction(dirs[1], camera)?,
+        project_cyclorama_direction(dirs[2], camera)?,
+        project_cyclorama_direction(dirs[3], camera)?,
+    ])
+}
+
+fn project_cyclorama_direction(dir: [i16; 3], camera: WorldCamera) -> Option<(i16, i16)> {
+    let x = i32::from(dir[0]);
+    let y = i32::from(dir[1]);
+    let z = i32::from(dir[2]);
+    let sin_yaw = camera.sin_yaw.raw();
+    let cos_yaw = camera.cos_yaw.raw();
+    let sin_pitch = camera.sin_pitch.raw();
+    let cos_pitch = camera.cos_pitch.raw();
+    let x1 = mul_q12_i32(x, cos_yaw) - mul_q12_i32(z, sin_yaw);
+    let z1 = -mul_q12_i32(x, sin_yaw) - mul_q12_i32(z, cos_yaw);
+    let y2 = mul_q12_i32(y, cos_pitch) - mul_q12_i32(z1, sin_pitch);
+    let z2 = mul_q12_i32(y, sin_pitch) + mul_q12_i32(z1, cos_pitch);
+    if z2 <= NEAR_Z {
+        return None;
     }
-    let Some(asset) = find_asset_of_kind(ASSETS, cloud.texture_asset, AssetKind::Texture) else {
-        return;
-    };
-    let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-        asset.id,
-        asset.bytes,
-        VramSlotClutMode::OpaqueZero,
-    ) else {
-        return;
-    };
-    // Camera-position-anchored plane + world-derived UV offset.
-    //
-    // The plane geometry hugs the camera (each sub-quad sits at
-    // `camera.x + Δx`, `camera.z + Δz`) so most corners stay in
-    // front of the near plane regardless of where the player is or
-    // which way they look. A horizontal world-fixed plane can't
-    // give that guarantee — back-half corners always straddle the
-    // near plane when the player looks forward.
-    //
-    // To preserve the *visual* world-fixed feel, the UV offset is
-    // derived from the camera's world position: as the player
-    // walks +X by `UV_WORLD_SCALE` units the texture scrolls -1 UV
-    // pixel. The cloud cover looks stationary in the world even
-    // though the geometry is following the camera. This is the
-    // Mario 64 / Crash Bandicoot sky trick; the perspective math
-    // is just a UV-scroll, but the eye reads it as parallax.
-    //
-    // Sub-quad split is still essential: the camera sits at the
-    // *centre* of the plane, so sub-quads behind the camera in the
-    // current view direction project with corners behind the near
-    // plane and `project_world_quad` drops them. Sub-quads in
-    // front render normally. As the camera yaws, "in front" rotates
-    // and a different patch of sub-quads becomes visible — that's
-    // the camera-rotation response that the screen-aligned
-    // gradient couldn't give.
-    const UV_WORLD_SCALE_SHIFT: i32 = 6; // 64 world units per UV pixel.
-    let tile_count = cloud.tile_count.clamp(1, 8) as i32;
-    let altitude = cloud.altitude as i32;
-    let extent = cloud.extent.max(1024) as i32;
-    let tile_world = (extent.saturating_mul(2) / tile_count).max(1);
+    let sx = SCREEN_CX as i32 + (x1 * FOCAL) / z2;
+    let sy = SCREEN_CY as i32 - (y2 * FOCAL) / z2;
+    Some((clamp_i16(sx.clamp(-512, 831)), clamp_i16(sy.clamp(-256, 495))))
+}
 
-    let cam_uv_x = (camera.position.x >> UV_WORLD_SCALE_SHIFT) & 63;
-    let cam_uv_z = (camera.position.z >> UV_WORLD_SCALE_SHIFT) & 63;
-    let time_scroll_u = (elapsed_vblanks as i32 * cloud.scroll_speed[0] as i32) >> 6;
-    let time_scroll_v = (elapsed_vblanks as i32 * cloud.scroll_speed[1] as i32) >> 6;
-    // World-derived offset *subtracts* so the texture appears to
-    // stay put as the player moves into it.
-    let scroll_u = ((time_scroll_u - cam_uv_x) & 63) as u8;
-    let scroll_v = ((time_scroll_v - cam_uv_z) & 63) as u8;
-    let uv_lo = (scroll_u, scroll_v);
-    let uv_hi_u = scroll_u.wrapping_add(63);
-    let uv_hi_v = scroll_v.wrapping_add(63);
-
-    let material =
-        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, rgb_tuple(cloud.color_rgb))
-            .with_texture_window(slot.texture_window);
-    let options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
-        .with_depth_policy(DepthPolicy::Farthest)
-        .with_cull_mode(CullMode::None)
-        .with_material_layer(material);
-
-    let cx = camera.position.x;
-    let cz = camera.position.z;
-    for tile_z in 0..tile_count {
-        let zlo = cz - extent + tile_z * tile_world;
-        let zhi = zlo + tile_world;
-        for tile_x in 0..tile_count {
-            let xlo = cx - extent + tile_x * tile_world;
-            let xhi = xlo + tile_world;
-            let _ = world.submit_textured_world_quad(
-                triangles,
-                camera,
-                [
-                    WorldVertex::new(xlo, altitude, zhi),
-                    WorldVertex::new(xhi, altitude, zhi),
-                    WorldVertex::new(xhi, altitude, zlo),
-                    WorldVertex::new(xlo, altitude, zlo),
-                ],
-                [
-                    uv_lo,
-                    (uv_hi_u, scroll_v),
-                    (uv_hi_u, uv_hi_v),
-                    (scroll_u, uv_hi_v),
-                ],
-                material,
-                options,
-            );
-        }
-    }
+fn cyclorama_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
+    let min_x = points.iter().map(|p| p.0).min().unwrap_or(0);
+    let max_x = points.iter().map(|p| p.0).max().unwrap_or(0);
+    let min_y = points.iter().map(|p| p.1).min().unwrap_or(0);
+    let max_y = points.iter().map(|p| p.1).max().unwrap_or(0);
+    max_x < 0 || min_x >= SCREEN_W || max_y < 0 || min_y >= SCREEN_H
 }
 
 fn draw_far_vista_ring(

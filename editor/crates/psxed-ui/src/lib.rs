@@ -39,7 +39,8 @@ use psxed_project::{
     WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
     HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
     MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-    MIN_WORLD_CAMERA_DISTANCE, MODEL_SCALE_ONE_Q8, WORLD_SECTOR_SIZE_PRESETS,
+    MIN_WORLD_CAMERA_DISTANCE, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
+    SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, WORLD_SECTOR_SIZE_PRESETS,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -5476,9 +5477,7 @@ impl EditorWorkspace {
             return false;
         }
         let screen_axis_delta = if mode == TransformGizmoMode::Rotate {
-            let Some(ring) = self
-                .node_rotation_gizmo_screen_ring_for_axis(rect, axis)
-            else {
+            let Some(ring) = self.node_rotation_gizmo_screen_ring_for_axis(rect, axis) else {
                 return false;
             };
             ring.points
@@ -14582,6 +14581,80 @@ fn draw_world_grid_settings(
                         changed = true;
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Horizon Thickness").color(STUDIO_TEXT_WEAK));
+                    let mut thickness = sky.horizon_thickness_percent.clamp(0, 80);
+                    if ui
+                        .add(egui::Slider::new(&mut thickness, 0..=80).suffix("%"))
+                        .changed()
+                    {
+                        sky.horizon_thickness_percent = thickness;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Horizon Glow").color(STUDIO_TEXT_WEAK));
+                    let mut glow = sky.horizon_glow_percent.clamp(0, 100);
+                    if ui
+                        .add(egui::Slider::new(&mut glow, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        sky.horizon_glow_percent = glow;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Glow Direction").color(STUDIO_TEXT_WEAK));
+                    let mut yaw = sky.horizon_glow_yaw_degrees.clamp(-180, 180);
+                    if ui
+                        .add(egui::Slider::new(&mut yaw, -180..=180).suffix("deg"))
+                        .changed()
+                    {
+                        sky.horizon_glow_yaw_degrees = yaw;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mountains").color(STUDIO_TEXT_WEAK));
+                    let mut mountains = sky.mountain_height_percent.clamp(0, 100);
+                    if ui
+                        .add(egui::Slider::new(&mut mountains, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        sky.mountain_height_percent = mountains;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Cyclorama Columns").color(STUDIO_TEXT_WEAK));
+                    let mut columns = sky
+                        .skybox_columns
+                        .clamp(SKYBOX_COLUMNS_MIN, SKYBOX_COLUMNS_MAX);
+                    if ui
+                        .add(egui::Slider::new(
+                            &mut columns,
+                            SKYBOX_COLUMNS_MIN..=SKYBOX_COLUMNS_MAX,
+                        ))
+                        .changed()
+                    {
+                        sky.skybox_columns = columns;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Cyclorama Rows").color(STUDIO_TEXT_WEAK));
+                    let mut rows = sky.skybox_rows.clamp(SKYBOX_ROWS_MIN, SKYBOX_ROWS_MAX);
+                    if ui
+                        .add(egui::Slider::new(
+                            &mut rows,
+                            SKYBOX_ROWS_MIN..=SKYBOX_ROWS_MAX,
+                        ))
+                        .changed()
+                    {
+                        sky.skybox_rows = rows;
+                        changed = true;
+                    }
+                });
                 changed |= ui
                     .checkbox(&mut sky.match_room_fog, "Match room fog")
                     .changed();
@@ -14617,9 +14690,9 @@ fn draw_world_grid_settings(
                             .changed();
                     });
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Tiles").color(STUDIO_TEXT_WEAK));
+                        ui.label(RichText::new("Detail").color(STUDIO_TEXT_WEAK));
                         changed |= ui
-                            .add(egui::Slider::new(&mut cloud.tile_count, 1..=8))
+                            .add(egui::Slider::new(&mut cloud.tile_count, 1..=16))
                             .changed();
                     });
                     ui.horizontal(|ui| {
@@ -14651,7 +14724,11 @@ fn draw_world_grid_settings(
                         ui.label(RichText::new("Noise Seed").color(STUDIO_TEXT_WEAK));
                         let mut seed = cloud.noise_seed;
                         if ui
-                            .add(egui::DragValue::new(&mut seed).speed(1.0).hexadecimal(8, false, true))
+                            .add(
+                                egui::DragValue::new(&mut seed)
+                                    .speed(1.0)
+                                    .hexadecimal(8, false, true),
+                            )
                             .changed()
                         {
                             cloud.noise_seed = seed;
