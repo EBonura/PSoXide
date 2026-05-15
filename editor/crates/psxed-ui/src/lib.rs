@@ -14614,6 +14614,67 @@ fn draw_world_grid_settings(
                         changed = true;
                     }
                 });
+                ui.separator();
+                changed |= ui.checkbox(&mut sky.sun_enabled, "Sun").changed();
+                ui.add_enabled_ui(sky.sun_enabled, |ui| {
+                    changed |= color_editor(ui, "Sun Color", &mut sky.sun_color);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sun Direction").color(STUDIO_TEXT_WEAK));
+                        let mut yaw = sky.sun_yaw_degrees.clamp(-180, 180);
+                        if ui
+                            .add(egui::Slider::new(&mut yaw, -180..=180).suffix("deg"))
+                            .changed()
+                        {
+                            sky.sun_yaw_degrees = yaw;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sun Height").color(STUDIO_TEXT_WEAK));
+                        let mut pitch = sky.sun_pitch_degrees.clamp(-30, 75);
+                        if ui
+                            .add(egui::Slider::new(&mut pitch, -30..=75).suffix("deg"))
+                            .changed()
+                        {
+                            sky.sun_pitch_degrees = pitch;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sun Size").color(STUDIO_TEXT_WEAK));
+                        let mut size = sky.sun_size_percent.clamp(1, 100);
+                        if ui
+                            .add(egui::Slider::new(&mut size, 1..=100).suffix("%"))
+                            .changed()
+                        {
+                            sky.sun_size_percent = size;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sun Glow").color(STUDIO_TEXT_WEAK));
+                        let mut glow = sky.sun_glow_percent.clamp(0, 100);
+                        if ui
+                            .add(egui::Slider::new(&mut glow, 0..=100).suffix("%"))
+                            .changed()
+                        {
+                            sky.sun_glow_percent = glow;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Glow Size").color(STUDIO_TEXT_WEAK));
+                        let mut spread = sky.sun_glow_size_percent.clamp(0, 100);
+                        if ui
+                            .add(egui::Slider::new(&mut spread, 0..=100).suffix("%"))
+                            .changed()
+                        {
+                            sky.sun_glow_size_percent = spread;
+                            changed = true;
+                        }
+                    });
+                });
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Mountains").color(STUDIO_TEXT_WEAK));
                     let mut mountains = sky.mountain_height_percent.clamp(0, 100);
