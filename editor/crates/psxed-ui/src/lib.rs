@@ -14617,7 +14617,8 @@ fn draw_world_grid_settings(
                 ui.separator();
                 changed |= ui.checkbox(&mut sky.sun_enabled, "Sun").changed();
                 ui.add_enabled_ui(sky.sun_enabled, |ui| {
-                    changed |= color_editor(ui, "Sun Color", &mut sky.sun_color);
+                    changed |= color_editor(ui, "Sun Inner", &mut sky.sun_color);
+                    changed |= color_editor(ui, "Sun Border", &mut sky.sun_border_color);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Sun Direction").color(STUDIO_TEXT_WEAK));
                         let mut yaw = sky.sun_yaw_degrees.clamp(-180, 180);
