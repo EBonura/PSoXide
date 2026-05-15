@@ -46,8 +46,9 @@ use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
 use crate::{
-    spatial, AnimationRole, GridDirection, NodeId, NodeKind, ProjectDocument, ResourceData,
-    ResourceId, SceneNode, WorldGrid, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    spatial, AnimationRole, CharacterControllerSettings, GridDirection, NodeId, NodeKind,
+    ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid, FAR_VISTA_TEXTURE_PANEL_COUNT,
+    MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -72,6 +73,7 @@ struct PlayerSpawnCandidate<'a> {
     room_index: u16,
     position: [i32; 3],
     character: Option<ResourceId>,
+    controller_settings: Option<CharacterControllerSettings>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -577,6 +579,7 @@ pub fn build_package(
                             room_index,
                             position: pos,
                             character: controller.character,
+                            controller_settings: Some(controller.settings),
                         });
                     } else if component_model_renderer(scene, node).is_none() {
                         let Some(character_id) = controller.character else {
@@ -659,6 +662,7 @@ pub fn build_package(
                     room_index,
                     position: pos,
                     character: *character,
+                    controller_settings: None,
                 });
             }
             NodeKind::SpawnPoint { player: false, .. } => {
@@ -907,6 +911,7 @@ pub fn build_package(
                         project_root,
                         spawn_node,
                         id,
+                        candidate.controller_settings,
                         &mut assets,
                         &mut models,
                         &mut model_clips,
@@ -1119,6 +1124,7 @@ fn cook_player_character(
     project_root: &Path,
     spawn_node: &SceneNode,
     character_id: ResourceId,
+    controller_settings: Option<CharacterControllerSettings>,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
@@ -1150,6 +1156,8 @@ fn cook_player_character(
             return None;
         }
     };
+    let settings = controller_settings
+        .unwrap_or_else(|| CharacterControllerSettings::from_character(character));
 
     let model_resource_id = match character.model {
         Some(id) => id,
@@ -1281,24 +1289,57 @@ fn cook_player_character(
     )
     .unwrap_or(CHARACTER_CLIP_NONE);
 
-    if character.radius == 0 {
+    if settings.radius == 0 {
         report.error(format!("Character '{}' radius must be > 0", resource.name));
         return None;
     }
-    if character.height == 0 {
+    if settings.height == 0 {
         report.error(format!("Character '{}' height must be > 0", resource.name));
         return None;
     }
-    if character.walk_speed <= 0 {
+    if settings.walk_speed <= 0 || settings.run_speed <= 0 {
         report.error(format!(
-            "Character '{}' walk_speed must be > 0",
+            "Character Controller for '{}' walk/run speeds must be > 0",
             resource.name
         ));
         return None;
     }
-    if character.turn_speed_degrees_per_second == 0 {
+    if settings.turn_speed_degrees_per_second == 0 {
         report.error(format!(
-            "Character '{}' turn_speed must be > 0",
+            "Character Controller for '{}' turn_speed must be > 0",
+            resource.name
+        ));
+        return None;
+    }
+    if settings.stamina_max_q12 <= 0 {
+        report.error(format!(
+            "Character Controller for '{}' stamina_max must be > 0",
+            resource.name
+        ));
+        return None;
+    }
+    if settings.sprint_min_q12 < 0
+        || settings.sprint_drain_q12 < 0
+        || settings.stamina_recover_q12 < 0
+        || settings.roll_cost_q12 < 0
+        || settings.backstep_cost_q12 < 0
+    {
+        report.error(format!(
+            "Character Controller for '{}' stamina costs and recovery must be >= 0",
+            resource.name
+        ));
+        return None;
+    }
+    if settings.roll_speed <= 0 || settings.backstep_speed <= 0 {
+        report.error(format!(
+            "Character Controller for '{}' evade speeds must be > 0",
+            resource.name
+        ));
+        return None;
+    }
+    if settings.roll_active_frames == 0 || settings.backstep_active_frames == 0 {
+        report.error(format!(
+            "Character Controller for '{}' evade active frames must be > 0",
             resource.name
         ));
         return None;
@@ -1336,11 +1377,25 @@ fn cook_player_character(
         walk_clip,
         run_clip,
         turn_clip,
-        radius: character.radius,
-        height: character.height,
-        walk_speed: character.walk_speed,
-        run_speed: character.run_speed,
-        turn_speed_degrees_per_second: character.turn_speed_degrees_per_second,
+        radius: settings.radius,
+        height: settings.height,
+        walk_speed: settings.walk_speed,
+        run_speed: settings.run_speed,
+        turn_speed_degrees_per_second: settings.turn_speed_degrees_per_second,
+        stamina_max_q12: settings.stamina_max_q12,
+        sprint_min_q12: settings.sprint_min_q12,
+        sprint_drain_q12: settings.sprint_drain_q12,
+        stamina_recover_q12: settings.stamina_recover_q12,
+        roll_cost_q12: settings.roll_cost_q12,
+        roll_speed: settings.roll_speed,
+        roll_active_frames: settings.roll_active_frames,
+        roll_recovery_frames: settings.roll_recovery_frames,
+        roll_invulnerable_frames: settings.roll_invulnerable_frames,
+        backstep_cost_q12: settings.backstep_cost_q12,
+        backstep_speed: settings.backstep_speed,
+        backstep_active_frames: settings.backstep_active_frames,
+        backstep_recovery_frames: settings.backstep_recovery_frames,
+        backstep_invulnerable_frames: settings.backstep_invulnerable_frames,
         camera_distance: character.camera_distance,
         camera_height: character.camera_height,
         camera_target_height: character.camera_target_height,
@@ -2194,6 +2249,7 @@ struct AnimatorComponent {
 #[derive(Clone, Copy)]
 struct CharacterControllerComponent {
     character: Option<ResourceId>,
+    settings: CharacterControllerSettings,
     player: bool,
 }
 
@@ -2225,8 +2281,13 @@ fn component_character_controller(
     host: &SceneNode,
 ) -> Option<CharacterControllerComponent> {
     component_children(scene, host).find_map(|node| match &node.kind {
-        NodeKind::CharacterController { character, player } => Some(CharacterControllerComponent {
+        NodeKind::CharacterController {
+            character,
+            settings,
+            player,
+        } => Some(CharacterControllerComponent {
             character: *character,
+            settings: *settings,
             player: *player,
         }),
         _ => None,
@@ -3745,6 +3806,7 @@ mod tests {
                 NodeKind::CharacterController {
                     player: true,
                     character: Some(character),
+                    ..
                 } => Some(*character),
                 _ => None,
             })
@@ -3785,7 +3847,9 @@ mod tests {
                     *player = false;
                     *character = None;
                 }
-                NodeKind::CharacterController { player, character } if *player => {
+                NodeKind::CharacterController {
+                    player, character, ..
+                } if *player => {
                     *player = false;
                     *character = None;
                 }
@@ -4185,6 +4249,31 @@ mod tests {
     }
 
     #[test]
+    fn player_character_controller_settings_drive_cooked_character() {
+        let mut project = project_with_one_room();
+        let controller_id = player_controller_component_id(&project);
+        let scene = project.active_scene_mut();
+        let controller = scene.node_mut(controller_id).unwrap();
+        let NodeKind::CharacterController { settings, .. } = &mut controller.kind else {
+            panic!("starter player controller must be a Character Controller");
+        };
+        settings.walk_speed = 61;
+        settings.run_speed = 133;
+        settings.turn_speed_degrees_per_second = 270;
+        settings.stamina_max_q12 = 2048;
+        settings.roll_speed = 144;
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let character = &package.expect("package returned on ok report").characters[0];
+        assert_eq!(character.walk_speed, 61);
+        assert_eq!(character.run_speed, 133);
+        assert_eq!(character.turn_speed_degrees_per_second, 270);
+        assert_eq!(character.stamina_max_q12, 2048);
+        assert_eq!(character.roll_speed, 144);
+    }
+
+    #[test]
     fn player_character_model_is_deduplicated_with_renderer_component() {
         // Starter includes both a ModelRenderer component and a
         // Character resource on the player
@@ -4364,19 +4453,12 @@ mod tests {
     }
 
     #[test]
-    fn character_with_zero_radius_fails_validation() {
+    fn character_controller_with_zero_radius_fails_validation() {
         let mut project = project_with_one_room();
-        let character_id = project
-            .resources
-            .iter()
-            .find_map(|r| match &r.data {
-                crate::ResourceData::Character(_) => Some(r.id),
-                _ => None,
-            })
-            .expect("starter has a Character");
-        if let Some(resource) = project.resource_mut(character_id) {
-            if let crate::ResourceData::Character(c) = &mut resource.data {
-                c.radius = 0;
+        let controller_id = player_controller_component_id(&project);
+        if let Some(node) = project.active_scene_mut().node_mut(controller_id) {
+            if let NodeKind::CharacterController { settings, .. } = &mut node.kind {
+                settings.radius = 0;
             }
         }
         let (package, report) = build_package(&project, &starter_project_root());
@@ -4439,6 +4521,7 @@ mod tests {
                 camera_distance: 1500,
                 camera_height: 800,
                 camera_target_height: 600,
+                ..CharacterResource::defaults()
             }),
         );
         let serialized = project.to_ron_string().expect("serializes");
@@ -4450,6 +4533,10 @@ mod tests {
                 assert_eq!(c.walk_clip, Some(1));
                 assert_eq!(c.radius, 200);
                 assert_eq!(c.walk_speed, 50);
+                assert_eq!(
+                    c.roll_active_frames,
+                    CharacterResource::defaults().roll_active_frames
+                );
                 assert_eq!(c.camera_target_height, 600);
             }
             _ => panic!("character resource lost its variant after round-trip"),
@@ -5379,6 +5466,7 @@ mod tests {
             "Character Controller",
             NodeKind::CharacterController {
                 character: Some(character),
+                settings: CharacterControllerSettings::default(),
                 player: true,
             },
         );
@@ -5700,6 +5788,7 @@ mod tests {
             "Character Controller",
             NodeKind::CharacterController {
                 character: Some(character_id),
+                settings: CharacterControllerSettings::default(),
                 player: false,
             },
         );
