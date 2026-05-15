@@ -31,9 +31,9 @@ use psxed_project::streaming::{
 };
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
-    default_model_collision_radius_for_height, snap_height, ColliderShape, FarVistaSettings,
-    GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
-    GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
+    default_model_collision_radius_for_height, snap_height, CharacterControllerSettings,
+    ColliderShape, FarVistaSettings, GridCellBounds, GridDirection, GridHorizontalFace, GridSector,
+    GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
     PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
     WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
@@ -6307,14 +6307,14 @@ impl EditorWorkspace {
                 self.push_undo();
                 let player = !self.has_player_source();
                 let idle_clip = self.resolve_character_idle_preview_clip(&character);
+                let settings = CharacterControllerSettings::from_character(&character);
                 let node = self.create_character_entity_at_room_hit(
                     room_id,
                     resource_id,
                     &resource.name,
                     character.model,
                     idle_clip,
-                    character.radius,
-                    character.height,
+                    settings,
                     player,
                     hit_world,
                 );
@@ -6452,8 +6452,7 @@ impl EditorWorkspace {
         name: &str,
         model_id: Option<ResourceId>,
         idle_clip: Option<u16>,
-        radius: u16,
-        height: u16,
+        settings: CharacterControllerSettings,
         player: bool,
         hit_world: [f32; 3],
     ) -> NodeId {
@@ -6489,6 +6488,7 @@ impl EditorWorkspace {
             "Character Controller",
             NodeKind::CharacterController {
                 character: Some(character_id),
+                settings,
                 player,
             },
         );
@@ -6496,7 +6496,10 @@ impl EditorWorkspace {
             entity,
             "Collider",
             NodeKind::Collider {
-                shape: ColliderShape::Capsule { radius, height },
+                shape: ColliderShape::Capsule {
+                    radius: settings.radius,
+                    height: settings.height,
+                },
                 solid: true,
             },
         );
@@ -6745,14 +6748,14 @@ impl EditorWorkspace {
                     Ok((character_id, name, character)) => {
                         let player = !self.has_player_source();
                         let idle_clip = self.resolve_character_idle_preview_clip(&character);
+                        let settings = CharacterControllerSettings::from_character(&character);
                         let id = self.create_character_entity_at_room_hit(
                             room_id,
                             character_id,
                             &name,
                             character.model,
                             idle_clip,
-                            character.radius,
-                            character.height,
+                            settings,
                             player,
                             hit_world,
                         );
@@ -15756,12 +15759,17 @@ fn draw_node_kind_editor(
                 changed |= ui.text_edit_singleline(action).changed();
             });
         }
-        NodeKind::CharacterController { character, player } => {
+        NodeKind::CharacterController {
+            character,
+            settings,
+            player,
+        } => {
             ui.weak("Component: binds an Entity to a Character Profile. Player controllers cook into the current playtest controller.");
             changed |= ui
                 .checkbox(player, icons::label(icons::MAP_PIN, "Player controlled"))
                 .changed();
-            changed |= draw_character_selector(ui, character_options, character);
+            changed |= draw_character_selector(ui, character_options, character, nav_target);
+            changed |= draw_character_controller_settings(ui, settings);
         }
         NodeKind::AiController { behavior } => {
             ui.weak("Component: future NPC/enemy AI profile.");
@@ -15839,7 +15847,7 @@ fn draw_node_kind_editor(
                 .checkbox(player, icons::label(icons::MAP_PIN, "Player spawn"))
                 .changed();
             if *player {
-                changed |= draw_character_selector(ui, character_options, character);
+                changed |= draw_character_selector(ui, character_options, character, nav_target);
             }
         }
         NodeKind::Trigger { trigger_id } => {
@@ -18075,27 +18083,6 @@ fn draw_character_resource_editor(
             }
         });
 
-    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Capsule"))
-        .default_open(false)
-        .show(ui, |ui| {
-            changed |= drag_u16(ui, "Radius", &mut character.radius, 1, 4096);
-            changed |= drag_u16(ui, "Height", &mut character.height, 1, 8192);
-        });
-
-    egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Controller"))
-        .default_open(false)
-        .show(ui, |ui| {
-            changed |= drag_i32(ui, "Walk speed", &mut character.walk_speed, 1, 1024);
-            changed |= drag_i32(ui, "Run speed", &mut character.run_speed, 1, 2048);
-            changed |= drag_u16(
-                ui,
-                "Turn speed (deg/s)",
-                &mut character.turn_speed_degrees_per_second,
-                1,
-                720,
-            );
-        });
-
     egui::CollapsingHeader::new(icons::label(icons::GRID, "Camera"))
         .default_open(false)
         .show(ui, |ui| {
@@ -18107,6 +18094,101 @@ fn draw_character_resource_editor(
                 &mut character.camera_target_height,
                 0,
                 16384,
+            );
+        });
+
+    changed
+}
+
+fn draw_character_controller_settings(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterControllerSettings,
+) -> bool {
+    let mut changed = false;
+
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Capsule"))
+        .default_open(false)
+        .show(ui, |ui| {
+            changed |= drag_u16(ui, "Radius", &mut settings.radius, 1, 4096);
+            changed |= drag_u16(ui, "Height", &mut settings.height, 1, 8192);
+        });
+
+    egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Movement"))
+        .default_open(true)
+        .show(ui, |ui| {
+            changed |= drag_i32(ui, "Walk speed", &mut settings.walk_speed, 1, 1024);
+            changed |= drag_i32(ui, "Run speed", &mut settings.run_speed, 1, 2048);
+            changed |= drag_u16(
+                ui,
+                "Turn speed (deg/s)",
+                &mut settings.turn_speed_degrees_per_second,
+                1,
+                720,
+            );
+        });
+
+    egui::CollapsingHeader::new(icons::label(icons::MOVE, "Stamina"))
+        .default_open(false)
+        .show(ui, |ui| {
+            changed |= drag_i32(ui, "Max", &mut settings.stamina_max_q12, 1, 16384);
+            changed |= drag_i32(ui, "Sprint start", &mut settings.sprint_min_q12, 0, 16384);
+            changed |= drag_i32(ui, "Sprint drain", &mut settings.sprint_drain_q12, 0, 4096);
+            changed |= drag_i32(ui, "Recover", &mut settings.stamina_recover_q12, 0, 4096);
+        });
+
+    egui::CollapsingHeader::new(icons::label(icons::PLAY, "Roll"))
+        .default_open(false)
+        .show(ui, |ui| {
+            changed |= drag_i32(ui, "Cost", &mut settings.roll_cost_q12, 0, 16384);
+            changed |= drag_i32(ui, "Speed", &mut settings.roll_speed, 1, 4096);
+            changed |= drag_u8(
+                ui,
+                "Active frames",
+                &mut settings.roll_active_frames,
+                1,
+                120,
+            );
+            changed |= drag_u8(
+                ui,
+                "Recovery frames",
+                &mut settings.roll_recovery_frames,
+                0,
+                120,
+            );
+            changed |= drag_u8(
+                ui,
+                "Invulnerable frames",
+                &mut settings.roll_invulnerable_frames,
+                0,
+                120,
+            );
+        });
+
+    egui::CollapsingHeader::new(icons::label(icons::ROTATE_CCW, "Backstep"))
+        .default_open(false)
+        .show(ui, |ui| {
+            changed |= drag_i32(ui, "Cost", &mut settings.backstep_cost_q12, 0, 16384);
+            changed |= drag_i32(ui, "Speed", &mut settings.backstep_speed, 1, 4096);
+            changed |= drag_u8(
+                ui,
+                "Active frames",
+                &mut settings.backstep_active_frames,
+                1,
+                120,
+            );
+            changed |= drag_u8(
+                ui,
+                "Recovery frames",
+                &mut settings.backstep_recovery_frames,
+                0,
+                120,
+            );
+            changed |= drag_u8(
+                ui,
+                "Invulnerable frames",
+                &mut settings.backstep_invulnerable_frames,
+                0,
+                120,
             );
         });
 
@@ -18265,6 +18347,7 @@ fn draw_character_selector(
     ui: &mut egui::Ui,
     options: &[(ResourceId, String)],
     current: &mut Option<ResourceId>,
+    jump_to: &mut Option<ResourceId>,
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -18291,6 +18374,16 @@ fn draw_character_selector(
                     }
                 }
             });
+        if let Some(id) = *current {
+            if options.iter().any(|(rid, _)| *rid == id)
+                && ui
+                    .small_button("Open")
+                    .on_hover_text("Open this Character Profile in the resource inspector.")
+                    .clicked()
+            {
+                *jump_to = Some(id);
+            }
+        }
     });
     if let Some(id) = *current {
         if !options.iter().any(|(rid, _)| *rid == id) {
@@ -18375,6 +18468,22 @@ fn drag_u16(ui: &mut egui::Ui, label: &str, value: &mut u16, min: u16, max: u16)
             .changed()
         {
             *value = v.clamp(min as i64, max as i64) as u16;
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn drag_u8(ui: &mut egui::Ui, label: &str, value: &mut u8, min: u8, max: u8) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut v = *value as i64;
+        if ui
+            .add(egui::DragValue::new(&mut v).range(min as i64..=max as i64))
+            .changed()
+        {
+            *value = v.clamp(min as i64, max as i64) as u8;
             changed = true;
         }
     });
@@ -19552,6 +19661,7 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
             "Character Controller",
             NodeKind::CharacterController {
                 character: None,
+                settings: CharacterControllerSettings::default(),
                 player: false,
             },
         ),
@@ -19676,6 +19786,7 @@ fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'static str, Node
             "Character Controller",
             NodeKind::CharacterController {
                 character: None,
+                settings: CharacterControllerSettings::default(),
                 player: false,
             },
         ),
@@ -29006,7 +29117,8 @@ mod tests {
                     child.kind,
                     NodeKind::CharacterController {
                         character: Some(id),
-                        player: false
+                        player: false,
+                        ..
                     } if id == character_id
                 )
             })
@@ -29147,6 +29259,7 @@ mod tests {
 
         let entity_existing = [NodeKind::CharacterController {
             character: None,
+            settings: CharacterControllerSettings::default(),
             player: false,
         }];
         let existing_refs: Vec<&NodeKind> = entity_existing.iter().collect();
@@ -29178,6 +29291,7 @@ mod tests {
                 "Character Controller",
                 NodeKind::CharacterController {
                     character: None,
+                    settings: CharacterControllerSettings::default(),
                     player: false,
                 },
             )
@@ -29269,7 +29383,9 @@ mod tests {
             .iter()
             .filter_map(|id| scene.node(*id))
             .find_map(|child| match child.kind {
-                NodeKind::CharacterController { character, player } => Some((character, player)),
+                NodeKind::CharacterController {
+                    character, player, ..
+                } => Some((character, player)),
                 _ => None,
             })
             .expect("character entity has controller component");
@@ -29345,6 +29461,7 @@ mod tests {
             "Character Controller",
             NodeKind::CharacterController {
                 character: None,
+                settings: CharacterControllerSettings::default(),
                 player: true,
             },
         );
@@ -29389,6 +29506,7 @@ mod tests {
             "Character Controller",
             NodeKind::CharacterController {
                 character: None,
+                settings: CharacterControllerSettings::default(),
                 player: false,
             },
         );

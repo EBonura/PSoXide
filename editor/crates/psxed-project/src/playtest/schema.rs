@@ -691,6 +691,34 @@ pub struct PlaytestCharacter {
     pub run_speed: i32,
     /// Turn speed (degrees / second).
     pub turn_speed_degrees_per_second: u16,
+    /// Maximum stamina in Q12-style arbitrary units.
+    pub stamina_max_q12: i32,
+    /// Minimum stamina required to start sprinting.
+    pub sprint_min_q12: i32,
+    /// Stamina spent per sprinting 60 Hz frame.
+    pub sprint_drain_q12: i32,
+    /// Stamina recovered per grounded non-sprint 60 Hz frame.
+    pub stamina_recover_q12: i32,
+    /// Stamina spent to start a roll.
+    pub roll_cost_q12: i32,
+    /// Roll travel speed in engine units per 60 Hz frame.
+    pub roll_speed: i32,
+    /// Frames where the roll keeps moving.
+    pub roll_active_frames: u8,
+    /// Recovery frames after roll movement ends.
+    pub roll_recovery_frames: u8,
+    /// Invulnerable frames from roll start.
+    pub roll_invulnerable_frames: u8,
+    /// Stamina spent to start a backstep.
+    pub backstep_cost_q12: i32,
+    /// Backstep travel speed in engine units per 60 Hz frame.
+    pub backstep_speed: i32,
+    /// Frames where the backstep keeps moving.
+    pub backstep_active_frames: u8,
+    /// Recovery frames after backstep movement ends.
+    pub backstep_recovery_frames: u8,
+    /// Invulnerable frames from backstep start.
+    pub backstep_invulnerable_frames: u8,
     /// Camera follow distance (engine units).
     pub camera_distance: i32,
     /// Camera vertical offset above the character origin.
