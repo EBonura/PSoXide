@@ -63,6 +63,12 @@ pub mod stage {
     pub const ROOM_DEPTH_PREP: u16 = 30;
     /// Cached-room surface culling, lighting, packet build, and command enqueue.
     pub const ROOM_SURFACE_DRAW: u16 = 31;
+    /// Cooked sky/cyclorama backdrop rendering.
+    pub const SKY: u16 = 32;
+    /// Distant far-vista ring rendering.
+    pub const FAR_VISTA: u16 = 33;
+    /// Editor-authored image/card prop rendering.
+    pub const IMAGE_PROPS: u16 = 34;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
