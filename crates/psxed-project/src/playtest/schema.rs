@@ -1,6 +1,6 @@
 //! Host-side package schema for embedded editor play mode.
 
-use crate::{MaterialFaceSidedness, ResourceId};
+use crate::{MaterialFaceSidedness, ResourceId, SkyCycloramaQuad};
 
 /// Generated subdirectory inside the playtest example that
 /// receives manifest source + `rooms/` + `textures/`. Stable
@@ -142,7 +142,7 @@ pub struct PlaytestChunk {
 }
 
 /// Resolved sky values written into one runtime room record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestSky {
     /// Zenith colour.
     pub top_rgb: [u8; 3],
@@ -152,30 +152,37 @@ pub struct PlaytestSky {
     pub bottom_rgb: [u8; 3],
     /// Horizon line as a percentage of screen height.
     pub horizon_percent: u8,
+    /// Angular thickness of the horizon colour band.
+    pub horizon_thickness_percent: u8,
+    /// Horizontal cyclorama subdivisions.
+    pub skybox_columns: u8,
+    /// Vertical cyclorama subdivisions.
+    pub skybox_rows: u8,
     /// Runtime sky flags.
     pub flags: u16,
-    /// Cloud-layer parameters (baked at scene init by the runtime).
+    /// Cooked panorama/cyclorama backdrop geometry.
+    pub cyclorama_quads: Vec<SkyCycloramaQuad>,
+    /// Cloud-layer parameters used to generate the cooked cyclorama.
     pub cloud_layer: PlaytestCloudLayer,
 }
 
 /// Resolved cloud-layer values written into one runtime room record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestCloudLayer {
-    /// Index into [`PlaytestPackage::assets`] for the baked Perlin
-    /// cloud texture. `None` when the layer is disabled or wasn't
-    /// baked.
+    /// Reserved texture slot. The current cyclorama sky path keeps
+    /// this as `None`.
     pub texture_asset_index: Option<usize>,
     /// Cloud highlight colour.
     pub color_rgb: [u8; 3],
-    /// CLUT pivot density 0..=255.
+    /// Cloud coverage density 0..=255.
     pub density: u8,
-    /// Plane altitude above world Y = 0 in engine units.
+    /// Cyclorama cloud-band vertical bias.
     pub altitude: u16,
-    /// Plane half-extent on each of X / Z in engine units.
+    /// Cyclorama cloud-band width.
     pub extent: u16,
-    /// Tile-repeats across the plane on each axis.
+    /// Noise/tile repeats across the cloud layer.
     pub tile_count: u8,
-    /// UV scroll speed per second on X / Z in PSX angle units.
+    /// Reserved cloud scroll speed.
     pub scroll_speed: [i16; 2],
     /// Perlin generator seed.
     pub noise_seed: u32,
