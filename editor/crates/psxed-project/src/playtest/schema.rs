@@ -169,7 +169,7 @@ pub struct PlaytestSky {
 /// Resolved cloud-layer values written into one runtime room record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestCloudLayer {
-    /// Cooked 8bpp sky panorama texture used by the runtime.
+    /// Cooked 4bpp multi-CLUT sky panorama texture used by the runtime.
     pub texture_asset_index: Option<usize>,
     /// Cloud highlight colour.
     pub color_rgb: [u8; 3],
