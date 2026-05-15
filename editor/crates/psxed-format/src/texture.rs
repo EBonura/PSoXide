@@ -22,7 +22,9 @@
 //!     _pad          u8   -- zero
 //!     width_px      u16  -- texture width in TEXELS
 //!     height_px     u16  -- texture height in TEXELS
-//!     clut_entries  u16  -- 16 (4bpp), 256 (8bpp), or 0 (15bpp)
+//!     clut_entries  u16  -- normally 16 (4bpp), 256 (8bpp), or
+//!                            0 (15bpp); specialized assets may
+//!                            concatenate multiple 4bpp CLUT rows
 //!     pixel_bytes   u32  -- byte count of the pixel block
 //!     clut_bytes    u32  -- byte count of the CLUT block (0 for 15bpp)
 //!
@@ -34,7 +36,8 @@
 //!     row starts on a halfword.
 //!
 //!   CLUT data (clut_bytes bytes, absent if depth == 15)
-//!     clut_entries × u16 LE, each an RGB555+M entry.
+//!     clut_entries × u16 LE, each an RGB555+M entry. Multi-row
+//!     4bpp assets store rows consecutively.
 //! ```
 //!
 //! All multi-byte integers little-endian. Bytes tightly packed.
@@ -65,8 +68,10 @@ pub mod flags {
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Depth {
-    /// 4 bits per texel → 16-colour CLUT. The smallest, most
-    /// common format for tiled walls / sprites / UI.
+    /// 4 bits per texel → 16-colour CLUT per primitive. The
+    /// smallest, most common format for tiled walls / sprites / UI.
+    /// Specialized assets can concatenate multiple 16-entry CLUT
+    /// rows and select the row per primitive.
     Bit4 = 4,
     /// 8 bits per texel → 256-colour CLUT. Used for
     /// characters / higher-detail surfaces.
@@ -120,7 +125,9 @@ pub struct TextureHeader {
     pub width_px: u16,
     /// Height in texels.
     pub height_px: u16,
-    /// 16, 256, or 0 (for 15bpp).
+    /// Number of CLUT entries in the following CLUT block. Normal
+    /// textures use 16, 256, or 0 for 15bpp; multi-row 4bpp assets
+    /// store `16 * row_count`.
     pub clut_entries: u16,
     /// Byte count of the pixel block immediately after this header.
     pub pixel_bytes: u32,
