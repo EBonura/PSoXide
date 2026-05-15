@@ -5597,8 +5597,7 @@ impl ModelResource {
 
 /// Gameplay metadata layered on top of a Model. The Model owns
 /// the `.psxmdl` / `.psxt` / `.psxanim` artifacts; the Character
-/// names which clips fill the idle / walk / run / turn roles
-/// and pins the controller's capsule + camera defaults.
+/// names which clips fill the idle / walk / run / turn roles.
 ///
 /// Authoring may leave the model unset (the resource still
 /// validates to support partial setup); a Character assigned to
@@ -5643,6 +5642,48 @@ pub struct CharacterResource {
     pub run_speed: i32,
     /// Yaw rate the controller applies when turning.
     pub turn_speed_degrees_per_second: u16,
+    /// Maximum stamina. Uses the runtime's Q12-style stamina units.
+    #[serde(default = "default_character_stamina_max_q12")]
+    pub stamina_max_q12: i32,
+    /// Minimum stamina required to start sprinting.
+    #[serde(default = "default_character_sprint_min_q12")]
+    pub sprint_min_q12: i32,
+    /// Stamina drained per 60 Hz sprint frame.
+    #[serde(default = "default_character_sprint_drain_q12")]
+    pub sprint_drain_q12: i32,
+    /// Stamina recovered per grounded non-sprint frame.
+    #[serde(default = "default_character_stamina_recover_q12")]
+    pub stamina_recover_q12: i32,
+    /// Stamina spent to start a roll.
+    #[serde(default = "default_character_roll_cost_q12")]
+    pub roll_cost_q12: i32,
+    /// Roll travel speed in engine units per 60 Hz frame.
+    #[serde(default = "default_character_roll_speed")]
+    pub roll_speed: i32,
+    /// Frames where the roll keeps moving.
+    #[serde(default = "default_character_roll_active_frames")]
+    pub roll_active_frames: u8,
+    /// Recovery frames after roll movement ends.
+    #[serde(default = "default_character_roll_recovery_frames")]
+    pub roll_recovery_frames: u8,
+    /// Invulnerable frames from roll start.
+    #[serde(default = "default_character_roll_invulnerable_frames")]
+    pub roll_invulnerable_frames: u8,
+    /// Stamina spent to start a backstep.
+    #[serde(default = "default_character_backstep_cost_q12")]
+    pub backstep_cost_q12: i32,
+    /// Backstep travel speed in engine units per 60 Hz frame.
+    #[serde(default = "default_character_backstep_speed")]
+    pub backstep_speed: i32,
+    /// Frames where the backstep keeps moving.
+    #[serde(default = "default_character_backstep_active_frames")]
+    pub backstep_active_frames: u8,
+    /// Recovery frames after backstep movement ends.
+    #[serde(default = "default_character_backstep_recovery_frames")]
+    pub backstep_recovery_frames: u8,
+    /// Invulnerable frames from backstep start.
+    #[serde(default = "default_character_backstep_invulnerable_frames")]
+    pub backstep_invulnerable_frames: u8,
     /// Distance the third-person camera trails the character.
     pub camera_distance: i32,
     /// Camera vertical offset above the character origin.
@@ -5664,11 +5705,25 @@ impl CharacterResource {
             walk_clip: None,
             run_clip: None,
             turn_clip: None,
-            radius: 192,
-            height: 1024,
-            walk_speed: 48,
-            run_speed: 96,
-            turn_speed_degrees_per_second: 180,
+            radius: default_character_radius(),
+            height: default_character_height(),
+            walk_speed: default_character_walk_speed(),
+            run_speed: default_character_run_speed(),
+            turn_speed_degrees_per_second: default_character_turn_speed_degrees_per_second(),
+            stamina_max_q12: default_character_stamina_max_q12(),
+            sprint_min_q12: default_character_sprint_min_q12(),
+            sprint_drain_q12: default_character_sprint_drain_q12(),
+            stamina_recover_q12: default_character_stamina_recover_q12(),
+            roll_cost_q12: default_character_roll_cost_q12(),
+            roll_speed: default_character_roll_speed(),
+            roll_active_frames: default_character_roll_active_frames(),
+            roll_recovery_frames: default_character_roll_recovery_frames(),
+            roll_invulnerable_frames: default_character_roll_invulnerable_frames(),
+            backstep_cost_q12: default_character_backstep_cost_q12(),
+            backstep_speed: default_character_backstep_speed(),
+            backstep_active_frames: default_character_backstep_active_frames(),
+            backstep_recovery_frames: default_character_backstep_recovery_frames(),
+            backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
             camera_distance: 6144,
             camera_height: 1280,
             camera_target_height: 640,
@@ -5676,7 +5731,202 @@ impl CharacterResource {
     }
 }
 
+const fn default_character_stamina_max_q12() -> i32 {
+    4096
+}
+
+const fn default_character_radius() -> u16 {
+    192
+}
+
+const fn default_character_height() -> u16 {
+    1024
+}
+
+const fn default_character_walk_speed() -> i32 {
+    48
+}
+
+const fn default_character_run_speed() -> i32 {
+    96
+}
+
+const fn default_character_turn_speed_degrees_per_second() -> u16 {
+    180
+}
+
+const fn default_character_sprint_min_q12() -> i32 {
+    384
+}
+
+const fn default_character_sprint_drain_q12() -> i32 {
+    48
+}
+
+const fn default_character_stamina_recover_q12() -> i32 {
+    36
+}
+
+const fn default_character_roll_cost_q12() -> i32 {
+    768
+}
+
+const fn default_character_roll_speed() -> i32 {
+    96
+}
+
+const fn default_character_roll_active_frames() -> u8 {
+    14
+}
+
+const fn default_character_roll_recovery_frames() -> u8 {
+    12
+}
+
+const fn default_character_roll_invulnerable_frames() -> u8 {
+    10
+}
+
+const fn default_character_backstep_cost_q12() -> i32 {
+    512
+}
+
+const fn default_character_backstep_speed() -> i32 {
+    72
+}
+
+const fn default_character_backstep_active_frames() -> u8 {
+    8
+}
+
+const fn default_character_backstep_recovery_frames() -> u8 {
+    10
+}
+
+const fn default_character_backstep_invulnerable_frames() -> u8 {
+    6
+}
+
 impl Default for CharacterResource {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+/// Tunable movement/collision settings authored on a
+/// [`NodeKind::CharacterController`] component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterControllerSettings {
+    /// Capsule radius (engine units).
+    #[serde(default = "default_character_radius")]
+    pub radius: u16,
+    /// Capsule height (engine units).
+    #[serde(default = "default_character_height")]
+    pub height: u16,
+    /// Forward walk speed in engine units per frame at 60 Hz.
+    #[serde(default = "default_character_walk_speed")]
+    pub walk_speed: i32,
+    /// Forward run speed in engine units per frame at 60 Hz.
+    #[serde(default = "default_character_run_speed")]
+    pub run_speed: i32,
+    /// Yaw rate the controller applies when turning.
+    #[serde(default = "default_character_turn_speed_degrees_per_second")]
+    pub turn_speed_degrees_per_second: u16,
+    /// Maximum stamina. Uses the runtime's Q12-style stamina units.
+    #[serde(default = "default_character_stamina_max_q12")]
+    pub stamina_max_q12: i32,
+    /// Minimum stamina required to start sprinting.
+    #[serde(default = "default_character_sprint_min_q12")]
+    pub sprint_min_q12: i32,
+    /// Stamina drained per 60 Hz sprint frame.
+    #[serde(default = "default_character_sprint_drain_q12")]
+    pub sprint_drain_q12: i32,
+    /// Stamina recovered per grounded non-sprint frame.
+    #[serde(default = "default_character_stamina_recover_q12")]
+    pub stamina_recover_q12: i32,
+    /// Stamina spent to start a roll.
+    #[serde(default = "default_character_roll_cost_q12")]
+    pub roll_cost_q12: i32,
+    /// Roll travel speed in engine units per 60 Hz frame.
+    #[serde(default = "default_character_roll_speed")]
+    pub roll_speed: i32,
+    /// Frames where the roll keeps moving.
+    #[serde(default = "default_character_roll_active_frames")]
+    pub roll_active_frames: u8,
+    /// Recovery frames after roll movement ends.
+    #[serde(default = "default_character_roll_recovery_frames")]
+    pub roll_recovery_frames: u8,
+    /// Invulnerable frames from roll start.
+    #[serde(default = "default_character_roll_invulnerable_frames")]
+    pub roll_invulnerable_frames: u8,
+    /// Stamina spent to start a backstep.
+    #[serde(default = "default_character_backstep_cost_q12")]
+    pub backstep_cost_q12: i32,
+    /// Backstep travel speed in engine units per 60 Hz frame.
+    #[serde(default = "default_character_backstep_speed")]
+    pub backstep_speed: i32,
+    /// Frames where the backstep keeps moving.
+    #[serde(default = "default_character_backstep_active_frames")]
+    pub backstep_active_frames: u8,
+    /// Recovery frames after backstep movement ends.
+    #[serde(default = "default_character_backstep_recovery_frames")]
+    pub backstep_recovery_frames: u8,
+    /// Invulnerable frames from backstep start.
+    #[serde(default = "default_character_backstep_invulnerable_frames")]
+    pub backstep_invulnerable_frames: u8,
+}
+
+impl CharacterControllerSettings {
+    pub const fn defaults() -> Self {
+        Self {
+            radius: default_character_radius(),
+            height: default_character_height(),
+            walk_speed: default_character_walk_speed(),
+            run_speed: default_character_run_speed(),
+            turn_speed_degrees_per_second: default_character_turn_speed_degrees_per_second(),
+            stamina_max_q12: default_character_stamina_max_q12(),
+            sprint_min_q12: default_character_sprint_min_q12(),
+            sprint_drain_q12: default_character_sprint_drain_q12(),
+            stamina_recover_q12: default_character_stamina_recover_q12(),
+            roll_cost_q12: default_character_roll_cost_q12(),
+            roll_speed: default_character_roll_speed(),
+            roll_active_frames: default_character_roll_active_frames(),
+            roll_recovery_frames: default_character_roll_recovery_frames(),
+            roll_invulnerable_frames: default_character_roll_invulnerable_frames(),
+            backstep_cost_q12: default_character_backstep_cost_q12(),
+            backstep_speed: default_character_backstep_speed(),
+            backstep_active_frames: default_character_backstep_active_frames(),
+            backstep_recovery_frames: default_character_backstep_recovery_frames(),
+            backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
+        }
+    }
+
+    pub fn from_character(character: &CharacterResource) -> Self {
+        Self {
+            radius: character.radius,
+            height: character.height,
+            walk_speed: character.walk_speed,
+            run_speed: character.run_speed,
+            turn_speed_degrees_per_second: character.turn_speed_degrees_per_second,
+            stamina_max_q12: character.stamina_max_q12,
+            sprint_min_q12: character.sprint_min_q12,
+            sprint_drain_q12: character.sprint_drain_q12,
+            stamina_recover_q12: character.stamina_recover_q12,
+            roll_cost_q12: character.roll_cost_q12,
+            roll_speed: character.roll_speed,
+            roll_active_frames: character.roll_active_frames,
+            roll_recovery_frames: character.roll_recovery_frames,
+            roll_invulnerable_frames: character.roll_invulnerable_frames,
+            backstep_cost_q12: character.backstep_cost_q12,
+            backstep_speed: character.backstep_speed,
+            backstep_active_frames: character.backstep_active_frames,
+            backstep_recovery_frames: character.backstep_recovery_frames,
+            backstep_invulnerable_frames: character.backstep_invulnerable_frames,
+        }
+    }
+}
+
+impl Default for CharacterControllerSettings {
     fn default() -> Self {
         Self::defaults()
     }
@@ -6052,6 +6302,9 @@ pub enum NodeKind {
         /// Character profile resource.
         #[serde(default)]
         character: Option<ResourceId>,
+        /// Movement, stamina, evade, and coarse capsule tuning for this controller.
+        #[serde(default)]
+        settings: CharacterControllerSettings,
         /// Whether this controller drives the player.
         #[serde(default)]
         player: bool,
@@ -7650,6 +7903,38 @@ mod tests {
         assert_eq!(snap_height(96), 128);
         assert_eq!(snap_height(-95), -64);
         assert_eq!(snap_height(-96), -128);
+    }
+
+    #[test]
+    fn character_resource_deserializes_without_new_motor_tuning_fields() {
+        let ron = r#"(
+            model: None,
+            animation_set: None,
+            idle_clip: None,
+            walk_clip: None,
+            run_clip: None,
+            turn_clip: None,
+            radius: 192,
+            height: 1024,
+            walk_speed: 48,
+            run_speed: 96,
+            turn_speed_degrees_per_second: 180,
+            camera_distance: 6144,
+            camera_height: 1280,
+            camera_target_height: 640,
+        )"#;
+        let character: CharacterResource =
+            ron::from_str(ron).expect("legacy character resource deserializes");
+
+        assert_eq!(
+            character.stamina_max_q12,
+            default_character_stamina_max_q12()
+        );
+        assert_eq!(character.roll_speed, default_character_roll_speed());
+        assert_eq!(
+            character.backstep_invulnerable_frames,
+            default_character_backstep_invulnerable_frames()
+        );
     }
 
     #[test]
@@ -9355,6 +9640,7 @@ mod tests {
             "Controller",
             NodeKind::CharacterController {
                 character: Some(target),
+                settings: CharacterControllerSettings::default(),
                 player: true,
             },
         );
