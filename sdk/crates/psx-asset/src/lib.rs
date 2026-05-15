@@ -486,6 +486,7 @@ impl<'a> Model<'a> {
     }
 
     /// Joint record by index.
+    #[inline]
     pub fn joint(&self, index: u16) -> Option<ModelJoint> {
         if index >= self.joint_count {
             return None;
@@ -500,6 +501,7 @@ impl<'a> Model<'a> {
     }
 
     /// Material record by index.
+    #[inline]
     pub fn material(&self, index: u16) -> Option<ModelMaterial> {
         if index >= self.material_count {
             return None;
@@ -516,6 +518,7 @@ impl<'a> Model<'a> {
     }
 
     /// Rigid part record by index.
+    #[inline]
     pub fn part(&self, index: u16) -> Option<ModelPart> {
         if index >= self.part_count {
             return None;
@@ -535,6 +538,7 @@ impl<'a> Model<'a> {
     }
 
     /// Vertex record by global vertex index.
+    #[inline]
     pub fn vertex(&self, index: u16) -> Option<ModelVertex> {
         if index >= self.vertex_count {
             return None;
@@ -551,6 +555,7 @@ impl<'a> Model<'a> {
     }
 
     /// Textured triangle by global face index.
+    #[inline]
     pub fn face(&self, index: u16) -> Option<ModelFace> {
         if index >= self.face_count {
             return None;
@@ -636,6 +641,16 @@ pub struct ModelPart {
 }
 
 impl ModelPart {
+    /// Empty part used for fixed static/runtime pools.
+    pub const ZERO: Self = Self {
+        joint_index: 0,
+        first_vertex: 0,
+        vertex_count: 0,
+        first_face: 0,
+        face_count: 0,
+        material_index: 0,
+    };
+
     /// Joint whose animation pose applies to this part.
     #[inline]
     pub fn joint_index(&self) -> u16 {
@@ -694,6 +709,13 @@ pub struct ModelVertex {
 }
 
 impl ModelVertex {
+    /// Empty vertex record used by fixed-size runtime decode pools.
+    pub const ZERO: Self = Self {
+        position: Vec3I16::ZERO,
+        joint1: NO_JOINT8,
+        blend: 0,
+    };
+
     /// `true` when this vertex needs the two-bone blend render path.
     #[inline]
     pub fn is_blend(&self) -> bool {
