@@ -1876,16 +1876,36 @@ const fn default_sky_mountain_height_percent() -> u8 {
     55
 }
 
+fn default_sky_mountain_top_color() -> [u8; 3] {
+    [84, 96, 124]
+}
+
+fn default_sky_mountain_base_color() -> [u8; 3] {
+    [24, 28, 42]
+}
+
+const fn default_sky_mountain_gap_percent() -> u8 {
+    22
+}
+
+const fn default_sky_mountain_roughness_percent() -> u8 {
+    58
+}
+
+const fn default_sky_mountain_layer_count() -> u8 {
+    2
+}
+
 /// Minimum number of horizontal cyclorama subdivisions.
 pub const SKYBOX_COLUMNS_MIN: u8 = 4;
 /// Maximum number of horizontal cyclorama subdivisions.
-pub const SKYBOX_COLUMNS_MAX: u8 = 48;
+pub const SKYBOX_COLUMNS_MAX: u8 = 32;
 /// Default number of horizontal cyclorama subdivisions.
 pub const SKYBOX_COLUMNS_DEFAULT: u8 = 16;
 /// Minimum number of vertical cyclorama subdivisions.
 pub const SKYBOX_ROWS_MIN: u8 = 3;
 /// Maximum number of vertical cyclorama subdivisions.
-pub const SKYBOX_ROWS_MAX: u8 = 32;
+pub const SKYBOX_ROWS_MAX: u8 = 20;
 /// Default number of vertical cyclorama subdivisions.
 pub const SKYBOX_ROWS_DEFAULT: u8 = 10;
 
@@ -1992,6 +2012,22 @@ pub struct SkySettings {
     /// Height/intensity of cooked distant mountain silhouettes.
     #[serde(default = "default_sky_mountain_height_percent")]
     pub mountain_height_percent: u8,
+    /// Tint used near distant mountain peaks.
+    #[serde(default = "default_sky_mountain_top_color")]
+    pub mountain_top_color: [u8; 3],
+    /// Tint used at the mountain bases.
+    #[serde(default = "default_sky_mountain_base_color")]
+    pub mountain_base_color: [u8; 3],
+    /// Gap between the horizon and the mountain ridge. Lower values
+    /// keep the mountains closer to the cloud/horizon band.
+    #[serde(default = "default_sky_mountain_gap_percent")]
+    pub mountain_gap_percent: u8,
+    /// Jaggedness of the generated mountain silhouette.
+    #[serde(default = "default_sky_mountain_roughness_percent")]
+    pub mountain_roughness_percent: u8,
+    /// Number of parallax-free painted mountain layers.
+    #[serde(default = "default_sky_mountain_layer_count")]
+    pub mountain_layer_count: u8,
     /// Horizontal cyclorama subdivisions used by the editor preview
     /// and runtime sky renderer.
     #[serde(default = "default_skybox_columns")]
@@ -2098,6 +2134,11 @@ impl SkySettings {
             horizon_glow_percent: self.horizon_glow_percent.clamp(0, 100),
             horizon_glow_yaw_degrees: self.horizon_glow_yaw_degrees.clamp(-180, 180),
             mountain_height_percent: self.mountain_height_percent.clamp(0, 100),
+            mountain_top_color: self.mountain_top_color,
+            mountain_base_color: self.mountain_base_color,
+            mountain_gap_percent: self.mountain_gap_percent.clamp(0, 100),
+            mountain_roughness_percent: self.mountain_roughness_percent.clamp(0, 100),
+            mountain_layer_count: self.mountain_layer_count.clamp(1, 3),
             skybox_columns: self
                 .skybox_columns
                 .clamp(SKYBOX_COLUMNS_MIN, SKYBOX_COLUMNS_MAX),
@@ -2119,6 +2160,11 @@ impl Default for SkySettings {
             horizon_glow_percent: default_sky_horizon_glow_percent(),
             horizon_glow_yaw_degrees: default_sky_horizon_glow_yaw_degrees(),
             mountain_height_percent: default_sky_mountain_height_percent(),
+            mountain_top_color: default_sky_mountain_top_color(),
+            mountain_base_color: default_sky_mountain_base_color(),
+            mountain_gap_percent: default_sky_mountain_gap_percent(),
+            mountain_roughness_percent: default_sky_mountain_roughness_percent(),
+            mountain_layer_count: default_sky_mountain_layer_count(),
             skybox_columns: default_skybox_columns(),
             skybox_rows: default_skybox_rows(),
             match_room_fog: default_sky_match_room_fog(),
@@ -2148,6 +2194,16 @@ pub struct ResolvedSkySettings {
     pub horizon_glow_yaw_degrees: i16,
     /// Height/intensity of cooked distant mountain silhouettes.
     pub mountain_height_percent: u8,
+    /// Tint used near distant mountain peaks.
+    pub mountain_top_color: [u8; 3],
+    /// Tint used at mountain bases.
+    pub mountain_base_color: [u8; 3],
+    /// Gap between horizon and generated ridge.
+    pub mountain_gap_percent: u8,
+    /// Jaggedness of the generated mountain silhouette.
+    pub mountain_roughness_percent: u8,
+    /// Number of painted mountain layers.
+    pub mountain_layer_count: u8,
     /// Horizontal cyclorama subdivisions.
     pub skybox_columns: u8,
     /// Vertical cyclorama subdivisions.
@@ -2170,18 +2226,18 @@ pub struct SkyCycloramaQuad {
 }
 
 const SKY_CYCLORAMA_MOUNTAIN_LAYERS: usize = 3;
-const SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX: usize = 64;
-const SKY_CYCLORAMA_CLOUD_STREAK_MAX: usize = 12;
-const SKY_CYCLORAMA_CLOUD_HERO_STREAKS: usize = 3;
-const SKY_CYCLORAMA_CLOUD_SEGMENTS: usize = 10;
-const SKY_CYCLORAMA_CLOUD_RIBBONS: usize = 4;
+const SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX: usize = 40;
+const SKY_CYCLORAMA_CLOUD_STREAK_MAX: usize = 6;
+const SKY_CYCLORAMA_CLOUD_HERO_STREAKS: usize = 2;
+const SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX: usize = 6;
+const SKY_CYCLORAMA_CLOUD_RIBBONS: usize = 2;
 const SKY_CYCLORAMA_CLOUD_RIBBON_QUADS: usize = 2;
 
 /// Maximum number of quads generated by [`generate_sky_cyclorama`].
 pub const SKY_CYCLORAMA_QUAD_MAX: usize = SKYBOX_COLUMNS_MAX as usize * SKYBOX_ROWS_MAX as usize
     + SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX * SKY_CYCLORAMA_MOUNTAIN_LAYERS
     + (SKY_CYCLORAMA_CLOUD_STREAK_MAX + SKY_CYCLORAMA_CLOUD_HERO_STREAKS)
-        * (SKY_CYCLORAMA_CLOUD_SEGMENTS + 1)
+        * (SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX + 1)
         * SKY_CYCLORAMA_CLOUD_RIBBONS
         * SKY_CYCLORAMA_CLOUD_RIBBON_QUADS;
 
@@ -2271,48 +2327,27 @@ fn push_mountain_cyclorama(
     if sky.mountain_height_percent == 0 {
         return;
     }
-    let mountain_columns = (columns * 2).clamp(columns, SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX);
+    let mountain_columns = columns.clamp(SKYBOX_COLUMNS_MIN as usize, SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX);
     let height_t = sky.mountain_height_percent.clamp(0, 100) as f32 / 100.0;
+    let layer_count = sky.mountain_layer_count.clamp(1, SKY_CYCLORAMA_MOUNTAIN_LAYERS as u8);
     let seed = sky.cloud_layer.noise_seed ^ 0x6d2b_79f5;
-    for column in 0..mountain_columns {
-        let yaw0 = cyclorama_yaw_for_column(column, mountain_columns);
-        let yaw1 = cyclorama_yaw_for_column(column + 1, mountain_columns);
-        push_mountain_layer_cyclorama(
-            out,
-            seed ^ 0xa341_316c,
-            sky,
-            yaw0,
-            yaw1,
-            horizon_pitch,
-            height_t,
-            0.42,
-            [92, 126, 172],
-            [58, 86, 112],
-        );
-        push_mountain_layer_cyclorama(
-            out,
-            seed ^ 0x9e37_79b9,
-            sky,
-            yaw0,
-            yaw1,
-            horizon_pitch,
-            height_t,
-            0.68,
-            [132, 92, 154],
-            [64, 52, 98],
-        );
-        push_mountain_layer_cyclorama(
-            out,
-            seed,
-            sky,
-            yaw0,
-            yaw1,
-            horizon_pitch,
-            height_t,
-            1.0,
-            [98, 76, 128],
-            [32, 38, 64],
-        );
+    for layer in 0..usize::from(layer_count) {
+        let depth_t = (layer + 1) as f32 / layer_count as f32;
+        let layer_seed = seed ^ sky_hash_u32(0xa341_316c, layer as u32);
+        for column in 0..mountain_columns {
+            let yaw0 = cyclorama_yaw_for_column(column, mountain_columns);
+            let yaw1 = cyclorama_yaw_for_column(column + 1, mountain_columns);
+            push_mountain_layer_cyclorama(
+                out,
+                layer_seed,
+                sky,
+                yaw0,
+                yaw1,
+                horizon_pitch,
+                height_t,
+                depth_t,
+            );
+        }
     }
 }
 
@@ -2325,17 +2360,25 @@ fn push_mountain_layer_cyclorama(
     horizon_pitch: f32,
     height_t: f32,
     depth_t: f32,
-    peak_tint: [u8; 3],
-    base_tint: [u8; 3],
 ) {
     let phase = 9.0 + depth_t * 19.0;
-    let top_base = horizon_pitch - (17.0 + depth_t * 11.0);
-    let amplitude = (3.0 + depth_t * 10.0) * height_t;
-    let base_pitch = horizon_pitch - (25.0 + depth_t * 22.0) * height_t.max(0.45);
-    let top0 = top_base + mountain_profile(seed, yaw0 + phase) * amplitude;
-    let top1 = top_base + mountain_profile(seed, yaw1 + phase) * amplitude;
-    let peak = cyclorama_lerp_rgb(sky.horizon_color, peak_tint, (62.0 + depth_t * 82.0) as u8);
-    let base = cyclorama_lerp_rgb(sky.lower_color, base_tint, (72.0 + depth_t * 78.0) as u8);
+    let gap_t = sky.mountain_gap_percent.clamp(0, 100) as f32 / 100.0;
+    let rough_t = sky.mountain_roughness_percent.clamp(0, 100) as f32 / 100.0;
+    let top_base = horizon_pitch - (2.5 + gap_t * 18.0 + depth_t * 5.5);
+    let amplitude = (2.0 + rough_t * 9.0 + depth_t * 4.0) * height_t;
+    let base_pitch = top_base - (8.0 + height_t * 19.0 + depth_t * 8.0);
+    let top0 = top_base + mountain_profile(seed, yaw0 + phase, rough_t) * amplitude;
+    let top1 = top_base + mountain_profile(seed, yaw1 + phase, rough_t) * amplitude;
+    let peak = cyclorama_lerp_rgb(
+        sky.horizon_color,
+        sky.mountain_top_color,
+        (72.0 + depth_t * 118.0) as u8,
+    );
+    let base = cyclorama_lerp_rgb(
+        sky.lower_color,
+        sky.mountain_base_color,
+        (96.0 + depth_t * 116.0) as u8,
+    );
     push_sky_cyclorama_quad_corners(
         out,
         yaw0,
@@ -2362,23 +2405,26 @@ fn push_cloud_streak_cyclorama(
     let tile_count = cloud.tile_count.clamp(1, 16);
     let altitude_t = (cloud.altitude as f32 / u16::MAX as f32).clamp(0.0, 1.0);
     let extent_t = (cloud.extent as f32 / u16::MAX as f32).clamp(0.0, 1.0);
-    let count = (4 + usize::from(cloud.density / 32) + usize::from(tile_count / 3))
+    let detail_t = (tile_count.saturating_sub(1) as f32 / 15.0).clamp(0.0, 1.0);
+    let segment_count =
+        (3 + usize::from(tile_count / 4)).clamp(3, SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX);
+    let count = (1 + usize::from(cloud.density / 64) + usize::from(tile_count / 6))
         .min(SKY_CYCLORAMA_CLOUD_STREAK_MAX);
     let density_t = cloud.density as f32 / 255.0;
-    let band_center = horizon_pitch + 7.0 + altitude_t * 42.0;
-    let pitch_spread = 5.0 + extent_t * 28.0;
-    let width_scale = 0.55 + extent_t * 1.55;
-    let repeat_scale = 0.85 + tile_count as f32 * 0.035;
+    let band_center = horizon_pitch + 4.0 + altitude_t * 28.0;
+    let pitch_spread = 3.5 + extent_t * 18.0;
+    let width_scale = 0.65 + extent_t * 1.05;
+    let repeat_scale = 1.05 + detail_t * 0.45;
     let hero_yaw = sky.horizon_glow_yaw_degrees as f32;
-    for (bank, offset) in [-58.0_f32, -8.0, 46.0].iter().enumerate() {
-        let width = (82.0 + bank as f32 * 18.0) * width_scale.min(1.55);
+    for (bank, offset) in [-34.0_f32, 28.0].iter().enumerate() {
+        let width = (56.0 + bank as f32 * 15.0) * width_scale.min(1.35);
         let center_pitch = band_center + (bank as f32 - 1.0) * pitch_spread * 0.18;
-        let thickness = 2.8 + extent_t * (3.6 + bank as f32);
-        let slant = -7.5 + bank as f32 * 5.6;
+        let thickness = 1.8 + extent_t * (2.6 + bank as f32 * 0.7);
+        let slant = -4.0 + bank as f32 * 3.5;
         let tint = cyclorama_lerp_rgb(
             cloud.color,
             [255, 166, 150],
-            (92.0 + bank as f32 * 28.0) as u8,
+            (68.0 + bank as f32 * 24.0) as u8,
         );
         push_cloud_streak_segments(
             out,
@@ -2390,7 +2436,8 @@ fn push_cloud_streak_cyclorama(
             slant,
             tint,
             density_t,
-            1.18,
+            0.92,
+            segment_count,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2419,6 +2466,7 @@ fn push_cloud_streak_cyclorama(
             tint,
             density_t,
             1.0,
+            segment_count,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2438,20 +2486,21 @@ fn push_cloud_streak_segments(
     tint: [u8; 3],
     density_t: f32,
     alpha_scale: f32,
+    segment_count: usize,
     horizon_pitch: f32,
     top_pitch: f32,
     bottom_pitch: f32,
 ) {
     let warm = cyclorama_lerp_rgb(tint, [255, 182, 142], 116);
-    let cool = cyclorama_lerp_rgb(tint, [128, 116, 172], 104);
-    for segment in 0..SKY_CYCLORAMA_CLOUD_SEGMENTS {
-        let t0 = segment as f32 / SKY_CYCLORAMA_CLOUD_SEGMENTS as f32;
-        let t1 = (segment + 1) as f32 / SKY_CYCLORAMA_CLOUD_SEGMENTS as f32;
-        let overlap = 0.35;
+    let segment_count = segment_count.clamp(2, SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX);
+    for segment in 0..segment_count {
+        let t0 = segment as f32 / segment_count as f32;
+        let t1 = (segment + 1) as f32 / segment_count as f32;
+        let overlap = 0.18;
         let yaw0 = yaw_start + width * t0 - if segment == 0 { 0.0 } else { overlap };
         let yaw1 = yaw_start
             + width * t1
-            + if segment + 1 == SKY_CYCLORAMA_CLOUD_SEGMENTS {
+            + if segment + 1 == segment_count {
                 0.0
             } else {
                 overlap
@@ -2469,8 +2518,8 @@ fn push_cloud_streak_segments(
             pitch1,
             thickness * 1.75,
             tint,
-            fade0 * 76.0,
-            fade1 * 76.0,
+            fade0 * 54.0,
+            fade1 * 54.0,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2482,40 +2531,10 @@ fn push_cloud_streak_segments(
             yaw1,
             pitch0,
             pitch1,
-            thickness * 0.92,
-            tint,
-            fade0 * 188.0,
-            fade1 * 188.0,
-            horizon_pitch,
-            top_pitch,
-            bottom_pitch,
-        );
-        push_wrapped_cloud_ribbon_cyclorama(
-            out,
-            sky,
-            yaw0,
-            yaw1,
-            pitch0 + thickness * 0.36,
-            pitch1 + thickness * 0.36,
-            thickness * 0.28,
+            thickness * 0.38,
             warm,
-            fade0 * 228.0,
-            fade1 * 228.0,
-            horizon_pitch,
-            top_pitch,
-            bottom_pitch,
-        );
-        push_wrapped_cloud_ribbon_cyclorama(
-            out,
-            sky,
-            yaw0,
-            yaw1,
-            pitch0 - thickness * 0.52,
-            pitch1 - thickness * 0.52,
-            thickness * 0.24,
-            cool,
-            fade0 * 132.0,
-            fade1 * 132.0,
+            fade0 * 148.0,
+            fade1 * 148.0,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2809,8 +2828,8 @@ fn sky_cloud_wash_color(
     let extent_t = (cloud.extent as f32 / u16::MAX as f32).clamp(0.0, 1.0);
     let tile_count = cloud.tile_count.clamp(1, 16) as f32;
     let density_t = cloud.density as f32 / 255.0;
-    let center = horizon_pitch + 7.0 + altitude_t * 42.0 + cloud_band_wave(cloud.noise_seed, yaw);
-    let width = 8.0 + extent_t * 16.0;
+    let center = horizon_pitch + 4.0 + altitude_t * 28.0 + cloud_band_wave(cloud.noise_seed, yaw);
+    let width = 5.0 + extent_t * 10.0;
     let pitch_weight = smooth_falloff(width, (pitch - center).abs());
     if pitch_weight <= 0.0 {
         return base;
@@ -2822,7 +2841,7 @@ fn sky_cloud_wash_color(
         + 0.18 * (yaw_r * (tile_count * 0.71) + phase * 1.7).sin();
     let strength = (density_t * pitch_weight * yaw_weight.clamp(0.18, 1.0)).clamp(0.0, 1.0);
     let tint = cyclorama_lerp_rgb(cloud.color, [255, 180, 148], (strength * 96.0) as u8);
-    cyclorama_lerp_rgb(base, tint, (strength * 42.0).clamp(0.0, 255.0) as u8)
+    cyclorama_lerp_rgb(base, tint, (strength * 20.0).clamp(0.0, 255.0) as u8)
 }
 
 fn cyclorama_yaw_for_column(column: usize, columns: usize) -> f32 {
@@ -2846,14 +2865,17 @@ fn smooth_step(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn mountain_profile(seed: u32, yaw_degrees: f32) -> f32 {
+fn mountain_profile(seed: u32, yaw_degrees: f32, roughness: f32) -> f32 {
     let r = yaw_degrees.to_radians();
     let phase0 = (seed & 0xff) as f32 * 0.031;
     let phase1 = ((seed >> 8) & 0xff) as f32 * 0.027;
     let broad = 0.5 + 0.5 * (r * 2.0 + phase0).sin();
     let mid = 0.5 + 0.5 * (r * 5.0 + phase1).sin();
     let jag = sky_hash_unit(seed ^ 0x85eb_ca6b, ((yaw_degrees + 720.0) / 18.0) as u32);
-    (broad * 0.50 + mid * 0.32 + jag * 0.18).clamp(0.0, 1.0)
+    let roughness = roughness.clamp(0.0, 1.0);
+    let smooth = broad * 0.68 + mid * 0.32;
+    let jagged = broad * 0.42 + mid * 0.34 + jag * 0.24;
+    lerp_f32(smooth, jagged, roughness).clamp(0.0, 1.0)
 }
 
 fn cloud_streak_fade(t: f32) -> f32 {
@@ -5898,6 +5920,10 @@ impl ProjectDocument {
                         sky.horizon_glow_yaw_degrees =
                             sky.horizon_glow_yaw_degrees.clamp(-180, 180);
                         sky.mountain_height_percent = sky.mountain_height_percent.clamp(0, 100);
+                        sky.mountain_gap_percent = sky.mountain_gap_percent.clamp(0, 100);
+                        sky.mountain_roughness_percent =
+                            sky.mountain_roughness_percent.clamp(0, 100);
+                        sky.mountain_layer_count = sky.mountain_layer_count.clamp(1, 3);
                         sky.cloud_layer.tile_count = sky.cloud_layer.tile_count.clamp(1, 16);
                         sky.skybox_columns = sky
                             .skybox_columns
@@ -6685,17 +6711,40 @@ mod tests {
             default_sky.mountain_height_percent,
             default_sky_mountain_height_percent()
         );
+        assert_eq!(default_sky.mountain_top_color, default_sky_mountain_top_color());
+        assert_eq!(
+            default_sky.mountain_base_color,
+            default_sky_mountain_base_color()
+        );
+        assert_eq!(
+            default_sky.mountain_gap_percent,
+            default_sky_mountain_gap_percent()
+        );
+        assert_eq!(
+            default_sky.mountain_roughness_percent,
+            default_sky_mountain_roughness_percent()
+        );
+        assert_eq!(
+            default_sky.mountain_layer_count,
+            default_sky_mountain_layer_count()
+        );
 
         let mut sky = SkySettings::default();
         sky.horizon_glow_percent = 240;
         sky.horizon_glow_yaw_degrees = 720;
         sky.mountain_height_percent = 240;
+        sky.mountain_gap_percent = 240;
+        sky.mountain_roughness_percent = 240;
+        sky.mountain_layer_count = 9;
         sky.skybox_columns = 1;
         sky.skybox_rows = 99;
         let resolved = sky.resolved_for_room(false, [0, 0, 0]);
         assert_eq!(resolved.horizon_glow_percent, 100);
         assert_eq!(resolved.horizon_glow_yaw_degrees, 180);
         assert_eq!(resolved.mountain_height_percent, 100);
+        assert_eq!(resolved.mountain_gap_percent, 100);
+        assert_eq!(resolved.mountain_roughness_percent, 100);
+        assert_eq!(resolved.mountain_layer_count, 3);
         assert_eq!(resolved.skybox_columns, SKYBOX_COLUMNS_MIN);
         assert_eq!(resolved.skybox_rows, SKYBOX_ROWS_MAX);
     }
