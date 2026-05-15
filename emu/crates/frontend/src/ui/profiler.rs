@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 
 use egui::{Color32, RichText};
 use emulator_core::telemetry::{
-    counter_name, stage_name, GuestTelemetryEvent, COUNTER_COUNT, STAGE_COUNT,
+    counter_name, stage, stage_name, GuestTelemetryEvent, COUNTER_COUNT, STAGE_COUNT,
 };
 
 use crate::theme;
@@ -25,6 +25,18 @@ const PSX_CYCLES_PER_MS: f32 = PSX_MASTER_CLOCK_HZ / 1000.0;
 const NTSC_CPU_CYCLES_PER_VBLANK: f32 = PSX_MASTER_CLOCK_HZ / 60.0;
 const PACED20_INTERVAL_VBLANKS: f32 = 3.0;
 const PACED20_VISUAL_BUDGET_CYCLES: f32 = NTSC_CPU_CYCLES_PER_VBLANK * PACED20_INTERVAL_VBLANKS;
+const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
+    (stage::SKY, "sky"),
+    (stage::FAR_VISTA, "far vista"),
+    (stage::ROOM, "room"),
+    (stage::ENTITY_MARKERS, "markers"),
+    (stage::IMAGE_PROPS, "image props"),
+    (stage::MODEL_INSTANCES, "models"),
+    (stage::PLAYER, "player"),
+    (stage::EQUIPMENT, "equipment"),
+    (stage::WORLD_FLUSH, "flush/sort"),
+    (stage::OT_SUBMIT, "ot submit"),
+];
 
 /// Timing breakdown returned by [`crate::gfx::Graphics::render`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -752,6 +764,7 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                 metric(ui, "3VB", avg.guest.paced20_budget_status().to_string());
             });
         }
+        draw_guest_render_breakdown(ui, avg.guest);
         draw_guest_runtime(ui, avg.guest);
     }
 
@@ -891,6 +904,73 @@ fn counter_row(ui: &mut egui::Ui, label: &str, value: f32) {
     ui.label(
         RichText::new(format!("{value:.0}"))
             .color(theme::TEXT)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+    ui.end_row();
+}
+
+fn draw_guest_render_breakdown(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
+    let render_cycles = guest.stage_cycles[stage::RENDER as usize].max(1.0);
+    if render_cycles <= 1.0 {
+        return;
+    }
+
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("Render %")
+            .color(theme::ACCENT)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+
+    let mut accounted = 0.0;
+    egui::Grid::new("guest-render-breakdown-grid")
+        .num_columns(4)
+        .spacing(egui::vec2(8.0, 3.0))
+        .striped(false)
+        .show(ui, |ui| {
+            for &(stage_id, label) in GUEST_RENDER_BREAKDOWN_STAGES {
+                let cycles = guest.stage_cycles[stage_id as usize];
+                if cycles <= 0.0 {
+                    continue;
+                }
+                accounted += cycles;
+                guest_render_percent_row(ui, label, cycles, render_cycles);
+            }
+            let other = (render_cycles - accounted).max(0.0);
+            if other > render_cycles * 0.005 {
+                guest_render_percent_row(ui, "other", other, render_cycles);
+            }
+        });
+}
+
+fn guest_render_percent_row(ui: &mut egui::Ui, label: &str, cycles: f32, render_cycles: f32) {
+    let percent = cycles * 100.0 / render_cycles.max(1.0);
+    ui.label(
+        RichText::new(label)
+            .color(theme::TEXT)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+
+    let width = ui.available_width().clamp(80.0, 240.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, theme::WIDGET_BG);
+    let fill_width = (rect.width() * (percent / 100.0).clamp(0.0, 1.0)).max(1.0);
+    let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
+    painter.rect_filled(fill_rect, 2.0, theme::ACCENT_HOVER);
+
+    ui.label(
+        RichText::new(format!("{percent:5.1}%"))
+            .color(theme::TEXT)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+    ui.label(
+        RichText::new(format!("{:.3} ms", cycles / PSX_CYCLES_PER_MS))
+            .color(theme::TEXT_DIM)
             .monospace()
             .size(theme::FONT_SIZE_SMALL),
     );
