@@ -1889,7 +1889,7 @@ const fn default_sky_mountain_gap_percent() -> u8 {
 }
 
 const fn default_sky_mountain_roughness_percent() -> u8 {
-    58
+    78
 }
 
 const fn default_sky_mountain_layer_count() -> u8 {
@@ -2226,7 +2226,7 @@ pub struct SkyCycloramaQuad {
 }
 
 const SKY_CYCLORAMA_MOUNTAIN_LAYERS: usize = 3;
-const SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX: usize = 40;
+const SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX: usize = 64;
 const SKY_CYCLORAMA_CLOUD_STREAK_MAX: usize = 6;
 const SKY_CYCLORAMA_CLOUD_HERO_STREAKS: usize = 2;
 const SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX: usize = 6;
@@ -2327,7 +2327,8 @@ fn push_mountain_cyclorama(
     if sky.mountain_height_percent == 0 {
         return;
     }
-    let mountain_columns = columns.clamp(SKYBOX_COLUMNS_MIN as usize, SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX);
+    let mountain_columns =
+        (columns * 3).clamp(24, SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX);
     let height_t = sky.mountain_height_percent.clamp(0, 100) as f32 / 100.0;
     let layer_count = sky.mountain_layer_count.clamp(1, SKY_CYCLORAMA_MOUNTAIN_LAYERS as u8);
     let seed = sky.cloud_layer.noise_seed ^ 0x6d2b_79f5;
@@ -2364,9 +2365,9 @@ fn push_mountain_layer_cyclorama(
     let phase = 9.0 + depth_t * 19.0;
     let gap_t = sky.mountain_gap_percent.clamp(0, 100) as f32 / 100.0;
     let rough_t = sky.mountain_roughness_percent.clamp(0, 100) as f32 / 100.0;
-    let top_base = horizon_pitch - (2.5 + gap_t * 18.0 + depth_t * 5.5);
-    let amplitude = (2.0 + rough_t * 9.0 + depth_t * 4.0) * height_t;
-    let base_pitch = top_base - (8.0 + height_t * 19.0 + depth_t * 8.0);
+    let top_base = horizon_pitch - (4.0 + gap_t * 14.0 + depth_t * 4.0);
+    let amplitude = (6.0 + rough_t * 16.0 + depth_t * 5.0) * height_t;
+    let base_pitch = top_base - (13.0 + height_t * 24.0 + depth_t * 8.0);
     let top0 = top_base + mountain_profile(seed, yaw0 + phase, rough_t) * amplitude;
     let top1 = top_base + mountain_profile(seed, yaw1 + phase, rough_t) * amplitude;
     let peak = cyclorama_lerp_rgb(
@@ -2408,19 +2409,19 @@ fn push_cloud_streak_cyclorama(
     let detail_t = (tile_count.saturating_sub(1) as f32 / 15.0).clamp(0.0, 1.0);
     let segment_count =
         (3 + usize::from(tile_count / 4)).clamp(3, SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX);
-    let count = (1 + usize::from(cloud.density / 64) + usize::from(tile_count / 6))
+    let count = (1 + usize::from(cloud.density / 96) + usize::from(tile_count / 8))
         .min(SKY_CYCLORAMA_CLOUD_STREAK_MAX);
     let density_t = cloud.density as f32 / 255.0;
     let band_center = horizon_pitch + 4.0 + altitude_t * 28.0;
     let pitch_spread = 3.5 + extent_t * 18.0;
-    let width_scale = 0.65 + extent_t * 1.05;
+    let width_scale = 0.55 + extent_t * 0.88;
     let repeat_scale = 1.05 + detail_t * 0.45;
     let hero_yaw = sky.horizon_glow_yaw_degrees as f32;
-    for (bank, offset) in [-34.0_f32, 28.0].iter().enumerate() {
-        let width = (56.0 + bank as f32 * 15.0) * width_scale.min(1.35);
+    for (bank, offset) in [-28.0_f32, 24.0].iter().enumerate() {
+        let width = (34.0 + bank as f32 * 12.0) * width_scale.min(1.15);
         let center_pitch = band_center + (bank as f32 - 1.0) * pitch_spread * 0.18;
-        let thickness = 1.8 + extent_t * (2.6 + bank as f32 * 0.7);
-        let slant = -4.0 + bank as f32 * 3.5;
+        let thickness = 1.0 + extent_t * (1.8 + bank as f32 * 0.45);
+        let slant = -2.8 + bank as f32 * 2.6;
         let tint = cyclorama_lerp_rgb(
             cloud.color,
             [255, 166, 150],
@@ -2436,8 +2437,9 @@ fn push_cloud_streak_cyclorama(
             slant,
             tint,
             density_t,
-            0.92,
+            0.62,
             segment_count,
+            cloud.noise_seed ^ sky_hash_u32(0x27d4eb2d, bank as u32),
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2446,10 +2448,10 @@ fn push_cloud_streak_cyclorama(
     for streak in 0..count {
         let h = sky_hash_u32(cloud.noise_seed, streak as u32);
         let yaw_start = -180.0 + sky_hash_unit(h, 0) * 360.0;
-        let width = (20.0 + sky_hash_unit(h, 1) * 70.0) * width_scale / repeat_scale;
+        let width = (14.0 + sky_hash_unit(h, 1) * 42.0) * width_scale / repeat_scale;
         let center_pitch = band_center + (sky_hash_unit(h, 2) - 0.5) * pitch_spread;
-        let thickness = (1.8 + sky_hash_unit(h, 3) * 5.2) / (0.9 + tile_count as f32 * 0.02);
-        let slant = (-10.0 + sky_hash_unit(h, 4) * 20.0) * (0.65 + extent_t * 0.7);
+        let thickness = (0.8 + sky_hash_unit(h, 3) * 2.6) / (0.9 + tile_count as f32 * 0.02);
+        let slant = (-6.0 + sky_hash_unit(h, 4) * 12.0) * (0.6 + extent_t * 0.45);
         let tint = cyclorama_lerp_rgb(
             cloud.color,
             [255, 170, 142],
@@ -2465,8 +2467,9 @@ fn push_cloud_streak_cyclorama(
             slant,
             tint,
             density_t,
-            1.0,
+            0.76,
             segment_count,
+            h,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2487,6 +2490,7 @@ fn push_cloud_streak_segments(
     density_t: f32,
     alpha_scale: f32,
     segment_count: usize,
+    seed: u32,
     horizon_pitch: f32,
     top_pitch: f32,
     bottom_pitch: f32,
@@ -2505,10 +2509,10 @@ fn push_cloud_streak_segments(
             } else {
                 overlap
             };
-        let pitch0 = center_pitch + slant * (t0 - 0.5);
-        let pitch1 = center_pitch + slant * (t1 - 0.5);
-        let fade0 = cloud_streak_fade(t0) * density_t * alpha_scale;
-        let fade1 = cloud_streak_fade(t1) * density_t * alpha_scale;
+        let pitch0 = center_pitch + slant * (t0 - 0.5) + cloud_lobe_pitch(seed, t0, thickness);
+        let pitch1 = center_pitch + slant * (t1 - 0.5) + cloud_lobe_pitch(seed, t1, thickness);
+        let fade0 = cloud_streak_fade(t0) * cloud_lobe_weight(seed, t0) * density_t * alpha_scale;
+        let fade1 = cloud_streak_fade(t1) * cloud_lobe_weight(seed, t1) * density_t * alpha_scale;
         push_wrapped_cloud_ribbon_cyclorama(
             out,
             sky,
@@ -2518,8 +2522,8 @@ fn push_cloud_streak_segments(
             pitch1,
             thickness * 1.75,
             tint,
-            fade0 * 54.0,
-            fade1 * 54.0,
+            fade0 * 34.0,
+            fade1 * 34.0,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2533,8 +2537,8 @@ fn push_cloud_streak_segments(
             pitch1,
             thickness * 0.38,
             warm,
-            fade0 * 148.0,
-            fade1 * 148.0,
+            fade0 * 108.0,
+            fade1 * 108.0,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2637,10 +2641,12 @@ fn push_cloud_ribbon_cyclorama(
     top_pitch: f32,
     bottom_pitch: f32,
 ) {
-    let top0 = pitch0 + half_thickness;
-    let top1 = pitch1 + half_thickness;
-    let bottom0 = pitch0 - half_thickness;
-    let bottom1 = pitch1 - half_thickness;
+    let width0 = cloud_width_fade(alpha0);
+    let width1 = cloud_width_fade(alpha1);
+    let top0 = pitch0 + half_thickness * width0;
+    let top1 = pitch1 + half_thickness * width1;
+    let bottom0 = pitch0 - half_thickness * width0;
+    let bottom1 = pitch1 - half_thickness * width1;
     let center0 = pitch0;
     let center1 = pitch1;
     let base_top0 =
@@ -2865,21 +2871,45 @@ fn smooth_step(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+fn cloud_width_fade(alpha: f32) -> f32 {
+    (alpha / 120.0).clamp(0.0, 1.0).sqrt()
+}
+
 fn mountain_profile(seed: u32, yaw_degrees: f32, roughness: f32) -> f32 {
-    let r = yaw_degrees.to_radians();
-    let phase0 = (seed & 0xff) as f32 * 0.031;
-    let phase1 = ((seed >> 8) & 0xff) as f32 * 0.027;
-    let broad = 0.5 + 0.5 * (r * 2.0 + phase0).sin();
-    let mid = 0.5 + 0.5 * (r * 5.0 + phase1).sin();
-    let jag = sky_hash_unit(seed ^ 0x85eb_ca6b, ((yaw_degrees + 720.0) / 18.0) as u32);
     let roughness = roughness.clamp(0.0, 1.0);
-    let smooth = broad * 0.68 + mid * 0.32;
-    let jagged = broad * 0.42 + mid * 0.34 + jag * 0.24;
-    lerp_f32(smooth, jagged, roughness).clamp(0.0, 1.0)
+    let spacing = lerp_f32(46.0, 16.0, roughness);
+    let phase = (seed & 0xff) as f32 * 0.17;
+    let x = (yaw_degrees + 540.0 + phase) / spacing;
+    let cell = x.floor() as i32;
+    let mut peak = 0.0_f32;
+    for offset in -1..=1 {
+        let c = cell + offset;
+        let center_jitter = sky_hash_unit(seed ^ 0x52dce729, c as u32) * 0.54 + 0.23;
+        let center = c as f32 + center_jitter;
+        let width = 0.13 + sky_hash_unit(seed ^ 0x9e3779b9, c as u32) * 0.13;
+        let height = 0.38 + sky_hash_unit(seed ^ 0x85ebca6b, c as u32) * 0.62;
+        let local = (1.0 - ((x - center).abs() / width)).clamp(0.0, 1.0);
+        peak = peak.max(local.powf(1.6 + roughness * 1.7) * height);
+    }
+    let broad = 0.5 + 0.5 * ((yaw_degrees.to_radians() * 1.7) + phase * 0.09).sin();
+    (peak * 0.92 + broad * 0.08).clamp(0.0, 1.0)
 }
 
 fn cloud_streak_fade(t: f32) -> f32 {
     (core::f32::consts::PI * t).sin().clamp(0.0, 1.0)
+}
+
+fn cloud_lobe_weight(seed: u32, t: f32) -> f32 {
+    let phase0 = (seed & 0xff) as f32 * 0.037;
+    let phase1 = ((seed >> 8) & 0xff) as f32 * 0.029;
+    let a = (core::f32::consts::TAU * (t * 2.0 + phase0)).sin();
+    let b = (core::f32::consts::TAU * (t * 3.0 + phase1)).sin();
+    (0.62 + 0.25 * a + 0.13 * b).clamp(0.18, 1.0)
+}
+
+fn cloud_lobe_pitch(seed: u32, t: f32, thickness: f32) -> f32 {
+    let phase = ((seed >> 16) & 0xff) as f32 * 0.041;
+    (core::f32::consts::TAU * (t * 1.5 + phase)).sin() * thickness * 0.36
 }
 
 fn cloud_band_wave(seed: u32, yaw_degrees: f32) -> f32 {
