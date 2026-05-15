@@ -97,14 +97,13 @@ pub use render3d::{
     project_model_vertex_with_joint_transforms, CullMode, DepthPolicy, GouraudMeshOptions,
     GouraudRenderPass, GouraudTriCommand, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, MeshRenderStats, ProjectedTexturedVertex, ProjectedVertex,
-    TexturedModelPartBounds, TexturedModelProjectVertex, TexturedModelProjectionCache,
-    TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex, ViewVertex,
-    WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
+    TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex,
+    ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
     WorldSurfaceOptions, WorldTriCommand,
 };
-// Re-export the GTE math types callers need to construct
-// arguments for `submit_textured_model` (instance rotation,
-// joint transforms) without pulling in `psx-gte` directly.
+// Re-export the GTE math types callers need to construct model render
+// arguments (instance rotation, joint transforms) without pulling in
+// `psx-gte` directly.
 pub use psx_gte::math::Mat3I16;
 pub use scene::{Ctx, Scene};
 pub use third_person_camera::{

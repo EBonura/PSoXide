@@ -15,12 +15,12 @@
 
 extern crate psx_rt;
 
-use psx_asset::{Animation, Model, Texture};
+use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 use psx_engine::{
     button, Angle, App, Config, Ctx, CullMode, DepthBand, DepthPolicy, DepthRange,
     JointViewTransform, Mat3I16, OtDepth, OtFrame, PrimitiveArena, ProjectedVertex, Scene,
-    WorldCamera, WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
-    WorldVertex,
+    TexturedModelGeometry, TexturedModelRenderFace, WorldCamera, WorldProjection,
+    WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex,
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{material::TextureMaterial, ot::OrderingTable, prim::TriTextured};
@@ -156,6 +156,9 @@ const WORLD_DEPTH_RANGE: DepthRange =
 
 const TRI_CAP: usize = 1536;
 const MODEL_VERTEX_CAP: usize = 1024;
+const MODEL_FACE_CAP: usize = 2048;
+const MODEL_PART_CAP: usize = 128;
+const MODEL_SOURCE_VERTEX_CAP: usize = MODEL_VERTEX_CAP;
 const JOINT_CAP: usize = 32;
 
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
@@ -171,6 +174,11 @@ static mut TEXTURED_TRIS: [TriTextured; TRI_CAP] = [const {
 static mut WORLD_COMMANDS: [WorldTriCommand; TRI_CAP] = [WorldTriCommand::EMPTY; TRI_CAP];
 static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
     [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
+static mut MODEL_RENDER_FACES: [TexturedModelRenderFace; MODEL_FACE_CAP] =
+    [TexturedModelRenderFace::ZERO; MODEL_FACE_CAP];
+static mut MODEL_RENDER_PARTS: [ModelPart; MODEL_PART_CAP] = [ModelPart::ZERO; MODEL_PART_CAP];
+static mut MODEL_RENDER_SOURCE_VERTICES: [ModelVertex; MODEL_SOURCE_VERTEX_CAP] =
+    [ModelVertex::ZERO; MODEL_SOURCE_VERTEX_CAP];
 static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
     [const { JointViewTransform::ZERO }; JOINT_CAP];
 
@@ -391,7 +399,17 @@ fn draw_animated_model(
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(CullMode::Back)
         .with_material_layer(material);
-    let stats = world.submit_textured_model(
+    let Some((geometry, faces)) = (unsafe {
+        decode_model_geometry_faces(
+            model,
+            &mut MODEL_RENDER_FACES,
+            &mut MODEL_RENDER_PARTS,
+            &mut MODEL_RENDER_SOURCE_VERTICES,
+        )
+    }) else {
+        return;
+    };
+    let stats = world.submit_textured_model_predecoded_geometry_faces(
         triangles,
         model,
         animation,
@@ -403,10 +421,77 @@ fn draw_animated_model(
         unsafe { &mut JOINT_VIEW_TRANSFORMS },
         material,
         options,
+        faces,
+        geometry,
     );
     if stats.primitive_overflow || stats.command_overflow || stats.vertex_overflow {
         return;
     }
+}
+
+fn decode_model_geometry_faces<'a>(
+    model: Model<'_>,
+    face_pool: &'a mut [TexturedModelRenderFace],
+    part_pool: &'a mut [ModelPart],
+    vertex_pool: &'a mut [ModelVertex],
+) -> Option<(TexturedModelGeometry<'a>, &'a [TexturedModelRenderFace])> {
+    let part_count = model.part_count() as usize;
+    let vertex_count = model.vertex_count() as usize;
+    let face_count = model.face_count() as usize;
+    if part_pool.len() < part_count || vertex_pool.len() < vertex_count || face_pool.len() < face_count
+    {
+        return None;
+    }
+
+    let mut i = 0usize;
+    while i < part_count {
+        part_pool[i] = model.part(i as u16)?;
+        i += 1;
+    }
+    i = 0;
+    while i < vertex_count {
+        vertex_pool[i] = model.vertex(i as u16)?;
+        i += 1;
+    }
+
+    let (max_u, max_v) = model_texture_uv_limits(model);
+    i = 0;
+    while i < face_count {
+        let face = model.face(i as u16)?;
+        face_pool[i] = TexturedModelRenderFace::new(
+            [
+                face.corners[0].vertex_index,
+                face.corners[1].vertex_index,
+                face.corners[2].vertex_index,
+            ],
+            [
+                clamp_model_uv(face.corners[0].uv, max_u, max_v),
+                clamp_model_uv(face.corners[1].uv, max_u, max_v),
+                clamp_model_uv(face.corners[2].uv, max_u, max_v),
+            ],
+        );
+        i += 1;
+    }
+
+    Some((
+        TexturedModelGeometry::new(&part_pool[..part_count], &vertex_pool[..vertex_count]),
+        &face_pool[..face_count],
+    ))
+}
+
+fn model_texture_uv_limits(model: Model<'_>) -> (u8, u8) {
+    (
+        model_texture_uv_max(model.texture_width()),
+        model_texture_uv_max(model.texture_height()),
+    )
+}
+
+fn model_texture_uv_max(size: u16) -> u8 {
+    size.saturating_sub(1).min(u16::from(u8::MAX)) as u8
+}
+
+fn clamp_model_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
+    (uv.0.min(max_u), uv.1.min(max_v))
 }
 
 /// One-frame text overlay: model name + clip name at the top, control
