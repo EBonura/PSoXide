@@ -2643,6 +2643,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats.projected_vertices = project_count as u16;
         let near_z = camera.projection.near_z;
         let mut all_projected_vertices_in_front = true;
+        let mut all_projected_vertices_inside_hw_bounds = project_count == model_vertex_count;
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         let parts = &geometry.parts[..model_part_count as usize];
         let vertices = &geometry.vertices[..model_vertex_count];
@@ -2652,6 +2653,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let primary_joint = part.joint_index() as usize;
             if primary_joint >= joint_count {
                 all_projected_vertices_in_front = false;
+                all_projected_vertices_inside_hw_bounds = false;
                 part_index += 1;
                 continue;
             }
@@ -2675,6 +2677,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     );
                     all_projected_vertices_in_front &=
                         projected_model_vertex_in_front(projected, near_z);
+                    all_projected_vertices_inside_hw_bounds &=
+                        projected_model_vertex_inside_hw_bounds(projected);
                     projected_vertices[global_index] = projected;
                     global_index += 1;
                     continue;
@@ -2703,6 +2707,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     all_projected_vertices_in_front &= projected_model_vertex_in_front(a, near_z)
                         && projected_model_vertex_in_front(b, near_z)
                         && projected_model_vertex_in_front(c, near_z);
+                    all_projected_vertices_inside_hw_bounds &=
+                        projected_model_vertex_inside_hw_bounds(a)
+                            && projected_model_vertex_inside_hw_bounds(b)
+                            && projected_model_vertex_inside_hw_bounds(c);
                     projected_vertices[global_index] = a;
                     projected_vertices[global_index + 1] = b;
                     projected_vertices[global_index + 2] = c;
@@ -2712,6 +2720,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         let projected = project_gte_model_vertex(batch[batch_index]);
                         all_projected_vertices_in_front &=
                             projected_model_vertex_in_front(projected, near_z);
+                        all_projected_vertices_inside_hw_bounds &=
+                            projected_model_vertex_inside_hw_bounds(projected);
                         projected_vertices[global_index + batch_index] = projected;
                         batch_index += 1;
                     }
@@ -2725,22 +2735,79 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let mut faces_considered = 0u32;
         let packet_material = material.textured_packet_material();
+        let packed_fast_faces =
+            options.split_textured_triangles && options.textured_split_max_edge == 0;
+        let packed_back_in_front_faces =
+            packed_fast_faces && all_projected_vertices_in_front && options.cull_mode == CullMode::Back;
+        let packed_back_average_in_front_faces =
+            packed_back_in_front_faces && options.depth_policy == DepthPolicy::Average;
+        let packed_back_average_unclamped_faces =
+            packed_back_average_in_front_faces && all_projected_vertices_inside_hw_bounds;
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_FACES);
         let mut face_index = 0usize;
         while face_index < faces.len() {
             faces_considered = faces_considered.wrapping_add(1);
-            if self.submit_predecoded_model_face(
-                triangles,
-                projected_vertices,
-                project_count,
-                faces[face_index],
-                all_projected_vertices_in_front,
-                near_z,
-                packet_material,
-                material,
-                options,
-                &mut stats,
-            ) {
+            let overflow = if packed_back_average_unclamped_faces {
+                self.submit_predecoded_model_face_packed_back_average_unclamped_fast(
+                    triangles,
+                    projected_vertices,
+                    project_count,
+                    faces[face_index],
+                    packet_material,
+                    material,
+                    options,
+                    &mut stats,
+                )
+            } else if packed_back_average_in_front_faces {
+                self.submit_predecoded_model_face_packed_back_average_in_front_fast(
+                    triangles,
+                    projected_vertices,
+                    project_count,
+                    faces[face_index],
+                    packet_material,
+                    material,
+                    options,
+                    &mut stats,
+                )
+            } else if packed_back_in_front_faces {
+                self.submit_predecoded_model_face_packed_back_in_front_fast(
+                    triangles,
+                    projected_vertices,
+                    project_count,
+                    faces[face_index],
+                    packet_material,
+                    material,
+                    options,
+                    &mut stats,
+                )
+            } else if packed_fast_faces {
+                self.submit_predecoded_model_face_packed_fast(
+                    triangles,
+                    projected_vertices,
+                    project_count,
+                    faces[face_index],
+                    all_projected_vertices_in_front,
+                    near_z,
+                    packet_material,
+                    material,
+                    options,
+                    &mut stats,
+                )
+            } else {
+                self.submit_predecoded_model_face(
+                    triangles,
+                    projected_vertices,
+                    project_count,
+                    faces[face_index],
+                    all_projected_vertices_in_front,
+                    near_z,
+                    packet_material,
+                    material,
+                    options,
+                    &mut stats,
+                )
+            };
+            if overflow {
                 crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
                 emit_textured_model_detail_counters(
                     joint_count,
@@ -2761,6 +2828,241 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         );
 
         stats
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn submit_predecoded_model_face_packed_back_average_unclamped_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        project_count: usize,
+        face: TexturedModelRenderFace,
+        packet_material: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let ia = face.vertex_indices[0] as usize;
+        let ib = face.vertex_indices[1] as usize;
+        let ic = face.vertex_indices[2] as usize;
+        if ia >= project_count || ib >= project_count || ic >= project_count {
+            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
+            return false;
+        }
+        let projected = [
+            projected_vertices[ia],
+            projected_vertices[ib],
+            projected_vertices[ic],
+        ];
+
+        if projected_back_facing(projected) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+
+        if projected_triangle_preclamped_hw_extent_safe(projected) {
+            return self.submit_projected_model_triangle_preclamped_packed_average_fast(
+                triangles,
+                projected,
+                face.uv_words,
+                packet_material,
+                options,
+                stats,
+            );
+        }
+
+        let uvs = face.uvs();
+        let textured = [
+            ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+            ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+            ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+        ];
+        let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        merge_textured_model_stats(stats, tri_stats);
+        stats.primitive_overflow || stats.command_overflow
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn submit_predecoded_model_face_packed_back_average_in_front_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        project_count: usize,
+        face: TexturedModelRenderFace,
+        packet_material: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let ia = face.vertex_indices[0] as usize;
+        let ib = face.vertex_indices[1] as usize;
+        let ic = face.vertex_indices[2] as usize;
+        if ia >= project_count || ib >= project_count || ic >= project_count {
+            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
+            return false;
+        }
+        let projected = [
+            projected_vertices[ia],
+            projected_vertices[ib],
+            projected_vertices[ic],
+        ];
+
+        if projected_back_facing(projected) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+
+        let projected = [
+            clamp_projected_vertex(projected[0]),
+            clamp_projected_vertex(projected[1]),
+            clamp_projected_vertex(projected[2]),
+        ];
+        if projected_triangle_preclamped_hw_extent_safe(projected) {
+            return self.submit_projected_model_triangle_preclamped_packed_average_fast(
+                triangles,
+                projected,
+                face.uv_words,
+                packet_material,
+                options,
+                stats,
+            );
+        }
+
+        let uvs = face.uvs();
+        let textured = [
+            ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+            ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+            ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+        ];
+        let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        merge_textured_model_stats(stats, tri_stats);
+        stats.primitive_overflow || stats.command_overflow
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn submit_predecoded_model_face_packed_back_in_front_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        project_count: usize,
+        face: TexturedModelRenderFace,
+        packet_material: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let ia = face.vertex_indices[0] as usize;
+        let ib = face.vertex_indices[1] as usize;
+        let ic = face.vertex_indices[2] as usize;
+        if ia >= project_count || ib >= project_count || ic >= project_count {
+            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
+            return false;
+        }
+        let projected = [
+            projected_vertices[ia],
+            projected_vertices[ib],
+            projected_vertices[ic],
+        ];
+
+        if projected_back_facing(projected) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+
+        let projected = [
+            clamp_projected_vertex(projected[0]),
+            clamp_projected_vertex(projected[1]),
+            clamp_projected_vertex(projected[2]),
+        ];
+        if projected_triangle_preclamped_hw_extent_safe(projected) {
+            return self.submit_projected_model_triangle_preclamped_packed_fast(
+                triangles,
+                projected,
+                face.uv_words,
+                packet_material,
+                options,
+                stats,
+            );
+        }
+
+        let uvs = face.uvs();
+        let textured = [
+            ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+            ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+            ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+        ];
+        let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        merge_textured_model_stats(stats, tri_stats);
+        stats.primitive_overflow || stats.command_overflow
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn submit_predecoded_model_face_packed_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        project_count: usize,
+        face: TexturedModelRenderFace,
+        all_projected_vertices_in_front: bool,
+        near_z: i32,
+        packet_material: TexturedPacketMaterial,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        let ia = face.vertex_indices[0] as usize;
+        let ib = face.vertex_indices[1] as usize;
+        let ic = face.vertex_indices[2] as usize;
+        if ia >= project_count || ib >= project_count || ic >= project_count {
+            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
+            return false;
+        }
+        let projected = [
+            projected_vertices[ia],
+            projected_vertices[ib],
+            projected_vertices[ic],
+        ];
+
+        if !all_projected_vertices_in_front && projected_model_face_crosses_near(projected, near_z)
+        {
+            stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+            return false;
+        }
+
+        if projected_culled(projected, options.cull_mode) {
+            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
+            return false;
+        }
+
+        let projected = [
+            clamp_projected_vertex(projected[0]),
+            clamp_projected_vertex(projected[1]),
+            clamp_projected_vertex(projected[2]),
+        ];
+        if projected_triangle_preclamped_hw_extent_safe(projected) {
+            return self.submit_projected_model_triangle_preclamped_packed_fast(
+                triangles,
+                projected,
+                face.uv_words,
+                packet_material,
+                options,
+                stats,
+            );
+        }
+
+        let uvs = face.uvs();
+        let textured = [
+            ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+            ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+            ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+        ];
+        let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        merge_textured_model_stats(stats, tri_stats);
+        stats.primitive_overflow || stats.command_overflow
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2840,6 +3142,50 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 stats,
             )
         }
+    }
+
+    #[inline(always)]
+    fn submit_projected_model_triangle_preclamped_packed_average_fast(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        material: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+    ) -> bool {
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return true;
+        }
+
+        let Some(tri) = triangles.push(TriTextured::with_packet_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uv_words,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return true;
+        };
+
+        let depth = CameraDepth::new(
+            ((verts[0].sz + verts[1].sz + verts[2].sz) / 3).saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        stats.submitted_triangles = stats.submitted_triangles.wrapping_add(1);
+        false
     }
 
     #[inline(always)]
@@ -3993,6 +4339,14 @@ fn valid_projected_from_gte(projected: scene::Projected, near_z: i32) -> Project
 #[inline]
 fn projected_model_vertex_in_front(vertex: ProjectedVertex, near_z: i32) -> bool {
     vertex.sz >= near_z
+}
+
+#[inline]
+fn projected_model_vertex_inside_hw_bounds(vertex: ProjectedVertex) -> bool {
+    vertex.sx >= PSX_VERTEX_MIN
+        && vertex.sx <= PSX_VERTEX_MAX
+        && vertex.sy >= PSX_VERTEX_MIN
+        && vertex.sy <= PSX_VERTEX_MAX
 }
 
 #[inline]
