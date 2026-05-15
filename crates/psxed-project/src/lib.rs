@@ -2411,7 +2411,7 @@ fn push_cloud_streak_cyclorama(
         (3 + usize::from(tile_count / 4)).clamp(3, SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX);
     let count = (1 + usize::from(cloud.density / 96) + usize::from(tile_count / 8))
         .min(SKY_CYCLORAMA_CLOUD_STREAK_MAX);
-    let density_t = cloud.density as f32 / 255.0;
+    let density_t = cloud_density_response(cloud.density);
     let band_center = horizon_pitch + 4.0 + altitude_t * 28.0;
     let pitch_spread = 3.5 + extent_t * 18.0;
     let width_scale = 0.55 + extent_t * 0.88;
@@ -2437,7 +2437,7 @@ fn push_cloud_streak_cyclorama(
             slant,
             tint,
             density_t,
-            0.62,
+            0.96,
             segment_count,
             cloud.noise_seed ^ sky_hash_u32(0x27d4eb2d, bank as u32),
             horizon_pitch,
@@ -2467,7 +2467,7 @@ fn push_cloud_streak_cyclorama(
             slant,
             tint,
             density_t,
-            0.76,
+            1.0,
             segment_count,
             h,
             horizon_pitch,
@@ -2495,7 +2495,9 @@ fn push_cloud_streak_segments(
     top_pitch: f32,
     bottom_pitch: f32,
 ) {
-    let warm = cyclorama_lerp_rgb(tint, [255, 182, 142], 116);
+    let body = cyclorama_lerp_rgb(tint, [255, 190, 160], 64);
+    let warm = brighten_rgb(cyclorama_lerp_rgb(tint, [255, 214, 188], 154), 10);
+    let shadow = cyclorama_lerp_rgb(tint, sky.lower_color, 84);
     let segment_count = segment_count.clamp(2, SKY_CYCLORAMA_CLOUD_SEGMENTS_MAX);
     for segment in 0..segment_count {
         let t0 = segment as f32 / segment_count as f32;
@@ -2520,10 +2522,10 @@ fn push_cloud_streak_segments(
             yaw1,
             pitch0,
             pitch1,
-            thickness * 1.75,
-            tint,
-            fade0 * 34.0,
-            fade1 * 34.0,
+            thickness * 2.15,
+            shadow,
+            fade0 * 62.0,
+            fade1 * 62.0,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2535,10 +2537,25 @@ fn push_cloud_streak_segments(
             yaw1,
             pitch0,
             pitch1,
-            thickness * 0.38,
+            thickness * 1.02,
+            body,
+            fade0 * 128.0,
+            fade1 * 128.0,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+        push_wrapped_cloud_ribbon_cyclorama(
+            out,
+            sky,
+            yaw0,
+            yaw1,
+            pitch0 + thickness * 0.14,
+            pitch1 + thickness * 0.14,
+            thickness * 0.26,
             warm,
-            fade0 * 108.0,
-            fade1 * 108.0,
+            fade0 * 236.0,
+            fade1 * 236.0,
             horizon_pitch,
             top_pitch,
             bottom_pitch,
@@ -2872,7 +2889,11 @@ fn smooth_step(t: f32) -> f32 {
 }
 
 fn cloud_width_fade(alpha: f32) -> f32 {
-    (alpha / 120.0).clamp(0.0, 1.0).sqrt()
+    (alpha / 150.0).clamp(0.0, 1.0).sqrt()
+}
+
+fn cloud_density_response(density: u8) -> f32 {
+    (density as f32 / 255.0).clamp(0.0, 1.0).powf(0.58)
 }
 
 fn mountain_profile(seed: u32, yaw_degrees: f32, roughness: f32) -> f32 {
