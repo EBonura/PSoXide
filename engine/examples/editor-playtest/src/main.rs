@@ -30,7 +30,7 @@
 
 extern crate psx_rt;
 
-use psx_asset::{Animation, Model, Texture};
+use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
 use psx_engine::{
@@ -40,11 +40,11 @@ use psx_engine::{
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitivePacketArena,
     PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender,
-    RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelRenderFace, TexturedModelRenderStats,
-    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, VisualPacing, WorldCamera, WorldProjection, WorldRenderMaterial,
-    WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions, WorldSurfaceSample,
-    WorldTriCommand, WorldVertex, Q12, Q8,
+    RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelGeometry, TexturedModelRenderFace,
+    TexturedModelRenderStats, ThirdPersonCameraConfig, ThirdPersonCameraInput,
+    ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing, WorldCamera, WorldProjection,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
+    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -325,6 +325,10 @@ const MAX_RESIDENT_VRAM_ASSETS: usize = 64;
 const MODEL_VERTEX_CAP: usize = 1024;
 /// Predecoded face records shared by runtime model assets.
 const MAX_RUNTIME_MODEL_FACES: usize = 4096;
+/// Predecoded part records shared by runtime model assets.
+const MAX_RUNTIME_MODEL_PARTS: usize = 128;
+/// Predecoded vertex records shared by runtime model assets.
+const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = 1024;
 /// Projected edge threshold used to subdivide close model triangles.
 const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 /// Joint-transform scratch -- all biped rigs we currently cook
@@ -466,6 +470,20 @@ struct RuntimeCharacter {
     /// Yaw rate translated from degrees/second to PSX angle
     /// units / 60 Hz frame at init time.
     yaw_step: Angle,
+    stamina_max_q12: i32,
+    sprint_min_q12: i32,
+    sprint_drain_q12: i32,
+    stamina_recover_q12: i32,
+    roll_cost_q12: i32,
+    roll_speed: i32,
+    roll_active_frames: u8,
+    roll_recovery_frames: u8,
+    roll_invulnerable_frames: u8,
+    backstep_cost_q12: i32,
+    backstep_speed: i32,
+    backstep_active_frames: u8,
+    backstep_recovery_frames: u8,
+    backstep_invulnerable_frames: u8,
 }
 
 impl RuntimeCharacter {
@@ -491,6 +509,20 @@ impl RuntimeCharacter {
             walk_speed: scaled_player_speed(c.walk_speed),
             run_speed: scaled_player_speed(c.run_speed),
             yaw_step: Angle::from_q12(yaw_step_q12),
+            stamina_max_q12: c.stamina_max_q12,
+            sprint_min_q12: c.sprint_min_q12,
+            sprint_drain_q12: c.sprint_drain_q12,
+            stamina_recover_q12: c.stamina_recover_q12,
+            roll_cost_q12: c.roll_cost_q12,
+            roll_speed: c.roll_speed,
+            roll_active_frames: c.roll_active_frames,
+            roll_recovery_frames: c.roll_recovery_frames,
+            roll_invulnerable_frames: c.roll_invulnerable_frames,
+            backstep_cost_q12: c.backstep_cost_q12,
+            backstep_speed: c.backstep_speed,
+            backstep_active_frames: c.backstep_active_frames,
+            backstep_recovery_frames: c.backstep_recovery_frames,
+            backstep_invulnerable_frames: c.backstep_invulnerable_frames,
         }
     }
 
@@ -505,13 +537,28 @@ impl RuntimeCharacter {
     }
 
     fn motor_config(&self) -> CharacterMotorConfig {
-        CharacterMotorConfig::character_with_body(
+        let mut config = CharacterMotorConfig::character_with_body(
             self.radius,
             self.height,
             self.walk_speed,
             self.run_speed,
             self.yaw_step,
-        )
+        );
+        config.stamina_max_q12 = self.stamina_max_q12;
+        config.sprint_min_q12 = self.sprint_min_q12;
+        config.sprint_drain_q12 = self.sprint_drain_q12;
+        config.stamina_recover_q12 = self.stamina_recover_q12;
+        config.roll_cost_q12 = self.roll_cost_q12;
+        config.roll_speed = self.roll_speed;
+        config.roll_active_frames = self.roll_active_frames;
+        config.roll_recovery_frames = self.roll_recovery_frames;
+        config.roll_invulnerable_frames = self.roll_invulnerable_frames;
+        config.backstep_cost_q12 = self.backstep_cost_q12;
+        config.backstep_speed = self.backstep_speed;
+        config.backstep_active_frames = self.backstep_active_frames;
+        config.backstep_recovery_frames = self.backstep_recovery_frames;
+        config.backstep_invulnerable_frames = self.backstep_invulnerable_frames;
+        config
     }
 }
 
@@ -537,6 +584,10 @@ struct RuntimeModelAsset {
     socket_count: u16,
     face_first: u16,
     face_count: u16,
+    part_first: u16,
+    part_count: u16,
+    vertex_first: u16,
+    vertex_count: u16,
     requires_cpu_blend: bool,
     world_height: u16,
     collision_radius: u16,
@@ -549,20 +600,37 @@ impl RuntimeModelAsset {
         record: &LevelModelRecord,
         face_pool: &mut [TexturedModelRenderFace],
         face_cursor: &mut usize,
+        part_pool: &mut [ModelPart],
+        part_cursor: &mut usize,
+        vertex_pool: &mut [ModelVertex],
+        vertex_cursor: &mut usize,
     ) -> Option<Self> {
         let mesh_asset = find_asset_of_kind(ASSETS, record.mesh_asset, AssetKind::ModelMesh)?;
         let model = Model::from_bytes(mesh_asset.bytes).ok()?;
         let texture_asset = record.texture_asset?;
         let atlas_asset = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture)?;
         let atlas_slot = ensure_model_atlas_uploaded(atlas_asset.id, atlas_asset.bytes)?;
-        let face_first = *face_cursor;
+        let mut next_face_cursor = *face_cursor;
+        let face_first = next_face_cursor;
         let face_count = decode_model_render_faces(
             model,
             atlas_slot.texture_width,
             atlas_slot.texture_height,
             face_pool,
-            face_cursor,
+            &mut next_face_cursor,
         )?;
+        let mut next_part_cursor = *part_cursor;
+        let mut next_vertex_cursor = *vertex_cursor;
+        let (part_first, part_count, vertex_first, vertex_count) = decode_model_render_geometry(
+            model,
+            part_pool,
+            &mut next_part_cursor,
+            vertex_pool,
+            &mut next_vertex_cursor,
+        )?;
+        *face_cursor = next_face_cursor;
+        *part_cursor = next_part_cursor;
+        *vertex_cursor = next_vertex_cursor;
         Some(Self {
             index,
             model,
@@ -578,6 +646,10 @@ impl RuntimeModelAsset {
             socket_count: record.socket_count,
             face_first: face_first as u16,
             face_count: face_count as u16,
+            part_first: part_first as u16,
+            part_count: part_count as u16,
+            vertex_first: vertex_first as u16,
+            vertex_count: vertex_count as u16,
             requires_cpu_blend: model_requires_cpu_blend(model),
             world_height: record.world_height,
             collision_radius: record.collision_radius,
@@ -652,6 +724,40 @@ fn decode_model_render_faces(
     Some(face_count)
 }
 
+fn decode_model_render_geometry(
+    model: Model<'_>,
+    part_pool: &mut [ModelPart],
+    part_cursor: &mut usize,
+    vertex_pool: &mut [ModelVertex],
+    vertex_cursor: &mut usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let part_count = model.part_count() as usize;
+    let vertex_count = model.vertex_count() as usize;
+    if part_count > u16::MAX as usize
+        || vertex_count > u16::MAX as usize
+        || part_pool.len().saturating_sub(*part_cursor) < part_count
+        || vertex_pool.len().saturating_sub(*vertex_cursor) < vertex_count
+    {
+        return None;
+    }
+
+    let part_first = *part_cursor;
+    let vertex_first = *vertex_cursor;
+    let mut i = 0usize;
+    while i < part_count {
+        part_pool[part_first + i] = model.part(i as u16)?;
+        i += 1;
+    }
+    i = 0;
+    while i < vertex_count {
+        vertex_pool[vertex_first + i] = model.vertex(i as u16)?;
+        i += 1;
+    }
+    *part_cursor += part_count;
+    *vertex_cursor += vertex_count;
+    Some((part_first, part_count, vertex_first, vertex_count))
+}
+
 fn square_i32_saturating(value: i32) -> i32 {
     let abs = value.saturating_abs();
     if abs > 46_340 {
@@ -692,6 +798,25 @@ fn runtime_model_faces<'a>(
     } else {
         &face_pool[first..end]
     }
+}
+
+fn runtime_model_geometry<'a>(
+    model: RuntimeModelAsset,
+    part_pool: &'a [ModelPart],
+    vertex_pool: &'a [ModelVertex],
+) -> Option<TexturedModelGeometry<'a>> {
+    let part_first = model.part_first as usize;
+    let part_count = model.part_count as usize;
+    let vertex_first = model.vertex_first as usize;
+    let vertex_count = model.vertex_count as usize;
+    if part_count == 0 || vertex_count == 0 {
+        return None;
+    }
+    let part_end = part_first.checked_add(part_count)?;
+    let vertex_end = vertex_first.checked_add(vertex_count)?;
+    let parts = part_pool.get(part_first..part_end)?;
+    let vertices = vertex_pool.get(vertex_first..vertex_end)?;
+    Some(TexturedModelGeometry::new(parts, vertices))
 }
 
 #[derive(Copy, Clone)]
@@ -1242,6 +1367,12 @@ struct Playtest {
     /// Predecoded model face records, shared by `models`.
     model_faces: [TexturedModelRenderFace; MAX_RUNTIME_MODEL_FACES],
     model_face_count: usize,
+    /// Predecoded model part records, shared by `models`.
+    model_parts: [ModelPart; MAX_RUNTIME_MODEL_PARTS],
+    model_part_count: usize,
+    /// Predecoded model vertex records, shared by `models`.
+    model_vertices: [ModelVertex; MAX_RUNTIME_MODEL_DECODED_VERTICES],
+    model_vertex_count: usize,
     /// Parsed animations, indexed like `MODEL_CLIPS`.
     clips: [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     /// VRAM-bound subtract-blended circular floor shadow.
@@ -1296,6 +1427,10 @@ impl Playtest {
             models: [const { None }; MAX_RUNTIME_MODELS],
             model_faces: [TexturedModelRenderFace::ZERO; MAX_RUNTIME_MODEL_FACES],
             model_face_count: 0,
+            model_parts: [ModelPart::ZERO; MAX_RUNTIME_MODEL_PARTS],
+            model_part_count: 0,
+            model_vertices: [ModelVertex::ZERO; MAX_RUNTIME_MODEL_DECODED_VERTICES],
+            model_vertex_count: 0,
             clips: [const { None }; MAX_RUNTIME_MODEL_CLIPS],
             shadow_material: None,
             show_collision_debug: false,
@@ -1767,6 +1902,8 @@ impl Scene for Playtest {
                     &lighting,
                     &self.models,
                     &self.model_faces[..self.model_face_count],
+                    &self.model_parts[..self.model_part_count],
+                    &self.model_vertices[..self.model_vertex_count],
                     &self.clips,
                     instance_depth_pass,
                     &mut primitive_packets,
@@ -1800,6 +1937,8 @@ impl Scene for Playtest {
                             character,
                             &self.models,
                             &self.model_faces[..self.model_face_count],
+                            &self.model_parts[..self.model_part_count],
+                            &self.model_vertices[..self.model_vertex_count],
                             &self.clips,
                             player.x,
                             player.y,
@@ -1842,6 +1981,8 @@ impl Scene for Playtest {
                             character,
                             &self.models,
                             &self.model_faces[..self.model_face_count],
+                            &self.model_parts[..self.model_part_count],
+                            &self.model_vertices[..self.model_vertex_count],
                             &self.clips,
                             player.x,
                             player.y,
@@ -1922,6 +2063,8 @@ impl Scene for Playtest {
                         &lighting,
                         &self.models,
                         &self.model_faces[..self.model_face_count],
+                        &self.model_parts[..self.model_part_count],
+                        &self.model_vertices[..self.model_vertex_count],
                         &self.clips,
                         ModelInstanceDepthPass::InFrontOfPlayer(player_depth),
                         &mut primitive_packets,
@@ -2029,6 +2172,13 @@ impl Scene for Playtest {
         if let Some(target) = self.lock_target_indicator_position() {
             draw_lock_target_indicator(target, camera, ctx.time.elapsed_vblanks());
         }
+
+        if self.character.is_some() {
+            draw_player_hud(
+                self.motor.stamina_q12(),
+                self.motor_config().stamina_max_q12,
+            );
+        }
     }
 }
 
@@ -2093,6 +2243,8 @@ impl Playtest {
             i += 1;
         }
         self.model_face_count = 0;
+        self.model_part_count = 0;
+        self.model_vertex_count = 0;
 
         for (index, clip) in MODEL_CLIPS.iter().enumerate() {
             if index >= MAX_RUNTIME_MODEL_CLIPS {
@@ -2115,6 +2267,10 @@ impl Playtest {
                 record,
                 &mut self.model_faces,
                 &mut self.model_face_count,
+                &mut self.model_parts,
+                &mut self.model_part_count,
+                &mut self.model_vertices,
+                &mut self.model_vertex_count,
             );
         }
     }
@@ -3070,6 +3226,8 @@ fn draw_player(
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     x: i32,
     y: i32,
@@ -3137,6 +3295,8 @@ fn draw_player(
         material,
         model_options,
         faces,
+        model_parts,
+        model_vertices,
     );
     telemetry::stage_end(telemetry::stage::PLAYER_DRAW);
     PlayerModelDrawStats {
@@ -3160,14 +3320,21 @@ fn submit_runtime_model_predecoded(
     material: TextureMaterial,
     options: WorldSurfaceOptions,
     faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
 ) -> TexturedModelRenderStats {
     let start_cycles = if MODEL_PROFILE_ENABLED {
         telemetry::cycle_counter()
     } else {
         0
     };
+    let Some(geometry) = runtime_model_geometry(runtime_model, model_parts, model_vertices) else {
+        let mut stats = TexturedModelRenderStats::default();
+        stats.vertex_overflow = true;
+        return stats;
+    };
     let stats = if runtime_model.requires_cpu_blend {
-        world.submit_textured_model_predecoded_faces(
+        world.submit_textured_model_predecoded_geometry_faces(
             triangles,
             runtime_model.model,
             anim,
@@ -3180,9 +3347,10 @@ fn submit_runtime_model_predecoded(
             material,
             options,
             faces,
+            geometry,
         )
     } else {
-        world.submit_textured_model_primary_joints_predecoded_faces(
+        world.submit_textured_model_primary_joints_predecoded_geometry_faces(
             triangles,
             runtime_model.model,
             anim,
@@ -3195,6 +3363,7 @@ fn submit_runtime_model_predecoded(
             material,
             options,
             faces,
+            geometry,
         )
     };
     if MODEL_PROFILE_ENABLED {
@@ -3250,6 +3419,8 @@ fn draw_player_equipment(
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     x: i32,
     y: i32,
@@ -3343,6 +3514,8 @@ fn draw_player_equipment(
                         material,
                         model_options,
                         faces,
+                        model_parts,
+                        model_vertices,
                     );
                     accumulate_model_stats(&mut out.stats, stats);
                     if stats.primitive_overflow || stats.command_overflow {
@@ -6443,6 +6616,8 @@ fn draw_model_instances(
     lighting: &RuntimeRoomLighting,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
+    model_parts: &[ModelPart],
+    model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     depth_pass: ModelInstanceDepthPass,
     triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -6515,6 +6690,8 @@ fn draw_model_instances(
             material,
             model_options,
             faces,
+            model_parts,
+            model_vertices,
         );
         telemetry::stage_end(telemetry::stage::MODEL_DRAW);
         accumulate_model_stats(&mut out.stats, stats);
