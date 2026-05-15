@@ -143,6 +143,7 @@ pub fn build_package(
     // only use it for presence tests.
     let mut texture_asset_for_resource: std::collections::HashMap<ResourceId, usize> =
         std::collections::HashMap::new();
+    let mut sky_texture_assets: Vec<(crate::ResolvedSkySettings, usize)> = Vec::new();
     let mut room_chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
     let mut room_bake_inputs: Vec<CookedRoomBakeInput> = Vec::new();
     let mut room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
@@ -369,6 +370,11 @@ pub fn build_package(
                 Vec::new()
             };
             let far_vista_has_texture = far_vista_texture_asset_indices.iter().any(Option::is_some);
+            let sky_texture_asset_index = cook_sky_panorama_texture_asset(
+                resolved_sky,
+                &mut sky_texture_assets,
+                &mut assets,
+            );
 
             rooms.push(PlaytestRoom {
                 name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
@@ -394,9 +400,9 @@ pub fn build_package(
                     } else {
                         0
                     },
-                    cyclorama_quads: crate::generate_sky_cyclorama(resolved_sky),
+                    cyclorama_quads: Vec::new(),
                     cloud_layer: PlaytestCloudLayer {
-                        texture_asset_index: None,
+                        texture_asset_index: sky_texture_asset_index,
                         color_rgb: resolved_sky.cloud_layer.color,
                         density: resolved_sky.cloud_layer.density,
                         altitude: resolved_sky.cloud_layer.altitude,
@@ -1033,6 +1039,33 @@ fn active_far_vista_panel_count(
         .unwrap_or(0)
         .min(segments as usize)
         .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
+}
+
+fn cook_sky_panorama_texture_asset(
+    sky: crate::ResolvedSkySettings,
+    sky_texture_assets: &mut Vec<(crate::ResolvedSkySettings, usize)>,
+    assets: &mut Vec<PlaytestAsset>,
+) -> Option<usize> {
+    if !sky.enabled {
+        return None;
+    }
+    if let Some((_, existing)) = sky_texture_assets
+        .iter()
+        .find(|(existing_sky, _)| *existing_sky == sky)
+    {
+        return Some(*existing);
+    }
+    let bytes = crate::generate_sky_panorama_psxt(sky)?;
+    let sky_index = sky_texture_assets.len();
+    let asset_index = assets.len();
+    assets.push(PlaytestAsset {
+        kind: PlaytestAssetKind::Texture,
+        bytes,
+        filename: format!("sky/sky_{sky_index:03}.psxt"),
+        source_label: format!("Cooked Sky Panorama {sky_index}"),
+    });
+    sky_texture_assets.push((sky, asset_index));
+    Some(asset_index)
 }
 
 fn cook_far_vista_texture_asset(
@@ -4428,11 +4461,12 @@ mod tests {
 
     #[test]
     fn starter_project_emits_expected_texture_assets() {
-        // Starter cooks one room texture and the player atlas.
+        // Starter cooks one room texture, one sky panorama, and the player atlas.
         let project = project_with_one_room();
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
-        assert_eq!(package.texture_asset_count(), 2);
+        assert_eq!(package.texture_asset_count(), 3);
+        assert!(package.rooms[0].sky.cloud_layer.texture_asset_index.is_some());
     }
 
     #[test]
