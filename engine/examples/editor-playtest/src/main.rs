@@ -342,6 +342,7 @@ const MAX_RUNTIME_MODELS: usize = 8;
 /// easily carry player + several enemy clip banks; keep this aligned
 /// with the residency table rather than the old single-character cap.
 const MAX_RUNTIME_MODEL_CLIPS: usize = 128;
+const MODEL_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_MODELS").is_some();
 const MODEL_BOUNDS_CULLING_ENABLED: bool =
     option_env!("PSXO_BENCH_DISABLE_MODEL_BOUNDS_CULL").is_none();
 
@@ -649,6 +650,15 @@ fn decode_model_render_faces(
     }
     *face_cursor += face_count;
     Some(face_count)
+}
+
+fn square_i32_saturating(value: i32) -> i32 {
+    let abs = value.saturating_abs();
+    if abs > 46_340 {
+        i32::MAX
+    } else {
+        abs * abs
+    }
 }
 
 fn model_render_uv_limits(texture_width: u16, texture_height: u16) -> (u8, u8) {
@@ -3151,7 +3161,12 @@ fn submit_runtime_model_predecoded(
     options: WorldSurfaceOptions,
     faces: &[TexturedModelRenderFace],
 ) -> TexturedModelRenderStats {
-    if runtime_model.requires_cpu_blend {
+    let start_cycles = if MODEL_PROFILE_ENABLED {
+        telemetry::cycle_counter()
+    } else {
+        0
+    };
+    let stats = if runtime_model.requires_cpu_blend {
         world.submit_textured_model_predecoded_faces(
             triangles,
             runtime_model.model,
@@ -3181,6 +3196,37 @@ fn submit_runtime_model_predecoded(
             options,
             faces,
         )
+    };
+    if MODEL_PROFILE_ENABLED {
+        emit_runtime_model_profile(runtime_model.index, start_cycles);
+    }
+    stats
+}
+
+fn emit_runtime_model_profile(index: ModelIndex, start_cycles: u32) {
+    let Some(cycle_counter) = runtime_model_profile_cycle_counter(index) else {
+        return;
+    };
+    let draw_counter =
+        telemetry::counter::MODEL_PROFILE_DRAWS_0.saturating_add(index.raw().min(7));
+    telemetry::counter(draw_counter, 1);
+    telemetry::counter(
+        cycle_counter,
+        telemetry::cycle_counter().wrapping_sub(start_cycles),
+    );
+}
+
+fn runtime_model_profile_cycle_counter(index: ModelIndex) -> Option<u16> {
+    match index.raw() {
+        0 => Some(telemetry::counter::MODEL_PROFILE_CYCLES_0),
+        1 => Some(telemetry::counter::MODEL_PROFILE_CYCLES_1),
+        2 => Some(telemetry::counter::MODEL_PROFILE_CYCLES_2),
+        3 => Some(telemetry::counter::MODEL_PROFILE_CYCLES_3),
+        4 => Some(telemetry::counter::MODEL_PROFILE_CYCLES_4),
+        5 => Some(telemetry::counter::MODEL_PROFILE_CYCLES_5),
+        6 => Some(telemetry::counter::MODEL_PROFILE_CYCLES_6),
+        7 => Some(telemetry::counter::MODEL_PROFILE_CYCLES_7),
+        _ => None,
     }
 }
 
