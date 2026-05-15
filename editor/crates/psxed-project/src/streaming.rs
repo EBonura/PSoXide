@@ -569,6 +569,7 @@ mod tests {
             "Controller",
             NodeKind::CharacterController {
                 character: Some(character),
+                settings: crate::CharacterControllerSettings::default(),
                 player: true,
             },
         );
