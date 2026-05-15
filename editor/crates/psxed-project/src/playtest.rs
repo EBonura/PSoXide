@@ -370,11 +370,8 @@ pub fn build_package(
                 Vec::new()
             };
             let far_vista_has_texture = far_vista_texture_asset_indices.iter().any(Option::is_some);
-            let sky_texture_asset_index = cook_sky_panorama_texture_asset(
-                resolved_sky,
-                &mut sky_texture_assets,
-                &mut assets,
-            );
+            let sky_texture_asset_index =
+                cook_sky_panorama_texture_asset(resolved_sky, &mut sky_texture_assets, &mut assets);
 
             rooms.push(PlaytestRoom {
                 name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
@@ -4466,7 +4463,11 @@ mod tests {
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
         assert_eq!(package.texture_asset_count(), 3);
-        assert!(package.rooms[0].sky.cloud_layer.texture_asset_index.is_some());
+        assert!(package.rooms[0]
+            .sky
+            .cloud_layer
+            .texture_asset_index
+            .is_some());
     }
 
     #[test]
