@@ -52,6 +52,9 @@ const FAR_VISTA_QUAD_CAP: usize = 16;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
 /// editor preview exercises the same overflow behavior.
 const PREVIEW_MODEL_VERTEX_CAP: usize = 1024;
+const PREVIEW_MODEL_SOURCE_VERTEX_CAP: usize = PREVIEW_MODEL_VERTEX_CAP;
+const PREVIEW_MODEL_FACE_CAP: usize = 2048;
+const PREVIEW_MODEL_PART_CAP: usize = 128;
 const PREVIEW_MODEL_COMMAND_CAP: usize = TRI_CAP;
 /// Cap on placed model-rendering nodes the editor preview will
 /// render in one frame. Excess instances skip silently (the
@@ -127,6 +130,9 @@ struct PreviewScratch {
     tris: [TriFlat; TRI_CAP],
     tex_tris: [TriTextured; TRI_CAP],
     model_vertices: [psx_engine::ProjectedVertex; PREVIEW_MODEL_VERTEX_CAP],
+    model_faces: [psx_engine::TexturedModelRenderFace; PREVIEW_MODEL_FACE_CAP],
+    model_parts: [psx_asset::ModelPart; PREVIEW_MODEL_PART_CAP],
+    model_source_vertices: [psx_asset::ModelVertex; PREVIEW_MODEL_SOURCE_VERTEX_CAP],
     model_joint_transforms: [psx_engine::JointViewTransform; PREVIEW_JOINT_CAP],
     /// `0` = next free slot in `tris` (flat-shaded);
     /// `tex_used` = next free slot in `tex_tris`.
@@ -169,6 +175,9 @@ static SCRATCH: Mutex<PreviewScratch> = Mutex::new(PreviewScratch {
     tris: [EMPTY_TRI; TRI_CAP],
     tex_tris: [EMPTY_TEX_TRI; TRI_CAP],
     model_vertices: [psx_engine::ProjectedVertex::new(0, 0, 0); PREVIEW_MODEL_VERTEX_CAP],
+    model_faces: [psx_engine::TexturedModelRenderFace::ZERO; PREVIEW_MODEL_FACE_CAP],
+    model_parts: [psx_asset::ModelPart::ZERO; PREVIEW_MODEL_PART_CAP],
+    model_source_vertices: [psx_asset::ModelVertex::ZERO; PREVIEW_MODEL_SOURCE_VERTEX_CAP],
     model_joint_transforms: [psx_engine::JointViewTransform::ZERO; PREVIEW_JOINT_CAP],
     used: 0,
     sky_used: 0,
@@ -989,6 +998,7 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
             let NodeKind::CharacterController {
                 character,
                 player: true,
+                ..
             } = &child.kind
             else {
                 return None;
@@ -2424,6 +2434,9 @@ fn draw_preview_model_instances(
             tick,
             instance,
             &mut scratch.model_vertices,
+            &mut scratch.model_faces,
+            &mut scratch.model_parts,
+            &mut scratch.model_source_vertices,
             &mut scratch.model_joint_transforms,
         ) {
             break;
@@ -2442,6 +2455,9 @@ fn submit_preview_model_instance(
     tick: u32,
     instance: &PreviewModelInstance<'_>,
     projected_vertices: &mut [psx_engine::ProjectedVertex],
+    face_pool: &mut [psx_engine::TexturedModelRenderFace],
+    part_pool: &mut [psx_asset::ModelPart],
+    source_vertex_pool: &mut [psx_asset::ModelVertex],
     joint_view_transforms: &mut [psx_engine::JointViewTransform],
 ) -> bool {
     let frame_q12 = instance.animation.phase_at_tick_q12(tick, 60);
@@ -2451,8 +2467,16 @@ fn submit_preview_model_instance(
         instance.tint,
     );
     let options = preview_model_surface_options(material);
+    let Some((geometry, faces)) = predecode_preview_model_geometry_faces(
+        instance.model,
+        face_pool,
+        part_pool,
+        source_vertex_pool,
+    ) else {
+        return false;
+    };
 
-    let stats = world.submit_textured_model(
+    let stats = world.submit_textured_model_predecoded_geometry_faces(
         triangles,
         instance.model,
         instance.animation,
@@ -2464,9 +2488,79 @@ fn submit_preview_model_instance(
         joint_view_transforms,
         material,
         options,
+        faces,
+        geometry,
     );
 
-    stats.primitive_overflow || stats.command_overflow
+    stats.primitive_overflow || stats.command_overflow || stats.vertex_overflow
+}
+
+fn predecode_preview_model_geometry_faces<'a>(
+    model: psx_asset::Model<'_>,
+    face_pool: &'a mut [psx_engine::TexturedModelRenderFace],
+    part_pool: &'a mut [psx_asset::ModelPart],
+    vertex_pool: &'a mut [psx_asset::ModelVertex],
+) -> Option<(
+    psx_engine::TexturedModelGeometry<'a>,
+    &'a [psx_engine::TexturedModelRenderFace],
+)> {
+    let part_count = model.part_count() as usize;
+    let vertex_count = model.vertex_count() as usize;
+    let face_count = model.face_count() as usize;
+    if part_pool.len() < part_count || vertex_pool.len() < vertex_count || face_pool.len() < face_count
+    {
+        return None;
+    }
+
+    let mut i = 0usize;
+    while i < part_count {
+        part_pool[i] = model.part(i as u16)?;
+        i += 1;
+    }
+    i = 0;
+    while i < vertex_count {
+        vertex_pool[i] = model.vertex(i as u16)?;
+        i += 1;
+    }
+
+    let (max_u, max_v) = preview_model_uv_limits(model);
+    i = 0;
+    while i < face_count {
+        let face = model.face(i as u16)?;
+        face_pool[i] = psx_engine::TexturedModelRenderFace::new(
+            [
+                face.corners[0].vertex_index,
+                face.corners[1].vertex_index,
+                face.corners[2].vertex_index,
+            ],
+            [
+                clamp_preview_model_uv(face.corners[0].uv, max_u, max_v),
+                clamp_preview_model_uv(face.corners[1].uv, max_u, max_v),
+                clamp_preview_model_uv(face.corners[2].uv, max_u, max_v),
+            ],
+        );
+        i += 1;
+    }
+
+    Some((
+        psx_engine::TexturedModelGeometry::new(&part_pool[..part_count], &vertex_pool[..vertex_count]),
+        &face_pool[..face_count],
+    ))
+}
+
+fn preview_model_uv_limits(model: psx_asset::Model<'_>) -> (u8, u8) {
+    (
+        preview_model_uv_max(model.texture_width()),
+        preview_model_uv_max(model.texture_height()),
+    )
+}
+
+fn preview_model_uv_max(size: u16) -> u8 {
+    size.saturating_sub(1).min(u16::from(u8::MAX)) as u8
+}
+
+fn clamp_preview_model_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
+    (uv.0.min(max_u), uv.1.min(max_v))
 }
 
 fn preview_model_surface_options(material: TextureMaterial) -> psx_engine::WorldSurfaceOptions {
