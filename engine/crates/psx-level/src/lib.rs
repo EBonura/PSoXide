@@ -1314,6 +1314,34 @@ pub struct LevelCharacterRecord {
     pub run_speed: i32,
     /// Yaw rate the controller applies when turning.
     pub turn_speed_degrees_per_second: u16,
+    /// Maximum stamina, in Q12-style arbitrary units.
+    pub stamina_max_q12: i32,
+    /// Minimum stamina required to start sprinting.
+    pub sprint_min_q12: i32,
+    /// Stamina spent per sprinting display frame.
+    pub sprint_drain_q12: i32,
+    /// Stamina recovered per grounded non-sprint display frame.
+    pub stamina_recover_q12: i32,
+    /// Stamina spent to start a roll.
+    pub roll_cost_q12: i32,
+    /// Roll travel speed in world units per display frame.
+    pub roll_speed: i32,
+    /// Display frames where roll keeps moving.
+    pub roll_active_frames: u8,
+    /// Recovery display frames after roll movement ends.
+    pub roll_recovery_frames: u8,
+    /// Roll invulnerability display frames from action start.
+    pub roll_invulnerable_frames: u8,
+    /// Stamina spent to start a backstep.
+    pub backstep_cost_q12: i32,
+    /// Backstep travel speed in world units per display frame.
+    pub backstep_speed: i32,
+    /// Display frames where backstep keeps moving.
+    pub backstep_active_frames: u8,
+    /// Recovery display frames after backstep movement ends.
+    pub backstep_recovery_frames: u8,
+    /// Backstep invulnerability display frames from action start.
+    pub backstep_invulnerable_frames: u8,
     /// Distance the third-person camera trails the character.
     pub camera_distance: i32,
     /// Camera vertical offset above the character origin.
