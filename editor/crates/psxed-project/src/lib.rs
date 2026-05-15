@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
-pub mod cloud_bake;
 pub mod model_import;
 pub mod playtest;
 pub mod resolve;
@@ -1861,6 +1860,43 @@ const fn default_sky_horizon_percent() -> u8 {
     58
 }
 
+const fn default_sky_horizon_thickness_percent() -> u8 {
+    8
+}
+
+const fn default_sky_horizon_glow_percent() -> u8 {
+    68
+}
+
+const fn default_sky_horizon_glow_yaw_degrees() -> i16 {
+    72
+}
+
+const fn default_sky_mountain_height_percent() -> u8 {
+    55
+}
+
+/// Minimum number of horizontal cyclorama subdivisions.
+pub const SKYBOX_COLUMNS_MIN: u8 = 4;
+/// Maximum number of horizontal cyclorama subdivisions.
+pub const SKYBOX_COLUMNS_MAX: u8 = 48;
+/// Default number of horizontal cyclorama subdivisions.
+pub const SKYBOX_COLUMNS_DEFAULT: u8 = 16;
+/// Minimum number of vertical cyclorama subdivisions.
+pub const SKYBOX_ROWS_MIN: u8 = 3;
+/// Maximum number of vertical cyclorama subdivisions.
+pub const SKYBOX_ROWS_MAX: u8 = 32;
+/// Default number of vertical cyclorama subdivisions.
+pub const SKYBOX_ROWS_DEFAULT: u8 = 10;
+
+const fn default_skybox_columns() -> u8 {
+    SKYBOX_COLUMNS_DEFAULT
+}
+
+const fn default_skybox_rows() -> u8 {
+    SKYBOX_ROWS_DEFAULT
+}
+
 const fn default_sky_match_room_fog() -> bool {
     true
 }
@@ -1914,7 +1950,7 @@ pub enum SkyMode {
     /// Disable authored sky rendering. The renderer clears to
     /// [`SkySettings::lower_color`] only.
     Off,
-    /// Draw a screen-space vertical gradient before world geometry.
+    /// Draw a cooked cyclorama before world geometry.
     Gradient,
 }
 
@@ -1942,58 +1978,66 @@ pub struct SkySettings {
     /// Horizon line as a percentage of screen height.
     #[serde(default = "default_sky_horizon_percent")]
     pub horizon_percent: u8,
+    /// Angular thickness of the horizon band. Wider values hold the
+    /// horizon colour longer before blending to zenith/lower sky.
+    #[serde(default = "default_sky_horizon_thickness_percent")]
+    pub horizon_thickness_percent: u8,
+    /// Strength of the warm localized horizon glow baked into the
+    /// cyclorama.
+    #[serde(default = "default_sky_horizon_glow_percent")]
+    pub horizon_glow_percent: u8,
+    /// Direction of the warm horizon glow in cyclorama yaw degrees.
+    #[serde(default = "default_sky_horizon_glow_yaw_degrees")]
+    pub horizon_glow_yaw_degrees: i16,
+    /// Height/intensity of cooked distant mountain silhouettes.
+    #[serde(default = "default_sky_mountain_height_percent")]
+    pub mountain_height_percent: u8,
+    /// Horizontal cyclorama subdivisions used by the editor preview
+    /// and runtime sky renderer.
+    #[serde(default = "default_skybox_columns")]
+    pub skybox_columns: u8,
+    /// Vertical cyclorama subdivisions used by the editor preview
+    /// and runtime sky renderer.
+    #[serde(default = "default_skybox_rows")]
+    pub skybox_rows: u8,
     /// Blend horizon/lower sky toward the room fog colour when
     /// fog is enabled.
     #[serde(default = "default_sky_match_room_fog")]
     pub match_room_fog: bool,
-    /// Optional cloud-layer baked at runtime from a Perlin noise
-    /// texture and drawn as a world-fixed horizontal plane above
-    /// the camera.
+    /// Optional cloud-layer settings folded into the cooked
+    /// cyclorama backdrop.
     #[serde(default)]
     pub cloud_layer: CloudLayerSettings,
 }
 
-/// Cloud-layer authoring fields. The runtime bakes a tileable
-/// Perlin noise texture once at scene load (using `noise_seed`),
-/// uploads it to a reserved VRAM slot, builds a CLUT that ramps
-/// from `horizon_color` to `color`, and draws the layer as a world-
-/// fixed plane at `altitude` above world Y = 0 with `scroll_speed`
-/// applied to UVs per second.
+/// Cloud-layer authoring fields. The cooker folds these values into
+/// the generated vertex-coloured cyclorama backdrop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudLayerSettings {
     /// Whether the cloud layer is drawn at all.
     #[serde(default)]
     pub enabled: bool,
-    /// Cloud highlight colour. Blended against the room horizon
-    /// colour through the CLUT to produce the baked gradient.
+    /// Cloud highlight colour used by the cyclorama cloud streaks.
     #[serde(default = "default_cloud_color")]
     pub color: [u8; 3],
-    /// 0 = fully horizon-color (no clouds), 255 = fully covered.
-    /// Controls where the CLUT ramp pivots between horizon and
-    /// cloud color.
+    /// 0 = no coverage, 255 = maximum coverage.
     #[serde(default = "default_cloud_density")]
     pub density: u8,
-    /// Altitude of the cloud plane above world Y = 0, in engine
-    /// units. The plane is horizontal and world-fixed, so this
-    /// directly controls how close clouds feel to the camera.
+    /// Vertical bias for the cyclorama cloud band.
     #[serde(default = "default_cloud_altitude")]
     pub altitude: u16,
-    /// Half-extent of the plane on each of X / Z in engine units.
-    /// Larger values stretch the visible cloud band further toward
-    /// the horizon at the cost of more world-space rasterization.
+    /// Width of the cyclorama cloud band.
     #[serde(default = "default_cloud_extent")]
     pub extent: u16,
-    /// UV scroll speed per second along X / Z in PSX angle units
-    /// (4096 = full wrap). Positive = clouds drift in the +axis
-    /// direction relative to the world.
+    /// Cloud scroll speed reserved for animated cyclorama variants.
     #[serde(default = "default_cloud_scroll_speed")]
     pub scroll_speed: [i16; 2],
-    /// Number of texture-tile repeats across the plane. More tiles
-    /// = denser-looking cover but smaller-feeling clouds.
+    /// Number of noise/tile repeats across the cloud layer. More
+    /// tiles = denser-looking cover but smaller-feeling clouds.
     #[serde(default = "default_cloud_tile_count")]
     pub tile_count: u8,
-    /// Seed for the runtime Perlin generator. Change to get a
-    /// different cloud pattern without re-cooking textures.
+    /// Seed for the cloud noise. Change to get a different cloud
+    /// pattern.
     #[serde(default = "default_cloud_noise_seed")]
     pub noise_seed: u32,
 }
@@ -2050,6 +2094,14 @@ impl SkySettings {
             horizon_color,
             lower_color,
             horizon_percent: self.horizon_percent.clamp(5, 95),
+            horizon_thickness_percent: self.horizon_thickness_percent.clamp(0, 80),
+            horizon_glow_percent: self.horizon_glow_percent.clamp(0, 100),
+            horizon_glow_yaw_degrees: self.horizon_glow_yaw_degrees.clamp(-180, 180),
+            mountain_height_percent: self.mountain_height_percent.clamp(0, 100),
+            skybox_columns: self
+                .skybox_columns
+                .clamp(SKYBOX_COLUMNS_MIN, SKYBOX_COLUMNS_MAX),
+            skybox_rows: self.skybox_rows.clamp(SKYBOX_ROWS_MIN, SKYBOX_ROWS_MAX),
             cloud_layer: self.cloud_layer,
         }
     }
@@ -2063,6 +2115,12 @@ impl Default for SkySettings {
             horizon_color: default_sky_horizon_color(),
             lower_color: default_sky_lower_color(),
             horizon_percent: default_sky_horizon_percent(),
+            horizon_thickness_percent: default_sky_horizon_thickness_percent(),
+            horizon_glow_percent: default_sky_horizon_glow_percent(),
+            horizon_glow_yaw_degrees: default_sky_horizon_glow_yaw_degrees(),
+            mountain_height_percent: default_sky_mountain_height_percent(),
+            skybox_columns: default_skybox_columns(),
+            skybox_rows: default_skybox_rows(),
             match_room_fog: default_sky_match_room_fog(),
             cloud_layer: CloudLayerSettings::default(),
         }
@@ -2082,9 +2140,766 @@ pub struct ResolvedSkySettings {
     pub lower_color: [u8; 3],
     /// Horizon line as a percentage of screen height.
     pub horizon_percent: u8,
-    /// Resolved cloud layer authoring values (still in authoring
-    /// units; runtime/preview consume them via cooked records).
+    /// Angular thickness of the horizon colour band.
+    pub horizon_thickness_percent: u8,
+    /// Strength of the warm localized horizon glow.
+    pub horizon_glow_percent: u8,
+    /// Direction of the warm horizon glow in cyclorama yaw degrees.
+    pub horizon_glow_yaw_degrees: i16,
+    /// Height/intensity of cooked distant mountain silhouettes.
+    pub mountain_height_percent: u8,
+    /// Horizontal cyclorama subdivisions.
+    pub skybox_columns: u8,
+    /// Vertical cyclorama subdivisions.
+    pub skybox_rows: u8,
+    /// Resolved cloud layer authoring values used by the cyclorama
+    /// generator.
     pub cloud_layer: CloudLayerSettings,
+}
+
+/// One generated cyclorama backdrop quad. Directions are unit vectors
+/// in Q0.12-ish scale. Runtime/editor preview apply camera rotation
+/// only, so this behaves like an infinite authored panorama.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkyCycloramaQuad {
+    /// Corner directions ordered top-left, top-right, bottom-left,
+    /// bottom-right in angular cyclorama space.
+    pub direction_q12: [[i16; 3]; 4],
+    /// Per-corner Gouraud colours.
+    pub rgb: [[u8; 3]; 4],
+}
+
+const SKY_CYCLORAMA_MOUNTAIN_LAYERS: usize = 3;
+const SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX: usize = 64;
+const SKY_CYCLORAMA_CLOUD_STREAK_MAX: usize = 12;
+const SKY_CYCLORAMA_CLOUD_HERO_STREAKS: usize = 3;
+const SKY_CYCLORAMA_CLOUD_SEGMENTS: usize = 10;
+const SKY_CYCLORAMA_CLOUD_RIBBONS: usize = 4;
+const SKY_CYCLORAMA_CLOUD_RIBBON_QUADS: usize = 2;
+
+/// Maximum number of quads generated by [`generate_sky_cyclorama`].
+pub const SKY_CYCLORAMA_QUAD_MAX: usize = SKYBOX_COLUMNS_MAX as usize * SKYBOX_ROWS_MAX as usize
+    + SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX * SKY_CYCLORAMA_MOUNTAIN_LAYERS
+    + (SKY_CYCLORAMA_CLOUD_STREAK_MAX + SKY_CYCLORAMA_CLOUD_HERO_STREAKS)
+        * (SKY_CYCLORAMA_CLOUD_SEGMENTS + 1)
+        * SKY_CYCLORAMA_CLOUD_RIBBONS
+        * SKY_CYCLORAMA_CLOUD_RIBBON_QUADS;
+
+/// Build a Spyro-style cyclorama from authored sky settings.
+///
+/// This intentionally does the expensive/expressive work at cook
+/// time: the output is explicit coloured backdrop geometry. Runtime
+/// rendering only projects the baked directions with camera rotation.
+pub fn generate_sky_cyclorama(sky: ResolvedSkySettings) -> Vec<SkyCycloramaQuad> {
+    if !sky.enabled {
+        return Vec::new();
+    }
+
+    let columns = sky
+        .skybox_columns
+        .clamp(SKYBOX_COLUMNS_MIN, SKYBOX_COLUMNS_MAX) as usize;
+    let rows = sky.skybox_rows.clamp(SKYBOX_ROWS_MIN, SKYBOX_ROWS_MAX) as usize;
+    let horizon_pitch = sky_horizon_pitch_degrees(sky.horizon_percent);
+    let top_pitch = (horizon_pitch + 58.0).min(78.0);
+    let bottom_pitch = (horizon_pitch - 46.0).max(-72.0);
+    let mut out = Vec::with_capacity(SKY_CYCLORAMA_QUAD_MAX);
+
+    for row in 0..rows {
+        let t0 = row as f32 / rows as f32;
+        let t1 = (row + 1) as f32 / rows as f32;
+        let pitch_top = lerp_f32(top_pitch, bottom_pitch, t0);
+        let pitch_bottom = lerp_f32(top_pitch, bottom_pitch, t1);
+        for column in 0..columns {
+            let yaw0 = cyclorama_yaw_for_column(column, columns);
+            let yaw1 = cyclorama_yaw_for_column(column + 1, columns);
+            push_sky_cyclorama_quad(
+                &mut out,
+                yaw0,
+                yaw1,
+                pitch_top,
+                pitch_bottom,
+                [
+                    sky_color_for_pitch_yaw(
+                        sky,
+                        pitch_top,
+                        yaw0,
+                        horizon_pitch,
+                        top_pitch,
+                        bottom_pitch,
+                    ),
+                    sky_color_for_pitch_yaw(
+                        sky,
+                        pitch_top,
+                        yaw1,
+                        horizon_pitch,
+                        top_pitch,
+                        bottom_pitch,
+                    ),
+                    sky_color_for_pitch_yaw(
+                        sky,
+                        pitch_bottom,
+                        yaw0,
+                        horizon_pitch,
+                        top_pitch,
+                        bottom_pitch,
+                    ),
+                    sky_color_for_pitch_yaw(
+                        sky,
+                        pitch_bottom,
+                        yaw1,
+                        horizon_pitch,
+                        top_pitch,
+                        bottom_pitch,
+                    ),
+                ],
+            );
+        }
+    }
+
+    push_mountain_cyclorama(&mut out, sky, columns, horizon_pitch);
+    push_cloud_streak_cyclorama(&mut out, sky, horizon_pitch, top_pitch, bottom_pitch);
+    out.truncate(SKY_CYCLORAMA_QUAD_MAX);
+    out
+}
+
+fn push_mountain_cyclorama(
+    out: &mut Vec<SkyCycloramaQuad>,
+    sky: ResolvedSkySettings,
+    columns: usize,
+    horizon_pitch: f32,
+) {
+    if sky.mountain_height_percent == 0 {
+        return;
+    }
+    let mountain_columns = (columns * 2).clamp(columns, SKY_CYCLORAMA_MOUNTAIN_COLUMNS_MAX);
+    let height_t = sky.mountain_height_percent.clamp(0, 100) as f32 / 100.0;
+    let seed = sky.cloud_layer.noise_seed ^ 0x6d2b_79f5;
+    for column in 0..mountain_columns {
+        let yaw0 = cyclorama_yaw_for_column(column, mountain_columns);
+        let yaw1 = cyclorama_yaw_for_column(column + 1, mountain_columns);
+        push_mountain_layer_cyclorama(
+            out,
+            seed ^ 0xa341_316c,
+            sky,
+            yaw0,
+            yaw1,
+            horizon_pitch,
+            height_t,
+            0.42,
+            [92, 126, 172],
+            [58, 86, 112],
+        );
+        push_mountain_layer_cyclorama(
+            out,
+            seed ^ 0x9e37_79b9,
+            sky,
+            yaw0,
+            yaw1,
+            horizon_pitch,
+            height_t,
+            0.68,
+            [132, 92, 154],
+            [64, 52, 98],
+        );
+        push_mountain_layer_cyclorama(
+            out,
+            seed,
+            sky,
+            yaw0,
+            yaw1,
+            horizon_pitch,
+            height_t,
+            1.0,
+            [98, 76, 128],
+            [32, 38, 64],
+        );
+    }
+}
+
+fn push_mountain_layer_cyclorama(
+    out: &mut Vec<SkyCycloramaQuad>,
+    seed: u32,
+    sky: ResolvedSkySettings,
+    yaw0: f32,
+    yaw1: f32,
+    horizon_pitch: f32,
+    height_t: f32,
+    depth_t: f32,
+    peak_tint: [u8; 3],
+    base_tint: [u8; 3],
+) {
+    let phase = 9.0 + depth_t * 19.0;
+    let top_base = horizon_pitch - (17.0 + depth_t * 11.0);
+    let amplitude = (3.0 + depth_t * 10.0) * height_t;
+    let base_pitch = horizon_pitch - (25.0 + depth_t * 22.0) * height_t.max(0.45);
+    let top0 = top_base + mountain_profile(seed, yaw0 + phase) * amplitude;
+    let top1 = top_base + mountain_profile(seed, yaw1 + phase) * amplitude;
+    let peak = cyclorama_lerp_rgb(sky.horizon_color, peak_tint, (62.0 + depth_t * 82.0) as u8);
+    let base = cyclorama_lerp_rgb(sky.lower_color, base_tint, (72.0 + depth_t * 78.0) as u8);
+    push_sky_cyclorama_quad_corners(
+        out,
+        yaw0,
+        yaw1,
+        top0,
+        top1,
+        base_pitch,
+        base_pitch,
+        [peak, peak, base, base],
+    );
+}
+
+fn push_cloud_streak_cyclorama(
+    out: &mut Vec<SkyCycloramaQuad>,
+    sky: ResolvedSkySettings,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) {
+    let cloud = sky.cloud_layer;
+    if !cloud.enabled || cloud.density == 0 {
+        return;
+    }
+    let tile_count = cloud.tile_count.clamp(1, 16);
+    let altitude_t = (cloud.altitude as f32 / u16::MAX as f32).clamp(0.0, 1.0);
+    let extent_t = (cloud.extent as f32 / u16::MAX as f32).clamp(0.0, 1.0);
+    let count = (4 + usize::from(cloud.density / 32) + usize::from(tile_count / 3))
+        .min(SKY_CYCLORAMA_CLOUD_STREAK_MAX);
+    let density_t = cloud.density as f32 / 255.0;
+    let band_center = horizon_pitch + 7.0 + altitude_t * 42.0;
+    let pitch_spread = 5.0 + extent_t * 28.0;
+    let width_scale = 0.55 + extent_t * 1.55;
+    let repeat_scale = 0.85 + tile_count as f32 * 0.035;
+    let hero_yaw = sky.horizon_glow_yaw_degrees as f32;
+    for (bank, offset) in [-58.0_f32, -8.0, 46.0].iter().enumerate() {
+        let width = (82.0 + bank as f32 * 18.0) * width_scale.min(1.55);
+        let center_pitch = band_center + (bank as f32 - 1.0) * pitch_spread * 0.18;
+        let thickness = 2.8 + extent_t * (3.6 + bank as f32);
+        let slant = -7.5 + bank as f32 * 5.6;
+        let tint = cyclorama_lerp_rgb(
+            cloud.color,
+            [255, 166, 150],
+            (92.0 + bank as f32 * 28.0) as u8,
+        );
+        push_cloud_streak_segments(
+            out,
+            sky,
+            hero_yaw + offset - width * 0.5,
+            width,
+            center_pitch,
+            thickness,
+            slant,
+            tint,
+            density_t,
+            1.18,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+    }
+    for streak in 0..count {
+        let h = sky_hash_u32(cloud.noise_seed, streak as u32);
+        let yaw_start = -180.0 + sky_hash_unit(h, 0) * 360.0;
+        let width = (20.0 + sky_hash_unit(h, 1) * 70.0) * width_scale / repeat_scale;
+        let center_pitch = band_center + (sky_hash_unit(h, 2) - 0.5) * pitch_spread;
+        let thickness = (1.8 + sky_hash_unit(h, 3) * 5.2) / (0.9 + tile_count as f32 * 0.02);
+        let slant = (-10.0 + sky_hash_unit(h, 4) * 20.0) * (0.65 + extent_t * 0.7);
+        let tint = cyclorama_lerp_rgb(
+            cloud.color,
+            [255, 170, 142],
+            (32.0 + sky_hash_unit(h, 5) * 92.0) as u8,
+        );
+        push_cloud_streak_segments(
+            out,
+            sky,
+            yaw_start,
+            width,
+            center_pitch,
+            thickness,
+            slant,
+            tint,
+            density_t,
+            1.0,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_cloud_streak_segments(
+    out: &mut Vec<SkyCycloramaQuad>,
+    sky: ResolvedSkySettings,
+    yaw_start: f32,
+    width: f32,
+    center_pitch: f32,
+    thickness: f32,
+    slant: f32,
+    tint: [u8; 3],
+    density_t: f32,
+    alpha_scale: f32,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) {
+    let warm = cyclorama_lerp_rgb(tint, [255, 182, 142], 116);
+    let cool = cyclorama_lerp_rgb(tint, [128, 116, 172], 104);
+    for segment in 0..SKY_CYCLORAMA_CLOUD_SEGMENTS {
+        let t0 = segment as f32 / SKY_CYCLORAMA_CLOUD_SEGMENTS as f32;
+        let t1 = (segment + 1) as f32 / SKY_CYCLORAMA_CLOUD_SEGMENTS as f32;
+        let overlap = 0.35;
+        let yaw0 = yaw_start + width * t0 - if segment == 0 { 0.0 } else { overlap };
+        let yaw1 = yaw_start
+            + width * t1
+            + if segment + 1 == SKY_CYCLORAMA_CLOUD_SEGMENTS {
+                0.0
+            } else {
+                overlap
+            };
+        let pitch0 = center_pitch + slant * (t0 - 0.5);
+        let pitch1 = center_pitch + slant * (t1 - 0.5);
+        let fade0 = cloud_streak_fade(t0) * density_t * alpha_scale;
+        let fade1 = cloud_streak_fade(t1) * density_t * alpha_scale;
+        push_wrapped_cloud_ribbon_cyclorama(
+            out,
+            sky,
+            yaw0,
+            yaw1,
+            pitch0,
+            pitch1,
+            thickness * 1.75,
+            tint,
+            fade0 * 76.0,
+            fade1 * 76.0,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+        push_wrapped_cloud_ribbon_cyclorama(
+            out,
+            sky,
+            yaw0,
+            yaw1,
+            pitch0,
+            pitch1,
+            thickness * 0.92,
+            tint,
+            fade0 * 188.0,
+            fade1 * 188.0,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+        push_wrapped_cloud_ribbon_cyclorama(
+            out,
+            sky,
+            yaw0,
+            yaw1,
+            pitch0 + thickness * 0.36,
+            pitch1 + thickness * 0.36,
+            thickness * 0.28,
+            warm,
+            fade0 * 228.0,
+            fade1 * 228.0,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+        push_wrapped_cloud_ribbon_cyclorama(
+            out,
+            sky,
+            yaw0,
+            yaw1,
+            pitch0 - thickness * 0.52,
+            pitch1 - thickness * 0.52,
+            thickness * 0.24,
+            cool,
+            fade0 * 132.0,
+            fade1 * 132.0,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_wrapped_cloud_ribbon_cyclorama(
+    out: &mut Vec<SkyCycloramaQuad>,
+    sky: ResolvedSkySettings,
+    yaw0: f32,
+    yaw1: f32,
+    pitch0: f32,
+    pitch1: f32,
+    half_thickness: f32,
+    tint: [u8; 3],
+    alpha0: f32,
+    alpha1: f32,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) {
+    let mut start = yaw0;
+    let mut end = yaw1;
+    while start < -180.0 {
+        start += 360.0;
+        end += 360.0;
+    }
+    while start >= 180.0 {
+        start -= 360.0;
+        end -= 360.0;
+    }
+    if end <= 180.0 {
+        push_cloud_ribbon_cyclorama(
+            out,
+            sky,
+            start,
+            end,
+            pitch0,
+            pitch1,
+            half_thickness,
+            tint,
+            alpha0,
+            alpha1,
+            horizon_pitch,
+            top_pitch,
+            bottom_pitch,
+        );
+        return;
+    }
+
+    let t = ((180.0 - start) / (end - start).max(0.001)).clamp(0.0, 1.0);
+    let split_pitch = lerp_f32(pitch0, pitch1, t);
+    let split_alpha = lerp_f32(alpha0, alpha1, t);
+    push_cloud_ribbon_cyclorama(
+        out,
+        sky,
+        start,
+        180.0,
+        pitch0,
+        split_pitch,
+        half_thickness,
+        tint,
+        alpha0,
+        split_alpha,
+        horizon_pitch,
+        top_pitch,
+        bottom_pitch,
+    );
+    push_cloud_ribbon_cyclorama(
+        out,
+        sky,
+        -180.0,
+        end - 360.0,
+        split_pitch,
+        pitch1,
+        half_thickness,
+        tint,
+        split_alpha,
+        alpha1,
+        horizon_pitch,
+        top_pitch,
+        bottom_pitch,
+    );
+}
+
+fn push_cloud_ribbon_cyclorama(
+    out: &mut Vec<SkyCycloramaQuad>,
+    sky: ResolvedSkySettings,
+    yaw0: f32,
+    yaw1: f32,
+    pitch0: f32,
+    pitch1: f32,
+    half_thickness: f32,
+    tint: [u8; 3],
+    alpha0: f32,
+    alpha1: f32,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) {
+    let top0 = pitch0 + half_thickness;
+    let top1 = pitch1 + half_thickness;
+    let bottom0 = pitch0 - half_thickness;
+    let bottom1 = pitch1 - half_thickness;
+    let center0 = pitch0;
+    let center1 = pitch1;
+    let base_top0 =
+        sky_color_for_pitch_yaw_core(sky, top0, yaw0, horizon_pitch, top_pitch, bottom_pitch);
+    let base_top1 =
+        sky_color_for_pitch_yaw_core(sky, top1, yaw1, horizon_pitch, top_pitch, bottom_pitch);
+    let base_center0 =
+        sky_color_for_pitch_yaw_core(sky, center0, yaw0, horizon_pitch, top_pitch, bottom_pitch);
+    let base_center1 =
+        sky_color_for_pitch_yaw_core(sky, center1, yaw1, horizon_pitch, top_pitch, bottom_pitch);
+    let base_bottom0 =
+        sky_color_for_pitch_yaw_core(sky, bottom0, yaw0, horizon_pitch, top_pitch, bottom_pitch);
+    let base_bottom1 =
+        sky_color_for_pitch_yaw_core(sky, bottom1, yaw1, horizon_pitch, top_pitch, bottom_pitch);
+    let center_tint0 = cyclorama_lerp_rgb(base_center0, tint, alpha0.clamp(0.0, 255.0) as u8);
+    let center_tint1 = cyclorama_lerp_rgb(base_center1, tint, alpha1.clamp(0.0, 255.0) as u8);
+    push_sky_cyclorama_quad_corners(
+        out,
+        yaw0,
+        yaw1,
+        top0,
+        top1,
+        center0,
+        center1,
+        [base_top0, base_top1, center_tint0, center_tint1],
+    );
+    push_sky_cyclorama_quad_corners(
+        out,
+        yaw0,
+        yaw1,
+        center0,
+        center1,
+        bottom0,
+        bottom1,
+        [center_tint0, center_tint1, base_bottom0, base_bottom1],
+    );
+}
+
+fn push_sky_cyclorama_quad(
+    out: &mut Vec<SkyCycloramaQuad>,
+    yaw0: f32,
+    yaw1: f32,
+    pitch_top: f32,
+    pitch_bottom: f32,
+    rgb: [[u8; 3]; 4],
+) {
+    push_sky_cyclorama_quad_corners(
+        out,
+        yaw0,
+        yaw1,
+        pitch_top,
+        pitch_top,
+        pitch_bottom,
+        pitch_bottom,
+        rgb,
+    );
+}
+
+fn push_sky_cyclorama_quad_corners(
+    out: &mut Vec<SkyCycloramaQuad>,
+    yaw0: f32,
+    yaw1: f32,
+    pitch_top0: f32,
+    pitch_top1: f32,
+    pitch_bottom0: f32,
+    pitch_bottom1: f32,
+    rgb: [[u8; 3]; 4],
+) {
+    if out.len() >= SKY_CYCLORAMA_QUAD_MAX {
+        return;
+    }
+    out.push(SkyCycloramaQuad {
+        direction_q12: [
+            cyclorama_direction_q12(yaw0, pitch_top0),
+            cyclorama_direction_q12(yaw1, pitch_top1),
+            cyclorama_direction_q12(yaw0, pitch_bottom0),
+            cyclorama_direction_q12(yaw1, pitch_bottom1),
+        ],
+        rgb,
+    });
+}
+
+fn cyclorama_direction_q12(yaw_degrees: f32, pitch_degrees: f32) -> [i16; 3] {
+    let yaw = yaw_degrees.to_radians();
+    let pitch = pitch_degrees.clamp(-82.0, 82.0).to_radians();
+    let cp = pitch.cos();
+    let scale = 4096.0;
+    [
+        (-yaw.sin() * cp * scale).round() as i16,
+        (pitch.sin() * scale).round() as i16,
+        (-yaw.cos() * cp * scale).round() as i16,
+    ]
+}
+
+fn sky_horizon_pitch_degrees(horizon_percent: u8) -> f32 {
+    let y = 120.0 - 240.0 * (horizon_percent.clamp(5, 95) as f32 / 100.0);
+    (y / 320.0).atan().to_degrees()
+}
+
+fn sky_color_for_pitch(
+    sky: ResolvedSkySettings,
+    pitch: f32,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) -> [u8; 3] {
+    let base = if pitch >= horizon_pitch {
+        let span = (top_pitch - horizon_pitch).max(1.0);
+        let t = smooth_step(((pitch - horizon_pitch) / span).clamp(0.0, 1.0));
+        cyclorama_lerp_rgb(sky.horizon_color, sky.top_color, (t * 255.0) as u8)
+    } else {
+        let span = (horizon_pitch - bottom_pitch).max(1.0);
+        let t = smooth_step(((horizon_pitch - pitch) / span).clamp(0.0, 1.0));
+        cyclorama_lerp_rgb(sky.horizon_color, sky.lower_color, (t * 255.0) as u8)
+    };
+    let hold_radius = 1.4 + sky.horizon_thickness_percent.clamp(0, 80) as f32 * 0.13;
+    let hold = smooth_falloff(hold_radius, (pitch - horizon_pitch).abs());
+    cyclorama_lerp_rgb(
+        base,
+        sky.horizon_color,
+        (hold * 92.0).clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn sky_color_for_pitch_yaw(
+    sky: ResolvedSkySettings,
+    pitch: f32,
+    yaw: f32,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) -> [u8; 3] {
+    let color = sky_color_for_pitch_yaw_core(sky, pitch, yaw, horizon_pitch, top_pitch, bottom_pitch);
+    sky_cloud_wash_color(sky, color, pitch, yaw, horizon_pitch)
+}
+
+fn sky_color_for_pitch_yaw_core(
+    sky: ResolvedSkySettings,
+    pitch: f32,
+    yaw: f32,
+    horizon_pitch: f32,
+    top_pitch: f32,
+    bottom_pitch: f32,
+) -> [u8; 3] {
+    let base = sky_color_for_pitch(sky, pitch, horizon_pitch, top_pitch, bottom_pitch);
+    let mut color = base;
+    let pitch_delta = (pitch - horizon_pitch).abs();
+    let pitch_weight = smooth_falloff(27.0, pitch_delta);
+    if sky.horizon_glow_percent > 0 && pitch_weight > 0.0 {
+        let yaw_delta = angular_distance_degrees(yaw, sky.horizon_glow_yaw_degrees as f32);
+        let yaw_weight = smooth_falloff(105.0, yaw_delta);
+        let strength =
+            (sky.horizon_glow_percent.clamp(0, 100) as f32 / 100.0) * pitch_weight * yaw_weight;
+        if strength > 0.0 {
+            color = cyclorama_lerp_rgb(
+                color,
+                horizon_glow_color_for_yaw(sky, yaw),
+                (strength * 156.0).clamp(0.0, 255.0) as u8,
+            );
+        }
+    }
+    color
+}
+
+fn horizon_glow_color_for_yaw(sky: ResolvedSkySettings, yaw: f32) -> [u8; 3] {
+    let yaw_delta = angular_distance_degrees(yaw, sky.horizon_glow_yaw_degrees as f32);
+    let hot = smooth_falloff(42.0, yaw_delta);
+    let warm = cyclorama_lerp_rgb(sky.horizon_color, [255, 174, 94], 188);
+    let pink = cyclorama_lerp_rgb(sky.horizon_color, [226, 118, 172], 132);
+    brighten_rgb(cyclorama_lerp_rgb(pink, warm, (hot * 255.0) as u8), 10)
+}
+
+fn sky_cloud_wash_color(
+    sky: ResolvedSkySettings,
+    base: [u8; 3],
+    pitch: f32,
+    yaw: f32,
+    horizon_pitch: f32,
+) -> [u8; 3] {
+    let cloud = sky.cloud_layer;
+    if !cloud.enabled || cloud.density == 0 {
+        return base;
+    }
+    let altitude_t = (cloud.altitude as f32 / u16::MAX as f32).clamp(0.0, 1.0);
+    let extent_t = (cloud.extent as f32 / u16::MAX as f32).clamp(0.0, 1.0);
+    let tile_count = cloud.tile_count.clamp(1, 16) as f32;
+    let density_t = cloud.density as f32 / 255.0;
+    let center = horizon_pitch + 7.0 + altitude_t * 42.0 + cloud_band_wave(cloud.noise_seed, yaw);
+    let width = 8.0 + extent_t * 16.0;
+    let pitch_weight = smooth_falloff(width, (pitch - center).abs());
+    if pitch_weight <= 0.0 {
+        return base;
+    }
+    let phase = (cloud.noise_seed & 0xff) as f32 * 0.037;
+    let yaw_r = yaw.to_radians();
+    let yaw_weight = 0.58
+        + 0.24 * (yaw_r * (tile_count * 0.38) + phase).sin()
+        + 0.18 * (yaw_r * (tile_count * 0.71) + phase * 1.7).sin();
+    let strength = (density_t * pitch_weight * yaw_weight.clamp(0.18, 1.0)).clamp(0.0, 1.0);
+    let tint = cyclorama_lerp_rgb(cloud.color, [255, 180, 148], (strength * 96.0) as u8);
+    cyclorama_lerp_rgb(base, tint, (strength * 42.0).clamp(0.0, 255.0) as u8)
+}
+
+fn cyclorama_yaw_for_column(column: usize, columns: usize) -> f32 {
+    -180.0 + 360.0 * (column as f32 / columns.max(1) as f32)
+}
+
+fn angular_distance_degrees(a: f32, b: f32) -> f32 {
+    let mut d = (a - b).abs() % 360.0;
+    if d > 180.0 {
+        d = 360.0 - d;
+    }
+    d
+}
+
+fn smooth_falloff(radius: f32, distance: f32) -> f32 {
+    let t = (1.0 - distance / radius.max(0.001)).clamp(0.0, 1.0);
+    smooth_step(t)
+}
+
+fn smooth_step(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn mountain_profile(seed: u32, yaw_degrees: f32) -> f32 {
+    let r = yaw_degrees.to_radians();
+    let phase0 = (seed & 0xff) as f32 * 0.031;
+    let phase1 = ((seed >> 8) & 0xff) as f32 * 0.027;
+    let broad = 0.5 + 0.5 * (r * 2.0 + phase0).sin();
+    let mid = 0.5 + 0.5 * (r * 5.0 + phase1).sin();
+    let jag = sky_hash_unit(seed ^ 0x85eb_ca6b, ((yaw_degrees + 720.0) / 18.0) as u32);
+    (broad * 0.50 + mid * 0.32 + jag * 0.18).clamp(0.0, 1.0)
+}
+
+fn cloud_streak_fade(t: f32) -> f32 {
+    (core::f32::consts::PI * t).sin().clamp(0.0, 1.0)
+}
+
+fn cloud_band_wave(seed: u32, yaw_degrees: f32) -> f32 {
+    let r = yaw_degrees.to_radians();
+    let phase0 = (seed & 0xff) as f32 * 0.019;
+    let phase1 = ((seed >> 8) & 0xff) as f32 * 0.023;
+    (r * 2.0 + phase0).sin() * 1.6 + (r * 5.0 + phase1).sin() * 0.72
+}
+
+fn sky_hash_u32(seed: u32, value: u32) -> u32 {
+    let mut h = seed ^ value.wrapping_mul(0x9e37_79b9);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^ (h >> 16)
+}
+
+fn sky_hash_unit(seed: u32, value: u32) -> f32 {
+    (sky_hash_u32(seed, value) >> 8) as f32 / 16_777_215.0
+}
+
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn cyclorama_lerp_rgb(a: [u8; 3], b: [u8; 3], t: u8) -> [u8; 3] {
+    let inv = 255 - t as u16;
+    let t = t as u16;
+    [
+        ((a[0] as u16 * inv + b[0] as u16 * t) / 255) as u8,
+        ((a[1] as u16 * inv + b[1] as u16 * t) / 255) as u8,
+        ((a[2] as u16 * inv + b[2] as u16 * t) / 255) as u8,
+    ]
+}
+
+fn brighten_rgb(rgb: [u8; 3], amount: u8) -> [u8; 3] {
+    [
+        rgb[0].saturating_add(amount),
+        rgb[1].saturating_add(amount),
+        rgb[2].saturating_add(amount),
+    ]
 }
 
 fn blend_rgb(a: [u8; 3], b: [u8; 3], b_weight_256: u16) -> [u8; 3] {
@@ -5078,6 +5893,16 @@ impl ProjectDocument {
                     } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
+                        sky.horizon_thickness_percent = sky.horizon_thickness_percent.clamp(0, 80);
+                        sky.horizon_glow_percent = sky.horizon_glow_percent.clamp(0, 100);
+                        sky.horizon_glow_yaw_degrees =
+                            sky.horizon_glow_yaw_degrees.clamp(-180, 180);
+                        sky.mountain_height_percent = sky.mountain_height_percent.clamp(0, 100);
+                        sky.cloud_layer.tile_count = sky.cloud_layer.tile_count.clamp(1, 16);
+                        sky.skybox_columns = sky
+                            .skybox_columns
+                            .clamp(SKYBOX_COLUMNS_MIN, SKYBOX_COLUMNS_MAX);
+                        sky.skybox_rows = sky.skybox_rows.clamp(SKYBOX_ROWS_MIN, SKYBOX_ROWS_MAX);
                         far_vista.radius = far_vista.radius.clamp(1_024, 65_535);
                         far_vista.height = far_vista.height.clamp(128, 32_768);
                         far_vista.vertical_offset =
@@ -5841,6 +6666,56 @@ mod tests {
         assert_eq!(snap_height(96), 128);
         assert_eq!(snap_height(-95), -64);
         assert_eq!(snap_height(-96), -128);
+    }
+
+    #[test]
+    fn sky_settings_resolve_clamps_subdivision_defaults() {
+        let default_sky = SkySettings::default().resolved_for_room(false, [0, 0, 0]);
+        assert_eq!(default_sky.skybox_columns, SKYBOX_COLUMNS_DEFAULT);
+        assert_eq!(default_sky.skybox_rows, SKYBOX_ROWS_DEFAULT);
+        assert_eq!(
+            default_sky.horizon_glow_percent,
+            default_sky_horizon_glow_percent()
+        );
+        assert_eq!(
+            default_sky.horizon_glow_yaw_degrees,
+            default_sky_horizon_glow_yaw_degrees()
+        );
+        assert_eq!(
+            default_sky.mountain_height_percent,
+            default_sky_mountain_height_percent()
+        );
+
+        let mut sky = SkySettings::default();
+        sky.horizon_glow_percent = 240;
+        sky.horizon_glow_yaw_degrees = 720;
+        sky.mountain_height_percent = 240;
+        sky.skybox_columns = 1;
+        sky.skybox_rows = 99;
+        let resolved = sky.resolved_for_room(false, [0, 0, 0]);
+        assert_eq!(resolved.horizon_glow_percent, 100);
+        assert_eq!(resolved.horizon_glow_yaw_degrees, 180);
+        assert_eq!(resolved.mountain_height_percent, 100);
+        assert_eq!(resolved.skybox_columns, SKYBOX_COLUMNS_MIN);
+        assert_eq!(resolved.skybox_rows, SKYBOX_ROWS_MAX);
+    }
+
+    #[test]
+    fn sky_cyclorama_generation_is_cook_time_geometry() {
+        let mut sky = SkySettings::default();
+        sky.cloud_layer.enabled = true;
+        sky.cloud_layer.density = 192;
+        let resolved = sky.resolved_for_room(false, [0, 0, 0]);
+        let quads = generate_sky_cyclorama(resolved);
+        assert!(!quads.is_empty());
+        assert!(quads.len() <= SKY_CYCLORAMA_QUAD_MAX);
+        assert!(quads
+            .iter()
+            .any(|quad| quad.direction_q12[0] != quad.direction_q12[1]));
+
+        let mut disabled = sky;
+        disabled.mode = SkyMode::Off;
+        assert!(generate_sky_cyclorama(disabled.resolved_for_room(false, [0, 0, 0])).is_empty());
     }
 
     #[test]

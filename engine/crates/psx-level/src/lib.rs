@@ -274,6 +274,19 @@ pub struct LevelAssetRecord {
     pub flags: u16,
 }
 
+/// One cooked cyclorama backdrop quad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCycloramaQuadRecord {
+    /// Unit direction vectors in Q0.12-ish scale, ordered as
+    /// top-left, top-right, bottom-left, bottom-right in angular
+    /// cyclorama space. Runtime applies camera rotation only.
+    pub direction_q12: [[i16; 3]; 4],
+    /// Per-corner Gouraud colours.
+    pub rgb: [[u8; 3]; 4],
+    /// Reserved.
+    pub flags: u16,
+}
+
 /// Resolved sky settings for one cooked room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelSkyRecord {
@@ -285,9 +298,17 @@ pub struct LevelSkyRecord {
     pub bottom_rgb: [u8; 3],
     /// Horizon line as a percentage of screen height.
     pub horizon_percent: u8,
+    /// Angular thickness of the horizon colour band.
+    pub horizon_thickness_percent: u8,
+    /// Horizontal cyclorama subdivisions.
+    pub skybox_columns: u8,
+    /// Vertical cyclorama subdivisions.
+    pub skybox_rows: u8,
     /// Sky flags.
     pub flags: u16,
-    /// Optional cloud layer baked from Perlin noise at scene init.
+    /// Cooked panorama/cyclorama backdrop geometry.
+    pub cyclorama_quads: &'static [LevelCycloramaQuadRecord],
+    /// Optional authored cloud layer used by the cooked cyclorama.
     pub cloud_layer: LevelCloudLayerRecord,
 }
 
@@ -298,7 +319,11 @@ impl LevelSkyRecord {
         horizon_rgb: [32, 30, 34],
         bottom_rgb: [5, 7, 12],
         horizon_percent: 58,
+        horizon_thickness_percent: 8,
+        skybox_columns: 16,
+        skybox_rows: 10,
         flags: sky_flags::ENABLED,
+        cyclorama_quads: &[],
         cloud_layer: LevelCloudLayerRecord::DEFAULT,
     };
 }
@@ -306,23 +331,22 @@ impl LevelSkyRecord {
 /// Resolved cloud-layer settings for one cooked room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelCloudLayerRecord {
-    /// Cooked PSXT texture (4bpp Perlin gradient) baked at cook
-    /// time. `AssetId(u16::MAX)` when the layer is disabled or no
-    /// texture was generated.
+    /// Reserved texture slot. `AssetId(u16::MAX)` for the current
+    /// cyclorama sky path.
     pub texture_asset: AssetId,
-    /// Cloud highlight colour blended through the bake CLUT.
+    /// Cloud highlight colour used by cyclorama cloud streaks.
     pub color_rgb: [u8; 3],
-    /// CLUT-ramp threshold pivot, 0..=255.
+    /// Cloud coverage threshold, 0..=255.
     pub density: u8,
-    /// Plane altitude above world Y = 0, in engine units.
+    /// Cyclorama cloud-band vertical bias.
     pub altitude: u16,
-    /// Plane half-extent on each of X / Z in engine units.
+    /// Cyclorama cloud-band width.
     pub extent: u16,
-    /// Texture tile-repeats across the plane on each axis.
+    /// Noise/tile repeats across the cloud layer.
     pub tile_count: u8,
-    /// UV scroll speed per second in PSX angle units.
+    /// Reserved cloud scroll speed.
     pub scroll_speed: [i16; 2],
-    /// Perlin generator seed used at bake time.
+    /// Cloud-noise seed used by the cooked cyclorama.
     pub noise_seed: u32,
     /// Cloud-layer flags.
     pub flags: u16,
