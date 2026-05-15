@@ -40,7 +40,7 @@ use psxed_project::{
     HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
     MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
     MIN_WORLD_CAMERA_DISTANCE, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
-    SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, WORLD_SECTOR_SIZE_PRESETS,
+    SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -14678,9 +14678,17 @@ fn draw_world_grid_settings(
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Mountains").color(STUDIO_TEXT_WEAK));
-                    let mut mountains = sky.mountain_height_percent.clamp(0, 100);
+                    let mut mountains = sky
+                        .mountain_height_percent
+                        .clamp(0, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX);
                     if ui
-                        .add(egui::Slider::new(&mut mountains, 0..=100).suffix("%"))
+                        .add(
+                            egui::Slider::new(
+                                &mut mountains,
+                                0..=SKY_MOUNTAIN_HEIGHT_PERCENT_MAX,
+                            )
+                            .suffix("%"),
+                        )
                         .changed()
                     {
                         sky.mountain_height_percent = mountains;
