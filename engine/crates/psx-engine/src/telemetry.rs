@@ -303,6 +303,38 @@ pub mod counter {
     pub const ROOM_SUBMIT_COMMAND_OVERFLOWS: u16 = 111;
     /// Cached room triangle submits rejected by primitive-buffer capacity.
     pub const ROOM_SUBMIT_PRIMITIVE_OVERFLOWS: u16 = 112;
+    /// Guest cycles spent rendering runtime model slot 0.
+    pub const MODEL_PROFILE_CYCLES_0: u16 = 113;
+    /// Guest cycles spent rendering runtime model slot 1.
+    pub const MODEL_PROFILE_CYCLES_1: u16 = 114;
+    /// Guest cycles spent rendering runtime model slot 2.
+    pub const MODEL_PROFILE_CYCLES_2: u16 = 115;
+    /// Guest cycles spent rendering runtime model slot 3.
+    pub const MODEL_PROFILE_CYCLES_3: u16 = 116;
+    /// Guest cycles spent rendering runtime model slot 4.
+    pub const MODEL_PROFILE_CYCLES_4: u16 = 117;
+    /// Guest cycles spent rendering runtime model slot 5.
+    pub const MODEL_PROFILE_CYCLES_5: u16 = 118;
+    /// Guest cycles spent rendering runtime model slot 6.
+    pub const MODEL_PROFILE_CYCLES_6: u16 = 119;
+    /// Guest cycles spent rendering runtime model slot 7.
+    pub const MODEL_PROFILE_CYCLES_7: u16 = 120;
+    /// Runtime model slot 0 draw submits.
+    pub const MODEL_PROFILE_DRAWS_0: u16 = 121;
+    /// Runtime model slot 1 draw submits.
+    pub const MODEL_PROFILE_DRAWS_1: u16 = 122;
+    /// Runtime model slot 2 draw submits.
+    pub const MODEL_PROFILE_DRAWS_2: u16 = 123;
+    /// Runtime model slot 3 draw submits.
+    pub const MODEL_PROFILE_DRAWS_3: u16 = 124;
+    /// Runtime model slot 4 draw submits.
+    pub const MODEL_PROFILE_DRAWS_4: u16 = 125;
+    /// Runtime model slot 5 draw submits.
+    pub const MODEL_PROFILE_DRAWS_5: u16 = 126;
+    /// Runtime model slot 6 draw submits.
+    pub const MODEL_PROFILE_DRAWS_6: u16 = 127;
+    /// Runtime model slot 7 draw submits.
+    pub const MODEL_PROFILE_DRAWS_7: u16 = 128;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
