@@ -833,6 +833,7 @@ impl<'a> Animation<'a> {
         self.pose_at_frame_offset(base, joint_index)
     }
 
+    #[inline]
     fn pose_at_frame_offset(&self, frame_offset: usize, joint_index: u16) -> Option<JointPose> {
         if joint_index >= self.joint_count {
             return None;
@@ -921,6 +922,7 @@ pub struct AnimationPoseSample<'a> {
 
 impl AnimationPoseSample<'_> {
     /// Joint pose at this sample's precomputed looping phase.
+    #[inline]
     pub fn pose(&self, joint_index: u16) -> Option<JointPose> {
         if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
             return self
@@ -947,6 +949,7 @@ pub struct JointPose {
     pub translation: Vec3I32,
 }
 
+#[inline]
 fn lerp_pose_q12(a: JointPose, b: JointPose, alpha_q12: u16) -> JointPose {
     let mut matrix = [[0i16; 3]; 3];
     let mut col = 0;
@@ -969,16 +972,19 @@ fn lerp_pose_q12(a: JointPose, b: JointPose, alpha_q12: u16) -> JointPose {
     }
 }
 
+#[inline]
 fn lerp_i16_q12(a: i16, b: i16, alpha_q12: u16) -> i16 {
     let value = a as i32 + (((b as i32 - a as i32) * alpha_q12 as i32) >> 12);
     clamp_i32_to_i16(value)
 }
 
+#[inline]
 fn lerp_i32_q12(a: i32, b: i32, alpha_q12: u16) -> i32 {
     let delta = b.saturating_sub(a);
     a.saturating_add(scale_i32_q12(delta, alpha_q12 as i32))
 }
 
+#[inline]
 fn scale_i32_q12(value: i32, scale_q12: i32) -> i32 {
     let whole = value >> 12;
     let frac = value - (whole << 12);
