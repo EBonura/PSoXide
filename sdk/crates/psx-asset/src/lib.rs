@@ -1101,7 +1101,9 @@ impl<'a> Texture<'a> {
         self.depth
     }
 
-    /// Number of CLUT entries (16, 256, or 0 for 15bpp).
+    /// Number of CLUT entries in the blob. Normal textures use 16
+    /// for 4bpp, 256 for 8bpp, or 0 for 15bpp; specialized 4bpp
+    /// assets may concatenate multiple 16-entry CLUT rows.
     #[inline]
     pub fn clut_entries(&self) -> u16 {
         self.clut_entries
