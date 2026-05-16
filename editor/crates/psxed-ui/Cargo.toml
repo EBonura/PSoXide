@@ -16,3 +16,4 @@ psx-engine = { path = "../../../engine/crates/psx-engine" }
 psx-gte = { path = "../../../sdk/crates/psx-gte" }
 psxed-project = { path = "../psxed-project" }
 rfd = { version = "0.15", default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
