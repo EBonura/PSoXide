@@ -3787,7 +3787,8 @@ fn mountain_profile(seed: u32, yaw_degrees: f32, roughness: f32) -> f32 {
     let mid = mountain_value_noise(seed ^ 0x9e37_79b9, x * (1.12 + roughness * 0.45));
     let fine = mountain_value_noise(seed ^ 0x85eb_ca6b, x * (2.35 + roughness * 1.3));
     let wave = 0.5 + 0.5 * ((yaw_degrees.to_radians() * 1.22) + phase * 0.09).sin();
-    let ridge = broad * 0.5 + mid * (0.34 + roughness * 0.08) + fine * (roughness * 0.12) + wave * 0.04;
+    let ridge =
+        broad * 0.5 + mid * (0.34 + roughness * 0.08) + fine * (roughness * 0.12) + wave * 0.04;
     smooth_step(((ridge - 0.18) / 0.82).clamp(0.0, 1.0)).powf(lerp_f32(1.0, 0.82, roughness))
 }
 
@@ -5240,8 +5241,148 @@ impl AnimationRole {
     }
 }
 
-/// Standalone cooked animation clip. A clip belongs to a skeleton,
-/// not to a model, so any model with a compatible skeleton can use it.
+/// Where an authoring-time animation candidate came from. The source
+/// kind is editor metadata only; runtime receives already-cooked
+/// `.psxanim` clips.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnimationSourceProvider {
+    #[default]
+    Unknown,
+    Meshy,
+    Mixamo,
+    Synty,
+    Other,
+}
+
+impl AnimationSourceProvider {
+    pub const ALL: [Self; 5] = [
+        Self::Unknown,
+        Self::Meshy,
+        Self::Mixamo,
+        Self::Synty,
+        Self::Other,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Meshy => "Meshy",
+            Self::Mixamo => "Mixamo",
+            Self::Synty => "Synty",
+            Self::Other => "Other",
+        }
+    }
+
+    pub fn guess_from_path(path: &str) -> Self {
+        let lowered = path.to_ascii_lowercase();
+        if lowered.contains("meshy") {
+            Self::Meshy
+        } else if lowered.contains("mixamo") || lowered.contains("standalone_fbx") {
+            Self::Mixamo
+        } else if lowered.contains("synty")
+            || lowered.contains("sword_combat")
+            || lowered.contains("sourcefiles/animations/polygon")
+            || lowered.contains("sourcefiles/animations/sidekick")
+        {
+            Self::Synty
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+/// Authoring-time animation library entry. A source may be a raw FBX /
+/// GLB clip, or a legacy cooked clip that has not yet been traced back
+/// to its raw source. It is never consumed directly by the runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnimationSourceResource {
+    /// Source file path. Prefer raw `.fbx` / `.glb` assets; legacy
+    /// catalogued projects may point at an existing `.psxanim`.
+    pub source_path: String,
+    /// Clip/take name inside the source file.
+    #[serde(default)]
+    pub clip_name: String,
+    /// Source provider hint used by the future retargeting pipeline.
+    #[serde(default)]
+    pub provider: AnimationSourceProvider,
+    /// Optional source skeleton metadata when the importer knows it.
+    #[serde(default)]
+    pub skeleton: Option<ResourceId>,
+    /// Optional target model when this source is known to be authored
+    /// specifically for one Meshy character/export.
+    #[serde(default)]
+    pub target_model: Option<ResourceId>,
+    /// Semantic role used for filtering and assignment.
+    #[serde(default)]
+    pub role: AnimationRole,
+    /// Whether this source is expected to loop when used.
+    #[serde(default = "default_true")]
+    pub looping: bool,
+    /// Searchable editor tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+impl AnimationSourceResource {
+    pub fn from_path(path: impl Into<String>, clip_name: impl Into<String>) -> Self {
+        let source_path = path.into();
+        let clip_name = clip_name.into();
+        let role = AnimationRole::guess_from_name(if clip_name.is_empty() {
+            &source_path
+        } else {
+            &clip_name
+        });
+        Self {
+            provider: AnimationSourceProvider::guess_from_path(&source_path),
+            source_path,
+            clip_name,
+            skeleton: None,
+            target_model: None,
+            role,
+            looping: !matches!(
+                role,
+                AnimationRole::Attack | AnimationRole::Hit | AnimationRole::Death
+            ),
+            tags: if matches!(role, AnimationRole::Generic) {
+                Vec::new()
+            } else {
+                vec![role.label().to_ascii_lowercase()]
+            },
+        }
+    }
+}
+
+/// How a cooked `.psxanim` was produced. This is editor metadata used
+/// to avoid treating raw source-compatible clips as if they were
+/// universally safe for every model on the same parent table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnimationClipBakeKind {
+    /// Legacy or hand-authored resource. Kept playable for existing
+    /// projects, but new imports should prefer a more specific value.
+    #[default]
+    LegacyShared,
+    /// Cooked directly from animation data authored with the target
+    /// model/export.
+    ModelNative,
+    /// Cooked from a source clip after retargeting to a target model.
+    Retargeted,
+}
+
+impl AnimationClipBakeKind {
+    pub const ALL: [Self; 3] = [Self::LegacyShared, Self::ModelNative, Self::Retargeted];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LegacyShared => "Legacy/shared",
+            Self::ModelNative => "Model native",
+            Self::Retargeted => "Retargeted",
+        }
+    }
+}
+
+/// Standalone cooked animation clip. This is the runtime-ready result:
+/// either model-native, retargeted to one target model, or legacy
+/// skeleton-shared data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnimationClipResource {
     /// Path to the cooked `.psxanim` artifact.
@@ -5249,6 +5390,19 @@ pub struct AnimationClipResource {
     /// Skeleton this clip targets.
     #[serde(default)]
     pub skeleton: Option<ResourceId>,
+    /// Optional authoring source this cooked clip was baked from.
+    #[serde(default)]
+    pub source: Option<ResourceId>,
+    /// Optional model this cooked clip was baked for. When present,
+    /// `resolved_model_animation_clips` only exposes the clip to that
+    /// exact model.
+    #[serde(default)]
+    pub target_model: Option<ResourceId>,
+    /// Bake provenance. Runtime ignores this; editor tooling uses it
+    /// to distinguish native Meshy clips from future retargeted Mixamo
+    /// clips.
+    #[serde(default)]
+    pub bake: AnimationClipBakeKind,
     /// Semantic role used by auto-assignment and animation sets.
     #[serde(default)]
     pub role: AnimationRole,
@@ -5507,6 +5661,11 @@ fn default_weapon_grip() -> String {
 pub struct ModelResource {
     /// Path to the cooked `.psxmdl` artifact.
     pub model_path: String,
+    /// Original GLB/glTF/FBX source used to cook this model, when
+    /// known. The editor uses this to bake additional animation
+    /// sources against the same skeleton.
+    #[serde(default)]
+    pub source_path: Option<String>,
     /// Optional atlas. Required for textured rendering at runtime;
     /// omitting is allowed for placeholder / debug bundles.
     #[serde(default)]
@@ -5962,6 +6121,10 @@ pub enum ResourceData {
     /// Skeleton compatibility contract shared by models and
     /// standalone animation clips.
     Skeleton(SkeletonResource),
+    /// Authoring-time animation library entry. Source clips are
+    /// previewed / retargeted / baked by editor tooling; runtime uses
+    /// [`ResourceData::AnimationClip`] only.
+    AnimationSource(AnimationSourceResource),
     /// Standalone cooked animation clip bound to a skeleton.
     AnimationClip(AnimationClipResource),
     /// Reusable role mapping for characters on one skeleton.
@@ -6005,6 +6168,7 @@ impl ResourceData {
             Self::Material(_) => "Material",
             Self::Model(_) => "Model",
             Self::Skeleton(_) => "Skeleton",
+            Self::AnimationSource(_) => "Animation Source",
             Self::AnimationClip(_) => "Animation Clip",
             Self::AnimationSet(_) => "Clip Role Map",
             Self::Mesh { .. } => "Mesh",
@@ -6819,8 +6983,8 @@ impl ProjectDocument {
 
     /// Resolve every animation a model can play. Legacy model-local
     /// clips are listed first so existing clip indices remain stable;
-    /// compatible standalone `AnimationClip` resources are appended
-    /// in resource order, de-duplicated by path.
+    /// target-specific cooked clips are preferred over generic
+    /// skeleton-shared clips, de-duplicated by path.
     pub fn resolved_model_animation_clips(
         &self,
         model_id: ResourceId,
@@ -6847,19 +7011,28 @@ impl ProjectDocument {
             }
         }
 
-        for resource in &self.resources {
-            let ResourceData::AnimationClip(clip) = &resource.data else {
-                continue;
-            };
-            if model.skeleton.is_none() || clip.skeleton != model.skeleton {
-                continue;
-            }
-            if seen_paths.insert(clip.psxanim_path.clone()) {
-                out.push(ResolvedModelAnimationClip {
-                    name: resource.name.clone(),
-                    psxanim_path: clip.psxanim_path.clone(),
-                    animation_resource: Some(resource.id),
-                });
+        for target_required in [true, false] {
+            for resource in &self.resources {
+                let ResourceData::AnimationClip(clip) = &resource.data else {
+                    continue;
+                };
+                let is_target_clip = clip.target_model == Some(model_id);
+                if is_target_clip != target_required {
+                    continue;
+                }
+                if model.skeleton.is_none() || clip.skeleton != model.skeleton {
+                    continue;
+                }
+                if clip.target_model.is_some_and(|target| target != model_id) {
+                    continue;
+                }
+                if seen_paths.insert(clip.psxanim_path.clone()) {
+                    out.push(ResolvedModelAnimationClip {
+                        name: resource.name.clone(),
+                        psxanim_path: clip.psxanim_path.clone(),
+                        animation_resource: Some(resource.id),
+                    });
+                }
             }
         }
         out
@@ -6990,6 +7163,16 @@ impl ProjectDocument {
             }
             ResourceData::Model(model) => {
                 plan_model_resource_rename(model, &safe_stem, project_root, &mut plan);
+            }
+            ResourceData::AnimationSource(source) => {
+                let fallback_ext = resource_default_extension(&resource.data);
+                plan_path_rename(
+                    &mut source.source_path,
+                    &safe_stem,
+                    fallback_ext,
+                    project_root,
+                    &mut plan,
+                );
             }
             ResourceData::AnimationClip(clip) => {
                 plan_path_rename(
@@ -7221,7 +7404,15 @@ fn resource_data_reference_count(data: &ResourceData, id: ResourceId) -> usize {
     match data {
         ResourceData::Material(material) => option_resource_reference_count(material.texture, id),
         ResourceData::Model(model) => option_resource_reference_count(model.skeleton, id),
-        ResourceData::AnimationClip(clip) => option_resource_reference_count(clip.skeleton, id),
+        ResourceData::AnimationSource(source) => {
+            option_resource_reference_count(source.skeleton, id)
+                + option_resource_reference_count(source.target_model, id)
+        }
+        ResourceData::AnimationClip(clip) => {
+            option_resource_reference_count(clip.skeleton, id)
+                + option_resource_reference_count(clip.source, id)
+                + option_resource_reference_count(clip.target_model, id)
+        }
         ResourceData::AnimationSet(set) => {
             option_resource_reference_count(set.skeleton, id)
                 + option_resource_reference_count(set.idle_clip, id)
@@ -7248,7 +7439,15 @@ fn clear_resource_data_references(data: &mut ResourceData, id: ResourceId) -> us
     match data {
         ResourceData::Material(material) => clear_option_resource(&mut material.texture, id),
         ResourceData::Model(model) => clear_option_resource(&mut model.skeleton, id),
-        ResourceData::AnimationClip(clip) => clear_option_resource(&mut clip.skeleton, id),
+        ResourceData::AnimationSource(source) => {
+            clear_option_resource(&mut source.skeleton, id)
+                + clear_option_resource(&mut source.target_model, id)
+        }
+        ResourceData::AnimationClip(clip) => {
+            clear_option_resource(&mut clip.skeleton, id)
+                + clear_option_resource(&mut clip.source, id)
+                + clear_option_resource(&mut clip.target_model, id)
+        }
         ResourceData::AnimationSet(set) => {
             let mut cleared = clear_option_resource(&mut set.skeleton, id)
                 + clear_option_resource(&mut set.idle_clip, id)
@@ -7510,6 +7709,9 @@ fn plan_resource_file_deletes(resource: &Resource, project_root: &Path) -> Resou
         }
         ResourceData::AnimationClip(clip) => {
             plan_path_delete(&clip.psxanim_path, project_root, &mut plan);
+        }
+        ResourceData::AnimationSource(source) => {
+            plan_path_delete(&source.source_path, project_root, &mut plan);
         }
         ResourceData::Mesh { source_path }
         | ResourceData::Scene { source_path }
@@ -7820,6 +8022,7 @@ const fn resource_default_stem(data: &ResourceData) -> &'static str {
         ResourceData::Material(_) => "material",
         ResourceData::Model(_) => "model",
         ResourceData::Skeleton(_) => "skeleton",
+        ResourceData::AnimationSource(_) => "animation_source",
         ResourceData::AnimationClip(_) => "animation",
         ResourceData::AnimationSet(_) => "animation_set",
         ResourceData::Weapon(_) => "weapon",
@@ -7837,6 +8040,7 @@ const fn resource_default_extension(data: &ResourceData) -> &'static str {
         ResourceData::Material(_) => "mat",
         ResourceData::Model(_) => "psxmdl",
         ResourceData::Skeleton(_) => "skeleton",
+        ResourceData::AnimationSource(_) => "animsrc",
         ResourceData::AnimationClip(_) => "psxanim",
         ResourceData::AnimationSet(_) => "animset",
         ResourceData::Weapon(_) => "weapon",
@@ -9175,6 +9379,7 @@ mod tests {
             "TestModel",
             ResourceData::Model(ModelResource {
                 model_path: "assets/models/x/x.psxmdl".to_string(),
+                source_path: None,
                 texture_path: Some("assets/models/x/x.psxt".to_string()),
                 skeleton: None,
                 clips: vec![
@@ -9250,6 +9455,9 @@ mod tests {
             ResourceData::AnimationClip(AnimationClipResource {
                 psxanim_path: "assets/animations/idle.psxanim".to_string(),
                 skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: AnimationClipBakeKind::LegacyShared,
                 role: AnimationRole::Idle,
                 looping: true,
                 tags: vec!["idle".to_string()],
@@ -9270,6 +9478,7 @@ mod tests {
             "Humanoid Model",
             ResourceData::Model(ModelResource {
                 model_path: "assets/models/humanoid.psxmdl".to_string(),
+                source_path: None,
                 texture_path: Some("assets/models/humanoid.psxt".to_string()),
                 skeleton: Some(skeleton),
                 clips: vec![ModelAnimationClip {
@@ -9304,6 +9513,125 @@ mod tests {
             Some(0),
             "standalone clips matching legacy model-local paths resolve to the stable legacy index",
         );
+    }
+
+    #[test]
+    fn animation_sources_and_target_specific_clips_roundtrip() {
+        let mut project = ProjectDocument::new("Animation Source Test");
+        let skeleton = project.add_resource(
+            "Meshy Biped Skeleton",
+            ResourceData::Skeleton(SkeletonResource {
+                joint_count: 24,
+                parents: vec![None],
+                signature: "psx-parent-v1:24:root".to_string(),
+                note: "test skeleton".to_string(),
+            }),
+        );
+        let model_a = project.add_resource(
+            "Knight",
+            ResourceData::Model(ModelResource {
+                model_path: "assets/models/knight/knight.psxmdl".to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: Some(skeleton),
+                clips: Vec::new(),
+                default_clip: None,
+                preview_clip: None,
+                world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
+                scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+                attachments: Vec::new(),
+            }),
+        );
+        let model_b = project.add_resource(
+            "Wraith",
+            ResourceData::Model(ModelResource {
+                model_path: "assets/models/wraith/wraith.psxmdl".to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: Some(skeleton),
+                clips: Vec::new(),
+                default_clip: None,
+                preview_clip: None,
+                world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
+                scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+                attachments: Vec::new(),
+            }),
+        );
+        let source = project.add_resource(
+            "Mixamo Roll",
+            ResourceData::AnimationSource(AnimationSourceResource {
+                source_path: "assets/animations/source/stand_to_roll.fbx".to_string(),
+                clip_name: "Stand To Roll".to_string(),
+                provider: AnimationSourceProvider::Mixamo,
+                skeleton: Some(skeleton),
+                target_model: None,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: vec!["roll".to_string()],
+            }),
+        );
+        let shared_walk = project.add_resource(
+            "Shared Walk",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/animations/shared_walk.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: AnimationClipBakeKind::LegacyShared,
+                role: AnimationRole::Walk,
+                looping: true,
+                tags: vec!["walk".to_string()],
+            }),
+        );
+        let baked_for_a = project.add_resource(
+            "Knight Roll",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/models/knight/knight_roll.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: Some(source),
+                target_model: Some(model_a),
+                bake: AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: vec!["roll".to_string()],
+            }),
+        );
+        project.add_resource(
+            "Wraith Roll",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/models/wraith/wraith_roll.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: Some(source),
+                target_model: Some(model_b),
+                bake: AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: vec!["roll".to_string()],
+            }),
+        );
+
+        let restored = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+        assert_eq!(restored, project);
+        let model_a_clips = restored.resolved_model_animation_clips(model_a);
+        let baked_for_a_index = model_a_clips
+            .iter()
+            .position(|clip| clip.animation_resource == Some(baked_for_a))
+            .expect("target-specific clip should resolve for its model");
+        let shared_walk_index = model_a_clips
+            .iter()
+            .position(|clip| clip.animation_resource == Some(shared_walk))
+            .expect("generic clip should still resolve for matching skeleton");
+        assert!(
+            baked_for_a_index < shared_walk_index,
+            "target-specific clips should be offered before generic skeleton-shared clips",
+        );
+        assert!(!restored
+            .resolved_model_animation_clips(model_b)
+            .iter()
+            .any(|clip| clip.animation_resource == Some(baked_for_a)));
+        assert_eq!(restored.resource_reference_count(source), 2);
     }
 
     #[test]
@@ -9480,6 +9808,7 @@ mod tests {
             "Obsidian Wraith",
             ResourceData::Model(ModelResource {
                 model_path: "assets/models/obsidian_wraith/obsidian_wraith.psxmdl".to_string(),
+                source_path: None,
                 texture_path: Some(
                     "assets/models/obsidian_wraith/obsidian_wraith.psxt".to_string(),
                 ),
