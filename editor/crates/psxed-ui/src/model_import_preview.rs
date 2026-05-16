@@ -89,16 +89,8 @@ pub fn render_import_model_preview_with_options(
             translation,
         };
     }
-    let root_projected = joint_transforms.first().and_then(|transform| {
-        cpu_project_gte_view(
-            ViewVertex::new(
-                transform.translation.x,
-                transform.translation.y,
-                transform.translation.z,
-            ),
-            projection,
-        )
-    });
+    let projected_body_anchor =
+        body_anchor_projected(camera, projection, focus.map(|focus| focus.center), origin);
     let joint_origins: Vec<Option<ProjectedVertex>> = if options.show_bones {
         estimated_joint_points(&model, &joint_transforms, projection)
     } else {
@@ -161,8 +153,8 @@ pub fn render_import_model_preview_with_options(
     }
 
     if options.show_animation_root {
-        if let Some(root) = root_projected {
-            draw_animation_root_marker(&mut image, root);
+        if let Some(anchor) = projected_body_anchor {
+            draw_animation_root_marker(&mut image, anchor);
         }
     }
     if options.show_bones {
@@ -460,6 +452,15 @@ fn project_preview_world(
     vertex: WorldVertex,
 ) -> Option<ProjectedVertex> {
     cpu_project_gte_view(camera.view_vertex(vertex), projection)
+}
+
+fn body_anchor_projected(
+    camera: WorldCamera,
+    projection: WorldProjection,
+    focus_center: Option<WorldVertex>,
+    fallback: WorldVertex,
+) -> Option<ProjectedVertex> {
+    project_preview_world(camera, projection, focus_center.unwrap_or(fallback))
 }
 
 #[derive(Copy, Clone)]
@@ -934,6 +935,27 @@ mod tests {
         assert_eq!(focus.center, WorldVertex::new(124, 24, 0));
         assert_eq!(focus.floor_y, 48);
         assert!(focus.radius >= 1536);
+    }
+
+    #[test]
+    fn body_anchor_uses_focus_center_not_distant_root() {
+        let projection = WorldProjection::new(160, 124, 320, 48);
+        let focus_center = WorldVertex::new(0, 512, 0);
+        let camera = WorldCamera::orbit(
+            projection,
+            focus_center,
+            1536,
+            Angle::from_q12(340),
+            Angle::from_q12(350),
+        );
+        let distant_root = WorldVertex::new(-4096, 2048, -4096);
+
+        let anchor = body_anchor_projected(camera, projection, Some(focus_center), distant_root)
+            .expect("focus center should project");
+        let expected =
+            project_preview_world(camera, projection, focus_center).expect("expected projection");
+
+        assert_eq!(anchor, expected);
     }
 
     #[test]
