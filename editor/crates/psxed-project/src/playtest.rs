@@ -28,7 +28,7 @@
 //! care. The residency manager already tracks RAM/VRAM membership
 //! independently of where bytes live.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use psx_engine::{
@@ -477,7 +477,9 @@ pub fn build_package(
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
     let mut lights: Vec<PlaytestLight> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
+    let runtime_model_clips = collect_runtime_model_clip_requirements(project, scene);
     let mut model_for_resource: HashMap<ResourceId, u16> = HashMap::new();
+    let mut model_clip_remaps: HashMap<ResourceId, Vec<Option<u16>>> = HashMap::new();
     let mut weapon_for_resource: HashMap<ResourceId, u16> = HashMap::new();
     let mut warned_unsupported: HashSet<&'static str> = HashSet::new();
 
@@ -565,6 +567,8 @@ pub fn build_package(
                             &mut model_sockets,
                             &mut model_instances,
                             &mut model_for_resource,
+                            &runtime_model_clips,
+                            &mut model_clip_remaps,
                             &mut report,
                         ) {
                             return (None, report);
@@ -605,6 +609,8 @@ pub fn build_package(
                             &mut model_sockets,
                             &mut model_instances,
                             &mut model_for_resource,
+                            &runtime_model_clips,
+                            &mut model_clip_remaps,
                             &mut report,
                         ) {
                             return (None, report);
@@ -625,6 +631,8 @@ pub fn build_package(
                             &mut model_frame_bounds,
                             &mut model_sockets,
                             &mut model_for_resource,
+                            &runtime_model_clips,
+                            &mut model_clip_remaps,
                             &mut weapon_hitboxes,
                             &mut weapons,
                             &mut weapon_for_resource,
@@ -717,6 +725,8 @@ pub fn build_package(
                         &mut model_sockets,
                         &mut model_instances,
                         &mut model_for_resource,
+                        &runtime_model_clips,
+                        &mut model_clip_remaps,
                         &mut report,
                     ) {
                         return (None, report);
@@ -919,6 +929,8 @@ pub fn build_package(
                         &mut model_frame_bounds,
                         &mut model_sockets,
                         &mut model_for_resource,
+                        &runtime_model_clips,
+                        &mut model_clip_remaps,
                         &mut characters,
                         &mut report,
                     )
@@ -1113,6 +1125,196 @@ fn cook_far_vista_texture_asset(
     Some(new_index)
 }
 
+fn collect_runtime_model_clip_requirements(
+    project: &ProjectDocument,
+    scene: &crate::Scene,
+) -> HashMap<ResourceId, BTreeSet<u16>> {
+    let mut out = HashMap::new();
+
+    for resource in &project.resources {
+        match &resource.data {
+            ResourceData::Model(_) => {
+                add_model_clip_requirement(project, &mut out, resource.id, None);
+            }
+            ResourceData::Character(character) => {
+                add_character_clip_requirements(project, &mut out, character);
+            }
+            ResourceData::Weapon(weapon) => {
+                if let Some(model) = weapon.model {
+                    add_model_clip_requirement(project, &mut out, model, None);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for node in scene.nodes() {
+        match &node.kind {
+            NodeKind::Entity => {
+                if let Some((Some(model), _)) = component_model_renderer(scene, node) {
+                    let clip = component_animator(scene, node).and_then(|anim| anim.clip);
+                    add_model_clip_requirement(project, &mut out, model, clip);
+                }
+                if let Some(controller) = component_character_controller(scene, node) {
+                    if let Some(character_id) = controller.character {
+                        if let Some(ResourceData::Character(character)) =
+                            project.resource(character_id).map(|r| &r.data)
+                        {
+                            add_character_clip_requirements(project, &mut out, character);
+                        }
+                    }
+                }
+                if let Some(equipment) = component_equipment(scene, node) {
+                    if let Some(weapon_id) = equipment.weapon {
+                        if let Some(ResourceData::Weapon(weapon)) =
+                            project.resource(weapon_id).map(|r| &r.data)
+                        {
+                            if let Some(model) = weapon.model {
+                                add_model_clip_requirement(project, &mut out, model, None);
+                            }
+                        }
+                    }
+                }
+            }
+            NodeKind::MeshInstance {
+                mesh: Some(model),
+                animation_clip,
+                ..
+            } => {
+                if project
+                    .resource(*model)
+                    .is_some_and(|r| matches!(r.data, ResourceData::Model(_)))
+                {
+                    add_model_clip_requirement(project, &mut out, *model, *animation_clip);
+                }
+            }
+            NodeKind::SpawnPoint {
+                character: Some(character_id),
+                ..
+            }
+            | NodeKind::CharacterController {
+                character: Some(character_id),
+                ..
+            } => {
+                if let Some(ResourceData::Character(character)) =
+                    project.resource(*character_id).map(|r| &r.data)
+                {
+                    add_character_clip_requirements(project, &mut out, character);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn add_character_clip_requirements(
+    project: &ProjectDocument,
+    out: &mut HashMap<ResourceId, BTreeSet<u16>>,
+    character: &crate::CharacterResource,
+) {
+    let Some(model) = character.model else {
+        return;
+    };
+    add_model_clip_requirement(project, out, model, None);
+
+    for legacy in [
+        character.idle_clip,
+        character.walk_clip,
+        character.run_clip,
+        character.turn_clip,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        add_model_clip_requirement(project, out, model, Some(legacy));
+    }
+
+    let Some(set) = character.animation_set.and_then(|id| {
+        project
+            .resource(id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationSet(set) => Some(set),
+                _ => None,
+            })
+    }) else {
+        return;
+    };
+
+    for role in [
+        AnimationRole::Idle,
+        AnimationRole::Walk,
+        AnimationRole::Run,
+        AnimationRole::Turn,
+    ] {
+        if let Some(animation_id) = set.role_clip(role) {
+            if let Some(index) = project.resolved_model_animation_index(model, animation_id) {
+                add_model_clip_requirement(project, out, model, Some(index));
+            }
+        }
+    }
+}
+
+fn add_model_clip_requirement(
+    project: &ProjectDocument,
+    out: &mut HashMap<ResourceId, BTreeSet<u16>>,
+    model: ResourceId,
+    clip: Option<u16>,
+) {
+    let resolved_len = project.resolved_model_animation_clips(model).len();
+    if resolved_len == 0 {
+        return;
+    }
+    let index = clip
+        .or_else(|| {
+            project
+                .resource(model)
+                .and_then(|resource| match &resource.data {
+                    ResourceData::Model(model) => model.default_clip,
+                    _ => None,
+                })
+        })
+        .unwrap_or(0);
+    if (index as usize) < resolved_len {
+        out.entry(model).or_default().insert(index);
+    }
+}
+
+fn runtime_model_clip_indices(
+    resolved_len: usize,
+    required: Option<&BTreeSet<u16>>,
+    default_clip: u16,
+) -> Vec<u16> {
+    let mut selected = BTreeSet::new();
+    if (default_clip as usize) < resolved_len {
+        selected.insert(default_clip);
+    }
+    if let Some(required) = required {
+        for index in required {
+            if (*index as usize) < resolved_len {
+                selected.insert(*index);
+            }
+        }
+    }
+    if selected.is_empty() && resolved_len > 0 {
+        selected.insert(0);
+    }
+    selected.into_iter().collect()
+}
+
+fn remap_runtime_model_clip(
+    remaps: &HashMap<ResourceId, Vec<Option<u16>>>,
+    model: ResourceId,
+    authored_index: u16,
+) -> Option<u16> {
+    remaps
+        .get(&model)
+        .and_then(|model_remap| model_remap.get(authored_index as usize))
+        .copied()
+        .flatten()
+}
+
 /// Cook one Character resource into a [`PlaytestCharacter`],
 /// registering its backing model on first sight (deduped against
 /// MeshInstance placements). Validates clip indices land inside
@@ -1132,6 +1334,8 @@ fn cook_player_character(
     model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut std::collections::HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     characters: &mut Vec<PlaytestCharacter>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
@@ -1180,11 +1384,12 @@ fn cook_player_character(
         model_frame_bounds,
         model_sockets,
         model_for_resource,
+        runtime_model_clips,
+        model_clip_remaps,
         report,
     )?;
     let model = &models[model_index as usize];
 
-    let clip_count = model.clip_count;
     let model_skeleton =
         project
             .resource(model_resource_id)
@@ -1219,10 +1424,14 @@ fn cook_player_character(
         if let Some((_, set_name, set)) = animation_set {
             if let Some(animation_id) = set.role_clip(role) {
                 match project.resolved_model_animation_index(model_resource_id, animation_id) {
-                    Some(index) if index < clip_count => return Some(index),
                     Some(index) => {
+                        if let Some(local) =
+                            remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)
+                        {
+                            return Some(local);
+                        }
                         report.error(format!(
-                            "Character '{}' {role_label} clip resolves to {index}, out of range ({clip_count} clips on model)",
+                            "Character '{}' {role_label} clip resolves to {index}, but that clip was not packaged for runtime",
                             resource.name
                         ));
                         return None;
@@ -1239,14 +1448,14 @@ fn cook_player_character(
         }
 
         match legacy_slot {
-            Some(idx) if idx < clip_count => Some(idx),
-            Some(idx) => {
-                report.error(format!(
-                    "Character '{}' {role_label} clip {idx} out of range ({clip_count} clips on model)",
-                    resource.name
-                ));
-                None
-            }
+            Some(idx) => remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
+                .or_else(|| {
+                    report.error(format!(
+                        "Character '{}' {role_label} clip {idx} was not packaged for runtime",
+                        resource.name
+                    ));
+                    None
+                }),
             None if required => {
                 report.error(format!(
                     "Character '{}' has no {role_label} clip assigned",
@@ -1422,6 +1631,8 @@ fn register_model_for_instance(
     model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut std::collections::HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     if let Some(&existing) = model_for_resource.get(&model_resource_id) {
@@ -1549,12 +1760,34 @@ fn register_model_for_instance(
         None
     };
 
-    // Clip assets -- one .psxanim per resolved clip, validated for
-    // joint parity. Legacy model-local clips stay first so existing
-    // clip indices keep working; compatible AnimationClip resources
-    // are appended for the new shared animation library path.
+    let authored_default_clip = match model.default_clip {
+        Some(idx) if (idx as usize) < resolved_clips.len() => idx,
+        Some(idx) => {
+            report.error(format!(
+                "Model '{}' default_clip {idx} is out of range ({} clips)",
+                resource.name,
+                resolved_clips.len()
+            ));
+            return None;
+        }
+        None => 0,
+    };
+    let selected_clip_indices = runtime_model_clip_indices(
+        resolved_clips.len(),
+        runtime_model_clips.get(&model_resource_id),
+        authored_default_clip,
+    );
+
+    // Clip assets -- one .psxanim per runtime-needed clip. The
+    // editor may keep a much larger animation library on the model;
+    // the PS1 package only needs defaults, placed overrides, and
+    // character role clips.
     let clip_first = u16::try_from(model_clips.len()).unwrap_or(u16::MAX);
-    for (i, clip) in resolved_clips.iter().enumerate() {
+    let mut clip_remap = vec![None; resolved_clips.len()];
+    for (local_i, resolved_i) in selected_clip_indices.iter().copied().enumerate() {
+        let Some(clip) = resolved_clips.get(resolved_i as usize) else {
+            continue;
+        };
         let abs = resolve_path(&clip.psxanim_path, project_root);
         let bytes = match std::fs::read(&abs) {
             Ok(b) => b,
@@ -1631,9 +1864,10 @@ fn register_model_for_instance(
         assets.push(PlaytestAsset {
             kind: PlaytestAssetKind::ModelAnimation,
             bytes,
-            filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", i),
+            filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
             source_label: format!("{} / {}", resource.name, clip.name),
         });
+        clip_remap[resolved_i as usize] = u16::try_from(local_i).ok();
         model_clips.push(PlaytestModelClip {
             model: model_index,
             name: clip.name.clone(),
@@ -1649,18 +1883,16 @@ fn register_model_for_instance(
     //     silently pointing at clip 0.
     //   - `None` falls back to clip 0. Cooker has already
     //     refused empty-clip placed models, so `clip_count >= 1`.
-    let default_clip = match model.default_clip {
-        Some(idx) => {
-            if idx >= clip_count {
-                report.error(format!(
-                    "Model '{}' default_clip {idx} is out of range ({} clips)",
-                    resource.name, clip_count
-                ));
-                return None;
-            }
-            idx
-        }
-        None => 0,
+    let Some(default_clip) = clip_remap
+        .get(authored_default_clip as usize)
+        .copied()
+        .flatten()
+    else {
+        report.error(format!(
+            "Model '{}' default_clip {authored_default_clip} was not packaged for runtime",
+            resource.name
+        ));
+        return None;
     };
 
     let socket_first = u16::try_from(model_sockets.len()).unwrap_or(u16::MAX);
@@ -1716,6 +1948,7 @@ fn register_model_for_instance(
         collision_radius: model.collision_radius,
     });
     model_for_resource.insert(model_resource_id, model_index);
+    model_clip_remaps.insert(model_resource_id, clip_remap);
     Some(model_index)
 }
 
@@ -1960,6 +2193,8 @@ fn push_model_instance_for_resource(
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_instances: &mut Vec<PlaytestModelInstance>,
     model_for_resource: &mut HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let Some(model_index) = register_model_for_instance(
@@ -1973,21 +2208,31 @@ fn push_model_instance_for_resource(
         model_frame_bounds,
         model_sockets,
         model_for_resource,
+        runtime_model_clips,
+        model_clip_remaps,
         report,
     ) else {
         return false;
     };
-    let model = &models[model_index as usize];
     let clip = match clip_override {
         Some(idx) => {
-            if idx >= model.clip_count {
+            let authored_clip_count = project
+                .resolved_model_animation_clips(model_resource_id)
+                .len();
+            if idx as usize >= authored_clip_count {
                 report.error(format!(
-                    "Model instance '{node_name}' clip override {idx} out of range (model has {})",
-                    model.clip_count
+                    "Model instance '{node_name}' clip override {idx} out of range (model has {authored_clip_count})"
                 ));
                 return false;
             }
-            idx
+            let Some(local) = remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
+            else {
+                report.error(format!(
+                    "Model instance '{node_name}' clip override {idx} was not packaged for runtime"
+                ));
+                return false;
+            };
+            local
         }
         None => MODEL_CLIP_INHERIT,
     };
@@ -2021,6 +2266,8 @@ fn push_character_controller_idle_instance(
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_instances: &mut Vec<PlaytestModelInstance>,
     model_for_resource: &mut HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let Some(resource) = project.resource(character_id) else {
@@ -2055,6 +2302,8 @@ fn push_character_controller_idle_instance(
         model_frame_bounds,
         model_sockets,
         model_for_resource,
+        runtime_model_clips,
+        model_clip_remaps,
         report,
     ) else {
         return false;
@@ -2065,6 +2314,7 @@ fn push_character_controller_idle_instance(
         character,
         model_resource_id,
         &models[model_index as usize],
+        model_clip_remaps,
         report,
     ) else {
         return false;
@@ -2088,6 +2338,7 @@ fn character_idle_clip_for_model_instance(
     character: &crate::CharacterResource,
     model_resource_id: ResourceId,
     model: &PlaytestModel,
+    model_clip_remaps: &HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     let model_skeleton =
@@ -2113,11 +2364,14 @@ fn character_idle_clip_for_model_instance(
         }
         if let Some(animation_id) = set.role_clip(AnimationRole::Idle) {
             return match project.resolved_model_animation_index(model_resource_id, animation_id) {
-                Some(index) if index < model.clip_count => Some(index),
                 Some(index) => {
+                    if let Some(local) =
+                        remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)
+                    {
+                        return Some(local);
+                    }
                     report.error(format!(
-                        "Character '{character_name}' idle clip resolves to {index}, out of range ({} clips on model)",
-                        model.clip_count
+                        "Character '{character_name}' idle clip resolves to {index}, but that clip was not packaged for runtime"
                     ));
                     None
                 }
@@ -2133,11 +2387,13 @@ fn character_idle_clip_for_model_instance(
     }
 
     match character.idle_clip {
-        Some(idx) if idx < model.clip_count => Some(idx),
         Some(idx) => {
+            if let Some(local) = remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
+            {
+                return Some(local);
+            }
             report.error(format!(
-                "Character '{character_name}' idle clip {idx} out of range ({} clips on model)",
-                model.clip_count
+                "Character '{character_name}' idle clip {idx} was not packaged for runtime"
             ));
             None
         }
@@ -2157,6 +2413,8 @@ fn register_weapon_for_equipment(
     model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     weapon_hitboxes: &mut Vec<PlaytestWeaponHitbox>,
     weapons: &mut Vec<PlaytestWeapon>,
     weapon_for_resource: &mut HashMap<ResourceId, u16>,
@@ -2192,6 +2450,8 @@ fn register_weapon_for_equipment(
             model_frame_bounds,
             model_sockets,
             model_for_resource,
+            runtime_model_clips,
+            model_clip_remaps,
             report,
         )?),
         None => None,
@@ -5555,6 +5815,46 @@ mod tests {
         assert_eq!(model.default_clip, 0);
         // Sanity: never emit the old u16::MAX sentinel.
         assert!(model.default_clip < model.clip_count);
+    }
+
+    #[test]
+    fn playtest_packages_only_runtime_required_player_clips() {
+        let project = ProjectDocument::starter();
+        let player_model = player_model_resource_id(&project);
+        let authored_clip_count = project.resolved_model_animation_clips(player_model).len();
+        assert!(
+            authored_clip_count > 4,
+            "starter should expose library clips for this regression"
+        );
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        let (model_index, model) = package
+            .models
+            .iter()
+            .enumerate()
+            .find(|(_, model)| model.source_resource == player_model)
+            .expect("player model is packaged");
+
+        assert!(
+            (model.clip_count as usize) < authored_clip_count,
+            "runtime should not package the full editor animation library"
+        );
+
+        let character = package
+            .characters
+            .iter()
+            .find(|character| character.model == model_index as u16)
+            .expect("player character is packaged");
+        assert!(character.idle_clip < model.clip_count);
+        assert!(character.walk_clip < model.clip_count);
+        if character.run_clip != CHARACTER_CLIP_NONE {
+            assert!(character.run_clip < model.clip_count);
+        }
+        if character.turn_clip != CHARACTER_CLIP_NONE {
+            assert!(character.turn_clip < model.clip_count);
+        }
     }
 
     #[test]
