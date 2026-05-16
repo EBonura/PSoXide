@@ -345,9 +345,9 @@ fn draw_overlay_toggles(ui: &mut egui::Ui, state: &mut ModelAnimationViewerState
     .on_hover_text("Draw the cooked skeleton overlay");
     ui.toggle_value(
         &mut state.show_animation_root,
-        icons::label(icons::CIRCLE_DOT, "Root"),
+        icons::label(icons::CIRCLE_DOT, "Anchor"),
     )
-    .on_hover_text("Draw the sampled animation root marker");
+    .on_hover_text("Draw the body-derived preview anchor");
 }
 
 fn draw_preview(
