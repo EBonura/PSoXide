@@ -16443,6 +16443,7 @@ fn draw_model_animated_import_preview(
         yaw_q12: (*preview_yaw_q12).rem_euclid(4096) as u16,
         pitch_q12: (*preview_pitch_q12).rem_euclid(4096) as u16,
         radius: *preview_radius,
+        focus_on_animated_bounds: true,
         show_animation_root,
         show_bones: false,
     };
@@ -17227,6 +17228,7 @@ fn draw_model_resource_preview_panel(
                     yaw_q12: yaw.rem_euclid(4096) as u16,
                     pitch_q12: pitch.rem_euclid(4096) as u16,
                     radius,
+                    focus_on_animated_bounds: true,
                     show_animation_root: false,
                     show_bones: false,
                 },
