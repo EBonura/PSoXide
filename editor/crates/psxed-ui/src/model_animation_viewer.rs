@@ -23,6 +23,8 @@ pub(crate) struct ModelAnimationViewerState {
     yaw_q12: i32,
     pitch_q12: i32,
     radius: i32,
+    show_animation_root: bool,
+    show_bones: bool,
     last_time_seconds: f64,
 }
 
@@ -38,6 +40,8 @@ impl Default for ModelAnimationViewerState {
             yaw_q12: 340,
             pitch_q12: 350,
             radius: 0,
+            show_animation_root: false,
+            show_bones: false,
             last_time_seconds: 0.0,
         }
     }
@@ -289,6 +293,7 @@ fn draw_playback_controls(
             } else {
                 ui.weak("No cooked animation loaded");
             }
+            draw_overlay_toggles(ui, state);
             return;
         };
         if ui
@@ -326,8 +331,23 @@ fn draw_playback_controls(
                 .text("Speed")
                 .step_by(0.1),
         );
+        draw_overlay_toggles(ui, state);
     });
     action
+}
+
+fn draw_overlay_toggles(ui: &mut egui::Ui, state: &mut ModelAnimationViewerState) {
+    ui.separator();
+    ui.toggle_value(
+        &mut state.show_bones,
+        icons::label(icons::WAYPOINT, "Bones"),
+    )
+    .on_hover_text("Draw the cooked skeleton overlay");
+    ui.toggle_value(
+        &mut state.show_animation_root,
+        icons::label(icons::CIRCLE_DOT, "Root"),
+    )
+    .on_hover_text("Draw the sampled animation root marker");
 }
 
 fn draw_preview(
@@ -465,9 +485,10 @@ fn draw_preview(
             time_seconds: seconds,
             yaw_q12: state.yaw_q12.rem_euclid(4096) as u16,
             pitch_q12: state.pitch_q12.rem_euclid(4096) as u16,
-            radius: effective_radius(state, Some(model)),
-            show_animation_root: false,
-            show_bones: false,
+            radius: state.radius,
+            focus_on_animated_bounds: true,
+            show_animation_root: state.show_animation_root,
+            show_bones: state.show_bones,
         },
     );
 
