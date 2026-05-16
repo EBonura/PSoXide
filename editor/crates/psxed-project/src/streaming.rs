@@ -536,6 +536,7 @@ mod tests {
             "model",
             ResourceData::Model(crate::ModelResource {
                 model_path: "model.psxmdl".to_string(),
+                source_path: None,
                 texture_path: None,
                 skeleton: None,
                 clips: Vec::new(),
