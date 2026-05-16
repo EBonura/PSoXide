@@ -3358,7 +3358,7 @@ impl EditorWorkspace {
                             egui::Slider::new(&mut dialog.preview_radius, 640..=4096)
                                 .text("Distance"),
                         );
-                        ui.checkbox(&mut dialog.show_animation_root, "Root marker");
+                        ui.checkbox(&mut dialog.show_animation_root, "Anchor marker");
                         if ui.button(icons::label(icons::ROTATE_CCW, "Reset View")).clicked() {
                             dialog.preview_yaw_q12 = 340;
                             dialog.preview_pitch_q12 = 350;
