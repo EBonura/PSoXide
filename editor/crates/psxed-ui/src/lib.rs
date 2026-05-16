@@ -1875,6 +1875,7 @@ impl ResourceFilter {
             Self::Animation => matches!(
                 data,
                 ResourceData::Skeleton(_)
+                    | ResourceData::AnimationSource(_)
                     | ResourceData::AnimationClip(_)
                     | ResourceData::AnimationSet(_)
             ),
@@ -3230,14 +3231,14 @@ impl EditorWorkspace {
                         });
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("Extra FBX animations")
+                                RichText::new("Extra animations")
                                     .color(STUDIO_TEXT_WEAK)
                                     .small(),
                             );
                             if ui
                                 .button(icons::label(icons::FILE_PLUS, "Add"))
                                 .on_hover_text(
-                                    "Add standalone .fbx animation takes to bake with this model.",
+                                    "Add standalone .fbx, .glb, or .gltf animation takes to bake with this model.",
                                 )
                                 .clicked()
                             {
@@ -3585,8 +3586,8 @@ impl EditorWorkspace {
 
     fn choose_model_import_animation_sources(&mut self) -> bool {
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Choose FBX animation takes")
-            .add_filter("FBX animation", &["fbx"]);
+            .set_title("Choose animation sources")
+            .add_filter("Animation source", &["fbx", "glb", "gltf"]);
         let current = self.model_import_source_path();
         if let Some(dir) = Self::path_parent_or_self(&current) {
             dialog = dialog.set_directory(dir);
@@ -3666,6 +3667,7 @@ impl EditorWorkspace {
             normalize_root_translation: self.model_import_dialog.normalize_root_translation,
             strip_animation_scale: true,
             prune_detached_face_islands: 4,
+            extra_animations_affect_bounds: true,
         }
     }
 
@@ -9672,7 +9674,12 @@ impl EditorWorkspace {
         // borrow on `resource_mut` is live.
         let character_ctx = build_character_editor_context(&self.project);
         let model_options = collect_model_options(&self.project);
+        let model_resource_options: Vec<(ResourceId, String)> = model_options
+            .iter()
+            .map(|(id, name, _)| (*id, name.clone()))
+            .collect();
         let skeleton_options = collect_skeleton_options(&self.project);
+        let animation_source_options = collect_animation_source_options(&self.project);
         let animation_clip_options = collect_animation_clip_options(&self.project);
         let attachment_socket_names = collect_attachment_socket_names(&self.project);
 
@@ -9838,9 +9845,24 @@ impl EditorWorkspace {
             ResourceData::Skeleton(skeleton) => {
                 changed |= draw_skeleton_resource_editor(ui, skeleton);
             }
+            ResourceData::AnimationSource(source) => {
+                changed |= draw_animation_source_resource_editor(
+                    ui,
+                    source,
+                    &project_root,
+                    &skeleton_options,
+                    &model_resource_options,
+                );
+            }
             ResourceData::AnimationClip(clip) => {
-                changed |=
-                    draw_animation_clip_resource_editor(ui, clip, &project_root, &skeleton_options);
+                changed |= draw_animation_clip_resource_editor(
+                    ui,
+                    clip,
+                    &project_root,
+                    &skeleton_options,
+                    &model_resource_options,
+                    &animation_source_options,
+                );
             }
             ResourceData::AnimationSet(set) => {
                 changed |= draw_animation_set_resource_editor(
@@ -9978,6 +10000,28 @@ impl EditorWorkspace {
                 ui.close_menu();
             }
             if ui
+                .button(icons::label(icons::PLAY, "Animation Source"))
+                .on_hover_text(
+                    "Add an authoring-time animation library entry. Sources are previewed or baked before runtime.",
+                )
+                .clicked()
+            {
+                let id = self.project.add_resource(
+                    "New Animation Source",
+                    ResourceData::AnimationSource(psxed_project::AnimationSourceResource::from_path(
+                        "",
+                        "",
+                    )),
+                );
+                self.replace_resource_selection(id);
+                self.clear_node_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = "Added animation source".to_string();
+                self.mark_dirty();
+                ui.close_menu();
+            }
+            if ui
                 .button(icons::label(icons::PLAY, "Clip Role Map"))
                 .on_hover_text(
                     "Add a reusable idle/walk/run/turn mapping for compatible animation clips.",
@@ -10047,8 +10091,10 @@ impl EditorWorkspace {
                 match catalogue_animation_library(&mut self.project, &self.project_dir) {
                     Ok(report) => {
                         self.status = format!(
-                            "Catalogued animations: {} skeleton(s), {} clip(s), {} set(s), {} updated",
+                            "Catalogued animations: {} skeleton(s), {} source(s), {} source update(s), {} clip(s), {} set(s), {} updated",
                             report.skeletons_added,
+                            report.sources_added,
+                            report.sources_updated,
                             report.clips_added,
                             report.sets_added,
                             report.sets_updated + report.models_updated + report.characters_updated
@@ -10061,6 +10107,26 @@ impl EditorWorkspace {
                         self.status = format!("Animation catalogue failed: {error}");
                     }
                 }
+                ui.close_menu();
+            }
+            if ui
+                .button(icons::label(icons::SCAN, "Catalogue Animation Source Folder"))
+                .on_hover_text(
+                    "Catalogue raw FBX/GLB animation source files without copying them into the project.",
+                )
+                .clicked()
+            {
+                self.catalogue_animation_source_folder();
+                ui.close_menu();
+            }
+            if ui
+                .button(icons::label(icons::SCAN, "Catalogue Animation Source Zip"))
+                .on_hover_text(
+                    "Catalogue raw FBX/GLB animation sources inside a zip without extracting them.",
+                )
+                .clicked()
+            {
+                self.catalogue_animation_source_zip();
                 ui.close_menu();
             }
             if ui
@@ -10486,13 +10552,16 @@ impl EditorWorkspace {
                     self.draw_viewport_tabs(ui);
                     tool_panel_body(ui, |ui| {
                         if self.active_workspace == WorkspaceView::Animation {
-                            model_animation_viewer::draw_model_animation_viewer(
+                            let action = model_animation_viewer::draw_model_animation_viewer(
                                 ui,
                                 &self.project,
                                 &self.project_dir,
                                 &mut self.animation_viewer,
                                 &mut self.animation_viewer_preview_texture,
                             );
+                            if let Some(action) = action {
+                                self.handle_animation_viewer_action(action);
+                            }
                             return;
                         }
 
@@ -13742,6 +13811,134 @@ impl EditorWorkspace {
         self.model_import_dialog.selected_clip = 0;
     }
 
+    fn catalogue_animation_source_folder(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose animation source folder");
+        if self.project_dir.is_dir() {
+            dialog = dialog.set_directory(&self.project_dir);
+        }
+        let Some(path) = dialog.pick_folder() else {
+            return;
+        };
+        self.catalogue_animation_source_path(&path);
+    }
+
+    fn catalogue_animation_source_zip(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Choose animation source zip")
+            .add_filter("Animation source zip", &["zip"]);
+        if self.project_dir.is_dir() {
+            dialog = dialog.set_directory(&self.project_dir);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        self.catalogue_animation_source_path(&path);
+    }
+
+    fn catalogue_animation_source_path(&mut self, path: &Path) {
+        match catalogue_animation_sources_from_path(&mut self.project, &self.project_dir, path) {
+            Ok(report) => {
+                self.status = format!(
+                    "Catalogued animation sources: {} found, {} added, {} updated",
+                    report.source_candidates, report.sources_added, report.sources_updated
+                );
+                if report.changed() {
+                    self.mark_dirty();
+                }
+            }
+            Err(error) => {
+                self.status = format!("Animation source catalogue failed: {error}");
+            }
+        }
+    }
+
+    fn handle_animation_viewer_action(
+        &mut self,
+        action: model_animation_viewer::AnimationViewerAction,
+    ) {
+        match action {
+            model_animation_viewer::AnimationViewerAction::BakeSourceForModel {
+                model_id,
+                source_id,
+            } => {
+                let Some((model_source, world_height)) =
+                    self.project.resource(model_id).and_then(|resource| {
+                        let ResourceData::Model(model) = &resource.data else {
+                            return None;
+                        };
+                        Some((model.source_path.clone(), model.world_height))
+                    })
+                else {
+                    self.status = format!("Model #{} is not available", model_id.raw());
+                    return;
+                };
+                let Some(model_source) = model_source.filter(|path| !path.trim().is_empty()) else {
+                    self.status = format!(
+                        "Model #{} has no source path. Set it in the Model inspector or reimport the model.",
+                        model_id.raw()
+                    );
+                    return;
+                };
+                let Some(animation_source) =
+                    self.project.resource(source_id).and_then(|resource| {
+                        let ResourceData::AnimationSource(source) = &resource.data else {
+                            return None;
+                        };
+                        Some(source.source_path.clone())
+                    })
+                else {
+                    self.status = format!("Animation source #{} is not available", source_id.raw());
+                    return;
+                };
+
+                let temp_dir = match make_animation_bake_temp_dir() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.status = format!("Animation bake failed: {error}");
+                        return;
+                    }
+                };
+                let result = (|| {
+                    let model_source_path = materialize_authoring_source_path(
+                        &model_source,
+                        &self.project_dir,
+                        &temp_dir,
+                    )?;
+                    let animation_source_path = materialize_authoring_source_path(
+                        &animation_source,
+                        &self.project_dir,
+                        &temp_dir,
+                    )?;
+                    let mut config = psxed_project::model_import::RigidModelConfig::default();
+                    config.world_height = world_height;
+                    config.extra_animations_affect_bounds = false;
+                    psxed_project::model_import::bake_animation_source_for_model(
+                        &mut self.project,
+                        model_id,
+                        source_id,
+                        &model_source_path,
+                        &animation_source_path,
+                        &self.project_dir,
+                        config,
+                    )
+                    .map_err(|error| error.to_string())
+                })();
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                match result {
+                    Ok(clip_id) => {
+                        self.animation_viewer.focus_resource(&self.project, clip_id);
+                        self.animation_viewer_preview_texture = None;
+                        self.mark_dirty();
+                        self.status = format!("Baked animation clip #{}", clip_id.raw());
+                    }
+                    Err(error) => {
+                        self.status = format!("Animation bake failed: {error}");
+                    }
+                }
+            }
+        }
+    }
+
     fn mark_dirty(&mut self) {
         self.dirty = true;
         self.clear_validation_issues();
@@ -14156,28 +14353,8 @@ fn should_auto_sync_starter_character_catalogue(project: &ProjectDocument) -> bo
         .resources
         .iter()
         .any(legacy_obsidian_warden_resource);
-    let has_starter_character_asset =
-        project
-            .resources
-            .iter()
-            .any(|resource| match &resource.data {
-                ResourceData::Model(_) => {
-                    STARTER_CHARACTER_MODEL_NAMES.contains(&resource.name.as_str())
-                }
-                ResourceData::Character(_) => {
-                    STARTER_CHARACTER_PROFILE_NAMES.contains(&resource.name.as_str())
-                }
-                _ => false,
-            });
-    let missing_canonical_profile = STARTER_CHARACTER_PROFILE_NAMES.iter().any(|name| {
-        !project_has_resource_name(project, name, |data| {
-            matches!(data, ResourceData::Character(_))
-        })
-    });
 
-    has_legacy_obsidian_warden
-        || (missing_canonical_profile
-            && (has_legacy_starter_character || has_starter_character_asset))
+    has_legacy_obsidian_warden || has_legacy_starter_character
 }
 
 fn sync_starter_character_catalogue(
@@ -14354,7 +14531,15 @@ fn remap_resource_data(data: &mut ResourceData, id_map: &HashMap<ResourceId, Res
     match data {
         ResourceData::Material(material) => remap_resource_id_option(&mut material.texture, id_map),
         ResourceData::Model(model) => remap_resource_id_option(&mut model.skeleton, id_map),
-        ResourceData::AnimationClip(clip) => remap_resource_id_option(&mut clip.skeleton, id_map),
+        ResourceData::AnimationSource(source) => {
+            remap_resource_id_option(&mut source.skeleton, id_map);
+            remap_resource_id_option(&mut source.target_model, id_map);
+        }
+        ResourceData::AnimationClip(clip) => {
+            remap_resource_id_option(&mut clip.skeleton, id_map);
+            remap_resource_id_option(&mut clip.source, id_map);
+            remap_resource_id_option(&mut clip.target_model, id_map);
+        }
         ResourceData::AnimationSet(set) => {
             remap_resource_id_option(&mut set.skeleton, id_map);
             remap_resource_id_option(&mut set.idle_clip, id_map);
@@ -14686,11 +14871,8 @@ fn draw_world_grid_settings(
                         .clamp(0, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX);
                     if ui
                         .add(
-                            egui::Slider::new(
-                                &mut mountains,
-                                0..=SKY_MOUNTAIN_HEIGHT_PERCENT_MAX,
-                            )
-                            .suffix("%"),
+                            egui::Slider::new(&mut mountains, 0..=SKY_MOUNTAIN_HEIGHT_PERCENT_MAX)
+                                .suffix("%"),
                         )
                         .changed()
                     {
@@ -16683,6 +16865,20 @@ fn draw_model_resource_editor(
             changed |= ui.text_edit_singleline(&mut model.model_path).changed();
 
             ui.add_space(4.0);
+            ui.label("Source GLB/glTF/FBX path (optional)");
+            let mut source = model.source_path.clone().unwrap_or_default();
+            let source_response = ui.text_edit_singleline(&mut source);
+            if source_response.changed() {
+                let trimmed = source.trim().to_string();
+                model.source_path = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                };
+                changed = true;
+            }
+
+            ui.add_space(4.0);
             ui.label("Atlas .psxt path (optional)");
             let mut atlas = model.texture_path.clone().unwrap_or_default();
             let atlas_response = ui.text_edit_singleline(&mut atlas);
@@ -17404,6 +17600,8 @@ fn draw_animation_clip_resource_editor(
     clip: &mut psxed_project::AnimationClipResource,
     project_root: &Path,
     skeleton_options: &[(ResourceId, String)],
+    model_options: &[(ResourceId, String)],
+    source_options: &[(ResourceId, String)],
 ) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new(icons::label(icons::PLAY, "Animation Clip"))
@@ -17418,6 +17616,35 @@ fn draw_animation_clip_resource_editor(
                 &mut clip.skeleton,
                 skeleton_options,
             );
+            changed |= resource_id_picker(
+                ui,
+                "Source",
+                "animation-clip-source-picker",
+                &mut clip.source,
+                source_options,
+            );
+            changed |= resource_id_picker(
+                ui,
+                "Target model",
+                "animation-clip-target-model-picker",
+                &mut clip.target_model,
+                model_options,
+            );
+
+            ui.horizontal(|ui| {
+                ui.label("Bake");
+                let before = clip.bake;
+                egui::ComboBox::from_id_salt("animation-clip-bake")
+                    .selected_text(clip.bake.label())
+                    .show_ui(ui, |ui| {
+                        for bake in psxed_project::AnimationClipBakeKind::ALL {
+                            ui.selectable_value(&mut clip.bake, bake, bake.label());
+                        }
+                    });
+                if clip.bake != before {
+                    changed = true;
+                }
+            });
 
             ui.horizontal(|ui| {
                 ui.label("Role");
@@ -17486,6 +17713,212 @@ fn draw_animation_clip_resource_editor(
         }
     }
     changed
+}
+
+fn draw_animation_source_resource_editor(
+    ui: &mut egui::Ui,
+    source: &mut psxed_project::AnimationSourceResource,
+    project_root: &Path,
+    skeleton_options: &[(ResourceId, String)],
+    model_options: &[(ResourceId, String)],
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::PLAY, "Animation Source"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.label("Source file");
+            changed |= ui.text_edit_singleline(&mut source.source_path).changed();
+            ui.horizontal(|ui| {
+                ui.label("Clip name");
+                changed |= ui.text_edit_singleline(&mut source.clip_name).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Provider");
+                let before = source.provider;
+                egui::ComboBox::from_id_salt("animation-source-provider")
+                    .selected_text(source.provider.label())
+                    .show_ui(ui, |ui| {
+                        for provider in psxed_project::AnimationSourceProvider::ALL {
+                            ui.selectable_value(&mut source.provider, provider, provider.label());
+                        }
+                    });
+                if source.provider != before {
+                    changed = true;
+                }
+            });
+            changed |= resource_id_picker(
+                ui,
+                "Skeleton",
+                "animation-source-skeleton-picker",
+                &mut source.skeleton,
+                skeleton_options,
+            );
+            changed |= resource_id_picker(
+                ui,
+                "Target model",
+                "animation-source-target-model-picker",
+                &mut source.target_model,
+                model_options,
+            );
+
+            ui.horizontal(|ui| {
+                ui.label("Role");
+                let before = source.role;
+                egui::ComboBox::from_id_salt("animation-source-role")
+                    .selected_text(source.role.label())
+                    .show_ui(ui, |ui| {
+                        for role in psxed_project::AnimationRole::ALL {
+                            ui.selectable_value(&mut source.role, role, role.label());
+                        }
+                    });
+                if source.role != before {
+                    changed = true;
+                }
+            });
+            changed |= ui.checkbox(&mut source.looping, "Looping").changed();
+
+            let mut tags = source.tags.join(", ");
+            ui.horizontal(|ui| {
+                ui.label("Tags");
+                if ui.text_edit_singleline(&mut tags).changed() {
+                    source.tags = tags
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|tag| !tag.is_empty())
+                        .map(ToString::to_string)
+                        .collect();
+                    changed = true;
+                }
+            });
+        });
+
+    if !source.source_path.trim().is_empty() {
+        let status = animation_source_path_status(&source.source_path, project_root);
+        egui::CollapsingHeader::new(icons::label(icons::SCAN, "Source Status"))
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(status.label).color(if status.found {
+                        STUDIO_TEXT_WEAK
+                    } else {
+                        Color32::from_rgb(220, 120, 100)
+                    }),
+                );
+                ui.label(
+                    RichText::new(
+                        "Source clips are library candidates. Bake or retarget them into cooked Animation Clip resources before runtime.",
+                    )
+                    .color(STUDIO_TEXT_WEAK)
+                    .small(),
+                );
+            });
+    }
+    changed
+}
+
+struct AnimationSourcePathStatus {
+    found: bool,
+    label: String,
+}
+
+fn animation_source_path_status(
+    source_path: &str,
+    project_root: &Path,
+) -> AnimationSourcePathStatus {
+    if let Some((archive, entry)) = split_archive_animation_source_path(source_path) {
+        let archive_path = psxed_project::model_import::resolve_path(archive, Some(project_root));
+        let found = archive_path.is_file();
+        let label = if found {
+            format!("Found archive: {} :: {}", archive_path.display(), entry)
+        } else {
+            format!("Missing archive: {} :: {}", archive_path.display(), entry)
+        };
+        return AnimationSourcePathStatus { found, label };
+    }
+
+    let path = psxed_project::model_import::resolve_path(source_path, Some(project_root));
+    let found = path.is_file();
+    let label = if found {
+        format!("Found: {}", path.display())
+    } else {
+        format!("Missing: {}", path.display())
+    };
+    AnimationSourcePathStatus { found, label }
+}
+
+fn split_archive_animation_source_path(path: &str) -> Option<(&str, &str)> {
+    let (archive, entry) = path.split_once("::")?;
+    (!archive.trim().is_empty() && !entry.trim().is_empty()).then_some((archive, entry))
+}
+
+fn make_animation_bake_temp_dir() -> Result<PathBuf, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "psoxide-animation-bake-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+fn materialize_authoring_source_path(
+    source_path: &str,
+    project_root: &Path,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    if let Some((archive, entry)) = split_archive_animation_source_path(source_path) {
+        let archive_path = psxed_project::model_import::resolve_path(archive, Some(project_root));
+        return extract_archive_entry_to_temp(&archive_path, entry, temp_dir);
+    }
+    let path = psxed_project::model_import::resolve_path(source_path, Some(project_root));
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!("missing source file {}", path.display()))
+    }
+}
+
+fn extract_archive_entry_to_temp(
+    archive_path: &Path,
+    entry_name: &str,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|error| format!("{}: {error}", archive_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("{}: {error}", archive_path.display()))?;
+    let mut entry = archive
+        .by_name(entry_name)
+        .map_err(|error| format!("{}::{}: {error}", archive_path.display(), entry_name))?;
+    let out_path = temp_dir.join(sanitized_archive_entry_filename(entry_name));
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    std::io::Read::read_to_end(&mut entry, &mut bytes)
+        .map_err(|error| format!("{}::{}: {error}", archive_path.display(), entry_name))?;
+    std::fs::write(&out_path, bytes).map_err(|error| format!("{}: {error}", out_path.display()))?;
+    Ok(out_path)
+}
+
+fn sanitized_archive_entry_filename(entry_name: &str) -> String {
+    let file_name = Path::new(entry_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("source.fbx");
+    let mut out = String::with_capacity(file_name.len());
+    for ch in file_name.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "source.fbx".to_string()
+    } else {
+        out
+    }
 }
 
 fn draw_animation_set_resource_editor(
@@ -20035,6 +20468,9 @@ fn resource_file_name(resource: &Resource) -> String {
         ResourceData::Material(_) => cooked_name(&resource.name, "", "mat"),
         ResourceData::Model(model) => cooked_name(&resource.name, &model.model_path, "psxmdl"),
         ResourceData::Skeleton(_) => cooked_name(&resource.name, "", "skeleton"),
+        ResourceData::AnimationSource(source) => {
+            cooked_name(&resource.name, &source.source_path, "animsrc")
+        }
         ResourceData::AnimationClip(clip) => {
             cooked_name(&resource.name, &clip.psxanim_path, "psxanim")
         }
@@ -20088,6 +20524,7 @@ fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFilter, usize)
             ResourceData::Material(_) => material += 1,
             ResourceData::Model(_) => model += 1,
             ResourceData::Skeleton(_)
+            | ResourceData::AnimationSource(_)
             | ResourceData::AnimationClip(_)
             | ResourceData::AnimationSet(_) => animation += 1,
             ResourceData::Character(_) => character += 1,
@@ -20127,6 +20564,7 @@ fn resource_source_path(resource: &Resource) -> Option<&str> {
     match &resource.data {
         ResourceData::Texture { psxt_path } => Some(psxt_path.as_str()),
         ResourceData::Model(model) => Some(model.model_path.as_str()),
+        ResourceData::AnimationSource(source) => Some(source.source_path.as_str()),
         ResourceData::AnimationClip(clip) => Some(clip.psxanim_path.as_str()),
         ResourceData::Mesh { source_path }
         | ResourceData::Scene { source_path }
@@ -20146,6 +20584,7 @@ fn resource_lucide_icon(data: &ResourceData) -> char {
         ResourceData::Material(_) => icons::BLEND,
         ResourceData::Model(_) => icons::BOX,
         ResourceData::Skeleton(_) => icons::WAYPOINT,
+        ResourceData::AnimationSource(_) => icons::PLAY,
         ResourceData::AnimationClip(_) => icons::PLAY,
         ResourceData::AnimationSet(_) => icons::LAYERS,
         ResourceData::Character(_) => icons::MAP_PIN,
@@ -20167,6 +20606,7 @@ fn resource_lucide_color(data: &ResourceData, selected: bool) -> Color32 {
         ResourceData::Material(_) => Color32::from_rgb(208, 112, 162),
         ResourceData::Model(_) => Color32::from_rgb(186, 178, 124),
         ResourceData::Skeleton(_) => Color32::from_rgb(144, 180, 216),
+        ResourceData::AnimationSource(_) => Color32::from_rgb(170, 140, 220),
         ResourceData::AnimationClip(_) => Color32::from_rgb(126, 164, 220),
         ResourceData::AnimationSet(_) => Color32::from_rgb(142, 190, 154),
         ResourceData::Character(_) => Color32::from_rgb(120, 220, 148),
@@ -20583,6 +21023,7 @@ fn resource_preview_color(resource: &Resource) -> Color32 {
             ResourceData::Material(_) => Color32::from_rgb(120, 92, 135),
             ResourceData::Model(_) => Color32::from_rgb(140, 124, 96),
             ResourceData::Skeleton(_) => Color32::from_rgb(82, 112, 145),
+            ResourceData::AnimationSource(_) => Color32::from_rgb(104, 82, 145),
             ResourceData::AnimationClip(_) => Color32::from_rgb(76, 108, 170),
             ResourceData::AnimationSet(_) => Color32::from_rgb(82, 136, 100),
             ResourceData::Character(_) => Color32::from_rgb(96, 144, 110),
@@ -20601,6 +21042,7 @@ fn resource_detail(resource: &Resource) -> &'static str {
         ResourceData::Material(_) => "Material - 4bpp",
         ResourceData::Model(_) => "Model",
         ResourceData::Skeleton(_) => "Skeleton",
+        ResourceData::AnimationSource(_) => "Animation Source",
         ResourceData::AnimationClip(_) => "Animation Clip",
         ResourceData::AnimationSet(_) => "Clip Role Map",
         ResourceData::Character(_) => "Character Profile",
@@ -24269,6 +24711,17 @@ fn collect_animation_clip_options(project: &ProjectDocument) -> Vec<AnimationCli
         .collect()
 }
 
+fn collect_animation_source_options(project: &ProjectDocument) -> Vec<(ResourceId, String)> {
+    project
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            ResourceData::AnimationSource(_) => Some((resource.id, resource.name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 fn collect_animation_set_options(project: &ProjectDocument) -> Vec<AnimationSetOption> {
     project
         .resources
@@ -24291,6 +24744,9 @@ fn collect_animation_set_options(project: &ProjectDocument) -> Vec<AnimationSetO
 #[derive(Default)]
 struct AnimationCatalogueReport {
     skeletons_added: usize,
+    source_candidates: usize,
+    sources_added: usize,
+    sources_updated: usize,
     clips_added: usize,
     sets_added: usize,
     sets_updated: usize,
@@ -24301,6 +24757,8 @@ struct AnimationCatalogueReport {
 impl AnimationCatalogueReport {
     const fn changed(&self) -> bool {
         self.skeletons_added > 0
+            || self.sources_added > 0
+            || self.sources_updated > 0
             || self.clips_added > 0
             || self.sets_added > 0
             || self.sets_updated > 0
@@ -24315,6 +24773,17 @@ struct ModelCatalogueInput {
     name: String,
     model_path: String,
     clips: Vec<psxed_project::ModelAnimationClip>,
+}
+
+#[derive(Debug, Clone)]
+struct AnimationSourceCandidate {
+    resource_name: String,
+    source_path: String,
+    clip_name: String,
+    provider: psxed_project::AnimationSourceProvider,
+    role: psxed_project::AnimationRole,
+    looping: bool,
+    tags: Vec<String>,
 }
 
 fn catalogue_animation_library(
@@ -24369,6 +24838,31 @@ fn catalogue_animation_library(
         let mut animation_ids = Vec::new();
         for clip in &model.clips {
             let role = psxed_project::AnimationRole::guess_from_name(&clip.name);
+            let source_id =
+                match find_animation_source_by_path(project, Some(model.id), &clip.psxanim_path) {
+                    Some(id) => id,
+                    None => {
+                        let mut source = psxed_project::AnimationSourceResource::from_path(
+                            clip.psxanim_path.clone(),
+                            clip.name.clone(),
+                        );
+                        source.skeleton = Some(skeleton_id);
+                        source.target_model = Some(model.id);
+                        source.role = role;
+                        source.looping = !matches!(
+                            role,
+                            psxed_project::AnimationRole::Attack
+                                | psxed_project::AnimationRole::Hit
+                                | psxed_project::AnimationRole::Death
+                        );
+                        let id = project.add_resource(
+                            format!("{} Source", clip.name),
+                            ResourceData::AnimationSource(source),
+                        );
+                        report.sources_added += 1;
+                        id
+                    }
+                };
             let clip_id =
                 match find_animation_clip_by_path(project, skeleton_id, &clip.psxanim_path) {
                     Some(id) => id,
@@ -24378,6 +24872,9 @@ fn catalogue_animation_library(
                             ResourceData::AnimationClip(psxed_project::AnimationClipResource {
                                 psxanim_path: clip.psxanim_path.clone(),
                                 skeleton: Some(skeleton_id),
+                                source: Some(source_id),
+                                target_model: Some(model.id),
+                                bake: psxed_project::AnimationClipBakeKind::ModelNative,
                                 role,
                                 looping: !matches!(
                                     role,
@@ -24432,6 +24929,354 @@ fn catalogue_animation_library(
     Ok(report)
 }
 
+fn catalogue_animation_sources_from_path(
+    project: &mut ProjectDocument,
+    project_root: &Path,
+    source_root: &Path,
+) -> Result<AnimationCatalogueReport, String> {
+    let mut candidates = Vec::new();
+    if source_root.is_dir() {
+        collect_animation_source_candidates_from_dir(source_root, project_root, &mut candidates)?;
+    } else if is_zip_path(source_root) {
+        collect_animation_source_candidates_from_zip(source_root, project_root, &mut candidates)?;
+    } else if is_animation_source_file_path(source_root) {
+        candidates.push(animation_source_candidate_for_file(
+            &EditorWorkspace::display_project_path(source_root, project_root),
+            source_root
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("animation"),
+        ));
+    } else {
+        return Err(format!(
+            "{} is not an animation source folder, zip, FBX, GLB, or glTF file",
+            source_root.display()
+        ));
+    }
+
+    candidates.sort_by_key(|candidate| {
+        (
+            candidate.provider.label(),
+            candidate.source_path.to_ascii_lowercase(),
+        )
+    });
+    candidates.dedup_by(|a, b| {
+        a.source_path.eq_ignore_ascii_case(&b.source_path)
+            && a.clip_name.eq_ignore_ascii_case(&b.clip_name)
+    });
+
+    let mut report = AnimationCatalogueReport {
+        source_candidates: candidates.len(),
+        ..AnimationCatalogueReport::default()
+    };
+    for candidate in candidates {
+        match upsert_animation_source_candidate(project, candidate) {
+            AnimationSourceUpsert::Added => report.sources_added += 1,
+            AnimationSourceUpsert::Updated => report.sources_updated += 1,
+            AnimationSourceUpsert::Unchanged => {}
+        }
+    }
+    Ok(report)
+}
+
+fn collect_animation_source_candidates_from_dir(
+    root: &Path,
+    project_root: &Path,
+    out: &mut Vec<AnimationSourceCandidate>,
+) -> Result<(), String> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries =
+            std::fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        let mut entries: Vec<_> = entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("{}: {error}", dir.display()))?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries.into_iter().rev() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if !should_skip_animation_source_dir(&path) {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if !is_animation_source_file_path(&path) {
+                continue;
+            }
+            let stored = EditorWorkspace::display_project_path(&path, project_root);
+            if should_skip_animation_source_path(&stored) {
+                continue;
+            }
+            let clip_name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("animation");
+            out.push(animation_source_candidate_for_file(&stored, clip_name));
+        }
+    }
+    Ok(())
+}
+
+fn collect_animation_source_candidates_from_zip(
+    zip_path: &Path,
+    project_root: &Path,
+    out: &mut Vec<AnimationSourceCandidate>,
+) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path)
+        .map_err(|error| format!("{}: {error}", zip_path.display()))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|error| format!("{}: {error}", zip_path.display()))?;
+    let stored_zip = EditorWorkspace::display_project_path(zip_path, project_root);
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .map_err(|error| format!("{} entry #{index}: {error}", zip_path.display()))?;
+        if file.is_dir() {
+            continue;
+        }
+        let entry_name = file.name().replace('\\', "/");
+        if !is_animation_source_entry_name(&entry_name)
+            || should_skip_animation_source_path(&entry_name)
+        {
+            continue;
+        }
+        let clip_name = Path::new(&entry_name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("animation");
+        let stored = format!("{stored_zip}::{entry_name}");
+        out.push(animation_source_candidate_for_file(&stored, clip_name));
+    }
+    Ok(())
+}
+
+enum AnimationSourceUpsert {
+    Added,
+    Updated,
+    Unchanged,
+}
+
+fn upsert_animation_source_candidate(
+    project: &mut ProjectDocument,
+    candidate: AnimationSourceCandidate,
+) -> AnimationSourceUpsert {
+    if let Some(resource) = project
+        .resources
+        .iter_mut()
+        .find(|resource| match &resource.data {
+            ResourceData::AnimationSource(source) => {
+                source.target_model.is_none()
+                    && source
+                        .source_path
+                        .eq_ignore_ascii_case(&candidate.source_path)
+                    && source.clip_name.eq_ignore_ascii_case(&candidate.clip_name)
+            }
+            _ => false,
+        })
+    {
+        let ResourceData::AnimationSource(source) = &mut resource.data else {
+            return AnimationSourceUpsert::Unchanged;
+        };
+        let mut changed = false;
+        if source.provider != candidate.provider {
+            source.provider = candidate.provider;
+            changed = true;
+        }
+        if source.role != candidate.role {
+            source.role = candidate.role;
+            changed = true;
+        }
+        if source.looping != candidate.looping {
+            source.looping = candidate.looping;
+            changed = true;
+        }
+        if source.tags != candidate.tags {
+            source.tags = candidate.tags;
+            changed = true;
+        }
+        if changed {
+            AnimationSourceUpsert::Updated
+        } else {
+            AnimationSourceUpsert::Unchanged
+        }
+    } else {
+        project.add_resource(
+            candidate.resource_name,
+            ResourceData::AnimationSource(psxed_project::AnimationSourceResource {
+                source_path: candidate.source_path,
+                clip_name: candidate.clip_name,
+                provider: candidate.provider,
+                skeleton: None,
+                target_model: None,
+                role: candidate.role,
+                looping: candidate.looping,
+                tags: candidate.tags,
+            }),
+        );
+        AnimationSourceUpsert::Added
+    }
+}
+
+fn animation_source_candidate_for_file(
+    stored_path: &str,
+    clip_name: &str,
+) -> AnimationSourceCandidate {
+    let provider = psxed_project::AnimationSourceProvider::guess_from_path(stored_path);
+    let role = psxed_project::AnimationRole::guess_from_name(clip_name);
+    AnimationSourceCandidate {
+        resource_name: animation_source_resource_name(clip_name),
+        source_path: stored_path.to_string(),
+        clip_name: clip_name.to_string(),
+        provider,
+        role,
+        looping: animation_source_default_looping(role, clip_name, stored_path),
+        tags: animation_source_tags(provider, role, clip_name, stored_path),
+    }
+}
+
+fn animation_source_resource_name(clip_name: &str) -> String {
+    let mut name = clip_name
+        .strip_prefix("A_MOD_SWD_")
+        .or_else(|| clip_name.strip_prefix("A_"))
+        .unwrap_or(clip_name)
+        .trim_end_matches("_Sword")
+        .trim_end_matches("_Neut")
+        .replace('_', " ");
+    name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        "Animation Source".to_string()
+    } else {
+        name
+    }
+}
+
+fn animation_source_default_looping(
+    role: psxed_project::AnimationRole,
+    clip_name: &str,
+    source_path: &str,
+) -> bool {
+    let lowered = format!("{clip_name} {source_path}").to_ascii_lowercase();
+    if lowered.contains("loop") {
+        return true;
+    }
+    if lowered.contains("begin")
+        || lowered.contains("enter")
+        || lowered.contains("end")
+        || lowered.contains("exit")
+        || lowered.contains("returntoidle")
+        || lowered.contains("draw")
+        || lowered.contains("sheathe")
+        || lowered.contains("parry")
+        || lowered.contains("dodge")
+        || lowered.contains("roll")
+        || lowered.contains("knockdown")
+        || lowered.contains("stagger")
+        || lowered.contains("stun")
+    {
+        return false;
+    }
+    matches!(
+        role,
+        psxed_project::AnimationRole::Idle
+            | psxed_project::AnimationRole::Walk
+            | psxed_project::AnimationRole::Run
+            | psxed_project::AnimationRole::Turn
+            | psxed_project::AnimationRole::Generic
+    )
+}
+
+fn animation_source_tags(
+    provider: psxed_project::AnimationSourceProvider,
+    role: psxed_project::AnimationRole,
+    clip_name: &str,
+    source_path: &str,
+) -> Vec<String> {
+    let lowered = format!("{clip_name} {source_path}").to_ascii_lowercase();
+    let mut tags = Vec::new();
+    if !matches!(provider, psxed_project::AnimationSourceProvider::Unknown) {
+        tags.push(provider.label().to_ascii_lowercase());
+    }
+    if !matches!(role, psxed_project::AnimationRole::Generic) {
+        tags.push(role.label().to_ascii_lowercase());
+    }
+    for (needle, tag) in [
+        ("polygon", "polygon"),
+        ("sidekick", "sidekick"),
+        ("rootmotion", "root_motion"),
+        ("_rm_", "root_motion"),
+        ("rmh", "root_motion_horizontal"),
+        ("rmv", "root_motion_vertical"),
+        ("returntoidle", "return_to_idle"),
+        ("dodge", "dodge"),
+        ("roll", "roll"),
+        ("block", "block"),
+        ("parry", "parry"),
+        ("stagger", "stagger"),
+        ("knockdown", "knockdown"),
+        ("stun", "stun"),
+        ("draw", "draw"),
+        ("sheathe", "sheathe"),
+        ("sheathed", "sheathed"),
+        ("femn", "feminine"),
+        ("masc", "masculine"),
+        ("sword", "sword"),
+    ] {
+        if lowered.contains(needle) {
+            tags.push(tag.to_string());
+        }
+    }
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+fn should_skip_animation_source_dir(path: &Path) -> bool {
+    let lowered = path.to_string_lossy().to_ascii_lowercase();
+    lowered.contains("/target/")
+        || lowered.ends_with("/target")
+        || lowered.contains("/.git/")
+        || lowered.ends_with("/.git")
+        || lowered.contains("/models/")
+        || lowered.ends_with("/models")
+        || lowered.contains("/textures/")
+        || lowered.ends_with("/textures")
+}
+
+fn should_skip_animation_source_path(path: &str) -> bool {
+    let lowered = path.replace('\\', "/").to_ascii_lowercase();
+    lowered.contains("/models/")
+        || lowered.starts_with("models/")
+        || lowered.contains("/textures/")
+        || lowered.starts_with("textures/")
+        || lowered.contains("/__macosx/")
+        || lowered.starts_with("__macosx/")
+}
+
+fn is_animation_source_entry_name(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    lowered.ends_with(".fbx") || lowered.ends_with(".glb") || lowered.ends_with(".gltf")
+}
+
+fn is_animation_source_file_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "fbx" | "glb" | "gltf"))
+        .unwrap_or(false)
+}
+
+fn is_zip_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false)
+}
+
 fn find_skeleton_by_signature(project: &ProjectDocument, signature: &str) -> Option<ResourceId> {
     project
         .resources
@@ -24455,6 +25300,24 @@ fn find_animation_clip_by_path(
         .find_map(|resource| match &resource.data {
             ResourceData::AnimationClip(clip)
                 if clip.skeleton == Some(skeleton) && clip.psxanim_path == path =>
+            {
+                Some(resource.id)
+            }
+            _ => None,
+        })
+}
+
+fn find_animation_source_by_path(
+    project: &ProjectDocument,
+    target_model: Option<ResourceId>,
+    path: &str,
+) -> Option<ResourceId> {
+    project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationSource(source)
+                if source.source_path == path && source.target_model == target_model =>
             {
                 Some(resource.id)
             }
@@ -24885,6 +25748,7 @@ fn resource_file_budget(
             }
             ResourceData::Material(_)
             | ResourceData::Skeleton(_)
+            | ResourceData::AnimationSource(_)
             | ResourceData::AnimationSet(_)
             | ResourceData::Character(_)
             | ResourceData::Weapon(_) => {}
@@ -25854,6 +26718,82 @@ mod tests {
     }
 
     #[test]
+    fn animation_source_catalogue_scans_synty_source_tree() {
+        let dir = test_temp_dir("animation-source-catalogue");
+        let anim_dir = dir.join("SourceFiles/Animations/Polygon/Dodge");
+        let model_dir = dir.join("SourceFiles/Models");
+        std::fs::create_dir_all(&anim_dir).unwrap();
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(anim_dir.join("A_DodgeRoll_F_RootMotion_Sword.fbx"), []).unwrap();
+        std::fs::write(anim_dir.join("A_Block_Loop_Sword.fbx"), []).unwrap();
+        std::fs::write(model_dir.join("POLYGONRig_01.fbx"), []).unwrap();
+
+        let mut project = ProjectDocument::new("source catalogue");
+        let report = catalogue_animation_sources_from_path(&mut project, &dir, &dir).unwrap();
+
+        assert_eq!(report.source_candidates, 2);
+        assert_eq!(report.sources_added, 2);
+        assert_eq!(report.sources_updated, 0);
+        let sources: Vec<_> = project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::AnimationSource(source) => Some((resource.name.as_str(), source)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources.len(), 2);
+        let roll = sources
+            .iter()
+            .find(|(_, source)| source.clip_name == "A_DodgeRoll_F_RootMotion_Sword")
+            .expect("roll source catalogued")
+            .1;
+        assert_eq!(roll.provider, psxed_project::AnimationSourceProvider::Synty);
+        assert!(!roll.looping);
+        assert!(roll.tags.iter().any(|tag| tag == "dodge"));
+        assert!(roll.tags.iter().any(|tag| tag == "root_motion"));
+        assert_eq!(
+            roll.source_path,
+            "SourceFiles/Animations/Polygon/Dodge/A_DodgeRoll_F_RootMotion_Sword.fbx"
+        );
+
+        let second = catalogue_animation_sources_from_path(&mut project, &dir, &dir).unwrap();
+        assert_eq!(second.source_candidates, 2);
+        assert_eq!(second.sources_added, 0);
+        assert_eq!(second.sources_updated, 0);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn materialize_authoring_source_path_extracts_deflated_zip_entry() {
+        use std::io::Write;
+
+        let dir = test_temp_dir("animation-source-zip");
+        let temp_dir = dir.join("tmp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let zip_path = dir.join("sources.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer
+            .start_file("SourceFiles/Animations/Test/test_clip.fbx", options)
+            .unwrap();
+        writer.write_all(b"fake-fbx-data").unwrap();
+        writer.finish().unwrap();
+
+        let source_path = format!(
+            "{}::SourceFiles/Animations/Test/test_clip.fbx",
+            zip_path.display()
+        );
+        let extracted = materialize_authoring_source_path(&source_path, &dir, &temp_dir).unwrap();
+
+        assert_eq!(std::fs::read(extracted).unwrap(), b"fake-fbx-data");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn selecting_animation_clip_source_updates_placeholder_names_only() {
         let mut placeholder = psxed_project::ModelAnimationClip {
             name: "clip_0".to_string(),
@@ -26000,6 +26940,7 @@ mod tests {
             "Obsidian Warden",
             ResourceData::Model(psxed_project::ModelResource {
                 model_path: "assets/models/obsidian_warden/obsidian_warden.psxmdl".to_string(),
+                source_path: None,
                 texture_path: Some(
                     "assets/models/obsidian_warden/obsidian_warden_128x128_8bpp.psxt".to_string(),
                 ),
@@ -26052,6 +26993,48 @@ mod tests {
         assert!(dir
             .join("assets/animations/standalone_fbx/neutral_idle.psxanim")
             .is_file());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn open_directory_does_not_resurrect_deleted_starter_characters() {
+        let dir = test_temp_dir("no-resurrect-starter-catalogue");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut project = ProjectDocument::starter();
+        project.resources.retain(|resource| {
+            resource.name == "Crimson Cross Knight"
+                || resource.name == "Crimson Cross Knight Player"
+                || resource.name == "Crimson Cross Knight Player Set"
+                || !STARTER_CHARACTER_PROFILE_NAMES.contains(&resource.name.as_str())
+                    && !STARTER_CHARACTER_MODEL_NAMES.contains(&resource.name.as_str())
+                    && !STARTER_ANIMATION_SET_NAMES.contains(&resource.name.as_str())
+        });
+        project.save_to_path(dir.join("project.ron")).unwrap();
+
+        let workspace = EditorWorkspace::open_directory(&dir).unwrap();
+
+        assert!(!workspace.is_dirty());
+        for name in [
+            "Obsidian Wraith Enemy",
+            "Hooded Wretch Enemy",
+            "Crowned Wraith Enemy",
+            "Obsidian Wraith",
+            "Hooded Wretch",
+            "Crowned Wraith",
+        ] {
+            assert!(
+                !workspace
+                    .project()
+                    .resources
+                    .iter()
+                    .any(|resource| resource.name == name),
+                "{name} should stay deleted"
+            );
+        }
+        assert!(!dir.join("assets/models/obsidian_wraith").exists());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -28265,6 +29248,7 @@ mod tests {
             "Obsidian Wraith",
             ResourceData::Model(psxed_project::ModelResource {
                 model_path: "assets/models/obsidian_wraith/obsidian_wraith.psxmdl".to_string(),
+                source_path: None,
                 texture_path: Some(
                     "assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt".to_string(),
                 ),

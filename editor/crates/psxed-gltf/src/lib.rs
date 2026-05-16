@@ -475,6 +475,12 @@ pub struct RigidModelConfig {
     /// after the model precision bounds are known so it uses the same
     /// quantised positions as the final `.psxmdl`.
     pub prune_detached_face_islands: u16,
+    /// Include standalone animation sources when choosing model/pose
+    /// precision bounds. Full bundle imports should keep this enabled
+    /// so every generated clip matches the generated model. Add-on
+    /// clip bakes should disable it so the new `.psxanim` remains
+    /// compatible with the already-cooked target model.
+    pub extra_animations_affect_bounds: bool,
 }
 
 impl Default for RigidModelConfig {
@@ -488,6 +494,7 @@ impl Default for RigidModelConfig {
             normalize_root_translation: false,
             strip_animation_scale: true,
             prune_detached_face_islands: 4,
+            extra_animations_affect_bounds: true,
         }
     }
 }
@@ -558,6 +565,45 @@ pub fn convert_rigid_model_path(
     convert_rigid_model_document(&document, &buffers, cfg)
 }
 
+/// Convert a `.glb`, `.gltf`, or `.fbx` model plus standalone FBX
+/// animation takes into native model/animation/texture blobs.
+pub fn convert_rigid_model_path_with_animation_paths(
+    path: impl AsRef<Path>,
+    animation_paths: &[PathBuf],
+    cfg: &RigidModelConfig,
+) -> Result<RigidModelPackage, Error> {
+    let path = path.as_ref();
+    let (fbx_animation_paths, gltf_animation_paths): (Vec<_>, Vec<_>) = animation_paths
+        .iter()
+        .cloned()
+        .partition(|path| is_fbx_path(path));
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("fbx"))
+    {
+        if !gltf_animation_paths.is_empty() {
+            return Err(Error::BadSkin(
+                "FBX model sources cannot use glTF/GLB extra animation sources yet",
+            ));
+        }
+        return convert_fbx_rigid_model_path_with_animation_paths(path, &fbx_animation_paths, cfg);
+    }
+
+    let (document, buffers, _images) = gltf::import(path)?;
+    let fbx_animation_scenes = load_extra_fbx_animation_scenes(&fbx_animation_paths)?;
+    let fbx_sources = fbx_extra_animation_sources(&fbx_animation_scenes);
+    let gltf_animation_scenes = load_extra_gltf_animation_scenes(&gltf_animation_paths)?;
+    let gltf_sources = gltf_extra_animation_sources(&gltf_animation_scenes);
+    convert_rigid_model_document_with_extra_animations(
+        &document,
+        &buffers,
+        &fbx_sources,
+        &gltf_sources,
+        cfg,
+    )
+}
+
 /// Convert a binary/ascii FBX file into native model/animation/texture blobs.
 pub fn convert_fbx_rigid_model_path(
     path: impl AsRef<Path>,
@@ -565,7 +611,7 @@ pub fn convert_fbx_rigid_model_path(
 ) -> Result<RigidModelPackage, Error> {
     let path = path.as_ref();
     let scene = load_fbx_scene(path)?;
-    convert_fbx_rigid_model_scene(&scene, cfg)
+    convert_fbx_rigid_model_scene(&scene, Some(path), cfg)
 }
 
 /// Convert an FBX model plus standalone FBX animation takes into native blobs.
@@ -574,7 +620,16 @@ pub fn convert_fbx_rigid_model_path_with_animation_paths(
     animation_paths: &[PathBuf],
     cfg: &RigidModelConfig,
 ) -> Result<RigidModelPackage, Error> {
-    let scene = load_fbx_scene(path.as_ref())?;
+    let path = path.as_ref();
+    let scene = load_fbx_scene(path)?;
+    let animation_scenes = load_extra_fbx_animation_scenes(animation_paths)?;
+    let extra_sources = fbx_extra_animation_sources(&animation_scenes);
+    convert_fbx_rigid_model_scene_with_extra_animations(&scene, Some(path), &extra_sources, cfg)
+}
+
+fn load_extra_fbx_animation_scenes(
+    animation_paths: &[PathBuf],
+) -> Result<Vec<(ufbx::SceneRoot, Option<String>)>, Error> {
     let mut animation_scenes = Vec::with_capacity(animation_paths.len());
     for path in animation_paths {
         animation_scenes.push((
@@ -584,14 +639,56 @@ pub fn convert_fbx_rigid_model_path_with_animation_paths(
                 .map(str::to_string),
         ));
     }
-    let extra_sources: Vec<FbxExtraAnimationScene<'_>> = animation_scenes
+    Ok(animation_scenes)
+}
+
+fn fbx_extra_animation_sources(
+    animation_scenes: &[(ufbx::SceneRoot, Option<String>)],
+) -> Vec<FbxExtraAnimationScene<'_>> {
+    animation_scenes
         .iter()
         .map(|(scene, fallback_name)| FbxExtraAnimationScene {
             scene,
             fallback_name: fallback_name.as_deref(),
         })
-        .collect();
-    convert_fbx_rigid_model_scene_with_extra_animations(&scene, &extra_sources, cfg)
+        .collect()
+}
+
+fn load_extra_gltf_animation_scenes(
+    animation_paths: &[PathBuf],
+) -> Result<Vec<LoadedGltfExtraAnimationScene>, Error> {
+    let mut animation_scenes = Vec::with_capacity(animation_paths.len());
+    for path in animation_paths {
+        let (document, buffers, _images) = gltf::import(path)?;
+        animation_scenes.push(LoadedGltfExtraAnimationScene {
+            document,
+            buffers,
+            fallback_name: path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string),
+        });
+    }
+    Ok(animation_scenes)
+}
+
+fn gltf_extra_animation_sources(
+    animation_scenes: &[LoadedGltfExtraAnimationScene],
+) -> Vec<GltfExtraAnimationScene<'_>> {
+    animation_scenes
+        .iter()
+        .map(|scene| GltfExtraAnimationScene {
+            document: &scene.document,
+            buffers: &scene.buffers,
+            fallback_name: scene.fallback_name.as_deref(),
+        })
+        .collect()
+}
+
+fn is_fbx_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("fbx"))
 }
 
 fn load_fbx_scene(path: &Path) -> Result<ufbx::SceneRoot, Error> {
@@ -626,6 +723,16 @@ fn convert_rigid_model_document(
     buffers: &[gltf::buffer::Data],
     cfg: &RigidModelConfig,
 ) -> Result<RigidModelPackage, Error> {
+    convert_rigid_model_document_with_extra_animations(document, buffers, &[], &[], cfg)
+}
+
+fn convert_rigid_model_document_with_extra_animations(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    extra_fbx_animation_scenes: &[FbxExtraAnimationScene<'_>],
+    extra_gltf_animation_scenes: &[GltfExtraAnimationScene<'_>],
+    cfg: &RigidModelConfig,
+) -> Result<RigidModelPackage, Error> {
     if cfg.animation_fps == 0 {
         return Err(Error::BadSkin("animation sample rate must be non-zero"));
     }
@@ -657,6 +764,18 @@ fn convert_rigid_model_document(
         return Err(Error::Empty);
     }
     assign_face_joints(&mut source, joints.len());
+    let bounds_extra_fbx_animation_scenes =
+        if cfg.extra_animations_affect_bounds {
+            extra_fbx_animation_scenes
+        } else {
+            &[]
+        };
+    let bounds_extra_gltf_animation_scenes =
+        if cfg.extra_animations_affect_bounds {
+            extra_gltf_animation_scenes
+        } else {
+            &[]
+        };
     let precision_bounds = collect_precision_bounds(
         document,
         buffers,
@@ -666,6 +785,8 @@ fn convert_rigid_model_document(
         &root_joint_nodes,
         &joints,
         &inverse_bind_matrices,
+        bounds_extra_fbx_animation_scenes,
+        bounds_extra_gltf_animation_scenes,
         cfg.animation_fps,
         cfg.normalize_root_translation,
         cfg.strip_animation_scale,
@@ -693,6 +814,8 @@ fn convert_rigid_model_document(
             &root_joint_nodes,
             &joints,
             &inverse_bind_matrices,
+            bounds_extra_fbx_animation_scenes,
+            bounds_extra_gltf_animation_scenes,
             cfg.animation_fps,
             cfg.normalize_root_translation,
             cfg.strip_animation_scale,
@@ -714,6 +837,8 @@ fn convert_rigid_model_document(
             &root_joint_nodes,
             &joints,
             &inverse_bind_matrices,
+            extra_fbx_animation_scenes,
+            extra_gltf_animation_scenes,
             mesh,
         );
     }
@@ -730,6 +855,8 @@ fn convert_rigid_model_document(
         &root_joint_nodes,
         &joints,
         &inverse_bind_matrices,
+        extra_fbx_animation_scenes,
+        extra_gltf_animation_scenes,
         mesh,
     )
 }
@@ -747,6 +874,8 @@ fn finish_rigid_model_document(
     root_joint_nodes: &[usize],
     joints: &[usize],
     inverse_bind_matrices: &[[[f32; 4]; 4]],
+    extra_fbx_animation_scenes: &[FbxExtraAnimationScene<'_>],
+    extra_gltf_animation_scenes: &[GltfExtraAnimationScene<'_>],
     mesh: gltf::Mesh<'_>,
 ) -> Result<RigidModelPackage, Error> {
     let local_height = bounds.encoded_axis_size(precision_bounds.min[1], precision_bounds.max[1]);
@@ -773,6 +902,8 @@ fn finish_rigid_model_document(
         &joints,
         &inverse_bind_matrices,
         &bounds,
+        extra_fbx_animation_scenes,
+        extra_gltf_animation_scenes,
         cfg.animation_fps,
         cfg.normalize_root_translation,
         cfg.strip_animation_scale,
@@ -811,15 +942,30 @@ struct FbxExtraAnimationScene<'a> {
     fallback_name: Option<&'a str>,
 }
 
+struct LoadedGltfExtraAnimationScene {
+    document: gltf::Document,
+    buffers: Vec<gltf::buffer::Data>,
+    fallback_name: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct GltfExtraAnimationScene<'a> {
+    document: &'a gltf::Document,
+    buffers: &'a [gltf::buffer::Data],
+    fallback_name: Option<&'a str>,
+}
+
 fn convert_fbx_rigid_model_scene(
     scene: &ufbx::Scene,
+    source_path: Option<&Path>,
     cfg: &RigidModelConfig,
 ) -> Result<RigidModelPackage, Error> {
-    convert_fbx_rigid_model_scene_with_extra_animations(scene, &[], cfg)
+    convert_fbx_rigid_model_scene_with_extra_animations(scene, source_path, &[], cfg)
 }
 
 fn convert_fbx_rigid_model_scene_with_extra_animations(
     scene: &ufbx::Scene,
+    source_path: Option<&Path>,
     extra_animation_scenes: &[FbxExtraAnimationScene<'_>],
     cfg: &RigidModelConfig,
 ) -> Result<RigidModelPackage, Error> {
@@ -853,10 +999,15 @@ fn convert_fbx_rigid_model_scene_with_extra_animations(
         return Err(Error::Empty);
     }
     assign_face_joints(&mut source, joints.len());
+    let bounds_extra_animation_scenes = if cfg.extra_animations_affect_bounds {
+        extra_animation_scenes
+    } else {
+        &[]
+    };
 
     let precision_bounds = collect_fbx_precision_bounds(
         scene,
-        extra_animation_scenes,
+        bounds_extra_animation_scenes,
         &source,
         &parents,
         &base_trs,
@@ -883,7 +1034,7 @@ fn convert_fbx_rigid_model_scene_with_extra_animations(
         }
         let precision_bounds = collect_fbx_precision_bounds(
             scene,
-            extra_animation_scenes,
+            bounds_extra_animation_scenes,
             &source,
             &parents,
             &base_trs,
@@ -902,6 +1053,7 @@ fn convert_fbx_rigid_model_scene_with_extra_animations(
         return finish_fbx_rigid_model_scene(
             scene,
             cfg,
+            source_path,
             source,
             bounds,
             precision_bounds,
@@ -919,6 +1071,7 @@ fn convert_fbx_rigid_model_scene_with_extra_animations(
     finish_fbx_rigid_model_scene(
         scene,
         cfg,
+        source_path,
         source,
         bounds,
         precision_bounds,
@@ -937,6 +1090,7 @@ fn convert_fbx_rigid_model_scene_with_extra_animations(
 fn finish_fbx_rigid_model_scene(
     scene: &ufbx::Scene,
     cfg: &RigidModelConfig,
+    source_path: Option<&Path>,
     source: SkinnedSourceMesh,
     bounds: ModelBounds,
     precision_bounds: PrecisionBounds,
@@ -952,7 +1106,7 @@ fn finish_fbx_rigid_model_scene(
     let local_height = bounds.encoded_axis_size(precision_bounds.min[1], precision_bounds.max[1]);
     let local_to_world_q12 = choose_local_to_world_q12(local_height, cfg.world_height);
     let material_color = first_fbx_material_base_color(mesh);
-    let texture = cook_fbx_base_color_texture(mesh, material_color, cfg)?;
+    let texture = cook_fbx_base_color_texture(mesh, source_path, material_color, cfg)?;
     let (model, cooked_vertices, parts) = cook_model_blob(
         &source,
         &bounds,
@@ -1252,6 +1406,7 @@ fn collect_fbx_precision_bounds(
                     extra.scene,
                     &stack.anim,
                     time,
+                    parents,
                     base_trs,
                     &mapping,
                 );
@@ -1296,6 +1451,7 @@ fn evaluate_mapped_fbx_frame_trs(
     animation_scene: &ufbx::Scene,
     anim: &ufbx::Anim,
     time: f64,
+    target_parents: &[Option<usize>],
     base_trs: &[Trs],
     mapping: &[Option<usize>],
 ) -> Vec<Trs> {
@@ -1304,19 +1460,144 @@ fn evaluate_mapped_fbx_frame_trs(
         .iter()
         .map(|node| fbx_transform_to_trs(node.evaluate_transform(anim, time)))
         .collect();
-    base_trs
-        .iter()
+    let animation_base = fbx_base_trs(animation_scene);
+    let node_indices = fbx_node_indices(animation_scene);
+    let source_parents = fbx_parent_indices(animation_scene, &node_indices);
+    retarget_mapped_frame_trs(
+        target_parents,
+        base_trs,
+        &source_parents,
+        &animation_base,
+        &evaluated,
+        mapping,
+    )
+}
+
+fn evaluate_mapped_gltf_frame_trs(
+    channels: &[AnimationChannel],
+    time: f32,
+    target_parents: &[Option<usize>],
+    target_base_trs: &[Trs],
+    source_parents: &[Option<usize>],
+    source_base_trs: &[Trs],
+    mapping: &[Option<usize>],
+    copy_full_local_trs: bool,
+) -> Vec<Trs> {
+    let mut source_pose_trs = source_base_trs.to_vec();
+    for channel in channels {
+        channel.apply(time, &mut source_pose_trs);
+    }
+
+    if !copy_full_local_trs {
+        return retarget_mapped_frame_trs(
+            target_parents,
+            target_base_trs,
+            source_parents,
+            source_base_trs,
+            &source_pose_trs,
+            mapping,
+        );
+    }
+
+    let mut out = target_base_trs.to_vec();
+    for (target_index, source_index) in mapping.iter().copied().enumerate() {
+        let Some(source_index) = source_index else {
+            continue;
+        };
+        let (Some(target), Some(source)) =
+            (out.get_mut(target_index), source_pose_trs.get(source_index))
+        else {
+            continue;
+        };
+        *target = *source;
+    }
+    out
+}
+
+fn retarget_mapped_frame_trs(
+    target_parents: &[Option<usize>],
+    target_base_trs: &[Trs],
+    source_parents: &[Option<usize>],
+    source_base_trs: &[Trs],
+    source_pose_trs: &[Trs],
+    mapping: &[Option<usize>],
+) -> Vec<Trs> {
+    let source_base_global = compute_global_rotations(source_parents, source_base_trs);
+    let source_pose_global = compute_global_rotations(source_parents, source_pose_trs);
+    let target_base_global = compute_global_rotations(target_parents, target_base_trs);
+
+    let mut out = target_base_trs.to_vec();
+    let mut target_pose_global = vec![identity_quat(); target_base_trs.len()];
+    let mut done = vec![false; target_base_trs.len()];
+    for index in 0..target_base_trs.len() {
+        retarget_target_node_rotation(
+            index,
+            target_parents,
+            target_base_trs,
+            &target_base_global,
+            &source_base_global,
+            &source_pose_global,
+            mapping,
+            &mut out,
+            &mut target_pose_global,
+            &mut done,
+        );
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retarget_target_node_rotation(
+    index: usize,
+    target_parents: &[Option<usize>],
+    target_base_trs: &[Trs],
+    target_base_global: &[[f32; 4]],
+    source_base_global: &[[f32; 4]],
+    source_pose_global: &[[f32; 4]],
+    mapping: &[Option<usize>],
+    out: &mut [Trs],
+    target_pose_global: &mut [[f32; 4]],
+    done: &mut [bool],
+) -> [f32; 4] {
+    if done[index] {
+        return target_pose_global[index];
+    }
+    let parent_global = if let Some(parent) = target_parents[index] {
+        retarget_target_node_rotation(
+            parent,
+            target_parents,
+            target_base_trs,
+            target_base_global,
+            source_base_global,
+            source_pose_global,
+            mapping,
+            out,
+            target_pose_global,
+            done,
+        )
+    } else {
+        identity_quat()
+    };
+    let local_rotation = mapping
+        .get(index)
         .copied()
-        .enumerate()
-        .map(|(model_index, base)| {
-            mapping
-                .get(model_index)
-                .copied()
-                .flatten()
-                .and_then(|animation_index| evaluated.get(animation_index).copied())
-                .unwrap_or(base)
+        .flatten()
+        .and_then(|source_index| {
+            let source_base = source_base_global.get(source_index).copied()?;
+            let source_pose = source_pose_global.get(source_index).copied()?;
+            let target_base = target_base_global.get(index).copied()?;
+            let local_delta = quat_mul(quat_inverse(source_base), source_pose);
+            let desired_global = quat_mul(target_base, local_delta);
+            Some(quat_mul(quat_inverse(parent_global), desired_global))
         })
-        .collect()
+        .unwrap_or(target_base_trs[index].rotation);
+    out[index].translation = target_base_trs[index].translation;
+    out[index].rotation = local_rotation;
+    out[index].scale = target_base_trs[index].scale;
+    let global = quat_mul(parent_global, local_rotation);
+    target_pose_global[index] = global;
+    done[index] = true;
+    global
 }
 
 fn fbx_animation_node_mapping(
@@ -1325,7 +1606,7 @@ fn fbx_animation_node_mapping(
 ) -> Vec<Option<usize>> {
     let mut animation_nodes = HashMap::new();
     for (index, node) in animation_scene.nodes.iter().enumerate() {
-        let key = fbx_node_match_key(&node.element.name);
+        let key = node_match_key(&node.element.name);
         if !key.is_empty() {
             animation_nodes.entry(key).or_insert(index);
         }
@@ -1334,7 +1615,47 @@ fn fbx_animation_node_mapping(
         .nodes
         .iter()
         .map(|node| {
-            let key = fbx_node_match_key(&node.element.name);
+            let key = node_match_key(&node.element.name);
+            animation_nodes.get(&key).copied()
+        })
+        .collect()
+}
+
+fn gltf_fbx_animation_node_mapping(
+    document: &gltf::Document,
+    animation_scene: &ufbx::Scene,
+) -> Vec<Option<usize>> {
+    let mut animation_nodes = HashMap::new();
+    for (index, node) in animation_scene.nodes.iter().enumerate() {
+        let key = node_match_key(&node.element.name);
+        if !key.is_empty() {
+            animation_nodes.entry(key).or_insert(index);
+        }
+    }
+    document
+        .nodes()
+        .map(|node| {
+            let key = node.name().map(node_match_key).unwrap_or_default();
+            animation_nodes.get(&key).copied()
+        })
+        .collect()
+}
+
+fn gltf_gltf_animation_node_mapping(
+    model_document: &gltf::Document,
+    animation_document: &gltf::Document,
+) -> Vec<Option<usize>> {
+    let mut animation_nodes = HashMap::new();
+    for node in animation_document.nodes() {
+        let key = node.name().map(node_match_key).unwrap_or_default();
+        if !key.is_empty() {
+            animation_nodes.entry(key).or_insert(node.index());
+        }
+    }
+    model_document
+        .nodes()
+        .map(|node| {
+            let key = node.name().map(node_match_key).unwrap_or_default();
             animation_nodes.get(&key).copied()
         })
         .collect()
@@ -1344,21 +1665,135 @@ fn validate_fbx_animation_mapping(
     animation_scene: &ufbx::Scene,
     mapping: &[Option<usize>],
 ) -> Result<(), Error> {
-    if animation_scene.anim_stacks.is_empty() || mapping.iter().any(Option::is_some) {
+    if animation_scene.anim_stacks.is_empty() {
         Ok(())
     } else {
-        Err(Error::BadSkin(
-            "FBX animation shares no named skeleton nodes with the model",
-        ))
+        let mapped = mapping.iter().filter(|entry| entry.is_some()).count();
+        if mapped >= 6 {
+            Ok(())
+        } else if mapped == 0 {
+            Err(Error::BadSkin(
+                "FBX animation shares no named skeleton nodes with the model",
+            ))
+        } else {
+            Err(Error::BadSkin(
+                "FBX animation maps too few humanoid skeleton nodes to retarget safely",
+            ))
+        }
     }
 }
 
-fn fbx_node_match_key(name: &str) -> String {
-    name.rsplit([':', '|'])
+fn validate_gltf_animation_mapping(
+    animation_document: &gltf::Document,
+    mapping: &[Option<usize>],
+) -> Result<(), Error> {
+    if animation_document.animations().next().is_none() {
+        Ok(())
+    } else {
+        let mapped = mapping.iter().filter(|entry| entry.is_some()).count();
+        if mapped >= 6 {
+            Ok(())
+        } else if mapped == 0 {
+            Err(Error::BadSkin(
+                "glTF animation shares no named skeleton nodes with the model",
+            ))
+        } else {
+            Err(Error::BadSkin(
+                "glTF animation maps too few humanoid skeleton nodes to retarget safely",
+            ))
+        }
+    }
+}
+
+fn mapped_local_binds_match(
+    target_base_trs: &[Trs],
+    source_base_trs: &[Trs],
+    mapping: &[Option<usize>],
+) -> bool {
+    let mut compared = 0usize;
+    for (target_index, source_index) in mapping.iter().copied().enumerate() {
+        let Some(source_index) = source_index else {
+            continue;
+        };
+        let (Some(target), Some(source)) = (
+            target_base_trs.get(target_index),
+            source_base_trs.get(source_index),
+        ) else {
+            return false;
+        };
+        compared += 1;
+        if !vec3_close(target.translation, source.translation, 0.01)
+            || !vec3_close(target.scale, source.scale, 0.001)
+            || !quat_close_same_orientation(target.rotation, source.rotation, 0.999)
+        {
+            return false;
+        }
+    }
+    compared >= 6
+}
+
+fn node_match_key(name: &str) -> String {
+    let raw = name
+        .rsplit([':', '|'])
         .next()
         .unwrap_or(name)
         .trim()
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    let compact: String = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+    match raw.as_str() {
+        "spine_01" | "spine 01" => return "spine1".to_string(),
+        "spine_02" | "spine 02" => return "spine2".to_string(),
+        "spine_03" | "spine 03" => return "spine3".to_string(),
+        _ => {}
+    }
+    match compact.as_str() {
+        "rootnode" | "root" => "root".to_string(),
+        "armature" => "armature".to_string(),
+        "hips" | "pelvis" => "hips".to_string(),
+        "spine" => "spine1".to_string(),
+        "spine1" | "spine01" => "spine2".to_string(),
+        "spine2" | "spine02" | "spine3" | "spine03" => "spine3".to_string(),
+        "neck" | "neck01" => "neck".to_string(),
+        "head" => "head".to_string(),
+        "leftshoulder" | "claviclel" | "leftclavicle" | "clavicleleft" => {
+            "leftshoulder".to_string()
+        }
+        "rightshoulder" | "clavicler" | "rightclavicle" | "clavicleright" => {
+            "rightshoulder".to_string()
+        }
+        "leftarm" | "shoulderl" | "leftupperarm" | "upperarml" | "upperarmleft" => {
+            "leftarm".to_string()
+        }
+        "rightarm" | "shoulderr" | "rightupperarm" | "upperarmr" | "upperarmright" => {
+            "rightarm".to_string()
+        }
+        "leftforearm" | "elbowl" | "leftlowerarm" | "lowerarml" | "lowerarmleft" => {
+            "leftforearm".to_string()
+        }
+        "rightforearm" | "elbowr" | "rightlowerarm" | "lowerarmr" | "lowerarmright" => {
+            "rightforearm".to_string()
+        }
+        "lefthand" | "handl" => "lefthand".to_string(),
+        "righthand" | "handr" => "righthand".to_string(),
+        "leftupleg" | "leftupperleg" | "upperlegl" | "thighl" | "thighleft" => {
+            "leftupleg".to_string()
+        }
+        "rightupleg" | "rightupperleg" | "upperlegr" | "thighr" | "thighright" => {
+            "rightupleg".to_string()
+        }
+        "leftleg" | "leftlowerleg" | "lowerlegl" | "calfl" | "calfleft" => "leftleg".to_string(),
+        "rightleg" | "rightlowerleg" | "lowerlegr" | "calfr" | "calfright" => {
+            "rightleg".to_string()
+        }
+        "leftfoot" | "anklel" | "footl" | "footleft" => "leftfoot".to_string(),
+        "rightfoot" | "ankler" | "footr" | "footright" => "rightfoot".to_string(),
+        "lefttoebase" | "lefttoe" | "toesl" | "balll" | "ballleft" => "lefttoebase".to_string(),
+        "righttoebase" | "righttoe" | "toesr" | "ballr" | "ballright" => "righttoebase".to_string(),
+        _ => compact,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1497,7 +1932,7 @@ fn cook_fbx_animation_bytes(
     for frame in 0..frame_count {
         let time = (min_time + frame as f64 / fps as f64).min(max_time);
         let mut frame_trs = if let Some(mapping) = node_mapping {
-            evaluate_mapped_fbx_frame_trs(scene, anim, time, base_trs, mapping)
+            evaluate_mapped_fbx_frame_trs(scene, anim, time, parents, base_trs, mapping)
         } else {
             evaluate_fbx_frame_trs(scene, anim, time)
         };
@@ -1541,6 +1976,7 @@ fn first_fbx_material_base_color(mesh: &ufbx::Mesh) -> [u8; 4] {
 
 fn cook_fbx_base_color_texture(
     mesh: &ufbx::Mesh,
+    source_path: Option<&Path>,
     fallback_color: [u8; 4],
     cfg: &RigidModelConfig,
 ) -> Result<Option<Vec<u8>>, Error> {
@@ -1575,11 +2011,22 @@ fn cook_fbx_base_color_texture(
             if filename.is_empty() {
                 continue;
             }
-            if let Ok(bytes) = std::fs::read(filename.as_ref()) {
-                return psxed_tex::convert(&bytes, &tex_cfg)
-                    .map(Some)
-                    .map_err(Error::TextureCook);
+            if let Some(path) = resolve_fbx_texture_path(Path::new(filename.as_ref()), source_path)
+            {
+                if let Ok(bytes) = std::fs::read(path) {
+                    return psxed_tex::convert(&bytes, &tex_cfg)
+                        .map(Some)
+                        .map_err(Error::TextureCook);
+                }
             }
+        }
+    }
+
+    if let Some(path) = source_path.and_then(find_companion_fbx_texture) {
+        if let Ok(bytes) = std::fs::read(path) {
+            return psxed_tex::convert(&bytes, &tex_cfg)
+                .map(Some)
+                .map_err(Error::TextureCook);
         }
     }
 
@@ -1591,6 +2038,41 @@ fn cook_fbx_base_color_texture(
     psxed_tex::convert(&bmp, &tex_cfg)
         .map(Some)
         .map_err(Error::TextureCook)
+}
+
+fn resolve_fbx_texture_path(texture_path: &Path, source_path: Option<&Path>) -> Option<PathBuf> {
+    if texture_path.exists() {
+        return Some(texture_path.to_path_buf());
+    }
+    if texture_path.is_absolute() {
+        return None;
+    }
+    let source_dir = source_path.and_then(Path::parent)?;
+    let candidate = source_dir.join(texture_path);
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn find_companion_fbx_texture(source_path: &Path) -> Option<PathBuf> {
+    let stem = source_path.file_stem()?.to_str()?;
+    let source_dir = source_path.parent()?;
+    let mut search_dirs = vec![source_dir.to_path_buf()];
+    if let Some(parent) = source_dir.parent() {
+        search_dirs.push(parent.join(format!("{stem}_obj")));
+        search_dirs.push(parent.join(format!("{stem}_fbx")));
+    }
+    for dir in search_dirs {
+        for ext in ["png", "jpg", "jpeg", "bmp", "tga", "webp"] {
+            let candidate = dir.join(format!("{stem}.{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn solid_color_bmp(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
@@ -1775,6 +2257,8 @@ fn collect_precision_bounds(
     root_joint_nodes: &[usize],
     joints: &[usize],
     inverse_bind_matrices: &[[[f32; 4]; 4]],
+    extra_fbx_animation_scenes: &[FbxExtraAnimationScene<'_>],
+    extra_gltf_animation_scenes: &[GltfExtraAnimationScene<'_>],
     fps: u16,
     normalize_root_translation: bool,
     strip_animation_scale: bool,
@@ -1821,6 +2305,87 @@ fn collect_precision_bounds(
                 inverse_bind_matrices,
                 strip_animation_scale,
             );
+        }
+    }
+
+    for extra in extra_fbx_animation_scenes {
+        let mapping = gltf_fbx_animation_node_mapping(document, extra.scene);
+        validate_fbx_animation_mapping(extra.scene, &mapping)?;
+        for stack in &extra.scene.anim_stacks {
+            let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
+                continue;
+            };
+            let frame_count = ((max_time - min_time) * fps as f64).round() as usize + 1;
+            ensure_u16("animation frames", frame_count)?;
+            for frame in 0..frame_count {
+                let time = (min_time + frame as f64 / fps as f64).min(max_time);
+                let mut frame_trs = evaluate_mapped_fbx_frame_trs(
+                    extra.scene,
+                    &stack.anim,
+                    time,
+                    parents,
+                    base_trs,
+                    &mapping,
+                );
+                if normalize_root_translation {
+                    restore_root_translations(&mut frame_trs, base_trs, root_joint_nodes);
+                }
+                include_pose_bounds(
+                    &mut bounds,
+                    &frame_trs,
+                    source,
+                    parents,
+                    joints,
+                    inverse_bind_matrices,
+                    strip_animation_scale,
+                );
+            }
+        }
+    }
+
+    for extra in extra_gltf_animation_scenes {
+        let mapping = gltf_gltf_animation_node_mapping(document, extra.document);
+        validate_gltf_animation_mapping(extra.document, &mapping)?;
+        let source_parents = build_parent_indices(extra.document);
+        let source_base_trs = collect_base_trs(extra.document);
+        let copy_full_local_trs =
+            mapped_local_binds_match(base_trs, &source_base_trs, &mapping);
+        for animation in extra.document.animations() {
+            let channels = read_animation_channels(&animation, extra.buffers)?;
+            if channels.is_empty() {
+                continue;
+            }
+            let Some((min_time, max_time)) = channel_time_range(&channels) else {
+                continue;
+            };
+            let duration = max_time - min_time;
+            let frame_count = (duration * fps as f32).round() as usize + 1;
+            ensure_u16("animation frames", frame_count)?;
+            for frame in 0..frame_count {
+                let time = (min_time + frame as f32 / fps as f32).min(max_time);
+                let mut frame_trs = evaluate_mapped_gltf_frame_trs(
+                    &channels,
+                    time,
+                    parents,
+                    base_trs,
+                    &source_parents,
+                    &source_base_trs,
+                    &mapping,
+                    copy_full_local_trs,
+                );
+                if normalize_root_translation {
+                    restore_root_translations(&mut frame_trs, base_trs, root_joint_nodes);
+                }
+                include_pose_bounds(
+                    &mut bounds,
+                    &frame_trs,
+                    source,
+                    parents,
+                    joints,
+                    inverse_bind_matrices,
+                    strip_animation_scale,
+                );
+            }
         }
     }
 
@@ -2288,6 +2853,36 @@ fn compute_global_matrix(
     global
 }
 
+fn compute_global_rotations(parents: &[Option<usize>], trs: &[Trs]) -> Vec<[f32; 4]> {
+    let mut globals = vec![identity_quat(); trs.len()];
+    let mut done = vec![false; trs.len()];
+    for index in 0..trs.len() {
+        compute_global_rotation(index, parents, trs, &mut globals, &mut done);
+    }
+    globals
+}
+
+fn compute_global_rotation(
+    index: usize,
+    parents: &[Option<usize>],
+    trs: &[Trs],
+    globals: &mut [[f32; 4]],
+    done: &mut [bool],
+) -> [f32; 4] {
+    if done[index] {
+        return globals[index];
+    }
+    let global = if let Some(parent) = parents[index] {
+        let parent_global = compute_global_rotation(parent, parents, trs, globals, done);
+        quat_mul(parent_global, trs[index].rotation)
+    } else {
+        normalize4(trs[index].rotation)
+    };
+    globals[index] = global;
+    done[index] = true;
+    global
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cook_model_blob(
     source: &SkinnedSourceMesh,
@@ -2665,6 +3260,8 @@ fn cook_all_animations(
     joints: &[usize],
     inverse_bind_matrices: &[[[f32; 4]; 4]],
     bounds: &ModelBounds,
+    extra_fbx_animation_scenes: &[FbxExtraAnimationScene<'_>],
+    extra_gltf_animation_scenes: &[GltfExtraAnimationScene<'_>],
     fps: u16,
     normalize_root_translation: bool,
     strip_animation_scale: bool,
@@ -2703,6 +3300,91 @@ fn cook_all_animations(
             bytes,
             frames,
         });
+    }
+    let mut clip_index = clips.len();
+    for extra in extra_fbx_animation_scenes {
+        let mapping = gltf_fbx_animation_node_mapping(document, extra.scene);
+        validate_fbx_animation_mapping(extra.scene, &mapping)?;
+        for stack in &extra.scene.anim_stacks {
+            let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
+                continue;
+            };
+            let Some(bytes) = cook_fbx_animation_bytes(
+                extra.scene,
+                &stack.anim,
+                parents,
+                base_trs,
+                root_joint_nodes,
+                joints,
+                inverse_bind_matrices,
+                bounds,
+                min_time,
+                max_time,
+                fps,
+                normalize_root_translation,
+                strip_animation_scale,
+                Some(&mapping),
+            )?
+            else {
+                continue;
+            };
+            let frames = animation_frame_count_from_bytes(&bytes);
+            let raw_name = fbx_stack_source_name(stack, extra.fallback_name);
+            clips.push(CookedClip {
+                source_name: raw_name.clone(),
+                sanitized_name: sanitize_clip_name(raw_name.as_deref(), clip_index),
+                bytes,
+                frames,
+            });
+            clip_index += 1;
+        }
+    }
+    for extra in extra_gltf_animation_scenes {
+        let mapping = gltf_gltf_animation_node_mapping(document, extra.document);
+        validate_gltf_animation_mapping(extra.document, &mapping)?;
+        let source_parents = build_parent_indices(extra.document);
+        let source_base_trs = collect_base_trs(extra.document);
+        let copy_full_local_trs =
+            mapped_local_binds_match(base_trs, &source_base_trs, &mapping);
+        for animation in extra.document.animations() {
+            let channels = read_animation_channels(&animation, extra.buffers)?;
+            if channels.is_empty() {
+                continue;
+            }
+            let Some((min_time, max_time)) = channel_time_range(&channels) else {
+                continue;
+            };
+            let Some(bytes) = cook_mapped_gltf_animation_bytes(
+                &channels,
+                parents,
+                base_trs,
+                &source_parents,
+                &source_base_trs,
+                root_joint_nodes,
+                joints,
+                inverse_bind_matrices,
+                bounds,
+                min_time,
+                max_time,
+                fps,
+                normalize_root_translation,
+                strip_animation_scale,
+                &mapping,
+                copy_full_local_trs,
+            )?
+            else {
+                continue;
+            };
+            let frames = animation_frame_count_from_bytes(&bytes);
+            let raw_name = gltf_animation_source_name(&animation, extra.fallback_name);
+            clips.push(CookedClip {
+                source_name: raw_name.clone(),
+                sanitized_name: sanitize_clip_name(raw_name.as_deref(), clip_index),
+                bytes,
+                frames,
+            });
+            clip_index += 1;
+        }
     }
     Ok(clips)
 }
@@ -2762,6 +3444,84 @@ fn cook_animation_bytes(
     }
 
     Ok(Some(out))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cook_mapped_gltf_animation_bytes(
+    channels: &[AnimationChannel],
+    target_parents: &[Option<usize>],
+    target_base_trs: &[Trs],
+    source_parents: &[Option<usize>],
+    source_base_trs: &[Trs],
+    root_joint_nodes: &[usize],
+    joints: &[usize],
+    inverse_bind_matrices: &[[[f32; 4]; 4]],
+    bounds: &ModelBounds,
+    min_time: f32,
+    max_time: f32,
+    fps: u16,
+    normalize_root_translation: bool,
+    strip_animation_scale: bool,
+    mapping: &[Option<usize>],
+    copy_full_local_trs: bool,
+) -> Result<Option<Vec<u8>>, Error> {
+    let duration = max_time - min_time;
+    let frame_count = (duration * fps as f32).round() as usize + 1;
+    ensure_u16("animation frames", frame_count)?;
+
+    let payload_len = psxed_format::animation::AnimationHeader::SIZE
+        + frame_count * joints.len() * psxed_format::animation::POSE_RECORD_SIZE;
+    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
+    append_asset_header(
+        &mut out,
+        psxed_format::animation::MAGIC,
+        psxed_format::animation::VERSION,
+        0,
+        payload_len,
+    )?;
+    append_u16(&mut out, ensure_u16("joints", joints.len())?);
+    append_u16(&mut out, ensure_u16("animation frames", frame_count)?);
+    append_u16(&mut out, fps);
+    append_u16(&mut out, 0);
+
+    for frame in 0..frame_count {
+        let time = (min_time + frame as f32 / fps as f32).min(max_time);
+        let mut frame_trs = evaluate_mapped_gltf_frame_trs(
+            channels,
+            time,
+            target_parents,
+            target_base_trs,
+            source_parents,
+            source_base_trs,
+            mapping,
+            copy_full_local_trs,
+        );
+        if normalize_root_translation {
+            restore_root_translations(&mut frame_trs, target_base_trs, root_joint_nodes);
+        }
+        let locals: Vec<[[f32; 4]; 4]> = frame_trs.iter().map(|trs| trs.matrix()).collect();
+        let globals = compute_global_matrices(target_parents, &locals);
+        for (joint_index, node_index) in joints.iter().copied().enumerate() {
+            let mut skin = mul_matrix(&globals[node_index], &inverse_bind_matrices[joint_index]);
+            if strip_animation_scale {
+                skin = strip_pose_scale(skin);
+            }
+            append_pose_record(&mut out, &skin, bounds);
+        }
+    }
+
+    Ok(Some(out))
+}
+
+fn gltf_animation_source_name(
+    animation: &gltf::Animation<'_>,
+    fallback_name: Option<&str>,
+) -> Option<String> {
+    animation
+        .name()
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| fallback_name.map(str::to_string))
 }
 
 fn sanitize_clip_name(source: Option<&str>, fallback_index: usize) -> String {
@@ -3083,6 +3843,19 @@ fn length_sq3(v: [f32; 3]) -> f32 {
     v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
 }
 
+fn vec3_close(a: [f32; 3], b: [f32; 3], epsilon: f32) -> bool {
+    (a[0] - b[0]).abs() <= epsilon
+        && (a[1] - b[1]).abs() <= epsilon
+        && (a[2] - b[2]).abs() <= epsilon
+}
+
+fn quat_close_same_orientation(a: [f32; 4], b: [f32; 4], min_abs_dot: f32) -> bool {
+    let a = normalize4(a);
+    let b = normalize4(b);
+    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    dot.abs() >= min_abs_dot
+}
+
 fn nlerp_quat(mut a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
     if dot < 0.0 {
@@ -3094,6 +3867,26 @@ fn nlerp_quat(mut a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
         a[2] + (b[2] - a[2]) * t,
         a[3] + (b[3] - a[3]) * t,
     ])
+}
+
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let [ax, ay, az, aw] = normalize4(a);
+    let [bx, by, bz, bw] = normalize4(b);
+    normalize4([
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ])
+}
+
+fn quat_inverse(q: [f32; 4]) -> [f32; 4] {
+    let [x, y, z, w] = normalize4(q);
+    [-x, -y, -z, w]
+}
+
+const fn identity_quat() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 1.0]
 }
 
 fn normalize3(v: [f32; 3]) -> [f32; 3] {
@@ -3117,6 +3910,182 @@ fn normalize4(v: [f32; 4]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_quat_close(actual: [f32; 4], expected: [f32; 4]) {
+        let direct = actual
+            .iter()
+            .zip(expected)
+            .map(|(a, e)| (a - e).abs())
+            .fold(0.0f32, f32::max);
+        let flipped = actual
+            .iter()
+            .zip(expected)
+            .map(|(a, e)| (a + e).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            direct.min(flipped) < 0.0001,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    fn quat_z_degrees(degrees: f32) -> [f32; 4] {
+        let radians = degrees.to_radians() * 0.5;
+        [0.0, 0.0, radians.sin(), radians.cos()]
+    }
+
+    fn quat_x_degrees(degrees: f32) -> [f32; 4] {
+        let radians = degrees.to_radians() * 0.5;
+        [radians.sin(), 0.0, 0.0, radians.cos()]
+    }
+
+    fn quat_y_degrees(degrees: f32) -> [f32; 4] {
+        let radians = degrees.to_radians() * 0.5;
+        [0.0, radians.sin(), 0.0, radians.cos()]
+    }
+
+    #[test]
+    fn humanoid_node_match_key_aliases_synty_and_meshy_bones() {
+        assert_eq!(node_match_key("LeftUpLeg"), node_match_key("UpperLeg_L"));
+        assert_eq!(node_match_key("LeftUpLeg"), node_match_key("thigh_l"));
+        assert_eq!(node_match_key("LeftLeg"), node_match_key("LowerLeg_L"));
+        assert_eq!(node_match_key("LeftLeg"), node_match_key("calf_l"));
+        assert_eq!(node_match_key("LeftFoot"), node_match_key("Ankle_L"));
+        assert_eq!(node_match_key("LeftFoot"), node_match_key("foot_l"));
+        assert_eq!(node_match_key("LeftToeBase"), node_match_key("ball_l"));
+        assert_eq!(node_match_key("LeftShoulder"), node_match_key("clavicle_l"));
+        assert_eq!(node_match_key("LeftArm"), node_match_key("Shoulder_L"));
+        assert_eq!(node_match_key("LeftArm"), node_match_key("upperarm_l"));
+        assert_eq!(node_match_key("LeftForeArm"), node_match_key("Elbow_L"));
+        assert_eq!(node_match_key("LeftForeArm"), node_match_key("lowerarm_l"));
+        assert_eq!(node_match_key("LeftHand"), node_match_key("Hand_L"));
+        assert_eq!(node_match_key("Neck"), node_match_key("neck_01"));
+        assert_eq!(node_match_key("Spine"), node_match_key("Spine_01"));
+        assert_eq!(node_match_key("Spine01"), node_match_key("Spine_02"));
+        assert_eq!(node_match_key("Spine02"), node_match_key("Spine_03"));
+        assert_ne!(node_match_key("Armature"), node_match_key("Root"));
+    }
+
+    #[test]
+    fn fbx_companion_texture_search_finds_meshy_obj_export_sibling() {
+        let root = std::env::temp_dir().join(format!(
+            "psxed-gltf-fbx-texture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let pack = root.join("Sword and Shield Pack");
+        let sibling = root.join("Meshy_AI_Crimson_Cross_Knight_0516082504_texture_obj");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let source = pack.join("Meshy_AI_Crimson_Cross_Knight_0516082504_texture.fbx");
+        let texture = sibling.join("Meshy_AI_Crimson_Cross_Knight_0516082504_texture.png");
+        std::fs::write(&source, b"fbx").unwrap();
+        std::fs::write(&texture, b"png").unwrap();
+
+        assert_eq!(find_companion_fbx_texture(&source), Some(texture));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retarget_mapped_frame_trs_keeps_target_offsets_and_child_inheritance() {
+        let target_parents = vec![None, Some(0)];
+        let source_parents = vec![None, Some(0)];
+        let target_base = vec![
+            Trs {
+                translation: [1.0, 2.0, 3.0],
+                rotation: identity_quat(),
+                scale: [1.0, 1.0, 1.0],
+            },
+            Trs {
+                translation: [4.0, 5.0, 6.0],
+                rotation: quat_z_degrees(10.0),
+                scale: [1.0, 1.0, 1.0],
+            },
+        ];
+        let source_base = vec![
+            Trs {
+                translation: [100.0, 200.0, 300.0],
+                rotation: identity_quat(),
+                scale: [2.0, 2.0, 2.0],
+            },
+            Trs {
+                translation: [400.0, 500.0, 600.0],
+                rotation: identity_quat(),
+                scale: [3.0, 3.0, 3.0],
+            },
+        ];
+        let source_pose = vec![
+            Trs {
+                translation: [120.0, 240.0, 360.0],
+                rotation: quat_z_degrees(45.0),
+                scale: [2.0, 2.0, 2.0],
+            },
+            Trs {
+                translation: [420.0, 540.0, 660.0],
+                rotation: quat_z_degrees(20.0),
+                scale: [3.0, 3.0, 3.0],
+            },
+        ];
+        let mapping = vec![Some(0), None];
+
+        let retargeted = retarget_mapped_frame_trs(
+            &target_parents,
+            &target_base,
+            &source_parents,
+            &source_base,
+            &source_pose,
+            &mapping,
+        );
+
+        assert_eq!(retargeted[0].translation, target_base[0].translation);
+        assert_eq!(retargeted[1].translation, target_base[1].translation);
+        assert_eq!(retargeted[0].scale, target_base[0].scale);
+        assert_eq!(retargeted[1].scale, target_base[1].scale);
+        assert_quat_close(retargeted[0].rotation, quat_z_degrees(45.0));
+        assert_quat_close(retargeted[1].rotation, target_base[1].rotation);
+    }
+
+    #[test]
+    fn retarget_mapped_frame_trs_applies_delta_in_source_rest_basis() {
+        let target_parents = vec![None];
+        let source_parents = vec![None];
+        let source_base_rotation = quat_x_degrees(90.0);
+        let target_base_rotation = quat_y_degrees(90.0);
+        let source_local_delta = quat_z_degrees(35.0);
+        let target_base = vec![Trs {
+            translation: [0.0, 0.0, 0.0],
+            rotation: target_base_rotation,
+            scale: [1.0, 1.0, 1.0],
+        }];
+        let source_base = vec![Trs {
+            translation: [0.0, 0.0, 0.0],
+            rotation: source_base_rotation,
+            scale: [1.0, 1.0, 1.0],
+        }];
+        let source_pose = vec![Trs {
+            translation: [0.0, 0.0, 0.0],
+            rotation: quat_mul(source_base_rotation, source_local_delta),
+            scale: [1.0, 1.0, 1.0],
+        }];
+        let mapping = vec![Some(0)];
+
+        let retargeted = retarget_mapped_frame_trs(
+            &target_parents,
+            &target_base,
+            &source_parents,
+            &source_base,
+            &source_pose,
+            &mapping,
+        );
+
+        assert_quat_close(
+            retargeted[0].rotation,
+            quat_mul(target_base_rotation, source_local_delta),
+        );
+    }
 
     #[test]
     fn imports_minimal_glb_triangle() {
@@ -3379,6 +4348,130 @@ mod tests {
         assert_eq!(first_pose_matrix_component(&stripped, 4), 4096);
         assert_eq!(first_pose_matrix_component(&stripped, 8), 4096);
         assert_eq!(first_pose_matrix_component(&kept, 0), 8192);
+    }
+
+    #[test]
+    fn mapped_gltf_same_bind_preserves_local_translation_keys() {
+        let target_parents = [None, Some(0), Some(1), Some(2), Some(3), Some(4)];
+        let source_parents = [None, Some(0), Some(1), Some(2), Some(3), Some(4)];
+        let base = [
+            Trs {
+                translation: [0.0, 0.0, 0.0],
+                rotation: identity_quat(),
+                scale: [1.0, 1.0, 1.0],
+            },
+            Trs {
+                translation: [0.0, 10.0, 0.0],
+                rotation: identity_quat(),
+                scale: [1.0, 1.0, 1.0],
+            },
+            Trs {
+                translation: [0.0, 20.0, 0.0],
+                rotation: identity_quat(),
+                scale: [1.0, 1.0, 1.0],
+            },
+            Trs {
+                translation: [0.0, 30.0, 0.0],
+                rotation: identity_quat(),
+                scale: [1.0, 1.0, 1.0],
+            },
+            Trs {
+                translation: [0.0, 40.0, 0.0],
+                rotation: identity_quat(),
+                scale: [1.0, 1.0, 1.0],
+            },
+            Trs {
+                translation: [0.0, 50.0, 0.0],
+                rotation: identity_quat(),
+                scale: [1.0, 1.0, 1.0],
+            },
+        ];
+        let mapping = [Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)];
+        let channels = [AnimationChannel {
+            node_index: 1,
+            interpolation: Interpolation::Linear,
+            times: vec![0.0, 1.0],
+            values: ChannelValues::Translation(vec![[0.0, 10.0, 0.0], [0.0, 24.0, 0.0]]),
+        }];
+
+        assert!(mapped_local_binds_match(&base, &base, &mapping));
+        let copied = evaluate_mapped_gltf_frame_trs(
+            &channels,
+            1.0,
+            &target_parents,
+            &base,
+            &source_parents,
+            &base,
+            &mapping,
+            true,
+        );
+        assert_eq!(copied[1].translation, [0.0, 24.0, 0.0]);
+
+        let retargeted = evaluate_mapped_gltf_frame_trs(
+            &channels,
+            1.0,
+            &target_parents,
+            &base,
+            &source_parents,
+            &base,
+            &mapping,
+            false,
+        );
+        assert_eq!(retargeted[1].translation, [0.0, 10.0, 0.0]);
+    }
+
+    #[test]
+    fn pose_record_round_trips_encoded_model_space() {
+        let bounds =
+            ModelBounds::from_min_max([-2.0, -3.0, -4.0], [4.0, 5.0, 6.0], 30_000.0).unwrap();
+        let skin = compose_trs([3.0, -2.0, 1.0], quat_z_degrees(90.0), [1.0, 1.0, 1.0]);
+        let payload_len = psxed_format::animation::AnimationHeader::SIZE
+            + psxed_format::animation::POSE_RECORD_SIZE;
+        let mut bytes = Vec::new();
+        append_asset_header(
+            &mut bytes,
+            psxed_format::animation::MAGIC,
+            psxed_format::animation::VERSION,
+            0,
+            payload_len,
+        )
+        .unwrap();
+        append_u16(&mut bytes, 1);
+        append_u16(&mut bytes, 1);
+        append_u16(&mut bytes, 15);
+        append_u16(&mut bytes, 0);
+        append_pose_record(&mut bytes, &skin, &bounds);
+
+        let animation = psx_asset::Animation::from_bytes(&bytes).unwrap();
+        let pose = animation.pose(0, 0).unwrap();
+        let source = [1.0, 2.0, 3.0];
+        let encoded = bounds.normalize_point(source).map(q12_i32);
+        let actual = [
+            (((pose.matrix[0][0] as i32) * encoded[0]
+                + (pose.matrix[1][0] as i32) * encoded[1]
+                + (pose.matrix[2][0] as i32) * encoded[2])
+                >> 12)
+                + pose.translation.x,
+            (((pose.matrix[0][1] as i32) * encoded[0]
+                + (pose.matrix[1][1] as i32) * encoded[1]
+                + (pose.matrix[2][1] as i32) * encoded[2])
+                >> 12)
+                + pose.translation.y,
+            (((pose.matrix[0][2] as i32) * encoded[0]
+                + (pose.matrix[1][2] as i32) * encoded[1]
+                + (pose.matrix[2][2] as i32) * encoded[2])
+                >> 12)
+                + pose.translation.z,
+        ];
+        let expected = bounds.normalize_point(transform_point(&skin, source)).map(q12_i32);
+        for axis in 0..3 {
+            assert!(
+                (actual[axis] - expected[axis]).abs() <= 2,
+                "axis {axis}: actual {} expected {}",
+                actual[axis],
+                expected[axis]
+            );
+        }
     }
 
     #[test]
