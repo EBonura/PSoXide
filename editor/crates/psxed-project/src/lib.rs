@@ -1755,6 +1755,10 @@ fn default_model_scale_q8() -> [u16; 3] {
     [MODEL_SCALE_ONE_Q8; 3]
 }
 
+fn default_model_renderer_visual_scale_q8() -> u16 {
+    MODEL_SCALE_ONE_Q8
+}
+
 fn scale_i32_ratio(value: i32, from: i32, to: i32) -> i32 {
     if from <= 0 || from == to {
         return value;
@@ -5187,18 +5191,22 @@ pub enum AnimationRole {
     Walk,
     Run,
     Turn,
+    Roll,
+    Backstep,
     Attack,
     Hit,
     Death,
 }
 
 impl AnimationRole {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Generic,
         Self::Idle,
         Self::Walk,
         Self::Run,
         Self::Turn,
+        Self::Roll,
+        Self::Backstep,
         Self::Attack,
         Self::Hit,
         Self::Death,
@@ -5212,6 +5220,8 @@ impl AnimationRole {
             Self::Walk => "Walk",
             Self::Run => "Run",
             Self::Turn => "Turn",
+            Self::Roll => "Roll",
+            Self::Backstep => "Backstep",
             Self::Attack => "Attack",
             Self::Hit => "Hit",
             Self::Death => "Death",
@@ -5225,6 +5235,15 @@ impl AnimationRole {
             Self::Idle
         } else if name.contains("run") {
             Self::Run
+        } else if name.contains("backstep")
+            || name.contains("back_step")
+            || name.contains("back step")
+            || name.contains("step_back")
+            || name.contains("step back")
+        {
+            Self::Backstep
+        } else if name.contains("roll") || name.contains("dodge") {
+            Self::Roll
         } else if name.contains("walk") {
             Self::Walk
         } else if name.contains("turn") {
@@ -5239,6 +5258,152 @@ impl AnimationRole {
             Self::Generic
         }
     }
+}
+
+/// Gameplay action slots that can be driven by animation clips.
+///
+/// This is distinct from [`AnimationRole`]: a clip's role describes
+/// what the source appears to be, while a character action says how
+/// the game will use it. Authors may bind any compatible clip to any
+/// action.
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = psx_level::CHARACTER_ANIMATION_ACTION_COUNT;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CharacterAnimationAction {
+    #[default]
+    Idle,
+    Walk,
+    Run,
+    Turn,
+    Roll,
+    Backstep,
+    LightAttack,
+    HeavyAttack,
+    ComboAttack,
+    Block,
+    HitReact,
+    Death,
+}
+
+impl CharacterAnimationAction {
+    pub const ALL: [Self; CHARACTER_ANIMATION_ACTION_COUNT] = [
+        Self::Idle,
+        Self::Walk,
+        Self::Run,
+        Self::Turn,
+        Self::Roll,
+        Self::Backstep,
+        Self::LightAttack,
+        Self::HeavyAttack,
+        Self::ComboAttack,
+        Self::Block,
+        Self::HitReact,
+        Self::Death,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Walk => "Walk",
+            Self::Run => "Run",
+            Self::Turn => "Turn",
+            Self::Roll => "Roll",
+            Self::Backstep => "Backstep",
+            Self::LightAttack => "Light Attack",
+            Self::HeavyAttack => "Heavy Attack",
+            Self::ComboAttack => "Combo Attack",
+            Self::Block => "Block",
+            Self::HitReact => "Hit React",
+            Self::Death => "Death",
+        }
+    }
+
+    pub const fn to_index(self) -> usize {
+        match self {
+            Self::Idle => 0,
+            Self::Walk => 1,
+            Self::Run => 2,
+            Self::Turn => 3,
+            Self::Roll => 4,
+            Self::Backstep => 5,
+            Self::LightAttack => 6,
+            Self::HeavyAttack => 7,
+            Self::ComboAttack => 8,
+            Self::Block => 9,
+            Self::HitReact => 10,
+            Self::Death => 11,
+        }
+    }
+
+    pub const fn role_hint(self) -> Option<AnimationRole> {
+        match self {
+            Self::Idle => Some(AnimationRole::Idle),
+            Self::Walk => Some(AnimationRole::Walk),
+            Self::Run => Some(AnimationRole::Run),
+            Self::Turn => Some(AnimationRole::Turn),
+            Self::Roll => Some(AnimationRole::Roll),
+            Self::Backstep => Some(AnimationRole::Backstep),
+            Self::LightAttack | Self::HeavyAttack | Self::ComboAttack | Self::Block => {
+                Some(AnimationRole::Attack)
+            }
+            Self::HitReact => Some(AnimationRole::Hit),
+            Self::Death => Some(AnimationRole::Death),
+        }
+    }
+
+    pub const fn required_for_player(self) -> bool {
+        matches!(self, Self::Idle | Self::Walk)
+    }
+
+    pub fn guess_from_name(name: &str) -> Option<Self> {
+        let name = name.to_ascii_lowercase();
+        if name.contains("idle") {
+            Some(Self::Idle)
+        } else if name.contains("run") {
+            Some(Self::Run)
+        } else if name.contains("backstep")
+            || name.contains("back_step")
+            || name.contains("back step")
+            || name.contains("step_back")
+            || name.contains("step back")
+        {
+            Some(Self::Backstep)
+        } else if name.contains("roll") || name.contains("dodge") {
+            Some(Self::Roll)
+        } else if name.contains("walk") {
+            Some(Self::Walk)
+        } else if name.contains("turn") {
+            Some(Self::Turn)
+        } else if name.contains("death") || name.contains("dead") {
+            Some(Self::Death)
+        } else if name.contains("hit") || name.contains("reaction") {
+            Some(Self::HitReact)
+        } else if name.contains("block") || name.contains("guard") {
+            Some(Self::Block)
+        } else if name.contains("combo") {
+            Some(Self::ComboAttack)
+        } else if name.contains("heavy") || name.contains("strong") {
+            Some(Self::HeavyAttack)
+        } else if name.contains("light") || name.contains("attack") || name.contains("melee") {
+            Some(Self::LightAttack)
+        } else {
+            None
+        }
+    }
+}
+
+/// Resource-based action binding used by Animation Sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnimationActionBinding {
+    pub action: CharacterAnimationAction,
+    pub clip: ResourceId,
+}
+
+/// Model-local fallback action binding used directly on Characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterActionClip {
+    pub action: CharacterAnimationAction,
+    pub clip: u16,
 }
 
 /// Where an authoring-time animation candidate came from. The source
@@ -5341,7 +5506,11 @@ impl AnimationSourceResource {
             role,
             looping: !matches!(
                 role,
-                AnimationRole::Attack | AnimationRole::Hit | AnimationRole::Death
+                AnimationRole::Roll
+                    | AnimationRole::Backstep
+                    | AnimationRole::Attack
+                    | AnimationRole::Hit
+                    | AnimationRole::Death
             ),
             tags: if matches!(role, AnimationRole::Generic) {
                 Vec::new()
@@ -5439,6 +5608,15 @@ pub struct AnimationSetResource {
     pub run_clip: Option<ResourceId>,
     #[serde(default)]
     pub turn_clip: Option<ResourceId>,
+    #[serde(default)]
+    pub roll_clip: Option<ResourceId>,
+    #[serde(default)]
+    pub backstep_clip: Option<ResourceId>,
+    /// Preferred action mapping. These bindings are used first
+    /// when cooking and let authors assign any compatible clip to
+    /// any gameplay action.
+    #[serde(default)]
+    pub action_clips: Vec<AnimationActionBinding>,
     /// Extra clips included with the set, such as attacks, hit
     /// reactions, death clips, emotes, and experiments.
     #[serde(default)]
@@ -5453,7 +5631,40 @@ impl AnimationSetResource {
             walk_clip: None,
             run_clip: None,
             turn_clip: None,
+            roll_clip: None,
+            backstep_clip: None,
+            action_clips: Vec::new(),
             clips: Vec::new(),
+        }
+    }
+
+    pub fn action_clip(&self, action: CharacterAnimationAction) -> Option<ResourceId> {
+        self.action_clips
+            .iter()
+            .find_map(|binding| (binding.action == action).then_some(binding.clip))
+            .or_else(|| action.role_hint().and_then(|role| self.role_clip(role)))
+    }
+
+    pub fn set_action_clip(&mut self, action: CharacterAnimationAction, clip: Option<ResourceId>) {
+        if let Some(role) = action.role_hint() {
+            if let Some(slot) = self.role_clip_mut(role) {
+                *slot = None;
+            }
+        }
+        match clip {
+            Some(clip) => {
+                if let Some(binding) = self
+                    .action_clips
+                    .iter_mut()
+                    .find(|binding| binding.action == action)
+                {
+                    binding.clip = clip;
+                } else {
+                    self.action_clips
+                        .push(AnimationActionBinding { action, clip });
+                }
+            }
+            None => self.action_clips.retain(|binding| binding.action != action),
         }
     }
 
@@ -5463,6 +5674,8 @@ impl AnimationSetResource {
             AnimationRole::Walk => self.walk_clip,
             AnimationRole::Run => self.run_clip,
             AnimationRole::Turn => self.turn_clip,
+            AnimationRole::Roll => self.roll_clip,
+            AnimationRole::Backstep => self.backstep_clip,
             AnimationRole::Generic
             | AnimationRole::Attack
             | AnimationRole::Hit
@@ -5476,6 +5689,8 @@ impl AnimationSetResource {
             AnimationRole::Walk => Some(&mut self.walk_clip),
             AnimationRole::Run => Some(&mut self.run_clip),
             AnimationRole::Turn => Some(&mut self.turn_clip),
+            AnimationRole::Roll => Some(&mut self.roll_clip),
+            AnimationRole::Backstep => Some(&mut self.backstep_clip),
             AnimationRole::Generic
             | AnimationRole::Attack
             | AnimationRole::Hit
@@ -5790,6 +6005,16 @@ pub struct CharacterResource {
     /// Index into the model's clip list -- optional turn clip.
     #[serde(default)]
     pub turn_clip: Option<u16>,
+    /// Index into the model's clip list -- optional roll clip.
+    #[serde(default)]
+    pub roll_clip: Option<u16>,
+    /// Index into the model's clip list -- optional backstep clip.
+    #[serde(default)]
+    pub backstep_clip: Option<u16>,
+    /// Model-local fallback action bindings. Animation Set
+    /// bindings are preferred when present.
+    #[serde(default)]
+    pub action_clips: Vec<CharacterActionClip>,
     /// Capsule radius (engine units). Used by collision +
     /// editor preview gizmo.
     pub radius: u16,
@@ -5864,6 +6089,9 @@ impl CharacterResource {
             walk_clip: None,
             run_clip: None,
             turn_clip: None,
+            roll_clip: None,
+            backstep_clip: None,
+            action_clips: Vec::new(),
             radius: default_character_radius(),
             height: default_character_height(),
             walk_speed: default_character_walk_speed(),
@@ -5886,6 +6114,57 @@ impl CharacterResource {
             camera_distance: 6144,
             camera_height: 1280,
             camera_target_height: 640,
+        }
+    }
+
+    pub fn action_clip(&self, action: CharacterAnimationAction) -> Option<u16> {
+        self.action_clips
+            .iter()
+            .find_map(|binding| (binding.action == action).then_some(binding.clip))
+            .or_else(|| match action {
+                CharacterAnimationAction::Idle => self.idle_clip,
+                CharacterAnimationAction::Walk => self.walk_clip,
+                CharacterAnimationAction::Run => self.run_clip,
+                CharacterAnimationAction::Turn => self.turn_clip,
+                CharacterAnimationAction::Roll => self.roll_clip,
+                CharacterAnimationAction::Backstep => self.backstep_clip,
+                CharacterAnimationAction::LightAttack
+                | CharacterAnimationAction::HeavyAttack
+                | CharacterAnimationAction::ComboAttack
+                | CharacterAnimationAction::Block
+                | CharacterAnimationAction::HitReact
+                | CharacterAnimationAction::Death => None,
+            })
+    }
+
+    pub fn set_action_clip(&mut self, action: CharacterAnimationAction, clip: Option<u16>) {
+        match action {
+            CharacterAnimationAction::Idle => self.idle_clip = None,
+            CharacterAnimationAction::Walk => self.walk_clip = None,
+            CharacterAnimationAction::Run => self.run_clip = None,
+            CharacterAnimationAction::Turn => self.turn_clip = None,
+            CharacterAnimationAction::Roll => self.roll_clip = None,
+            CharacterAnimationAction::Backstep => self.backstep_clip = None,
+            CharacterAnimationAction::LightAttack
+            | CharacterAnimationAction::HeavyAttack
+            | CharacterAnimationAction::ComboAttack
+            | CharacterAnimationAction::Block
+            | CharacterAnimationAction::HitReact
+            | CharacterAnimationAction::Death => {}
+        }
+        match clip {
+            Some(clip) => {
+                if let Some(binding) = self
+                    .action_clips
+                    .iter_mut()
+                    .find(|binding| binding.action == action)
+                {
+                    binding.clip = clip;
+                } else {
+                    self.action_clips.push(CharacterActionClip { action, clip });
+                }
+            }
+            None => self.action_clips.retain(|binding| binding.action != action),
         }
     }
 }
@@ -6150,10 +6429,10 @@ pub enum ResourceData {
         /// Project-relative audio path.
         source_path: String,
     },
-    /// Gameplay character profile -- Model + role clip mapping +
-    /// capsule/camera defaults. Layered on top of a Model
-    /// resource; character-controller components reference this to
-    /// resolve what to render and how movement/camera behaviour works.
+    /// Optional gameplay preset with model, animation, capsule, and
+    /// camera defaults. Component-authored entities can override the
+    /// visual model through Model Renderer, action clips through
+    /// Animator, and movement tuning through Character Controller.
     Character(CharacterResource),
     /// Equipment/weapon authoring resource. A Weapon references a
     /// Model for visuals and owns grip + hitbox data for combat.
@@ -6421,6 +6700,16 @@ pub enum NodeKind {
         /// ignore this field.
         #[serde(default)]
         material: Option<ResourceId>,
+        /// Render-only offset from the owning Entity root to the
+        /// model origin, in entity-local engine units. This does
+        /// not affect collision, camera, or movement.
+        #[serde(default)]
+        visual_offset: [i16; 3],
+        /// Render-only uniform scale in Q8 fixed point (`256 =
+        /// 1.0`). Use this for per-instance calibration; use the
+        /// Model resource import scale for global asset fixes.
+        #[serde(default = "default_model_renderer_visual_scale_q8")]
+        visual_scale_q8: u16,
     },
     /// Animation component for a model-rendering entity. `clip`
     /// overrides the model default when set; `None` inherits the
@@ -6429,6 +6718,11 @@ pub enum NodeKind {
         /// Per-instance clip override.
         #[serde(default)]
         clip: Option<u16>,
+        /// Gameplay action to model-local animation clip mapping.
+        /// This is the authoritative authoring location for
+        /// player/NPC action animation.
+        #[serde(default)]
+        action_clips: Vec<CharacterActionClip>,
         /// Whether this animation should run automatically in the
         /// editor/playtest runtime.
         #[serde(default = "default_true")]
@@ -7419,6 +7713,13 @@ fn resource_data_reference_count(data: &ResourceData, id: ResourceId) -> usize {
                 + option_resource_reference_count(set.walk_clip, id)
                 + option_resource_reference_count(set.run_clip, id)
                 + option_resource_reference_count(set.turn_clip, id)
+                + option_resource_reference_count(set.roll_clip, id)
+                + option_resource_reference_count(set.backstep_clip, id)
+                + set
+                    .action_clips
+                    .iter()
+                    .filter(|binding| binding.clip == id)
+                    .count()
                 + set.clips.iter().filter(|clip_id| **clip_id == id).count()
         }
         ResourceData::Character(character) => {
@@ -7453,7 +7754,12 @@ fn clear_resource_data_references(data: &mut ResourceData, id: ResourceId) -> us
                 + clear_option_resource(&mut set.idle_clip, id)
                 + clear_option_resource(&mut set.walk_clip, id)
                 + clear_option_resource(&mut set.run_clip, id)
-                + clear_option_resource(&mut set.turn_clip, id);
+                + clear_option_resource(&mut set.turn_clip, id)
+                + clear_option_resource(&mut set.roll_clip, id)
+                + clear_option_resource(&mut set.backstep_clip, id);
+            let before_actions = set.action_clips.len();
+            set.action_clips.retain(|binding| binding.clip != id);
+            cleared += before_actions - set.action_clips.len();
             let before = set.clips.len();
             set.clips.retain(|clip_id| *clip_id != id);
             cleared += before - set.clips.len();
@@ -7467,6 +7773,9 @@ fn clear_resource_data_references(data: &mut ResourceData, id: ResourceId) -> us
                 character.walk_clip = None;
                 character.run_clip = None;
                 character.turn_clip = None;
+                character.roll_clip = None;
+                character.backstep_clip = None;
+                character.action_clips.clear();
             }
             cleared_model + cleared_set
         }
@@ -7488,7 +7797,9 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
                 + option_resource_reference_count(*material, id)
         }
         NodeKind::ImageProp { material, .. } => option_resource_reference_count(*material, id),
-        NodeKind::ModelRenderer { model, material } => {
+        NodeKind::ModelRenderer {
+            model, material, ..
+        } => {
             option_resource_reference_count(*model, id)
                 + option_resource_reference_count(*material, id)
         }
@@ -7537,9 +7848,9 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
             clear_option_resource(mesh, id) + clear_option_resource(material, id)
         }
         NodeKind::ImageProp { material, .. } => clear_option_resource(material, id),
-        NodeKind::ModelRenderer { model, material } => {
-            clear_option_resource(model, id) + clear_option_resource(material, id)
-        }
+        NodeKind::ModelRenderer {
+            model, material, ..
+        } => clear_option_resource(model, id) + clear_option_resource(material, id),
         NodeKind::CharacterController { character, .. } => clear_option_resource(character, id),
         NodeKind::Equipment { weapon, .. } => clear_option_resource(weapon, id),
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
@@ -9471,6 +9782,9 @@ mod tests {
                 walk_clip: None,
                 run_clip: None,
                 turn_clip: None,
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: Vec::new(),
                 clips: Vec::new(),
             }),
         );
@@ -9962,6 +10276,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(target),
                 material: Some(target),
+                visual_offset: [0; 3],
+                visual_scale_q8: MODEL_SCALE_ONE_Q8,
             },
         );
         scene.add_node(
@@ -10053,7 +10369,9 @@ mod tests {
                 NodeKind::MeshInstance { mesh, material, .. } => {
                     assert_eq!((*mesh, *material), (None, None));
                 }
-                NodeKind::ModelRenderer { model, material } => {
+                NodeKind::ModelRenderer {
+                    model, material, ..
+                } => {
                     assert_eq!((*model, *material), (None, None));
                 }
                 NodeKind::CharacterController { character, .. }

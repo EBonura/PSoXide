@@ -46,9 +46,9 @@ use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
 use crate::{
-    spatial, AnimationRole, CharacterControllerSettings, GridDirection, NodeId, NodeKind,
-    ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid, FAR_VISTA_TEXTURE_PANEL_COUNT,
-    MAX_ROOM_BYTES,
+    spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, GridDirection,
+    NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
+    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -74,6 +74,8 @@ struct PlayerSpawnCandidate<'a> {
     position: [i32; 3],
     character: Option<ResourceId>,
     controller_settings: Option<CharacterControllerSettings>,
+    renderer: Option<ModelRendererComponent>,
+    animator: Option<AnimatorComponent<'a>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -537,16 +539,17 @@ pub fn build_package(
                 let is_player_controlled =
                     character_controller.is_some_and(|controller| controller.player);
                 if !is_player_controlled {
-                    if let Some((model_resource_id, _material)) =
-                        component_model_renderer(scene, node).and_then(|(model, material)| {
-                            model
+                    if let Some((model_resource_id, renderer)) =
+                        component_model_renderer(scene, node).and_then(|renderer| {
+                            renderer
+                                .model
                                 .and_then(|id| {
                                     project
                                         .resource(id)
                                         .filter(|r| matches!(r.data, ResourceData::Model(_)))
                                         .map(|_| id)
                                 })
-                                .map(|id| (id, material))
+                                .map(|id| (id, renderer))
                         })
                     {
                         let clip = component_animator(scene, node).and_then(|anim| anim.clip);
@@ -559,6 +562,8 @@ pub fn build_package(
                             room_index,
                             pos,
                             yaw,
+                            renderer.visual_offset,
+                            renderer.visual_scale_q8,
                             &mut assets,
                             &mut models,
                             &mut model_clips,
@@ -584,6 +589,8 @@ pub fn build_package(
                             position: pos,
                             character: controller.character,
                             controller_settings: Some(controller.settings),
+                            renderer: component_model_renderer(scene, node),
+                            animator: component_animator(scene, node),
                         });
                     } else if component_model_renderer(scene, node).is_none() {
                         let Some(character_id) = controller.character else {
@@ -671,6 +678,8 @@ pub fn build_package(
                     position: pos,
                     character: *character,
                     controller_settings: None,
+                    renderer: None,
+                    animator: None,
                 });
             }
             NodeKind::SpawnPoint { player: false, .. } => {
@@ -717,6 +726,8 @@ pub fn build_package(
                         room_index,
                         pos,
                         yaw,
+                        [0; 3],
+                        crate::MODEL_SCALE_ONE_Q8,
                         &mut assets,
                         &mut models,
                         &mut model_clips,
@@ -865,80 +876,94 @@ pub fn build_package(
     let player_controller = match (spawn, &player_spawns[..]) {
         (Some(spawn_record), [candidate]) => {
             let spawn_node = candidate.node;
-            let resolved = match crate::resolve::resolve_spawn_character(
-                project,
-                candidate.character,
-            ) {
-                Ok(resolved) => {
-                    if resolved.auto_picked {
-                        report.warn(format!(
-                            "Player source '{}' had no Character — auto-picked the only one defined",
-                            spawn_node.name,
-                        ));
+            let renderer_model = candidate.renderer.and_then(|renderer| renderer.model);
+            let resolved = if renderer_model.is_some() {
+                candidate.character
+            } else {
+                match crate::resolve::resolve_spawn_character(project, candidate.character) {
+                    Ok(resolved) => {
+                        if resolved.auto_picked {
+                            report.warn(format!(
+                                "Player source '{}' had no Character -- auto-picked the only one defined",
+                                spawn_node.name,
+                            ));
+                        }
+                        Some(resolved.id)
                     }
-                    Some(resolved.id)
-                }
-                Err(crate::resolve::SpawnCharacterResolutionError::MissingExplicit(id)) => {
-                    report.error(format!(
-                        "Player source '{}' references Character #{} which doesn't exist",
-                        spawn_node.name,
-                        id.raw()
-                    ));
-                    None
-                }
-                Err(crate::resolve::SpawnCharacterResolutionError::ExplicitNotCharacter(id)) => {
-                    let name = project
-                        .resource(id)
-                        .map(|r| r.name.as_str())
-                        .unwrap_or("<missing>");
-                    report.error(format!(
-                        "Player source '{}' references resource '{}' which is not a Character",
-                        spawn_node.name, name
-                    ));
-                    None
-                }
-                Err(crate::resolve::SpawnCharacterResolutionError::NoCharacters) => {
-                    report.error(format!(
-                        "Player source '{}' has no Character assigned and no Character resources exist",
-                        spawn_node.name
-                    ));
-                    None
-                }
-                Err(crate::resolve::SpawnCharacterResolutionError::AmbiguousCharacters {
-                    count,
-                }) => {
-                    report.error(format!(
-                        "Player source '{}' has no Character assigned and {count} Characters are defined — pick one explicitly",
-                        spawn_node.name
-                    ));
-                    None
+                    Err(crate::resolve::SpawnCharacterResolutionError::MissingExplicit(id)) => {
+                        report.error(format!(
+                            "Player source '{}' references Character #{} which doesn't exist",
+                            spawn_node.name,
+                            id.raw()
+                        ));
+                        None
+                    }
+                    Err(crate::resolve::SpawnCharacterResolutionError::ExplicitNotCharacter(
+                        id,
+                    )) => {
+                        let name = project
+                            .resource(id)
+                            .map(|r| r.name.as_str())
+                            .unwrap_or("<missing>");
+                        report.error(format!(
+                            "Player source '{}' references resource '{}' which is not a Character",
+                            spawn_node.name, name
+                        ));
+                        None
+                    }
+                    Err(crate::resolve::SpawnCharacterResolutionError::NoCharacters) => {
+                        report.error(format!(
+                            "Player source '{}' has no Character assigned and no Character resources exist",
+                            spawn_node.name
+                        ));
+                        None
+                    }
+                    Err(crate::resolve::SpawnCharacterResolutionError::AmbiguousCharacters {
+                        count,
+                    }) => {
+                        report.error(format!(
+                            "Player source '{}' has no Character assigned and {count} Characters are defined -- pick one explicitly",
+                            spawn_node.name
+                        ));
+                        None
+                    }
                 }
             };
-            resolved
-                .and_then(|id| {
-                    cook_player_character(
-                        project,
-                        project_root,
-                        spawn_node,
-                        id,
-                        candidate.controller_settings,
-                        &mut assets,
-                        &mut models,
-                        &mut model_clips,
-                        &mut model_clip_bounds,
-                        &mut model_frame_bounds,
-                        &mut model_sockets,
-                        &mut model_for_resource,
-                        &runtime_model_clips,
-                        &mut model_clip_remaps,
-                        &mut characters,
-                        &mut report,
-                    )
-                })
-                .map(|character_index| PlaytestPlayerController {
-                    spawn: spawn_record,
-                    character: character_index,
-                })
+            cook_player_character(
+                project,
+                project_root,
+                spawn_node,
+                resolved,
+                renderer_model,
+                candidate
+                    .renderer
+                    .map(|renderer| renderer.visual_offset)
+                    .unwrap_or([0; 3]),
+                candidate
+                    .renderer
+                    .map(|renderer| renderer.visual_scale_q8)
+                    .unwrap_or(crate::MODEL_SCALE_ONE_Q8),
+                candidate
+                    .animator
+                    .map(|animator| animator.action_clips)
+                    .unwrap_or(&[]),
+                candidate.controller_settings,
+                &mut assets,
+                &mut models,
+                &mut model_clips,
+                &mut model_clip_bounds,
+                &mut model_frame_bounds,
+                &mut model_sockets,
+                &mut model_for_resource,
+                &runtime_model_clips,
+                &mut model_clip_remaps,
+                &mut characters,
+                &mut report,
+            )
+            .map(|character_index| PlaytestPlayerController {
+                spawn: spawn_record,
+                character: character_index,
+            })
         }
         _ => None,
     };
@@ -1151,9 +1176,20 @@ fn collect_runtime_model_clip_requirements(
     for node in scene.nodes() {
         match &node.kind {
             NodeKind::Entity => {
-                if let Some((Some(model), _)) = component_model_renderer(scene, node) {
-                    let clip = component_animator(scene, node).and_then(|anim| anim.clip);
-                    add_model_clip_requirement(project, &mut out, model, clip);
+                if let Some(model) = component_model_renderer(scene, node).and_then(|r| r.model) {
+                    if let Some(animator) = component_animator(scene, node) {
+                        add_model_clip_requirement(project, &mut out, model, animator.clip);
+                        for binding in animator.action_clips {
+                            add_model_clip_requirement(
+                                project,
+                                &mut out,
+                                model,
+                                Some(binding.clip),
+                            );
+                        }
+                    } else {
+                        add_model_clip_requirement(project, &mut out, model, None);
+                    }
                 }
                 if let Some(controller) = component_character_controller(scene, node) {
                     if let Some(character_id) = controller.character {
@@ -1224,11 +1260,16 @@ fn add_character_clip_requirements(
         character.walk_clip,
         character.run_clip,
         character.turn_clip,
+        character.roll_clip,
+        character.backstep_clip,
     ]
     .into_iter()
     .flatten()
     {
         add_model_clip_requirement(project, out, model, Some(legacy));
+    }
+    for binding in &character.action_clips {
+        add_model_clip_requirement(project, out, model, Some(binding.clip));
     }
 
     let Some(set) = character.animation_set.and_then(|id| {
@@ -1242,18 +1283,45 @@ fn add_character_clip_requirements(
         return;
     };
 
-    for role in [
-        AnimationRole::Idle,
-        AnimationRole::Walk,
-        AnimationRole::Run,
-        AnimationRole::Turn,
-    ] {
-        if let Some(animation_id) = set.role_clip(role) {
+    for action in CharacterAnimationAction::ALL {
+        if let Some(animation_id) = animation_set_action_clip(project, set, action) {
             if let Some(index) = project.resolved_model_animation_index(model, animation_id) {
                 add_model_clip_requirement(project, out, model, Some(index));
             }
         }
     }
+}
+
+fn animation_set_action_clip(
+    project: &ProjectDocument,
+    set: &crate::AnimationSetResource,
+    action: CharacterAnimationAction,
+) -> Option<ResourceId> {
+    if let Some(id) = set.action_clip(action) {
+        return Some(id);
+    }
+    set.clips.iter().copied().find(|id| {
+        project
+            .resource(*id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationClip(clip) => {
+                    let role_matches = match action {
+                        CharacterAnimationAction::HeavyAttack
+                        | CharacterAnimationAction::ComboAttack
+                        | CharacterAnimationAction::Block => false,
+                        _ => action.role_hint().is_some_and(|role| {
+                            clip.role == role
+                                || AnimationRole::guess_from_name(&resource.name) == role
+                        }),
+                    };
+                    let action_matches =
+                        CharacterAnimationAction::guess_from_name(&resource.name) == Some(action);
+                    Some(role_matches || action_matches)
+                }
+                _ => None,
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn add_model_clip_requirement(
@@ -1325,7 +1393,11 @@ fn cook_player_character(
     project: &ProjectDocument,
     project_root: &Path,
     spawn_node: &SceneNode,
-    character_id: ResourceId,
+    character_id: Option<ResourceId>,
+    model_override: Option<ResourceId>,
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
+    action_overrides: &[crate::CharacterActionClip],
     controller_settings: Option<CharacterControllerSettings>,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
@@ -1339,36 +1411,42 @@ fn cook_player_character(
     characters: &mut Vec<PlaytestCharacter>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
-    let resource = match project.resource(character_id) {
-        Some(r) => r,
-        None => {
-            report.error(format!(
-                "Player Spawn '{}' references Character #{} which doesn't exist",
-                spawn_node.name,
-                character_id.raw()
-            ));
-            return None;
+    let default_character = crate::CharacterResource::defaults();
+    let (character, character_name) = match character_id {
+        Some(character_id) => {
+            let resource = match project.resource(character_id) {
+                Some(r) => r,
+                None => {
+                    report.error(format!(
+                        "Player Spawn '{}' references Character #{} which doesn't exist",
+                        spawn_node.name,
+                        character_id.raw()
+                    ));
+                    return None;
+                }
+            };
+            match &resource.data {
+                ResourceData::Character(c) => (c, resource.name.as_str()),
+                _ => {
+                    report.error(format!(
+                        "Player Spawn '{}' references resource '{}' which is not a Character",
+                        spawn_node.name, resource.name
+                    ));
+                    return None;
+                }
+            }
         }
-    };
-    let character = match &resource.data {
-        ResourceData::Character(c) => c,
-        _ => {
-            report.error(format!(
-                "Player Spawn '{}' references resource '{}' which is not a Character",
-                spawn_node.name, resource.name
-            ));
-            return None;
-        }
+        None => (&default_character, spawn_node.name.as_str()),
     };
     let settings = controller_settings
         .unwrap_or_else(|| CharacterControllerSettings::from_character(character));
 
-    let model_resource_id = match character.model {
+    let model_resource_id = match model_override.or(character.model) {
         Some(id) => id,
         None => {
             report.error(format!(
-                "Character '{}' has no Model assigned — required for the player",
-                resource.name
+                "Character '{}' has no Model assigned -- add a Model Renderer or set a profile Model",
+                character_name
             ));
             return None;
         }
@@ -1408,21 +1486,35 @@ fn cook_player_character(
         if set.skeleton.is_some() && model_skeleton.is_some() && set.skeleton != model_skeleton {
             report.error(format!(
                 "Character '{}' clip role map '{}' targets a different skeleton than its model",
-                resource.name, set_name
+                character_name, set_name
             ));
             return None;
         }
     }
 
-    let resolve_role = |role: AnimationRole,
-                        legacy_slot: Option<u16>,
-                        required: bool,
-                        project: &ProjectDocument,
-                        report: &mut PlaytestValidationReport|
+    let resolve_action = |action: CharacterAnimationAction,
+                          required: bool,
+                          project: &ProjectDocument,
+                          report: &mut PlaytestValidationReport|
      -> Option<u16> {
-        let role_label = role.label().to_ascii_lowercase();
+        let action_label = action.label().to_ascii_lowercase();
+        if let Some(idx) = action_overrides
+            .iter()
+            .find_map(|binding| (binding.action == action).then_some(binding.clip))
+        {
+            return remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx).or_else(
+                || {
+                    report.error(format!(
+                        "Animator on '{}' maps {action_label} to clip {idx}, but that clip was not packaged for runtime",
+                        spawn_node.name
+                    ));
+                    None
+                },
+            );
+        }
+
         if let Some((_, set_name, set)) = animation_set {
-            if let Some(animation_id) = set.role_clip(role) {
+            if let Some(animation_id) = animation_set_action_clip(project, set, action) {
                 match project.resolved_model_animation_index(model_resource_id, animation_id) {
                     Some(index) => {
                         if let Some(local) =
@@ -1431,15 +1523,15 @@ fn cook_player_character(
                             return Some(local);
                         }
                         report.error(format!(
-                            "Character '{}' {role_label} clip resolves to {index}, but that clip was not packaged for runtime",
-                            resource.name
+                            "Character '{}' {action_label} clip resolves to {index}, but that clip was not packaged for runtime",
+                            character_name
                         ));
                         return None;
                     }
                     None => {
                         report.error(format!(
-                            "Character '{}' clip role map '{}' {role_label} clip is not compatible with model '{}'",
-                            resource.name, set_name, model.name
+                            "Character '{}' action map '{}' {action_label} clip is not compatible with model '{}'",
+                            character_name, set_name, model.name
                         ));
                         return None;
                     }
@@ -1447,19 +1539,19 @@ fn cook_player_character(
             }
         }
 
-        match legacy_slot {
+        match character.action_clip(action) {
             Some(idx) => remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
                 .or_else(|| {
                     report.error(format!(
-                        "Character '{}' {role_label} clip {idx} was not packaged for runtime",
-                        resource.name
+                        "Character '{}' {action_label} clip {idx} was not packaged for runtime",
+                        character_name
                     ));
                     None
                 }),
             None if required => {
                 report.error(format!(
-                    "Character '{}' has no {role_label} clip assigned",
-                    resource.name
+                    "Character '{}' has no {action_label} clip assigned",
+                    character_name
                 ));
                 None
             }
@@ -1467,63 +1559,38 @@ fn cook_player_character(
         }
     };
 
-    let idle_clip = resolve_role(
-        AnimationRole::Idle,
-        character.idle_clip,
-        true,
-        project,
-        report,
-    )?;
-    let walk_clip = resolve_role(
-        AnimationRole::Walk,
-        character.walk_clip,
-        true,
-        project,
-        report,
-    )?;
-    let run_clip = resolve_role(
-        AnimationRole::Run,
-        character.run_clip,
-        false,
-        project,
-        report,
-    )
-    .unwrap_or(CHARACTER_CLIP_NONE);
-    let turn_clip = resolve_role(
-        AnimationRole::Turn,
-        character.turn_clip,
-        false,
-        project,
-        report,
-    )
-    .unwrap_or(CHARACTER_CLIP_NONE);
+    let mut action_clips = [CHARACTER_CLIP_NONE; PLAYTEST_CHARACTER_ACTION_COUNT];
+    for action in CharacterAnimationAction::ALL {
+        action_clips[action.to_index()] =
+            resolve_action(action, action.required_for_player(), project, report)?;
+    }
 
     if settings.radius == 0 {
-        report.error(format!("Character '{}' radius must be > 0", resource.name));
+        report.error(format!("Character '{character_name}' radius must be > 0"));
         return None;
     }
     if settings.height == 0 {
-        report.error(format!("Character '{}' height must be > 0", resource.name));
+        report.error(format!("Character '{character_name}' height must be > 0"));
         return None;
     }
     if settings.walk_speed <= 0 || settings.run_speed <= 0 {
         report.error(format!(
             "Character Controller for '{}' walk/run speeds must be > 0",
-            resource.name
+            character_name
         ));
         return None;
     }
     if settings.turn_speed_degrees_per_second == 0 {
         report.error(format!(
             "Character Controller for '{}' turn_speed must be > 0",
-            resource.name
+            character_name
         ));
         return None;
     }
     if settings.stamina_max_q12 <= 0 {
         report.error(format!(
             "Character Controller for '{}' stamina_max must be > 0",
-            resource.name
+            character_name
         ));
         return None;
     }
@@ -1535,57 +1602,65 @@ fn cook_player_character(
     {
         report.error(format!(
             "Character Controller for '{}' stamina costs and recovery must be >= 0",
-            resource.name
+            character_name
         ));
         return None;
     }
     if settings.roll_speed <= 0 || settings.backstep_speed <= 0 {
         report.error(format!(
             "Character Controller for '{}' evade speeds must be > 0",
-            resource.name
+            character_name
         ));
         return None;
     }
     if settings.roll_active_frames == 0 || settings.backstep_active_frames == 0 {
         report.error(format!(
             "Character Controller for '{}' evade active frames must be > 0",
-            resource.name
+            character_name
         ));
         return None;
     }
     if character.camera_distance <= 0 {
         report.error(format!(
             "Character '{}' camera_distance must be > 0",
-            resource.name
+            character_name
         ));
         return None;
     }
     if character.camera_height < 0 || character.camera_target_height < 0 {
         report.error(format!(
             "Character '{}' camera offsets must be >= 0",
-            resource.name
+            character_name
         ));
         return None;
     }
 
-    if run_clip == CHARACTER_CLIP_NONE {
+    if action_clips[CharacterAnimationAction::Run.to_index()] == CHARACTER_CLIP_NONE {
         report.warn(format!(
-            "Character '{}' has no run clip — runtime will fall back to walk for run input",
-            resource.name
+            "Character '{character_name}' has no run clip -- runtime will fall back to walk for run input",
         ));
     }
-    if turn_clip == CHARACTER_CLIP_NONE {
-        report.warn(format!("Character '{}' has no turn clip", resource.name));
+    if action_clips[CharacterAnimationAction::Turn.to_index()] == CHARACTER_CLIP_NONE {
+        report.warn(format!("Character '{character_name}' has no turn clip"));
+    }
+    if action_clips[CharacterAnimationAction::Roll.to_index()] == CHARACTER_CLIP_NONE {
+        report.warn(format!(
+            "Character '{character_name}' has no roll clip -- runtime will fall back to run/walk",
+        ));
+    }
+    if action_clips[CharacterAnimationAction::Backstep.to_index()] == CHARACTER_CLIP_NONE {
+        report.warn(format!(
+            "Character '{character_name}' has no backstep clip -- runtime will fall back to walk",
+        ));
     }
 
     let character_index = u16::try_from(characters.len()).unwrap_or(u16::MAX);
     characters.push(PlaytestCharacter {
-        source_resource: character_id,
+        source_resource: character_id.unwrap_or(model_resource_id),
         model: model_index,
-        idle_clip,
-        walk_clip,
-        run_clip,
-        turn_clip,
+        action_clips,
+        visual_offset,
+        visual_scale_q8,
         radius: settings.radius,
         height: settings.height,
         walk_speed: settings.walk_speed,
@@ -2185,6 +2260,8 @@ fn push_model_instance_for_resource(
     room_index: u16,
     pos: [i32; 3],
     yaw: i16,
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
@@ -2244,6 +2321,8 @@ fn push_model_instance_for_resource(
         y: pos[1],
         z: pos[2],
         yaw,
+        visual_offset,
+        visual_scale_q8,
         flags: 0,
     });
     true
@@ -2327,6 +2406,8 @@ fn push_character_controller_idle_instance(
         y: pos[1],
         z: pos[2],
         yaw,
+        visual_offset: [0; 3],
+        visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
         flags: 0,
     });
     true
@@ -2502,8 +2583,16 @@ fn playtest_weapon_shape(shape: &crate::WeaponHitShape) -> PlaytestWeaponHitShap
 }
 
 #[derive(Clone, Copy)]
-struct AnimatorComponent {
+struct ModelRendererComponent {
+    model: Option<ResourceId>,
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
+}
+
+#[derive(Clone, Copy)]
+struct AnimatorComponent<'a> {
     clip: Option<u16>,
+    action_clips: &'a [crate::CharacterActionClip],
 }
 
 #[derive(Clone, Copy)]
@@ -2522,16 +2611,33 @@ struct EquipmentComponent<'a> {
 fn component_model_renderer(
     scene: &crate::Scene,
     host: &SceneNode,
-) -> Option<(Option<ResourceId>, Option<ResourceId>)> {
+) -> Option<ModelRendererComponent> {
     component_children(scene, host).find_map(|node| match &node.kind {
-        NodeKind::ModelRenderer { model, material } => Some((*model, *material)),
+        NodeKind::ModelRenderer {
+            model,
+            material: _,
+            visual_offset,
+            visual_scale_q8,
+        } => Some(ModelRendererComponent {
+            model: *model,
+            visual_offset: *visual_offset,
+            visual_scale_q8: *visual_scale_q8,
+        }),
         _ => None,
     })
 }
 
-fn component_animator(scene: &crate::Scene, host: &SceneNode) -> Option<AnimatorComponent> {
+fn component_animator<'a>(
+    scene: &'a crate::Scene,
+    host: &'a SceneNode,
+) -> Option<AnimatorComponent<'a>> {
     component_children(scene, host).find_map(|node| match &node.kind {
-        NodeKind::Animator { clip, .. } => Some(AnimatorComponent { clip: *clip }),
+        NodeKind::Animator {
+            clip, action_clips, ..
+        } => Some(AnimatorComponent {
+            clip: *clip,
+            action_clips,
+        }),
         _ => None,
     })
 }
@@ -4502,10 +4608,116 @@ mod tests {
         let character = &package.characters[0];
         // Starter characters use the shared standalone FBX
         // library rather than model-local Meshy clips.
-        assert_eq!(character.idle_clip, 0);
-        assert_eq!(character.walk_clip, 1);
-        assert_eq!(character.run_clip, 1);
-        assert_eq!(character.turn_clip, CHARACTER_CLIP_NONE);
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Idle.to_index()],
+            0
+        );
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Walk.to_index()],
+            1
+        );
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Run.to_index()],
+            1
+        );
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Turn.to_index()],
+            CHARACTER_CLIP_NONE
+        );
+    }
+
+    #[test]
+    fn animation_set_infers_evade_roles_from_extra_clip_names() {
+        let mut project = ProjectDocument::new("role inference");
+        let skeleton = project.add_resource(
+            "Skeleton",
+            ResourceData::Skeleton(crate::SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "test".to_string(),
+                note: String::new(),
+            }),
+        );
+        let roll = project.add_resource(
+            "Meshy Gold / roll dodge",
+            ResourceData::AnimationClip(crate::AnimationClipResource {
+                psxanim_path: "roll.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: crate::AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: Vec::new(),
+            }),
+        );
+        let backstep = project.add_resource(
+            "Meshy Gold / step back",
+            ResourceData::AnimationClip(crate::AnimationClipResource {
+                psxanim_path: "backstep.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: crate::AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: Vec::new(),
+            }),
+        );
+        let light_attack = project.add_resource(
+            "Standalone FBX / sword attack",
+            ResourceData::AnimationClip(crate::AnimationClipResource {
+                psxanim_path: "attack.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: crate::AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: Vec::new(),
+            }),
+        );
+        let heavy_attack = project.add_resource(
+            "Custom flourish",
+            ResourceData::AnimationClip(crate::AnimationClipResource {
+                psxanim_path: "heavy.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: crate::AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: Vec::new(),
+            }),
+        );
+        let mut set = crate::AnimationSetResource {
+            skeleton: Some(skeleton),
+            clips: vec![roll, backstep, light_attack],
+            ..crate::AnimationSetResource::default()
+        };
+        set.set_action_clip(CharacterAnimationAction::HeavyAttack, Some(heavy_attack));
+
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::Roll),
+            Some(roll)
+        );
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::Backstep),
+            Some(backstep)
+        );
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::LightAttack),
+            Some(light_attack)
+        );
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::HeavyAttack),
+            Some(heavy_attack)
+        );
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::ComboAttack),
+            None,
+            "generic attack clips must not fill every combat action"
+        );
     }
 
     #[test]
@@ -4531,6 +4743,40 @@ mod tests {
         assert_eq!(character.turn_speed_degrees_per_second, 270);
         assert_eq!(character.stamina_max_q12, 2048);
         assert_eq!(character.roll_speed, 144);
+    }
+
+    #[test]
+    fn player_model_renderer_visual_transform_drives_cooked_character() {
+        let mut project = project_with_one_room();
+        let spawn_id = player_spawn_node_id(&project);
+        let scene = project.active_scene_mut();
+        let renderer_id = scene
+            .node(spawn_id)
+            .and_then(|node| {
+                node.children.iter().find_map(|child| {
+                    scene.node(*child).and_then(|node| {
+                        matches!(node.kind, NodeKind::ModelRenderer { .. }).then_some(node.id)
+                    })
+                })
+            })
+            .expect("starter player has a model renderer");
+        let renderer = scene.node_mut(renderer_id).unwrap();
+        let NodeKind::ModelRenderer {
+            visual_offset,
+            visual_scale_q8,
+            ..
+        } = &mut renderer.kind
+        else {
+            panic!("expected model renderer");
+        };
+        *visual_offset = [32, -16, 48];
+        *visual_scale_q8 = crate::MODEL_SCALE_ONE_Q8 + 64;
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let character = &package.expect("package returned on ok report").characters[0];
+        assert_eq!(character.visual_offset, [32, -16, 48]);
+        assert_eq!(character.visual_scale_q8, crate::MODEL_SCALE_ONE_Q8 + 64);
     }
 
     #[test]
@@ -4692,24 +4938,112 @@ mod tests {
     }
 
     #[test]
-    fn player_spawn_without_character_assignment_auto_picks_when_one_exists() {
-        // Keep exactly one Character. Clear the spawn's explicit
-        // reference; cooker should auto-pick + warn.
+    fn legacy_spawn_without_character_assignment_auto_picks_when_one_exists() {
+        // Keep exactly one Character. Component-authored players use
+        // their Model Renderer directly, so this legacy auto-pick path
+        // is only for SpawnPoint-authored projects.
         let mut project = project_with_one_room();
         let player_character = player_character_resource_id(&project);
         project.resources.retain(|resource| {
             !matches!(resource.data, ResourceData::Character(_)) || resource.id == player_character
         });
-        let controller_id = player_controller_component_id(&project);
-        if let Some(node) = project.active_scene_mut().node_mut(controller_id) {
-            if let NodeKind::CharacterController { character, .. } = &mut node.kind {
-                *character = None;
-            }
+        demote_player_spawns(&mut project);
+        let room_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        let spawn_id = project.active_scene_mut().add_node(
+            room_id,
+            "Legacy Player Spawn",
+            NodeKind::SpawnPoint {
+                player: true,
+                character: None,
+            },
+        );
+        if let Some(node) = project.active_scene_mut().node_mut(spawn_id) {
+            node.transform.translation = [0.0, 0.0, 0.0];
         }
         let (package, report) = build_package(&project, &starter_project_root());
+        assert!(
+            report.is_ok(),
+            "errors: {:?}; warnings: {:?}",
+            report.errors,
+            report.warnings
+        );
         let package = package.expect("auto-pick should succeed");
         assert!(package.player_controller.is_some());
         assert!(report.warnings.iter().any(|w| w.contains("auto-picked")));
+    }
+
+    #[test]
+    fn component_player_without_profile_uses_model_renderer_and_animator() {
+        let mut project = project_with_one_room();
+        let model = player_model_resource_id(&project);
+        let controller_id = player_controller_component_id(&project);
+        let scene = project.active_scene_mut();
+        if let Some(controller) = scene.node_mut(controller_id) {
+            let NodeKind::CharacterController {
+                character,
+                settings,
+                ..
+            } = &mut controller.kind
+            else {
+                panic!("starter player controller must be a Character Controller");
+            };
+            *character = None;
+            settings.walk_speed = 77;
+        }
+        let player = player_spawn_node_id(&project);
+        let animator_id = project
+            .active_scene()
+            .node(player)
+            .and_then(|node| {
+                node.children.iter().find_map(|id| {
+                    project.active_scene().node(*id).and_then(|child| {
+                        matches!(child.kind, NodeKind::Animator { .. }).then_some(child.id)
+                    })
+                })
+            })
+            .expect("starter player has Animator component");
+        if let Some(animator) = project.active_scene_mut().node_mut(animator_id) {
+            let NodeKind::Animator { action_clips, .. } = &mut animator.kind else {
+                panic!("expected Animator component");
+            };
+            action_clips.push(crate::CharacterActionClip {
+                action: CharacterAnimationAction::Idle,
+                clip: 0,
+            });
+            action_clips.push(crate::CharacterActionClip {
+                action: CharacterAnimationAction::Walk,
+                clip: 0,
+            });
+            action_clips.push(crate::CharacterActionClip {
+                action: CharacterAnimationAction::Backstep,
+                clip: 0,
+            });
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        assert!(
+            !report.warnings.iter().any(|w| w.contains("auto-picked")),
+            "component player should not secretly auto-pick a profile: {:?}",
+            report.warnings
+        );
+        let package = package.expect("component player cooks");
+        let character = &package.characters[0];
+        assert_eq!(character.walk_speed, 77);
+        assert_eq!(
+            package.models[character.model as usize].source_resource,
+            model
+        );
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Backstep.to_index()],
+            0
+        );
     }
 
     #[test]
@@ -5711,6 +6045,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
             },
         );
         scene.add_node(
@@ -5718,6 +6054,7 @@ mod tests {
             "Animator",
             NodeKind::Animator {
                 clip: Some(0),
+                action_clips: Vec::new(),
                 autoplay: true,
             },
         );
@@ -5847,13 +6184,13 @@ mod tests {
             .iter()
             .find(|character| character.model == model_index as u16)
             .expect("player character is packaged");
-        assert!(character.idle_clip < model.clip_count);
-        assert!(character.walk_clip < model.clip_count);
-        if character.run_clip != CHARACTER_CLIP_NONE {
-            assert!(character.run_clip < model.clip_count);
-        }
-        if character.turn_clip != CHARACTER_CLIP_NONE {
-            assert!(character.turn_clip < model.clip_count);
+        for action in CharacterAnimationAction::ALL {
+            let clip = character.action_clips[action.to_index()];
+            if action.required_for_player() {
+                assert!(clip < model.clip_count);
+            } else if clip != CHARACTER_CLIP_NONE {
+                assert!(clip < model.clip_count);
+            }
         }
     }
 
@@ -6012,6 +6349,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [24, 8, -12],
+                visual_scale_q8: crate::MODEL_SCALE_ONE_Q8 + 32,
             },
         );
 
@@ -6020,6 +6359,11 @@ mod tests {
         let package = package.expect("cooks");
         assert_eq!(package.model_instances.len(), 1);
         assert_eq!(package.model_instances[0].yaw, 1024);
+        assert_eq!(package.model_instances[0].visual_offset, [24, 8, -12]);
+        assert_eq!(
+            package.model_instances[0].visual_scale_q8,
+            crate::MODEL_SCALE_ONE_Q8 + 32
+        );
     }
 
     #[test]
@@ -6108,7 +6452,10 @@ mod tests {
         let instance = package.model_instances[0];
         assert_eq!(instance.yaw, 2048);
         assert_eq!(instance.model, package.characters[0].model);
-        assert_eq!(instance.clip, package.characters[0].idle_clip);
+        assert_eq!(
+            instance.clip,
+            package.characters[0].action_clips[CharacterAnimationAction::Idle.to_index()]
+        );
     }
 
     #[test]
@@ -6145,6 +6492,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
             },
         );
 
