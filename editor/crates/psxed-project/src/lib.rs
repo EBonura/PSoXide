@@ -5114,6 +5114,43 @@ pub struct ModelAnimationClip {
     pub name: String,
     /// Path to the cooked `.psxanim` artifact.
     pub psxanim_path: String,
+    /// Per-clip model placement controls used by editor preview and
+    /// cooked runtime rendering.
+    #[serde(default, skip_serializing_if = "AnimationClipCalibration::is_default")]
+    pub calibration: AnimationClipCalibration,
+}
+
+/// Per-animation model placement controls.
+///
+/// These are deliberately stored on the clip, not on the character or
+/// model renderer: different imported animations can have different
+/// root conventions even when they target the same skeleton.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnimationClipCalibration {
+    /// Render the clip in-place by cancelling root translation in
+    /// model-local space. Controller code owns gameplay movement.
+    #[serde(default = "default_true")]
+    pub in_place: bool,
+    /// Extra model-local pose translation in cooked pose units.
+    #[serde(default)]
+    pub offset: [i32; 3],
+}
+
+impl AnimationClipCalibration {
+    pub const DEFAULT: Self = Self {
+        in_place: true,
+        offset: [0, 0, 0],
+    };
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::DEFAULT
+    }
+}
+
+impl Default for AnimationClipCalibration {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// Skeleton compatibility contract for skinned models and animation
@@ -5581,6 +5618,10 @@ pub struct AnimationClipResource {
     /// Searchable editor tags.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Per-clip model placement controls used by editor preview and
+    /// cooked runtime rendering.
+    #[serde(default, skip_serializing_if = "AnimationClipCalibration::is_default")]
+    pub calibration: AnimationClipCalibration,
 }
 
 impl AnimationClipResource {
@@ -5589,6 +5630,7 @@ impl AnimationClipResource {
         ModelAnimationClip {
             name: name.into(),
             psxanim_path: self.psxanim_path.clone(),
+            calibration: self.calibration,
         }
     }
 }
@@ -6483,6 +6525,11 @@ pub struct ResolvedModelAnimationClip {
     /// animation library. `None` means it came from
     /// `ModelResource::clips`.
     pub animation_resource: Option<ResourceId>,
+    /// Model-local clip index when this row came from
+    /// `ModelResource::clips`.
+    pub model_clip_index: Option<usize>,
+    /// Per-clip placement calibration.
+    pub calibration: AnimationClipCalibration,
 }
 
 /// One backing-file move performed by a resource rename.
@@ -7295,12 +7342,14 @@ impl ProjectDocument {
 
         let mut out = Vec::new();
         let mut seen_paths = HashSet::new();
-        for clip in &model.clips {
+        for (model_clip_index, clip) in model.clips.iter().enumerate() {
             if seen_paths.insert(clip.psxanim_path.clone()) {
                 out.push(ResolvedModelAnimationClip {
                     name: clip.name.clone(),
                     psxanim_path: clip.psxanim_path.clone(),
                     animation_resource: None,
+                    model_clip_index: Some(model_clip_index),
+                    calibration: clip.calibration,
                 });
             }
         }
@@ -7325,6 +7374,8 @@ impl ProjectDocument {
                         name: resource.name.clone(),
                         psxanim_path: clip.psxanim_path.clone(),
                         animation_resource: Some(resource.id),
+                        model_clip_index: None,
+                        calibration: clip.calibration,
                     });
                 }
             }
@@ -9697,10 +9748,15 @@ mod tests {
                     ModelAnimationClip {
                         name: "idle".to_string(),
                         psxanim_path: "assets/models/x/x_idle.psxanim".to_string(),
+                        calibration: Default::default(),
                     },
                     ModelAnimationClip {
                         name: "walk".to_string(),
                         psxanim_path: "assets/models/x/x_walk.psxanim".to_string(),
+                        calibration: AnimationClipCalibration {
+                            in_place: false,
+                            offset: [12, -8, 24],
+                        },
                     },
                 ],
                 default_clip: Some(0),
@@ -9729,6 +9785,8 @@ mod tests {
                 assert_eq!(m.clips.len(), 2);
                 assert_eq!(m.default_clip, Some(0));
                 assert_eq!(m.preview_clip, Some(1));
+                assert_eq!(m.clips[1].calibration.offset, [12, -8, 24]);
+                assert!(!m.clips[1].calibration.in_place);
                 assert_eq!(m.world_height, 1280);
                 assert_eq!(m.collision_radius, 240);
                 assert_eq!(
@@ -9772,6 +9830,7 @@ mod tests {
                 role: AnimationRole::Idle,
                 looping: true,
                 tags: vec!["idle".to_string()],
+                calibration: Default::default(),
             }),
         );
         let set = project.add_resource(
@@ -9798,6 +9857,7 @@ mod tests {
                 clips: vec![ModelAnimationClip {
                     name: "legacy idle".to_string(),
                     psxanim_path: "assets/animations/idle.psxanim".to_string(),
+                    calibration: Default::default(),
                 }],
                 default_clip: Some(0),
                 preview_clip: Some(0),
@@ -9897,6 +9957,7 @@ mod tests {
                 role: AnimationRole::Walk,
                 looping: true,
                 tags: vec!["walk".to_string()],
+                calibration: Default::default(),
             }),
         );
         let baked_for_a = project.add_resource(
@@ -9910,6 +9971,7 @@ mod tests {
                 role: AnimationRole::Generic,
                 looping: false,
                 tags: vec!["roll".to_string()],
+                calibration: Default::default(),
             }),
         );
         project.add_resource(
@@ -9923,6 +9985,7 @@ mod tests {
                 role: AnimationRole::Generic,
                 looping: false,
                 tags: vec!["roll".to_string()],
+                calibration: Default::default(),
             }),
         );
 
@@ -10132,11 +10195,13 @@ mod tests {
                         name: "idle".to_string(),
                         psxanim_path: "assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim"
                             .to_string(),
+                        calibration: Default::default(),
                     },
                     ModelAnimationClip {
                         name: "walk".to_string(),
                         psxanim_path: "assets/models/obsidian_wraith/obsidian_wraith_walk.psxanim"
                             .to_string(),
+                        calibration: Default::default(),
                     },
                 ],
                 default_clip: Some(0),

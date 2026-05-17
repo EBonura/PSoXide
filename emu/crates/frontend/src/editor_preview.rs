@@ -2569,6 +2569,7 @@ fn submit_preview_model_instance(
         instance.origin,
         instance.instance_rotation,
         preview_model_local_to_world(instance.model, instance.visual_scale_q8),
+        psx_engine::ModelPoseTranslation::ZERO,
         projected_vertices,
         joint_view_transforms,
         material,
