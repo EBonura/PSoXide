@@ -717,13 +717,7 @@ pub(crate) fn project_world_vertex_indices_gte(
         group[group_count] = index;
         group_count += 1;
         if group_count == 3 {
-            project_world_index_group_gte(
-                camera,
-                vertices,
-                projected_vertices,
-                near_z,
-                group,
-            );
+            project_world_index_group_gte(camera, vertices, projected_vertices, near_z, group);
             group_count = 0;
         }
     }
@@ -2506,6 +2500,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         camera: WorldCamera,
         origin: WorldVertex,
         instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
@@ -2521,6 +2516,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             camera,
             origin,
             instance_rotation,
+            local_to_world,
             projected_vertices,
             joint_view_transforms,
             material,
@@ -2546,6 +2542,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         camera: WorldCamera,
         origin: WorldVertex,
         instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
@@ -2561,6 +2558,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             camera,
             origin,
             instance_rotation,
+            local_to_world,
             projected_vertices,
             joint_view_transforms,
             material,
@@ -2581,6 +2579,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         camera: WorldCamera,
         origin: WorldVertex,
         instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
@@ -2590,7 +2589,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         blend_vertices: bool,
     ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
-        let local_to_world = LocalToWorldScale::from_q12(model.local_to_world_q12());
         let camera_view = camera_gte_view_matrix(camera);
         load_world_projection_gte(camera.projection);
 
@@ -2737,8 +2735,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let packet_material = material.textured_packet_material();
         let packed_fast_faces =
             options.split_textured_triangles && options.textured_split_max_edge == 0;
-        let packed_back_in_front_faces =
-            packed_fast_faces && all_projected_vertices_in_front && options.cull_mode == CullMode::Back;
+        let packed_back_in_front_faces = packed_fast_faces
+            && all_projected_vertices_in_front
+            && options.cull_mode == CullMode::Back;
         let packed_back_average_in_front_faces =
             packed_back_in_front_faces && options.depth_policy == DepthPolicy::Average;
         let packed_back_average_unclamped_faces =
@@ -2878,7 +2877,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
             ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
         ];
-        let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        let tri_stats =
+            self.submit_textured_triangle_split(triangles, textured, material, options, 0);
         merge_textured_model_stats(stats, tri_stats);
         stats.primitive_overflow || stats.command_overflow
     }
@@ -2936,7 +2936,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
             ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
         ];
-        let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        let tri_stats =
+            self.submit_textured_triangle_split(triangles, textured, material, options, 0);
         merge_textured_model_stats(stats, tri_stats);
         stats.primitive_overflow || stats.command_overflow
     }
@@ -2994,7 +2995,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
             ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
         ];
-        let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        let tri_stats =
+            self.submit_textured_triangle_split(triangles, textured, material, options, 0);
         merge_textured_model_stats(stats, tri_stats);
         stats.primitive_overflow || stats.command_overflow
     }
@@ -3060,7 +3062,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
             ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
         ];
-        let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+        let tri_stats =
+            self.submit_textured_triangle_split(triangles, textured, material, options, 0);
         merge_textured_model_stats(stats, tri_stats);
         stats.primitive_overflow || stats.command_overflow
     }
@@ -3129,7 +3132,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
                 ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
             ];
-            let tri_stats = self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+            let tri_stats =
+                self.submit_textured_triangle_split(triangles, textured, material, options, 0);
             merge_textured_model_stats(stats, tri_stats);
             stats.primitive_overflow || stats.command_overflow
         } else {

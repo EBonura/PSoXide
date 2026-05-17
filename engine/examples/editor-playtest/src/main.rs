@@ -22,7 +22,10 @@
 //! Controls (free-orbit toggled with SELECT):
 //! * Left stick / D-pad -- camera-relative movement.
 //! * Right stick        -- camera yaw; vertical adjusts camera height.
-//! * CIRCLE            -- run while moving.
+//! * CIRCLE tap        -- roll / backstep.
+//! * CIRCLE hold       -- run while moving.
+//! * R1                -- light attack.
+//! * R2                -- heavy attack.
 
 #![no_std]
 #![no_main]
@@ -65,11 +68,12 @@ use psx_gpu::{
 };
 use psx_level::{
     equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, room_flags, sky_flags,
-    AssetId, AssetKind, EntityRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
-    LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness,
-    LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
-    LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
-    OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
+    AssetId, AssetKind, CharacterAnimationAction, EntityRecord, LevelCameraRecord,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
+    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
+    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
+    WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
@@ -228,7 +232,10 @@ const FALLBACK_PLAYER_YAW_STEP: Angle = Angle::from_q12(32);
 const FALLBACK_PLAYER_SPEED: i32 = 32;
 const PLAYER_SPEED_SCALE_NUM: i32 = 3;
 const PLAYER_SPEED_SCALE_DEN: i32 = 4;
-const RUN_BUTTON: u16 = button::CIRCLE;
+const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
+const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
+const LIGHT_ATTACK_BUTTON: u16 = button::R1;
+const HEAVY_ATTACK_BUTTON: u16 = button::R2;
 
 #[cfg(feature = "ot-2048")]
 const OT_DEPTH: usize = 2048;
@@ -331,6 +338,8 @@ const MAX_RUNTIME_MODEL_PARTS: usize = 128;
 const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = 1024;
 /// Projected edge threshold used to subdivide close model triangles.
 const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
+/// Q8 fixed-point identity for per-instance visual model scale.
+const MODEL_VISUAL_SCALE_ONE_Q8: u16 = 256;
 /// Joint-transform scratch -- all biped rigs we currently cook
 /// fit comfortably in 32.
 const JOINT_CAP: usize = 32;
@@ -443,6 +452,30 @@ enum PlayerAnim {
     Idle,
     Walk,
     Run,
+    Roll,
+    Backstep,
+    LightAttack,
+    HeavyAttack,
+}
+
+impl PlayerAnim {
+    const fn action(self) -> CharacterAnimationAction {
+        match self {
+            Self::Idle => CharacterAnimationAction::Idle,
+            Self::Walk => CharacterAnimationAction::Walk,
+            Self::Run => CharacterAnimationAction::Run,
+            Self::Roll => CharacterAnimationAction::Roll,
+            Self::Backstep => CharacterAnimationAction::Backstep,
+            Self::LightAttack => CharacterAnimationAction::LightAttack,
+            Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct EvadeRunIntent {
+    sprint: bool,
+    evade: bool,
 }
 
 /// Runtime view of the cooked LevelCharacterRecord -- the same
@@ -453,14 +486,9 @@ enum PlayerAnim {
 struct RuntimeCharacter {
     /// Index into `MODELS`.
     model: ModelIndex,
-    idle_clip: ModelClipIndex,
-    walk_clip: ModelClipIndex,
-    /// Optional run clip -- `CHARACTER_CLIP_NONE` when unset.
-    /// Runtime falls back to `walk_clip` for run input.
-    run_clip: OptionalModelClipIndex,
-    /// Optional turn clip (currently unused at runtime -- turn
-    /// is folded into idle with yaw input).
-    _turn_clip: OptionalModelClipIndex,
+    action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
     /// Coarse collision cylinder radius. Engine units.
     radius: i32,
     /// Coarse collision cylinder height. Engine units.
@@ -500,10 +528,9 @@ impl RuntimeCharacter {
         let yaw_step_q12 = ((c.turn_speed_degrees_per_second as u32 * 4096) / (360 * 60)) as u16;
         Self {
             model: c.model,
-            idle_clip: c.idle_clip,
-            walk_clip: c.walk_clip,
-            run_clip: c.run_clip,
-            _turn_clip: c.turn_clip,
+            action_clips: c.action_clips,
+            visual_offset: c.visual_offset,
+            visual_scale_q8: c.visual_scale_q8,
             radius: c.radius as i32,
             height: c.height as i32,
             walk_speed: scaled_player_speed(c.walk_speed),
@@ -526,13 +553,71 @@ impl RuntimeCharacter {
         }
     }
 
-    /// Pick the clip index for an animation state, with the
-    /// "run falls back to walk when unassigned" rule.
+    fn action_clip(&self, action: CharacterAnimationAction) -> OptionalModelClipIndex {
+        self.action_clips
+            .get(action.to_index())
+            .copied()
+            .unwrap_or(OptionalModelClipIndex::NONE)
+    }
+
+    /// Pick the clip index for an animation state, with
+    /// cheap deterministic fallbacks for unassigned optional actions.
     fn clip_for(&self, anim: PlayerAnim) -> ModelClipIndex {
-        match anim {
-            PlayerAnim::Idle => self.idle_clip,
-            PlayerAnim::Walk => self.walk_clip,
-            PlayerAnim::Run => self.run_clip.unwrap_or(self.walk_clip),
+        let idle = self
+            .action_clip(CharacterAnimationAction::Idle)
+            .unwrap_or(ModelClipIndex::ZERO);
+        let walk = self
+            .action_clip(CharacterAnimationAction::Walk)
+            .unwrap_or(idle);
+        match anim.action() {
+            CharacterAnimationAction::Idle => idle,
+            CharacterAnimationAction::Walk => walk,
+            CharacterAnimationAction::Run => self
+                .action_clip(CharacterAnimationAction::Run)
+                .unwrap_or(walk),
+            CharacterAnimationAction::Roll => {
+                self.action_clip(CharacterAnimationAction::Roll).unwrap_or(
+                    self.action_clip(CharacterAnimationAction::Run)
+                        .unwrap_or(walk),
+                )
+            }
+            CharacterAnimationAction::Backstep => self
+                .action_clip(CharacterAnimationAction::Backstep)
+                .unwrap_or(walk),
+            CharacterAnimationAction::LightAttack => self
+                .action_clip(CharacterAnimationAction::LightAttack)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::ComboAttack)
+                        .to_option()
+                })
+                .unwrap_or(idle),
+            CharacterAnimationAction::HeavyAttack => self
+                .action_clip(CharacterAnimationAction::HeavyAttack)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::LightAttack)
+                        .to_option()
+                })
+                .unwrap_or(idle),
+            CharacterAnimationAction::ComboAttack => self
+                .action_clip(CharacterAnimationAction::ComboAttack)
+                .to_option()
+                .or_else(|| {
+                    self.action_clip(CharacterAnimationAction::LightAttack)
+                        .to_option()
+                })
+                .unwrap_or(idle),
+            CharacterAnimationAction::Block => self
+                .action_clip(CharacterAnimationAction::Block)
+                .unwrap_or(idle),
+            CharacterAnimationAction::HitReact => self
+                .action_clip(CharacterAnimationAction::HitReact)
+                .unwrap_or(idle),
+            CharacterAnimationAction::Death => self
+                .action_clip(CharacterAnimationAction::Death)
+                .unwrap_or(idle),
+            CharacterAnimationAction::Turn => idle,
         }
     }
 
@@ -1338,6 +1423,15 @@ struct Playtest {
     /// the loop relative to clip switches so transitions don't
     /// pop into the middle of the new clip.
     anim_start_tick: u32,
+    /// Non-looping gameplay animation lock. While active,
+    /// locomotion input is ignored and the current action clip
+    /// plays from start to finish.
+    anim_lock_until_tick: u32,
+    /// Circle is shared by tap-evade and hold-sprint. We delay
+    /// either decision for a few simulation ticks: release before
+    /// the threshold becomes evade; holding past it becomes sprint.
+    evade_run_hold_ticks: u8,
+    evade_run_hold_consumed: bool,
     /// `true` toggles a free-orbit camera around the spawn for
     /// debug inspection. Default = follow.
     free_orbit: bool,
@@ -1406,6 +1500,9 @@ impl Playtest {
             character: None,
             anim_state: PlayerAnim::Idle,
             anim_start_tick: 0,
+            anim_lock_until_tick: 0,
+            evade_run_hold_ticks: 0,
+            evade_run_hold_consumed: false,
             free_orbit: false,
             orbit_yaw: CAMERA_START_YAW,
             orbit_radius: CAMERA_START_RADIUS,
@@ -1434,6 +1531,38 @@ impl Playtest {
             clips: [const { None }; MAX_RUNTIME_MODEL_CLIPS],
             shadow_material: None,
             show_collision_debug: false,
+        }
+    }
+
+    fn update_evade_run_button(&mut self, ctx: &Ctx, delta_vblanks: u16) -> EvadeRunIntent {
+        if ctx.just_pressed(EVADE_RUN_BUTTON) {
+            self.evade_run_hold_ticks = 0;
+            self.evade_run_hold_consumed = false;
+        }
+
+        if ctx.is_held(EVADE_RUN_BUTTON) {
+            self.evade_run_hold_ticks = self
+                .evade_run_hold_ticks
+                .saturating_add(delta_vblanks.min(u8::MAX as u16) as u8);
+            if self.evade_run_hold_ticks >= EVADE_RUN_HOLD_VBLANKS {
+                self.evade_run_hold_consumed = true;
+                return EvadeRunIntent {
+                    sprint: true,
+                    evade: false,
+                };
+            }
+            return EvadeRunIntent {
+                sprint: false,
+                evade: false,
+            };
+        }
+
+        let evade = ctx.just_released(EVADE_RUN_BUTTON) && !self.evade_run_hold_consumed;
+        self.evade_run_hold_ticks = 0;
+        self.evade_run_hold_consumed = false;
+        EvadeRunIntent {
+            sprint: false,
+            evade,
         }
     }
 }
@@ -1546,7 +1675,26 @@ impl Scene for Playtest {
             return;
         }
 
-        let input = motor_input(ctx, self.camera.yaw());
+        let now = ctx.time.elapsed_vblanks();
+        let action_locked = self.anim_lock_until_tick > now;
+        let circle = self.update_evade_run_button(ctx, delta_vblanks);
+        let mut input = if action_locked {
+            CharacterMotorInput::default()
+        } else {
+            motor_input(ctx, self.camera.yaw(), circle.sprint, circle.evade)
+        };
+        if !action_locked && self.motor.action().is_idle() {
+            let started = if ctx.just_pressed(LIGHT_ATTACK_BUTTON) {
+                self.start_player_anim_action(PlayerAnim::LightAttack, now, ctx.time.video_hz())
+            } else if ctx.just_pressed(HEAVY_ATTACK_BUTTON) {
+                self.start_player_anim_action(PlayerAnim::HeavyAttack, now, ctx.time.video_hz())
+            } else {
+                false
+            };
+            if started {
+                input = CharacterMotorInput::default();
+            }
+        }
         let config = self.motor_config();
         let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
         let collision_room_count = if self.chunked_level() {
@@ -1588,13 +1736,14 @@ impl Scene for Playtest {
             self.refresh_active_room_window_if_needed();
         }
 
-        // Animation state comes from the reusable motor, but the
-        // playtest intentionally exposes only the core locomotion
-        // trio for now: idle, walking, running.
-        let new_state = player_anim_from_motor(motor_frame.anim);
+        let new_state = if self.anim_lock_until_tick > now {
+            self.anim_state
+        } else {
+            player_anim_from_motor(motor_frame.anim)
+        };
         if new_state != self.anim_state {
             self.anim_state = new_state;
-            self.anim_start_tick = ctx.time.elapsed_vblanks();
+            self.anim_start_tick = now;
         }
 
         if self.lock_target.is_some() {
@@ -2231,6 +2380,45 @@ fn begin_world_render_pass<'a, 'ot>(
 }
 
 impl Playtest {
+    fn start_player_anim_action(&mut self, anim: PlayerAnim, now: u32, video_hz: u16) -> bool {
+        let Some(character) = self.character else {
+            return false;
+        };
+        if character.action_clip(anim.action()).is_none() {
+            return false;
+        }
+        let clip = character.clip_for(anim);
+        let duration = self
+            .player_clip_duration_vblanks(character, clip, video_hz)
+            .unwrap_or(24)
+            .max(1);
+        self.anim_state = anim;
+        self.anim_start_tick = now;
+        self.anim_lock_until_tick = now.saturating_add(duration);
+        true
+    }
+
+    fn player_clip_duration_vblanks(
+        &self,
+        character: RuntimeCharacter,
+        clip: ModelClipIndex,
+        video_hz: u16,
+    ) -> Option<u32> {
+        let runtime_model = self
+            .models
+            .get(character.model.to_usize())
+            .copied()
+            .flatten()?;
+        let animation = runtime_model.clip(&self.clips, clip)?;
+        let sample_rate = animation.sample_rate_hz().max(1) as u32;
+        let frames = animation.frame_count().max(1) as u32;
+        Some(
+            frames
+                .saturating_mul(video_hz.max(1) as u32)
+                .div_ceil(sample_rate),
+        )
+    }
+
     fn load_runtime_models(&mut self) {
         let mut i = 0;
         while i < MAX_RUNTIME_MODELS {
@@ -3125,12 +3313,6 @@ impl Playtest {
     }
 
     fn update_lock_target_switch(&mut self, ctx: &Ctx) {
-        if ctx.just_pressed(button::R2) {
-            self.switch_lock_target(1);
-        } else if ctx.just_pressed(button::L2) {
-            self.switch_lock_target(-1);
-        }
-
         let (right_x, _) = ctx.pad.sticks.right_centered();
         let magnitude = abs_i16(right_x);
         if magnitude <= LOCK_SWITCH_STICK_RELEASE {
@@ -3255,13 +3437,27 @@ fn draw_player(
     let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
     let phase = anim.phase_at_tick_q12(local_tick, video_hz);
 
-    let origin = floor_anchored_model_origin(x, y, z, runtime_model.world_height);
     let instance_rotation = yaw_rotation_matrix(yaw);
+    let origin = visual_model_origin(
+        x,
+        y,
+        z,
+        runtime_model.world_height,
+        character.visual_offset,
+        character.visual_scale_q8,
+        &instance_rotation,
+    );
+    let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);
     telemetry::stage_begin(telemetry::stage::PLAYER_BOUNDS);
     let visible = match model_frame_bounds(runtime_model, clip_local, phase) {
-        Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => {
-            model_bounds_visible(camera, options, origin, instance_rotation, bounds)
-        }
+        Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => model_bounds_visible(
+            camera,
+            options,
+            origin,
+            instance_rotation,
+            bounds,
+            character.visual_scale_q8,
+        ),
         _ => true,
     };
     telemetry::stage_end(telemetry::stage::PLAYER_BOUNDS);
@@ -3292,6 +3488,7 @@ fn draw_player(
         *camera,
         origin,
         instance_rotation,
+        local_to_world,
         material,
         model_options,
         faces,
@@ -3317,6 +3514,7 @@ fn submit_runtime_model_predecoded(
     camera: WorldCamera,
     origin: WorldVertex,
     rotation: Mat3I16,
+    local_to_world: LocalToWorldScale,
     material: TextureMaterial,
     options: WorldSurfaceOptions,
     faces: &[TexturedModelRenderFace],
@@ -3342,6 +3540,7 @@ fn submit_runtime_model_predecoded(
             camera,
             origin,
             rotation,
+            local_to_world,
             unsafe { &mut MODEL_VERTICES },
             unsafe { &mut JOINT_VIEW_TRANSFORMS },
             material,
@@ -3358,6 +3557,7 @@ fn submit_runtime_model_predecoded(
             camera,
             origin,
             rotation,
+            local_to_world,
             unsafe { &mut MODEL_VERTICES },
             unsafe { &mut JOINT_VIEW_TRANSFORMS },
             material,
@@ -3376,8 +3576,7 @@ fn emit_runtime_model_profile(index: ModelIndex, start_cycles: u32) {
     let Some(cycle_counter) = runtime_model_profile_cycle_counter(index) else {
         return;
     };
-    let draw_counter =
-        telemetry::counter::MODEL_PROFILE_DRAWS_0.saturating_add(index.raw().min(7));
+    let draw_counter = telemetry::counter::MODEL_PROFILE_DRAWS_0.saturating_add(index.raw().min(7));
     telemetry::counter(draw_counter, 1);
     telemetry::counter(
         cycle_counter,
@@ -3446,8 +3645,18 @@ fn draw_player_equipment(
     let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
     let character_phase = character_anim.phase_at_tick_q12(local_tick, video_hz);
     let character_frame = (character_phase >> 12) as u16;
-    let character_origin = floor_anchored_model_origin(x, y, z, character_model.world_height);
     let character_rotation = yaw_rotation_matrix(yaw);
+    let character_origin = visual_model_origin(
+        x,
+        y,
+        z,
+        character_model.world_height,
+        character.visual_offset,
+        character.visual_scale_q8,
+        &character_rotation,
+    );
+    let character_local_to_world =
+        visual_model_local_to_world(character_model, character.visual_scale_q8);
 
     let mut drawn = 0usize;
     for equipment in EQUIPMENT {
@@ -3471,6 +3680,7 @@ fn draw_player_equipment(
             character_phase,
             character_origin,
             character_rotation,
+            character_local_to_world,
             socket,
         ) else {
             continue;
@@ -3511,6 +3721,7 @@ fn draw_player_equipment(
                         *camera,
                         origin,
                         weapon_rotation,
+                        weapon_model.local_to_world,
                         material,
                         model_options,
                         faces,
@@ -3554,16 +3765,16 @@ fn find_model_socket(
 }
 
 fn attachment_socket_pose(
-    model: RuntimeModelAsset,
+    _model: RuntimeModelAsset,
     animation: Animation<'static>,
     phase_q12: u32,
     origin: WorldVertex,
     instance_rotation: Mat3I16,
+    local_to_world: LocalToWorldScale,
     socket: &LevelModelSocketRecord,
 ) -> Option<AttachmentPose> {
     let pose = animation.pose_looped_q12(phase_q12, socket.joint)?;
-    let joint =
-        compute_joint_world_transform(pose, instance_rotation, model.local_to_world, origin);
+    let joint = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
     Some(compose_socket_pose(
         joint,
         socket.translation,
@@ -6642,23 +6853,36 @@ fn draw_model_instances(
         };
         let phase = anim.phase_at_tick_q12(elapsed_vblanks, video_hz);
 
-        // Authored instance positions are floor anchors; cooked
-        // model vertices are centred around their bounds.
-        let origin =
-            floor_anchored_model_origin(inst.x, inst.y, inst.z, runtime_model.world_height);
-        if !depth_pass.includes(camera.view_vertex(origin).z) {
-            continue;
-        }
         // Instance Y-axis rotation from authored yaw. PSX angle
         // units (4096 per turn) → Q12 sin/cos via the existing
         // GTE shim, then composed into a rotation matrix.
         let instance_rotation = yaw_rotation_matrix(Angle::from_q12(inst.yaw as u16));
+        // Authored instance positions are floor anchors; cooked
+        // model vertices are centred around their bounds.
+        let origin = visual_model_origin(
+            inst.x,
+            inst.y,
+            inst.z,
+            runtime_model.world_height,
+            inst.visual_offset,
+            inst.visual_scale_q8,
+            &instance_rotation,
+        );
+        let local_to_world = visual_model_local_to_world(runtime_model, inst.visual_scale_q8);
+        if !depth_pass.includes(camera.view_vertex(origin).z) {
+            continue;
+        }
         telemetry::stage_begin(telemetry::stage::MODEL_BOUNDS);
         out.bounds_tests = out.bounds_tests.saturating_add(1);
         let visible = match model_frame_bounds(runtime_model, clip_local, phase) {
-            Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => {
-                model_bounds_visible(camera, options, origin, instance_rotation, bounds)
-            }
+            Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => model_bounds_visible(
+                camera,
+                options,
+                origin,
+                instance_rotation,
+                bounds,
+                inst.visual_scale_q8,
+            ),
             None => true,
             _ => true,
         };
@@ -6687,6 +6911,7 @@ fn draw_model_instances(
             *camera,
             origin,
             instance_rotation,
+            local_to_world,
             material,
             model_options,
             faces,
@@ -6734,6 +6959,43 @@ fn yaw_rotation_matrix(yaw: Angle) -> Mat3I16 {
     }
 }
 
+fn visual_model_local_to_world(
+    runtime_model: RuntimeModelAsset,
+    visual_scale_q8: u16,
+) -> LocalToWorldScale {
+    let scale_q8 = visual_scale_q8.max(1) as u32;
+    let q12 = ((runtime_model.local_to_world.q12() as u32)
+        .saturating_mul(scale_q8)
+        .saturating_add((MODEL_VISUAL_SCALE_ONE_Q8 / 2) as u32))
+        / MODEL_VISUAL_SCALE_ONE_Q8 as u32;
+    LocalToWorldScale::from_q12(q12.clamp(1, u16::MAX as u32) as u16)
+}
+
+fn visual_model_origin(
+    x: i32,
+    y: i32,
+    z: i32,
+    world_height: u16,
+    visual_offset: [i16; 3],
+    _visual_scale_q8: u16,
+    rotation: &Mat3I16,
+) -> WorldVertex {
+    let origin = floor_anchored_model_origin(x, y, z, world_height);
+    let offset = rotate_offset_q12(
+        rotation,
+        [
+            visual_offset[0] as i32,
+            visual_offset[1] as i32,
+            visual_offset[2] as i32,
+        ],
+    );
+    WorldVertex::new(
+        origin.x.saturating_add(offset[0]),
+        origin.y.saturating_add(offset[1]),
+        origin.z.saturating_add(offset[2]),
+    )
+}
+
 fn floor_anchored_model_origin(x: i32, y: i32, z: i32, world_height: u16) -> WorldVertex {
     WorldVertex::new(
         x,
@@ -6771,8 +7033,13 @@ fn model_bounds_visible(
     origin: WorldVertex,
     rotation: Mat3I16,
     bounds: LevelModelFrameBoundsRecord,
+    visual_scale_q8: u16,
 ) -> bool {
-    let center = rotate_bounds_center(rotation, bounds.center);
+    let center = rotate_bounds_center(
+        rotation,
+        scaled_bounds_center(bounds.center, visual_scale_q8),
+    );
+    let radius = scale_model_bounds_radius(bounds.radius, visual_scale_q8);
     sphere_visible_to_camera(
         camera,
         options,
@@ -6781,12 +7048,28 @@ fn model_bounds_visible(
             origin.y.saturating_add(center[1]),
             origin.z.saturating_add(center[2]),
         ),
-        bounds
-            .radius
+        radius
             .max(0)
             .saturating_add(MODEL_BOUNDS_RUNTIME_RADIUS_PAD),
         MODEL_BOUNDS_SCREEN_MARGIN,
     )
+}
+
+fn scaled_bounds_center(center: [i32; 3], visual_scale_q8: u16) -> [i32; 3] {
+    [
+        scale_q8_i32(center[0], visual_scale_q8),
+        scale_q8_i32(center[1], visual_scale_q8),
+        scale_q8_i32(center[2], visual_scale_q8),
+    ]
+}
+
+fn scale_model_bounds_radius(radius: i32, visual_scale_q8: u16) -> i32 {
+    scale_q8_i32(radius, visual_scale_q8)
+}
+
+fn scale_q8_i32(value: i32, scale_q8: u16) -> i32 {
+    let scale = scale_q8.max(1) as i32;
+    value.saturating_mul(scale) / MODEL_VISUAL_SCALE_ONE_Q8 as i32
 }
 
 fn rotate_bounds_center(rotation: Mat3I16, center: [i32; 3]) -> [i32; 3] {
