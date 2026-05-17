@@ -409,6 +409,12 @@ pub struct PlaytestModelClipBounds {
     pub first_frame: u16,
     /// Number of frame-bound records for this clip.
     pub frame_count: u16,
+    /// Grounding floor in raw model-local units.
+    pub floor_y: i32,
+    /// Additional model-local pose offset in cooked pose units.
+    pub pose_offset: [i32; 3],
+    /// See `psx_level::model_clip_flags`.
+    pub flags: u16,
 }
 
 /// Conservative local-space sphere for one animation frame.
@@ -418,6 +424,8 @@ pub struct PlaytestModelFrameBounds {
     pub center: [i32; 3],
     /// Conservative radius in engine world units.
     pub radius: i32,
+    /// Grounding floor in raw model-local units.
+    pub floor_y: i32,
 }
 
 /// One named model attachment socket.
