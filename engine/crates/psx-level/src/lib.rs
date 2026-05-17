@@ -143,6 +143,12 @@ pub mod image_prop_flags {
     pub const CYLINDRICAL_BILLBOARD: u16 = 1 << 0;
 }
 
+/// Model clip bounds/calibration flags.
+pub mod model_clip_flags {
+    /// Runtime should cancel root translation for this clip.
+    pub const IN_PLACE: u16 = 1 << 0;
+}
+
 typed_index! {
     /// Clip index local to one model's clip slice.
     pub struct ModelClipIndex;
@@ -1019,7 +1025,11 @@ pub struct LevelModelClipBoundsRecord {
     pub first_frame: ModelFrameBoundsIndex,
     /// Number of frame-bound records.
     pub frame_count: u16,
-    /// Reserved.
+    /// Grounding floor in raw model-local units.
+    pub floor_y: i32,
+    /// Additional model-local pose offset in cooked pose units.
+    pub pose_offset: [i32; 3],
+    /// See [`model_clip_flags`].
     pub flags: u16,
 }
 

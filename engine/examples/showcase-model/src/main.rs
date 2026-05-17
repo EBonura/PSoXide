@@ -18,9 +18,10 @@ extern crate psx_rt;
 use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 use psx_engine::{
     button, Angle, App, Config, Ctx, CullMode, DepthBand, DepthPolicy, DepthRange,
-    JointViewTransform, LocalToWorldScale, Mat3I16, OtDepth, OtFrame, PrimitiveArena,
-    ProjectedVertex, Scene, TexturedModelGeometry, TexturedModelRenderFace, WorldCamera,
-    WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex,
+    JointViewTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, OtDepth, OtFrame,
+    PrimitiveArena, ProjectedVertex, Scene, TexturedModelGeometry, TexturedModelRenderFace,
+    WorldCamera, WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
+    WorldVertex,
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{material::TextureMaterial, ot::OrderingTable, prim::TriTextured};
@@ -418,6 +419,7 @@ fn draw_animated_model(
         WorldVertex::new(0, MODEL_Y_OFFSET, 0),
         Mat3I16::IDENTITY,
         LocalToWorldScale::from_q12(model.local_to_world_q12()),
+        ModelPoseTranslation::ZERO,
         unsafe { &mut MODEL_VERTICES },
         unsafe { &mut JOINT_VIEW_TRANSFORMS },
         material,
@@ -439,7 +441,9 @@ fn decode_model_geometry_faces<'a>(
     let part_count = model.part_count() as usize;
     let vertex_count = model.vertex_count() as usize;
     let face_count = model.face_count() as usize;
-    if part_pool.len() < part_count || vertex_pool.len() < vertex_count || face_pool.len() < face_count
+    if part_pool.len() < part_count
+        || vertex_pool.len() < vertex_count
+        || face_pool.len() < face_count
     {
         return None;
     }

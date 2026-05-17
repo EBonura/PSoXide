@@ -37,17 +37,18 @@ use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
 use psx_engine::{
-    button, compute_joint_world_transform, telemetry, Angle, App, CachedRoomCell,
-    CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder, CharacterCollisionRoom,
-    CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
-    Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, Mat3I16, MaterialTint, OtFrame, PointLightSample, PrimitivePacketArena,
-    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender,
-    RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelGeometry, TexturedModelRenderFace,
-    TexturedModelRenderStats, ThirdPersonCameraConfig, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing, WorldCamera, WorldProjection,
-    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
-    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
+    apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
+    CachedRoomCell, CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder,
+    CharacterCollisionRoom, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput,
+    CharacterMotorState, Config, Ctx, CullMode, DepthBand, DepthPolicy, DepthRange,
+    JointViewTransform, JointWorldTransform, LocalToWorldScale, Mat3I16, MaterialTint,
+    ModelPoseTranslation, OtFrame, PointLightSample, PrimitivePacketArena, PrimitivePacketScratch,
+    PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom,
+    Scene, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
+    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, VisualPacing, WorldCamera, WorldProjection, WorldRenderMaterial,
+    WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions, WorldSurfaceSample,
+    WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -67,13 +68,13 @@ use psx_gpu::{
     VideoMode,
 };
 use psx_level::{
-    equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, room_flags, sky_flags,
-    AssetId, AssetKind, CharacterAnimationAction, EntityRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
-    WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
+    equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, model_clip_flags,
+    room_flags, sky_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
+    LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord,
+    LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord,
+    LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex,
+    ModelClipTableIndex, ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager,
+    RoomIndex, WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
@@ -3436,6 +3437,11 @@ fn draw_player(
     // state changes don't pop into the middle of a new clip.
     let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
     let phase = anim.phase_at_tick_q12(local_tick, video_hz);
+    let bounds = model_frame_bounds(runtime_model, clip_local, phase);
+    let clip_anchor = model_clip_anchor(runtime_model, clip_local);
+    let reference_anchor = model_clip_anchor(runtime_model, character.clip_for(PlayerAnim::Idle));
+    let pose_translation =
+        model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor);
 
     let instance_rotation = yaw_rotation_matrix(yaw);
     let origin = visual_model_origin(
@@ -3448,12 +3454,14 @@ fn draw_player(
         &instance_rotation,
     );
     let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);
+    let bounds_origin =
+        model_pose_translated_origin(origin, instance_rotation, local_to_world, pose_translation);
     telemetry::stage_begin(telemetry::stage::PLAYER_BOUNDS);
-    let visible = match model_frame_bounds(runtime_model, clip_local, phase) {
+    let visible = match bounds {
         Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => model_bounds_visible(
             camera,
             options,
-            origin,
+            bounds_origin,
             instance_rotation,
             bounds,
             character.visual_scale_q8,
@@ -3489,6 +3497,7 @@ fn draw_player(
         origin,
         instance_rotation,
         local_to_world,
+        pose_translation,
         material,
         model_options,
         faces,
@@ -3515,6 +3524,7 @@ fn submit_runtime_model_predecoded(
     origin: WorldVertex,
     rotation: Mat3I16,
     local_to_world: LocalToWorldScale,
+    pose_translation: ModelPoseTranslation,
     material: TextureMaterial,
     options: WorldSurfaceOptions,
     faces: &[TexturedModelRenderFace],
@@ -3541,6 +3551,7 @@ fn submit_runtime_model_predecoded(
             origin,
             rotation,
             local_to_world,
+            pose_translation,
             unsafe { &mut MODEL_VERTICES },
             unsafe { &mut JOINT_VIEW_TRANSFORMS },
             material,
@@ -3558,6 +3569,7 @@ fn submit_runtime_model_predecoded(
             origin,
             rotation,
             local_to_world,
+            pose_translation,
             unsafe { &mut MODEL_VERTICES },
             unsafe { &mut JOINT_VIEW_TRANSFORMS },
             material,
@@ -3644,6 +3656,14 @@ fn draw_player_equipment(
     };
     let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
     let character_phase = character_anim.phase_at_tick_q12(local_tick, video_hz);
+    let character_anchor = model_clip_anchor(character_model, clip_local);
+    let reference_anchor = model_clip_anchor(character_model, character.clip_for(PlayerAnim::Idle));
+    let character_pose_translation = model_pose_anchor_translation(
+        character_anim,
+        character_phase,
+        character_anchor,
+        reference_anchor,
+    );
     let character_frame = (character_phase >> 12) as u16;
     let character_rotation = yaw_rotation_matrix(yaw);
     let character_origin = visual_model_origin(
@@ -3681,6 +3701,7 @@ fn draw_player_equipment(
             character_origin,
             character_rotation,
             character_local_to_world,
+            character_pose_translation,
             socket,
         ) else {
             continue;
@@ -3722,6 +3743,7 @@ fn draw_player_equipment(
                         origin,
                         weapon_rotation,
                         weapon_model.local_to_world,
+                        ModelPoseTranslation::ZERO,
                         material,
                         model_options,
                         faces,
@@ -3771,9 +3793,13 @@ fn attachment_socket_pose(
     origin: WorldVertex,
     instance_rotation: Mat3I16,
     local_to_world: LocalToWorldScale,
+    pose_translation: ModelPoseTranslation,
     socket: &LevelModelSocketRecord,
 ) -> Option<AttachmentPose> {
-    let pose = animation.pose_looped_q12(phase_q12, socket.joint)?;
+    let pose = apply_model_pose_translation(
+        animation.pose_looped_q12(phase_q12, socket.joint)?,
+        pose_translation,
+    );
     let joint = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
     Some(compose_socket_pose(
         joint,
@@ -6852,6 +6878,11 @@ fn draw_model_instances(
             continue;
         };
         let phase = anim.phase_at_tick_q12(elapsed_vblanks, video_hz);
+        let bounds = model_frame_bounds(runtime_model, clip_local, phase);
+        let clip_anchor = model_clip_anchor(runtime_model, clip_local);
+        let reference_anchor = model_clip_anchor(runtime_model, runtime_model.default_clip);
+        let pose_translation =
+            model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor);
 
         // Instance Y-axis rotation from authored yaw. PSX angle
         // units (4096 per turn) → Q12 sin/cos via the existing
@@ -6869,16 +6900,22 @@ fn draw_model_instances(
             &instance_rotation,
         );
         let local_to_world = visual_model_local_to_world(runtime_model, inst.visual_scale_q8);
+        let bounds_origin = model_pose_translated_origin(
+            origin,
+            instance_rotation,
+            local_to_world,
+            pose_translation,
+        );
         if !depth_pass.includes(camera.view_vertex(origin).z) {
             continue;
         }
         telemetry::stage_begin(telemetry::stage::MODEL_BOUNDS);
         out.bounds_tests = out.bounds_tests.saturating_add(1);
-        let visible = match model_frame_bounds(runtime_model, clip_local, phase) {
+        let visible = match bounds {
             Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => model_bounds_visible(
                 camera,
                 options,
-                origin,
+                bounds_origin,
                 instance_rotation,
                 bounds,
                 inst.visual_scale_q8,
@@ -6912,6 +6949,7 @@ fn draw_model_instances(
             origin,
             instance_rotation,
             local_to_world,
+            pose_translation,
             material,
             model_options,
             faces,
@@ -6996,6 +7034,69 @@ fn visual_model_origin(
     )
 }
 
+fn model_pose_anchor_translation(
+    animation: Animation<'static>,
+    phase_q12: u32,
+    clip_anchor: Option<ModelClipAnchor>,
+    reference_anchor: Option<ModelClipAnchor>,
+) -> ModelPoseTranslation {
+    let Some(clip_anchor) = clip_anchor else {
+        return ModelPoseTranslation::ZERO;
+    };
+    let reference_floor_y = reference_anchor.map(|anchor| anchor.floor_y);
+    let root_translation = if clip_anchor.in_place {
+        match (
+            animation.pose(0, 0),
+            animation.pose_looped_q12(phase_q12, 0),
+        ) {
+            (Some(first_root), Some(current_root)) => [
+                first_root
+                    .translation
+                    .x
+                    .saturating_sub(current_root.translation.x),
+                0,
+                first_root
+                    .translation
+                    .z
+                    .saturating_sub(current_root.translation.z),
+            ],
+            _ => [0, 0, 0],
+        }
+    } else {
+        [0, 0, 0]
+    };
+    let floor_y = match reference_floor_y {
+        Some(reference_floor_y) => reference_floor_y.saturating_sub(clip_anchor.floor_y),
+        None => 0,
+    };
+    ModelPoseTranslation {
+        x: root_translation[0].saturating_add(clip_anchor.pose_offset[0]),
+        y: root_translation[1]
+            .saturating_add(floor_y)
+            .saturating_add(clip_anchor.pose_offset[1]),
+        z: root_translation[2].saturating_add(clip_anchor.pose_offset[2]),
+    }
+}
+
+fn model_pose_translated_origin(
+    origin: WorldVertex,
+    rotation: Mat3I16,
+    local_to_world: LocalToWorldScale,
+    pose_translation: ModelPoseTranslation,
+) -> WorldVertex {
+    let scaled = [
+        local_to_world.apply(pose_translation.x),
+        local_to_world.apply(pose_translation.y),
+        local_to_world.apply(pose_translation.z),
+    ];
+    let offset = rotate_offset_q12(&rotation, scaled);
+    WorldVertex::new(
+        origin.x.saturating_add(offset[0]),
+        origin.y.saturating_add(offset[1]),
+        origin.z.saturating_add(offset[2]),
+    )
+}
+
 fn floor_anchored_model_origin(x: i32, y: i32, z: i32, world_height: u16) -> WorldVertex {
     WorldVertex::new(
         x,
@@ -7011,6 +7112,13 @@ fn model_origin_floor_lift(world_height: u16) -> i32 {
 const MODEL_BOUNDS_SCREEN_MARGIN: i32 = 192;
 const MODEL_BOUNDS_RUNTIME_RADIUS_PAD: i32 = 128;
 
+#[derive(Clone, Copy, Default)]
+struct ModelClipAnchor {
+    floor_y: i32,
+    pose_offset: [i32; 3],
+    in_place: bool,
+}
+
 fn model_frame_bounds(
     runtime_model: RuntimeModelAsset,
     clip_local: ModelClipIndex,
@@ -7025,6 +7133,19 @@ fn model_frame_bounds(
     MODEL_FRAME_BOUNDS
         .get(record.first_frame.to_usize().saturating_add(frame))
         .copied()
+}
+
+fn model_clip_anchor(
+    runtime_model: RuntimeModelAsset,
+    clip_local: ModelClipIndex,
+) -> Option<ModelClipAnchor> {
+    let clip = runtime_model.clip_table_index(clip_local)?;
+    let record = MODEL_CLIP_BOUNDS.get(clip.to_usize()).copied()?;
+    (record.model == runtime_model.index && record.clip == clip).then_some(ModelClipAnchor {
+        floor_y: record.floor_y,
+        pose_offset: record.pose_offset,
+        in_place: (record.flags & model_clip_flags::IN_PLACE) != 0,
+    })
 }
 
 fn model_bounds_visible(
