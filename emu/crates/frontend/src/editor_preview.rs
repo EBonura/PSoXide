@@ -924,6 +924,8 @@ struct PreviewModelReference {
     clip_override: Option<u16>,
     renderer_node: Option<NodeId>,
     animator_node: Option<NodeId>,
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
 }
 
 fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewModelReference> {
@@ -937,6 +939,8 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
             clip_override: *animation_clip,
             renderer_node: None,
             animator_node: None,
+            visual_offset: [0; 3],
+            visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         }),
         NodeKind::Entity => {
             let mut renderer = None;
@@ -945,9 +949,11 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                 match &child.kind {
                     NodeKind::ModelRenderer {
                         model: Some(model_id),
+                        visual_offset,
+                        visual_scale_q8,
                         ..
                     } if renderer.is_none() => {
-                        renderer = Some((child.id, *model_id));
+                        renderer = Some((child.id, *model_id, *visual_offset, *visual_scale_q8));
                     }
                     NodeKind::Animator { clip, .. } if animator.is_none() => {
                         animator = Some((child.id, *clip));
@@ -955,12 +961,16 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                     _ => {}
                 }
             }
-            renderer.map(|(renderer_node, model_id)| PreviewModelReference {
-                model_id,
-                clip_override: animator.and_then(|(_, clip)| clip),
-                renderer_node: Some(renderer_node),
-                animator_node: animator.map(|(node_id, _)| node_id),
-            })
+            renderer.map(
+                |(renderer_node, model_id, visual_offset, visual_scale_q8)| PreviewModelReference {
+                    model_id,
+                    clip_override: animator.and_then(|(_, clip)| clip),
+                    renderer_node: Some(renderer_node),
+                    animator_node: animator.map(|(node_id, _)| node_id),
+                    visual_offset,
+                    visual_scale_q8,
+                },
+            )
         }
         _ => None,
     }
@@ -982,7 +992,11 @@ fn preview_static_model_reference(
 #[derive(Clone, Copy)]
 struct PreviewPlayerReference {
     character: Option<ResourceId>,
+    model_override: Option<ResourceId>,
     controller_node: Option<NodeId>,
+    renderer_node: Option<NodeId>,
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
 }
 
 fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPlayerReference> {
@@ -992,22 +1006,49 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
             character,
         } => Some(PreviewPlayerReference {
             character: *character,
+            model_override: None,
             controller_node: None,
+            renderer_node: None,
+            visual_offset: [0; 3],
+            visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         }),
-        NodeKind::Entity => component_children(scene, node).find_map(|child| {
-            let NodeKind::CharacterController {
-                character,
-                player: true,
-                ..
-            } = &child.kind
-            else {
-                return None;
-            };
-            Some(PreviewPlayerReference {
-                character: *character,
-                controller_node: Some(child.id),
+        NodeKind::Entity => {
+            let mut controller = None;
+            let mut renderer = None;
+            for child in component_children(scene, node) {
+                match &child.kind {
+                    NodeKind::CharacterController {
+                        character,
+                        player: true,
+                        ..
+                    } if controller.is_none() => {
+                        controller = Some((child.id, *character));
+                    }
+                    NodeKind::ModelRenderer {
+                        model,
+                        visual_offset,
+                        visual_scale_q8,
+                        ..
+                    } if renderer.is_none() => {
+                        renderer = Some((child.id, *model, *visual_offset, *visual_scale_q8));
+                    }
+                    _ => {}
+                }
+            }
+            controller.map(|(controller_node, character)| {
+                let (renderer_node, model_override, visual_offset, visual_scale_q8) = renderer
+                    .map(|(node, model, offset, scale)| (Some(node), model, offset, scale))
+                    .unwrap_or((None, None, [0; 3], psxed_project::MODEL_SCALE_ONE_Q8));
+                PreviewPlayerReference {
+                    character,
+                    model_override,
+                    controller_node: Some(controller_node),
+                    renderer_node,
+                    visual_offset,
+                    visual_scale_q8,
+                }
             })
-        }),
+        }
         _ => None,
     }
 }
@@ -1901,6 +1942,8 @@ struct PreviewModelInstance<'a> {
     origin: psx_engine::WorldVertex,
     /// Y-axis rotation matrix derived from the node's yaw.
     instance_rotation: Mat3I16,
+    /// Render-only scale from the ModelRenderer component.
+    visual_scale_q8: u16,
     /// Lit and fogged model texture tint, matching editor-playtest's
     /// single-material actor lighting path.
     tint: (u8, u8, u8),
@@ -2012,6 +2055,8 @@ fn walk_model_instances(
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
+            visual_offset: reference.visual_offset,
+            visual_scale_q8: reference.visual_scale_q8,
         });
     }
 
@@ -2048,13 +2093,20 @@ fn walk_model_instances(
         let Ok(animation) = psx_asset::Animation::from_bytes(anim_bytes) else {
             continue;
         };
-        let origin = floor_anchored_model_origin(meta.origin, meta.world_height);
+        let origin = visual_model_origin(
+            meta.origin,
+            meta.world_height,
+            meta.visual_offset,
+            meta.visual_scale_q8,
+            meta.instance_rotation,
+        );
         instances.push(PreviewModelInstance {
             model,
             animation,
             atlas: meta.atlas,
             origin,
             instance_rotation: meta.instance_rotation,
+            visual_scale_q8: meta.visual_scale_q8,
             tint: shade_model_tint(origin, *camera, fog, &lights, ambient),
         });
     }
@@ -2110,7 +2162,7 @@ fn walk_player_spawn_preview(
             hidden_scene_nodes,
             node.id,
             reference.controller_node,
-            None,
+            reference.renderer_node,
         ) {
             continue;
         }
@@ -2124,7 +2176,7 @@ fn walk_player_spawn_preview(
         let ResourceData::Character(char_resource) = &character_resource.data else {
             continue;
         };
-        let Some(model_id) = char_resource.model else {
+        let Some(model_id) = reference.model_override.or(char_resource.model) else {
             continue;
         };
         let Some(model_resource) = project.resource(model_id) else {
@@ -2174,11 +2226,13 @@ fn walk_player_spawn_preview(
                 selected,
                 node.id,
                 reference.controller_node,
-                None,
+                reference.renderer_node,
             ),
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
+            visual_offset: reference.visual_offset,
+            visual_scale_q8: reference.visual_scale_q8,
         });
     }
 }
@@ -2360,6 +2414,9 @@ struct InstanceMeta {
     /// Approximate world-space height for the facing arrow's
     /// vertical extent. Lifted from `ModelResource::world_height`.
     world_height: i32,
+    /// Render-only calibration copied from ModelRenderer.
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
 }
 
 fn floor_anchored_model_origin(
@@ -2375,12 +2432,39 @@ fn floor_anchored_model_origin(
     )
 }
 
+fn visual_model_origin(
+    origin: psx_engine::WorldVertex,
+    world_height: i32,
+    visual_offset: [i16; 3],
+    _visual_scale_q8: u16,
+    instance_rotation: Mat3I16,
+) -> psx_engine::WorldVertex {
+    let origin = floor_anchored_model_origin(origin, world_height);
+    let offset = rotate_visual_offset(instance_rotation, visual_offset);
+    psx_engine::WorldVertex::new(
+        origin.x.saturating_add(offset[0]),
+        origin.y.saturating_add(offset[1]),
+        origin.z.saturating_add(offset[2]),
+    )
+}
+
 fn model_origin_floor_lift(world_height: i32) -> i32 {
     // Imported model vertices are normalized around their bounds
     // centre, while editor placements describe the floor contact
     // point. The model path's projected Y convention needs the
     // render origin offset by +half height for that floor anchor.
     world_height.max(0) / 2
+}
+
+fn rotate_visual_offset(rotation: Mat3I16, offset: [i16; 3]) -> [i32; 3] {
+    let offset = [offset[0] as i32, offset[1] as i32, offset[2] as i32];
+    let row = |r: [i16; 3]| -> i32 {
+        let x = (r[0] as i32).saturating_mul(offset[0]);
+        let y = (r[1] as i32).saturating_mul(offset[1]);
+        let z = (r[2] as i32).saturating_mul(offset[2]);
+        x.saturating_add(y).saturating_add(z) >> 12
+    };
+    [row(rotation.m[0]), row(rotation.m[1]), row(rotation.m[2])]
 }
 
 /// Convert editor-Y rotation in degrees to PSX angle units
@@ -2484,6 +2568,7 @@ fn submit_preview_model_instance(
         *camera,
         instance.origin,
         instance.instance_rotation,
+        preview_model_local_to_world(instance.model, instance.visual_scale_q8),
         projected_vertices,
         joint_view_transforms,
         material,
@@ -2493,6 +2578,17 @@ fn submit_preview_model_instance(
     );
 
     stats.primitive_overflow || stats.command_overflow || stats.vertex_overflow
+}
+
+fn preview_model_local_to_world(
+    model: psx_asset::Model<'_>,
+    visual_scale_q8: u16,
+) -> psx_engine::LocalToWorldScale {
+    let q12 = (model.local_to_world_q12() as u32)
+        .saturating_mul(visual_scale_q8.max(1) as u32)
+        .saturating_add((psxed_project::MODEL_SCALE_ONE_Q8 / 2) as u32)
+        / psxed_project::MODEL_SCALE_ONE_Q8 as u32;
+    psx_engine::LocalToWorldScale::from_q12(q12.clamp(1, u16::MAX as u32) as u16)
 }
 
 fn predecode_preview_model_geometry_faces<'a>(
@@ -2507,7 +2603,9 @@ fn predecode_preview_model_geometry_faces<'a>(
     let part_count = model.part_count() as usize;
     let vertex_count = model.vertex_count() as usize;
     let face_count = model.face_count() as usize;
-    if part_pool.len() < part_count || vertex_pool.len() < vertex_count || face_pool.len() < face_count
+    if part_pool.len() < part_count
+        || vertex_pool.len() < vertex_count
+        || face_pool.len() < face_count
     {
         return None;
     }
@@ -2543,7 +2641,10 @@ fn predecode_preview_model_geometry_faces<'a>(
     }
 
     Some((
-        psx_engine::TexturedModelGeometry::new(&part_pool[..part_count], &vertex_pool[..vertex_count]),
+        psx_engine::TexturedModelGeometry::new(
+            &part_pool[..part_count],
+            &vertex_pool[..vertex_count],
+        ),
         &face_pool[..face_count],
     ))
 }
@@ -4406,6 +4507,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
             },
         );
         let animator = scene.add_node(
@@ -4476,6 +4579,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
             },
         );
         scene.add_node(
