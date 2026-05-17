@@ -505,6 +505,24 @@ impl JointWorldTransform {
     };
 }
 
+/// Model-local translation applied to every sampled joint pose before
+/// model-to-world scaling. Gameplay uses this to render locomotion
+/// clips in-place while movement remains owned by controller code.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelPoseTranslation {
+    /// Model-local X offset.
+    pub x: i32,
+    /// Model-local Y offset.
+    pub y: i32,
+    /// Model-local Z offset.
+    pub z: i32,
+}
+
+impl ModelPoseTranslation {
+    /// No pose offset.
+    pub const ZERO: Self = Self { x: 0, y: 0, z: 0 };
+}
+
 /// Perspective projection settings for world-space render passes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WorldProjection {
@@ -2501,6 +2519,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         origin: WorldVertex,
         instance_rotation: Mat3I16,
         local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
@@ -2517,6 +2536,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             origin,
             instance_rotation,
             local_to_world,
+            pose_translation,
             projected_vertices,
             joint_view_transforms,
             material,
@@ -2543,6 +2563,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         origin: WorldVertex,
         instance_rotation: Mat3I16,
         local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
@@ -2559,6 +2580,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             origin,
             instance_rotation,
             local_to_world,
+            pose_translation,
             projected_vertices,
             joint_view_transforms,
             material,
@@ -2580,6 +2602,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         origin: WorldVertex,
         instance_rotation: Mat3I16,
         local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
@@ -2603,6 +2626,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             {
                 *joint_view_transform = match sample.pose(joint as u16) {
                     Some(pose) => {
+                        let pose = apply_model_pose_translation(pose, pose_translation);
                         let (rotation, translation) = textured_model_part_gte_transform_with_view(
                             camera_view,
                             camera.position,
@@ -4092,6 +4116,17 @@ pub fn compute_joint_world_transform(
     }
 }
 
+/// Apply a model-local translation to a sampled joint pose.
+pub fn apply_model_pose_translation(
+    mut pose: JointPose,
+    translation: ModelPoseTranslation,
+) -> JointPose {
+    pose.translation.x = pose.translation.x.saturating_add(translation.x);
+    pose.translation.y = pose.translation.y.saturating_add(translation.y);
+    pose.translation.z = pose.translation.z.saturating_add(translation.z);
+    pose
+}
+
 /// Project one model vertex using the same GTE/CPU-blend split as model
 /// rendering.
 ///
@@ -5180,6 +5215,20 @@ mod tests {
 
         assert_eq!(joint.rotation, Mat3I16::IDENTITY);
         assert_eq!(joint.translation, WorldVertex::new(1256, 2128, 2936));
+    }
+
+    #[test]
+    fn model_pose_translation_offsets_joint_pose_without_rotating_it() {
+        let pose = JointPose {
+            matrix: Mat3I16::IDENTITY.m,
+            translation: Vec3I32::new(10, -20, 30),
+        };
+
+        let adjusted =
+            apply_model_pose_translation(pose, ModelPoseTranslation { x: -3, y: 5, z: 7 });
+
+        assert_eq!(adjusted.matrix, pose.matrix);
+        assert_eq!(adjusted.translation, Vec3I32::new(7, -15, 37));
     }
 
     #[test]

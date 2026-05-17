@@ -632,8 +632,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for bounds in &package.model_clip_bounds {
         let _ = writeln!(
             out,
-            "    LevelModelClipBoundsRecord {{ model: ModelIndex({}), clip: ModelClipTableIndex({}), first_frame: ModelFrameBoundsIndex({}), frame_count: {}, flags: 0 }},",
-            bounds.model, bounds.clip, bounds.first_frame, bounds.frame_count,
+            "    LevelModelClipBoundsRecord {{ model: ModelIndex({}), clip: ModelClipTableIndex({}), first_frame: ModelFrameBoundsIndex({}), frame_count: {}, floor_y: {}, pose_offset: [{}, {}, {}], flags: {} }},",
+            bounds.model,
+            bounds.clip,
+            bounds.first_frame,
+            bounds.frame_count,
+            bounds.floor_y,
+            bounds.pose_offset[0],
+            bounds.pose_offset[1],
+            bounds.pose_offset[2],
+            bounds.flags,
         );
     }
     out.push_str("];\n\n");
