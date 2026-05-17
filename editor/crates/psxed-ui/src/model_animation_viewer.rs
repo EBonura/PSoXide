@@ -5,7 +5,8 @@ use egui::{
 };
 use psx_asset::{Animation, Texture};
 use psxed_project::{
-    model_import::resolve_path, AnimationRole, ProjectDocument, ResourceData, ResourceId,
+    model_import::resolve_path, AnimationClipCalibration, AnimationRole, ProjectDocument,
+    ResourceData, ResourceId,
 };
 
 use crate::icons;
@@ -25,7 +26,6 @@ pub(crate) struct ModelAnimationViewerState {
     radius: i32,
     show_animation_root: bool,
     show_bones: bool,
-    preview_in_place: bool,
     last_time_seconds: f64,
 }
 
@@ -43,7 +43,6 @@ impl Default for ModelAnimationViewerState {
             radius: 0,
             show_animation_root: false,
             show_bones: false,
-            preview_in_place: true,
             last_time_seconds: 0.0,
         }
     }
@@ -138,6 +137,8 @@ struct ViewerClipOption {
     role: AnimationRole,
     looping: bool,
     resource: Option<ResourceId>,
+    model_clip_index: Option<usize>,
+    calibration: AnimationClipCalibration,
     previewable: bool,
 }
 
@@ -165,11 +166,12 @@ pub(crate) enum AnimationViewerAction {
         model_id: ResourceId,
         source_id: ResourceId,
     },
+    ProjectChanged,
 }
 
 pub(crate) fn draw_model_animation_viewer(
     ui: &mut egui::Ui,
-    project: &ProjectDocument,
+    project: &mut ProjectDocument,
     project_root: &Path,
     state: &mut ModelAnimationViewerState,
     preview_texture: &mut Option<egui::TextureHandle>,
@@ -205,7 +207,7 @@ pub(crate) fn draw_model_animation_viewer(
         let model_context = state
             .selected_model
             .and_then(|id| load_model_context(project, project_root, id));
-        let selected_clip = state
+        let mut selected_clip = state
             .selected_clip_path
             .as_ref()
             .and_then(|path| clip_options.iter().find(|clip| clip.path == *path))
@@ -228,6 +230,12 @@ pub(crate) fn draw_model_animation_viewer(
             selected_clip.as_ref(),
             clip_context.as_ref().and_then(|clip| clip.animation_stats),
         );
+        if draw_selected_clip_calibration(ui, project, selected_model, selected_clip.as_mut()) {
+            preview_texture.take();
+            if action.is_none() {
+                action = Some(AnimationViewerAction::ProjectChanged);
+            }
+        }
 
         let preview_height = ui.available_height().max(320.0);
         ui.allocate_ui_with_layout(
@@ -350,11 +358,109 @@ fn draw_overlay_toggles(ui: &mut egui::Ui, state: &mut ModelAnimationViewerState
         icons::label(icons::CIRCLE_DOT, "Anchor"),
     )
     .on_hover_text("Draw the body-derived preview anchor");
-    ui.toggle_value(
-        &mut state.preview_in_place,
-        icons::label(icons::MOVE, "In-place"),
-    )
-    .on_hover_text("Preview with root-motion translation removed");
+}
+
+fn draw_selected_clip_calibration(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    selected_model: Option<ResourceId>,
+    clip: Option<&mut ViewerClipOption>,
+) -> bool {
+    let Some(clip) = clip else {
+        return false;
+    };
+    let editable = clip_calibration_editable(project, selected_model, clip);
+    let mut calibration = clip.calibration;
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Placement").color(STUDIO_TEXT_WEAK));
+        changed |= ui
+            .add_enabled(
+                editable,
+                egui::Checkbox::new(&mut calibration.in_place, "In-place"),
+            )
+            .on_hover_text("Cancels this clip's root translation while previewing and at runtime")
+            .changed();
+        ui.separator();
+        for (axis, label) in ["X", "Y", "Z"].iter().enumerate() {
+            ui.label(RichText::new(*label).color(STUDIO_TEXT_WEAK));
+            changed |= ui
+                .add_enabled(
+                    editable,
+                    egui::DragValue::new(&mut calibration.offset[axis])
+                        .speed(4.0)
+                        .range(-8192..=8192),
+                )
+                .changed();
+        }
+        if ui
+            .add_enabled(editable, egui::Button::new("Reset"))
+            .clicked()
+        {
+            calibration = AnimationClipCalibration::default();
+            changed = true;
+        }
+        if !editable {
+            ui.weak("Bake this source before editing placement.");
+        }
+    });
+    if changed && store_clip_calibration(project, selected_model, clip, calibration) {
+        clip.calibration = calibration;
+        return true;
+    }
+    false
+}
+
+fn clip_calibration_editable(
+    project: &ProjectDocument,
+    selected_model: Option<ResourceId>,
+    clip: &ViewerClipOption,
+) -> bool {
+    if let Some(resource_id) = clip.resource {
+        if project
+            .resource(resource_id)
+            .is_some_and(|resource| matches!(&resource.data, ResourceData::AnimationClip(_)))
+        {
+            return true;
+        }
+    }
+    selected_model.is_some()
+        && clip.model_clip_index.is_some()
+        && selected_model.is_some_and(|model_id| {
+            project
+                .resource(model_id)
+                .is_some_and(|resource| matches!(&resource.data, ResourceData::Model(_)))
+        })
+}
+
+fn store_clip_calibration(
+    project: &mut ProjectDocument,
+    selected_model: Option<ResourceId>,
+    clip: &ViewerClipOption,
+    calibration: AnimationClipCalibration,
+) -> bool {
+    if let Some(resource_id) = clip.resource {
+        if let Some(resource) = project.resource_mut(resource_id) {
+            if let ResourceData::AnimationClip(animation) = &mut resource.data {
+                animation.calibration = calibration;
+                return true;
+            }
+        }
+    }
+    let (Some(model_id), Some(index)) = (selected_model, clip.model_clip_index) else {
+        return false;
+    };
+    let Some(resource) = project.resource_mut(model_id) else {
+        return false;
+    };
+    let ResourceData::Model(model) = &mut resource.data else {
+        return false;
+    };
+    let Some(model_clip) = model.clips.get_mut(index) else {
+        return false;
+    };
+    model_clip.calibration = calibration;
+    true
 }
 
 fn draw_preview(
@@ -494,7 +600,8 @@ fn draw_preview(
             pitch_q12: state.pitch_q12.rem_euclid(4096) as u16,
             radius: state.radius,
             focus_on_animated_bounds: true,
-            preview_in_place: state.preview_in_place,
+            preview_in_place: selected_clip.calibration.in_place,
+            pose_offset: selected_clip.calibration.offset,
             show_animation_root: state.show_animation_root,
             show_bones: state.show_bones,
         },
@@ -688,6 +795,8 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
             role,
             looping,
             resource: clip.animation_resource,
+            model_clip_index: clip.model_clip_index,
+            calibration: clip.calibration,
             previewable: true,
         });
     }
@@ -712,6 +821,8 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
             role: clip.role,
             looping: clip.looping,
             resource: Some(resource.id),
+            model_clip_index: None,
+            calibration: clip.calibration,
             previewable: true,
         });
     }
@@ -730,6 +841,8 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
             role: source.role,
             looping: source.looping,
             resource: Some(resource.id),
+            model_clip_index: None,
+            calibration: AnimationClipCalibration::default(),
             previewable: is_cooked_animation_path(&source.source_path),
         });
     }
@@ -983,6 +1096,7 @@ mod tests {
                 role: AnimationRole::Walk,
                 looping: true,
                 tags: vec!["meshy".to_string()],
+                calibration: Default::default(),
             }),
         );
         let shared_clip = project.add_resource(
@@ -996,6 +1110,7 @@ mod tests {
                 role: AnimationRole::Idle,
                 looping: true,
                 tags: vec!["mixamo".to_string()],
+                calibration: Default::default(),
             }),
         );
         let other_model_clip = project.add_resource(
@@ -1009,6 +1124,7 @@ mod tests {
                 role: AnimationRole::Attack,
                 looping: false,
                 tags: vec!["meshy".to_string()],
+                calibration: Default::default(),
             }),
         );
         let source = project.add_resource(
@@ -1072,10 +1188,12 @@ mod tests {
             ModelAnimationClip {
                 name: "a_tpose".to_string(),
                 psxanim_path: "assets/models/knight/a_tpose.psxanim".to_string(),
+                calibration: Default::default(),
             },
             ModelAnimationClip {
                 name: "idle".to_string(),
                 psxanim_path: "assets/models/knight/idle.psxanim".to_string(),
+                calibration: Default::default(),
             },
         ];
         model.default_clip = Some(1);
@@ -1107,6 +1225,7 @@ mod tests {
         model.clips = vec![ModelAnimationClip {
             name: "idle".to_string(),
             psxanim_path: "assets/models/knight/idle.psxanim".to_string(),
+            calibration: Default::default(),
         }];
         let model_id = project.add_resource("Knight", ResourceData::Model(model));
         project.add_resource(
