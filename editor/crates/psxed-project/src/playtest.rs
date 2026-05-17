@@ -36,8 +36,8 @@ use psx_engine::{
     WorldRenderMaterial, WorldVertex,
 };
 use psx_level::{
-    cloud_layer_flags, far_vista_flags, image_prop_flags, sky_flags, visibility_cell_flags,
-    visibility_edge_flags,
+    cloud_layer_flags, far_vista_flags, image_prop_flags, model_clip_flags, sky_flags,
+    visibility_cell_flags, visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
@@ -1927,12 +1927,23 @@ fn register_model_for_instance(
                 return None;
             }
         };
+        let floor_y = baked_bounds
+            .first()
+            .map(|bounds| bounds.floor_y)
+            .unwrap_or(0);
         model_frame_bounds.extend(baked_bounds);
         model_clip_bounds.push(PlaytestModelClipBounds {
             model: model_index,
             clip: clip_index,
             first_frame: frame_first,
             frame_count,
+            floor_y,
+            pose_offset: clip.calibration.offset,
+            flags: if clip.calibration.in_place {
+                model_clip_flags::IN_PLACE
+            } else {
+                0
+            },
         });
         let asset_index = assets.len();
         let safe_clip = sanitise_model_dirname(&clip.name);
@@ -2063,15 +2074,17 @@ fn bake_model_frame_pair_bounds(
 ) -> PlaytestModelFrameBounds {
     let mut min = [i32::MAX; 3];
     let mut max = [i32::MIN; 3];
-    accumulate_model_frame_bounds(model, animation, a, &mut min, &mut max);
+    let mut floor_y = i32::MIN;
+    accumulate_model_frame_bounds(model, animation, a, &mut min, &mut max, &mut floor_y);
     if b != a {
-        accumulate_model_frame_bounds(model, animation, b, &mut min, &mut max);
+        accumulate_model_frame_bounds(model, animation, b, &mut min, &mut max, &mut floor_y);
     }
 
     if min[0] == i32::MAX {
         return PlaytestModelFrameBounds {
             center: [0, 0, 0],
             radius: MODEL_FRAME_BOUNDS_PAD_UNITS,
+            floor_y: 0,
         };
     }
 
@@ -2081,7 +2094,11 @@ fn bake_model_frame_pair_bounds(
         average_i32(min[2], max[2]),
     ];
     let radius = aabb_radius(min, max).saturating_add(MODEL_FRAME_BOUNDS_PAD_UNITS);
-    PlaytestModelFrameBounds { center, radius }
+    PlaytestModelFrameBounds {
+        center,
+        radius,
+        floor_y,
+    }
 }
 
 fn accumulate_model_frame_bounds(
@@ -2090,9 +2107,11 @@ fn accumulate_model_frame_bounds(
     frame: u16,
     min: &mut [i32; 3],
     max: &mut [i32; 3],
+    floor_y: &mut i32,
 ) {
     let joint_count = model.joint_count().min(animation.joint_count());
     let mut joints = Vec::with_capacity(joint_count as usize);
+    let mut raw_joints = Vec::with_capacity(joint_count as usize);
     let mut joint = 0u16;
     while joint < joint_count {
         if let Some(pose) = animation.pose(frame, joint) {
@@ -2100,6 +2119,7 @@ fn accumulate_model_frame_bounds(
                 pose,
                 model.local_to_world_q12(),
             ));
+            raw_joints.push(model_bounds_joint_transform(pose, 0x1000));
         }
         joint += 1;
     }
@@ -2115,6 +2135,10 @@ fn accumulate_model_frame_bounds(
             part_index += 1;
             continue;
         };
+        let Some(raw_primary) = raw_joints.get(primary_joint).copied() else {
+            part_index += 1;
+            continue;
+        };
         let first = part.first_vertex();
         let end = first
             .saturating_add(part.vertex_count())
@@ -2123,13 +2147,20 @@ fn accumulate_model_frame_bounds(
         while vertex_index < end {
             if let Some(vertex) = model.vertex(vertex_index) {
                 let mut point = transform_model_bounds_vertex(primary, vertex);
+                let mut raw_point = transform_model_bounds_vertex(raw_primary, vertex);
                 if vertex.is_blend() {
                     if let Some(secondary) = joints.get(vertex.joint1 as usize).copied() {
                         let secondary_point = transform_model_bounds_vertex(secondary, vertex);
                         point = lerp_bounds_point(point, secondary_point, vertex.blend);
                     }
+                    if let Some(raw_secondary) = raw_joints.get(vertex.joint1 as usize).copied() {
+                        let raw_secondary_point =
+                            transform_model_bounds_vertex(raw_secondary, vertex);
+                        raw_point = lerp_bounds_point(raw_point, raw_secondary_point, vertex.blend);
+                    }
                 }
                 include_bounds_point(point, min, max);
+                *floor_y = (*floor_y).max(raw_point[1]);
             }
             vertex_index += 1;
         }
@@ -4649,6 +4680,7 @@ mod tests {
                 role: AnimationRole::Generic,
                 looping: false,
                 tags: Vec::new(),
+                calibration: Default::default(),
             }),
         );
         let backstep = project.add_resource(
@@ -4662,6 +4694,7 @@ mod tests {
                 role: AnimationRole::Generic,
                 looping: false,
                 tags: Vec::new(),
+                calibration: Default::default(),
             }),
         );
         let light_attack = project.add_resource(
@@ -4675,6 +4708,7 @@ mod tests {
                 role: AnimationRole::Attack,
                 looping: false,
                 tags: Vec::new(),
+                calibration: Default::default(),
             }),
         );
         let heavy_attack = project.add_resource(
@@ -4688,6 +4722,7 @@ mod tests {
                 role: AnimationRole::Generic,
                 looping: false,
                 tags: Vec::new(),
+                calibration: Default::default(),
             }),
         );
         let mut set = crate::AnimationSetResource {
@@ -5176,6 +5211,11 @@ mod tests {
             assert!(count > 0);
             assert!(first + count <= package.model_frame_bounds.len());
             assert!(package.model_frame_bounds[first].radius > 0);
+            assert_eq!(
+                bounds.floor_y, package.model_frame_bounds[first].floor_y,
+                "clip floor anchor should use its first cooked frame floor"
+            );
+            assert_ne!(package.model_frame_bounds[first].floor_y, i32::MIN);
         }
     }
 
@@ -5984,6 +6024,7 @@ mod tests {
         starter_model.clips.push(crate::ModelAnimationClip {
             name: "neutral idle".to_string(),
             psxanim_path: "assets/animations/standalone_fbx/neutral_idle.psxanim".to_string(),
+            calibration: Default::default(),
         });
         let mut project = ProjectDocument::new("equipment-test");
         let texture = project.add_resource(
