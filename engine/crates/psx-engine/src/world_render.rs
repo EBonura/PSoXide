@@ -3995,17 +3995,16 @@ fn submit_projected_split_triangle_vertex_lit_cached_uv_words<const OT: usize>(
     let tri_colors = [colors[a], colors[b], colors[c]];
     if let Some(prepared_depth) = prepared_depth {
         #[cfg(feature = "room-surface-profile")]
-        let _ = world
-            .submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
-                triangles,
-                tri_verts,
-                tri_uv_words,
-                tri_colors,
-                material.gouraud_packet,
-                opts,
-                prepared_depth,
-                profile.submit_profile(),
-            );
+        let _ = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
+            triangles,
+            tri_verts,
+            tri_uv_words,
+            tri_colors,
+            material.gouraud_packet,
+            opts,
+            prepared_depth,
+            profile.submit_profile(),
+        );
         #[cfg(not(feature = "room-surface-profile"))]
         let _ = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
             triangles,
@@ -4070,17 +4069,16 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     let [(a, b, c), (d, e, f)] = split_triangles;
     if let Some(prepared_depth) = prepared_depth {
         #[cfg(feature = "room-surface-profile")]
-        let stats = world
-            .submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
-                triangles,
-                [verts[a], verts[b], verts[c]],
-                [uv_words[a], uv_words[b], uv_words[c]],
-                [colors[a], colors[b], colors[c]],
-                material.gouraud_packet,
-                opts,
-                prepared_depth,
-                profile.submit_profile(),
-            );
+        let stats = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
+            triangles,
+            [verts[a], verts[b], verts[c]],
+            [uv_words[a], uv_words[b], uv_words[c]],
+            [colors[a], colors[b], colors[c]],
+            material.gouraud_packet,
+            opts,
+            prepared_depth,
+            profile.submit_profile(),
+        );
         #[cfg(not(feature = "room-surface-profile"))]
         let stats = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
             triangles,
@@ -4095,17 +4093,16 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
             return;
         }
         #[cfg(feature = "room-surface-profile")]
-        let _ = world
-            .submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
-                triangles,
-                [verts[d], verts[e], verts[f]],
-                [uv_words[d], uv_words[e], uv_words[f]],
-                [colors[d], colors[e], colors[f]],
-                material.gouraud_packet,
-                opts,
-                prepared_depth,
-                profile.submit_profile(),
-            );
+        let _ = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
+            triangles,
+            [verts[d], verts[e], verts[f]],
+            [uv_words[d], uv_words[e], uv_words[f]],
+            [colors[d], colors[e], colors[f]],
+            material.gouraud_packet,
+            opts,
+            prepared_depth,
+            profile.submit_profile(),
+        );
         #[cfg(not(feature = "room-surface-profile"))]
         let _ = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
             triangles,

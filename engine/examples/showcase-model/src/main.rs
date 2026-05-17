@@ -18,9 +18,9 @@ extern crate psx_rt;
 use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 use psx_engine::{
     button, Angle, App, Config, Ctx, CullMode, DepthBand, DepthPolicy, DepthRange,
-    JointViewTransform, Mat3I16, OtDepth, OtFrame, PrimitiveArena, ProjectedVertex, Scene,
-    TexturedModelGeometry, TexturedModelRenderFace, WorldCamera, WorldProjection,
-    WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex,
+    JointViewTransform, LocalToWorldScale, Mat3I16, OtDepth, OtFrame, PrimitiveArena,
+    ProjectedVertex, Scene, TexturedModelGeometry, TexturedModelRenderFace, WorldCamera,
+    WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex,
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{material::TextureMaterial, ot::OrderingTable, prim::TriTextured};
@@ -417,6 +417,7 @@ fn draw_animated_model(
         camera,
         WorldVertex::new(0, MODEL_Y_OFFSET, 0),
         Mat3I16::IDENTITY,
+        LocalToWorldScale::from_q12(model.local_to_world_q12()),
         unsafe { &mut MODEL_VERTICES },
         unsafe { &mut JOINT_VIEW_TRANSFORMS },
         material,

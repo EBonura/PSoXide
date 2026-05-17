@@ -440,6 +440,7 @@ struct ModelImportDialog {
     preview_pitch_q12: i32,
     preview_radius: i32,
     show_animation_root: bool,
+    preview_in_place: bool,
     status: Option<ModelImportStatus>,
     preview: Option<ModelImportPreview>,
 }
@@ -462,6 +463,7 @@ impl Default for ModelImportDialog {
             preview_pitch_q12: 350,
             preview_radius: 1536,
             show_animation_root: true,
+            preview_in_place: true,
             status: None,
             preview: None,
         }
@@ -496,6 +498,9 @@ struct RootMotionStats {
     min: [i32; 3],
     max: [i32; 3],
     mean: [i32; 3],
+    first: [i32; 3],
+    last: [i32; 3],
+    delta: [i32; 3],
 }
 
 /// Decoded metadata for one `.psxt` blob. Cheap to compute
@@ -3325,10 +3330,10 @@ impl EditorWorkspace {
                         });
                         ui.checkbox(
                             &mut dialog.normalize_root_translation,
-                            "Center animation root",
+                            "Bake clips in place",
                         )
                         .on_hover_text(
-                            "Restores root-joint translation to bind pose while baking clips. Useful for Meshy exports with noisy Hips location keys.",
+                            "Removes root-joint translation while baking clips so gameplay code owns character movement.",
                         );
                         ui.label(
                             RichText::new("Texture depth: 8bpp indexed")
@@ -3359,11 +3364,14 @@ impl EditorWorkspace {
                                 .text("Distance"),
                         );
                         ui.checkbox(&mut dialog.show_animation_root, "Anchor marker");
+                        ui.checkbox(&mut dialog.preview_in_place, "Preview in-place")
+                            .on_hover_text("Show the selected clip with root-motion translation removed.");
                         if ui.button(icons::label(icons::ROTATE_CCW, "Reset View")).clicked() {
                             dialog.preview_yaw_q12 = 340;
                             dialog.preview_pitch_q12 = 350;
                             dialog.preview_radius = 1536;
                             dialog.show_animation_root = true;
+                            dialog.preview_in_place = true;
                         }
 
                         ui.separator();
@@ -3408,6 +3416,7 @@ impl EditorWorkspace {
                                 &mut dialog.preview_pitch_q12,
                                 &mut dialog.preview_radius,
                                 dialog.show_animation_root,
+                                dialog.preview_in_place,
                             );
                         } else {
                             ui.vertical_centered(|ui| {
@@ -3538,7 +3547,7 @@ impl EditorWorkspace {
                 self.model_import_dialog.status = Some(ModelImportStatus::Info(format!(
                     "Preview cooked: {clip_count} clip(s){}",
                     if self.model_import_dialog.normalize_root_translation {
-                        ", root centered"
+                        ", in-place baked"
                     } else {
                         ""
                     }
@@ -6392,6 +6401,8 @@ impl EditorWorkspace {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
             },
         );
         scene.add_node(
@@ -6399,6 +6410,7 @@ impl EditorWorkspace {
             "Animator",
             NodeKind::Animator {
                 clip: None,
+                action_clips: Vec::new(),
                 autoplay: true,
             },
         );
@@ -6431,6 +6443,8 @@ impl EditorWorkspace {
                 NodeKind::ModelRenderer {
                     model: Some(model_id),
                     material: None,
+                    visual_offset: [0; 3],
+                    visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
                 },
             );
         }
@@ -6474,6 +6488,8 @@ impl EditorWorkspace {
                 NodeKind::ModelRenderer {
                     model: Some(model_id),
                     material: None,
+                    visual_offset: [0; 3],
+                    visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
                 },
             );
             scene.add_node(
@@ -6481,6 +6497,7 @@ impl EditorWorkspace {
                 "Animator",
                 NodeKind::Animator {
                     clip: idle_clip,
+                    action_clips: Vec::new(),
                     autoplay: true,
                 },
             );
@@ -6527,7 +6544,7 @@ impl EditorWorkspace {
                     )
                 })
             })
-            .or(character.idle_clip)
+            .or_else(|| character.action_clip(psxed_project::CharacterAnimationAction::Idle))
     }
 
     /// Build the dedupe key for the next paint dispatch. PaintWall
@@ -8707,6 +8724,8 @@ impl EditorWorkspace {
                                 let character_options = collect_character_options(&self.project);
                                 let weapon_options = collect_weapon_options(&self.project);
                                 let selected = self.selected_node;
+                                let animator_clip_context =
+                                    selected_animator_clip_context(&self.project, selected);
                                 let active_room = self.active_room_id();
                                 let selected_sector = self.selected_sector;
                                 let selected_sector_count = self.selected_sectors.len();
@@ -8775,6 +8794,7 @@ impl EditorWorkspace {
                                             &model_options,
                                             &character_options,
                                             &weapon_options,
+                                            animator_clip_context.as_ref(),
                                             inherited_sector_size,
                                             &mut nav_target,
                                         );
@@ -14546,6 +14566,13 @@ fn remap_resource_data(data: &mut ResourceData, id_map: &HashMap<ResourceId, Res
             remap_resource_id_option(&mut set.walk_clip, id_map);
             remap_resource_id_option(&mut set.run_clip, id_map);
             remap_resource_id_option(&mut set.turn_clip, id_map);
+            remap_resource_id_option(&mut set.roll_clip, id_map);
+            remap_resource_id_option(&mut set.backstep_clip, id_map);
+            for binding in &mut set.action_clips {
+                if let Some(mapped) = id_map.get(&binding.clip).copied() {
+                    binding.clip = mapped;
+                }
+            }
             for clip in &mut set.clips {
                 if let Some(mapped) = id_map.get(clip).copied() {
                     *clip = mapped;
@@ -15572,6 +15599,92 @@ fn transform_icon(label: &str) -> char {
     }
 }
 
+struct AnimatorClipContext {
+    model_name: String,
+    clips: Vec<String>,
+    profile_name: Option<String>,
+    profile_action_clips: [Option<u16>; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT],
+}
+
+fn selected_animator_clip_context(
+    project: &ProjectDocument,
+    selected: NodeId,
+) -> Option<AnimatorClipContext> {
+    let scene = project.active_scene();
+    let node = scene.node(selected)?;
+    if !matches!(node.kind, NodeKind::Animator { .. }) {
+        return None;
+    }
+    let host = scene.node(node.parent?)?;
+    let model_id = host.children.iter().find_map(|child_id| {
+        scene.node(*child_id).and_then(|child| match child.kind {
+            NodeKind::ModelRenderer {
+                model: Some(model), ..
+            } => Some(model),
+            _ => None,
+        })
+    })?;
+    let profile = host.children.iter().find_map(|child_id| {
+        scene.node(*child_id).and_then(|child| match child.kind {
+            NodeKind::CharacterController {
+                character: Some(character),
+                ..
+            } => project
+                .resource(character)
+                .and_then(|resource| match &resource.data {
+                    ResourceData::Character(character) => Some((resource.name.clone(), character)),
+                    _ => None,
+                }),
+            _ => None,
+        })
+    });
+    let mut profile_action_clips = [None; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT];
+    let profile_name = profile.as_ref().map(|(name, _)| name.clone());
+    if let Some((_, character)) = profile {
+        for action in psxed_project::CharacterAnimationAction::ALL {
+            profile_action_clips[action.to_index()] =
+                character_profile_action_clip(project, model_id, character, action);
+        }
+    }
+    project
+        .resources
+        .iter()
+        .find(|resource| resource.id == model_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Model(_) => Some(AnimatorClipContext {
+                model_name: resource.name.clone(),
+                clips: project
+                    .resolved_model_animation_clips(model_id)
+                    .iter()
+                    .map(|clip| clip.name.clone())
+                    .collect(),
+                profile_name,
+                profile_action_clips,
+            }),
+            _ => None,
+        })
+}
+
+fn character_profile_action_clip(
+    project: &ProjectDocument,
+    model_id: ResourceId,
+    character: &psxed_project::CharacterResource,
+    action: psxed_project::CharacterAnimationAction,
+) -> Option<u16> {
+    character.action_clip(action).or_else(|| {
+        let set = character.animation_set.and_then(|id| {
+            project
+                .resource(id)
+                .and_then(|resource| match &resource.data {
+                    ResourceData::AnimationSet(set) => Some(set),
+                    _ => None,
+                })
+        })?;
+        let clip = set.action_clip(action)?;
+        project.resolved_model_animation_index(model_id, clip)
+    })
+}
+
 fn draw_node_kind_editor(
     ui: &mut egui::Ui,
     kind: &mut NodeKind,
@@ -15580,6 +15693,7 @@ fn draw_node_kind_editor(
     model_options: &[(ResourceId, String, Vec<String>)],
     character_options: &[(ResourceId, String)],
     weapon_options: &[(ResourceId, String)],
+    animator_clip_context: Option<&AnimatorClipContext>,
     inherited_sector_size: i32,
     nav_target: &mut Option<ResourceId>,
 ) -> bool {
@@ -15864,7 +15978,12 @@ fn draw_node_kind_editor(
                 });
             });
         }
-        NodeKind::ModelRenderer { model, material: _ } => {
+        NodeKind::ModelRenderer {
+            model,
+            material: _,
+            visual_offset,
+            visual_scale_q8,
+        } => {
             ui.weak("Component: renders a Model from the parent Entity transform.");
             let bound_model =
                 model.and_then(|id| model_options.iter().find(|(rid, _, _)| *rid == id));
@@ -15894,36 +16013,134 @@ fn draw_node_kind_editor(
                     "Model resource is missing.",
                 );
             }
-        }
-        NodeKind::Animator { clip, autoplay } => {
-            ui.weak("Component: controls which model animation clip plays on this entity.");
-            changed |= ui
-                .checkbox(autoplay, icons::label(icons::PLAY, "Autoplay"))
-                .changed();
-            let mut current = clip.map(|i| i as i32).unwrap_or(-1);
+            ui.separator();
+            ui.weak("Visual calibration only. Collision, camera, and movement still use Entity, Character Controller, and Collider data.");
+            ui.label("Visual Offset");
+            for (axis, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    let mut v = visual_offset[axis] as i32;
+                    if ui
+                        .add(egui::DragValue::new(&mut v).range(-8192..=8192).speed(8.0))
+                        .changed()
+                    {
+                        visual_offset[axis] = v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        changed = true;
+                    }
+                });
+            }
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Clip override").color(STUDIO_TEXT_WEAK));
-                let response = ui.add(
-                    egui::DragValue::new(&mut current)
-                        .speed(0.1)
-                        .range(-1..=255)
-                        .custom_formatter(|n, _| {
-                            if n < 0.0 {
-                                "inherit".to_string()
-                            } else {
-                                format!("{}", n as i32)
-                            }
-                        }),
+                ui.label("Visual Scale");
+                let mut q8 = (*visual_scale_q8).max(1) as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut q8).range(1..=4096).speed(16.0))
+                    .changed()
+                {
+                    *visual_scale_q8 = q8.clamp(1, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "{:.3}x",
+                        *visual_scale_q8 as f32 / MODEL_SCALE_ONE_Q8 as f32
+                    ))
+                    .color(STUDIO_TEXT_WEAK)
+                    .monospace(),
                 );
-                if response.changed() {
-                    *clip = if current < 0 {
-                        None
-                    } else {
-                        Some(current as u16)
-                    };
+                if ui.button("Reset").clicked() {
+                    *visual_offset = [0; 3];
+                    *visual_scale_q8 = MODEL_SCALE_ONE_Q8;
                     changed = true;
                 }
             });
+        }
+        NodeKind::Animator {
+            clip,
+            action_clips,
+            autoplay,
+        } => {
+            ui.weak("Component: maps gameplay actions to model animation clips.");
+            changed |= ui
+                .checkbox(autoplay, icons::label(icons::PLAY, "Autoplay"))
+                .changed();
+            if let Some(context) = animator_clip_context {
+                ui.label(
+                    RichText::new(format!("Model: {}", context.model_name))
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
+                );
+                changed |= clip_role_picker(
+                    ui,
+                    "Preview Clip",
+                    "animator-preview-clip",
+                    clip,
+                    &context.clips,
+                );
+                egui::CollapsingHeader::new(icons::label(icons::PLAY, "Gameplay Actions"))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if let Some(profile_name) = &context.profile_name {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Empty slots inherit from profile: {profile_name}"
+                                ))
+                                .color(STUDIO_TEXT_WEAK)
+                                .small(),
+                            );
+                        }
+                        for action in psxed_project::CharacterAnimationAction::ALL {
+                            let mut current = action_clips.iter().find_map(|binding| {
+                                (binding.action == action).then_some(binding.clip)
+                            });
+                            changed |= animator_action_clip_picker(
+                                ui,
+                                action.label(),
+                                &format!("animator-action-{}", action.to_index()),
+                                &mut current,
+                                context.profile_action_clips[action.to_index()],
+                                context.profile_name.as_deref(),
+                                &context.clips,
+                            );
+                            if current
+                                != action_clips.iter().find_map(|binding| {
+                                    (binding.action == action).then_some(binding.clip)
+                                })
+                            {
+                                set_node_action_clip(action_clips, action, current);
+                                changed = true;
+                            }
+                        }
+                    });
+            } else {
+                ui.colored_label(
+                    STUDIO_TEXT_WEAK,
+                    "Add a Model Renderer sibling to select animation clips.",
+                );
+                let mut current = clip.map(|i| i as i32).unwrap_or(-1);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Preview Clip").color(STUDIO_TEXT_WEAK));
+                    let response = ui.add(
+                        egui::DragValue::new(&mut current)
+                            .speed(0.1)
+                            .range(-1..=255)
+                            .custom_formatter(|n, _| {
+                                if n < 0.0 {
+                                    "inherit".to_string()
+                                } else {
+                                    format!("{}", n as i32)
+                                }
+                            }),
+                    );
+                    if response.changed() {
+                        *clip = if current < 0 {
+                            None
+                        } else {
+                            Some(current as u16)
+                        };
+                        changed = true;
+                    }
+                });
+            }
         }
         NodeKind::Collider { shape, solid } => {
             ui.weak("Component: collision authored on an Entity. Runtime entity collision is not cooked yet.");
@@ -15946,11 +16163,18 @@ fn draw_node_kind_editor(
             settings,
             player,
         } => {
-            ui.weak("Component: binds an Entity to a Character Profile. Player controllers cook into the current playtest controller.");
+            ui.weak("Component: movement, stamina, and player-control logic. Model Renderer owns the model; Animator owns action clips.");
             changed |= ui
                 .checkbox(player, icons::label(icons::MAP_PIN, "Player controlled"))
                 .changed();
             changed |= draw_character_selector(ui, character_options, character, nav_target);
+            ui.label(
+                RichText::new(
+                    "Optional preset. Component values are used where they are authored.",
+                )
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
             changed |= draw_character_controller_settings(ui, settings);
         }
         NodeKind::AiController { behavior } => {
@@ -16317,6 +16541,7 @@ fn draw_model_import_preview(
     preview_pitch_q12: &mut i32,
     preview_radius: &mut i32,
     show_animation_root: bool,
+    preview_in_place: bool,
 ) {
     ui.label(RichText::new("Cooked Model").strong());
     if !draw_model_animated_import_preview(
@@ -16327,6 +16552,7 @@ fn draw_model_import_preview(
         preview_pitch_q12,
         preview_radius,
         show_animation_root,
+        preview_in_place,
     ) {
         draw_model_wireframe_preview(ui, &preview.model_bytes);
     }
@@ -16415,6 +16641,7 @@ fn draw_model_animated_import_preview(
     preview_pitch_q12: &mut i32,
     preview_radius: &mut i32,
     show_animation_root: bool,
+    preview_in_place: bool,
 ) -> bool {
     let Some(atlas) = preview.atlas_image.as_ref() else {
         return false;
@@ -16444,6 +16671,7 @@ fn draw_model_animated_import_preview(
         pitch_q12: (*preview_pitch_q12).rem_euclid(4096) as u16,
         radius: *preview_radius,
         focus_on_animated_bounds: true,
+        preview_in_place,
         show_animation_root,
         show_bones: false,
     };
@@ -16599,9 +16827,15 @@ fn root_motion_stats(bytes: &[u8], joint_index: u16) -> Option<RootMotionStats> 
     let mut max = [i32::MIN; 3];
     let mut sum = [0i64; 3];
     let mut count = 0i64;
+    let mut first = None;
+    let mut last = None;
     for frame in 0..anim.frame_count() {
         let pose = anim.pose(frame, joint_index)?;
         let values = [pose.translation.x, pose.translation.y, pose.translation.z];
+        if first.is_none() {
+            first = Some(values);
+        }
+        last = Some(values);
         for axis in 0..3 {
             min[axis] = min[axis].min(values[axis]);
             max[axis] = max[axis].max(values[axis]);
@@ -16612,6 +16846,8 @@ fn root_motion_stats(bytes: &[u8], joint_index: u16) -> Option<RootMotionStats> 
     if count == 0 {
         return None;
     }
+    let first = first?;
+    let last = last?;
     Some(RootMotionStats {
         min,
         max,
@@ -16620,6 +16856,13 @@ fn root_motion_stats(bytes: &[u8], joint_index: u16) -> Option<RootMotionStats> 
             (sum[1] / count) as i32,
             (sum[2] / count) as i32,
         ],
+        first,
+        last,
+        delta: [
+            last[0].saturating_sub(first[0]),
+            last[1].saturating_sub(first[1]),
+            last[2].saturating_sub(first[2]),
+        ],
     })
 }
 
@@ -16627,21 +16870,30 @@ fn root_motion_brief(stats: RootMotionStats) -> String {
     let span_x = stats.max[0].saturating_sub(stats.min[0]).abs();
     let span_y = stats.max[1].saturating_sub(stats.min[1]).abs();
     let span_z = stats.max[2].saturating_sub(stats.min[2]).abs();
-    format!("root span {span_x}/{span_y}/{span_z}")
+    format!(
+        "root delta {}/{}/{} · span {span_x}/{span_y}/{span_z}",
+        stats.delta[0], stats.delta[1], stats.delta[2]
+    )
 }
 
 fn draw_root_motion_stats(ui: &mut egui::Ui, stats: RootMotionStats) {
     egui::Grid::new("model-import-root-motion")
-        .num_columns(4)
+        .num_columns(6)
         .spacing([8.0, 3.0])
         .show(ui, |ui| {
             ui.label("");
+            ui.label(RichText::new("first").color(STUDIO_TEXT_WEAK).small());
+            ui.label(RichText::new("last").color(STUDIO_TEXT_WEAK).small());
+            ui.label(RichText::new("delta").color(STUDIO_TEXT_WEAK).small());
             ui.label(RichText::new("min").color(STUDIO_TEXT_WEAK).small());
             ui.label(RichText::new("max").color(STUDIO_TEXT_WEAK).small());
             ui.label(RichText::new("mean").color(STUDIO_TEXT_WEAK).small());
             ui.end_row();
             for (axis, name) in ["X", "Y", "Z"].iter().enumerate() {
                 ui.label(*name);
+                ui.label(RichText::new(stats.first[axis].to_string()).monospace());
+                ui.label(RichText::new(stats.last[axis].to_string()).monospace());
+                ui.label(RichText::new(stats.delta[axis].to_string()).monospace());
                 ui.label(RichText::new(stats.min[axis].to_string()).monospace());
                 ui.label(RichText::new(stats.max[axis].to_string()).monospace());
                 ui.label(RichText::new(stats.mean[axis].to_string()).monospace());
@@ -17229,6 +17481,7 @@ fn draw_model_resource_preview_panel(
                     pitch_q12: pitch.rem_euclid(4096) as u16,
                     radius,
                     focus_on_animated_bounds: true,
+                    preview_in_place: true,
                     show_animation_root: false,
                     show_bones: false,
                 },
@@ -17930,7 +18183,7 @@ fn draw_animation_set_resource_editor(
     clip_options: &[AnimationClipOption],
 ) -> bool {
     let mut changed = false;
-    egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Clip Role Map"))
+    egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Action Map"))
         .default_open(true)
         .show(ui, |ui| {
             changed |= resource_id_picker(
@@ -17940,42 +18193,22 @@ fn draw_animation_set_resource_editor(
                 &mut set.skeleton,
                 skeleton_options,
             );
-            changed |= animation_resource_picker(
-                ui,
-                "Idle",
-                "animation-set-idle",
-                &mut set.idle_clip,
-                set.skeleton,
-                clip_options,
-                Some(psxed_project::AnimationRole::Idle),
-            );
-            changed |= animation_resource_picker(
-                ui,
-                "Walk",
-                "animation-set-walk",
-                &mut set.walk_clip,
-                set.skeleton,
-                clip_options,
-                Some(psxed_project::AnimationRole::Walk),
-            );
-            changed |= animation_resource_picker(
-                ui,
-                "Run",
-                "animation-set-run",
-                &mut set.run_clip,
-                set.skeleton,
-                clip_options,
-                Some(psxed_project::AnimationRole::Run),
-            );
-            changed |= animation_resource_picker(
-                ui,
-                "Turn",
-                "animation-set-turn",
-                &mut set.turn_clip,
-                set.skeleton,
-                clip_options,
-                Some(psxed_project::AnimationRole::Turn),
-            );
+            for action in psxed_project::CharacterAnimationAction::ALL {
+                let mut current = set.action_clip(action);
+                changed |= animation_resource_picker(
+                    ui,
+                    action.label(),
+                    &format!("animation-set-action-{}", action.to_index()),
+                    &mut current,
+                    set.skeleton,
+                    clip_options,
+                    action.role_hint(),
+                );
+                if current != set.action_clip(action) {
+                    set.set_action_clip(action, current);
+                    changed = true;
+                }
+            }
         });
 
     egui::CollapsingHeader::new(icons::label(icons::PLAY, "Extra Clips"))
@@ -18057,15 +18290,10 @@ fn animation_resource_picker(
                     *current = None;
                     changed = true;
                 }
-                for option in options.iter().filter(|option| {
-                    animation_option_matches_skeleton(option, skeleton)
-                        && role_hint
-                            .map(|role| {
-                                option.role == role
-                                    || matches!(option.role, psxed_project::AnimationRole::Generic)
-                            })
-                            .unwrap_or(true)
-                }) {
+                for option in options
+                    .iter()
+                    .filter(|option| animation_option_matches_skeleton(option, skeleton))
+                {
                     let label = if matches!(option.role, psxed_project::AnimationRole::Generic) {
                         option.name.clone()
                     } else {
@@ -18325,17 +18553,14 @@ struct AnimationSetOption {
     id: ResourceId,
     name: String,
     skeleton: Option<ResourceId>,
-    idle_clip: Option<ResourceId>,
-    walk_clip: Option<ResourceId>,
-    run_clip: Option<ResourceId>,
-    turn_clip: Option<ResourceId>,
+    action_clips: [Option<ResourceId>; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT],
 }
 
 /// Inspector body for `ResourceData::Character` profiles. Combines a
-/// model picker, four role-clip pickers (idle / walk / run /
-/// turn), capsule sizes, controller speed, and camera params.
+/// model picker, role-clip pickers, capsule sizes, controller speed,
+/// and camera params.
 /// `Auto Assign Clips By Name` walks the bound model's clip
-/// list and matches `idle` / `walk` / `run` / `turn` substrings
+/// list and matches gameplay role substrings
 /// -- case-insensitive -- into role slots.
 fn draw_character_resource_editor(
     ui: &mut egui::Ui,
@@ -18388,7 +18613,7 @@ fn draw_character_resource_editor(
             }
             changed |= resource_id_picker(
                 ui,
-                "Clip Role Map",
+                "Action Map",
                 "character-animation-set-picker",
                 &mut character.animation_set,
                 &ctx.animation_sets
@@ -18404,7 +18629,7 @@ fn draw_character_resource_editor(
             if character.animation_set.is_some() && selected_set.is_none() {
                 ui.colored_label(
                     Color32::from_rgb(220, 120, 100),
-                    "Clip Role Map resource is missing.",
+                    "Action Map resource is missing.",
                 );
             }
             if let Some(set) = selected_set {
@@ -18414,20 +18639,20 @@ fn draw_character_resource_editor(
                 {
                     ui.colored_label(
                         Color32::from_rgb(220, 120, 100),
-                        "Clip Role Map targets a different skeleton than the selected Model.",
+                        "Action Map targets a different skeleton than the selected Model.",
                     );
                 }
             }
         });
 
-    egui::CollapsingHeader::new(icons::label(icons::PALETTE, "Animation roles"))
+    egui::CollapsingHeader::new(icons::label(icons::PALETTE, "Animation Actions"))
         .default_open(true)
         .show(ui, |ui| {
             let clips: &[String] = bound.map(|(_, _, c)| c.as_slice()).unwrap_or(&[]);
             if character.animation_set.is_some() {
                 ui.label(
                     RichText::new(
-                        "Clip Role Map roles are used first; legacy clip indices below are fallbacks.",
+                        "Preset clips below are fallback defaults. Animator components can override action clips per entity.",
                     )
                     .color(STUDIO_TEXT_WEAK)
                     .small(),
@@ -18439,10 +18664,20 @@ fn draw_character_resource_editor(
                     "Pick a Model to surface its clip list.",
                 );
             }
-            changed |= clip_role_picker(ui, "Idle", "character-clip-idle", &mut character.idle_clip, clips);
-            changed |= clip_role_picker(ui, "Walk", "character-clip-walk", &mut character.walk_clip, clips);
-            changed |= clip_role_picker(ui, "Run", "character-clip-run", &mut character.run_clip, clips);
-            changed |= clip_role_picker(ui, "Turn", "character-clip-turn", &mut character.turn_clip, clips);
+            for action in psxed_project::CharacterAnimationAction::ALL {
+                let mut current = character.action_clip(action);
+                changed |= clip_role_picker(
+                    ui,
+                    action.label(),
+                    &format!("character-action-clip-{}", action.to_index()),
+                    &mut current,
+                    clips,
+                );
+                if current != character.action_clip(action) {
+                    character.set_action_clip(action, current);
+                    changed = true;
+                }
+            }
 
             draw_character_effective_roles(ui, character, selected_set, clips, ctx);
 
@@ -18455,24 +18690,13 @@ fn draw_character_resource_editor(
                         egui::Button::new(icons::label(icons::SCAN, "Auto Assign Clips By Name")),
                     )
                     .on_hover_text(
-                        "Match clip names against idle/walk/run/turn substrings (case-insensitive).",
+                        "Match clip names against gameplay action names (case-insensitive).",
                     )
                     .clicked()
                 {
-                    let before = (
-                        character.idle_clip,
-                        character.walk_clip,
-                        character.run_clip,
-                        character.turn_clip,
-                    );
+                    let before = character.action_clips.clone();
                     auto_assign_character_clips(character, clips);
-                    if (
-                        character.idle_clip,
-                        character.walk_clip,
-                        character.run_clip,
-                        character.turn_clip,
-                    ) != before
-                    {
+                    if character.action_clips != before {
                         changed = true;
                     }
                 }
@@ -18491,26 +18715,34 @@ fn draw_character_resource_editor(
                     None
                 }
             };
-            for warning in [
-                warn_idx("Idle", character.idle_clip),
-                warn_idx("Walk", character.walk_clip),
-                warn_idx("Run", character.run_clip),
-                warn_idx("Turn", character.turn_clip),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                ui.colored_label(Color32::from_rgb(220, 160, 80), warning);
+            for action in psxed_project::CharacterAnimationAction::ALL {
+                if let Some(warning) = warn_idx(action.label(), character.action_clip(action)) {
+                    ui.colored_label(Color32::from_rgb(220, 160, 80), warning);
+                }
             }
-            let has_set_idle = selected_set.and_then(|set| set.idle_clip).is_some();
-            let has_set_walk = selected_set.and_then(|set| set.walk_clip).is_some();
-            if character.model.is_some() && character.idle_clip.is_none() && !has_set_idle {
+            let has_set_idle = selected_set
+                .and_then(|set| set.action_clips[psxed_project::CharacterAnimationAction::Idle.to_index()])
+                .is_some();
+            let has_set_walk = selected_set
+                .and_then(|set| set.action_clips[psxed_project::CharacterAnimationAction::Walk.to_index()])
+                .is_some();
+            if character.model.is_some()
+                && character
+                    .action_clip(psxed_project::CharacterAnimationAction::Idle)
+                    .is_none()
+                && !has_set_idle
+            {
                 ui.colored_label(
                     Color32::from_rgb(220, 120, 100),
                     "Idle clip is required for the player character.",
                 );
             }
-            if character.model.is_some() && character.walk_clip.is_none() && !has_set_walk {
+            if character.model.is_some()
+                && character
+                    .action_clip(psxed_project::CharacterAnimationAction::Walk)
+                    .is_none()
+                && !has_set_walk
+            {
                 ui.colored_label(
                     Color32::from_rgb(220, 120, 100),
                     "Walk clip is required for the player character.",
@@ -18639,7 +18871,7 @@ fn draw_character_effective_roles(
 ) {
     ui.add_space(4.0);
     ui.label(
-        RichText::new("Effective roles")
+        RichText::new("Effective actions")
             .color(STUDIO_TEXT_WEAK)
             .small(),
     );
@@ -18647,33 +18879,10 @@ fn draw_character_effective_roles(
         .num_columns(3)
         .spacing([8.0, 3.0])
         .show(ui, |ui| {
-            for (label, set_clip, legacy_clip, required) in [
-                (
-                    "Idle",
-                    set.and_then(|set| set.idle_clip),
-                    character.idle_clip,
-                    true,
-                ),
-                (
-                    "Walk",
-                    set.and_then(|set| set.walk_clip),
-                    character.walk_clip,
-                    true,
-                ),
-                (
-                    "Run",
-                    set.and_then(|set| set.run_clip),
-                    character.run_clip,
-                    false,
-                ),
-                (
-                    "Turn",
-                    set.and_then(|set| set.turn_clip),
-                    character.turn_clip,
-                    false,
-                ),
-            ] {
-                ui.label(label);
+            for action in psxed_project::CharacterAnimationAction::ALL {
+                let set_clip = set.and_then(|set| set.action_clips[action.to_index()]);
+                let legacy_clip = character.action_clip(action);
+                ui.label(action.label());
                 if let Some(clip) = set_clip {
                     ui.label(ctx.animation_clip_name(clip));
                     ui.label(RichText::new("set").color(STUDIO_TEXT_WEAK).small());
@@ -18684,7 +18893,7 @@ fn draw_character_effective_roles(
                         .unwrap_or("(missing)");
                     ui.label(format!("{index}: {name}"));
                     ui.label(RichText::new("fallback").color(STUDIO_TEXT_WEAK).small());
-                } else if required {
+                } else if action.required_for_player() {
                     ui.colored_label(Color32::from_rgb(220, 120, 100), "missing");
                     ui.label("");
                 } else {
@@ -18738,6 +18947,89 @@ fn clip_role_picker(
     changed
 }
 
+fn animator_action_clip_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    id_salt: &str,
+    slot: &mut Option<u16>,
+    inherited_clip: Option<u16>,
+    inherited_source: Option<&str>,
+    clips: &[String],
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let preview = match *slot {
+            Some(idx) => clips
+                .get(idx as usize)
+                .map(|name| format!("{idx}: {name}"))
+                .unwrap_or_else(|| format!("#{idx} (missing)")),
+            None => inherited_clip
+                .map(|idx| {
+                    let name = clips
+                        .get(idx as usize)
+                        .map(String::as_str)
+                        .unwrap_or("(missing)");
+                    match inherited_source {
+                        Some(source) => format!("{idx}: {name} from {source}"),
+                        None => format!("{idx}: {name} inherited"),
+                    }
+                })
+                .unwrap_or_else(|| "(none)".to_string()),
+        };
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(preview)
+            .show_ui(ui, |ui| {
+                let inherit_label = inherited_clip
+                    .map(|idx| {
+                        let name = clips
+                            .get(idx as usize)
+                            .map(String::as_str)
+                            .unwrap_or("(missing)");
+                        format!("Inherit {idx}: {name}")
+                    })
+                    .unwrap_or_else(|| "(none)".to_string());
+                if ui.selectable_label(slot.is_none(), inherit_label).clicked() {
+                    if slot.is_some() {
+                        changed = true;
+                    }
+                    *slot = None;
+                }
+                for (idx, name) in clips.iter().enumerate() {
+                    let label = format!("{idx}: {name}");
+                    if ui
+                        .selectable_label(*slot == Some(idx as u16), label)
+                        .clicked()
+                    {
+                        *slot = Some(idx as u16);
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed
+}
+
+fn set_node_action_clip(
+    action_clips: &mut Vec<psxed_project::CharacterActionClip>,
+    action: psxed_project::CharacterAnimationAction,
+    clip: Option<u16>,
+) {
+    match clip {
+        Some(clip) => {
+            if let Some(binding) = action_clips
+                .iter_mut()
+                .find(|binding| binding.action == action)
+            {
+                binding.clip = clip;
+            } else {
+                action_clips.push(psxed_project::CharacterActionClip { action, clip });
+            }
+        }
+        None => action_clips.retain(|binding| binding.action != action),
+    }
+}
+
 /// Heuristic clip-by-name auto-assignment. Case-insensitive
 /// substring match. Leaves missing roles unset so the validation
 /// warnings still fire.
@@ -18758,26 +19050,63 @@ fn auto_assign_character_clips(character: &mut psxed_project::CharacterResource,
             .map(|i| i as u16)
     };
 
-    if let Some(i) = find_exact(&["idle"]).or_else(|| find_contains("idle", &[])) {
-        character.idle_clip = Some(i);
-    }
-    if let Some(i) = find_exact(&["walking", "walk", "walk_forward", "forward_walk"])
-        .or_else(|| find_contains("walk", &["back", "backward", "unsteady"]))
-        .or_else(|| find_contains("walk", &[]))
-    {
-        character.walk_clip = Some(i);
-    }
-    if let Some(i) = find_exact(&["running", "run"]).or_else(|| find_contains("run", &[])) {
-        character.run_clip = Some(i);
-    }
-    if let Some(i) = find_exact(&["turn", "turning"]).or_else(|| find_contains("turn", &[])) {
-        character.turn_clip = Some(i);
+    for action in psxed_project::CharacterAnimationAction::ALL {
+        let index = match action {
+            psxed_project::CharacterAnimationAction::Idle => {
+                find_exact(&["idle"]).or_else(|| find_contains("idle", &[]))
+            }
+            psxed_project::CharacterAnimationAction::Walk => {
+                find_exact(&["walking", "walk", "walk_forward", "forward_walk"])
+                    .or_else(|| find_contains("walk", &["back", "backward", "unsteady"]))
+                    .or_else(|| find_contains("walk", &[]))
+            }
+            psxed_project::CharacterAnimationAction::Run => {
+                find_exact(&["running", "run"]).or_else(|| find_contains("run", &[]))
+            }
+            psxed_project::CharacterAnimationAction::Turn => {
+                find_exact(&["turn", "turning"]).or_else(|| find_contains("turn", &[]))
+            }
+            psxed_project::CharacterAnimationAction::Roll => {
+                find_exact(&["roll", "dodge", "dodge_roll"])
+                    .or_else(|| find_contains("roll", &[]))
+                    .or_else(|| find_contains("dodge", &[]))
+            }
+            psxed_project::CharacterAnimationAction::Backstep => {
+                find_exact(&["backstep", "back_step", "step_back"])
+                    .or_else(|| find_contains("backstep", &[]))
+                    .or_else(|| find_contains("back_step", &[]))
+                    .or_else(|| find_contains("back step", &[]))
+                    .or_else(|| find_contains("step_back", &[]))
+                    .or_else(|| find_contains("step back", &[]))
+            }
+            psxed_project::CharacterAnimationAction::LightAttack => find_contains("light", &[])
+                .or_else(|| find_contains("attack", &["heavy", "combo"]))
+                .or_else(|| find_contains("melee", &["heavy", "combo"])),
+            psxed_project::CharacterAnimationAction::HeavyAttack => {
+                find_contains("heavy", &[]).or_else(|| find_contains("strong", &[]))
+            }
+            psxed_project::CharacterAnimationAction::ComboAttack => find_contains("combo", &[]),
+            psxed_project::CharacterAnimationAction::Block => {
+                find_contains("block", &[]).or_else(|| find_contains("guard", &[]))
+            }
+            psxed_project::CharacterAnimationAction::HitReact => {
+                find_contains("hit", &[]).or_else(|| find_contains("reaction", &[]))
+            }
+            psxed_project::CharacterAnimationAction::Death => {
+                find_contains("death", &[]).or_else(|| find_contains("dead", &[]))
+            }
+        };
+        if let Some(index) = index {
+            character.set_action_clip(action, Some(index));
+        }
     }
 }
 
-/// Character-controller / player-spawn inspector helper: pick which
-/// Character Profile drives this entity. `(none)` lets the cook step
-/// auto-pick when exactly one profile exists.
+/// Character-controller / player-spawn inspector helper: pick an
+/// optional Character Profile preset. Component-authored players can
+/// leave this empty when a Model Renderer and Animator are present;
+/// legacy SpawnPoint players can still auto-pick when exactly one
+/// profile exists.
 fn draw_character_selector(
     ui: &mut egui::Ui,
     options: &[(ResourceId, String)],
@@ -18841,7 +19170,7 @@ fn draw_character_selector(
         ui.colored_label(
             STUDIO_TEXT_WEAK,
             format!(
-                "Cook will auto-select \"{}\" — only one Character Profile defined.",
+                "Legacy SpawnPoint cooks can auto-select \"{}\" because it is the only profile.",
                 options[0].1
             ),
         );
@@ -20069,12 +20398,15 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
             NodeKind::ModelRenderer {
                 model: None,
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
             },
         ),
         (
             "Animator",
             NodeKind::Animator {
                 clip: None,
+                action_clips: Vec::new(),
                 autoplay: true,
             },
         ),
@@ -20194,12 +20526,15 @@ fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'static str, Node
             NodeKind::ModelRenderer {
                 model: None,
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
             },
         ),
         (
             "Animator",
             NodeKind::Animator {
                 clip: None,
+                action_clips: Vec::new(),
                 autoplay: true,
             },
         ),
@@ -24729,15 +25064,18 @@ fn collect_animation_set_options(project: &ProjectDocument) -> Vec<AnimationSetO
         .resources
         .iter()
         .filter_map(|resource| match &resource.data {
-            ResourceData::AnimationSet(set) => Some(AnimationSetOption {
-                id: resource.id,
-                name: resource.name.clone(),
-                skeleton: set.skeleton,
-                idle_clip: set.idle_clip,
-                walk_clip: set.walk_clip,
-                run_clip: set.run_clip,
-                turn_clip: set.turn_clip,
-            }),
+            ResourceData::AnimationSet(set) => {
+                let mut action_clips = [None; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT];
+                for action in psxed_project::CharacterAnimationAction::ALL {
+                    action_clips[action.to_index()] = set.action_clip(action);
+                }
+                Some(AnimationSetOption {
+                    id: resource.id,
+                    name: resource.name.clone(),
+                    skeleton: set.skeleton,
+                    action_clips,
+                })
+            }
             _ => None,
         })
         .collect()
@@ -24853,7 +25191,9 @@ fn catalogue_animation_library(
                         source.role = role;
                         source.looping = !matches!(
                             role,
-                            psxed_project::AnimationRole::Attack
+                            psxed_project::AnimationRole::Roll
+                                | psxed_project::AnimationRole::Backstep
+                                | psxed_project::AnimationRole::Attack
                                 | psxed_project::AnimationRole::Hit
                                 | psxed_project::AnimationRole::Death
                         );
@@ -24880,7 +25220,9 @@ fn catalogue_animation_library(
                                 role,
                                 looping: !matches!(
                                     role,
-                                    psxed_project::AnimationRole::Attack
+                                    psxed_project::AnimationRole::Roll
+                                        | psxed_project::AnimationRole::Backstep
+                                        | psxed_project::AnimationRole::Attack
                                         | psxed_project::AnimationRole::Hit
                                         | psxed_project::AnimationRole::Death
                                 ),
@@ -25175,6 +25517,10 @@ fn animation_source_default_looping(
         || lowered.contains("draw")
         || lowered.contains("sheathe")
         || lowered.contains("parry")
+        || lowered.contains("backstep")
+        || lowered.contains("back_step")
+        || lowered.contains("back step")
+        || lowered.contains("step_back")
         || lowered.contains("dodge")
         || lowered.contains("roll")
         || lowered.contains("knockdown")
@@ -25372,6 +25718,12 @@ fn build_animation_set_from_clips(
             psxed_project::AnimationRole::Turn if set.turn_clip.is_none() => {
                 set.turn_clip = Some(*id)
             }
+            psxed_project::AnimationRole::Roll if set.roll_clip.is_none() => {
+                set.roll_clip = Some(*id)
+            }
+            psxed_project::AnimationRole::Backstep if set.backstep_clip.is_none() => {
+                set.backstep_clip = Some(*id)
+            }
             _ => {
                 if !set.clips.contains(id) {
                     set.clips.push(*id);
@@ -25396,6 +25748,8 @@ fn merge_animation_set(
         psxed_project::AnimationRole::Walk,
         psxed_project::AnimationRole::Run,
         psxed_project::AnimationRole::Turn,
+        psxed_project::AnimationRole::Roll,
+        psxed_project::AnimationRole::Backstep,
     ] {
         let source_clip = source.role_clip(role);
         if source_clip.is_some() {
@@ -26751,6 +27105,7 @@ mod tests {
             .expect("roll source catalogued")
             .1;
         assert_eq!(roll.provider, psxed_project::AnimationSourceProvider::Synty);
+        assert_eq!(roll.role, psxed_project::AnimationRole::Roll);
         assert!(!roll.looping);
         assert!(roll.tags.iter().any(|tag| tag == "dodge"));
         assert!(roll.tags.iter().any(|tag| tag == "root_motion"));
