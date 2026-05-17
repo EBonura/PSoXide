@@ -1,5 +1,5 @@
 use egui::{Color32, ColorImage};
-use psx_asset::{Animation, Model, ModelVertex};
+use psx_asset::{Animation, JointPose, Model, ModelVertex};
 use psx_engine::{
     compute_joint_view_transform, compute_joint_world_transform, Angle, JointViewTransform,
     JointWorldTransform, LocalToWorldScale, Mat3I16, ProjectedVertex, ViewVertex, WorldCamera,
@@ -22,6 +22,7 @@ pub struct ImportPreviewOptions {
     pub pitch_q12: u16,
     pub radius: i32,
     pub focus_on_animated_bounds: bool,
+    pub preview_in_place: bool,
     pub show_animation_root: bool,
     pub show_bones: bool,
 }
@@ -50,10 +51,23 @@ pub fn render_import_model_preview_with_options(
         (options.time_seconds.max(0.0) * PREVIEW_PLAYBACK_HZ as f64) as u32,
         PREVIEW_PLAYBACK_HZ,
     );
+    let root_delta = options
+        .preview_in_place
+        .then(|| root_motion_delta_q12(&animation, frame_q12))
+        .flatten();
     let local_to_world = LocalToWorldScale::from_q12(model.local_to_world_q12());
     let focus = options
         .focus_on_animated_bounds
-        .then(|| animation_preview_focus(&model, &animation, local_to_world, origin, height))
+        .then(|| {
+            animation_preview_focus(
+                &model,
+                &animation,
+                local_to_world,
+                origin,
+                height,
+                options.preview_in_place,
+            )
+        })
         .flatten();
     let target = focus.map(|focus| focus.center).unwrap_or(origin);
     let radius = if options.radius > 0 {
@@ -81,7 +95,10 @@ pub fn render_import_model_preview_with_options(
     let mut joint_transforms =
         vec![JointViewTransform::ZERO; model.joint_count().min(animation.joint_count()) as usize];
     for (joint, transform) in joint_transforms.iter_mut().enumerate() {
-        let pose = animation.pose_looped_q12(frame_q12, joint as u16)?;
+        let mut pose = animation.pose_looped_q12(frame_q12, joint as u16)?;
+        if let Some(delta) = root_delta {
+            apply_root_motion_delta(&mut pose, delta);
+        }
         let (rotation, translation) =
             compute_joint_view_transform(camera, pose, Mat3I16::IDENTITY, local_to_world, origin);
         *transform = JointViewTransform {
@@ -254,6 +271,7 @@ fn animation_preview_focus(
     local_to_world: LocalToWorldScale,
     origin: WorldVertex,
     fallback_height: i32,
+    preview_in_place: bool,
 ) -> Option<PreviewFocus> {
     let frame_count = animation.frame_count().max(1);
     let mut all_bounds: Option<PreviewWorldBounds> = None;
@@ -261,8 +279,17 @@ fn animation_preview_focus(
     let mut sum_z = 0i64;
     let mut sampled = 0i64;
     for frame in 0..frame_count {
-        let joint_world_transforms =
-            build_joint_world_transforms_at_frame(model, animation, frame, local_to_world, origin);
+        let root_delta = preview_in_place
+            .then(|| root_motion_delta_at_frame(animation, frame))
+            .flatten();
+        let joint_world_transforms = build_joint_world_transforms_at_frame(
+            model,
+            animation,
+            frame,
+            local_to_world,
+            origin,
+            root_delta,
+        );
         let Some(bounds) = animated_model_world_bounds(model, &joint_world_transforms) else {
             continue;
         };
@@ -299,16 +326,46 @@ fn build_joint_world_transforms_at_frame(
     frame: u16,
     local_to_world: LocalToWorldScale,
     origin: WorldVertex,
+    root_delta: Option<[i32; 3]>,
 ) -> Vec<JointWorldTransform> {
     let joint_count = model.joint_count().min(animation.joint_count()) as usize;
     let mut transforms = vec![JointWorldTransform::ZERO; joint_count];
     for (joint, transform) in transforms.iter_mut().enumerate() {
-        if let Some(pose) = animation.pose(frame, joint as u16) {
+        if let Some(mut pose) = animation.pose(frame, joint as u16) {
+            if let Some(delta) = root_delta {
+                apply_root_motion_delta(&mut pose, delta);
+            }
             *transform =
                 compute_joint_world_transform(pose, Mat3I16::IDENTITY, local_to_world, origin);
         }
     }
     transforms
+}
+
+fn root_motion_delta_at_frame(animation: &Animation<'_>, frame: u16) -> Option<[i32; 3]> {
+    let first = animation.pose(0, 0)?;
+    let current = animation.pose(frame, 0)?;
+    Some(root_motion_delta(first, current))
+}
+
+fn root_motion_delta_q12(animation: &Animation<'_>, frame_q12: u32) -> Option<[i32; 3]> {
+    let first = animation.pose(0, 0)?;
+    let current = animation.pose_looped_q12(frame_q12, 0)?;
+    Some(root_motion_delta(first, current))
+}
+
+fn root_motion_delta(first: JointPose, current: JointPose) -> [i32; 3] {
+    [
+        current.translation.x.saturating_sub(first.translation.x),
+        current.translation.y.saturating_sub(first.translation.y),
+        current.translation.z.saturating_sub(first.translation.z),
+    ]
+}
+
+fn apply_root_motion_delta(pose: &mut JointPose, delta: [i32; 3]) {
+    pose.translation.x = pose.translation.x.saturating_sub(delta[0]);
+    pose.translation.y = pose.translation.y.saturating_sub(delta[1]);
+    pose.translation.z = pose.translation.z.saturating_sub(delta[2]);
 }
 
 fn animated_model_world_bounds(
@@ -853,6 +910,7 @@ mod tests {
                 pitch_q12: 350,
                 radius: 1536,
                 focus_on_animated_bounds: true,
+                preview_in_place: true,
                 show_animation_root: true,
                 show_bones: false,
             },
@@ -929,12 +987,44 @@ mod tests {
             LocalToWorldScale::from_q12(model.local_to_world_q12()),
             WorldVertex::ZERO,
             1024,
+            false,
         )
         .expect("focus");
 
         assert_eq!(focus.center, WorldVertex::new(124, 24, 0));
         assert_eq!(focus.floor_y, 48);
         assert!(focus.radius >= 1536);
+    }
+
+    #[test]
+    fn in_place_preview_removes_root_motion_from_focus() {
+        let model_bytes = two_joint_model_with_child_part();
+        let model = Model::from_bytes(&model_bytes).expect("model fixture");
+        let animation_bytes = two_joint_animation_with_global_x_offsets(&[0, 200]);
+        let animation = Animation::from_bytes(&animation_bytes).expect("animation fixture");
+
+        let moving = animation_preview_focus(
+            &model,
+            &animation,
+            LocalToWorldScale::from_q12(model.local_to_world_q12()),
+            WorldVertex::ZERO,
+            1024,
+            false,
+        )
+        .expect("moving focus");
+        let in_place = animation_preview_focus(
+            &model,
+            &animation,
+            LocalToWorldScale::from_q12(model.local_to_world_q12()),
+            WorldVertex::ZERO,
+            1024,
+            true,
+        )
+        .expect("in-place focus");
+
+        assert_eq!(moving.center, WorldVertex::new(124, 24, 0));
+        assert_eq!(in_place.center, WorldVertex::new(24, 24, 0));
+        assert_eq!(in_place.floor_y, 48);
     }
 
     #[test]
@@ -1082,6 +1172,32 @@ mod tests {
 
         for x in offsets {
             append_identity_pose(&mut out, [0, 0, 0]);
+            append_identity_pose(&mut out, [*x, 0, 0]);
+        }
+
+        out
+    }
+
+    fn two_joint_animation_with_global_x_offsets(offsets: &[i32]) -> Vec<u8> {
+        const ASSET_HEADER_SIZE: usize = 12;
+        const ANIMATION_HEADER_SIZE: usize = 8;
+        const POSE_RECORD_SIZE: usize = 30;
+        const ANIMATION_VERSION: u16 = 1;
+
+        let frame_count = offsets.len() as u16;
+        let payload_len = ANIMATION_HEADER_SIZE + offsets.len() * 2 * POSE_RECORD_SIZE;
+        let mut out = Vec::with_capacity(ASSET_HEADER_SIZE + payload_len);
+        out.extend_from_slice(b"PSXA");
+        out.extend_from_slice(&ANIMATION_VERSION.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+        append_u16(&mut out, 2);
+        append_u16(&mut out, frame_count);
+        append_u16(&mut out, 30);
+        append_u16(&mut out, 0);
+
+        for x in offsets {
+            append_identity_pose(&mut out, [*x, 0, 0]);
             append_identity_pose(&mut out, [*x, 0, 0]);
         }
 
