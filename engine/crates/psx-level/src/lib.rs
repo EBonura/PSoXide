@@ -1114,6 +1114,11 @@ pub struct LevelModelInstanceRecord {
     pub z: i32,
     /// Yaw, PSX angle units.
     pub yaw: i16,
+    /// Render-only model offset from the authored floor anchor,
+    /// in entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
     /// Reserved.
     pub flags: u16,
 }
@@ -1279,6 +1284,66 @@ pub struct PointLightRecord {
 /// idle as appropriate.
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
+/// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 12;
+
+/// Runtime animation action slot.
+///
+/// The editor is free to bind any compatible clip to any slot. The
+/// runtime only relies on stable numeric indices so cooked
+/// characters stay compact and heap-free.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharacterAnimationAction {
+    /// Standing still.
+    Idle = 0,
+    /// Normal locomotion.
+    Walk = 1,
+    /// Fast locomotion.
+    Run = 2,
+    /// In-place turn, when authored.
+    Turn = 3,
+    /// Forward evade.
+    Roll = 4,
+    /// Backward evade.
+    Backstep = 5,
+    /// Primary attack.
+    LightAttack = 6,
+    /// Secondary attack.
+    HeavyAttack = 7,
+    /// Follow-up / combo attack.
+    ComboAttack = 8,
+    /// Guard / block pose.
+    Block = 9,
+    /// Damage reaction.
+    HitReact = 10,
+    /// Death / collapse.
+    Death = 11,
+}
+
+impl CharacterAnimationAction {
+    /// Ordered list matching [`CHARACTER_ANIMATION_ACTION_COUNT`].
+    pub const ALL: [Self; CHARACTER_ANIMATION_ACTION_COUNT] = [
+        Self::Idle,
+        Self::Walk,
+        Self::Run,
+        Self::Turn,
+        Self::Roll,
+        Self::Backstep,
+        Self::LightAttack,
+        Self::HeavyAttack,
+        Self::ComboAttack,
+        Self::Block,
+        Self::HitReact,
+        Self::Death,
+    ];
+
+    /// Convert to the cooked action slot index.
+    pub const fn to_index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Gameplay character -- backing model + role-clip mapping +
 /// capsule / camera / controller defaults. Layered on top of
 /// a [`LevelModelRecord`]; the player spawn references one of
@@ -1290,19 +1355,15 @@ pub struct LevelCharacterRecord {
     /// as. The cooker guarantees this resolves; runtime trusts
     /// the contract.
     pub model: ModelIndex,
-    /// Idle clip index *within the model's clip slice*. The
-    /// cooker rejects characters whose idle clip is out of
-    /// range -- runtime never has to fall back to bind pose.
-    pub idle_clip: ModelClipIndex,
-    /// Walk clip index within the model's clip slice. Required
-    /// (same validation as `idle_clip`).
-    pub walk_clip: ModelClipIndex,
-    /// Optional run clip index. [`CHARACTER_CLIP_NONE`] means
-    /// "no run clip authored -- runtime should fall back to
-    /// `walk_clip` when the controller wants to run".
-    pub run_clip: OptionalModelClipIndex,
-    /// Optional turn clip index. Same sentinel as `run_clip`.
-    pub turn_clip: OptionalModelClipIndex,
+    /// Optional clip per [`CharacterAnimationAction`] slot.
+    /// Required slots are validated by the cooker; optional slots
+    /// use [`CHARACTER_CLIP_NONE`] and runtime fallbacks.
+    pub action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Render-only model offset from the controller root, in
+    /// entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
     /// Capsule radius in engine units. Used by collision +
     /// any future debug draw.
     pub radius: u16,
