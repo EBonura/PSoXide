@@ -25,8 +25,8 @@ use std::{
 
 use crate::{
     default_model_collision_radius_for_height, AnimationClipBakeKind, AnimationClipResource,
-    AnimationRole, AnimationSetResource, AnimationSourceResource, ModelAnimationClip,
-    ModelResource, ProjectDocument, ResourceData, ResourceId, SkeletonResource,
+    AnimationRole, AnimationSetResource, AnimationSourceResource, CharacterAnimationAction,
+    ModelAnimationClip, ModelResource, ProjectDocument, ResourceData, ResourceId, SkeletonResource,
 };
 
 pub use psxed_format::texture::Depth as TextureDepth;
@@ -579,8 +579,10 @@ pub fn import_model_with_animation_sources(
 
     let mut used_clip_stems = BTreeSet::new();
     for clip in &package.clips {
-        let clip_stem =
-            unique_clip_stem(&mut used_clip_stems, &format!("{}_{}", safe, clip.sanitized_name));
+        let clip_stem = unique_clip_stem(
+            &mut used_clip_stems,
+            &format!("{}_{}", safe, clip.sanitized_name),
+        );
         let clip_path = bundle_dir.join(format!("{clip_stem}.psxanim"));
         std::fs::write(&clip_path, &clip.bytes).map_err(|e| ModelImportError::Io {
             path: clip_path,
@@ -969,7 +971,11 @@ fn register_animation_clip_resources(
                 role,
                 looping: !matches!(
                     role,
-                    AnimationRole::Attack | AnimationRole::Hit | AnimationRole::Death
+                    AnimationRole::Roll
+                        | AnimationRole::Backstep
+                        | AnimationRole::Attack
+                        | AnimationRole::Hit
+                        | AnimationRole::Death
                 ),
                 tags: role_tag_list(role),
             }),
@@ -1010,7 +1016,11 @@ fn find_or_add_animation_source_for_clip(
     source.role = role;
     source.looping = !matches!(
         role,
-        AnimationRole::Attack | AnimationRole::Hit | AnimationRole::Death
+        AnimationRole::Roll
+            | AnimationRole::Backstep
+            | AnimationRole::Attack
+            | AnimationRole::Hit
+            | AnimationRole::Death
     );
     source.tags = role_tag_list(role);
     project.add_resource(
@@ -1036,23 +1046,19 @@ fn register_animation_set_resource(
         let ResourceData::AnimationClip(clip) = &resource.data else {
             continue;
         };
-        match clip.role {
-            AnimationRole::Idle if set.idle_clip.is_none() => set.idle_clip = Some(*id),
-            AnimationRole::Walk if set.walk_clip.is_none() => set.walk_clip = Some(*id),
-            AnimationRole::Run if set.run_clip.is_none() => set.run_clip = Some(*id),
-            AnimationRole::Turn if set.turn_clip.is_none() => set.turn_clip = Some(*id),
-            AnimationRole::Generic
-            | AnimationRole::Attack
-            | AnimationRole::Hit
-            | AnimationRole::Death
-            | AnimationRole::Idle
-            | AnimationRole::Walk
-            | AnimationRole::Run
-            | AnimationRole::Turn => {
-                if !set.clips.contains(id) {
-                    set.clips.push(*id);
-                }
+        let action = CharacterAnimationAction::guess_from_name(&resource.name).or_else(|| {
+            CharacterAnimationAction::ALL
+                .iter()
+                .copied()
+                .find(|action| action.role_hint() == Some(clip.role))
+        });
+        if let Some(action) = action {
+            if set.action_clip(action).is_none() {
+                set.set_action_clip(action, Some(*id));
             }
+        }
+        if !set.clips.contains(id) {
+            set.clips.push(*id);
         }
     }
     let set_name = format!("{display_name} Animation Set");
@@ -1082,6 +1088,8 @@ fn merge_animation_set(target: &mut AnimationSetResource, source: &AnimationSetR
         AnimationRole::Walk,
         AnimationRole::Run,
         AnimationRole::Turn,
+        AnimationRole::Roll,
+        AnimationRole::Backstep,
     ] {
         let source_clip = source.role_clip(role);
         if source_clip.is_some() {
@@ -1090,6 +1098,11 @@ fn merge_animation_set(target: &mut AnimationSetResource, source: &AnimationSetR
                     *target_slot = source_clip;
                 }
             }
+        }
+    }
+    for binding in &source.action_clips {
+        if target.action_clip(binding.action).is_none() {
+            target.set_action_clip(binding.action, Some(binding.clip));
         }
     }
     for clip in &source.clips {
@@ -1253,7 +1266,10 @@ mod tests {
     #[test]
     fn unique_clip_stem_preserves_duplicate_animation_names() {
         let mut used = BTreeSet::new();
-        assert_eq!(unique_clip_stem(&mut used, "knight_running"), "knight_running");
+        assert_eq!(
+            unique_clip_stem(&mut used, "knight_running"),
+            "knight_running"
+        );
         assert_eq!(
             unique_clip_stem(&mut used, "knight_running"),
             "knight_running_2"

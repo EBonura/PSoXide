@@ -2,6 +2,9 @@
 
 use crate::{MaterialFaceSidedness, ResourceId, SkyCycloramaQuad};
 
+/// Number of cooked character animation action slots.
+pub const PLAYTEST_CHARACTER_ACTION_COUNT: usize = psx_level::CHARACTER_ANIMATION_ACTION_COUNT;
+
 /// Generated subdirectory inside the playtest example that
 /// receives manifest source + `rooms/` + `textures/`. Stable
 /// so the example's `include!` paths don't move.
@@ -494,6 +497,11 @@ pub struct PlaytestModelInstance {
     pub z: i32,
     /// Yaw, PSX angle units.
     pub yaw: i16,
+    /// Render-only model offset from the authored floor anchor,
+    /// in entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
     /// Reserved.
     pub flags: u16,
 }
@@ -672,15 +680,14 @@ pub struct PlaytestCharacter {
     pub source_resource: ResourceId,
     /// Index into [`PlaytestPackage::models`].
     pub model: u16,
-    /// Idle clip index *within the model's clip slice*.
-    pub idle_clip: u16,
-    /// Walk clip index within the model's clip slice.
-    pub walk_clip: u16,
-    /// Optional run clip; `u16::MAX` (= `CHARACTER_CLIP_NONE`)
-    /// means "no run clip authored".
-    pub run_clip: u16,
-    /// Optional turn clip; same sentinel as `run_clip`.
-    pub turn_clip: u16,
+    /// Optional clip index per [`crate::CharacterAnimationAction`]
+    /// slot, within the model's runtime clip slice.
+    pub action_clips: [u16; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Render-only model offset from the player/controller root,
+    /// in entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
     /// Capsule radius in engine units.
     pub radius: u16,
     /// Capsule height in engine units.
