@@ -336,7 +336,9 @@ fn collect_resource_use(
                     }
                 }
             }
-            NodeKind::ModelRenderer { model, material } => {
+            NodeKind::ModelRenderer {
+                model, material, ..
+            } => {
                 push_material(*material, &mut use_set, &mut materials);
                 if let Some(model_id) = model {
                     use_set.model_instances += 1;
@@ -580,6 +582,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
             },
         );
 

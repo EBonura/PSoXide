@@ -25,6 +25,7 @@ pub(crate) struct ModelAnimationViewerState {
     radius: i32,
     show_animation_root: bool,
     show_bones: bool,
+    preview_in_place: bool,
     last_time_seconds: f64,
 }
 
@@ -42,6 +43,7 @@ impl Default for ModelAnimationViewerState {
             radius: 0,
             show_animation_root: false,
             show_bones: false,
+            preview_in_place: true,
             last_time_seconds: 0.0,
         }
     }
@@ -348,6 +350,11 @@ fn draw_overlay_toggles(ui: &mut egui::Ui, state: &mut ModelAnimationViewerState
         icons::label(icons::CIRCLE_DOT, "Anchor"),
     )
     .on_hover_text("Draw the body-derived preview anchor");
+    ui.toggle_value(
+        &mut state.preview_in_place,
+        icons::label(icons::MOVE, "In-place"),
+    )
+    .on_hover_text("Preview with root-motion translation removed");
 }
 
 fn draw_preview(
@@ -487,6 +494,7 @@ fn draw_preview(
             pitch_q12: state.pitch_q12.rem_euclid(4096) as u16,
             radius: state.radius,
             focus_on_animated_bounds: true,
+            preview_in_place: state.preview_in_place,
             show_animation_root: state.show_animation_root,
             show_bones: state.show_bones,
         },
