@@ -10574,7 +10574,7 @@ impl EditorWorkspace {
                         if self.active_workspace == WorkspaceView::Animation {
                             let action = model_animation_viewer::draw_model_animation_viewer(
                                 ui,
-                                &self.project,
+                                &mut self.project,
                                 &self.project_dir,
                                 &mut self.animation_viewer,
                                 &mut self.animation_viewer_preview_texture,
@@ -13956,6 +13956,9 @@ impl EditorWorkspace {
                     }
                 }
             }
+            model_animation_viewer::AnimationViewerAction::ProjectChanged => {
+                self.mark_dirty();
+            }
         }
     }
 
@@ -14599,6 +14602,7 @@ fn remap_resource_id_option(id: &mut Option<ResourceId>, id_map: &HashMap<Resour
     }
 }
 
+#[cfg(test)]
 fn project_has_resource_name(
     project: &ProjectDocument,
     name: &str,
@@ -16672,6 +16676,7 @@ fn draw_model_animated_import_preview(
         radius: *preview_radius,
         focus_on_animated_bounds: true,
         preview_in_place,
+        pose_offset: [0, 0, 0],
         show_animation_root,
         show_bones: false,
     };
@@ -17261,6 +17266,12 @@ fn draw_model_resource_editor(
                     clip,
                     &available_clips,
                 );
+                let calibration_id = ui.id().with("model-animation-clip-calibration").with(i);
+                changed |= draw_animation_clip_calibration_controls(
+                    ui,
+                    &mut clip.calibration,
+                    calibration_id,
+                );
                 // Inline per-clip stats: parse on the fly. Joint
                 // mismatch is the most actionable thing to surface
                 // -- the cooker rejects the bundle if it persists.
@@ -17336,9 +17347,11 @@ fn draw_model_resource_editor(
                 let (name, psxanim_path) = source
                     .map(|clip| (clip.default_name.clone(), clip.stored_path.clone()))
                     .unwrap_or_else(|| (format!("clip_{}", model.clips.len()), String::new()));
-                model
-                    .clips
-                    .push(psxed_project::ModelAnimationClip { name, psxanim_path });
+                model.clips.push(psxed_project::ModelAnimationClip {
+                    name,
+                    psxanim_path,
+                    calibration: Default::default(),
+                });
                 changed = true;
             }
 
@@ -17481,7 +17494,8 @@ fn draw_model_resource_preview_panel(
                     pitch_q12: pitch.rem_euclid(4096) as u16,
                     radius,
                     focus_on_animated_bounds: true,
-                    preview_in_place: true,
+                    preview_in_place: clip.calibration.in_place,
+                    pose_offset: clip.calibration.offset,
                     show_animation_root: false,
                     show_bones: false,
                 },
@@ -17714,6 +17728,40 @@ fn set_model_animation_clip_source(
     true
 }
 
+fn draw_animation_clip_calibration_controls(
+    ui: &mut egui::Ui,
+    calibration: &mut psxed_project::AnimationClipCalibration,
+    id: egui::Id,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Placement").color(STUDIO_TEXT_WEAK));
+        changed |= ui
+            .checkbox(&mut calibration.in_place, "In-place")
+            .on_hover_text("Cancels this clip's root translation while previewing and at runtime")
+            .changed();
+        ui.separator();
+        for (axis, label) in ["X", "Y", "Z"].iter().enumerate() {
+            ui.label(RichText::new(*label).color(STUDIO_TEXT_WEAK));
+            changed |= ui
+                .push_id(id.with(axis), |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut calibration.offset[axis])
+                            .speed(4.0)
+                            .range(-8192..=8192),
+                    )
+                    .changed()
+                })
+                .inner;
+        }
+        if ui.button("Reset").clicked() {
+            *calibration = psxed_project::AnimationClipCalibration::default();
+            changed = true;
+        }
+    });
+    changed
+}
+
 fn should_auto_rename_animation_clip(name: &str, old_path: &str) -> bool {
     let trimmed = name.trim();
     trimmed.is_empty()
@@ -17916,6 +17964,9 @@ fn draw_animation_clip_resource_editor(
                 }
             });
             changed |= ui.checkbox(&mut clip.looping, "Looping").changed();
+            let calibration_id = ui.id().with("animation-clip-calibration");
+            changed |=
+                draw_animation_clip_calibration_controls(ui, &mut clip.calibration, calibration_id);
 
             let mut tags = clip.tags.join(", ");
             ui.horizontal(|ui| {
@@ -25231,6 +25282,7 @@ fn catalogue_animation_library(
                                 } else {
                                     vec![role.label().to_ascii_lowercase()]
                                 },
+                                calibration: clip.calibration,
                             }),
                         );
                         report.clips_added += 1;
@@ -27155,6 +27207,7 @@ mod tests {
         let mut placeholder = psxed_project::ModelAnimationClip {
             name: "clip_0".to_string(),
             psxanim_path: String::new(),
+            calibration: Default::default(),
         };
         assert!(set_model_animation_clip_source(
             &mut placeholder,
@@ -27166,6 +27219,7 @@ mod tests {
         let mut default_named = psxed_project::ModelAnimationClip {
             name: "idle".to_string(),
             psxanim_path: "assets/models/wraith/idle.psxanim".to_string(),
+            calibration: Default::default(),
         };
         assert!(set_model_animation_clip_source(
             &mut default_named,
@@ -27176,6 +27230,7 @@ mod tests {
         let mut custom_named = psxed_project::ModelAnimationClip {
             name: "Combat Idle".to_string(),
             psxanim_path: "assets/models/wraith/idle.psxanim".to_string(),
+            calibration: Default::default(),
         };
         assert!(set_model_animation_clip_source(
             &mut custom_named,
@@ -27306,6 +27361,7 @@ mod tests {
                     name: "walking".to_string(),
                     psxanim_path: "assets/models/obsidian_warden/obsidian_warden_walking.psxanim"
                         .to_string(),
+                    calibration: Default::default(),
                 }],
                 default_clip: Some(0),
                 preview_clip: Some(0),

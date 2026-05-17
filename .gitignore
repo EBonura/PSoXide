@@ -34,6 +34,7 @@ local-assets/
 # Run artifacts
 run/
 traces/
+screenshots/
 goldens/*.bin
 goldens/*.raw
 /build/examples/**/.cargo-build-lock

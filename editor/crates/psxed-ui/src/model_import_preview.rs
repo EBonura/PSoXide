@@ -23,6 +23,7 @@ pub struct ImportPreviewOptions {
     pub radius: i32,
     pub focus_on_animated_bounds: bool,
     pub preview_in_place: bool,
+    pub pose_offset: [i32; 3],
     pub show_animation_root: bool,
     pub show_bones: bool,
 }
@@ -66,6 +67,7 @@ pub fn render_import_model_preview_with_options(
                 origin,
                 height,
                 options.preview_in_place,
+                options.pose_offset,
             )
         })
         .flatten();
@@ -99,6 +101,7 @@ pub fn render_import_model_preview_with_options(
         if let Some(delta) = root_delta {
             apply_root_motion_delta(&mut pose, delta);
         }
+        apply_pose_offset(&mut pose, options.pose_offset);
         let (rotation, translation) =
             compute_joint_view_transform(camera, pose, Mat3I16::IDENTITY, local_to_world, origin);
         *transform = JointViewTransform {
@@ -272,6 +275,7 @@ fn animation_preview_focus(
     origin: WorldVertex,
     fallback_height: i32,
     preview_in_place: bool,
+    pose_offset: [i32; 3],
 ) -> Option<PreviewFocus> {
     let frame_count = animation.frame_count().max(1);
     let mut all_bounds: Option<PreviewWorldBounds> = None;
@@ -289,6 +293,7 @@ fn animation_preview_focus(
             local_to_world,
             origin,
             root_delta,
+            pose_offset,
         );
         let Some(bounds) = animated_model_world_bounds(model, &joint_world_transforms) else {
             continue;
@@ -327,6 +332,7 @@ fn build_joint_world_transforms_at_frame(
     local_to_world: LocalToWorldScale,
     origin: WorldVertex,
     root_delta: Option<[i32; 3]>,
+    pose_offset: [i32; 3],
 ) -> Vec<JointWorldTransform> {
     let joint_count = model.joint_count().min(animation.joint_count()) as usize;
     let mut transforms = vec![JointWorldTransform::ZERO; joint_count];
@@ -335,6 +341,7 @@ fn build_joint_world_transforms_at_frame(
             if let Some(delta) = root_delta {
                 apply_root_motion_delta(&mut pose, delta);
             }
+            apply_pose_offset(&mut pose, pose_offset);
             *transform =
                 compute_joint_world_transform(pose, Mat3I16::IDENTITY, local_to_world, origin);
         }
@@ -357,7 +364,7 @@ fn root_motion_delta_q12(animation: &Animation<'_>, frame_q12: u32) -> Option<[i
 fn root_motion_delta(first: JointPose, current: JointPose) -> [i32; 3] {
     [
         current.translation.x.saturating_sub(first.translation.x),
-        current.translation.y.saturating_sub(first.translation.y),
+        0,
         current.translation.z.saturating_sub(first.translation.z),
     ]
 }
@@ -366,6 +373,12 @@ fn apply_root_motion_delta(pose: &mut JointPose, delta: [i32; 3]) {
     pose.translation.x = pose.translation.x.saturating_sub(delta[0]);
     pose.translation.y = pose.translation.y.saturating_sub(delta[1]);
     pose.translation.z = pose.translation.z.saturating_sub(delta[2]);
+}
+
+fn apply_pose_offset(pose: &mut JointPose, offset: [i32; 3]) {
+    pose.translation.x = pose.translation.x.saturating_add(offset[0]);
+    pose.translation.y = pose.translation.y.saturating_add(offset[1]);
+    pose.translation.z = pose.translation.z.saturating_add(offset[2]);
 }
 
 fn animated_model_world_bounds(
@@ -911,6 +924,7 @@ mod tests {
                 radius: 1536,
                 focus_on_animated_bounds: true,
                 preview_in_place: true,
+                pose_offset: [0, 0, 0],
                 show_animation_root: true,
                 show_bones: false,
             },
@@ -988,6 +1002,7 @@ mod tests {
             WorldVertex::ZERO,
             1024,
             false,
+            [0, 0, 0],
         )
         .expect("focus");
 
@@ -1010,6 +1025,7 @@ mod tests {
             WorldVertex::ZERO,
             1024,
             false,
+            [0, 0, 0],
         )
         .expect("moving focus");
         let in_place = animation_preview_focus(
@@ -1019,6 +1035,7 @@ mod tests {
             WorldVertex::ZERO,
             1024,
             true,
+            [0, 0, 0],
         )
         .expect("in-place focus");
 
