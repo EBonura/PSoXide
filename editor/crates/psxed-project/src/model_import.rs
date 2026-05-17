@@ -485,6 +485,7 @@ pub fn register_cooked_model_bundle(
         clips.push(ModelAnimationClip {
             name: clip_name_from_path(path),
             psxanim_path: relativise(path, project_root),
+            calibration: Default::default(),
         });
     }
 
@@ -812,6 +813,7 @@ pub fn bake_animation_source_for_model(
         role,
         looping: source_meta.looping,
         tags: source_meta.tags,
+        calibration: Default::default(),
     };
     if let Some((existing_id, _)) = existing_clip {
         if let Some(resource) = project.resource_mut(existing_id) {
@@ -978,6 +980,7 @@ fn register_animation_clip_resources(
                         | AnimationRole::Death
                 ),
                 tags: role_tag_list(role),
+                calibration: clip.calibration,
             }),
         );
         ids.push(id);

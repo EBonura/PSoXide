@@ -93,13 +93,13 @@ pub use render::{
     PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink,
 };
 pub use render3d::{
-    compute_joint_view_transform, compute_joint_world_transform,
+    apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_transform,
     project_model_vertex_with_joint_transforms, CullMode, DepthPolicy, GouraudMeshOptions,
     GouraudRenderPass, GouraudTriCommand, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, MeshRenderStats, ProjectedTexturedVertex, ProjectedVertex,
-    TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex,
-    ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
-    WorldSurfaceOptions, WorldTriCommand,
+    LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ProjectedTexturedVertex,
+    ProjectedVertex, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
+    TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer,
+    WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
 };
 // Re-export the GTE math types callers need to construct model render
 // arguments (instance rotation, joint transforms) without pulling in
