@@ -926,6 +926,7 @@ struct PreviewModelReference {
     renderer_node: Option<NodeId>,
     animator_node: Option<NodeId>,
     visual_offset: [i16; 3],
+    visual_yaw_q12: u16,
     visual_scale_q8: u16,
 }
 
@@ -942,6 +943,7 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
             renderer_node: None,
             animator_node: None,
             visual_offset: [0; 3],
+            visual_yaw_q12: 0,
             visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         }),
         NodeKind::Entity => {
@@ -955,7 +957,13 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                         visual_scale_q8,
                         ..
                     } if renderer.is_none() => {
-                        renderer = Some((child.id, *model_id, *visual_offset, *visual_scale_q8));
+                        renderer = Some((
+                            child.id,
+                            *model_id,
+                            *visual_offset,
+                            yaw_to_q12(child.transform.rotation_degrees[1]),
+                            *visual_scale_q8,
+                        ));
                     }
                     NodeKind::Animator { clip, autoplay, .. } if animator.is_none() => {
                         animator = Some((child.id, *clip, *autoplay));
@@ -964,14 +972,17 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                 }
             }
             renderer.map(
-                |(renderer_node, model_id, visual_offset, visual_scale_q8)| PreviewModelReference {
-                    model_id,
-                    clip_override: animator.and_then(|(_, clip, _)| clip),
-                    autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
-                    renderer_node: Some(renderer_node),
-                    animator_node: animator.map(|(node_id, _, _)| node_id),
-                    visual_offset,
-                    visual_scale_q8,
+                |(renderer_node, model_id, visual_offset, visual_yaw_q12, visual_scale_q8)| {
+                    PreviewModelReference {
+                        model_id,
+                        clip_override: animator.and_then(|(_, clip, _)| clip),
+                        autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
+                        renderer_node: Some(renderer_node),
+                        animator_node: animator.map(|(node_id, _, _)| node_id),
+                        visual_offset,
+                        visual_yaw_q12,
+                        visual_scale_q8,
+                    }
                 },
             )
         }
@@ -1002,6 +1013,7 @@ struct PreviewPlayerReference {
     animator_node: Option<NodeId>,
     autoplay: bool,
     visual_offset: [i16; 3],
+    visual_yaw_q12: u16,
     visual_scale_q8: u16,
 }
 
@@ -1019,6 +1031,7 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
             animator_node: None,
             autoplay: true,
             visual_offset: [0; 3],
+            visual_yaw_q12: 0,
             visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         }),
         NodeKind::Entity => {
@@ -1040,7 +1053,13 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                         visual_scale_q8,
                         ..
                     } if renderer.is_none() => {
-                        renderer = Some((child.id, *model, *visual_offset, *visual_scale_q8));
+                        renderer = Some((
+                            child.id,
+                            *model,
+                            *visual_offset,
+                            yaw_to_q12(child.transform.rotation_degrees[1]),
+                            *visual_scale_q8,
+                        ));
                     }
                     NodeKind::Animator { clip, autoplay, .. } if animator.is_none() => {
                         animator = Some((child.id, *clip, *autoplay));
@@ -1049,9 +1068,12 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                 }
             }
             controller.map(|(controller_node, character)| {
-                let (renderer_node, model_override, visual_offset, visual_scale_q8) = renderer
-                    .map(|(node, model, offset, scale)| (Some(node), model, offset, scale))
-                    .unwrap_or((None, None, [0; 3], psxed_project::MODEL_SCALE_ONE_Q8));
+                let (renderer_node, model_override, visual_offset, visual_yaw_q12, visual_scale_q8) =
+                    renderer
+                        .map(|(node, model, offset, yaw, scale)| {
+                            (Some(node), model, offset, yaw, scale)
+                        })
+                        .unwrap_or((None, None, [0; 3], 0, psxed_project::MODEL_SCALE_ONE_Q8));
                 PreviewPlayerReference {
                     character,
                     model_override,
@@ -1061,6 +1083,7 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                     animator_node: animator.map(|(node_id, _, _)| node_id),
                     autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
                     visual_offset,
+                    visual_yaw_q12,
                     visual_scale_q8,
                 }
             })
@@ -1962,8 +1985,8 @@ struct PreviewModelInstance<'a> {
     /// stays floor-anchored in `InstanceMeta`; this is lifted to
     /// the cooked model's centre before drawing.
     origin: psx_engine::WorldVertex,
-    /// Y-axis rotation matrix derived from the node's yaw.
-    instance_rotation: Mat3I16,
+    /// Y-axis rotation matrix used for mesh vertices.
+    model_rotation: Mat3I16,
     /// Render-only scale from the ModelRenderer component.
     visual_scale_q8: u16,
     /// Lit and fogged model texture tint, matching editor-playtest's
@@ -2064,13 +2087,13 @@ fn walk_model_instances(
         let origin = floor_anchored_node_room_local_origin(grid, &node.transform);
 
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
-        let instance_rotation = yaw_rotation_q12(yaw_q12);
+        let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
 
         instances_meta.push(InstanceMeta {
             mesh_id: reference.model_id,
             clip_local,
             origin,
-            instance_rotation,
+            model_rotation,
             atlas: atlas_slot,
             is_selected: preview_reference_selected(
                 selected,
@@ -2126,14 +2149,14 @@ fn walk_model_instances(
             meta.world_height,
             meta.visual_offset,
             meta.visual_scale_q8,
-            meta.instance_rotation,
+            meta.model_rotation,
         );
         instances.push(PreviewModelInstance {
             model,
             animation,
             atlas: meta.atlas,
             origin,
-            instance_rotation: meta.instance_rotation,
+            model_rotation: meta.model_rotation,
             visual_scale_q8: meta.visual_scale_q8,
             tint: shade_model_tint(origin, *camera, fog, &lights, ambient),
             autoplay: meta.autoplay,
@@ -2242,13 +2265,13 @@ fn walk_player_spawn_preview(
 
         let origin = floor_anchored_node_room_local_origin(grid, &node.transform);
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
-        let instance_rotation = yaw_rotation_q12(yaw_q12);
+        let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
 
         instances_meta.push(InstanceMeta {
             mesh_id: model_id,
             clip_local,
             origin,
-            instance_rotation,
+            model_rotation,
             atlas: atlas_slot,
             // Host/controller node is selected, not the model --
             // but the preview gizmo still helps designers see
@@ -2435,7 +2458,7 @@ struct InstanceMeta {
     /// animation lands separately.
     clip_local: u16,
     origin: psx_engine::WorldVertex,
-    instance_rotation: Mat3I16,
+    model_rotation: Mat3I16,
     atlas: MaterialSlot,
     /// `true` when the placed instance is the currently
     /// selected scene node. Drives the selection gizmo.
@@ -2605,7 +2628,7 @@ fn submit_preview_model_instance(
         frame_q12,
         *camera,
         instance.origin,
-        instance.instance_rotation,
+        instance.model_rotation,
         preview_model_local_to_world(instance.model, instance.visual_scale_q8),
         psx_engine::ModelPoseTranslation::ZERO,
         projected_vertices,
