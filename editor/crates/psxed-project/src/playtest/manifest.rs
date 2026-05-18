@@ -712,13 +712,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, x: {}, y: {}, z: {}, yaw: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
+            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
             inst.room,
             inst.model,
             inst.x,
             inst.y,
             inst.z,
             inst.yaw,
+            inst.visual_yaw,
             inst.visual_offset[0],
             inst.visual_offset[1],
             inst.visual_offset[2],
@@ -851,13 +852,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_scale_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
             character.visual_offset[0],
             character.visual_offset[1],
             character.visual_offset[2],
+            character.visual_yaw,
             character.visual_scale_q8,
             character.radius,
             character.height,

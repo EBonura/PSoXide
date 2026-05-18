@@ -505,6 +505,8 @@ pub struct PlaytestModelInstance {
     pub z: i32,
     /// Yaw, PSX angle units.
     pub yaw: i16,
+    /// Render-only yaw from the Model Renderer component, PSX angle units.
+    pub visual_yaw: i16,
     /// Render-only model offset from the authored floor anchor,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],
@@ -696,6 +698,8 @@ pub struct PlaytestCharacter {
     /// Render-only model offset from the player/controller root,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],
+    /// Render-only yaw from the Model Renderer component, PSX angle units.
+    pub visual_yaw: i16,
     /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
     pub visual_scale_q8: u16,
     /// Capsule radius in engine units.
