@@ -1092,6 +1092,29 @@ pub fn ray_intersects_horizontal_plane(
     Some([origin[0] + dir[0] * t, plane_y, origin[2] + dir[2] * t])
 }
 
+fn ray_intersects_axis_aligned_plane(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    normal_axis: PrimitiveGizmoAxis,
+    plane_coord: f32,
+) -> Option<[f32; 3]> {
+    let axis = normal_axis.index();
+    if dir[axis].abs() < 1e-6 {
+        return None;
+    }
+    let t = (plane_coord - origin[axis]) / dir[axis];
+    if t < 0.0 {
+        return None;
+    }
+    let mut hit = [
+        origin[0] + dir[0] * t,
+        origin[1] + dir[1] * t,
+        origin[2] + dir[2] * t,
+    ];
+    hit[axis] = plane_coord;
+    Some(hit)
+}
+
 #[cfg(test)]
 mod entity_bounds_tests {
     use super::ray_intersects_aabb as ray_aabb;
@@ -1378,6 +1401,14 @@ impl PrimitiveGizmoAxis {
             Self::Z => [0, steps],
         }
     }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1385,6 +1416,73 @@ struct PrimitiveGizmoScreenAxis {
     axis: PrimitiveGizmoAxis,
     start: Pos2,
     end: Pos2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum NodeGizmoPlane {
+    XY,
+    XZ,
+    YZ,
+}
+
+impl NodeGizmoPlane {
+    const ALL: [Self; 3] = [Self::XY, Self::XZ, Self::YZ];
+
+    const fn axes(self) -> [PrimitiveGizmoAxis; 2] {
+        match self {
+            Self::XY => [PrimitiveGizmoAxis::X, PrimitiveGizmoAxis::Y],
+            Self::XZ => [PrimitiveGizmoAxis::X, PrimitiveGizmoAxis::Z],
+            Self::YZ => [PrimitiveGizmoAxis::Y, PrimitiveGizmoAxis::Z],
+        }
+    }
+
+    const fn normal_axis(self) -> PrimitiveGizmoAxis {
+        match self {
+            Self::XY => PrimitiveGizmoAxis::Z,
+            Self::XZ => PrimitiveGizmoAxis::Y,
+            Self::YZ => PrimitiveGizmoAxis::X,
+        }
+    }
+
+    fn color(self) -> Color32 {
+        self.normal_axis().color()
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::XY => "XY",
+            Self::XZ => "XZ",
+            Self::YZ => "YZ",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum NodeGizmoHandle {
+    Axis(PrimitiveGizmoAxis),
+    Plane(NodeGizmoPlane),
+}
+
+impl NodeGizmoHandle {
+    const fn axis(self) -> Option<PrimitiveGizmoAxis> {
+        match self {
+            Self::Axis(axis) => Some(axis),
+            Self::Plane(_) => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Axis(axis) => axis.label(),
+            Self::Plane(plane) => plane.label(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NodeGizmoScreenPlane {
+    plane: NodeGizmoPlane,
+    corners: [Pos2; 4],
 }
 
 #[derive(Debug, Clone)]
@@ -1420,9 +1518,11 @@ struct PrimitiveGizmoGridDrag {
 #[derive(Debug, Clone)]
 struct NodeGizmoDrag {
     mode: TransformGizmoMode,
-    axis: PrimitiveGizmoAxis,
+    handle: NodeGizmoHandle,
     start_pointer: Pos2,
     screen_axis: Vec2,
+    start_plane_hit: Option<[f32; 3]>,
+    current_plane_delta_world: [f32; 3],
     targets: Vec<NodeGizmoTarget>,
     current_steps: i32,
     snapshot_pushed: bool,
@@ -3975,8 +4075,8 @@ impl EditorWorkspace {
                             .flatten();
                         if let Some(axis) = primitive_axis {
                             self.begin_primitive_gizmo_drag(axis, rect, pointer);
-                        } else if let Some(axis) = self.pick_node_gizmo_axis(rect, pointer) {
-                            self.begin_node_gizmo_drag(axis, rect, pointer);
+                        } else if let Some(handle) = self.pick_node_gizmo_handle(rect, pointer) {
+                            self.begin_node_gizmo_handle_drag(handle, rect, pointer);
                         } else {
                             let entity_hit =
                                 self.pick_entity_bound(rect, pointer, self.active_room_id());
@@ -4004,7 +4104,7 @@ impl EditorWorkspace {
                         }
                     } else if self.node_gizmo_drag.is_some() {
                         if let Some(p) = response.interact_pointer_pos() {
-                            self.update_node_gizmo_drag(p);
+                            self.update_node_gizmo_drag(rect, p);
                         }
                     } else if self.node_drag.is_some() {
                         if let Some(p) = response.interact_pointer_pos() {
@@ -4103,9 +4203,9 @@ impl EditorWorkspace {
     }
 
     fn rotate_viewport_3d_camera(&mut self, delta: Vec2) {
-        // 0.25 q12-step per pixel keeps the viewport responsive without
-        // making a small wrist flick spin the camera multiple turns.
-        const CAMERA_DRAG_STEP: f32 = 0.25;
+        // 4 q12 units per pixel preserves the pre-q12-fix feel:
+        // roughly 0.35 degrees of camera rotation per dragged pixel.
+        const CAMERA_DRAG_STEP: f32 = 4.0;
         let yaw_delta = (delta.x * CAMERA_DRAG_STEP) as i16 as u16;
         let pitch_delta = (delta.y * CAMERA_DRAG_STEP) as i32;
         match self.viewport_3d_camera_mode {
@@ -5097,6 +5197,47 @@ impl EditorWorkspace {
             .collect()
     }
 
+    fn node_gizmo_screen_planes(&self, rect: Rect) -> Vec<NodeGizmoScreenPlane> {
+        if self.transform_gizmo_mode != TransformGizmoMode::Move {
+            return Vec::new();
+        }
+        let targets = self.selected_node_gizmo_targets();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let Some((pivot, _)) = self.node_gizmo_bounds_3d(&targets) else {
+            return Vec::new();
+        };
+        let camera = self.viewport_3d_camera();
+        let axis_len = self.node_gizmo_axis_world_length(&targets) as f32;
+        let near = axis_len * 0.18;
+        let far = axis_len * 0.44;
+
+        NodeGizmoPlane::ALL
+            .into_iter()
+            .filter_map(|plane| {
+                let [a, b] = plane.axes();
+                let a_delta = a.world_delta(1);
+                let b_delta = b.world_delta(1);
+                let corner_world = |a_scale: f32, b_scale: f32| {
+                    [
+                        pivot[0] + a_delta[0] * a_scale + b_delta[0] * b_scale,
+                        pivot[1] + a_delta[1] * a_scale + b_delta[1] * b_scale,
+                        pivot[2] + a_delta[2] * a_scale + b_delta[2] * b_scale,
+                    ]
+                };
+                let corners = [
+                    project_world_to_viewport_screen(camera, rect, corner_world(near, near))?,
+                    project_world_to_viewport_screen(camera, rect, corner_world(far, near))?,
+                    project_world_to_viewport_screen(camera, rect, corner_world(far, far))?,
+                    project_world_to_viewport_screen(camera, rect, corner_world(near, far))?,
+                ];
+                (polygon_area_2d(&corners).abs() >= 24.0)
+                    .then_some(NodeGizmoScreenPlane { plane, corners })
+            })
+            .collect()
+    }
+
     fn selected_node_gizmo_targets(&self) -> Vec<NodeId> {
         self.selected_node_ids_in_hierarchy()
             .into_iter()
@@ -5219,7 +5360,7 @@ impl EditorWorkspace {
         axes
     }
 
-    fn pick_node_gizmo_axis(&self, rect: Rect, pointer: Pos2) -> Option<PrimitiveGizmoAxis> {
+    fn pick_node_gizmo_handle(&self, rect: Rect, pointer: Pos2) -> Option<NodeGizmoHandle> {
         if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
             return self
                 .node_rotation_gizmo_screen_rings(rect)
@@ -5233,17 +5374,26 @@ impl EditorWorkspace {
                 })
                 .filter(|(distance, _)| *distance <= 12.0)
                 .min_by(|(a, _), (b, _)| a.total_cmp(b))
-                .map(|(_, axis)| axis);
+                .map(|(_, axis)| NodeGizmoHandle::Axis(axis));
+        }
+        if self.transform_gizmo_mode == TransformGizmoMode::Move {
+            if let Some(plane) = self
+                .node_gizmo_screen_planes(rect)
+                .into_iter()
+                .find(|screen_plane| point_in_polygon_2d(pointer, &screen_plane.corners))
+            {
+                return Some(NodeGizmoHandle::Plane(plane.plane));
+            }
         }
         self.node_gizmo_screen_axes(rect)
             .into_iter()
             .filter_map(|screen_axis| {
                 let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
                     .min((pointer - screen_axis.end).length());
-                (distance <= 10.0).then_some((distance, screen_axis.axis))
+                (distance <= 10.0).then_some((distance, NodeGizmoHandle::Axis(screen_axis.axis)))
             })
             .min_by(|(a, _), (b, _)| a.total_cmp(b))
-            .map(|(_, axis)| axis)
+            .map(|(_, handle)| handle)
     }
 
     fn draw_node_gizmo(&self, painter: &egui::Painter, rect: Rect) {
@@ -5252,7 +5402,10 @@ impl EditorWorkspace {
             if rings.is_empty() {
                 return;
             }
-            let active_axis = self.node_gizmo_drag.as_ref().map(|drag| drag.axis);
+            let active_axis = self
+                .node_gizmo_drag
+                .as_ref()
+                .and_then(|drag| drag.handle.axis());
             painter.circle_filled(rings[0].center, 4.0, Color32::from_rgb(235, 242, 248));
             for ring in &rings {
                 let active = active_axis == Some(ring.axis);
@@ -5278,10 +5431,23 @@ impl EditorWorkspace {
         if axes.is_empty() {
             return;
         }
-        let active_axis = self.node_gizmo_drag.as_ref().map(|drag| drag.axis);
+        let active_handle = self.node_gizmo_drag.as_ref().map(|drag| drag.handle);
         painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
+        if self.transform_gizmo_mode == TransformGizmoMode::Move {
+            for screen_plane in self.node_gizmo_screen_planes(rect) {
+                let active = active_handle == Some(NodeGizmoHandle::Plane(screen_plane.plane));
+                let color = screen_plane.plane.color();
+                let fill_alpha = if active { 112 } else { 58 };
+                let stroke_width = if active { 2.5 } else { 1.5 };
+                painter.add(egui::Shape::convex_polygon(
+                    screen_plane.corners.to_vec(),
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), fill_alpha),
+                    Stroke::new(stroke_width, color),
+                ));
+            }
+        }
         for screen_axis in axes {
-            let active = active_axis == Some(screen_axis.axis);
+            let active = active_handle == Some(NodeGizmoHandle::Axis(screen_axis.axis));
             let color = screen_axis.axis.color();
             let stroke_width = if active { 4.0 } else { 2.5 };
             painter.line_segment(
@@ -5540,9 +5706,19 @@ impl EditorWorkspace {
         }
     }
 
+    #[cfg(test)]
     fn begin_node_gizmo_drag(
         &mut self,
         axis: PrimitiveGizmoAxis,
+        rect: Rect,
+        pointer: Pos2,
+    ) -> bool {
+        self.begin_node_gizmo_handle_drag(NodeGizmoHandle::Axis(axis), rect, pointer)
+    }
+
+    fn begin_node_gizmo_handle_drag(
+        &mut self,
+        handle: NodeGizmoHandle,
         rect: Rect,
         pointer: Pos2,
     ) -> bool {
@@ -5551,24 +5727,63 @@ impl EditorWorkspace {
         if ids.is_empty() {
             return false;
         }
-        let screen_axis_delta = if mode == TransformGizmoMode::Rotate {
-            let Some(ring) = self.node_rotation_gizmo_screen_ring_for_axis(rect, axis) else {
-                return false;
+        if mode != TransformGizmoMode::Move && !matches!(handle, NodeGizmoHandle::Axis(_)) {
+            return false;
+        }
+
+        let start_plane_hit =
+            if let (TransformGizmoMode::Move, NodeGizmoHandle::Plane(plane)) = (mode, handle) {
+                let Some((pivot, _)) = self.node_gizmo_bounds_3d(&ids) else {
+                    return false;
+                };
+                let Some((origin, dir)) = self.camera_ray_for_pointer(rect, pointer) else {
+                    return false;
+                };
+                let normal = plane.normal_axis();
+                ray_intersects_axis_aligned_plane(origin, dir, normal, pivot[normal.index()])
+            } else {
+                None
             };
-            ring.points
-                .first()
-                .map(|point| *point - ring.center)
-                .filter(|delta| delta.length_sq() >= 64.0)
-                .unwrap_or(Vec2::new(64.0, 0.0))
-        } else {
-            let Some(screen_axis) = self
-                .node_gizmo_screen_axes(rect)
-                .into_iter()
-                .find(|candidate| candidate.axis == axis)
-            else {
-                return false;
-            };
-            screen_axis.end - screen_axis.start
+        if matches!(
+            (mode, handle),
+            (TransformGizmoMode::Move, NodeGizmoHandle::Plane(_))
+        ) && start_plane_hit.is_none()
+        {
+            return false;
+        }
+
+        let screen_axis_delta = match (mode, handle) {
+            (TransformGizmoMode::Rotate, NodeGizmoHandle::Axis(axis)) => {
+                let Some(ring) = self.node_rotation_gizmo_screen_ring_for_axis(rect, axis) else {
+                    return false;
+                };
+                ring.points
+                    .first()
+                    .map(|point| *point - ring.center)
+                    .filter(|delta| delta.length_sq() >= 64.0)
+                    .unwrap_or(Vec2::new(64.0, 0.0))
+            }
+            (_, NodeGizmoHandle::Axis(axis)) => {
+                let Some(screen_axis) = self
+                    .node_gizmo_screen_axes(rect)
+                    .into_iter()
+                    .find(|candidate| candidate.axis == axis)
+                else {
+                    return false;
+                };
+                screen_axis.end - screen_axis.start
+            }
+            (TransformGizmoMode::Move, NodeGizmoHandle::Plane(plane)) => {
+                let Some(screen_plane) = self
+                    .node_gizmo_screen_planes(rect)
+                    .into_iter()
+                    .find(|candidate| candidate.plane == plane)
+                else {
+                    return false;
+                };
+                screen_plane.corners[2] - screen_plane.corners[0]
+            }
+            (_, NodeGizmoHandle::Plane(_)) => return false,
         };
         if screen_axis_delta.length_sq() < 64.0 {
             return false;
@@ -5596,9 +5811,11 @@ impl EditorWorkspace {
 
         self.node_gizmo_drag = Some(NodeGizmoDrag {
             mode,
-            axis,
+            handle,
             start_pointer: pointer,
             screen_axis: screen_axis_delta,
+            start_plane_hit,
+            current_plane_delta_world: [0.0, 0.0, 0.0],
             targets,
             current_steps: 0,
             snapshot_pushed: false,
@@ -5606,10 +5823,38 @@ impl EditorWorkspace {
         true
     }
 
-    fn update_node_gizmo_drag(&mut self, pointer: Pos2) {
+    fn update_node_gizmo_drag(&mut self, rect: Rect, pointer: Pos2) {
         let Some(drag) = self.node_gizmo_drag.as_ref() else {
             return;
         };
+        if let (TransformGizmoMode::Move, NodeGizmoHandle::Plane(plane)) = (drag.mode, drag.handle)
+        {
+            let Some(start_hit) = drag.start_plane_hit else {
+                return;
+            };
+            let Some((origin, dir)) = self.camera_ray_for_pointer(rect, pointer) else {
+                return;
+            };
+            let normal = plane.normal_axis();
+            let Some(hit) =
+                ray_intersects_axis_aligned_plane(origin, dir, normal, start_hit[normal.index()])
+            else {
+                return;
+            };
+            let [a, b] = plane.axes();
+            let mut delta = [0.0, 0.0, 0.0];
+            delta[a.index()] = hit[a.index()] - start_hit[a.index()];
+            delta[b.index()] = hit[b.index()] - start_hit[b.index()];
+            if vec3_nearly_equal(delta, drag.current_plane_delta_world) {
+                return;
+            }
+            if let Some(drag) = self.node_gizmo_drag.as_mut() {
+                drag.current_plane_delta_world = delta;
+            }
+            self.apply_node_gizmo_drag();
+            return;
+        }
+
         let axis_len_sq = drag.screen_axis.length_sq();
         if axis_len_sq < f32::EPSILON {
             return;
@@ -5639,7 +5884,7 @@ impl EditorWorkspace {
         let Some(drag) = self.node_gizmo_drag.as_ref() else {
             return;
         };
-        if drag.current_steps == 0 && !drag.snapshot_pushed {
+        if !node_gizmo_drag_has_motion(drag) && !drag.snapshot_pushed {
             return;
         }
         if !drag.snapshot_pushed {
@@ -5652,8 +5897,9 @@ impl EditorWorkspace {
         let Some(drag) = self.node_gizmo_drag.as_ref() else {
             return;
         };
-        let axis = drag.axis;
+        let handle = drag.handle;
         let steps = drag.current_steps;
+        let plane_delta_world = drag.current_plane_delta_world;
         let mode = drag.mode;
         let targets = drag.targets.clone();
         let scene = self.project.active_scene_mut();
@@ -5662,21 +5908,36 @@ impl EditorWorkspace {
                 continue;
             };
             match mode {
-                TransformGizmoMode::Move => {
-                    node.transform.translation = node_gizmo_translation(
-                        node,
-                        target.start_translation,
-                        axis,
-                        steps,
-                        target.sector_size,
-                    );
-                }
+                TransformGizmoMode::Move => match handle {
+                    NodeGizmoHandle::Axis(axis) => {
+                        node.transform.translation = node_gizmo_translation(
+                            node,
+                            target.start_translation,
+                            axis,
+                            steps,
+                            target.sector_size,
+                        );
+                    }
+                    NodeGizmoHandle::Plane(plane) => {
+                        node.transform.translation = node_gizmo_plane_translation(
+                            node,
+                            target.start_translation,
+                            plane,
+                            plane_delta_world,
+                            target.sector_size,
+                        );
+                    }
+                },
                 TransformGizmoMode::Rotate => {
-                    node.transform.rotation_degrees =
-                        node_gizmo_rotation(node, target.start_rotation_degrees, axis, steps);
+                    if let NodeGizmoHandle::Axis(axis) = handle {
+                        node.transform.rotation_degrees =
+                            node_gizmo_rotation(node, target.start_rotation_degrees, axis, steps);
+                    }
                 }
                 TransformGizmoMode::Scale => {
-                    apply_node_gizmo_scale(node, target.start_image_prop_size, axis, steps);
+                    if let NodeGizmoHandle::Axis(axis) = handle {
+                        apply_node_gizmo_scale(node, target.start_image_prop_size, axis, steps);
+                    }
                 }
             }
         }
@@ -5690,7 +5951,7 @@ impl EditorWorkspace {
         if !drag.snapshot_pushed {
             return;
         }
-        let axis = drag.axis.label();
+        let handle = drag.handle.label();
         let moved = drag.targets.len();
         let action = match drag.mode {
             TransformGizmoMode::Move => "Moved",
@@ -5698,9 +5959,9 @@ impl EditorWorkspace {
             TransformGizmoMode::Scale => "Scaled",
         };
         self.status = if moved == 1 {
-            format!("{action} 1 node on {axis}")
+            format!("{action} 1 node on {handle}")
         } else {
-            format!("{action} {moved} nodes on {axis}")
+            format!("{action} {moved} nodes on {handle}")
         };
     }
 
@@ -15479,6 +15740,48 @@ fn node_gizmo_translation(
     }
 }
 
+fn node_gizmo_plane_translation(
+    node: &psxed_project::SceneNode,
+    start: [f32; 3],
+    plane: NodeGizmoPlane,
+    delta_world: [f32; 3],
+    sector_size: i32,
+) -> [f32; 3] {
+    let mut translation = start;
+    let sector_size = sector_size.max(1);
+    for axis in plane.axes() {
+        let index = axis.index();
+        translation[index] = start[index] + delta_world[index] / sector_size as f32;
+    }
+
+    match &node.kind {
+        NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. } => {
+            for axis in plane.axes() {
+                let index = axis.index();
+                if delta_world[index].abs() > f32::EPSILON {
+                    translation[index] = snap_node_transform_component_to_world_step(
+                        translation[index],
+                        sector_size,
+                    );
+                }
+            }
+            translation
+        }
+        _ => translation,
+    }
+}
+
+fn node_gizmo_drag_has_motion(drag: &NodeGizmoDrag) -> bool {
+    match drag.handle {
+        NodeGizmoHandle::Axis(_) => drag.current_steps != 0,
+        NodeGizmoHandle::Plane(plane) => {
+            let [a, b] = plane.axes();
+            drag.current_plane_delta_world[a.index()].abs() > f32::EPSILON
+                || drag.current_plane_delta_world[b.index()].abs() > f32::EPSILON
+        }
+    }
+}
+
 fn node_gizmo_rotation(
     node: &psxed_project::SceneNode,
     start: [f32; 3],
@@ -22825,10 +23128,10 @@ fn orbit_camera_position_f32(
     target: [i32; 3],
 ) -> [f32; 3] {
     let radius = radius as f32;
-    let cos_p = psx_gte::transform::cos_1_3_12(pitch_q12) as f32 / 4096.0;
-    let sin_p = psx_gte::transform::sin_1_3_12(pitch_q12) as f32 / 4096.0;
-    let cos_y = psx_gte::transform::cos_1_3_12(yaw_q12) as f32 / 4096.0;
-    let sin_y = psx_gte::transform::sin_1_3_12(yaw_q12) as f32 / 4096.0;
+    let cos_p = cos_q12_turn_f32(pitch_q12);
+    let sin_p = sin_q12_turn_f32(pitch_q12);
+    let cos_y = cos_q12_turn_f32(yaw_q12);
+    let sin_y = sin_q12_turn_f32(yaw_q12);
     [
         target[0] as f32 + radius * cos_p * sin_y,
         target[1] as f32 - radius * sin_p,
@@ -22846,11 +23149,19 @@ fn orbit_camera_position_i32(
 }
 
 fn camera_forward_from_angles(yaw_q12: u16, pitch_q12: u16) -> [f32; 3] {
-    let cos_p = psx_gte::transform::cos_1_3_12(pitch_q12) as f32 / 4096.0;
-    let sin_p = psx_gte::transform::sin_1_3_12(pitch_q12) as f32 / 4096.0;
-    let cos_y = psx_gte::transform::cos_1_3_12(yaw_q12) as f32 / 4096.0;
-    let sin_y = psx_gte::transform::sin_1_3_12(yaw_q12) as f32 / 4096.0;
+    let cos_p = cos_q12_turn_f32(pitch_q12);
+    let sin_p = sin_q12_turn_f32(pitch_q12);
+    let cos_y = cos_q12_turn_f32(yaw_q12);
+    let sin_y = sin_q12_turn_f32(yaw_q12);
     normalize3([-cos_p * sin_y, sin_p, -cos_p * cos_y])
+}
+
+fn sin_q12_turn_f32(angle_q12: u16) -> f32 {
+    psx_engine::Angle::from_q12(angle_q12).sin().raw() as f32 / 4096.0
+}
+
+fn cos_q12_turn_f32(angle_q12: u16) -> f32 {
+    psx_engine::Angle::from_q12(angle_q12).cos().raw() as f32 / 4096.0
 }
 
 fn distance_i32(a: [i32; 3], b: [i32; 3]) -> i32 {
@@ -22939,6 +23250,43 @@ fn distance_to_segment_2d(point: Pos2, a: Pos2, b: Pos2) -> f32 {
     let t = ((point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
     let closest = a + ab * t;
     (point - closest).length()
+}
+
+fn polygon_area_2d(points: &[Pos2]) -> f32 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0;
+    for i in 0..points.len() {
+        let a = points[i];
+        let b = points[(i + 1) % points.len()];
+        area += a.x * b.y - b.x * a.y;
+    }
+    area * 0.5
+}
+
+fn point_in_polygon_2d(point: Pos2, polygon: &[Pos2]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = polygon.len() - 1;
+    for i in 0..polygon.len() {
+        let a = polygon[i];
+        let b = polygon[j];
+        if (a.y > point.y) != (b.y > point.y) {
+            let x = (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x;
+            if point.x < x {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+fn vec3_nearly_equal(a: [f32; 3], b: [f32; 3]) -> bool {
+    (a[0] - b[0]).abs() < 0.001 && (a[1] - b[1]).abs() < 0.001 && (a[2] - b[2]).abs() < 0.001
 }
 
 fn round_to_i32(value: f32) -> i32 {
@@ -27088,6 +27436,27 @@ mod tests {
             .expect("node gizmo axis projects")
     }
 
+    fn projected_node_gizmo_plane(
+        workspace: &EditorWorkspace,
+        viewport: Rect,
+        plane: NodeGizmoPlane,
+    ) -> NodeGizmoScreenPlane {
+        workspace
+            .node_gizmo_screen_planes(viewport)
+            .into_iter()
+            .find(|candidate| candidate.plane == plane)
+            .expect("node gizmo plane projects")
+    }
+
+    fn screen_plane_center(plane: NodeGizmoScreenPlane) -> Pos2 {
+        let sum = plane
+            .corners
+            .iter()
+            .fold(Vec2::ZERO, |acc, corner| acc + corner.to_vec2());
+        let average = sum / plane.corners.len() as f32;
+        Pos2::new(average.x, average.y)
+    }
+
     fn assert_pos_approx(actual: Pos2, expected: Pos2) {
         assert!((actual.x - expected.x).abs() < 0.001);
         assert!((actual.y - expected.y).abs() < 0.001);
@@ -27154,6 +27523,20 @@ mod tests {
         assert_vec3_approx(dir, [0.0, 0.0, -1.0]);
         assert_eq!(camera.anchor_i32(), [10, 20, 30]);
         assert_eq!(camera.position_i32(), [10, 20, 1030]);
+    }
+
+    #[test]
+    fn orbit_camera_quarter_turn_uses_q12_units() {
+        let position = orbit_camera_position_i32(1024, 0, 1000, [10, 20, 30]);
+
+        assert_eq!(position, [1010, 20, 30]);
+    }
+
+    #[test]
+    fn free_camera_forward_quarter_turn_uses_q12_units() {
+        let forward = camera_forward_from_angles(1024, 0);
+
+        assert_vec3_approx(forward, [-1.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -27224,8 +27607,23 @@ mod tests {
 
         workspace.rotate_viewport_3d_camera(Vec2::new(100.0, 200.0));
 
-        assert_eq!(workspace.viewport_3d_yaw, 25);
+        assert_eq!(workspace.viewport_3d_yaw, 400);
         assert_eq!(workspace.viewport_3d_pitch, signed_to_q12(960));
+    }
+
+    #[test]
+    fn free_camera_rotation_uses_q12_drag_sensitivity() {
+        let mut workspace =
+            EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
+        workspace.viewport_3d_free_yaw = 1024;
+        workspace.viewport_3d_free_pitch = 0;
+
+        workspace.rotate_viewport_3d_camera(Vec2::new(100.0, 50.0));
+
+        assert_eq!(workspace.viewport_3d_free_yaw, 624);
+        assert_eq!(workspace.viewport_3d_free_pitch, signed_to_q12(-200));
+        assert!(workspace.viewport_3d_free_initialized);
     }
 
     #[test]
@@ -27290,7 +27688,7 @@ mod tests {
         workspace.viewport_3d_free_initialized = true;
         workspace.viewport_3d_free_position = [512, 2048, 512];
         workspace.viewport_3d_free_yaw = 0;
-        workspace.viewport_3d_free_pitch = signed_to_q12(-64);
+        workspace.viewport_3d_free_pitch = signed_to_q12(-960);
 
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
         let (_, dir) = workspace
@@ -27358,7 +27756,7 @@ mod tests {
         workspace.viewport_3d_free_initialized = true;
         workspace.viewport_3d_free_position = [2048, 4096, 4096];
         workspace.viewport_3d_free_yaw = 0;
-        workspace.viewport_3d_free_pitch = signed_to_q12(-64);
+        workspace.viewport_3d_free_pitch = signed_to_q12(-960);
 
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
         let pointer = rect.center() + egui::vec2(80.0, 0.0);
@@ -29703,6 +30101,112 @@ mod tests {
     }
 
     #[test]
+    fn node_gizmo_move_planes_appear_for_selected_entity() {
+        let mut project = ProjectDocument::new("node-gizmo-planes");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let entity = project
+            .active_scene_mut()
+            .add_node(room, "Entity", NodeKind::Entity);
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("node-gizmo-planes"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.viewport_3d_free_position = [2048, 1024, -2048];
+        let (yaw, pitch) = camera_angles_to_look_at(
+            workspace.viewport_3d_free_position,
+            [
+                DEFAULT_WORLD_SECTOR_SIZE / 2,
+                DEFAULT_WORLD_SECTOR_SIZE / 4,
+                DEFAULT_WORLD_SECTOR_SIZE / 2,
+            ],
+        )
+        .expect("oblique gizmo test camera can face the entity");
+        workspace.viewport_3d_free_yaw = yaw;
+        workspace.viewport_3d_free_pitch = pitch;
+        workspace.replace_node_selection(entity);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let planes: HashSet<_> = workspace
+            .node_gizmo_screen_planes(viewport)
+            .into_iter()
+            .map(|plane| plane.plane)
+            .collect();
+
+        assert!(planes.contains(&NodeGizmoPlane::XY));
+        assert!(planes.contains(&NodeGizmoPlane::XZ));
+        assert!(planes.contains(&NodeGizmoPlane::YZ));
+    }
+
+    #[test]
+    fn node_gizmo_xy_plane_moves_entity_on_two_axes() {
+        let mut project = ProjectDocument::new("entity-gizmo-xy");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let entity = project
+            .active_scene_mut()
+            .add_node(room, "Entity", NodeKind::Entity);
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("entity-gizmo-xy"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.replace_node_selection(entity);
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let screen_plane = projected_node_gizmo_plane(&workspace, viewport, NodeGizmoPlane::XY);
+        let start = screen_plane_center(screen_plane);
+        assert_eq!(
+            workspace.pick_node_gizmo_handle(viewport, start),
+            Some(NodeGizmoHandle::Plane(NodeGizmoPlane::XY))
+        );
+        assert!(workspace.begin_node_gizmo_handle_drag(
+            NodeGizmoHandle::Plane(NodeGizmoPlane::XY),
+            viewport,
+            start
+        ));
+        let start_hit = workspace
+            .node_gizmo_drag
+            .as_ref()
+            .and_then(|drag| drag.start_plane_hit)
+            .expect("plane drag stores start hit");
+        let target_hit = [
+            start_hit[0] + HEIGHT_QUANTUM as f32,
+            start_hit[1] + HEIGHT_QUANTUM as f32,
+            start_hit[2],
+        ];
+        let target_pointer =
+            project_world_to_viewport_screen(workspace.viewport_3d_camera(), viewport, target_hit)
+                .expect("target hit projects");
+
+        workspace.update_node_gizmo_drag(viewport, target_pointer);
+        workspace.end_node_gizmo_drag();
+
+        let node = workspace.project.active_scene().node(entity).unwrap();
+        assert_vec3_approx(
+            node.transform.translation,
+            [
+                HEIGHT_QUANTUM as f32 / 1024.0,
+                HEIGHT_QUANTUM as f32 / 1024.0,
+                0.0,
+            ],
+        );
+        assert_eq!(workspace.status, "Moved 1 node on XY");
+        assert!(workspace.is_dirty());
+
+        workspace.do_undo();
+        let node = workspace.project.active_scene().node(entity).unwrap();
+        assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
     fn node_gizmo_moves_entity_on_selected_axis() {
         let mut project = ProjectDocument::new("entity-gizmo-x");
         let room = project.active_scene_mut().add_node(
@@ -29723,7 +30227,7 @@ mod tests {
         let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
         let unit = (x_axis.end - x_axis.start).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
-        workspace.update_node_gizmo_drag(x_axis.start + unit * 8.0);
+        workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(entity).unwrap();
@@ -29771,7 +30275,7 @@ mod tests {
         let y_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
         let unit = (y_axis.end - y_axis.start).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, y_axis.start));
-        workspace.update_node_gizmo_drag(y_axis.start + unit * 8.0);
+        workspace.update_node_gizmo_drag(viewport, y_axis.start + unit * 8.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(light).unwrap();
@@ -29828,7 +30332,7 @@ mod tests {
         let start = ring.points[0];
         let unit = (start - ring.center).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, start));
-        workspace.update_node_gizmo_drag(start + unit * 24.0);
+        workspace.update_node_gizmo_drag(viewport, start + unit * 24.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(prop).unwrap();
@@ -29872,7 +30376,7 @@ mod tests {
         let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
         let unit = (x_axis.end - x_axis.start).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
-        workspace.update_node_gizmo_drag(x_axis.start + unit * 8.0);
+        workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(prop).unwrap();

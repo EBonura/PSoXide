@@ -380,10 +380,10 @@ fn first_visible_room_grid<'a>(
 /// `project_triangle` calls produce screen-space coords for the
 /// requested editor camera.
 fn setup_gte_for_camera(camera: ViewportCameraState) -> psx_engine::WorldCamera {
-    let cos_p = psx_gte::transform::cos_1_3_12(camera.pitch_q12) as i32;
-    let sin_p = psx_gte::transform::sin_1_3_12(camera.pitch_q12) as i32;
-    let cos_y = psx_gte::transform::cos_1_3_12(camera.yaw_q12) as i32;
-    let sin_y = psx_gte::transform::sin_1_3_12(camera.yaw_q12) as i32;
+    let cos_p = cos_q12_turn(camera.pitch_q12);
+    let sin_p = sin_q12_turn(camera.pitch_q12);
+    let cos_y = cos_q12_turn(camera.yaw_q12);
+    let sin_y = sin_q12_turn(camera.yaw_q12);
     let anchor = camera.anchor_i32();
     let [cam_x, cam_y, cam_z] = camera.position_i32();
 
@@ -1918,8 +1918,8 @@ fn push_image_prop_collision_wireframe(
 }
 
 fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+    let s = sin_q12_turn(angle_q12);
+    let c = cos_q12_turn(angle_q12);
     [
         v[0],
         mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
@@ -1928,8 +1928,8 @@ fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
 }
 
 fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+    let s = sin_q12_turn(angle_q12);
+    let c = cos_q12_turn(angle_q12);
     [
         mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
         v[1],
@@ -1938,8 +1938,8 @@ fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
 }
 
 fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+    let s = sin_q12_turn(angle_q12);
+    let c = cos_q12_turn(angle_q12);
     [
         mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
         mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
@@ -1949,6 +1949,14 @@ fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
 
 fn mul_q12_i32(value: i32, q12: i32) -> i32 {
     (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn sin_q12_turn(angle_q12: u16) -> i32 {
+    psx_engine::Angle::from_q12(angle_q12).sin().raw()
+}
+
+fn cos_q12_turn(angle_q12: u16) -> i32 {
+    psx_engine::Angle::from_q12(angle_q12).cos().raw()
 }
 
 fn preview_projected_from_engine(
@@ -2359,8 +2367,8 @@ fn draw_model_selection_gizmo(meta: &InstanceMeta, scratch: &mut PreviewScratch)
     let top_w = [meta.origin.x, meta.origin.y - height, meta.origin.z];
     let mid_w = [meta.origin.x, meta.origin.y - height / 4, meta.origin.z];
     let len = (height / 3).max(128);
-    let s = psx_gte::transform::sin_1_3_12(meta.yaw_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(meta.yaw_q12) as i32;
+    let s = sin_q12_turn(meta.yaw_q12);
+    let c = cos_q12_turn(meta.yaw_q12);
     let forward_w = [
         meta.origin.x + ((s * len) >> 12),
         meta.origin.y - height / 4,
@@ -2535,8 +2543,8 @@ fn yaw_to_q12(degrees: f32) -> u16 {
 /// Y-axis rotation matrix in Q12. Mirrors `yaw_rotation_matrix`
 /// in editor-playtest's runtime.
 fn yaw_rotation_q12(yaw_q12: u16) -> Mat3I16 {
-    let s = psx_gte::transform::sin_1_3_12(yaw_q12);
-    let c = psx_gte::transform::cos_1_3_12(yaw_q12);
+    let s = clamp_i16(sin_q12_turn(yaw_q12));
+    let c = clamp_i16(cos_q12_turn(yaw_q12));
     Mat3I16 {
         m: [[c, 0, s], [0, 0x1000, 0], [-s, 0, c]],
     }
@@ -2977,8 +2985,8 @@ fn push_facing_arrow(
     style: FaceOutlineStyle,
 ) {
     let yaw_q12 = yaw_to_q12(yaw_degrees);
-    let s = psx_gte::transform::sin_1_3_12(yaw_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(yaw_q12) as i32;
+    let s = sin_q12_turn(yaw_q12);
+    let c = cos_q12_turn(yaw_q12);
     // Arrow length = bound's horizontal half-extent + a small
     // overshoot so the head sits clearly outside the box.
     let reach = (half_extents[0].max(half_extents[2]) * 1.5).max(96.0) as i32;
@@ -3010,11 +3018,11 @@ fn push_horizontal_ring(
     let mut prev_world = [center[0] + radius, center[1], center[2]];
     let mut prev_proj = gte_scene::project_vertex(world_to_view(prev_world));
     for i in 1..=segments {
-        // PSX trig uses 4096 units per turn; sample the unit
-        // circle around the light origin once per segment.
+        // Authored editor angles use 4096 units per turn; sample
+        // the unit circle around the light origin once per segment.
         let angle_q12 = ((i as u32 * 4096) / segments as u32) as u16;
-        let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
-        let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+        let s = sin_q12_turn(angle_q12);
+        let c = cos_q12_turn(angle_q12);
         let next_world = [
             center[0] + ((c * radius) >> 12),
             center[1],
@@ -4457,10 +4465,10 @@ mod tests {
         preview_projected_triangle_hw_safe, preview_shadow_radius, preview_static_model_reference,
         preview_vertices_in_front, push_wall_face, room_depth_slot, rotate_image_prop_local,
         setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline,
-        wall_material_sidedness_for_edge, wall_side_visible, FaceShade, MaterialSlot, PreviewFog,
-        WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
-        PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
-        PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
+        wall_material_sidedness_for_edge, wall_side_visible, yaw_rotation_q12, FaceShade,
+        MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS,
+        PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
+        PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -4502,8 +4510,20 @@ mod tests {
 
     #[test]
     fn image_prop_overlay_rotation_applies_roll() {
-        let rotated = rotate_image_prop_local([0, 512, 0], [0, 0, 64]);
+        let rotated = rotate_image_prop_local([0, 512, 0], [0, 0, 1024]);
         assert_eq!(rotated, [-512, 0, 0]);
+    }
+
+    #[test]
+    fn image_prop_overlay_rotation_applies_yaw_q12_quarter_turn() {
+        let rotated = rotate_image_prop_local([512, 0, 0], [0, 1024, 0]);
+        assert_eq!(rotated, [0, 0, -512]);
+    }
+
+    #[test]
+    fn model_preview_yaw_matrix_uses_q12_quarter_turn() {
+        let rotation = yaw_rotation_q12(1024);
+        assert_eq!(rotation.m, [[0, 0, 4096], [0, 4096, 0], [-4096, 0, 0]]);
     }
 
     fn projected(sx: i16, sy: i16) -> Projected {
@@ -4756,10 +4776,10 @@ mod tests {
     #[test]
     fn editor_cardinal_wall_front_material_renders_from_owning_cell() {
         let cases = [
-            (WallEdge::North, [512, 512, 512], 128, [512, 512, 1536], 0),
-            (WallEdge::East, [512, 512, 512], 192, [1536, 512, 512], 64),
-            (WallEdge::South, [512, 512, 512], 0, [512, 512, -512], 128),
-            (WallEdge::West, [512, 512, 512], 64, [-512, 512, 512], 192),
+            (WallEdge::North, [512, 512, 512], 2048, [512, 512, 1536], 0),
+            (WallEdge::East, [512, 512, 512], 3072, [1536, 512, 512], 1024),
+            (WallEdge::South, [512, 512, 512], 0, [512, 512, -512], 2048),
+            (WallEdge::West, [512, 512, 512], 1024, [-512, 512, 512], 3072),
         ];
 
         for (edge, inside_pos, inside_yaw, outside_pos, outside_yaw) in cases {
