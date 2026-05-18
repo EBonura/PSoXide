@@ -149,6 +149,18 @@ pub mod model_clip_flags {
     pub const IN_PLACE: u16 = 1 << 0;
 }
 
+/// Per-character action playback flags.
+pub mod character_action_flags {
+    /// The action should loop while the gameplay state remains active.
+    pub const LOOPING: u8 = 1 << 0;
+    /// The action binding explicitly overrides the clip's baked
+    /// in-place calibration.
+    pub const IN_PLACE_OVERRIDE: u8 = 1 << 1;
+    /// When [`IN_PLACE_OVERRIDE`] is set, cancel root translation
+    /// for this action.
+    pub const IN_PLACE: u8 = 1 << 2;
+}
+
 typed_index! {
     /// Clip index local to one model's clip slice.
     pub struct ModelClipIndex;
@@ -1369,6 +1381,8 @@ pub struct LevelCharacterRecord {
     /// Required slots are validated by the cooker; optional slots
     /// use [`CHARACTER_CLIP_NONE`] and runtime fallbacks.
     pub action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Per-action playback flags matching [`Self::action_clips`].
+    pub action_flags: [u8; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Render-only model offset from the controller root, in
     /// entity-local engine units.
     pub visual_offset: [i16; 3],
