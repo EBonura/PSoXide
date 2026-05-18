@@ -36,8 +36,8 @@ use psx_engine::{
     WorldRenderMaterial, WorldVertex,
 };
 use psx_level::{
-    cloud_layer_flags, far_vista_flags, image_prop_flags, model_clip_flags, sky_flags,
-    visibility_cell_flags, visibility_edge_flags,
+    character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags, model_clip_flags,
+    sky_flags, visibility_cell_flags, visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
@@ -1324,6 +1324,26 @@ fn animation_set_action_clip(
     })
 }
 
+fn character_action_flags_for(
+    action: CharacterAnimationAction,
+    options: Option<crate::CharacterActionOptions>,
+) -> u8 {
+    let mut flags = 0;
+    if options
+        .map(|options| options.looping)
+        .unwrap_or_else(|| action.loops_by_default())
+    {
+        flags |= character_action_flags::LOOPING;
+    }
+    if let Some(options) = options {
+        flags |= character_action_flags::IN_PLACE_OVERRIDE;
+        if options.in_place {
+            flags |= character_action_flags::IN_PLACE;
+        }
+    }
+    flags
+}
+
 fn add_model_clip_requirement(
     project: &ProjectDocument,
     out: &mut HashMap<ResourceId, BTreeSet<u16>>,
@@ -1496,31 +1516,37 @@ fn cook_player_character(
                           required: bool,
                           project: &ProjectDocument,
                           report: &mut PlaytestValidationReport|
-     -> Option<u16> {
+     -> Option<(u16, u8)> {
         let action_label = action.label().to_ascii_lowercase();
-        if let Some(idx) = action_overrides
+        if let Some(binding) = action_overrides
             .iter()
-            .find_map(|binding| (binding.action == action).then_some(binding.clip))
+            .find(|binding| binding.action == action)
         {
-            return remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx).or_else(
-                || {
+            let idx = binding.clip;
+            return match remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx) {
+                Some(local) => Some((local, character_action_flags_for(action, binding.options))),
+                None => {
                     report.error(format!(
                         "Animator on '{}' maps {action_label} to clip {idx}, but that clip was not packaged for runtime",
                         spawn_node.name
                     ));
                     None
-                },
-            );
+                }
+            };
         }
 
         if let Some((_, set_name, set)) = animation_set {
             if let Some(animation_id) = animation_set_action_clip(project, set, action) {
+                let options = set
+                    .action_binding(action)
+                    .filter(|binding| binding.clip == animation_id)
+                    .and_then(|binding| binding.options);
                 match project.resolved_model_animation_index(model_resource_id, animation_id) {
                     Some(index) => {
                         if let Some(local) =
                             remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)
                         {
-                            return Some(local);
+                            return Some((local, character_action_flags_for(action, options)));
                         }
                         report.error(format!(
                             "Character '{}' {action_label} clip resolves to {index}, but that clip was not packaged for runtime",
@@ -1539,15 +1565,29 @@ fn cook_player_character(
             }
         }
 
-        match character.action_clip(action) {
-            Some(idx) => remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
-                .or_else(|| {
-                    report.error(format!(
-                        "Character '{}' {action_label} clip {idx} was not packaged for runtime",
-                        character_name
-                    ));
-                    None
-                }),
+        let character_binding = character.action_binding(action);
+        match character_binding
+            .map(|binding| binding.clip)
+            .or_else(|| character.action_clip(action))
+        {
+            Some(idx) => {
+                match remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx) {
+                    Some(local) => Some((
+                        local,
+                        character_action_flags_for(
+                            action,
+                            character_binding.and_then(|binding| binding.options),
+                        ),
+                    )),
+                    None => {
+                        report.error(format!(
+                            "Character '{}' {action_label} clip {idx} was not packaged for runtime",
+                            character_name
+                        ));
+                        None
+                    }
+                }
+            }
             None if required => {
                 report.error(format!(
                     "Character '{}' has no {action_label} clip assigned",
@@ -1555,14 +1595,19 @@ fn cook_player_character(
                 ));
                 None
             }
-            None => Some(CHARACTER_CLIP_NONE),
+            None => Some((
+                CHARACTER_CLIP_NONE,
+                character_action_flags_for(action, None),
+            )),
         }
     };
 
     let mut action_clips = [CHARACTER_CLIP_NONE; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut action_flags = [0u8; PLAYTEST_CHARACTER_ACTION_COUNT];
     for action in CharacterAnimationAction::ALL {
-        action_clips[action.to_index()] =
-            resolve_action(action, action.required_for_player(), project, report)?;
+        let (clip, flags) = resolve_action(action, action.required_for_player(), project, report)?;
+        action_clips[action.to_index()] = clip;
+        action_flags[action.to_index()] = flags;
     }
 
     if settings.radius == 0 {
@@ -1659,6 +1704,7 @@ fn cook_player_character(
         source_resource: character_id.unwrap_or(model_resource_id),
         model: model_index,
         action_clips,
+        action_flags,
         visual_offset,
         visual_scale_q8,
         radius: settings.radius,
@@ -5050,14 +5096,20 @@ mod tests {
             action_clips.push(crate::CharacterActionClip {
                 action: CharacterAnimationAction::Idle,
                 clip: 0,
+                options: None,
             });
             action_clips.push(crate::CharacterActionClip {
                 action: CharacterAnimationAction::Walk,
                 clip: 0,
+                options: None,
             });
             action_clips.push(crate::CharacterActionClip {
                 action: CharacterAnimationAction::Backstep,
                 clip: 0,
+                options: Some(crate::CharacterActionOptions {
+                    looping: true,
+                    in_place: false,
+                }),
             });
         }
 
@@ -5078,6 +5130,10 @@ mod tests {
         assert_eq!(
             character.action_clips[CharacterAnimationAction::Backstep.to_index()],
             0
+        );
+        assert_eq!(
+            character.action_flags[CharacterAnimationAction::Backstep.to_index()],
+            character_action_flags::LOOPING | character_action_flags::IN_PLACE_OVERRIDE
         );
     }
 
