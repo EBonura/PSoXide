@@ -352,14 +352,16 @@ struct TextureImportDialog {
     preview: Option<TextureImportPreview>,
 }
 
+const TEXTURE_IMPORT_RESOLUTION_PRESETS: [i32; 6] = [8, 16, 32, 64, 128, 256];
+
 impl Default for TextureImportDialog {
     fn default() -> Self {
         Self {
             open: false,
             source_path: String::new(),
             output_name: String::new(),
-            width: 64,
-            height: 64,
+            width: 32,
+            height: 32,
             depth_bits: 4,
             centre_crop: true,
             transparent_index_zero: false,
@@ -393,6 +395,16 @@ impl TextureImportResamplerChoice {
             Self::Triangle => psxed_project::texture_import::Resampler::Triangle,
             Self::Lanczos3 => psxed_project::texture_import::Resampler::Lanczos3,
         }
+    }
+}
+
+fn texture_import_resolution_label(width: i32, height: i32) -> String {
+    let width = width.clamp(1, 256);
+    let height = height.clamp(1, 256);
+    if width == height && TEXTURE_IMPORT_RESOLUTION_PRESETS.contains(&width) {
+        format!("{width} x {height}")
+    } else {
+        format!("Custom {width} x {height}")
     }
 }
 
@@ -2305,12 +2317,13 @@ impl EditorWorkspace {
         // demos' first-frame angle.
         self.viewport_3d_yaw = 256;
         self.viewport_3d_pitch = 256;
-        self.focus_3d_on_bounds(center, half);
+        self.fit_3d_bounds(center, half);
     }
 
     /// Move the 3D orbit target onto `center` and choose a radius
-    /// that fits `half` without changing yaw/pitch.
-    fn focus_3d_on_bounds(&mut self, center: [f32; 3], half: [f32; 3]) {
+    /// that fits `half` without changing yaw/pitch. Used for startup
+    /// and explicit whole-room framing.
+    fn fit_3d_bounds(&mut self, center: [f32; 3], half: [f32; 3]) {
         self.viewport_3d_target = [
             round_to_i32(center[0]),
             round_to_i32(center[1]),
@@ -2319,6 +2332,34 @@ impl EditorWorkspace {
         self.viewport_3d_radius = frame_radius_for_3d_bounds(half);
         if self.viewport_3d_camera_mode == ViewportCameraMode::Free {
             self.sync_free_camera_to_orbit();
+        }
+    }
+
+    /// Repoint the 3D viewport at `center` without changing the
+    /// user's current distance from the focus. This is the behavior
+    /// expected from the `.` shortcut while inspecting nearby props.
+    fn focus_3d_on_point_preserving_distance(&mut self, center: [f32; 3]) {
+        let target = [
+            round_to_i32(center[0]),
+            round_to_i32(center[1]),
+            round_to_i32(center[2]),
+        ];
+        match self.viewport_3d_camera_mode {
+            ViewportCameraMode::Orbit => {
+                self.viewport_3d_target = target;
+            }
+            ViewportCameraMode::Free => {
+                self.viewport_3d_target = target;
+                self.viewport_3d_radius =
+                    distance_i32(self.viewport_3d_free_position, target).clamp(512, 262_144);
+                if let Some((yaw, pitch)) =
+                    camera_angles_to_look_at(self.viewport_3d_free_position, target)
+                {
+                    self.viewport_3d_free_yaw = yaw;
+                    self.viewport_3d_free_pitch = pitch;
+                }
+                self.viewport_3d_free_initialized = true;
+            }
         }
     }
 
@@ -2822,14 +2863,37 @@ impl EditorWorkspace {
 
                         ui.separator();
                         ui.label(RichText::new("Cook Settings").strong());
+                        egui::ComboBox::from_label("Target resolution")
+                            .selected_text(texture_import_resolution_label(
+                                dialog.width,
+                                dialog.height,
+                            ))
+                            .show_ui(ui, |ui| {
+                                for size in TEXTURE_IMPORT_RESOLUTION_PRESETS {
+                                    let selected = dialog.width == size && dialog.height == size;
+                                    if ui
+                                        .selectable_label(selected, format!("{size} x {size}"))
+                                        .clicked()
+                                    {
+                                        dialog.width = size;
+                                        dialog.height = size;
+                                    }
+                                }
+                                ui.separator();
+                                ui.label(
+                                    RichText::new("Use the fields below for custom dimensions.")
+                                        .color(STUDIO_TEXT_WEAK)
+                                        .small(),
+                                );
+                            });
                         ui.horizontal(|ui| {
-                            ui.label("Size");
+                            ui.label("Width");
                             ui.add(
                                 egui::DragValue::new(&mut dialog.width)
                                     .range(1..=256)
                                     .speed(4.0),
                             );
-                            ui.label("×");
+                            ui.label("Height");
                             ui.add(
                                 egui::DragValue::new(&mut dialog.height)
                                     .range(1..=256)
@@ -14055,8 +14119,8 @@ impl EditorWorkspace {
 
     fn frame_viewport(&mut self) {
         if !self.view_2d {
-            if let Some((center, half)) = self.current_frame_bounds_3d() {
-                self.focus_3d_on_bounds(center, half);
+            if let Some((center, _half)) = self.current_frame_bounds_3d() {
+                self.focus_3d_on_point_preserving_distance(center);
                 self.status = "Framed selection".to_string();
             } else {
                 self.status = "Nothing to frame".to_string();
@@ -15606,6 +15670,7 @@ fn transform_icon(label: &str) -> char {
 struct AnimatorClipContext {
     model_name: String,
     clips: Vec<String>,
+    clip_in_place_defaults: Vec<bool>,
     profile_name: Option<String>,
     profile_action_clips: [Option<u16>; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT],
 }
@@ -15655,16 +15720,19 @@ fn selected_animator_clip_context(
         .iter()
         .find(|resource| resource.id == model_id)
         .and_then(|resource| match &resource.data {
-            ResourceData::Model(_) => Some(AnimatorClipContext {
-                model_name: resource.name.clone(),
-                clips: project
-                    .resolved_model_animation_clips(model_id)
-                    .iter()
-                    .map(|clip| clip.name.clone())
-                    .collect(),
-                profile_name,
-                profile_action_clips,
-            }),
+            ResourceData::Model(_) => {
+                let clips = project.resolved_model_animation_clips(model_id);
+                Some(AnimatorClipContext {
+                    model_name: resource.name.clone(),
+                    clip_in_place_defaults: clips
+                        .iter()
+                        .map(|clip| clip.calibration.in_place)
+                        .collect(),
+                    clips: clips.iter().map(|clip| clip.name.clone()).collect(),
+                    profile_name,
+                    profile_action_clips,
+                })
+            }
             _ => None,
         })
 }
@@ -16064,9 +16132,13 @@ fn draw_node_kind_editor(
             autoplay,
         } => {
             ui.weak("Component: maps gameplay actions to model animation clips.");
-            changed |= ui
-                .checkbox(autoplay, icons::label(icons::PLAY, "Autoplay"))
-                .changed();
+            let autoplay_response = ui.checkbox(autoplay, icons::label(icons::PLAY, "Autoplay"));
+            if autoplay_response.changed() {
+                changed = true;
+            }
+            autoplay_response.on_hover_text(
+                "Advance the editor preview clip in the room viewport. Off holds frame zero.",
+            );
             if let Some(context) = animator_clip_context {
                 ui.label(
                     RichText::new(format!("Model: {}", context.model_name))
@@ -16075,7 +16147,7 @@ fn draw_node_kind_editor(
                 );
                 changed |= clip_role_picker(
                     ui,
-                    "Preview Clip",
+                    "Editor Clip",
                     "animator-preview-clip",
                     clip,
                     &context.clips,
@@ -16092,28 +16164,7 @@ fn draw_node_kind_editor(
                                 .small(),
                             );
                         }
-                        for action in psxed_project::CharacterAnimationAction::ALL {
-                            let mut current = action_clips.iter().find_map(|binding| {
-                                (binding.action == action).then_some(binding.clip)
-                            });
-                            changed |= animator_action_clip_picker(
-                                ui,
-                                action.label(),
-                                &format!("animator-action-{}", action.to_index()),
-                                &mut current,
-                                context.profile_action_clips[action.to_index()],
-                                context.profile_name.as_deref(),
-                                &context.clips,
-                            );
-                            if current
-                                != action_clips.iter().find_map(|binding| {
-                                    (binding.action == action).then_some(binding.clip)
-                                })
-                            {
-                                set_node_action_clip(action_clips, action, current);
-                                changed = true;
-                            }
-                        }
+                        changed |= draw_animator_action_clip_table(ui, action_clips, context);
                     });
             } else {
                 ui.colored_label(
@@ -16122,7 +16173,7 @@ fn draw_node_kind_editor(
                 );
                 let mut current = clip.map(|i| i as i32).unwrap_or(-1);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Preview Clip").color(STUDIO_TEXT_WEAK));
+                    ui.label(RichText::new("Editor Clip").color(STUDIO_TEXT_WEAK));
                     let response = ui.add(
                         egui::DragValue::new(&mut current)
                             .speed(0.1)
@@ -18998,67 +19049,216 @@ fn clip_role_picker(
     changed
 }
 
-fn animator_action_clip_picker(
+fn draw_animator_action_clip_table(
     ui: &mut egui::Ui,
-    label: &str,
+    action_clips: &mut Vec<psxed_project::CharacterActionClip>,
+    context: &AnimatorClipContext,
+) -> bool {
+    let mut changed = false;
+
+    let available_width = ui.available_width().max(280.0);
+    let spacing = ui.spacing().item_spacing.x;
+    let action_width = 92.0;
+    let flag_width = 58.0;
+    let clip_width =
+        (available_width - action_width - flag_width * 2.0 - spacing * 3.0).clamp(150.0, 360.0);
+
+    let header = |ui: &mut egui::Ui, text: &str, width: f32| {
+        ui.add_sized(
+            [width, 18.0],
+            egui::Label::new(RichText::new(text).color(STUDIO_TEXT_WEAK).small()),
+        );
+    };
+    ui.horizontal(|ui| {
+        header(ui, "Action", action_width);
+        header(ui, "Clip", clip_width);
+        header(ui, "Loop", flag_width);
+        header(ui, "In-place", flag_width);
+    });
+
+    ui.add_space(2.0);
+    for (row, action) in psxed_project::CharacterAnimationAction::ALL
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let binding_index = action_clips
+            .iter()
+            .position(|binding| binding.action == action);
+        let inherited_clip = context.profile_action_clips[action.to_index()];
+        let mut current = binding_index.map(|index| action_clips[index].clip);
+        let mut options = binding_index
+            .and_then(|index| action_clips[index].options)
+            .unwrap_or_else(|| {
+                animator_action_option_defaults(action, current, inherited_clip, context)
+            });
+
+        let row_fill = if row % 2 == 0 {
+            STUDIO_PANEL_HEADER
+        } else {
+            Color32::TRANSPARENT
+        };
+        egui::Frame::new()
+            .fill(row_fill)
+            .inner_margin(egui::Margin::symmetric(4, 2))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_sized([action_width, 24.0], egui::Label::new(action.label()));
+                    if animator_action_clip_combo(
+                        ui,
+                        &format!("animator-action-{}", action.to_index()),
+                        clip_width,
+                        &mut current,
+                        inherited_clip,
+                        context.profile_name.as_deref(),
+                        &context.clips,
+                    ) {
+                        set_node_action_clip(action_clips, action, current);
+                        changed = true;
+                    }
+
+                    let effective_clip = current.or(inherited_clip);
+                    let enabled = effective_clip.is_some();
+                    let before_options = options;
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(flag_width, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    changed |= ui
+                                        .checkbox(&mut options.looping, "")
+                                        .on_hover_text(
+                                            "Loop this clip while the action remains active",
+                                        )
+                                        .changed();
+                                });
+                            });
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(flag_width, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    changed |= ui
+                                        .checkbox(&mut options.in_place, "")
+                                        .on_hover_text("Cancel root translation for this action")
+                                        .changed();
+                                });
+                            });
+                        },
+                    );
+                    if enabled && options != before_options {
+                        let clip = effective_clip.expect("enabled rows have a clip");
+                        if current.is_none() {
+                            current = Some(clip);
+                            set_node_action_clip(action_clips, action, current);
+                        }
+                        let defaults = animator_action_option_defaults(
+                            action,
+                            current,
+                            inherited_clip,
+                            context,
+                        );
+                        let stored = (options != defaults).then_some(options);
+                        set_node_action_options(action_clips, action, stored);
+                        changed = true;
+                    }
+                });
+            });
+    }
+    changed
+}
+
+fn animator_action_option_defaults(
+    action: psxed_project::CharacterAnimationAction,
+    current: Option<u16>,
+    inherited: Option<u16>,
+    context: &AnimatorClipContext,
+) -> psxed_project::CharacterActionOptions {
+    let clip = current.or(inherited);
+    psxed_project::CharacterActionOptions {
+        looping: action.loops_by_default(),
+        in_place: clip
+            .and_then(|idx| context.clip_in_place_defaults.get(idx as usize).copied())
+            .unwrap_or(true),
+    }
+}
+
+fn animator_action_clip_combo(
+    ui: &mut egui::Ui,
     id_salt: &str,
+    width: f32,
     slot: &mut Option<u16>,
     inherited_clip: Option<u16>,
     inherited_source: Option<&str>,
     clips: &[String],
 ) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.label(label);
-        let preview = match *slot {
-            Some(idx) => clips
-                .get(idx as usize)
-                .map(|name| format!("{idx}: {name}"))
-                .unwrap_or_else(|| format!("#{idx} (missing)")),
-            None => inherited_clip
+    let preview = match *slot {
+        Some(idx) => clips
+            .get(idx as usize)
+            .map(|name| format!("{idx}: {name}"))
+            .unwrap_or_else(|| format!("#{idx} (missing)")),
+        None => inherited_clip
+            .map(|idx| {
+                let name = clips
+                    .get(idx as usize)
+                    .map(String::as_str)
+                    .unwrap_or("(missing)");
+                match inherited_source {
+                    Some(source) => format!("{idx}: {name} from {source}"),
+                    None => format!("{idx}: {name} inherited"),
+                }
+            })
+            .unwrap_or_else(|| "(none)".to_string()),
+    };
+    let short_preview = compact_animator_clip_label(&preview, 36);
+    egui::ComboBox::from_id_salt(id_salt)
+        .width(width)
+        .selected_text(short_preview)
+        .show_ui(ui, |ui| {
+            let inherit_label = inherited_clip
                 .map(|idx| {
                     let name = clips
                         .get(idx as usize)
                         .map(String::as_str)
                         .unwrap_or("(missing)");
-                    match inherited_source {
-                        Some(source) => format!("{idx}: {name} from {source}"),
-                        None => format!("{idx}: {name} inherited"),
-                    }
+                    format!("Inherit {idx}: {name}")
                 })
-                .unwrap_or_else(|| "(none)".to_string()),
-        };
-        egui::ComboBox::from_id_salt(id_salt)
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                let inherit_label = inherited_clip
-                    .map(|idx| {
-                        let name = clips
-                            .get(idx as usize)
-                            .map(String::as_str)
-                            .unwrap_or("(missing)");
-                        format!("Inherit {idx}: {name}")
-                    })
-                    .unwrap_or_else(|| "(none)".to_string());
-                if ui.selectable_label(slot.is_none(), inherit_label).clicked() {
-                    if slot.is_some() {
-                        changed = true;
-                    }
-                    *slot = None;
+                .unwrap_or_else(|| "(none)".to_string());
+            if ui.selectable_label(slot.is_none(), inherit_label).clicked() {
+                if slot.is_some() {
+                    changed = true;
                 }
-                for (idx, name) in clips.iter().enumerate() {
-                    let label = format!("{idx}: {name}");
-                    if ui
-                        .selectable_label(*slot == Some(idx as u16), label)
-                        .clicked()
-                    {
-                        *slot = Some(idx as u16);
-                        changed = true;
-                    }
+                *slot = None;
+            }
+            for (idx, name) in clips.iter().enumerate() {
+                let label = format!("{idx}: {name}");
+                if ui
+                    .selectable_label(*slot == Some(idx as u16), label)
+                    .clicked()
+                {
+                    *slot = Some(idx as u16);
+                    changed = true;
                 }
-            });
-    });
+            }
+        })
+        .response
+        .on_hover_text(preview);
     changed
+}
+
+fn compact_animator_clip_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out = label.chars().take(keep).collect::<String>();
+    out.push_str("...");
+    out
 }
 
 fn set_node_action_clip(
@@ -19074,10 +19274,27 @@ fn set_node_action_clip(
             {
                 binding.clip = clip;
             } else {
-                action_clips.push(psxed_project::CharacterActionClip { action, clip });
+                action_clips.push(psxed_project::CharacterActionClip {
+                    action,
+                    clip,
+                    options: None,
+                });
             }
         }
         None => action_clips.retain(|binding| binding.action != action),
+    }
+}
+
+fn set_node_action_options(
+    action_clips: &mut [psxed_project::CharacterActionClip],
+    action: psxed_project::CharacterAnimationAction,
+    options: Option<psxed_project::CharacterActionOptions>,
+) {
+    if let Some(binding) = action_clips
+        .iter_mut()
+        .find(|binding| binding.action == action)
+    {
+        binding.options = options;
     }
 }
 
@@ -22634,6 +22851,39 @@ fn camera_forward_from_angles(yaw_q12: u16, pitch_q12: u16) -> [f32; 3] {
     let cos_y = psx_gte::transform::cos_1_3_12(yaw_q12) as f32 / 4096.0;
     let sin_y = psx_gte::transform::sin_1_3_12(yaw_q12) as f32 / 4096.0;
     normalize3([-cos_p * sin_y, sin_p, -cos_p * cos_y])
+}
+
+fn distance_i32(a: [i32; 3], b: [i32; 3]) -> i32 {
+    let dx = (a[0] - b[0]) as f32;
+    let dy = (a[1] - b[1]) as f32;
+    let dz = (a[2] - b[2]) as f32;
+    (dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt())
+        .round()
+        .clamp(0.0, i32::MAX as f32) as i32
+}
+
+fn camera_angles_to_look_at(position: [i32; 3], target: [i32; 3]) -> Option<(u16, u16)> {
+    let dx = (target[0] - position[0]) as f32;
+    let dy = (target[1] - position[1]) as f32;
+    let dz = (target[2] - position[2]) as f32;
+    let len = dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt();
+    if !len.is_finite() || len <= f32::EPSILON {
+        return None;
+    }
+
+    let dir = [dx / len, dy / len, dz / len];
+    let yaw = q12_from_radians((-dir[0]).atan2(-dir[2]));
+    let pitch =
+        signed_to_q12(q12_signed_from_radians(dir[1].clamp(-1.0, 1.0).asin()).clamp(-960, 960));
+    Some((yaw, pitch))
+}
+
+fn q12_from_radians(radians: f32) -> u16 {
+    ((radians * (4096.0 / std::f32::consts::TAU)).round() as i32).rem_euclid(4096) as u16
+}
+
+fn q12_signed_from_radians(radians: f32) -> i32 {
+    (radians * (4096.0 / std::f32::consts::TAU)).round() as i32
 }
 
 fn viewport_3d_pan_delta(
@@ -26904,6 +27154,48 @@ mod tests {
         assert_vec3_approx(dir, [0.0, 0.0, -1.0]);
         assert_eq!(camera.anchor_i32(), [10, 20, 30]);
         assert_eq!(camera.position_i32(), [10, 20, 1030]);
+    }
+
+    #[test]
+    fn focus_shortcut_preserves_orbit_distance() {
+        let mut workspace =
+            EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Orbit;
+        workspace.viewport_3d_radius = 12_345;
+        workspace.viewport_3d_yaw = 256;
+        workspace.viewport_3d_pitch = 256;
+
+        workspace.focus_3d_on_point_preserving_distance([4096.0, 512.0, -2048.0]);
+
+        assert_eq!(workspace.viewport_3d_target, [4096, 512, -2048]);
+        assert_eq!(workspace.viewport_3d_radius, 12_345);
+        assert_eq!(workspace.viewport_3d_yaw, 256);
+        assert_eq!(workspace.viewport_3d_pitch, 256);
+    }
+
+    #[test]
+    fn focus_shortcut_in_free_mode_keeps_position_and_points_at_target() {
+        let mut workspace =
+            EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
+        workspace.viewport_3d_free_position = [0, 0, 0];
+        workspace.viewport_3d_free_yaw = 1024;
+        workspace.viewport_3d_free_pitch = signed_to_q12(300);
+        workspace.viewport_3d_free_initialized = true;
+
+        workspace.focus_3d_on_point_preserving_distance([0.0, 0.0, -4096.0]);
+
+        assert_eq!(workspace.viewport_3d_free_position, [0, 0, 0]);
+        assert_eq!(workspace.viewport_3d_target, [0, 0, -4096]);
+        assert_eq!(workspace.viewport_3d_radius, 4096);
+        assert_eq!(workspace.viewport_3d_free_yaw, 0);
+        assert_eq!(workspace.viewport_3d_free_pitch, 0);
+    }
+
+    #[test]
+    fn texture_import_resolution_label_marks_presets_and_custom_sizes() {
+        assert_eq!(texture_import_resolution_label(32, 32), "32 x 32");
+        assert_eq!(texture_import_resolution_label(40, 24), "Custom 40 x 24");
     }
 
     #[test]
