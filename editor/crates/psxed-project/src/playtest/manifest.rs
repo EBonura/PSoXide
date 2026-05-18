@@ -734,7 +734,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for prop in &package.image_props {
         let _ = writeln!(
             out,
-            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], flags: {} }},",
+            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], flags: {} }},",
             prop.room,
             prop.texture_asset_index,
             prop.x,
@@ -748,6 +748,18 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             prop.tint_rgb[0],
             prop.tint_rgb[1],
             prop.tint_rgb[2],
+            prop.baked_vertex_rgb[0].0,
+            prop.baked_vertex_rgb[0].1,
+            prop.baked_vertex_rgb[0].2,
+            prop.baked_vertex_rgb[1].0,
+            prop.baked_vertex_rgb[1].1,
+            prop.baked_vertex_rgb[1].2,
+            prop.baked_vertex_rgb[2].0,
+            prop.baked_vertex_rgb[2].1,
+            prop.baked_vertex_rgb[2].2,
+            prop.baked_vertex_rgb[3].0,
+            prop.baked_vertex_rgb[3].1,
+            prop.baked_vertex_rgb[3].2,
             prop.flags,
         );
     }
