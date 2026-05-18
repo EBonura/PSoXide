@@ -213,7 +213,7 @@ impl CharacterMotorConfig {
             yaw_step,
             stamina_max_q12: DEFAULT_STAMINA_MAX_Q12,
             sprint_min_q12: 384,
-            sprint_drain_q12: 48,
+            sprint_drain_q12: 40,
             stamina_recover_q12: 36,
             roll_cost_q12: 768,
             roll_speed: 96,

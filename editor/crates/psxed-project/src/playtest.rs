@@ -980,6 +980,7 @@ pub fn build_package(
 
     let lights = expand_lights_across_chunks(&room_bake_inputs, &lights);
     bake_static_surface_lights(&mut room_bake_inputs, &lights);
+    bake_static_image_prop_lights(&mut image_props, &room_bake_inputs, &lights);
     for room in &room_bake_inputs {
         let bytes = match room.cooked.to_psxw_bytes() {
             Ok(b) => b,
@@ -2869,6 +2870,7 @@ fn push_image_prop(
         width: width.max(1),
         height: height.max(1),
         tint_rgb: material.tint,
+        baked_vertex_rgb: [rgb_tuple(material.tint); 4],
         flags: if cylindrical_billboard {
             image_prop_flags::CYLINDRICAL_BILLBOARD
         } else {
@@ -3056,6 +3058,134 @@ fn bake_static_surface_lights(rooms: &mut [CookedRoomBakeInput], lights: &[Playt
             }
         }
     }
+}
+
+fn bake_static_image_prop_lights(
+    image_props: &mut [PlaytestImageProp],
+    rooms: &[CookedRoomBakeInput],
+    lights: &[PlaytestLight],
+) {
+    for prop in image_props {
+        let Some(room) = rooms.iter().find(|room| room.room_index == prop.room) else {
+            continue;
+        };
+        let room_lights: Vec<&PlaytestLight> = lights
+            .iter()
+            .filter(|light| light.room == prop.room)
+            .collect();
+        let ambient = room.cooked.ambient_color;
+        let base = prop.tint_rgb;
+        prop.baked_vertex_rgb = if prop.flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0 {
+            let bottom = [prop.x, prop.y, prop.z];
+            let top = [
+                prop.x,
+                prop.y.saturating_add(prop.height as i32),
+                prop.z,
+            ];
+            let top_rgb = rgb_tuple(bake_static_vertex_rgb(top, base, ambient, &room_lights));
+            let bottom_rgb = rgb_tuple(bake_static_vertex_rgb(bottom, base, ambient, &room_lights));
+            [top_rgb, top_rgb, bottom_rgb, bottom_rgb]
+        } else {
+            let vertices = image_prop_static_vertices(prop);
+            [
+                rgb_tuple(bake_static_vertex_rgb(
+                    vertices[0],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    vertices[1],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    vertices[2],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    vertices[3],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+            ]
+        };
+    }
+}
+
+fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
+    let half_width = (prop.width as i32) / 2;
+    let height = prop.height as i32;
+    let locals = [
+        [-half_width, height, 0],
+        [half_width, height, 0],
+        [half_width, 0, 0],
+        [-half_width, 0, 0],
+    ];
+    let mut out = [[0, 0, 0]; 4];
+    for (idx, local) in locals.iter().enumerate() {
+        let rotated = rotate_image_prop_local(
+            *local,
+            prop.pitch as u16,
+            prop.yaw as u16,
+            prop.roll as u16,
+        );
+        out[idx] = [
+            prop.x.saturating_add(rotated[0]),
+            prop.y.saturating_add(rotated[1]),
+            prop.z.saturating_add(rotated[2]),
+        ];
+    }
+    out
+}
+
+fn rotate_image_prop_local(v: [i32; 3], pitch: u16, yaw: u16, roll: u16) -> [i32; 3] {
+    rotate_z_q12(rotate_y_q12(rotate_x_q12(v, pitch), yaw), roll)
+}
+
+fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = psx_engine::Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
+    [
+        v[0],
+        mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
+        mul_q12_i32(v[1], s) + mul_q12_i32(v[2], c),
+    ]
+}
+
+fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = psx_engine::Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
+    [
+        mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
+        v[1],
+        -mul_q12_i32(v[0], s) + mul_q12_i32(v[2], c),
+    ]
+}
+
+fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = psx_engine::Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
+    [
+        mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
+        mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
+        v[2],
+    ]
+}
+
+fn mul_q12_i32(value: i32, q12: i32) -> i32 {
+    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
+    (rgb[0], rgb[1], rgb[2])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5987,6 +6117,59 @@ mod tests {
             assert_ne!(expected, DEFAULT_BAKED_VERTEX_RGB);
             assert_eq!(wall.baked_vertex_rgb, expected);
         }
+    }
+
+    #[test]
+    fn billboard_image_props_bake_vertical_static_lighting() {
+        let mut props = vec![PlaytestImageProp {
+            room: 0,
+            texture_asset_index: 0,
+            x: 0,
+            y: 0,
+            z: 0,
+            pitch: 0,
+            yaw: 0,
+            roll: 0,
+            width: 128,
+            height: 512,
+            tint_rgb: [128, 128, 128],
+            baked_vertex_rgb: [(128, 128, 128); 4],
+            flags: image_prop_flags::CYLINDRICAL_BILLBOARD,
+        }];
+        let room = CookedRoomBakeInput {
+            room_index: 0,
+            world_asset_index: 0,
+            world_origin: [0, 0],
+            cooked: CookedWorldGrid {
+                width: 0,
+                depth: 0,
+                sector_size: 1024,
+                sectors: Vec::new(),
+                materials: Vec::new(),
+                ambient_color: [32, 32, 32],
+                static_vertex_lighting: true,
+                fog_enabled: false,
+                fog_color: [0, 0, 0],
+                fog_near: 0,
+                fog_far: 0,
+            },
+        };
+        let lights = [PlaytestLight {
+            room: 0,
+            x: 0,
+            y: 512,
+            z: 0,
+            radius: 1024,
+            intensity_q8: 256,
+            color: [128, 128, 128],
+        }];
+
+        bake_static_image_prop_lights(&mut props, &[room], &lights);
+
+        assert_eq!(props[0].baked_vertex_rgb[0], (160, 160, 160));
+        assert_eq!(props[0].baked_vertex_rgb[1], (160, 160, 160));
+        assert_eq!(props[0].baked_vertex_rgb[2], (96, 96, 96));
+        assert_eq!(props[0].baked_vertex_rgb[3], (96, 96, 96));
     }
 
     #[test]

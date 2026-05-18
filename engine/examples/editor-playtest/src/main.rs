@@ -64,7 +64,7 @@ use psx_gpu::{
     draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
-    prim::TriTextured,
+    prim::{TriTextured, TriTexturedGouraud},
     VideoMode,
 };
 use psx_level::{
@@ -7318,15 +7318,17 @@ fn sphere_visible_to_camera(
     projected_x <= half_w.saturating_mul(z) && projected_y <= half_h.saturating_mul(z)
 }
 
-fn draw_image_props(
+fn draw_image_props<T>(
     props: &[LevelImagePropRecord],
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
+    triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-) {
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
     for prop in props {
         if prop.room != current_room {
             continue;
@@ -7357,11 +7359,17 @@ fn draw_image_props(
             continue;
         }
         let sort_depth = image_prop_sort_depth(camera, verts);
-        let tint = lighting.shade_tint_at(
-            RoomPoint::new(prop.x, prop.y, prop.z),
-            rgb_tuple(prop.tint_rgb),
-        );
-        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+        let colors = [
+            lighting.apply_vertex_fog(prop.baked_vertex_rgb[0], verts[0]),
+            lighting.apply_vertex_fog(prop.baked_vertex_rgb[1], verts[1]),
+            lighting.apply_vertex_fog(prop.baked_vertex_rgb[2], verts[2]),
+            lighting.apply_vertex_fog(prop.baked_vertex_rgb[3], verts[3]),
+        ];
+        let material = TextureMaterial::opaque(
+            slot.clut_word,
+            slot.tpage_word,
+            (0x80, 0x80, 0x80),
+        )
             .with_texture_window(slot.texture_window);
         let u_max = model_render_uv_max(slot.texture_width);
         let v_max = model_render_uv_max(slot.texture_height);
@@ -7376,8 +7384,43 @@ fn draw_image_props(
             .with_material_layer(material)
             .with_textured_triangle_splitting(true)
             .with_textured_triangle_max_edge(0);
-        let _ = world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, opts);
+        if let Some(projected) = camera.project_world_quad(verts) {
+            let _ = world.submit_textured_gouraud_triangle(
+                triangles,
+                [projected[0], projected[1], projected[2]],
+                [uvs[0], uvs[1], uvs[2]],
+                [colors[0], colors[1], colors[2]],
+                material,
+                opts,
+            );
+            let _ = world.submit_textured_gouraud_triangle(
+                triangles,
+                [projected[0], projected[2], projected[3]],
+                [uvs[0], uvs[2], uvs[3]],
+                [colors[0], colors[2], colors[3]],
+                material,
+                opts,
+            );
+        } else {
+            let tint = average_vertex_rgb(colors);
+            let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+                .with_texture_window(slot.texture_window);
+            let opts = opts.with_material_layer(material);
+            let _ = world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, opts);
+        }
     }
+}
+
+fn average_vertex_rgb(colors: [(u8, u8, u8); 4]) -> (u8, u8, u8) {
+    let mut r = 0u16;
+    let mut g = 0u16;
+    let mut b = 0u16;
+    for color in colors {
+        r += color.0 as u16;
+        g += color.1 as u16;
+        b += color.2 as u16;
+    }
+    ((r / 4) as u8, (g / 4) as u8, (b / 4) as u8)
 }
 
 fn image_prop_depth_bias(width: u16, height: u16) -> i32 {
