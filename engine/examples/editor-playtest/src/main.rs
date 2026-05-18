@@ -68,9 +68,9 @@ use psx_gpu::{
     VideoMode,
 };
 use psx_level::{
-    equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags, model_clip_flags,
-    room_flags, sky_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
-    LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord,
+    character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags,
+    model_clip_flags, room_flags, sky_flags, AssetId, AssetKind, CharacterAnimationAction,
+    EntityRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord,
     LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord,
     LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex,
     ModelClipTableIndex, ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager,
@@ -471,6 +471,10 @@ impl PlayerAnim {
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
         }
     }
+
+    const fn is_motor_fixed_action(self) -> bool {
+        matches!(self, Self::Roll | Self::Backstep)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -488,6 +492,7 @@ struct RuntimeCharacter {
     /// Index into `MODELS`.
     model: ModelIndex,
     action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
+    action_flags: [u8; CHARACTER_ANIMATION_ACTION_COUNT],
     visual_offset: [i16; 3],
     visual_scale_q8: u16,
     /// Coarse collision cylinder radius. Engine units.
@@ -530,6 +535,7 @@ impl RuntimeCharacter {
         Self {
             model: c.model,
             action_clips: c.action_clips,
+            action_flags: c.action_flags,
             visual_offset: c.visual_offset,
             visual_scale_q8: c.visual_scale_q8,
             radius: c.radius as i32,
@@ -559,6 +565,26 @@ impl RuntimeCharacter {
             .get(action.to_index())
             .copied()
             .unwrap_or(OptionalModelClipIndex::NONE)
+    }
+
+    fn action_flags(&self, action: CharacterAnimationAction) -> u8 {
+        self.action_flags
+            .get(action.to_index())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn action_loops(&self, action: CharacterAnimationAction) -> bool {
+        self.action_flags(action) & character_action_flags::LOOPING != 0
+    }
+
+    fn action_in_place_override(&self, action: CharacterAnimationAction) -> Option<bool> {
+        let flags = self.action_flags(action);
+        if flags & character_action_flags::IN_PLACE_OVERRIDE == 0 {
+            None
+        } else {
+            Some(flags & character_action_flags::IN_PLACE != 0)
+        }
     }
 
     /// Pick the clip index for an animation state, with
@@ -1745,6 +1771,11 @@ impl Scene for Playtest {
         if new_state != self.anim_state {
             self.anim_state = new_state;
             self.anim_start_tick = now;
+            if new_state.is_motor_fixed_action() {
+                if let Some(character) = self.character {
+                    self.lock_player_anim_action(character, new_state, now, ctx.time.video_hz());
+                }
+            }
         }
 
         if self.lock_target.is_some() {
@@ -2094,6 +2125,7 @@ impl Scene for Playtest {
                             player.y,
                             player.z,
                             self.motor.yaw(),
+                            self.anim_state.action(),
                             character.clip_for(self.anim_state),
                             self.anim_start_tick,
                             ctx.time.elapsed_vblanks(),
@@ -2138,6 +2170,7 @@ impl Scene for Playtest {
                             player.y,
                             player.z,
                             self.motor.yaw(),
+                            self.anim_state.action(),
                             character.clip_for(self.anim_state),
                             self.anim_start_tick,
                             ctx.time.elapsed_vblanks(),
@@ -2385,6 +2418,21 @@ impl Playtest {
         let Some(character) = self.character else {
             return false;
         };
+        if !self.lock_player_anim_action(character, anim, now, video_hz) {
+            return false;
+        }
+        self.anim_state = anim;
+        self.anim_start_tick = now;
+        true
+    }
+
+    fn lock_player_anim_action(
+        &mut self,
+        character: RuntimeCharacter,
+        anim: PlayerAnim,
+        now: u32,
+        video_hz: u16,
+    ) -> bool {
         if character.action_clip(anim.action()).is_none() {
             return false;
         }
@@ -2393,8 +2441,6 @@ impl Playtest {
             .player_clip_duration_vblanks(character, clip, video_hz)
             .unwrap_or(24)
             .max(1);
-        self.anim_state = anim;
-        self.anim_start_tick = now;
         self.anim_lock_until_tick = now.saturating_add(duration);
         true
     }
@@ -3416,6 +3462,7 @@ fn draw_player(
     y: i32,
     z: i32,
     yaw: Angle,
+    anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: u32,
     elapsed_vblanks: u32,
@@ -3436,12 +3483,22 @@ fn draw_player(
     // Phase the animation relative to the clip-start tick so
     // state changes don't pop into the middle of a new clip.
     let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
-    let phase = anim.phase_at_tick_q12(local_tick, video_hz);
+    let phase = animation_phase_at_tick_q12(
+        anim,
+        local_tick,
+        video_hz,
+        character.action_loops(anim_action),
+    );
     let bounds = model_frame_bounds(runtime_model, clip_local, phase);
     let clip_anchor = model_clip_anchor(runtime_model, clip_local);
     let reference_anchor = model_clip_anchor(runtime_model, character.clip_for(PlayerAnim::Idle));
-    let pose_translation =
-        model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor);
+    let pose_translation = model_pose_anchor_translation(
+        anim,
+        phase,
+        clip_anchor,
+        reference_anchor,
+        character.action_in_place_override(anim_action),
+    );
 
     let instance_rotation = yaw_rotation_matrix(yaw);
     let origin = visual_model_origin(
@@ -3637,6 +3694,7 @@ fn draw_player_equipment(
     y: i32,
     z: i32,
     yaw: Angle,
+    anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
     anim_start_tick: u32,
     elapsed_vblanks: u32,
@@ -3655,7 +3713,12 @@ fn draw_player_equipment(
         return out;
     };
     let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
-    let character_phase = character_anim.phase_at_tick_q12(local_tick, video_hz);
+    let character_phase = animation_phase_at_tick_q12(
+        character_anim,
+        local_tick,
+        video_hz,
+        character.action_loops(anim_action),
+    );
     let character_anchor = model_clip_anchor(character_model, clip_local);
     let reference_anchor = model_clip_anchor(character_model, character.clip_for(PlayerAnim::Idle));
     let character_pose_translation = model_pose_anchor_translation(
@@ -3663,6 +3726,7 @@ fn draw_player_equipment(
         character_phase,
         character_anchor,
         reference_anchor,
+        character.action_in_place_override(anim_action),
     );
     let character_frame = (character_phase >> 12) as u16;
     let character_rotation = yaw_rotation_matrix(yaw);
@@ -6882,7 +6946,7 @@ fn draw_model_instances(
         let clip_anchor = model_clip_anchor(runtime_model, clip_local);
         let reference_anchor = model_clip_anchor(runtime_model, runtime_model.default_clip);
         let pose_translation =
-            model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor);
+            model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor, None);
 
         // Instance Y-axis rotation from authored yaw. PSX angle
         // units (4096 per turn) → Q12 sin/cos via the existing
@@ -7034,17 +7098,33 @@ fn visual_model_origin(
     )
 }
 
+fn animation_phase_at_tick_q12(
+    animation: Animation<'static>,
+    local_tick: u32,
+    video_hz: u16,
+    looping: bool,
+) -> u32 {
+    let phase = animation.phase_at_tick_q12(local_tick, video_hz);
+    if looping {
+        return phase;
+    }
+    let final_unique_frame = animation.frame_count().saturating_sub(2) as u32;
+    phase.min(final_unique_frame << 12)
+}
+
 fn model_pose_anchor_translation(
     animation: Animation<'static>,
     phase_q12: u32,
     clip_anchor: Option<ModelClipAnchor>,
     reference_anchor: Option<ModelClipAnchor>,
+    in_place_override: Option<bool>,
 ) -> ModelPoseTranslation {
     let Some(clip_anchor) = clip_anchor else {
         return ModelPoseTranslation::ZERO;
     };
     let reference_floor_y = reference_anchor.map(|anchor| anchor.floor_y);
-    let root_translation = if clip_anchor.in_place {
+    let in_place = in_place_override.unwrap_or(clip_anchor.in_place);
+    let root_translation = if in_place {
         match (
             animation.pose(0, 0),
             animation.pose_looped_q12(phase_q12, 0),
@@ -7259,16 +7339,6 @@ fn draw_image_props(
             continue;
         };
         let origin = WorldVertex::new(prop.x, prop.y, prop.z);
-        let center = WorldVertex::new(
-            prop.x,
-            prop.y.saturating_add((prop.height as i32) / 2),
-            prop.z,
-        );
-        let radius = ((prop.width.max(prop.height) as i32) / 2).max(32);
-        if !sphere_visible_to_camera(camera, options, center, radius, 96) {
-            continue;
-        }
-        let sort_depth = camera.view_vertex(center).z;
         let verts = image_prop_vertices(
             origin,
             prop.width,
@@ -7279,6 +7349,11 @@ fn draw_image_props(
             prop.flags,
             *camera,
         );
+        let (center, radius) = image_prop_cull_bounds(verts);
+        if !sphere_visible_to_camera(camera, options, center, radius, 96) {
+            continue;
+        }
+        let sort_depth = image_prop_sort_depth(camera, verts);
         let tint = lighting.shade_tint_at(
             RoomPoint::new(prop.x, prop.y, prop.z),
             rgb_tuple(prop.tint_rgb),
@@ -7288,15 +7363,55 @@ fn draw_image_props(
         let u_max = model_render_uv_max(slot.texture_width);
         let v_max = model_render_uv_max(slot.texture_height);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+        let depth_bias = options
+            .depth_bias
+            .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
         let opts = options
             .with_depth_policy(DepthPolicy::Fixed(sort_depth))
-            .with_depth_bias(options.depth_bias.saturating_sub(IMAGE_PROP_DEPTH_BIAS))
+            .with_depth_bias(depth_bias)
             .with_cull_mode(CullMode::None)
             .with_material_layer(material)
             .with_textured_triangle_splitting(true)
             .with_textured_triangle_max_edge(0);
         let _ = world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, opts);
     }
+}
+
+fn image_prop_depth_bias(width: u16, height: u16) -> i32 {
+    IMAGE_PROP_DEPTH_BIAS.saturating_add((width.max(height) as i32) / 2)
+}
+
+fn image_prop_cull_bounds(verts: [WorldVertex; 4]) -> (WorldVertex, i32) {
+    let center = WorldVertex::new(
+        ((verts[0].x as i64 + verts[1].x as i64 + verts[2].x as i64 + verts[3].x as i64) / 4)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        ((verts[0].y as i64 + verts[1].y as i64 + verts[2].y as i64 + verts[3].y as i64) / 4)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        ((verts[0].z as i64 + verts[1].z as i64 + verts[2].z as i64 + verts[3].z as i64) / 4)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+    );
+    let mut radius = 32;
+    for vertex in verts {
+        let dx = (vertex.x as i64 - center.x as i64)
+            .abs()
+            .min(i32::MAX as i64) as i32;
+        let dy = (vertex.y as i64 - center.y as i64)
+            .abs()
+            .min(i32::MAX as i64) as i32;
+        let dz = (vertex.z as i64 - center.z as i64)
+            .abs()
+            .min(i32::MAX as i64) as i32;
+        radius = radius.max(dx.saturating_add(dy).saturating_add(dz));
+    }
+    (center, radius)
+}
+
+fn image_prop_sort_depth(camera: &WorldCamera, verts: [WorldVertex; 4]) -> i32 {
+    let mut nearest = i32::MAX;
+    for vertex in verts {
+        nearest = nearest.min(camera.view_vertex(vertex).z);
+    }
+    nearest.max(camera.projection.near_z)
 }
 
 fn image_prop_vertices(
