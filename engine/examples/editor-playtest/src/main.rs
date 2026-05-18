@@ -494,6 +494,7 @@ struct RuntimeCharacter {
     action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
     action_flags: [u8; CHARACTER_ANIMATION_ACTION_COUNT],
     visual_offset: [i16; 3],
+    visual_yaw: i16,
     visual_scale_q8: u16,
     /// Coarse collision cylinder radius. Engine units.
     radius: i32,
@@ -537,6 +538,7 @@ impl RuntimeCharacter {
             action_clips: c.action_clips,
             action_flags: c.action_flags,
             visual_offset: c.visual_offset,
+            visual_yaw: c.visual_yaw,
             visual_scale_q8: c.visual_scale_q8,
             radius: c.radius as i32,
             height: c.height as i32,
@@ -3500,7 +3502,7 @@ fn draw_player(
         character.action_in_place_override(anim_action),
     );
 
-    let instance_rotation = yaw_rotation_matrix(yaw);
+    let model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let origin = visual_model_origin(
         x,
         y,
@@ -3508,18 +3510,18 @@ fn draw_player(
         runtime_model.world_height,
         character.visual_offset,
         character.visual_scale_q8,
-        &instance_rotation,
+        &model_rotation,
     );
     let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);
     let bounds_origin =
-        model_pose_translated_origin(origin, instance_rotation, local_to_world, pose_translation);
+        model_pose_translated_origin(origin, model_rotation, local_to_world, pose_translation);
     telemetry::stage_begin(telemetry::stage::PLAYER_BOUNDS);
     let visible = match bounds {
         Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => model_bounds_visible(
             camera,
             options,
             bounds_origin,
-            instance_rotation,
+            model_rotation,
             bounds,
             character.visual_scale_q8,
         ),
@@ -3552,7 +3554,7 @@ fn draw_player(
         phase,
         *camera,
         origin,
-        instance_rotation,
+        model_rotation,
         local_to_world,
         pose_translation,
         material,
@@ -3729,7 +3731,7 @@ fn draw_player_equipment(
         character.action_in_place_override(anim_action),
     );
     let character_frame = (character_phase >> 12) as u16;
-    let character_rotation = yaw_rotation_matrix(yaw);
+    let character_model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let character_origin = visual_model_origin(
         x,
         y,
@@ -3737,7 +3739,7 @@ fn draw_player_equipment(
         character_model.world_height,
         character.visual_offset,
         character.visual_scale_q8,
-        &character_rotation,
+        &character_model_rotation,
     );
     let character_local_to_world =
         visual_model_local_to_world(character_model, character.visual_scale_q8);
@@ -3763,7 +3765,7 @@ fn draw_player_equipment(
             character_anim,
             character_phase,
             character_origin,
-            character_rotation,
+            character_model_rotation,
             character_local_to_world,
             character_pose_translation,
             socket,
@@ -6951,7 +6953,8 @@ fn draw_model_instances(
         // Instance Y-axis rotation from authored yaw. PSX angle
         // units (4096 per turn) → Q12 sin/cos via the existing
         // GTE shim, then composed into a rotation matrix.
-        let instance_rotation = yaw_rotation_matrix(Angle::from_q12(inst.yaw as u16));
+        let root_yaw = Angle::from_q12(inst.yaw as u16);
+        let model_rotation = yaw_rotation_matrix(root_yaw.add_signed_q12(inst.visual_yaw));
         // Authored instance positions are floor anchors; cooked
         // model vertices are centred around their bounds.
         let origin = visual_model_origin(
@@ -6961,12 +6964,12 @@ fn draw_model_instances(
             runtime_model.world_height,
             inst.visual_offset,
             inst.visual_scale_q8,
-            &instance_rotation,
+            &model_rotation,
         );
         let local_to_world = visual_model_local_to_world(runtime_model, inst.visual_scale_q8);
         let bounds_origin = model_pose_translated_origin(
             origin,
-            instance_rotation,
+            model_rotation,
             local_to_world,
             pose_translation,
         );
@@ -6980,7 +6983,7 @@ fn draw_model_instances(
                 camera,
                 options,
                 bounds_origin,
-                instance_rotation,
+                model_rotation,
                 bounds,
                 inst.visual_scale_q8,
             ),
@@ -7011,7 +7014,7 @@ fn draw_model_instances(
             phase,
             *camera,
             origin,
-            instance_rotation,
+            model_rotation,
             local_to_world,
             pose_translation,
             material,

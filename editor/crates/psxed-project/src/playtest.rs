@@ -562,6 +562,7 @@ pub fn build_package(
                             room_index,
                             pos,
                             yaw,
+                            renderer.visual_yaw,
                             renderer.visual_offset,
                             renderer.visual_scale_q8,
                             &mut assets,
@@ -726,6 +727,7 @@ pub fn build_package(
                         room_index,
                         pos,
                         yaw,
+                        0,
                         [0; 3],
                         crate::MODEL_SCALE_ONE_Q8,
                         &mut assets,
@@ -939,6 +941,10 @@ pub fn build_package(
                     .renderer
                     .map(|renderer| renderer.visual_offset)
                     .unwrap_or([0; 3]),
+                candidate
+                    .renderer
+                    .map(|renderer| renderer.visual_yaw)
+                    .unwrap_or(0),
                 candidate
                     .renderer
                     .map(|renderer| renderer.visual_scale_q8)
@@ -1416,6 +1422,7 @@ fn cook_player_character(
     character_id: Option<ResourceId>,
     model_override: Option<ResourceId>,
     visual_offset: [i16; 3],
+    visual_yaw: i16,
     visual_scale_q8: u16,
     action_overrides: &[crate::CharacterActionClip],
     controller_settings: Option<CharacterControllerSettings>,
@@ -1706,6 +1713,7 @@ fn cook_player_character(
         action_clips,
         action_flags,
         visual_offset,
+        visual_yaw,
         visual_scale_q8,
         radius: settings.radius,
         height: settings.height,
@@ -2337,6 +2345,7 @@ fn push_model_instance_for_resource(
     room_index: u16,
     pos: [i32; 3],
     yaw: i16,
+    visual_yaw: i16,
     visual_offset: [i16; 3],
     visual_scale_q8: u16,
     assets: &mut Vec<PlaytestAsset>,
@@ -2398,6 +2407,7 @@ fn push_model_instance_for_resource(
         y: pos[1],
         z: pos[2],
         yaw,
+        visual_yaw,
         visual_offset,
         visual_scale_q8,
         flags: 0,
@@ -2483,6 +2493,7 @@ fn push_character_controller_idle_instance(
         y: pos[1],
         z: pos[2],
         yaw,
+        visual_yaw: 0,
         visual_offset: [0; 3],
         visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
         flags: 0,
@@ -2663,6 +2674,7 @@ fn playtest_weapon_shape(shape: &crate::WeaponHitShape) -> PlaytestWeaponHitShap
 struct ModelRendererComponent {
     model: Option<ResourceId>,
     visual_offset: [i16; 3],
+    visual_yaw: i16,
     visual_scale_q8: u16,
 }
 
@@ -2698,6 +2710,7 @@ fn component_model_renderer(
         } => Some(ModelRendererComponent {
             model: *model,
             visual_offset: *visual_offset,
+            visual_yaw: yaw_from_degrees(node.transform.rotation_degrees[1]),
             visual_scale_q8: *visual_scale_q8,
         }),
         _ => None,
@@ -4852,11 +4865,13 @@ mod tests {
         };
         *visual_offset = [32, -16, 48];
         *visual_scale_q8 = crate::MODEL_SCALE_ONE_Q8 + 64;
+        renderer.transform.rotation_degrees[1] = 45.0;
 
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let character = &package.expect("package returned on ok report").characters[0];
         assert_eq!(character.visual_offset, [32, -16, 48]);
+        assert_eq!(character.visual_yaw, 512);
         assert_eq!(character.visual_scale_q8, crate::MODEL_SCALE_ONE_Q8 + 64);
     }
 
@@ -6450,12 +6465,22 @@ mod tests {
                 visual_scale_q8: crate::MODEL_SCALE_ONE_Q8 + 32,
             },
         );
+        let renderer_id = scene
+            .node(entity)
+            .and_then(|node| node.children.first().copied())
+            .expect("renderer child");
+        scene
+            .node_mut(renderer_id)
+            .expect("renderer exists")
+            .transform
+            .rotation_degrees[1] = 45.0;
 
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
         assert_eq!(package.model_instances.len(), 1);
         assert_eq!(package.model_instances[0].yaw, 1024);
+        assert_eq!(package.model_instances[0].visual_yaw, 512);
         assert_eq!(package.model_instances[0].visual_offset, [24, 8, -12]);
         assert_eq!(
             package.model_instances[0].visual_scale_q8,
@@ -6609,6 +6634,7 @@ mod tests {
         assert!(src.contains("LevelModelRecord"));
         assert!(src.contains("collision_radius:"));
         assert!(src.contains("LevelModelInstanceRecord"));
+        assert!(src.contains("visual_yaw:"));
         assert!(src.contains("LevelModelClipRecord"));
         assert!(src.contains("LevelModelClipBoundsRecord"));
         assert!(src.contains("LevelModelFrameBoundsRecord"));
