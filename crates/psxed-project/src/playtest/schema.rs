@@ -691,6 +691,8 @@ pub struct PlaytestCharacter {
     /// Optional clip index per [`crate::CharacterAnimationAction`]
     /// slot, within the model's runtime clip slice.
     pub action_clips: [u16; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Per-action playback flags matching [`Self::action_clips`].
+    pub action_flags: [u8; PLAYTEST_CHARACTER_ACTION_COUNT],
     /// Render-only model offset from the player/controller root,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],
