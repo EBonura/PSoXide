@@ -1702,6 +1702,7 @@ fn walk_image_props(
     scratch: &mut PreviewScratch,
 ) {
     let scene = project.active_scene();
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
     for node in scene.nodes() {
         if scene_node_hidden(scene, hidden_scene_nodes, node.id)
             || !is_descendant_of_room(scene, node.id, room_id)
@@ -1748,9 +1749,9 @@ fn walk_image_props(
         let u_max = slot.texture_width.saturating_sub(1);
         let v_max = slot.texture_height.saturating_sub(1);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-        let material =
-            TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (tint[0], tint[1], tint[2]))
-                .with_texture_window(slot.texture_window);
+        let lit_tint = preview_lit_image_prop_tint(tint, verts, &lights, grid.ambient_color);
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, lit_tint)
+            .with_texture_window(slot.texture_window);
         let _ = push_textured_material_tri(
             scratch,
             [p[0], p[1], p[2]],
@@ -1788,6 +1789,31 @@ fn walk_image_props(
             );
         }
     }
+}
+
+fn preview_lit_image_prop_tint(
+    tint: [u8; 3],
+    verts: [psx_engine::WorldVertex; 4],
+    lights: &[psx_engine::PointLightSample],
+    ambient: [u8; 3],
+) -> (u8, u8, u8) {
+    let center = [
+        average_i32_4(verts[0].x, verts[1].x, verts[2].x, verts[3].x),
+        average_i32_4(verts[0].y, verts[1].y, verts[2].y, verts[3].y),
+        average_i32_4(verts[0].z, verts[1].z, verts[2].z, verts[3].z),
+    ];
+    psx_engine::shade_material_tint_with_lights(
+        psx_engine::MaterialTint::from_tuple((tint[0], tint[1], tint[2])),
+        center,
+        psx_engine::Rgb8::from_array(ambient),
+        lights.iter().copied(),
+    )
+    .to_tuple()
+}
+
+fn average_i32_4(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    ((a as i64 + b as i64 + c as i64 + d as i64) / 4).clamp(i32::MIN as i64, i32::MAX as i64)
+        as i32
 }
 
 fn image_prop_vertices(

@@ -1180,6 +1180,8 @@ pub struct LevelImagePropRecord {
     pub height: u16,
     /// Per-material modulation tint.
     pub tint_rgb: [u8; 3],
+    /// Baked static light base per quad vertex, in perimeter order.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
     /// Runtime flags.
     pub flags: u16,
 }
