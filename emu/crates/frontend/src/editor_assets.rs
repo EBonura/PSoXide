@@ -312,16 +312,19 @@ mod tests {
             "Test Model",
             ResourceData::Model(ModelResource {
                 model_path: mesh_rel,
+                source_path: None,
                 texture_path: None,
                 skeleton: None,
                 clips: vec![
                     ModelAnimationClip {
                         name: "a".into(),
                         psxanim_path: clip_a_rel,
+                        calibration: Default::default(),
                     },
                     ModelAnimationClip {
                         name: "b".into(),
                         psxanim_path: clip_b_rel,
+                        calibration: Default::default(),
                     },
                 ],
                 default_clip: Some(0),
@@ -444,6 +447,7 @@ mod tests {
             "Test Model",
             ResourceData::Model(ModelResource {
                 model_path: "missing.psxmdl".into(),
+                source_path: None,
                 texture_path: None,
                 skeleton: None,
                 clips: vec![],

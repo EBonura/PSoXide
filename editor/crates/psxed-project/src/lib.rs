@@ -5392,6 +5392,13 @@ impl CharacterAnimationAction {
         matches!(self, Self::Idle | Self::Walk)
     }
 
+    pub const fn loops_by_default(self) -> bool {
+        matches!(
+            self,
+            Self::Idle | Self::Walk | Self::Run | Self::Turn | Self::Block
+        )
+    }
+
     pub fn guess_from_name(name: &str) -> Option<Self> {
         let name = name.to_ascii_lowercase();
         if name.contains("idle") {
@@ -5434,6 +5441,8 @@ impl CharacterAnimationAction {
 pub struct AnimationActionBinding {
     pub action: CharacterAnimationAction,
     pub clip: ResourceId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<CharacterActionOptions>,
 }
 
 /// Model-local fallback action binding used directly on Characters.
@@ -5441,6 +5450,30 @@ pub struct AnimationActionBinding {
 pub struct CharacterActionClip {
     pub action: CharacterAnimationAction,
     pub clip: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<CharacterActionOptions>,
+}
+
+/// Per-action playback controls.
+///
+/// This deliberately belongs to the action binding, not the clip
+/// resource: the same cooked animation can be used as a looping
+/// locomotion fallback in one place and a one-shot action in another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterActionOptions {
+    #[serde(default)]
+    pub looping: bool,
+    #[serde(default = "default_true")]
+    pub in_place: bool,
+}
+
+impl CharacterActionOptions {
+    pub const fn for_action(action: CharacterAnimationAction) -> Self {
+        Self {
+            looping: action.loops_by_default(),
+            in_place: true,
+        }
+    }
 }
 
 /// Where an authoring-time animation candidate came from. The source
@@ -5687,6 +5720,15 @@ impl AnimationSetResource {
             .or_else(|| action.role_hint().and_then(|role| self.role_clip(role)))
     }
 
+    pub fn action_binding(
+        &self,
+        action: CharacterAnimationAction,
+    ) -> Option<&AnimationActionBinding> {
+        self.action_clips
+            .iter()
+            .find(|binding| binding.action == action)
+    }
+
     pub fn set_action_clip(&mut self, action: CharacterAnimationAction, clip: Option<ResourceId>) {
         if let Some(role) = action.role_hint() {
             if let Some(slot) = self.role_clip_mut(role) {
@@ -5702,8 +5744,11 @@ impl AnimationSetResource {
                 {
                     binding.clip = clip;
                 } else {
-                    self.action_clips
-                        .push(AnimationActionBinding { action, clip });
+                    self.action_clips.push(AnimationActionBinding {
+                        action,
+                        clip,
+                        options: None,
+                    });
                 }
             }
             None => self.action_clips.retain(|binding| binding.action != action),
@@ -6179,6 +6224,12 @@ impl CharacterResource {
             })
     }
 
+    pub fn action_binding(&self, action: CharacterAnimationAction) -> Option<&CharacterActionClip> {
+        self.action_clips
+            .iter()
+            .find(|binding| binding.action == action)
+    }
+
     pub fn set_action_clip(&mut self, action: CharacterAnimationAction, clip: Option<u16>) {
         match action {
             CharacterAnimationAction::Idle => self.idle_clip = None,
@@ -6203,7 +6254,11 @@ impl CharacterResource {
                 {
                     binding.clip = clip;
                 } else {
-                    self.action_clips.push(CharacterActionClip { action, clip });
+                    self.action_clips.push(CharacterActionClip {
+                        action,
+                        clip,
+                        options: None,
+                    });
                 }
             }
             None => self.action_clips.retain(|binding| binding.action != action),

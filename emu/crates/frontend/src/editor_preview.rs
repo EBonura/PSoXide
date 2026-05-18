@@ -922,6 +922,7 @@ fn component_children<'a>(
 struct PreviewModelReference {
     model_id: ResourceId,
     clip_override: Option<u16>,
+    autoplay: bool,
     renderer_node: Option<NodeId>,
     animator_node: Option<NodeId>,
     visual_offset: [i16; 3],
@@ -937,6 +938,7 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
         } => Some(PreviewModelReference {
             model_id: *model_id,
             clip_override: *animation_clip,
+            autoplay: true,
             renderer_node: None,
             animator_node: None,
             visual_offset: [0; 3],
@@ -955,8 +957,8 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                     } if renderer.is_none() => {
                         renderer = Some((child.id, *model_id, *visual_offset, *visual_scale_q8));
                     }
-                    NodeKind::Animator { clip, .. } if animator.is_none() => {
-                        animator = Some((child.id, *clip));
+                    NodeKind::Animator { clip, autoplay, .. } if animator.is_none() => {
+                        animator = Some((child.id, *clip, *autoplay));
                     }
                     _ => {}
                 }
@@ -964,9 +966,10 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
             renderer.map(
                 |(renderer_node, model_id, visual_offset, visual_scale_q8)| PreviewModelReference {
                     model_id,
-                    clip_override: animator.and_then(|(_, clip)| clip),
+                    clip_override: animator.and_then(|(_, clip, _)| clip),
+                    autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
                     renderer_node: Some(renderer_node),
-                    animator_node: animator.map(|(node_id, _)| node_id),
+                    animator_node: animator.map(|(node_id, _, _)| node_id),
                     visual_offset,
                     visual_scale_q8,
                 },
@@ -993,8 +996,11 @@ fn preview_static_model_reference(
 struct PreviewPlayerReference {
     character: Option<ResourceId>,
     model_override: Option<ResourceId>,
+    clip_override: Option<u16>,
     controller_node: Option<NodeId>,
     renderer_node: Option<NodeId>,
+    animator_node: Option<NodeId>,
+    autoplay: bool,
     visual_offset: [i16; 3],
     visual_scale_q8: u16,
 }
@@ -1007,14 +1013,18 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
         } => Some(PreviewPlayerReference {
             character: *character,
             model_override: None,
+            clip_override: None,
             controller_node: None,
             renderer_node: None,
+            animator_node: None,
+            autoplay: true,
             visual_offset: [0; 3],
             visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         }),
         NodeKind::Entity => {
             let mut controller = None;
             let mut renderer = None;
+            let mut animator = None;
             for child in component_children(scene, node) {
                 match &child.kind {
                     NodeKind::CharacterController {
@@ -1032,6 +1042,9 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                     } if renderer.is_none() => {
                         renderer = Some((child.id, *model, *visual_offset, *visual_scale_q8));
                     }
+                    NodeKind::Animator { clip, autoplay, .. } if animator.is_none() => {
+                        animator = Some((child.id, *clip, *autoplay));
+                    }
                     _ => {}
                 }
             }
@@ -1042,8 +1055,11 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                 PreviewPlayerReference {
                     character,
                     model_override,
+                    clip_override: animator.and_then(|(_, clip, _)| clip),
                     controller_node: Some(controller_node),
                     renderer_node,
+                    animator_node: animator.map(|(node_id, _, _)| node_id),
+                    autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
                     visual_offset,
                     visual_scale_q8,
                 }
@@ -1058,8 +1074,12 @@ fn preview_reference_selected(
     host_id: NodeId,
     component_a: Option<NodeId>,
     component_b: Option<NodeId>,
+    component_c: Option<NodeId>,
 ) -> bool {
-    selected == host_id || component_a == Some(selected) || component_b == Some(selected)
+    selected == host_id
+        || component_a == Some(selected)
+        || component_b == Some(selected)
+        || component_c == Some(selected)
 }
 
 fn preview_reference_hidden(
@@ -1068,10 +1088,12 @@ fn preview_reference_hidden(
     host_id: NodeId,
     component_a: Option<NodeId>,
     component_b: Option<NodeId>,
+    component_c: Option<NodeId>,
 ) -> bool {
     scene_node_hidden(scene, hidden_scene_nodes, host_id)
         || component_a.is_some_and(|id| scene_node_hidden(scene, hidden_scene_nodes, id))
         || component_b.is_some_and(|id| scene_node_hidden(scene, hidden_scene_nodes, id))
+        || component_c.is_some_and(|id| scene_node_hidden(scene, hidden_scene_nodes, id))
 }
 
 fn scene_node_hidden(scene: &Scene, hidden_scene_nodes: &HashSet<NodeId>, id: NodeId) -> bool {
@@ -1947,6 +1969,9 @@ struct PreviewModelInstance<'a> {
     /// Lit and fogged model texture tint, matching editor-playtest's
     /// single-material actor lighting path.
     tint: (u8, u8, u8),
+    /// Whether the editor preview should advance this instance's
+    /// animation phase. Disabled instances hold frame zero.
+    autoplay: bool,
 }
 
 /// Render every Model-backed legacy `MeshInstance` or component
@@ -1999,6 +2024,7 @@ fn walk_model_instances(
             node.id,
             reference.renderer_node,
             reference.animator_node,
+            None,
         ) {
             continue;
         }
@@ -2051,7 +2077,9 @@ fn walk_model_instances(
                 node.id,
                 reference.renderer_node,
                 reference.animator_node,
+                None,
             ),
+            autoplay: reference.autoplay,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
@@ -2108,6 +2136,7 @@ fn walk_model_instances(
             instance_rotation: meta.instance_rotation,
             visual_scale_q8: meta.visual_scale_q8,
             tint: shade_model_tint(origin, *camera, fog, &lights, ambient),
+            autoplay: meta.autoplay,
         });
     }
 
@@ -2163,6 +2192,7 @@ fn walk_player_spawn_preview(
             node.id,
             reference.controller_node,
             reference.renderer_node,
+            reference.animator_node,
         ) {
             continue;
         }
@@ -2192,19 +2222,20 @@ fn walk_player_spawn_preview(
             continue;
         };
 
-        // Idle clip drives the preview loop -- the spec wants
-        // designers to see "what would the player be doing
-        // standing still here". Falls through to the model's
-        // preview / default clip if the Character has no idle
-        // assigned, so the surface still renders even when the
-        // Character is mid-author.
-        let clip_local = psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
-            project,
-            char_resource,
-            model_id,
-            model,
-        )
-        .unwrap_or(0);
+        // Animator clip drives the editor viewport when authored.
+        // Otherwise fall back to the player's idle action, then the
+        // model preview/default clip so partial characters still draw.
+        let clip_local = reference
+            .clip_override
+            .or_else(|| {
+                psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
+                    project,
+                    char_resource,
+                    model_id,
+                    model,
+                )
+            })
+            .unwrap_or(0);
         if (clip_local as usize) >= project.resolved_model_animation_clips(model_id).len() {
             continue;
         }
@@ -2227,7 +2258,9 @@ fn walk_player_spawn_preview(
                 node.id,
                 reference.controller_node,
                 reference.renderer_node,
+                reference.animator_node,
             ),
+            autoplay: reference.autoplay,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
@@ -2417,6 +2450,7 @@ struct InstanceMeta {
     /// Render-only calibration copied from ModelRenderer.
     visual_offset: [i16; 3],
     visual_scale_q8: u16,
+    autoplay: bool,
 }
 
 fn floor_anchored_model_origin(
@@ -2544,7 +2578,11 @@ fn submit_preview_model_instance(
     source_vertex_pool: &mut [psx_asset::ModelVertex],
     joint_view_transforms: &mut [psx_engine::JointViewTransform],
 ) -> bool {
-    let frame_q12 = instance.animation.phase_at_tick_q12(tick, 60);
+    let frame_q12 = if instance.autoplay {
+        instance.animation.phase_at_tick_q12(tick, 60)
+    } else {
+        0
+    };
     let material = TextureMaterial::opaque(
         instance.atlas.clut_word,
         instance.atlas.tpage_word,
@@ -2712,9 +2750,9 @@ fn walk_light_gizmos(
     for light in preview_lights(scene, hidden_scene_nodes) {
         let center = node_room_local_origin(grid, &light.transform);
         let center_world = [center.x, center.y, center.z];
-        let is_selected = preview_reference_selected(selected, light.host_id, None, None);
-        let is_hovered =
-            hovered.is_some_and(|id| preview_reference_selected(id, light.host_id, None, None));
+        let is_selected = preview_reference_selected(selected, light.host_id, None, None, None);
+        let is_hovered = hovered
+            .is_some_and(|id| preview_reference_selected(id, light.host_id, None, None, None));
         let style = if is_selected {
             FaceOutlineStyle {
                 rgb: (0xFF, 0xE0, 0x80),
@@ -4517,6 +4555,7 @@ mod tests {
             "Animator",
             NodeKind::Animator {
                 clip: Some(3),
+                action_clips: Vec::new(),
                 autoplay: true,
             },
         );
@@ -4526,12 +4565,13 @@ mod tests {
 
         assert_eq!(reference.model_id, model_id);
         assert_eq!(reference.clip_override, Some(3));
+        assert!(reference.autoplay);
         assert_eq!(reference.renderer_node, Some(renderer));
         assert_eq!(reference.animator_node, Some(animator));
     }
 
     #[test]
-    fn component_player_reference_reads_controller_child() {
+    fn component_player_reference_reads_controller_renderer_and_animator_children() {
         let mut project = ProjectDocument::new("test");
         let character_id = project.add_resource(
             "Dummy",
@@ -4547,6 +4587,26 @@ mod tests {
             NodeKind::CharacterController {
                 character: Some(character_id),
                 player: true,
+                settings: Default::default(),
+            },
+        );
+        let renderer = scene.add_node(
+            actor,
+            "Model Renderer",
+            NodeKind::ModelRenderer {
+                model: None,
+                material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
+            },
+        );
+        let animator = scene.add_node(
+            actor,
+            "Animator",
+            NodeKind::Animator {
+                clip: Some(2),
+                action_clips: Vec::new(),
+                autoplay: false,
             },
         );
 
@@ -4555,6 +4615,10 @@ mod tests {
 
         assert_eq!(reference.character, Some(character_id));
         assert_eq!(reference.controller_node, Some(controller));
+        assert_eq!(reference.renderer_node, Some(renderer));
+        assert_eq!(reference.animator_node, Some(animator));
+        assert_eq!(reference.clip_override, Some(2));
+        assert!(!reference.autoplay);
     }
 
     #[test]
@@ -4590,6 +4654,7 @@ mod tests {
             NodeKind::CharacterController {
                 character: Some(character_id),
                 player: true,
+                settings: Default::default(),
             },
         );
 
