@@ -6295,7 +6295,7 @@ const fn default_character_sprint_min_q12() -> i32 {
 }
 
 const fn default_character_sprint_drain_q12() -> i32 {
-    48
+    40
 }
 
 const fn default_character_stamina_recover_q12() -> i32 {
@@ -9504,7 +9504,7 @@ mod tests {
             default_model_collision_radius_for_height(wraith.world_height)
         );
         let resolved_clips = project.resolved_model_animation_clips(wraith_id);
-        assert_eq!(resolved_clips.len(), 9);
+        assert_eq!(resolved_clips.len(), 8);
         assert_eq!(resolved_clips[0].name, "Standalone FBX / neutral idle");
         assert_eq!(wraith.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
     }
