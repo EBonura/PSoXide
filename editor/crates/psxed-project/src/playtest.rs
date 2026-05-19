@@ -66,7 +66,8 @@ pub use manifest::{
 };
 pub use schema::*;
 
-const PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
+#[cfg(test)]
+const DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
 const ATMOSPHERE_DENSITY_MAX: i32 = 96;
 const ATMOSPHERE_FALL_SPEED_MAX_Q4: i32 = 64;
 const ATMOSPHERE_WIND_SPEED_MIN_Q4: i32 = -64;
@@ -313,9 +314,14 @@ pub fn build_package(
             let material_count =
                 u16::try_from(materials.len() - material_first as usize).unwrap_or(u16::MAX);
 
+            let resolved_culling = scene
+                .world_culling_for_node(room_node.id)
+                .unwrap_or_default()
+                .normalized();
             append_room_visibility(
                 room_index,
                 &cooked,
+                resolved_culling.visibility_radius,
                 &mut room_visibility,
                 &mut visibility_cells,
                 &mut visibility_pvs,
@@ -405,6 +411,10 @@ pub fn build_package(
                 origin_x: chunk_grid.origin[0],
                 origin_z: chunk_grid.origin[1],
                 sector_size: chunk_grid.sector_size,
+                draw_distance: resolved_culling.draw_distance,
+                chunk_activation_radius_sectors: resolved_culling
+                    .chunk_activation_radius_sectors,
+                visibility_radius: resolved_culling.visibility_radius,
                 material_first,
                 material_count,
                 fog_rgb: chunk_grid.fog_color,
@@ -3377,6 +3387,7 @@ const FULL_HEIGHT_BLOCKER_TOLERANCE: i32 = 32;
 fn append_room_visibility(
     room_index: u16,
     cooked: &CookedWorldGrid,
+    visibility_radius: u16,
     room_visibility: &mut Vec<PlaytestRoomVisibility>,
     visibility_cells: &mut Vec<PlaytestVisibilityCell>,
     visibility_pvs: &mut Vec<PlaytestVisibilityPvs>,
@@ -3398,6 +3409,7 @@ fn append_room_visibility(
         cooked.depth,
         &local_cells,
         &index_by_coord,
+        visibility_radius,
         visibility_pvs,
         visibility_pvs_bits,
     );
@@ -3751,6 +3763,7 @@ fn append_visibility_pvs(
     depth: u16,
     cells: &[PlaytestVisibilityCell],
     index_by_coord: &[Option<usize>],
+    visibility_radius: u16,
     visibility_pvs: &mut Vec<PlaytestVisibilityPvs>,
     visibility_pvs_bits: &mut Vec<u8>,
 ) {
@@ -3758,7 +3771,15 @@ fn append_visibility_pvs(
     let mut bits = vec![0u8; bitset_bytes];
     for anchor_index in 0..cells.len() {
         bits.fill(0);
-        fill_visibility_pvs_bits(anchor_index, width, depth, cells, index_by_coord, &mut bits);
+        fill_visibility_pvs_bits(
+            anchor_index,
+            width,
+            depth,
+            cells,
+            index_by_coord,
+            visibility_radius,
+            &mut bits,
+        );
         let byte_first =
             find_existing_visibility_pvs_bits(visibility_pvs, visibility_pvs_bits, &bits)
                 .unwrap_or_else(|| {
@@ -3803,9 +3824,17 @@ fn fill_visibility_pvs_bits(
     depth: u16,
     cells: &[PlaytestVisibilityCell],
     index_by_coord: &[Option<usize>],
+    visibility_radius: u16,
     bits: &mut [u8],
 ) -> Vec<usize> {
-    let visible = visibility_indices_for_anchor(anchor_index, width, depth, cells, index_by_coord);
+    let visible = visibility_indices_for_anchor(
+        anchor_index,
+        width,
+        depth,
+        cells,
+        index_by_coord,
+        visibility_radius,
+    );
     for &index in &visible {
         set_visibility_pvs_bit(bits, index);
     }
@@ -3818,6 +3847,7 @@ fn visibility_indices_for_anchor(
     depth: u16,
     cells: &[PlaytestVisibilityCell],
     index_by_coord: &[Option<usize>],
+    visibility_radius: u16,
 ) -> Vec<usize> {
     if anchor_index >= cells.len() {
         return Vec::new();
@@ -3834,7 +3864,7 @@ fn visibility_indices_for_anchor(
     while let Some(&(cell_index, distance)) = queue.get(cursor) {
         cursor += 1;
         visible.push(cell_index);
-        if distance >= PLAYTEST_VISIBILITY_CELL_RADIUS {
+        if distance >= visibility_radius {
             continue;
         }
 
@@ -4686,19 +4716,21 @@ mod tests {
     #[test]
     fn visibility_pvs_adds_one_cell_boundary_shell() {
         let width = 1;
-        let depth = PLAYTEST_VISIBILITY_CELL_RADIUS + 6;
+        let radius = DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS;
+        let depth = radius + 6;
         let mut cells: Vec<PlaytestVisibilityCell> =
             (0..depth).map(|z| visibility_test_cell(0, z, 0)).collect();
         let index_by_coord = visibility_index_by_coord(width, depth, &cells);
         assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
 
-        let visible = visibility_indices_for_anchor(0, width, depth, &cells, &index_by_coord);
+        let visible =
+            visibility_indices_for_anchor(0, width, depth, &cells, &index_by_coord, radius);
 
-        assert_eq!(visible.len(), PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 2);
+        assert_eq!(visible.len(), radius as usize + 2);
         assert!(visible.contains(&0));
-        assert!(visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize)));
-        assert!(visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 1)));
-        assert!(!visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 2)));
+        assert!(visible.contains(&(radius as usize)));
+        assert!(visible.contains(&(radius as usize + 1)));
+        assert!(!visible.contains(&(radius as usize + 2)));
     }
 
     #[test]
@@ -4712,7 +4744,14 @@ mod tests {
         let index_by_coord = visibility_index_by_coord(width, depth, &cells);
         assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
 
-        let visible = visibility_indices_for_anchor(0, width, depth, &cells, &index_by_coord);
+        let visible = visibility_indices_for_anchor(
+            0,
+            width,
+            depth,
+            &cells,
+            &index_by_coord,
+            DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS,
+        );
 
         assert_eq!(visible, vec![1, 0]);
     }
@@ -4727,7 +4766,15 @@ mod tests {
         let mut pvs = Vec::new();
         let mut bits = Vec::new();
 
-        append_visibility_pvs(width, depth, &cells, &index_by_coord, &mut pvs, &mut bits);
+        append_visibility_pvs(
+            width,
+            depth,
+            &cells,
+            &index_by_coord,
+            DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS,
+            &mut pvs,
+            &mut bits,
+        );
 
         assert_eq!(pvs.len(), 2);
         assert_eq!(bits.len(), 1);
