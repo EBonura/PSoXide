@@ -96,6 +96,10 @@ pub struct PlaytestRoom {
     pub chunk_activation_radius_sectors: i32,
     /// Cooked PVS traversal radius in room cells.
     pub visibility_radius: u16,
+    /// Runtime generated-chunk residency budget inherited from the World node.
+    pub resident_chunk_limit: u8,
+    /// Runtime generated-chunk visible/drawable budget inherited from the World node.
+    pub visible_chunk_limit: u8,
     /// First index into [`PlaytestPackage::materials`] for this
     /// room's slice.
     pub material_first: u16,

@@ -283,7 +283,7 @@ pub fn build_phase1_frame(
         &mut scratch,
     );
     if show_grid {
-        push_streaming_chunk_boundaries(grid, &mut scratch);
+        push_streaming_chunk_boundaries(project, room_id, grid, &mut scratch);
     }
     walk_entities(project, grid, hidden_scene_nodes, selected, &mut scratch);
     walk_light_gizmos(
@@ -1819,8 +1819,7 @@ fn preview_lit_image_prop_tint(
 }
 
 fn average_i32_4(a: i32, b: i32, c: i32, d: i32) -> i32 {
-    ((a as i64 + b as i64 + c as i64 + d as i64) / 4).clamp(i32::MIN as i64, i32::MAX as i64)
-        as i32
+    ((a as i64 + b as i64 + c as i64 + d as i64) / 4).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 fn image_prop_vertices(
@@ -3566,8 +3565,17 @@ fn push_triangle_outline(
     }
 }
 
-fn push_streaming_chunk_boundaries(grid: &WorldGrid, scratch: &mut PreviewScratch) {
-    let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config());
+fn push_streaming_chunk_boundaries(
+    project: &ProjectDocument,
+    room_id: NodeId,
+    grid: &WorldGrid,
+    scratch: &mut PreviewScratch,
+) {
+    let streaming = project
+        .active_scene()
+        .world_streaming_for_node(room_id)
+        .unwrap_or_default();
+    let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config(streaming));
     if plan.chunk_count() <= 1 {
         return;
     }
@@ -4810,9 +4818,21 @@ mod tests {
     fn editor_cardinal_wall_front_material_renders_from_owning_cell() {
         let cases = [
             (WallEdge::North, [512, 512, 512], 2048, [512, 512, 1536], 0),
-            (WallEdge::East, [512, 512, 512], 3072, [1536, 512, 512], 1024),
+            (
+                WallEdge::East,
+                [512, 512, 512],
+                3072,
+                [1536, 512, 512],
+                1024,
+            ),
             (WallEdge::South, [512, 512, 512], 0, [512, 512, -512], 2048),
-            (WallEdge::West, [512, 512, 512], 1024, [-512, 512, 512], 3072),
+            (
+                WallEdge::West,
+                [512, 512, 512],
+                1024,
+                [-512, 512, 512],
+                3072,
+            ),
         ];
 
         for (edge, inside_pos, inside_yaw, outside_pos, outside_yaw) in cases {
