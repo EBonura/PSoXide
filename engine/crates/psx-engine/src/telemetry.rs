@@ -335,6 +335,26 @@ pub mod counter {
     pub const MODEL_PROFILE_DRAWS_6: u16 = 127;
     /// Runtime model slot 7 draw submits.
     pub const MODEL_PROFILE_DRAWS_7: u16 = 128;
+    /// Low 32 bits of the resident streamed room/chunk bitset.
+    pub const ROOM_STREAM_RESIDENT_MASK_LO: u16 = 129;
+    /// High 32 bits of the resident streamed room/chunk bitset.
+    pub const ROOM_STREAM_RESIDENT_MASK_HI: u16 = 130;
+    /// Low 32 bits of the active drawable room/chunk bitset.
+    pub const ROOM_ACTIVE_CHUNK_MASK_LO: u16 = 131;
+    /// High 32 bits of the active drawable room/chunk bitset.
+    pub const ROOM_ACTIVE_CHUNK_MASK_HI: u16 = 132;
+    /// Low 32 bits of the room/chunk bitset that submitted room geometry.
+    pub const ROOM_DRAWN_CHUNK_MASK_LO: u16 = 133;
+    /// High 32 bits of the room/chunk bitset that submitted room geometry.
+    pub const ROOM_DRAWN_CHUNK_MASK_HI: u16 = 134;
+    /// Runtime room/chunk index containing the player.
+    pub const ROOM_PLAYER_ROOM_INDEX: u16 = 135;
+    /// Player room-local X, biased for unsigned telemetry transport.
+    pub const ROOM_PLAYER_LOCAL_X_BIASED: u16 = 136;
+    /// Player room-local Z, biased for unsigned telemetry transport.
+    pub const ROOM_PLAYER_LOCAL_Z_BIASED: u16 = 137;
+    /// Camera/view yaw used by player-centred chunk diagnostics, in Q12 angle units.
+    pub const ROOM_PLAYER_VIEW_YAW_Q12: u16 = 138;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
