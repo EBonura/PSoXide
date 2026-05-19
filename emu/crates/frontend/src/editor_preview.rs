@@ -207,6 +207,7 @@ pub fn build_phase1_frame(
     camera: ViewportCameraState,
     preview_fog: bool,
     preview_backface_wireframe: bool,
+    preview_bounds: bool,
     show_grid: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
@@ -278,6 +279,7 @@ pub fn build_phase1_frame(
         hidden_scene_nodes,
         selected,
         hovered_entity_node,
+        preview_bounds,
         &mut scratch,
     );
     if show_grid {
@@ -338,10 +340,12 @@ pub fn build_phase1_frame(
     // rendering left it set to the last joint's view, which
     // would project entity bound lines into junk.
     let _ = setup_gte_for_camera(camera);
-    walk_entity_bounds(entity_bounds, selected, hovered_entity_node, &mut scratch);
-    if let Some((center, half_extents)) = selected_bounds {
-        if !selected_node_is_image_prop(project, selected) {
-            push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
+    if preview_bounds {
+        walk_entity_bounds(entity_bounds, selected, hovered_entity_node, &mut scratch);
+        if let Some((center, half_extents)) = selected_bounds {
+            if !selected_node_is_image_prop(project, selected) {
+                push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
+            }
         }
     }
     for selection in validation_issue_primitives {
@@ -1699,6 +1703,7 @@ fn walk_image_props(
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: NodeId,
     hovered: Option<NodeId>,
+    preview_bounds: bool,
     scratch: &mut PreviewScratch,
 ) {
     let scene = project.active_scene();
@@ -1768,25 +1773,27 @@ fn walk_image_props(
         );
         let is_selected = node.id == selected;
         let is_hovered = hovered == Some(node.id);
-        push_world_quad_wireframe(
-            scratch,
-            verts,
-            entity_bound_style(
-                psxed_ui::EntityBoundKind::ImageProp,
-                is_selected,
-                is_hovered,
-            ),
-        );
-        if *collision_enabled {
-            push_image_prop_collision_wireframe(
+        if preview_bounds {
+            push_world_quad_wireframe(
                 scratch,
-                origin,
-                *height,
-                *collision_size,
-                node.transform.rotation_degrees,
-                *cylindrical_billboard,
-                IMAGE_PROP_COLLISION_BOX,
+                verts,
+                entity_bound_style(
+                    psxed_ui::EntityBoundKind::ImageProp,
+                    is_selected,
+                    is_hovered,
+                ),
             );
+            if *collision_enabled {
+                push_image_prop_collision_wireframe(
+                    scratch,
+                    origin,
+                    *height,
+                    *collision_size,
+                    node.transform.rotation_degrees,
+                    *cylindrical_billboard,
+                    IMAGE_PROP_COLLISION_BOX,
+                );
+            }
         }
     }
 }
