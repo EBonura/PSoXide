@@ -189,6 +189,10 @@ const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const SCREEN_CX: i16 = 160;
 const SCREEN_CY: i16 = 120;
+const ATMOSPHERE_PARTICLE_MAX: u32 = 96;
+const ATMOSPHERE_SCREEN_MARGIN: i32 = 24;
+const ATMOSPHERE_WRAP_W: i32 = SCREEN_W as i32 + ATMOSPHERE_SCREEN_MARGIN * 2;
+const ATMOSPHERE_WRAP_H: i32 = SCREEN_H as i32 + ATMOSPHERE_SCREEN_MARGIN * 2;
 const FOCAL: i32 = 320;
 const NEAR_Z: i32 = 64;
 const FAR_Z: i32 = 16384;
@@ -2349,6 +2353,10 @@ impl Scene for Playtest {
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         ot.submit();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
+
+        if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
+            draw_room_atmosphere_overlay(room_record, ctx.time.elapsed_vblanks());
+        }
 
         if self.show_collision_debug {
             self.draw_collision_debug_overlay(camera);
@@ -6967,12 +6975,8 @@ fn draw_model_instances(
             &model_rotation,
         );
         let local_to_world = visual_model_local_to_world(runtime_model, inst.visual_scale_q8);
-        let bounds_origin = model_pose_translated_origin(
-            origin,
-            model_rotation,
-            local_to_world,
-            pose_translation,
-        );
+        let bounds_origin =
+            model_pose_translated_origin(origin, model_rotation, local_to_world, pose_translation);
         if !depth_pass.includes(camera.view_vertex(origin).z) {
             continue;
         }
@@ -7365,11 +7369,7 @@ fn draw_image_props<T>(
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[2], verts[2]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[3], verts[3]),
         ];
-        let material = TextureMaterial::opaque(
-            slot.clut_word,
-            slot.tpage_word,
-            (0x80, 0x80, 0x80),
-        )
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
             .with_texture_window(slot.texture_window);
         let u_max = model_render_uv_max(slot.texture_width);
         let v_max = model_render_uv_max(slot.texture_height);
@@ -7406,7 +7406,8 @@ fn draw_image_props<T>(
             let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
                 .with_texture_window(slot.texture_window);
             let opts = opts.with_material_layer(material);
-            let _ = world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, opts);
+            let _ =
+                world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, opts);
         }
     }
 }
@@ -7674,6 +7675,81 @@ fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle)
         clamp_i16((center.sx as i32).saturating_add(rx)),
         clamp_i16((center.sy as i32).saturating_add(ry)),
     )
+}
+
+fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_vblanks: u32) {
+    if room.flags & room_flags::ATMOSPHERE_ENABLED == 0 {
+        return;
+    }
+    let count = (room.atmosphere_density as u32).min(ATMOSPHERE_PARTICLE_MAX);
+    if count == 0 {
+        return;
+    }
+    let base_fall_q4 = room.atmosphere_fall_speed_q4.max(0) as i32;
+    let base_wind_q4 = room.atmosphere_wind_speed_q4 as i32;
+    let elapsed = elapsed_vblanks as i32;
+    let mut i = 0u32;
+    while i < count {
+        let seed = atmosphere_seed(i);
+        let layer = ((seed >> 4) & 3) as u32;
+        let fall_q4 = base_fall_q4 + (layer as i32) * 3;
+        let wind_q4 = base_wind_q4 + layer as i32;
+        let base_x = (seed & 0x1ff) as i32;
+        let base_y = ((seed >> 9) & 0x1ff) as i32;
+        let drift_phase = ((elapsed_vblanks >> (2 + layer)) as i32 + ((seed >> 18) as i32)) & 31;
+        let drift = drift_phase - 16;
+        let x = wrap_atmosphere_axis(
+            base_x + (elapsed.wrapping_mul(wind_q4) >> 4) + drift,
+            ATMOSPHERE_WRAP_W,
+        );
+        let y = wrap_atmosphere_axis(
+            base_y + (elapsed.wrapping_mul(fall_q4) >> 4),
+            ATMOSPHERE_WRAP_H,
+        );
+        let size = 1 + (layer as i16 / 2);
+        draw_atmosphere_particle(
+            x,
+            y,
+            size,
+            atmosphere_particle_tint(room.atmosphere_rgb, layer, seed),
+        );
+        i += 1;
+    }
+}
+
+fn draw_atmosphere_particle(x: i16, y: i16, size: i16, tint: (u8, u8, u8)) {
+    let lean = size + 1;
+    draw_tri_flat_blended(
+        [(x, y), (x + lean, y + 1), (x, y + size + 1)],
+        tint.0,
+        tint.1,
+        tint.2,
+        BlendMode::Average,
+    );
+}
+
+fn atmosphere_particle_tint(base: [u8; 3], layer: u32, seed: u32) -> (u8, u8, u8) {
+    let lift = ((layer * 10) + ((seed >> 22) & 7)) as i16;
+    (
+        tint_channel(base[0], lift),
+        tint_channel(base[1], lift),
+        tint_channel(base[2], lift),
+    )
+}
+
+fn tint_channel(value: u8, delta: i16) -> u8 {
+    (value as i16 + delta).clamp(0, 255) as u8
+}
+
+fn wrap_atmosphere_axis(value: i32, span: i32) -> i16 {
+    (value.rem_euclid(span) - ATMOSPHERE_SCREEN_MARGIN) as i16
+}
+
+fn atmosphere_seed(index: u32) -> u32 {
+    let mut x = index.wrapping_mul(0x9e37_79b9).wrapping_add(0x7f4a_7c15);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x85eb_ca6b);
+    x ^ (x >> 13)
 }
 
 fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {

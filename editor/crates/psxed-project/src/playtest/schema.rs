@@ -102,6 +102,14 @@ pub struct PlaytestRoom {
     pub fog_near: i32,
     /// Fog end distance in engine units.
     pub fog_far: i32,
+    /// Base colour for the cheap screen-space room atmosphere pass.
+    pub atmosphere_rgb: [u8; 3],
+    /// Number of screen-space particles to draw for this room.
+    pub atmosphere_density: u8,
+    /// Base vertical particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_fall_speed_q4: i16,
+    /// Base horizontal particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_wind_speed_q4: i16,
     /// Resolved world sky for this cooked room.
     pub sky: PlaytestSky,
     /// Resolved far-vista ring for this cooked room.
