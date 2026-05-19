@@ -11,8 +11,9 @@ mod play_mode;
 mod style;
 
 pub use play_mode::{
-    EditorPlaytestMetrics, EditorPlaytestRequest, EditorPlaytestStatus, EditorViewport3dMode,
-    EditorViewport3dPresentation, EditorViewportOverlayLine,
+    EditorPlaytestMetrics, EditorPlaytestRequest, EditorPlaytestStatus, EditorPlaytestTapeMode,
+    EditorPlaytestTapeStatus, EditorViewport3dMode, EditorViewport3dPresentation,
+    EditorViewportOverlayLine,
 };
 
 use crate::history::UndoStack;
@@ -27,7 +28,7 @@ use egui::{
 };
 use psxed_project::playtest::playtest_streaming_chunk_config;
 use psxed_project::streaming::{
-    collect_scene_resource_use, plan_generated_chunks, SceneResourceUse,
+    collect_scene_resource_use, plan_generated_chunks, SceneResourceUse, StreamingChunkConfig,
 };
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
@@ -36,14 +37,18 @@ use psxed_project::{
     GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
     PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
-    WorldCullingSettings, WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
-    MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
-    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
-    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
+    WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
+    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
+    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
+    MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
+    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE,
+    MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
+    MAX_WORLD_STREAMING_VISIBLE_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
     MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
-    MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
-    SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
+    MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
+    MIN_WORLD_STREAMING_VISIBLE_CHUNKS, MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8,
+    SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN,
+    SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -289,6 +294,7 @@ pub struct EditorWorkspace {
     preview_fog: bool,
     preview_backface_wireframe: bool,
     preview_bounds: bool,
+    show_play_debug_overlays: bool,
     view_2d: bool,
     active_workspace: WorkspaceView,
     left_dock_open: bool,
@@ -1502,11 +1508,19 @@ fn gizmo_highlight_color(color: Color32, highlighted: bool) -> Color32 {
 }
 
 fn gizmo_axis_stroke_width(highlighted: bool) -> f32 {
-    if highlighted { 4.25 } else { 2.5 }
+    if highlighted {
+        4.25
+    } else {
+        2.5
+    }
 }
 
 fn gizmo_axis_handle_radius(highlighted: bool) -> f32 {
-    if highlighted { 6.5 } else { 5.0 }
+    if highlighted {
+        6.5
+    } else {
+        5.0
+    }
 }
 
 fn lerp_u8(a: u8, b: u8, amount: u16) -> u8 {
@@ -2155,6 +2169,7 @@ impl EditorWorkspace {
             preview_fog: true,
             preview_backface_wireframe: true,
             preview_bounds: true,
+            show_play_debug_overlays: true,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
@@ -4232,8 +4247,7 @@ impl EditorWorkspace {
         } else {
             None
         };
-        let (hovered_primitive_axis, hovered_node_handle) =
-            hovered_gizmo.unwrap_or((None, None));
+        let (hovered_primitive_axis, hovered_node_handle) = hovered_gizmo.unwrap_or((None, None));
 
         egui::Image::new((viewport_3d.texture, rect.size()))
             .uv(viewport_3d.uv)
@@ -4420,13 +4434,50 @@ impl EditorWorkspace {
         );
         let (rect, response) =
             allocate_centered_preview_rect(ui, "viewport_3d_play_canvas", egui::Sense::click());
-        if response.clicked() {
-            self.pending_playtest_request = Some(EditorPlaytestRequest::CaptureInput);
-        }
-
         egui::Image::new((viewport_3d.texture, rect.size()))
             .uv(viewport_3d.uv)
             .paint_at(ui, rect);
+
+        let toggle_rect = Rect::from_min_size(
+            Pos2::new(rect.right() - 36.0, rect.top() + 8.0),
+            Vec2::splat(28.0),
+        );
+        let toggle_response = ui
+            .interact(
+                toggle_rect,
+                ui.id().with("play_debug_overlay_toggle"),
+                Sense::click(),
+            )
+            .on_hover_text(if self.show_play_debug_overlays {
+                "Hide play debug overlays"
+            } else {
+                "Show play debug overlays"
+            });
+        if toggle_response.clicked() {
+            self.show_play_debug_overlays = !self.show_play_debug_overlays;
+        }
+        let show_debug_overlays = self.show_play_debug_overlays;
+        let debug_rect = Rect::from_min_size(
+            rect.left_top() + Vec2::new(8.0, 8.0),
+            Vec2::new(238.0, 177.0),
+        );
+        let tape_top = if show_debug_overlays {
+            debug_rect.bottom() + 6.0
+        } else {
+            rect.top() + 8.0
+        };
+        let tape_controls_rect = Rect::from_min_size(
+            Pos2::new(debug_rect.left(), tape_top),
+            Vec2::new(238.0, 28.0),
+        );
+        let clicked_overlay = response.interact_pointer_pos().is_some_and(|pos| {
+            toggle_rect.contains(pos)
+                || tape_controls_rect.contains(pos)
+                || (show_debug_overlays && debug_rect.contains(pos))
+        });
+        if response.clicked() && !clicked_overlay {
+            self.pending_playtest_request = Some(EditorPlaytestRequest::CaptureInput);
+        }
 
         let painter = ui.painter_at(rect);
         if !captured {
@@ -4439,76 +4490,234 @@ impl EditorWorkspace {
                 STUDIO_TEXT,
             );
         }
-        let debug_rect = Rect::from_min_size(
-            rect.left_top() + Vec2::new(8.0, 8.0),
-            Vec2::new(168.0, 106.0),
-        );
-        painter.rect_filled(debug_rect, 4.0, Color32::from_black_alpha(164));
-        let mut y = debug_rect.top() + 7.0;
-        draw_play_metric_line(
-            &painter,
-            debug_rect.left() + 8.0,
-            &mut y,
-            "Play profiler",
-            STUDIO_TEXT,
-        );
-        if let Some(metrics) = viewport_3d.play_metrics {
+        if show_debug_overlays {
+            painter.rect_filled(debug_rect, 4.0, Color32::from_black_alpha(164));
+            let mut y = debug_rect.top() + 7.0;
             draw_play_metric_line(
                 &painter,
                 debug_rect.left() + 8.0,
                 &mut y,
-                &format!("EMU  {:>5.1} Hz", metrics.emu_hz),
+                "Play profiler",
                 STUDIO_TEXT,
             );
-            draw_play_metric_line(
-                &painter,
-                debug_rect.left() + 8.0,
-                &mut y,
-                &match metrics.visual_hz {
-                    Some(visual_hz) => format!("VIS  {:>5.1} Hz", visual_hz),
-                    None => format!("DRAW {:>5.1} Hz", metrics.draw_hz),
-                },
-                STUDIO_TEXT,
-            );
-            draw_play_metric_line(
-                &painter,
-                debug_rect.left() + 8.0,
-                &mut y,
-                &format!("HOST {:>5.1} fps", metrics.host_fps),
-                STUDIO_TEXT_WEAK,
-            );
-            draw_play_metric_line(
-                &painter,
-                debug_rect.left() + 8.0,
-                &mut y,
-                &format!("FRAME {:>5.2} ms", metrics.total_ms),
-                STUDIO_TEXT_WEAK,
-            );
-            draw_play_metric_line(
-                &painter,
-                debug_rect.left() + 8.0,
-                &mut y,
-                &format!(
-                    "EMU/HW/UI {:>4.1}/{:>4.1}/{:>4.1}",
-                    metrics.emu_ms, metrics.hw_ms, metrics.ui_ms
+            if let Some(metrics) = viewport_3d.play_metrics {
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!("EMU  {:>5.1} Hz", metrics.emu_hz),
+                    STUDIO_TEXT,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &match metrics.visual_hz {
+                        Some(visual_hz) => format!("VIS  {:>5.1} Hz", visual_hz),
+                        None => format!("DRAW {:>5.1} Hz", metrics.draw_hz),
+                    },
+                    STUDIO_TEXT,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!("HOST {:>5.1} fps", metrics.host_fps),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!("FRAME {:>5.2} ms", metrics.total_ms),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "EMU/HW/UI {:>4.1}/{:>4.1}/{:>4.1}",
+                        metrics.emu_ms, metrics.hw_ms, metrics.ui_ms
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!("STEP {:>5.1}%", metrics.step_budget_percent),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "CHNK vis/load {:>2}/{:<2}",
+                        metrics.chunk_visible, metrics.chunk_loaded
+                    ),
+                    STUDIO_TEXT,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "WIN  cand/built/skip {:>2}/{:<2}/{:<2}",
+                        metrics.chunk_candidates, metrics.chunk_built, metrics.chunk_cache_skips
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "STRM req/miss/pf {:>2}/{:<2}/{:<2}",
+                        metrics.stream_requests, metrics.stream_misses, metrics.stream_prefetches
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "STRM ev/pnd/fail {:>2}/{:<2}/{:<2}",
+                        metrics.stream_evictions, metrics.stream_pending, metrics.stream_failed
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+            } else {
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    "collecting...",
+                    STUDIO_TEXT_WEAK,
+                );
+            }
+            let tape_line = match viewport_3d.play_tape.mode {
+                EditorPlaytestTapeMode::Idle if viewport_3d.play_tape.frames == 0 => {
+                    "TAPE empty".to_string()
+                }
+                EditorPlaytestTapeMode::Idle => {
+                    format!("TAPE {:>5} fr", viewport_3d.play_tape.frames)
+                }
+                EditorPlaytestTapeMode::Recording => {
+                    format!("REC  {:>5} fr", viewport_3d.play_tape.frames)
+                }
+                EditorPlaytestTapeMode::Replaying => format!(
+                    "PLAY {:>5}/{:<5}",
+                    viewport_3d.play_tape.cursor, viewport_3d.play_tape.frames
                 ),
-                STUDIO_TEXT_WEAK,
-            );
+            };
             draw_play_metric_line(
                 &painter,
                 debug_rect.left() + 8.0,
                 &mut y,
-                &format!("STEP {:>5.1}%", metrics.step_budget_percent),
-                STUDIO_TEXT_WEAK,
+                &tape_line,
+                STUDIO_TEXT,
             );
+        }
+        self.draw_play_input_tape_controls(ui, tape_controls_rect, viewport_3d.play_tape);
+        if show_debug_overlays {
+            if let Some(metrics) = viewport_3d.play_metrics {
+                draw_play_chunk_debug_map(&painter, rect, &self.project, metrics);
+            }
+        }
+        draw_play_debug_overlay_toggle(
+            &painter,
+            toggle_rect,
+            show_debug_overlays,
+            toggle_response.hovered(),
+        );
+    }
+
+    fn draw_play_input_tape_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        tape: EditorPlaytestTapeStatus,
+    ) {
+        ui.painter()
+            .rect_filled(rect, 4.0, Color32::from_black_alpha(164));
+        let gap = 6.0;
+        let button_width = (rect.width() - gap) * 0.5;
+        let record_rect =
+            Rect::from_min_size(rect.left_top(), Vec2::new(button_width, rect.height()));
+        let replay_rect = Rect::from_min_size(
+            Pos2::new(record_rect.right() + gap, rect.top()),
+            Vec2::new(button_width, rect.height()),
+        );
+        let recording = tape.mode == EditorPlaytestTapeMode::Recording;
+        let replaying = tape.mode == EditorPlaytestTapeMode::Replaying;
+        let can_record = !replaying;
+        let can_replay = !recording;
+
+        let record_label = if recording {
+            "Stop Rec".to_string()
         } else {
-            draw_play_metric_line(
-                &painter,
-                debug_rect.left() + 8.0,
-                &mut y,
-                "collecting...",
-                STUDIO_TEXT_WEAK,
-            );
+            icons::label(icons::CIRCLE_DOT, "Rec")
+        };
+        let record_response = ui.put(
+            record_rect,
+            egui::Button::new(RichText::new(record_label).color(if can_record {
+                STUDIO_TEXT
+            } else {
+                STUDIO_TEXT_WEAK
+            }))
+            .fill(if recording {
+                Color32::from_rgb(92, 34, 34)
+            } else {
+                STUDIO_PANEL_DARK
+            }),
+        );
+        let record_clicked = record_response.clicked();
+        record_response.on_hover_text(if recording {
+            "Stop recording input"
+        } else {
+            "Record embedded play input"
+        });
+        if can_record && record_clicked {
+            self.pending_playtest_request = Some(if recording {
+                EditorPlaytestRequest::StopInputRecording
+            } else {
+                EditorPlaytestRequest::StartInputRecording
+            });
+        }
+
+        let replay_label = if replaying {
+            "Stop".to_string()
+        } else {
+            icons::label(icons::PLAY, "Replay")
+        };
+        let replay_response = ui.put(
+            replay_rect,
+            egui::Button::new(RichText::new(replay_label).color(if can_replay {
+                STUDIO_TEXT
+            } else {
+                STUDIO_TEXT_WEAK
+            }))
+            .fill(if replaying {
+                STUDIO_ACCENT_DIM
+            } else {
+                STUDIO_PANEL_DARK
+            }),
+        );
+        let replay_clicked = replay_response.clicked();
+        replay_response.on_hover_text(if replaying {
+            "Stop replaying input"
+        } else {
+            "Replay saved input"
+        });
+        if can_replay && replay_clicked {
+            self.pending_playtest_request = Some(if replaying {
+                EditorPlaytestRequest::StopInputReplay
+            } else {
+                EditorPlaytestRequest::StartInputReplay
+            });
         }
     }
 
@@ -5218,7 +5427,11 @@ impl EditorWorkspace {
                 [screen_axis.start, screen_axis.end],
                 Stroke::new(stroke_width, color),
             );
-            painter.circle_filled(screen_axis.end, gizmo_axis_handle_radius(highlighted), color);
+            painter.circle_filled(
+                screen_axis.end,
+                gizmo_axis_handle_radius(highlighted),
+                color,
+            );
             let label_offset = (screen_axis.end - screen_axis.start).normalized() * 12.0;
             painter.text(
                 screen_axis.end + label_offset,
@@ -5545,7 +5758,11 @@ impl EditorWorkspace {
                 [screen_axis.start, screen_axis.end],
                 Stroke::new(stroke_width, color),
             );
-            painter.circle_filled(screen_axis.end, gizmo_axis_handle_radius(highlighted), color);
+            painter.circle_filled(
+                screen_axis.end,
+                gizmo_axis_handle_radius(highlighted),
+                color,
+            );
             let label_offset = (screen_axis.end - screen_axis.start).normalized() * 12.0;
             painter.text(
                 screen_axis.end + label_offset,
@@ -7064,7 +7281,8 @@ impl EditorWorkspace {
         }
         self.push_undo();
         let scene = self.project.active_scene_mut();
-        let cell = extend_room_grid_to_include_preserving_child_positions(scene, room_id, wcx, wcz)?;
+        let cell =
+            extend_room_grid_to_include_preserving_child_positions(scene, room_id, wcx, wcz)?;
         let node = scene.node(room_id)?;
         let NodeKind::Room { grid } = &node.kind else {
             return None;
@@ -7666,7 +7884,8 @@ impl EditorWorkspace {
             if grid.populated_sector_count() == 0 {
                 continue;
             }
-            let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config());
+            let config = playtest_streaming_chunk_config_for_room(project, room_node.id);
+            let plan = plan_generated_chunks(grid, config);
             for chunk in plan.chunks {
                 let Some(chunk_grid) =
                     grid_rect_for_validation_issue(grid, chunk.array_origin, chunk.size)
@@ -15152,6 +15371,7 @@ fn draw_transform_policy_editor(
             far_vista,
             camera,
             culling,
+            streaming,
         } => draw_world_grid_settings(
             ui,
             *sector_size,
@@ -15159,6 +15379,7 @@ fn draw_transform_policy_editor(
             far_vista,
             camera,
             culling,
+            streaming,
             texture_options,
             nav_target,
             world_sector_size_change,
@@ -15222,6 +15443,7 @@ fn draw_world_grid_settings(
     far_vista: &mut FarVistaSettings,
     camera: &mut WorldCameraSettings,
     culling: &mut WorldCullingSettings,
+    streaming: &mut WorldStreamingSettings,
     texture_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
     world_sector_size_change: &mut Option<i32>,
@@ -15245,6 +15467,81 @@ fn draw_world_grid_settings(
                     changed = true;
                 }
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
+            });
+        });
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Streaming"))
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Chunk Target").color(STUDIO_TEXT_WEAK));
+                let mut width = streaming.chunk_target_width as i32;
+                let mut depth = streaming.chunk_target_depth as i32;
+                let width_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut width)
+                            .speed(1.0)
+                            .range(
+                                MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32
+                                    ..=MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32,
+                            )
+                            .prefix("W "),
+                    )
+                    .changed();
+                let depth_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut depth)
+                            .speed(1.0)
+                            .range(
+                                MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32
+                                    ..=MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32,
+                            )
+                            .prefix("D "),
+                    )
+                    .changed();
+                if width_changed || depth_changed {
+                    streaming.chunk_target_width = width as u16;
+                    streaming.chunk_target_depth = depth as u16;
+                    *streaming = streaming.normalized();
+                    changed = true;
+                }
+                ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Resident Chunks").color(STUDIO_TEXT_WEAK));
+                let mut limit = streaming.resident_chunk_limit as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut limit).speed(1.0).range(
+                        MIN_WORLD_STREAMING_RESIDENT_CHUNKS as i32
+                            ..=MAX_WORLD_STREAMING_RESIDENT_CHUNKS as i32,
+                    ))
+                    .changed()
+                {
+                    streaming.resident_chunk_limit = limit as u8;
+                    *streaming = streaming.normalized();
+                    changed = true;
+                }
+                ui.label(RichText::new("chunks").color(STUDIO_TEXT_WEAK));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Visible Chunks").color(STUDIO_TEXT_WEAK));
+                let mut limit = streaming.visible_chunk_limit as i32;
+                let max_visible = streaming.resident_chunk_limit.clamp(
+                    MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
+                    MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+                );
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut limit)
+                            .speed(1.0)
+                            .range(MIN_WORLD_STREAMING_VISIBLE_CHUNKS as i32..=max_visible as i32),
+                    )
+                    .changed()
+                {
+                    streaming.visible_chunk_limit = limit as u8;
+                    *streaming = streaming.normalized();
+                    changed = true;
+                }
+                ui.label(RichText::new("chunks").color(STUDIO_TEXT_WEAK));
             });
         });
     egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
@@ -15607,14 +15904,9 @@ fn draw_world_grid_settings(
                 ui.label(RichText::new("Visibility Radius").color(STUDIO_TEXT_WEAK));
                 let mut radius = culling.visibility_radius as i32;
                 if ui
-                    .add(
-                        egui::DragValue::new(&mut radius)
-                            .speed(1.0)
-                            .range(
-                                MIN_WORLD_VISIBILITY_RADIUS as i32
-                                    ..=MAX_WORLD_VISIBILITY_RADIUS as i32,
-                            ),
-                    )
+                    .add(egui::DragValue::new(&mut radius).speed(1.0).range(
+                        MIN_WORLD_VISIBILITY_RADIUS as i32..=MAX_WORLD_VISIBILITY_RADIUS as i32,
+                    ))
                     .changed()
                 {
                     culling.visibility_radius = radius as u16;
@@ -20673,6 +20965,284 @@ fn human_bytes_u64(n: u64) -> String {
     }
 }
 
+fn draw_play_debug_overlay_toggle(
+    painter: &egui::Painter,
+    rect: Rect,
+    visible: bool,
+    hovered: bool,
+) {
+    let fill = if hovered {
+        Color32::from_rgba_unmultiplied(34, 48, 58, 232)
+    } else {
+        Color32::from_black_alpha(176)
+    };
+    painter.rect_filled(rect, 4.0, fill);
+    painter.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 84)),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        if visible { icons::EYE_OFF } else { icons::EYE }.to_string(),
+        icons::font(14.0),
+        if hovered { Color32::WHITE } else { STUDIO_TEXT },
+    );
+}
+
+#[derive(Clone, Copy)]
+struct PlayChunkDebugMapCell {
+    runtime_room_index: usize,
+    center: [f32; 2],
+    half: [f32; 2],
+    sector_size: f32,
+}
+
+fn draw_play_chunk_debug_map(
+    painter: &egui::Painter,
+    viewport_rect: Rect,
+    project: &ProjectDocument,
+    metrics: EditorPlaytestMetrics,
+) {
+    let cells = collect_play_chunk_debug_map_cells(project);
+    if cells.is_empty() {
+        return;
+    }
+
+    let map_size = Vec2::new(230.0, 180.0);
+    let mut map_rect = Rect::from_min_size(
+        Pos2::new(
+            viewport_rect.right() - map_size.x - 8.0,
+            viewport_rect.top() + 44.0,
+        ),
+        map_size,
+    );
+    if map_rect.left() < viewport_rect.left() + 270.0 {
+        map_rect = Rect::from_min_size(
+            Pos2::new(
+                viewport_rect.right() - map_size.x - 8.0,
+                viewport_rect.bottom() - map_size.y - 8.0,
+            ),
+            map_size,
+        );
+    }
+
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for cell in &cells {
+        min_x = min_x.min(cell.center[0] - cell.half[0]);
+        max_x = max_x.max(cell.center[0] + cell.half[0]);
+        min_z = min_z.min(cell.center[1] - cell.half[1]);
+        max_z = max_z.max(cell.center[1] + cell.half[1]);
+    }
+    if !min_x.is_finite() || !min_z.is_finite() {
+        return;
+    }
+
+    painter.rect_filled(map_rect, 4.0, Color32::from_black_alpha(176));
+    painter.rect_stroke(
+        map_rect,
+        4.0,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 68)),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        map_rect.left_top() + Vec2::new(8.0, 7.0),
+        Align2::LEFT_TOP,
+        "Chunk map",
+        FontId::monospace(11.0),
+        STUDIO_TEXT,
+    );
+
+    let plot = Rect::from_min_max(
+        map_rect.left_top() + Vec2::new(8.0, 24.0),
+        map_rect.right_bottom() - Vec2::new(8.0, 24.0),
+    );
+    let world_w = (max_x - min_x).max(1.0);
+    let world_h = (max_z - min_z).max(1.0);
+    let scale = (plot.width() / world_w).min(plot.height() / world_h);
+    let content_w = world_w * scale;
+    let content_h = world_h * scale;
+    let origin = Pos2::new(
+        plot.left() + (plot.width() - content_w) * 0.5,
+        plot.top() + (plot.height() - content_h) * 0.5,
+    );
+    let map_x = |x: f32| origin.x + (x - min_x) * scale;
+    let map_z = |z: f32| origin.y + (z - min_z) * scale;
+
+    for cell in &cells {
+        let bit = debug_chunk_bit(cell.runtime_room_index);
+        let loaded = bit != 0 && metrics.chunk_loaded_mask & bit != 0;
+        let active = bit != 0 && metrics.chunk_active_mask & bit != 0;
+        let drawn = bit != 0 && metrics.chunk_drawn_mask & bit != 0;
+        let rect = Rect::from_min_max(
+            Pos2::new(
+                map_x(cell.center[0] - cell.half[0]),
+                map_z(cell.center[1] - cell.half[1]),
+            ),
+            Pos2::new(
+                map_x(cell.center[0] + cell.half[0]),
+                map_z(cell.center[1] + cell.half[1]),
+            ),
+        )
+        .shrink(0.75);
+        let fill = if drawn {
+            Color32::from_rgba_unmultiplied(40, 210, 112, 150)
+        } else if loaded {
+            Color32::from_rgba_unmultiplied(220, 56, 64, 104)
+        } else {
+            Color32::from_rgba_unmultiplied(0, 0, 0, 0)
+        };
+        if fill.a() > 0 {
+            painter.rect_filled(rect, 0.0, fill);
+        }
+        let stroke = if drawn {
+            Stroke::new(1.5, Color32::from_rgb(76, 255, 144))
+        } else if active {
+            Stroke::new(1.7, Color32::from_rgb(255, 206, 82))
+        } else if loaded {
+            Stroke::new(1.2, Color32::from_rgb(255, 84, 92))
+        } else {
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 120))
+        };
+        painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
+    }
+
+    if metrics.player_map_valid {
+        if let Some(cell) = cells
+            .iter()
+            .find(|cell| cell.runtime_room_index == metrics.player_room_index as usize)
+        {
+            let sector_size = cell.sector_size.max(1.0);
+            let cell_min_x = cell.center[0] - cell.half[0];
+            let cell_min_z = cell.center[1] - cell.half[1];
+            let player_x = cell_min_x + metrics.player_local_x as f32 / sector_size;
+            let player_z = cell_min_z + metrics.player_local_z as f32 / sector_size;
+            let player_pos = Pos2::new(map_x(player_x), map_z(player_z));
+            if player_pos.x.is_finite() && player_pos.y.is_finite() {
+                let yaw = metrics.player_view_yaw_q12 as f32 * std::f32::consts::TAU / 4096.0;
+                let forward = Vec2::new(-yaw.sin(), -yaw.cos());
+                let cone_len = (scale * 3.0).clamp(20.0, 42.0);
+                let cone_half_angle = 0.48;
+                let left = rotate_vec2(forward, -cone_half_angle) * cone_len;
+                let right = rotate_vec2(forward, cone_half_angle) * cone_len;
+                let clipped = painter.with_clip_rect(plot);
+                clipped.add(egui::Shape::convex_polygon(
+                    vec![player_pos, player_pos + left, player_pos + right],
+                    Color32::from_rgba_unmultiplied(92, 190, 255, 62),
+                    Stroke::new(1.2, Color32::from_rgb(112, 210, 255)),
+                ));
+                clipped.line_segment(
+                    [player_pos, player_pos + forward * (cone_len * 0.82)],
+                    Stroke::new(1.2, Color32::from_rgb(218, 244, 255)),
+                );
+                clipped.circle_filled(player_pos, 3.5, Color32::from_rgb(245, 250, 255));
+                clipped.circle_stroke(player_pos, 3.5, Stroke::new(1.0, Color32::BLACK));
+            }
+        }
+    }
+
+    draw_chunk_map_legend_item(
+        painter,
+        map_rect.left_bottom() + Vec2::new(8.0, -16.0),
+        Color32::from_rgba_unmultiplied(40, 210, 112, 150),
+        Color32::from_rgb(76, 255, 144),
+        "drawn",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        map_rect.left_bottom() + Vec2::new(74.0, -16.0),
+        Color32::from_rgba_unmultiplied(220, 56, 64, 104),
+        Color32::from_rgb(255, 84, 92),
+        "loaded",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        map_rect.left_bottom() + Vec2::new(140.0, -16.0),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 0),
+        Color32::from_rgba_unmultiplied(210, 220, 235, 120),
+        "unloaded",
+    );
+}
+
+fn collect_play_chunk_debug_map_cells(project: &ProjectDocument) -> Vec<PlayChunkDebugMapCell> {
+    let scene = project.active_scene();
+    let mut cells = Vec::new();
+    let mut runtime_room_index = 0usize;
+    for node in scene.nodes() {
+        let NodeKind::Room { grid } = &node.kind else {
+            continue;
+        };
+        if grid.populated_sector_count() == 0 {
+            continue;
+        }
+        let config = playtest_streaming_chunk_config_for_room(project, node.id);
+        let plan = plan_generated_chunks(grid, config);
+        let node_center = node_world(node);
+        for chunk in plan.chunks {
+            let Some(chunk_grid) =
+                grid_rect_for_validation_issue(grid, chunk.array_origin, chunk.size)
+            else {
+                continue;
+            };
+            if chunk_grid.populated_sector_count() == 0 {
+                continue;
+            }
+            let (local_center, half) =
+                grid_rect_editor_center_half(grid, chunk.array_origin, chunk.size);
+            cells.push(PlayChunkDebugMapCell {
+                runtime_room_index,
+                center: [
+                    node_center[0] + local_center[0],
+                    node_center[1] + local_center[1],
+                ],
+                half,
+                sector_size: grid.sector_size.max(1) as f32,
+            });
+            runtime_room_index += 1;
+        }
+    }
+    cells
+}
+
+fn debug_chunk_bit(index: usize) -> u64 {
+    if index < u64::BITS as usize {
+        1u64 << index
+    } else {
+        0
+    }
+}
+
+fn rotate_vec2(v: Vec2, radians: f32) -> Vec2 {
+    let (sin, cos) = radians.sin_cos();
+    Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos)
+}
+
+fn draw_chunk_map_legend_item(
+    painter: &egui::Painter,
+    pos: Pos2,
+    fill: Color32,
+    stroke: Color32,
+    label: &str,
+) {
+    let swatch = Rect::from_min_size(pos, Vec2::new(9.0, 9.0));
+    if fill.a() > 0 {
+        painter.rect_filled(swatch, 0.0, fill);
+    }
+    painter.rect_stroke(swatch, 0.0, Stroke::new(1.0, stroke), StrokeKind::Inside);
+    painter.text(
+        pos + Vec2::new(13.0, -1.0),
+        Align2::LEFT_TOP,
+        label,
+        FontId::monospace(10.0),
+        STUDIO_TEXT_WEAK,
+    );
+}
+
 fn draw_play_metric_line(painter: &egui::Painter, x: f32, y: &mut f32, text: &str, color: Color32) {
     painter.text(
         Pos2::new(x, *y),
@@ -21196,6 +21766,7 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
                 far_vista: FarVistaSettings::default(),
                 camera: WorldCameraSettings::default(),
                 culling: WorldCullingSettings::default(),
+                streaming: WorldStreamingSettings::default(),
             },
         ),
         (
@@ -22635,7 +23206,7 @@ fn draw_room(
         }
     }
 
-    draw_streaming_chunk_boundaries_2d(painter, transform, grid, node_center);
+    draw_streaming_chunk_boundaries_2d(painter, transform, project, node.id, grid, node_center);
     draw_validation_issue_primitives_2d(
         painter,
         transform,
@@ -22666,10 +23237,13 @@ fn draw_room(
 fn draw_streaming_chunk_boundaries_2d(
     painter: &egui::Painter,
     transform: ViewportTransform,
+    project: &ProjectDocument,
+    room_id: NodeId,
     grid: &WorldGrid,
     node_center: [f32; 2],
 ) {
-    let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config());
+    let config = playtest_streaming_chunk_config_for_room(project, room_id);
+    let plan = plan_generated_chunks(grid, config);
     if plan.chunk_count() <= 1 {
         return;
     }
@@ -23255,10 +23829,7 @@ fn recenter_room_spatial_descendants(
     let Some(new_center) = room_grid_center_cells(scene, room) else {
         return;
     };
-    let delta = [
-        old_center[0] - new_center[0],
-        old_center[1] - new_center[1],
-    ];
+    let delta = [old_center[0] - new_center[0], old_center[1] - new_center[1]];
     if delta[0] == 0.0 && delta[1] == 0.0 {
         return;
     }
@@ -26803,6 +27374,20 @@ fn collect_weapon_options(project: &ProjectDocument) -> Vec<(ResourceId, String)
         .collect()
 }
 
+fn playtest_streaming_chunk_config_for_room(
+    project: &ProjectDocument,
+    room_id: NodeId,
+) -> StreamingChunkConfig {
+    playtest_streaming_chunk_config(world_streaming_for_room(project, room_id))
+}
+
+fn world_streaming_for_room(project: &ProjectDocument, room_id: NodeId) -> WorldStreamingSettings {
+    project
+        .active_scene()
+        .world_streaming_for_node(room_id)
+        .unwrap_or_default()
+}
+
 fn draw_streaming_budget(
     ui: &mut egui::Ui,
     project: &ProjectDocument,
@@ -26810,7 +27395,8 @@ fn draw_streaming_budget(
     room_id: NodeId,
     grid: &WorldGrid,
 ) {
-    let config = playtest_streaming_chunk_config();
+    let streaming = world_streaming_for_room(project, room_id);
+    let config = playtest_streaming_chunk_config(streaming);
     let plan = plan_generated_chunks(grid, config);
     let resource_use = collect_scene_resource_use(project);
     let file_budget = resource_file_budget(project, project_root, &resource_use);
@@ -26836,6 +27422,18 @@ fn draw_streaming_budget(
                 ui,
                 "Target chunk",
                 format!("{}×{} sectors", config.target_width, config.target_depth),
+                false,
+            );
+            draw_budget_row(
+                ui,
+                "Resident chunks",
+                format!("{}", streaming.resident_chunk_limit),
+                false,
+            );
+            draw_budget_row(
+                ui,
+                "Visible chunks",
+                format!("{}", streaming.visible_chunk_limit),
                 false,
             );
             draw_budget_row(
@@ -27808,11 +28406,7 @@ mod tests {
         assert!((actual.y - expected.y).abs() < 0.001);
     }
 
-    fn test_node_preview_origin(
-        project: &ProjectDocument,
-        room: NodeId,
-        node: NodeId,
-    ) -> [i32; 3] {
+    fn test_node_preview_origin(project: &ProjectDocument, room: NodeId, node: NodeId) -> [i32; 3] {
         let scene = project.active_scene();
         let room_node = scene.node(room).expect("room exists");
         let NodeKind::Room { grid } = &room_node.kind else {
@@ -31919,6 +32513,7 @@ mod tests {
                 far_vista: FarVistaSettings::default(),
                 camera: WorldCameraSettings::default(),
                 culling: WorldCullingSettings::default(),
+                streaming: WorldStreamingSettings::default(),
             },
         );
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
