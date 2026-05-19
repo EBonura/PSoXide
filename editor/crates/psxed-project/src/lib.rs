@@ -1848,6 +1848,26 @@ const fn default_fog_color() -> [u8; 3] {
     [24, 28, 34]
 }
 
+const fn default_atmosphere_enabled() -> bool {
+    true
+}
+
+const fn default_atmosphere_color() -> [u8; 3] {
+    [58, 52, 44]
+}
+
+const fn default_atmosphere_density() -> i32 {
+    44
+}
+
+const fn default_atmosphere_fall_speed_q4() -> i32 {
+    7
+}
+
+const fn default_atmosphere_wind_speed_q4() -> i32 {
+    2
+}
+
 const fn default_sky_top_color() -> [u8; 3] {
     [7, 8, 14]
 }
@@ -4085,6 +4105,21 @@ pub struct WorldGrid {
     /// Fully-fogged distance for authored fog/depth cue in engine units.
     #[serde(default = "default_fog_far")]
     pub fog_far: i32,
+    /// Whether a cheap screen-space falling particle pass should render in this room.
+    #[serde(default = "default_atmosphere_enabled")]
+    pub atmosphere_enabled: bool,
+    /// Base particle colour for ash/snow style room atmosphere.
+    #[serde(default = "default_atmosphere_color")]
+    pub atmosphere_color: [u8; 3],
+    /// Number of screen-space particles to draw.
+    #[serde(default = "default_atmosphere_density")]
+    pub atmosphere_density: i32,
+    /// Base vertical particle speed, in 1/16 pixel-per-vblank units.
+    #[serde(default = "default_atmosphere_fall_speed_q4")]
+    pub atmosphere_fall_speed_q4: i32,
+    /// Base horizontal particle speed, in 1/16 pixel-per-vblank units.
+    #[serde(default = "default_atmosphere_wind_speed_q4")]
+    pub atmosphere_wind_speed_q4: i32,
 }
 
 impl WorldGrid {
@@ -4102,6 +4137,11 @@ impl WorldGrid {
             fog_color: default_fog_color(),
             fog_near: default_fog_near(),
             fog_far: default_fog_far(),
+            atmosphere_enabled: default_atmosphere_enabled(),
+            atmosphere_color: default_atmosphere_color(),
+            atmosphere_density: default_atmosphere_density(),
+            atmosphere_fall_speed_q4: default_atmosphere_fall_speed_q4(),
+            atmosphere_wind_speed_q4: default_atmosphere_wind_speed_q4(),
         }
     }
 
