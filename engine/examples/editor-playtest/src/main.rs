@@ -254,9 +254,6 @@ const OT_DEPTH: usize = 512;
 const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
-const ROOM_GRID_VISIBILITY_RADIUS: u16 = 32;
-const ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS: i32 = 64;
-#[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
 #[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_CAMERA_MARGIN: i32 = 96;
@@ -276,6 +273,38 @@ const ROOM_VISIBLE_CELL_WEDGE_DEN: u64 = 4;
 const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
 #[cfg(feature = "world-grid-visible")]
 const MAX_ACTIVE_VISIBLE_CELLS: usize = 1024;
+
+fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
+    record.draw_distance.max(NEAR_Z + 128)
+}
+
+fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
+    DepthRange::new(NEAR_Z, room_draw_distance(record))
+}
+
+fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
+    WorldSurfaceOptions::new(WORLD_BAND, room_depth_range(record))
+}
+
+fn fallback_surface_options() -> WorldSurfaceOptions {
+    WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
+}
+
+fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
+    ROOMS
+        .get(room_index.to_usize())
+        .map(room_surface_options)
+        .unwrap_or_else(fallback_surface_options)
+}
+
+fn room_chunk_activation_radius_sectors(record: &LevelRoomRecord) -> i32 {
+    record.chunk_activation_radius_sectors.max(1)
+}
+
+#[cfg(feature = "world-grid-visible")]
+fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
+    record.visibility_radius.max(1)
+}
 /// Per-frame projected scratch for one generated room surface cache.
 /// Rooms that exceed this vertex budget fall back to the uncached draw.
 const MAX_CACHED_ROOM_VERTICES: usize = 4096;
@@ -1826,6 +1855,7 @@ impl Scene for Playtest {
             draw_far_vista_ring(
                 camera,
                 room_record.far_vista,
+                room_surface_options(room_record),
                 &mut primitive_packets,
                 &mut world,
             );
@@ -1833,8 +1863,6 @@ impl Scene for Playtest {
         }
 
         if self.current_collision_room.is_some() {
-            let room_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
-            let actor_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE);
             let mut total_instance_stats = ModelInstanceDrawStats::default();
             let mut room_active_chunks = 0u32;
             let mut room_cached_draws = 0u32;
@@ -1873,6 +1901,8 @@ impl Scene for Playtest {
                 let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                     continue;
                 };
+                let room_options = room_surface_options(room_record);
+                let actor_options = room_options;
                 let room_camera = camera_for_room(camera, active);
                 let lighting = RuntimeRoomLighting {
                     room_index: active.index,
@@ -1895,7 +1925,7 @@ impl Scene for Playtest {
                         global_visibility_anchor.z.saturating_sub(active.offset_z),
                     );
                     let visibility =
-                        GridVisibility::around(visibility_anchor, ROOM_GRID_VISIBILITY_RADIUS)
+                        GridVisibility::around(visibility_anchor, room_visibility_radius(room_record))
                             .with_screen_margin(ROOM_VISIBLE_CELL_SCREEN_MARGIN);
                     telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
                     let visible_cells_result = self.cached_precomputed_visible_cells(
@@ -2074,6 +2104,7 @@ impl Scene for Playtest {
                     draw_model_instance_shadows(
                         active.index,
                         &room_camera,
+                        actor_options,
                         shadow_material,
                         &self.models,
                         &mut primitive_packets,
@@ -2105,6 +2136,7 @@ impl Scene for Playtest {
             if let Some(character) = self.character {
                 let player = self.motor.position();
                 let player_lighting = self.current_room_lighting(camera);
+                let actor_options = current_room_surface_options(self.room_index);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
                 if let Some(shadow_material) = self.shadow_material {
                     draw_actor_shadow(
@@ -2113,6 +2145,7 @@ impl Scene for Playtest {
                         player.z,
                         actor_shadow_radius(character.radius),
                         &camera,
+                        actor_options,
                         shadow_material,
                         &mut primitive_packets,
                         &mut world,
@@ -2233,6 +2266,7 @@ impl Scene for Playtest {
                     let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                         continue;
                     };
+                    let actor_options = room_surface_options(room_record);
                     let lighting = RuntimeRoomLighting {
                         room_index: active.index,
                         ambient: Rgb8::from_array(active.ambient_rgb),
@@ -4265,6 +4299,7 @@ fn sky_panorama_clut_word(band: usize) -> u16 {
 fn draw_far_vista_ring(
     camera: WorldCamera,
     vista: LevelFarVistaRecord,
+    options: WorldSurfaceOptions,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
@@ -4292,7 +4327,7 @@ fn draw_far_vista_ring(
             vista.tint_rgb,
         );
         if let Some((material, texture_width, texture_height)) = material {
-            let options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
+            let options = options
                 .with_depth_policy(DepthPolicy::Farthest)
                 .with_cull_mode(CullMode::None)
                 .with_material_layer(material);
@@ -4789,6 +4824,7 @@ fn fill_precomputed_visible_cells(
     let room_visibility = ROOM_VISIBILITY
         .iter()
         .find(|visibility| visibility.room == room_index)?;
+    let room_record = ROOMS.get(room_index.to_usize())?;
     let first = room_visibility.cell_first.to_usize();
     let count = room_visibility.cell_count as usize;
     if count > out.len() || count > depths.len() || count > MAX_PRECOMPUTED_VISIBLE_CELLS {
@@ -4813,6 +4849,8 @@ fn fill_precomputed_visible_cells(
         room_offset_z,
         global_anchor,
         camera,
+        far_z: room_draw_distance(room_record),
+        global_radius_sectors: room_chunk_activation_radius_sectors(room_record),
     };
     let mut written = 0usize;
     let mut rejected_global = 0u16;
@@ -4872,6 +4910,7 @@ fn visible_cell_camera_depth_if_sphere_visible(
     cell: psx_level::LevelVisibilityCellRecord,
     camera: WorldCamera,
     sector_size: i32,
+    far_z: i32,
 ) -> Option<i32> {
     let sector_size = sector_size.max(1);
     let half = sector_size / 2;
@@ -4888,7 +4927,7 @@ fn visible_cell_camera_depth_if_sphere_visible(
     let radius = sector_size.saturating_add(half_height);
     let view = camera.view_vertex(center);
     let near = camera.projection.near_z.max(1);
-    let far = FAR_Z.max(near);
+    let far = far_z.max(near);
     if view.z < near.saturating_sub(radius) || view.z > far.saturating_add(radius) {
         return None;
     }
@@ -4919,6 +4958,8 @@ struct VisibleCellFilter {
     room_offset_z: i32,
     global_anchor: RoomPoint,
     camera: WorldCamera,
+    far_z: i32,
+    global_radius_sectors: i32,
 }
 
 #[cfg(feature = "world-grid-visible")]
@@ -4949,7 +4990,12 @@ fn write_visible_cell_candidate(
         return;
     }
     let Some(depth) =
-        visible_cell_camera_depth_if_sphere_visible(cell, filter.camera, filter.sector_size)
+        visible_cell_camera_depth_if_sphere_visible(
+            cell,
+            filter.camera,
+            filter.sector_size,
+            filter.far_z,
+        )
     else {
         return;
     };
@@ -4980,10 +5026,16 @@ fn visible_cell_reject_reason(
         filter.room_offset_x,
         filter.room_offset_z,
         filter.global_anchor,
+        filter.global_radius_sectors,
     ) {
         return Some(VisibleCellReject::GlobalRange);
     }
-    if !visibility_cell_aabb_intersects_camera(cell, filter.sector_size, filter.camera) {
+    if !visibility_cell_aabb_intersects_camera(
+        cell,
+        filter.sector_size,
+        filter.camera,
+        filter.far_z,
+    ) {
         return Some(VisibleCellReject::Camera);
     }
     if !visibility_cell_in_view_wedge(cell, filter) {
@@ -5074,6 +5126,7 @@ fn visibility_cell_aabb_intersects_camera(
     cell: psx_level::LevelVisibilityCellRecord,
     sector_size: i32,
     camera: WorldCamera,
+    far_z: i32,
 ) -> bool {
     let sector_size = sector_size.max(1);
     let margin = ROOM_VISIBLE_CELL_CAMERA_MARGIN.max(sector_size / 4);
@@ -5093,7 +5146,7 @@ fn visibility_cell_aabb_intersects_camera(
         .saturating_add(margin);
     let y0 = cell.min_y.saturating_sub(margin);
     let y1 = cell.max_y.saturating_add(margin);
-    aabb_intersects_camera_frustum(x0, x1, y0, y1, z0, z1, camera)
+    aabb_intersects_camera_frustum(x0, x1, y0, y1, z0, z1, camera, far_z)
 }
 
 #[cfg(feature = "world-grid-visible")]
@@ -5105,9 +5158,10 @@ fn aabb_intersects_camera_frustum(
     z0: i32,
     z1: i32,
     camera: WorldCamera,
+    far_z: i32,
 ) -> bool {
     let near = camera.projection.near_z.max(1);
-    let far = FAR_Z.max(near);
+    let far = far_z.max(near);
     let focal = camera.projection.focal_length.max(1) as i64;
     let half_w = (camera.projection.screen_x as i32)
         .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
@@ -5167,8 +5221,9 @@ fn visibility_cell_in_global_range(
     room_offset_x: i32,
     room_offset_z: i32,
     global_anchor: RoomPoint,
+    radius_sectors: i32,
 ) -> bool {
-    let radius = ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS.saturating_mul(sector_size);
+    let radius = radius_sectors.max(1).saturating_mul(sector_size);
     let x0 = room_offset_x.saturating_add((x as i32).saturating_mul(sector_size));
     let z0 = room_offset_z.saturating_add((z as i32).saturating_mul(sector_size));
     let x1 = x0.saturating_add(sector_size);
@@ -5801,7 +5856,7 @@ fn chunk_within_activation_range(
     player: RoomPoint,
 ) -> bool {
     let sector_size = current_record.sector_size.max(1);
-    let radius = ROOM_GLOBAL_VISIBILITY_RADIUS_SECTORS.saturating_mul(sector_size);
+    let radius = room_chunk_activation_radius_sectors(current_record).saturating_mul(sector_size);
     chunk_distance_sq_current_space(chunk, current_record, player)
         <= (radius as u64).saturating_mul(radius as u64)
 }
@@ -6778,6 +6833,7 @@ fn accumulate_model_instance_draw_stats(
 fn draw_model_instance_shadows(
     current_room: RoomIndex,
     camera: &WorldCamera,
+    options: WorldSurfaceOptions,
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     triangles: &mut impl PrimitiveSink<TriTextured>,
@@ -6798,6 +6854,7 @@ fn draw_model_instance_shadows(
             inst.z,
             actor_shadow_radius(i32::from(runtime_model.collision_radius)),
             camera,
+            options,
             material,
             triangles,
             world,
@@ -6812,6 +6869,7 @@ fn draw_actor_shadow(
     z: i32,
     radius: i32,
     camera: &WorldCamera,
+    options: WorldSurfaceOptions,
     material: TextureMaterial,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -6827,7 +6885,7 @@ fn draw_actor_shadow(
         WorldVertex::new(x.saturating_add(h), y, z.saturating_add(h)),
         WorldVertex::new(x.saturating_sub(h), y, z.saturating_add(h)),
     ];
-    let shadow_options = WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
+    let shadow_options = options
         .with_depth_policy(DepthPolicy::Nearest)
         .with_depth_bias(SHADOW_DEPTH_BIAS.saturating_neg())
         .with_cull_mode(CullMode::None)

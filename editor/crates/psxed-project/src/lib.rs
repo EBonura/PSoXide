@@ -4060,6 +4060,75 @@ impl Default for WorldCameraSettings {
     }
 }
 
+/// Minimum camera-space far plane used by runtime world drawing.
+pub const MIN_WORLD_DRAW_DISTANCE: i32 = 4_096;
+/// Maximum camera-space far plane exposed for playtest experimentation.
+pub const MAX_WORLD_DRAW_DISTANCE: i32 = 262_144;
+/// Minimum active streamed chunk radius, in world sectors.
+pub const MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS: i32 = 4;
+/// Maximum active streamed chunk radius, in world sectors.
+pub const MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS: i32 = 256;
+/// Minimum precomputed cell-visibility traversal radius.
+pub const MIN_WORLD_VISIBILITY_RADIUS: u16 = 4;
+/// Maximum precomputed cell-visibility traversal radius.
+pub const MAX_WORLD_VISIBILITY_RADIUS: u16 = 96;
+
+const fn default_world_draw_distance() -> i32 {
+    16_384
+}
+
+const fn default_world_chunk_activation_radius_sectors() -> i32 {
+    64
+}
+
+const fn default_world_visibility_radius() -> u16 {
+    32
+}
+
+/// Runtime culling knobs inherited by descendant Rooms from their
+/// nearest World node. These are editor/playtest controls, not per-room
+/// geometry data, so older projects safely load with the defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldCullingSettings {
+    /// Camera-space far plane used for world, actor, and prop drawing.
+    #[serde(default = "default_world_draw_distance")]
+    pub draw_distance: i32,
+    /// Radius around the current room/player used to keep chunks active.
+    #[serde(default = "default_world_chunk_activation_radius_sectors")]
+    pub chunk_activation_radius_sectors: i32,
+    /// Radius used while cooking each room's visibility/PVS cell graph.
+    #[serde(default = "default_world_visibility_radius")]
+    pub visibility_radius: u16,
+}
+
+impl WorldCullingSettings {
+    /// Clamp authored values to runtime-safe ranges.
+    pub fn normalized(self) -> Self {
+        Self {
+            draw_distance: self
+                .draw_distance
+                .clamp(MIN_WORLD_DRAW_DISTANCE, MAX_WORLD_DRAW_DISTANCE),
+            chunk_activation_radius_sectors: self.chunk_activation_radius_sectors.clamp(
+                MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
+                MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
+            ),
+            visibility_radius: self
+                .visibility_radius
+                .clamp(MIN_WORLD_VISIBILITY_RADIUS, MAX_WORLD_VISIBILITY_RADIUS),
+        }
+    }
+}
+
+impl Default for WorldCullingSettings {
+    fn default() -> Self {
+        Self {
+            draw_distance: default_world_draw_distance(),
+            chunk_activation_radius_sectors: default_world_chunk_activation_radius_sectors(),
+            visibility_radius: default_world_visibility_radius(),
+        }
+    }
+}
+
 fn face_triangle_count(face: &GridHorizontalFace) -> usize {
     if face.is_triangle() {
         1
@@ -6774,6 +6843,9 @@ pub enum NodeKind {
         /// Third-person camera defaults inherited by descendant Rooms.
         #[serde(default)]
         camera: WorldCameraSettings,
+        /// Runtime culling controls inherited by descendant Rooms.
+        #[serde(default)]
+        culling: WorldCullingSettings,
     },
     /// One streamed level chunk: a sector grid plus its child
     /// entities. Cooks to a single `.psxw` blob the runtime loads
@@ -7313,6 +7385,19 @@ impl Scene {
         None
     }
 
+    /// Runtime culling settings inherited by `id` from the nearest World ancestor.
+    pub fn world_culling_for_node(&self, id: NodeId) -> Option<WorldCullingSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { culling, .. } = &node.kind {
+                return Some(culling.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
     /// Rows in root-first depth-first order.
     pub fn hierarchy_rows(&self) -> Vec<NodeRow> {
         let mut rows = Vec::new();
@@ -7741,6 +7826,7 @@ impl ProjectDocument {
                         sky,
                         far_vista,
                         camera,
+                        culling,
                     } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
@@ -7769,6 +7855,7 @@ impl ProjectDocument {
                             far_vista.vertical_offset.clamp(-32_768, 32_768);
                         far_vista.segments = far_vista.segments.clamp(3, 16);
                         *camera = camera.normalized();
+                        *culling = culling.normalized();
                     }
                     _ => {}
                 }
@@ -8866,6 +8953,7 @@ mod tests {
                 sky: SkySettings::default(),
                 far_vista: FarVistaSettings::default(),
                 camera: WorldCameraSettings::default(),
+                culling: WorldCullingSettings::default(),
             },
         );
         let mut grid = WorldGrid::empty(1, 1, 1024);
