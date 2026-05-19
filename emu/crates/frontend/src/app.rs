@@ -17,6 +17,7 @@ use psx_trace::InstructionRecord;
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
 use crate::embedded_playtest::EmbeddedPlaytestState;
+use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
 use crate::ui;
 use crate::ui::hud::HudState;
 use crate::ui::memory::MemoryView;
@@ -106,6 +107,8 @@ pub struct AppState {
     pub editor: EditorWorkspace,
     /// In-process playtest launched from the editor viewport.
     pub embedded_playtest: EmbeddedPlaytestState,
+    /// Recorded/replayed input for embedded editor play sessions.
+    playtest_input_tape: PlaytestInputTape,
     /// Editor project directory observed at the last
     /// [`AppState::sync_embedded_playtest_with_editor_project`]
     /// call. When the editor's current project_dir diverges, the
@@ -268,6 +271,7 @@ impl AppState {
             workspace: Workspace::Emulator,
             editor,
             embedded_playtest: EmbeddedPlaytestState::default(),
+            playtest_input_tape: PlaytestInputTape::default(),
             editor_project_dir_seen,
             editor_build_completion: None,
             examples_build_child: None,
@@ -967,6 +971,41 @@ impl AppState {
         self.embedded_playtest.editor_status()
     }
 
+    /// Editor-facing input-tape summary for the play viewport overlay.
+    pub fn editor_playtest_input_tape_status(&self) -> psxed_ui::EditorPlaytestTapeStatus {
+        self.playtest_input_tape.editor_status()
+    }
+
+    /// Resolve the persistent input tape for the current editor project.
+    fn editor_playtest_input_tape_path(&self) -> PathBuf {
+        let stem = self
+            .editor
+            .project_dir()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| psxed_project::project_file_stem(&self.editor.project().name));
+        self.paths
+            .editor_dir()
+            .join("playtest_tapes")
+            .join(format!("{stem}.pxtape"))
+    }
+
+    /// Feed or override the live pad sample for one embedded-play frame.
+    pub fn editor_playtest_input_sample_for_frame(
+        &mut self,
+        live_sample: Port1PadSample,
+    ) -> Port1PadSample {
+        let (sample, event) = self.playtest_input_tape.sample_for_frame(live_sample);
+        if let Some(PlaytestInputEvent::ReplayFinished { frames }) = event {
+            let message = format!("Input replay finished: {frames} frames");
+            self.editor.set_status(message.clone());
+            self.status_message_set(message);
+        }
+        sample
+    }
+
     /// True when the editor viewport is currently the live game.
     pub fn embedded_playtest_running(&self) -> bool {
         self.embedded_playtest.is_running()
@@ -1152,6 +1191,10 @@ impl AppState {
     /// Stop embedded play mode and return the editor viewport to the
     /// authored 3D preview.
     pub fn stop_embedded_playtest(&mut self) {
+        let tape_path = self.editor_playtest_input_tape_path();
+        if let Err(error) = self.playtest_input_tape.stop_active(&tape_path) {
+            eprintln!("[frontend] stop input tape: {error}");
+        }
         if let Some(mut child) = self.embedded_playtest.take_build_child() {
             let _ = child.kill();
             let _ = child.wait();
@@ -1206,6 +1249,75 @@ impl AppState {
         }
     }
 
+    fn start_embedded_playtest_input_recording(&mut self) {
+        if !self.embedded_playtest_running() {
+            self.editor
+                .set_status("Start Embedded Play before recording input");
+            return;
+        }
+        self.playtest_input_tape.start_recording();
+        let _ = self.embedded_playtest.capture_input();
+        self.running = true;
+        self.menu.open = false;
+        self.menu.sync_run_label(true);
+        let message = "Input recording started";
+        self.editor.set_status(message);
+        self.status_message_set(message);
+    }
+
+    fn stop_embedded_playtest_input_recording(&mut self) {
+        let path = self.editor_playtest_input_tape_path();
+        match self.playtest_input_tape.stop_recording(&path) {
+            Ok(frames) => {
+                let message = format!("Input recording saved: {frames} frames");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+            Err(error) => {
+                let message = format!("Input recording save failed: {error}");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+        }
+    }
+
+    fn start_embedded_playtest_input_replay(&mut self) {
+        if !self.embedded_playtest_running() {
+            self.editor
+                .set_status("Start Embedded Play before replaying input");
+            return;
+        }
+        if self.playtest_input_tape.is_recording() {
+            self.editor
+                .set_status("Stop input recording before replaying it");
+            return;
+        }
+        let path = self.editor_playtest_input_tape_path();
+        match self.playtest_input_tape.start_replay(&path) {
+            Ok(frames) => {
+                let _ = self.embedded_playtest.capture_input();
+                self.running = true;
+                self.menu.open = false;
+                self.menu.sync_run_label(true);
+                let message = format!("Input replay started: {frames} frames");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+            Err(error) => {
+                let message = format!("Input replay unavailable: {error}");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+        }
+    }
+
+    fn stop_embedded_playtest_input_replay(&mut self) {
+        self.playtest_input_tape.stop_replay();
+        let message = "Input replay stopped";
+        self.editor.set_status(message);
+        self.status_message_set(message);
+    }
+
     /// Handle one request emitted by the editor UI.
     pub fn handle_editor_playtest_request(&mut self, request: psxed_ui::EditorPlaytestRequest) {
         match request {
@@ -1222,6 +1334,18 @@ impl AppState {
             }
             psxed_ui::EditorPlaytestRequest::CaptureInput => {
                 self.capture_embedded_playtest_input();
+            }
+            psxed_ui::EditorPlaytestRequest::StartInputRecording => {
+                self.start_embedded_playtest_input_recording();
+            }
+            psxed_ui::EditorPlaytestRequest::StopInputRecording => {
+                self.stop_embedded_playtest_input_recording();
+            }
+            psxed_ui::EditorPlaytestRequest::StartInputReplay => {
+                self.start_embedded_playtest_input_replay();
+            }
+            psxed_ui::EditorPlaytestRequest::StopInputReplay => {
+                self.stop_embedded_playtest_input_replay();
             }
         }
     }
@@ -1569,7 +1693,14 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     }
 }
 
-fn fast_boot_embedded_playtest_disc(bus: &mut Bus, cpu: &mut Cpu, disc: &Disc, path: &Path) {
+/// Fast-boot an embedded editor playtest disc through the same no-BIOS path
+/// used by the in-editor Play viewport.
+pub(crate) fn fast_boot_embedded_playtest_disc(
+    bus: &mut Bus,
+    cpu: &mut Cpu,
+    disc: &Disc,
+    path: &Path,
+) {
     match fast_boot_disc_with_hle(bus, cpu, disc, true) {
         Ok(info) => {
             eprintln!(
@@ -1738,7 +1869,9 @@ fn editor_playtest_disc_path() -> PathBuf {
         .join("editor-playtest.bin")
 }
 
-fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
+/// Wrap the current editor-playtest executable and generated world pack into
+/// the local embedded playtest disc image.
+pub(crate) fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
     let exe_path = editor_playtest_exe_path();
     let exe_bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
     let world_pack = embedded_world_pack_payload()?;
