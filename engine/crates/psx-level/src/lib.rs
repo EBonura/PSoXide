@@ -469,6 +469,10 @@ pub struct LevelRoomRecord {
     pub chunk_activation_radius_sectors: i32,
     /// Cooked PVS traversal radius in room cells.
     pub visibility_radius: u16,
+    /// Maximum generated chunks kept resident for this world.
+    pub resident_chunk_limit: u8,
+    /// Maximum generated chunks selected for drawing/collision for this world.
+    pub visible_chunk_limit: u8,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.
     pub material_first: MaterialIndex,
