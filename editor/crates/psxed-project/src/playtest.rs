@@ -37,7 +37,7 @@ use psx_engine::{
 };
 use psx_level::{
     character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags, model_clip_flags,
-    sky_flags, visibility_cell_flags, visibility_edge_flags,
+    room_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
@@ -67,6 +67,10 @@ pub use manifest::{
 pub use schema::*;
 
 const PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
+const ATMOSPHERE_DENSITY_MAX: i32 = 96;
+const ATMOSPHERE_FALL_SPEED_MAX_Q4: i32 = 64;
+const ATMOSPHERE_WIND_SPEED_MIN_Q4: i32 = -64;
+const ATMOSPHERE_WIND_SPEED_MAX_Q4: i32 = 64;
 
 struct PlayerSpawnCandidate<'a> {
     node: &'a SceneNode,
@@ -76,6 +80,18 @@ struct PlayerSpawnCandidate<'a> {
     controller_settings: Option<CharacterControllerSettings>,
     renderer: Option<ModelRendererComponent>,
     animator: Option<AnimatorComponent<'a>>,
+}
+
+fn clamp_atmosphere_density(value: i32) -> u8 {
+    value.clamp(0, ATMOSPHERE_DENSITY_MAX) as u8
+}
+
+fn clamp_atmosphere_fall_speed_q4(value: i32) -> i16 {
+    value.clamp(0, ATMOSPHERE_FALL_SPEED_MAX_Q4) as i16
+}
+
+fn clamp_atmosphere_wind_speed_q4(value: i32) -> i16 {
+    value.clamp(ATMOSPHERE_WIND_SPEED_MIN_Q4, ATMOSPHERE_WIND_SPEED_MAX_Q4) as i16
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -376,6 +392,12 @@ pub fn build_package(
             let far_vista_has_texture = far_vista_texture_asset_indices.iter().any(Option::is_some);
             let sky_texture_asset_index =
                 cook_sky_panorama_texture_asset(resolved_sky, &mut sky_texture_assets, &mut assets);
+            let atmosphere_density = clamp_atmosphere_density(chunk_grid.atmosphere_density);
+            let atmosphere_fall_speed_q4 =
+                clamp_atmosphere_fall_speed_q4(chunk_grid.atmosphere_fall_speed_q4);
+            let atmosphere_wind_speed_q4 =
+                clamp_atmosphere_wind_speed_q4(chunk_grid.atmosphere_wind_speed_q4);
+            let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
 
             rooms.push(PlaytestRoom {
                 name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
@@ -388,6 +410,10 @@ pub fn build_package(
                 fog_rgb: chunk_grid.fog_color,
                 fog_near: chunk_grid.fog_near,
                 fog_far: chunk_grid.fog_far,
+                atmosphere_rgb: chunk_grid.atmosphere_color,
+                atmosphere_density,
+                atmosphere_fall_speed_q4,
+                atmosphere_wind_speed_q4,
                 sky: PlaytestSky {
                     top_rgb: resolved_sky.top_color,
                     horizon_rgb: resolved_sky.horizon_color,
@@ -444,7 +470,11 @@ pub fn build_package(
                     min_floor_clearance: resolved_camera.min_floor_clearance,
                 },
                 flags: if chunk_grid.fog_enabled {
-                    psx_level::room_flags::FOG_ENABLED
+                    room_flags::FOG_ENABLED
+                } else {
+                    0
+                } | if atmosphere_enabled {
+                    room_flags::ATMOSPHERE_ENABLED
                 } else {
                     0
                 },
@@ -3077,11 +3107,7 @@ fn bake_static_image_prop_lights(
         let base = prop.tint_rgb;
         prop.baked_vertex_rgb = if prop.flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0 {
             let bottom = [prop.x, prop.y, prop.z];
-            let top = [
-                prop.x,
-                prop.y.saturating_add(prop.height as i32),
-                prop.z,
-            ];
+            let top = [prop.x, prop.y.saturating_add(prop.height as i32), prop.z];
             let top_rgb = rgb_tuple(bake_static_vertex_rgb(top, base, ambient, &room_lights));
             let bottom_rgb = rgb_tuple(bake_static_vertex_rgb(bottom, base, ambient, &room_lights));
             [top_rgb, top_rgb, bottom_rgb, bottom_rgb]
@@ -3128,12 +3154,8 @@ fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
     ];
     let mut out = [[0, 0, 0]; 4];
     for (idx, local) in locals.iter().enumerate() {
-        let rotated = rotate_image_prop_local(
-            *local,
-            prop.pitch as u16,
-            prop.yaw as u16,
-            prop.roll as u16,
-        );
+        let rotated =
+            rotate_image_prop_local(*local, prop.pitch as u16, prop.yaw as u16, prop.roll as u16);
         out[idx] = [
             prop.x.saturating_add(rotated[0]),
             prop.y.saturating_add(rotated[1]),
