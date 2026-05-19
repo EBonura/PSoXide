@@ -48,7 +48,7 @@ use crate::world_cook::{
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, GridDirection,
     NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
-    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -120,8 +120,39 @@ struct CookedRoomBakeInput {
 /// Chunking policy used by Embedded Play. Authored Rooms may grow
 /// beyond the runtime room cap, but generated `.psxw` chunks should be
 /// sized for render cost before the hard runtime limits are reached.
-pub fn playtest_streaming_chunk_config() -> StreamingChunkConfig {
-    StreamingChunkConfig::default()
+/// `PSXED_PLAYTEST_CHUNK_TARGET=8` or `8x6` overrides the target size
+/// for cook-time benchmark sweeps.
+pub fn playtest_streaming_chunk_config(streaming: WorldStreamingSettings) -> StreamingChunkConfig {
+    let default = streaming.chunk_config();
+    std::env::var("PSXED_PLAYTEST_CHUNK_TARGET")
+        .ok()
+        .and_then(|raw| streaming_chunk_config_with_target(default, &raw))
+        .unwrap_or(default)
+}
+
+fn streaming_chunk_config_with_target(
+    mut config: StreamingChunkConfig,
+    raw: &str,
+) -> Option<StreamingChunkConfig> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.split(['x', 'X', ',', ':']);
+    let width = parts.next()?.trim().parse::<u16>().ok()?.max(1);
+    let depth = parts
+        .next()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .and_then(|part| part.parse::<u16>().ok())
+        .unwrap_or(width)
+        .max(1);
+    if parts.next().is_some() {
+        return None;
+    }
+    config.target_width = width;
+    config.target_depth = depth;
+    Some(config)
 }
 
 /// Build a playtest package from `project`. Validates the scene
@@ -188,7 +219,11 @@ pub fn build_package(
             ));
             continue;
         }
-        let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config());
+        let streaming = scene
+            .world_streaming_for_node(room_node.id)
+            .unwrap_or_default()
+            .normalized();
+        let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config(streaming));
         let chunk_count = plan.chunk_count();
         for chunk in plan.chunks {
             let Some(chunk_grid) = grid_rect(grid, chunk.array_origin, chunk.size) else {
@@ -412,9 +447,10 @@ pub fn build_package(
                 origin_z: chunk_grid.origin[1],
                 sector_size: chunk_grid.sector_size,
                 draw_distance: resolved_culling.draw_distance,
-                chunk_activation_radius_sectors: resolved_culling
-                    .chunk_activation_radius_sectors,
+                chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
                 visibility_radius: resolved_culling.visibility_radius,
+                resident_chunk_limit: streaming.resident_chunk_limit,
+                visible_chunk_limit: streaming.visible_chunk_limit,
                 material_first,
                 material_count,
                 fog_rgb: chunk_grid.fog_color,
@@ -4395,6 +4431,22 @@ mod tests {
         project
     }
 
+    #[test]
+    fn streaming_chunk_target_override_accepts_square_and_rect_values() {
+        let default = WorldStreamingSettings::default().chunk_config();
+
+        let square = streaming_chunk_config_with_target(default, "8").expect("square target");
+        assert_eq!(square.target_width, 8);
+        assert_eq!(square.target_depth, 8);
+
+        let rect = streaming_chunk_config_with_target(default, "12x6").expect("rect target");
+        assert_eq!(rect.target_width, 12);
+        assert_eq!(rect.target_depth, 6);
+
+        assert!(streaming_chunk_config_with_target(default, "").is_none());
+        assert!(streaming_chunk_config_with_target(default, "8x8x8").is_none());
+    }
+
     fn is_player_spawn_node(scene: &crate::Scene, node: &SceneNode) -> bool {
         match &node.kind {
             NodeKind::SpawnPoint { player: true, .. } => true,
@@ -4822,8 +4874,8 @@ mod tests {
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("package returned on ok report");
-        assert_eq!(package.rooms.len(), 4);
-        assert_eq!(package.room_asset_count(), 4);
+        assert_eq!(package.rooms.len(), 8);
+        assert_eq!(package.room_asset_count(), 8);
         assert!(package
             .spawn
             .is_some_and(|spawn| (spawn.room as usize) < package.rooms.len()));
@@ -6027,10 +6079,10 @@ mod tests {
 
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
-        assert_eq!(package.rooms.len(), 4);
+        assert_eq!(package.rooms.len(), 8);
         assert_eq!(package.lights.len(), 2);
-        assert!(package.lights.iter().any(|light| light.room == 0));
-        assert!(package.lights.iter().any(|light| light.room == 1));
+        let light_rooms: BTreeSet<u16> = package.lights.iter().map(|light| light.room).collect();
+        assert_eq!(light_rooms.len(), 2);
     }
 
     #[test]
@@ -6068,7 +6120,7 @@ mod tests {
 
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
-        assert_eq!(package.rooms.len(), 2);
+        assert_eq!(package.rooms.len(), 4);
         let mut transition_walls = 0usize;
         for room in &package.rooms {
             let world = psx_asset::World::from_bytes(&package.assets[room.world_asset_index].bytes)
