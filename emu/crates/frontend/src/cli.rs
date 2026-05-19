@@ -597,6 +597,7 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         camera,
         true,
         true,
+        true,
         !args.no_grid,
         &empty_hidden,
         NodeId::ROOT,

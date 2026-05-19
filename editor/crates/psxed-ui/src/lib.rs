@@ -36,10 +36,13 @@ use psxed_project::{
     GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
     PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
-    WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
-    HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
-    MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-    MIN_WORLD_CAMERA_DISTANCE, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
+    WorldCullingSettings, WorldGrid, WorldGridBudget, DEFAULT_WALL_HEIGHT_SECTORS,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
+    MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
+    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
+    MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
+    MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
     SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
 };
 
@@ -52,6 +55,8 @@ const EDITOR_OUTLINE_STROKE_WIDTH: f32 = 1.25;
 const EDITOR_SELECTED_OUTLINE_STROKE_WIDTH: f32 = 3.0;
 const EDITOR_OUTLINE_ACCENT: Color32 = Color32::from_rgb(165, 238, 255);
 const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
+const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
+const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
 const MAX_IMAGE_PROP_SIZE: u16 = 4096;
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
 const RESOURCE_CARD_WIDTH: f32 = 120.0;
@@ -283,6 +288,7 @@ pub struct EditorWorkspace {
     show_grid: bool,
     preview_fog: bool,
     preview_backface_wireframe: bool,
+    preview_bounds: bool,
     view_2d: bool,
     active_workspace: WorkspaceView,
     left_dock_open: bool,
@@ -1479,6 +1485,39 @@ impl NodeGizmoHandle {
     }
 }
 
+fn gizmo_axis_color(axis: PrimitiveGizmoAxis, highlighted: bool) -> Color32 {
+    gizmo_highlight_color(axis.color(), highlighted)
+}
+
+fn gizmo_highlight_color(color: Color32, highlighted: bool) -> Color32 {
+    if highlighted {
+        Color32::from_rgb(
+            lerp_u8(color.r(), 255, 96),
+            lerp_u8(color.g(), 255, 96),
+            lerp_u8(color.b(), 255, 96),
+        )
+    } else {
+        color
+    }
+}
+
+fn gizmo_axis_stroke_width(highlighted: bool) -> f32 {
+    if highlighted { 4.25 } else { 2.5 }
+}
+
+fn gizmo_axis_handle_radius(highlighted: bool) -> f32 {
+    if highlighted { 6.5 } else { 5.0 }
+}
+
+fn lerp_u8(a: u8, b: u8, amount: u16) -> u8 {
+    let inv = 255u16.saturating_sub(amount);
+    let value = (a as u16)
+        .saturating_mul(inv)
+        .saturating_add((b as u16).saturating_mul(amount))
+        / 255;
+    value.min(255) as u8
+}
+
 #[derive(Debug, Clone, Copy)]
 struct NodeGizmoScreenPlane {
     plane: NodeGizmoPlane,
@@ -2115,6 +2154,7 @@ impl EditorWorkspace {
             show_grid: true,
             preview_fog: true,
             preview_backface_wireframe: true,
+            preview_bounds: true,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
@@ -4177,13 +4217,31 @@ impl EditorWorkspace {
             }
         }
 
+        let hovered_gizmo = if select_tool && !dnd_active && response.hovered() {
+            response.hover_pos().map(|pointer| {
+                let primitive_axis = (self.transform_gizmo_mode == TransformGizmoMode::Move)
+                    .then(|| self.pick_primitive_gizmo_axis(rect, pointer))
+                    .flatten();
+                let node_handle = if primitive_axis.is_none() {
+                    self.pick_node_gizmo_handle(rect, pointer)
+                } else {
+                    None
+                };
+                (primitive_axis, node_handle)
+            })
+        } else {
+            None
+        };
+        let (hovered_primitive_axis, hovered_node_handle) =
+            hovered_gizmo.unwrap_or((None, None));
+
         egui::Image::new((viewport_3d.texture, rect.size()))
             .uv(viewport_3d.uv)
             .paint_at(ui, rect);
         let painter = ui.painter_at(rect);
         Self::draw_viewport_3d_overlay_lines(&painter, rect, &viewport_3d);
-        self.draw_primitive_gizmo(&painter, rect);
-        self.draw_node_gizmo(&painter, rect);
+        self.draw_primitive_gizmo(&painter, rect, hovered_primitive_axis);
+        self.draw_node_gizmo(&painter, rect, hovered_node_handle);
         draw_viewport_box_select_marquee(&painter, self.viewport_3d_box_select_rect());
         if resource_drop_hovered {
             painter.rect_stroke(
@@ -4488,6 +4546,12 @@ impl EditorWorkspace {
     /// one-sided faces whose rendered side is currently culled.
     pub fn preview_backface_wireframe_enabled(&self) -> bool {
         self.preview_backface_wireframe
+    }
+
+    /// Whether the editor preview should draw entity/image/collision
+    /// bounds. Picking stays enabled; this only hides the visual boxes.
+    pub fn preview_bounds_enabled(&self) -> bool {
+        self.preview_bounds
     }
 
     /// Whether the Grid toolbar toggle is currently on. In 2D this
@@ -4951,6 +5015,24 @@ impl EditorWorkspace {
         let mut selected_primitives = Vec::new();
         {
             let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node(drag.room) else {
+                self.primitive_grid_drag = None;
+                self.status = "Move target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { .. } = &node.kind else {
+                self.primitive_grid_drag = None;
+                self.status = "Move target is not a Room".to_string();
+                return;
+            };
+            for cell in &drag.cells {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene,
+                    drag.room,
+                    drag.source_origin[0] + drag.current_delta[0] + cell.offset[0],
+                    drag.source_origin[1] + drag.current_delta[1] + cell.offset[1],
+                );
+            }
             let Some(node) = scene.node_mut(drag.room) else {
                 self.primitive_grid_drag = None;
                 self.status = "Move target room no longer exists".to_string();
@@ -4961,12 +5043,6 @@ impl EditorWorkspace {
                 self.status = "Move target is not a Room".to_string();
                 return;
             };
-            for cell in &drag.cells {
-                grid.extend_to_include(
-                    drag.source_origin[0] + drag.current_delta[0] + cell.offset[0],
-                    drag.source_origin[1] + drag.current_delta[1] + cell.offset[1],
-                );
-            }
             for cell in drag.cells {
                 let wcx = drag.source_origin[0] + drag.current_delta[0] + cell.offset[0];
                 let wcz = drag.source_origin[1] + drag.current_delta[1] + cell.offset[1];
@@ -5112,13 +5188,18 @@ impl EditorWorkspace {
             .filter_map(|screen_axis| {
                 let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
                     .min((pointer - screen_axis.end).length());
-                (distance <= 10.0).then_some((distance, screen_axis.axis))
+                (distance <= GIZMO_AXIS_PICK_RADIUS).then_some((distance, screen_axis.axis))
             })
             .min_by(|(a, _), (b, _)| a.total_cmp(b))
             .map(|(_, axis)| axis)
     }
 
-    fn draw_primitive_gizmo(&self, painter: &egui::Painter, rect: Rect) {
+    fn draw_primitive_gizmo(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        hovered_axis: Option<PrimitiveGizmoAxis>,
+    ) {
         if self.transform_gizmo_mode != TransformGizmoMode::Move {
             return;
         }
@@ -5129,14 +5210,15 @@ impl EditorWorkspace {
         let active_axis = self.primitive_gizmo_drag.as_ref().map(|drag| drag.axis);
         painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
         for screen_axis in axes {
-            let active = active_axis == Some(screen_axis.axis);
-            let color = screen_axis.axis.color();
-            let stroke_width = if active { 4.0 } else { 2.5 };
+            let highlighted =
+                active_axis == Some(screen_axis.axis) || hovered_axis == Some(screen_axis.axis);
+            let color = gizmo_axis_color(screen_axis.axis, highlighted);
+            let stroke_width = gizmo_axis_stroke_width(highlighted);
             painter.line_segment(
                 [screen_axis.start, screen_axis.end],
                 Stroke::new(stroke_width, color),
             );
-            painter.circle_filled(screen_axis.end, if active { 6.0 } else { 5.0 }, color);
+            painter.circle_filled(screen_axis.end, gizmo_axis_handle_radius(highlighted), color);
             let label_offset = (screen_axis.end - screen_axis.start).normalized() * 12.0;
             painter.text(
                 screen_axis.end + label_offset,
@@ -5372,7 +5454,7 @@ impl EditorWorkspace {
                         .min_by(|a, b| a.total_cmp(b))
                         .map(|distance| (distance, ring.axis))
                 })
-                .filter(|(distance, _)| *distance <= 12.0)
+                .filter(|(distance, _)| *distance <= GIZMO_ROTATION_PICK_RADIUS)
                 .min_by(|(a, _), (b, _)| a.total_cmp(b))
                 .map(|(_, axis)| NodeGizmoHandle::Axis(axis));
         }
@@ -5390,13 +5472,19 @@ impl EditorWorkspace {
             .filter_map(|screen_axis| {
                 let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
                     .min((pointer - screen_axis.end).length());
-                (distance <= 10.0).then_some((distance, NodeGizmoHandle::Axis(screen_axis.axis)))
+                (distance <= GIZMO_AXIS_PICK_RADIUS)
+                    .then_some((distance, NodeGizmoHandle::Axis(screen_axis.axis)))
             })
             .min_by(|(a, _), (b, _)| a.total_cmp(b))
             .map(|(_, handle)| handle)
     }
 
-    fn draw_node_gizmo(&self, painter: &egui::Painter, rect: Rect) {
+    fn draw_node_gizmo(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        hovered_handle: Option<NodeGizmoHandle>,
+    ) {
         if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
             let rings = self.node_rotation_gizmo_screen_rings(rect);
             if rings.is_empty() {
@@ -5408,14 +5496,15 @@ impl EditorWorkspace {
                 .and_then(|drag| drag.handle.axis());
             painter.circle_filled(rings[0].center, 4.0, Color32::from_rgb(235, 242, 248));
             for ring in &rings {
-                let active = active_axis == Some(ring.axis);
-                let color = ring.axis.color();
-                let stroke_width = if active { 4.0 } else { 2.5 };
+                let highlighted = active_axis == Some(ring.axis)
+                    || hovered_handle == Some(NodeGizmoHandle::Axis(ring.axis));
+                let color = gizmo_axis_color(ring.axis, highlighted);
+                let stroke_width = gizmo_axis_stroke_width(highlighted);
                 for pair in ring.points.windows(2) {
                     painter.line_segment([pair[0], pair[1]], Stroke::new(stroke_width, color));
                 }
                 if let Some(label_pos) = ring.points.first().copied() {
-                    painter.circle_filled(label_pos, if active { 6.0 } else { 5.0 }, color);
+                    painter.circle_filled(label_pos, gizmo_axis_handle_radius(highlighted), color);
                     painter.text(
                         label_pos + Vec2::new(14.0, 0.0),
                         Align2::CENTER_CENTER,
@@ -5435,10 +5524,11 @@ impl EditorWorkspace {
         painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
         if self.transform_gizmo_mode == TransformGizmoMode::Move {
             for screen_plane in self.node_gizmo_screen_planes(rect) {
-                let active = active_handle == Some(NodeGizmoHandle::Plane(screen_plane.plane));
-                let color = screen_plane.plane.color();
-                let fill_alpha = if active { 112 } else { 58 };
-                let stroke_width = if active { 2.5 } else { 1.5 };
+                let highlighted = active_handle == Some(NodeGizmoHandle::Plane(screen_plane.plane))
+                    || hovered_handle == Some(NodeGizmoHandle::Plane(screen_plane.plane));
+                let color = gizmo_highlight_color(screen_plane.plane.color(), highlighted);
+                let fill_alpha = if highlighted { 128 } else { 58 };
+                let stroke_width = if highlighted { 3.0 } else { 1.5 };
                 painter.add(egui::Shape::convex_polygon(
                     screen_plane.corners.to_vec(),
                     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), fill_alpha),
@@ -5447,14 +5537,15 @@ impl EditorWorkspace {
             }
         }
         for screen_axis in axes {
-            let active = active_handle == Some(NodeGizmoHandle::Axis(screen_axis.axis));
-            let color = screen_axis.axis.color();
-            let stroke_width = if active { 4.0 } else { 2.5 };
+            let highlighted = active_handle == Some(NodeGizmoHandle::Axis(screen_axis.axis))
+                || hovered_handle == Some(NodeGizmoHandle::Axis(screen_axis.axis));
+            let color = gizmo_axis_color(screen_axis.axis, highlighted);
+            let stroke_width = gizmo_axis_stroke_width(highlighted);
             painter.line_segment(
                 [screen_axis.start, screen_axis.end],
                 Stroke::new(stroke_width, color),
             );
-            painter.circle_filled(screen_axis.end, if active { 6.0 } else { 5.0 }, color);
+            painter.circle_filled(screen_axis.end, gizmo_axis_handle_radius(highlighted), color);
             let label_offset = (screen_axis.end - screen_axis.start).normalized() * 12.0;
             painter.text(
                 screen_axis.end + label_offset,
@@ -5630,6 +5721,24 @@ impl EditorWorkspace {
         let mut selected_primitives = Vec::new();
         {
             let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node(grid_drag.room) else {
+                self.primitive_gizmo_drag = None;
+                self.status = "Move target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { .. } = &node.kind else {
+                self.primitive_gizmo_drag = None;
+                self.status = "Move target is not a Room".to_string();
+                return;
+            };
+            for cell in &grid_drag.cells {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene,
+                    grid_drag.room,
+                    grid_drag.source_origin[0] + grid_drag.current_delta[0] + cell.offset[0],
+                    grid_drag.source_origin[1] + grid_drag.current_delta[1] + cell.offset[1],
+                );
+            }
             let Some(node) = scene.node_mut(grid_drag.room) else {
                 self.primitive_gizmo_drag = None;
                 self.status = "Move target room no longer exists".to_string();
@@ -5640,12 +5749,6 @@ impl EditorWorkspace {
                 self.status = "Move target is not a Room".to_string();
                 return;
             };
-            for cell in &grid_drag.cells {
-                grid.extend_to_include(
-                    grid_drag.source_origin[0] + grid_drag.current_delta[0] + cell.offset[0],
-                    grid_drag.source_origin[1] + grid_drag.current_delta[1] + cell.offset[1],
-                );
-            }
             for cell in grid_drag.cells {
                 let wcx = grid_drag.source_origin[0] + grid_drag.current_delta[0] + cell.offset[0];
                 let wcz = grid_drag.source_origin[1] + grid_drag.current_delta[1] + cell.offset[1];
@@ -6961,11 +7064,11 @@ impl EditorWorkspace {
         }
         self.push_undo();
         let scene = self.project.active_scene_mut();
-        let node = scene.node_mut(room_id)?;
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let cell = extend_room_grid_to_include_preserving_child_positions(scene, room_id, wcx, wcz)?;
+        let node = scene.node(room_id)?;
+        let NodeKind::Room { grid } = &node.kind else {
             return None;
         };
-        let cell = grid.extend_to_include(wcx, wcz);
         self.status = format!(
             "Grew grid to {}×{} (origin {},{})",
             grid.width, grid.depth, grid.origin[0], grid.origin[1]
@@ -9060,6 +9163,7 @@ impl EditorWorkspace {
                                 // Applied after both phases release their borrows.
                                 let mut nav_target: Option<ResourceId> = None;
                                 let mut world_sector_size_change: Option<i32> = None;
+                                let mut room_grid_resize: Option<(u16, u16)> = None;
                                 let inherited_sector_size =
                                     self.project.world_sector_size_for_node(selected);
 
@@ -9121,6 +9225,7 @@ impl EditorWorkspace {
                                             &weapon_options,
                                             animator_clip_context.as_ref(),
                                             inherited_sector_size,
+                                            &mut room_grid_resize,
                                             &mut nav_target,
                                         );
                                     });
@@ -9131,6 +9236,16 @@ impl EditorWorkspace {
                                         self.project.set_world_sector_size(selected, new_sector_size)
                                     {
                                         self.status = format!("World grid size set to {applied}");
+                                        changed = true;
+                                    }
+                                }
+                                if let Some((new_w, new_d)) = room_grid_resize {
+                                    if resize_room_grid_preserving_child_positions(
+                                        self.project.active_scene_mut(),
+                                        selected,
+                                        new_w,
+                                        new_d,
+                                    ) {
                                         changed = true;
                                     }
                                 }
@@ -11258,6 +11373,15 @@ impl EditorWorkspace {
                             "Toggle passive outlines for culled backfaces.",
                         ) {
                             self.preview_backface_wireframe = !self.preview_backface_wireframe;
+                        }
+                        if toolbar_icon_button(
+                            ui,
+                            self.preview_bounds,
+                            icons::BOX,
+                            "Bounds",
+                            "Toggle entity, prop, and collision bounds in the 3D preview.",
+                        ) {
+                            self.preview_bounds = !self.preview_bounds;
                         }
                     });
                     ui.separator();
@@ -13409,6 +13533,24 @@ impl EditorWorkspace {
         let mut selected_primitives = Vec::new();
         {
             let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node(preview.room) else {
+                self.floating_geometry = None;
+                self.status = "Duplicate target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { .. } = &node.kind else {
+                self.floating_geometry = None;
+                self.status = "Duplicate target is not a Room".to_string();
+                return;
+            };
+            for (offset, _) in &cells {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene,
+                    preview.room,
+                    preview.origin[0] + offset[0],
+                    preview.origin[1] + offset[1],
+                );
+            }
             let Some(node) = scene.node_mut(preview.room) else {
                 self.floating_geometry = None;
                 self.status = "Duplicate target room no longer exists".to_string();
@@ -13419,12 +13561,6 @@ impl EditorWorkspace {
                 self.status = "Duplicate target is not a Room".to_string();
                 return;
             };
-            for (offset, _) in &cells {
-                grid.extend_to_include(
-                    preview.origin[0] + offset[0],
-                    preview.origin[1] + offset[1],
-                );
-            }
             for (offset, sector) in cells {
                 let wcx = preview.origin[0] + offset[0];
                 let wcz = preview.origin[1] + offset[1];
@@ -13559,6 +13695,20 @@ impl EditorWorkspace {
         let mut selected = Vec::new();
         {
             let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node(room) else {
+                self.status = "Selected room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { .. } = &node.kind else {
+                self.status = "Selected target is not a Room".to_string();
+                return;
+            };
+
+            for (world, _) in &rotated {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene, room, world[0], world[1],
+                );
+            }
             let Some(node) = scene.node_mut(room) else {
                 self.status = "Selected room no longer exists".to_string();
                 return;
@@ -13567,10 +13717,6 @@ impl EditorWorkspace {
                 self.status = "Selected target is not a Room".to_string();
                 return;
             };
-
-            for (world, _) in &rotated {
-                grid.extend_to_include(world[0], world[1]);
-            }
             for (world, _) in &staged {
                 if let Some((sx, sz)) = grid.world_cell_to_array(world[0], world[1]) {
                     if let Some(index) = grid.sector_index(sx, sz) {
@@ -15005,12 +15151,14 @@ fn draw_transform_policy_editor(
             sky,
             far_vista,
             camera,
+            culling,
         } => draw_world_grid_settings(
             ui,
             *sector_size,
             sky,
             far_vista,
             camera,
+            culling,
             texture_options,
             nav_target,
             world_sector_size_change,
@@ -15073,6 +15221,7 @@ fn draw_world_grid_settings(
     sky: &mut SkySettings,
     far_vista: &mut FarVistaSettings,
     camera: &mut WorldCameraSettings,
+    culling: &mut WorldCullingSettings,
     texture_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
     world_sector_size_change: &mut Option<i32>,
@@ -15424,6 +15573,54 @@ fn draw_world_grid_settings(
                     )
                     .on_hover_text("Minimum camera origin height above the sampled floor.")
                     .changed();
+            });
+        });
+    egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Culling"))
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Draw Distance").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut culling.draw_distance)
+                            .speed(512.0)
+                            .range(MIN_WORLD_DRAW_DISTANCE..=MAX_WORLD_DRAW_DISTANCE),
+                    )
+                    .changed();
+                ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Chunk Radius").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut culling.chunk_activation_radius_sectors)
+                            .speed(1.0)
+                            .range(
+                                MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS
+                                    ..=MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
+                            ),
+                    )
+                    .changed();
+                ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Visibility Radius").color(STUDIO_TEXT_WEAK));
+                let mut radius = culling.visibility_radius as i32;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut radius)
+                            .speed(1.0)
+                            .range(
+                                MIN_WORLD_VISIBILITY_RADIUS as i32
+                                    ..=MAX_WORLD_VISIBILITY_RADIUS as i32,
+                            ),
+                    )
+                    .changed()
+                {
+                    culling.visibility_radius = radius as u16;
+                    changed = true;
+                }
+                ui.label(RichText::new("cells").color(STUDIO_TEXT_WEAK));
             });
         });
     egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Far Vista"))
@@ -16070,6 +16267,7 @@ fn draw_node_kind_editor(
     weapon_options: &[(ResourceId, String)],
     animator_clip_context: Option<&AnimatorClipContext>,
     inherited_sector_size: i32,
+    room_grid_resize: &mut Option<(u16, u16)>,
     nav_target: &mut Option<ResourceId>,
 ) -> bool {
     let mut changed = false;
@@ -16112,7 +16310,7 @@ fn draw_node_kind_editor(
                     )
                     .changed();
                 if w_changed || d_changed {
-                    grid.resize(new_w, new_d);
+                    *room_grid_resize = Some((new_w, new_d));
                     changed = true;
                 }
             });
@@ -20997,6 +21195,7 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
                 sky: SkySettings::default(),
                 far_vista: FarVistaSettings::default(),
                 camera: WorldCameraSettings::default(),
+                culling: WorldCullingSettings::default(),
             },
         ),
         (
@@ -23024,6 +23223,105 @@ fn selected_stroke(selected: bool) -> Stroke {
 
 fn node_world(node: &psxed_project::SceneNode) -> [f32; 2] {
     [node.transform.translation[0], node.transform.translation[2]]
+}
+
+fn room_grid_center_cells(scene: &psxed_project::Scene, room: NodeId) -> Option<[f32; 2]> {
+    let node = scene.node(room)?;
+    let NodeKind::Room { grid } = &node.kind else {
+        return None;
+    };
+    Some(grid.grid_center_cells())
+}
+
+fn node_kind_uses_room_editor_position(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Entity
+            | NodeKind::MeshInstance { .. }
+            | NodeKind::ImageProp { .. }
+            | NodeKind::SpawnPoint { .. }
+            | NodeKind::PointLight { .. }
+            | NodeKind::Trigger { .. }
+            | NodeKind::Portal { .. }
+            | NodeKind::AudioSource { .. }
+    )
+}
+
+fn recenter_room_spatial_descendants(
+    scene: &mut psxed_project::Scene,
+    room: NodeId,
+    old_center: [f32; 2],
+) {
+    let Some(new_center) = room_grid_center_cells(scene, room) else {
+        return;
+    };
+    let delta = [
+        old_center[0] - new_center[0],
+        old_center[1] - new_center[1],
+    ];
+    if delta[0] == 0.0 && delta[1] == 0.0 {
+        return;
+    }
+    let ids: Vec<NodeId> = scene
+        .nodes()
+        .iter()
+        .filter(|node| node.id != room)
+        .filter(|node| scene.is_descendant_of(node.id, room))
+        .filter(|node| node_kind_uses_room_editor_position(&node.kind))
+        .map(|node| node.id)
+        .collect();
+    for id in ids {
+        if let Some(node) = scene.node_mut(id) {
+            node.transform.translation[0] += delta[0];
+            node.transform.translation[2] += delta[1];
+        }
+    }
+}
+
+fn extend_room_grid_to_include_preserving_child_positions(
+    scene: &mut psxed_project::Scene,
+    room: NodeId,
+    wcx: i32,
+    wcz: i32,
+) -> Option<(u16, u16)> {
+    let old_center = room_grid_center_cells(scene, room)?;
+    let cell = {
+        let node = scene.node_mut(room)?;
+        let NodeKind::Room { grid } = &mut node.kind else {
+            return None;
+        };
+        grid.extend_to_include(wcx, wcz)
+    };
+    recenter_room_spatial_descendants(scene, room, old_center);
+    Some(cell)
+}
+
+fn resize_room_grid_preserving_child_positions(
+    scene: &mut psxed_project::Scene,
+    room: NodeId,
+    width: u16,
+    depth: u16,
+) -> bool {
+    let Some(old_center) = room_grid_center_cells(scene, room) else {
+        return false;
+    };
+    let resized = {
+        let Some(node) = scene.node_mut(room) else {
+            return false;
+        };
+        let NodeKind::Room { grid } = &mut node.kind else {
+            return false;
+        };
+        if grid.width == width && grid.depth == depth {
+            return false;
+        }
+        grid.resize(width, depth);
+        true
+    };
+    if resized {
+        recenter_room_spatial_descendants(scene, room, old_center);
+    }
+    resized
 }
 
 fn grid_cell_editor_center(grid: &WorldGrid, sx: u16, sz: u16) -> [f32; 2] {
@@ -27510,6 +27808,64 @@ mod tests {
         assert!((actual.y - expected.y).abs() < 0.001);
     }
 
+    fn test_node_preview_origin(
+        project: &ProjectDocument,
+        room: NodeId,
+        node: NodeId,
+    ) -> [i32; 3] {
+        let scene = project.active_scene();
+        let room_node = scene.node(room).expect("room exists");
+        let NodeKind::Room { grid } = &room_node.kind else {
+            panic!("expected room");
+        };
+        let node = scene.node(node).expect("node exists");
+        psxed_project::spatial::node_preview_origin(grid, &node.transform)
+    }
+
+    #[test]
+    fn room_grid_grow_preserves_spatial_descendant_preview_position() {
+        let mut project = ProjectDocument::new("grid-grow");
+        let scene = project.active_scene_mut();
+        let room = scene.add_node(
+            scene.root,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(2, 2, 1024),
+            },
+        );
+        let entity = scene.add_node(room, "Entity", NodeKind::Entity);
+        scene
+            .node_mut(entity)
+            .expect("entity exists")
+            .transform
+            .translation = [0.0, 0.0, 0.0];
+
+        let before = test_node_preview_origin(&project, room, entity);
+        assert_eq!(before, [1024, 0, 1024]);
+
+        assert_eq!(
+            extend_room_grid_to_include_preserving_child_positions(
+                project.active_scene_mut(),
+                room,
+                2,
+                0,
+            ),
+            Some((2, 0))
+        );
+        assert_eq!(test_node_preview_origin(&project, room, entity), before);
+
+        assert_eq!(
+            extend_room_grid_to_include_preserving_child_positions(
+                project.active_scene_mut(),
+                room,
+                -1,
+                0,
+            ),
+            Some((0, 0))
+        );
+        assert_eq!(test_node_preview_origin(&project, room, entity), before);
+    }
+
     #[test]
     fn centered_aspect_rect_centers_wide_preview_box() {
         let container = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(800.0, 240.0));
@@ -31562,6 +31918,7 @@ mod tests {
                 sky: SkySettings::default(),
                 far_vista: FarVistaSettings::default(),
                 camera: WorldCameraSettings::default(),
+                culling: WorldCullingSettings::default(),
             },
         );
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
