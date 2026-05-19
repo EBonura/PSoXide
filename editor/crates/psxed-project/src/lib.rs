@@ -4072,6 +4072,24 @@ pub const MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS: i32 = 256;
 pub const MIN_WORLD_VISIBILITY_RADIUS: u16 = 4;
 /// Maximum precomputed cell-visibility traversal radius.
 pub const MAX_WORLD_VISIBILITY_RADIUS: u16 = 96;
+/// Smallest generated streaming chunk target accepted by the cooker.
+pub const MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = 1;
+/// Default generated streaming chunk target in sectors.
+pub const DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = 6;
+/// Largest generated streaming chunk target accepted by the cooker.
+pub const MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = MAX_ROOM_WIDTH;
+/// Smallest resident generated-chunk budget accepted by the runtime.
+pub const MIN_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 1;
+/// Default generated-chunk residency budget used by the playtest runtime.
+pub const DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 10;
+/// Largest generated-chunk residency budget supported by the current runtime.
+pub const MAX_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 32;
+/// Smallest generated-chunk visible-window budget accepted by the runtime.
+pub const MIN_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 1;
+/// Default generated-chunk visible-window budget used by the playtest runtime.
+pub const DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS;
+/// Largest generated-chunk visible-window budget supported by the current runtime.
+pub const MAX_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 32;
 
 const fn default_world_draw_distance() -> i32 {
     16_384
@@ -4083,6 +4101,18 @@ const fn default_world_chunk_activation_radius_sectors() -> i32 {
 
 const fn default_world_visibility_radius() -> u16 {
     32
+}
+
+const fn default_world_streaming_chunk_target_sectors() -> u16 {
+    DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS
+}
+
+const fn default_world_streaming_resident_chunks() -> u8 {
+    DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS
+}
+
+const fn default_world_streaming_visible_chunks() -> u8 {
+    DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS
 }
 
 /// Runtime culling knobs inherited by descendant Rooms from their
@@ -4125,6 +4155,77 @@ impl Default for WorldCullingSettings {
             draw_distance: default_world_draw_distance(),
             chunk_activation_radius_sectors: default_world_chunk_activation_radius_sectors(),
             visibility_radius: default_world_visibility_radius(),
+        }
+    }
+}
+
+/// Cook-time streaming chunk controls inherited by descendant Rooms from
+/// their nearest World node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldStreamingSettings {
+    /// Preferred generated chunk width in grid sectors.
+    #[serde(default = "default_world_streaming_chunk_target_sectors")]
+    pub chunk_target_width: u16,
+    /// Preferred generated chunk depth in grid sectors.
+    #[serde(default = "default_world_streaming_chunk_target_sectors")]
+    pub chunk_target_depth: u16,
+    /// Maximum generated chunks kept resident by the playtest runtime.
+    #[serde(default = "default_world_streaming_resident_chunks")]
+    pub resident_chunk_limit: u8,
+    /// Maximum generated chunks selected for drawing/collision by the runtime.
+    ///
+    /// A serialized zero is treated as a legacy project value and inherits the
+    /// resident chunk limit during normalization.
+    #[serde(default)]
+    pub visible_chunk_limit: u8,
+}
+
+impl WorldStreamingSettings {
+    /// Clamp authored values to cooker-safe ranges.
+    pub fn normalized(self) -> Self {
+        let resident_chunk_limit = self.resident_chunk_limit.clamp(
+            MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
+            MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
+        );
+        let visible_chunk_limit = if self.visible_chunk_limit == 0 {
+            resident_chunk_limit
+        } else {
+            self.visible_chunk_limit
+        }
+        .clamp(
+            MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
+            MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+        )
+        .min(resident_chunk_limit);
+        Self {
+            chunk_target_width: self
+                .chunk_target_width
+                .clamp(MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_WIDTH),
+            chunk_target_depth: self
+                .chunk_target_depth
+                .clamp(MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_DEPTH),
+            resident_chunk_limit,
+            visible_chunk_limit,
+        }
+    }
+
+    /// Convert authored world settings into the chunk planner config.
+    pub fn chunk_config(self) -> crate::streaming::StreamingChunkConfig {
+        let mut config = crate::streaming::StreamingChunkConfig::default();
+        let normalized = self.normalized();
+        config.target_width = normalized.chunk_target_width;
+        config.target_depth = normalized.chunk_target_depth;
+        config
+    }
+}
+
+impl Default for WorldStreamingSettings {
+    fn default() -> Self {
+        Self {
+            chunk_target_width: default_world_streaming_chunk_target_sectors(),
+            chunk_target_depth: default_world_streaming_chunk_target_sectors(),
+            resident_chunk_limit: default_world_streaming_resident_chunks(),
+            visible_chunk_limit: default_world_streaming_visible_chunks(),
         }
     }
 }
@@ -6404,7 +6505,7 @@ const fn default_character_sprint_min_q12() -> i32 {
 }
 
 const fn default_character_sprint_drain_q12() -> i32 {
-    40
+    10
 }
 
 const fn default_character_stamina_recover_q12() -> i32 {
@@ -6846,6 +6947,9 @@ pub enum NodeKind {
         /// Runtime culling controls inherited by descendant Rooms.
         #[serde(default)]
         culling: WorldCullingSettings,
+        /// Cook-time streaming chunk controls inherited by descendant Rooms.
+        #[serde(default)]
+        streaming: WorldStreamingSettings,
     },
     /// One streamed level chunk: a sector grid plus its child
     /// entities. Cooks to a single `.psxw` blob the runtime loads
@@ -7398,6 +7502,19 @@ impl Scene {
         None
     }
 
+    /// Streaming chunk settings inherited by `id` from the nearest World ancestor.
+    pub fn world_streaming_for_node(&self, id: NodeId) -> Option<WorldStreamingSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { streaming, .. } = &node.kind {
+                return Some(streaming.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
     /// Rows in root-first depth-first order.
     pub fn hierarchy_rows(&self) -> Vec<NodeRow> {
         let mut rows = Vec::new();
@@ -7827,6 +7944,7 @@ impl ProjectDocument {
                         far_vista,
                         camera,
                         culling,
+                        streaming,
                     } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
@@ -7856,6 +7974,7 @@ impl ProjectDocument {
                         far_vista.segments = far_vista.segments.clamp(3, 16);
                         *camera = camera.normalized();
                         *culling = culling.normalized();
+                        *streaming = streaming.normalized();
                     }
                     _ => {}
                 }
@@ -8942,6 +9061,34 @@ mod tests {
     }
 
     #[test]
+    fn world_streaming_settings_separate_resident_and_visible_limits() {
+        let settings = WorldStreamingSettings {
+            chunk_target_width: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
+            chunk_target_depth: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
+            resident_chunk_limit: 24,
+            visible_chunk_limit: 8,
+        }
+        .normalized();
+
+        assert_eq!(settings.resident_chunk_limit, 24);
+        assert_eq!(settings.visible_chunk_limit, 8);
+    }
+
+    #[test]
+    fn world_streaming_legacy_visible_limit_inherits_resident_limit() {
+        let settings = WorldStreamingSettings {
+            chunk_target_width: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
+            chunk_target_depth: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
+            resident_chunk_limit: 18,
+            visible_chunk_limit: 0,
+        }
+        .normalized();
+
+        assert_eq!(settings.resident_chunk_limit, 18);
+        assert_eq!(settings.visible_chunk_limit, 18);
+    }
+
+    #[test]
     fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
         let mut project = ProjectDocument::new("test");
         let scene = project.active_scene_mut();
@@ -8954,6 +9101,7 @@ mod tests {
                 far_vista: FarVistaSettings::default(),
                 camera: WorldCameraSettings::default(),
                 culling: WorldCullingSettings::default(),
+                streaming: WorldStreamingSettings::default(),
             },
         );
         let mut grid = WorldGrid::empty(1, 1, 1024);

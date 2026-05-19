@@ -76,6 +76,8 @@ pub struct GuestRuntimeProfile {
     pub counters: [f32; COUNTER_COUNT],
     /// Largest single value observed per guest counter id.
     pub counter_max_values: [f32; COUNTER_COUNT],
+    /// Last value observed per guest counter id.
+    pub counter_latest_values: [u32; COUNTER_COUNT],
 }
 
 impl Default for GuestRuntimeProfile {
@@ -86,6 +88,7 @@ impl Default for GuestRuntimeProfile {
             stage_hits: [0.0; STAGE_COUNT],
             counters: [0.0; COUNTER_COUNT],
             counter_max_values: [0.0; COUNTER_COUNT],
+            counter_latest_values: [0; COUNTER_COUNT],
         }
     }
 }
@@ -104,6 +107,12 @@ impl GuestRuntimeProfile {
             self.counters[j] += other.counters[j];
             self.counter_max_values[j] =
                 self.counter_max_values[j].max(other.counter_max_values[j]);
+            if other.counter_latest_values[j] > 0
+                || other.counter_max_values[j] > 0.0
+                || other.counters[j] > 0.0
+            {
+                self.counter_latest_values[j] = other.counter_latest_values[j];
+            }
             j += 1;
         }
     }
@@ -157,8 +166,12 @@ impl GuestRuntimeProfile {
         self.counters[counter_id]
     }
 
-    fn counter_max_value(self, counter_id: usize) -> f32 {
+    pub(crate) fn counter_max_value(self, counter_id: usize) -> f32 {
         self.counter_max_values[counter_id]
+    }
+
+    pub(crate) fn counter_latest_value(self, counter_id: usize) -> u32 {
+        self.counter_latest_values[counter_id]
     }
 
     fn has_pacing_data(self) -> bool {
@@ -524,6 +537,17 @@ impl FrameProfiler {
         self.samples.back().copied()
     }
 
+    /// Most recent sample that contains one of the requested guest counters.
+    pub fn latest_with_guest_counters(&self, counter_ids: &[u16]) -> Option<FrameProfileSample> {
+        self.samples.iter().rev().copied().find(|sample| {
+            counter_ids.iter().any(|&id| {
+                sample.guest.counter_max_value(id as usize) > 0.0
+                    || sample.guest.counter_latest_value(id as usize) > 0
+                    || sample.guest.counter_total(id as usize) > 0.0
+            })
+        })
+    }
+
     /// Average across the rolling window.
     pub fn average(&self) -> Option<FrameProfileSample> {
         let n = self.samples.len();
@@ -576,6 +600,10 @@ impl FrameProfiler {
                     }
                     if let Some(max_value) = out.counter_max_values.get_mut(event.id as usize) {
                         *max_value = (*max_value).max(event.value as f32);
+                    }
+                    if let Some(latest_value) = out.counter_latest_values.get_mut(event.id as usize)
+                    {
+                        *latest_value = event.value;
                     }
                 }
                 emulator_core::telemetry::GuestTelemetryKind::Unknown(_) => {}
