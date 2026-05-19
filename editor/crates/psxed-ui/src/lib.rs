@@ -16177,6 +16177,49 @@ fn draw_node_kind_editor(
                     }
                 });
             }
+            ui.separator();
+            changed |= ui
+                .checkbox(
+                    &mut grid.atmosphere_enabled,
+                    icons::label(icons::SCAN, "Atmosphere"),
+                )
+                .changed();
+            if grid.atmosphere_enabled {
+                changed |= color_editor(ui, "Particle Color", &mut grid.atmosphere_color);
+                changed |= drag_i32(ui, "Density", &mut grid.atmosphere_density, 0, 96);
+                changed |= drag_i32(ui, "Fall Speed", &mut grid.atmosphere_fall_speed_q4, 0, 64);
+                changed |= drag_i32(
+                    ui,
+                    "Wind Speed",
+                    &mut grid.atmosphere_wind_speed_q4,
+                    -64,
+                    64,
+                );
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Preset").color(STUDIO_TEXT_WEAK));
+                    if ui.small_button("Ash").clicked() {
+                        grid.atmosphere_color = [58, 52, 44];
+                        grid.atmosphere_density = 44;
+                        grid.atmosphere_fall_speed_q4 = 7;
+                        grid.atmosphere_wind_speed_q4 = 2;
+                        changed = true;
+                    }
+                    if ui.small_button("Snow").clicked() {
+                        grid.atmosphere_color = [198, 205, 214];
+                        grid.atmosphere_density = 36;
+                        grid.atmosphere_fall_speed_q4 = 10;
+                        grid.atmosphere_wind_speed_q4 = 1;
+                        changed = true;
+                    }
+                    if ui.small_button("Sparse").clicked() {
+                        grid.atmosphere_color = [74, 66, 56];
+                        grid.atmosphere_density = 18;
+                        grid.atmosphere_fall_speed_q4 = 5;
+                        grid.atmosphere_wind_speed_q4 = 1;
+                        changed = true;
+                    }
+                });
+            }
         }
         NodeKind::MeshInstance {
             mesh,
