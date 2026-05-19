@@ -107,6 +107,8 @@ typed_index! {
 pub mod room_flags {
     /// Per-room fog/depth cue is enabled.
     pub const FOG_ENABLED: u16 = 1 << 0;
+    /// Per-room screen-space falling atmosphere is enabled.
+    pub const ATMOSPHERE_ENABLED: u16 = 1 << 1;
 }
 
 /// Sky record flags.
@@ -473,6 +475,14 @@ pub struct LevelRoomRecord {
     pub fog_near: i32,
     /// Fog end distance in engine units.
     pub fog_far: i32,
+    /// Base colour for the cheap screen-space room atmosphere pass.
+    pub atmosphere_rgb: [u8; 3],
+    /// Number of screen-space particles to draw for this room.
+    pub atmosphere_density: u8,
+    /// Base vertical particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_fall_speed_q4: i16,
+    /// Base horizontal particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_wind_speed_q4: i16,
     /// Resolved world sky for this room.
     pub sky: LevelSkyRecord,
     /// Resolved distant scenery ring for this room.
