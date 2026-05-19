@@ -463,6 +463,12 @@ pub struct LevelRoomRecord {
     pub origin_z: i32,
     /// Engine units per sector.
     pub sector_size: i32,
+    /// Camera-space far plane used for room/actor rendering.
+    pub draw_distance: i32,
+    /// Runtime active-chunk radius in world sectors.
+    pub chunk_activation_radius_sectors: i32,
+    /// Cooked PVS traversal radius in room cells.
+    pub visibility_radius: u16,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.
     pub material_first: MaterialIndex,
