@@ -68,6 +68,30 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
+    let world_pack_toc = world_pack_toc(package);
+    let world_pack_max_chunk_bytes = world_pack_toc
+        .iter()
+        .map(|entry| entry.byte_size as usize)
+        .max()
+        .unwrap_or(0);
+    let resident_chunk_limit = package
+        .rooms
+        .iter()
+        .map(|room| room.resident_chunk_limit as usize)
+        .max()
+        .unwrap_or(crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS as usize)
+        .clamp(
+            crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
+            crate::MAX_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
+        );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = {resident_chunk_limit};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = {world_pack_max_chunk_bytes};\n",
+    );
 
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
@@ -242,7 +266,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -251,6 +275,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.draw_distance,
             room.chunk_activation_radius_sectors,
             room.visibility_radius,
+            room.resident_chunk_limit,
+            room.visible_chunk_limit,
             room.material_first,
             room.material_count,
             room.fog_rgb[0],
@@ -349,7 +375,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         "/// Cooked WORLD.PAK room table generated from the same layout as the ISO packer.\n",
     );
     out.push_str("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[\n");
-    for entry in world_pack_toc(package) {
+    for entry in &world_pack_toc {
         let _ = writeln!(
             out,
             "    LevelWorldPackEntryRecord {{ room: RoomIndex({}), sector_offset: {}, sector_count: {}, byte_size: {}, checksum: {} }},",
@@ -2269,6 +2295,7 @@ mod tests {
         );
 
         let manifest = render_manifest_source(&package);
+        assert!(manifest.contains("pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 10;"));
         assert!(manifest.contains("pub const WORLD_PACK_START_LBA: u32 = 54;"));
         assert!(manifest.contains("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord]"));
         assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 1, byte_size: 144"));
@@ -2536,6 +2563,8 @@ mod tests {
             draw_distance: 16_384,
             chunk_activation_radius_sectors: 64,
             visibility_radius: 32,
+            resident_chunk_limit: 10,
+            visible_chunk_limit: 10,
             material_first: 0,
             material_count: 0,
             fog_rgb: [0, 0, 0],

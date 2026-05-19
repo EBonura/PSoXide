@@ -9,7 +9,8 @@ use std::collections::HashSet;
 
 use crate::{
     GridDirection, NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, WorldGrid,
-    WorldGridBudget, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
+    WorldGridBudget, DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_BYTES, MAX_ROOM_DEPTH,
+    MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
 };
 
 /// Tunable limits for generated streaming chunks.
@@ -35,8 +36,8 @@ pub struct StreamingChunkConfig {
 impl Default for StreamingChunkConfig {
     fn default() -> Self {
         Self {
-            target_width: 16,
-            target_depth: 16,
+            target_width: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
+            target_depth: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
             max_width: MAX_ROOM_WIDTH,
             max_depth: MAX_ROOM_DEPTH,
             max_triangles: MAX_ROOM_TRIANGLES,
@@ -195,10 +196,53 @@ fn split_rect(grid: &WorldGrid, config: StreamingChunkConfig, rect: Rect, out: &
     let budget = grid
         .budget_for_rect(rect.x, rect.z, rect.width, rect.depth)
         .unwrap_or_default();
-    let wants_size_split = rect.width > config.target_width || rect.depth > config.target_depth;
     let wants_budget_split = config.over_budget(&budget);
     let can_split = rect.width > 1 || rect.depth > 1;
-    if (wants_size_split || wants_budget_split) && can_split {
+    if rect.width > config.target_width {
+        split_rect(
+            grid,
+            config,
+            Rect {
+                width: config.target_width,
+                ..rect
+            },
+            out,
+        );
+        split_rect(
+            grid,
+            config,
+            Rect {
+                x: rect.x + config.target_width,
+                width: rect.width - config.target_width,
+                ..rect
+            },
+            out,
+        );
+        return;
+    }
+    if rect.depth > config.target_depth {
+        split_rect(
+            grid,
+            config,
+            Rect {
+                depth: config.target_depth,
+                ..rect
+            },
+            out,
+        );
+        split_rect(
+            grid,
+            config,
+            Rect {
+                z: rect.z + config.target_depth,
+                depth: rect.depth - config.target_depth,
+                ..rect
+            },
+            out,
+        );
+        return;
+    }
+    if wants_budget_split && can_split {
         let split_x = split_on_x(rect, config);
         if split_x && rect.width > 1 {
             let first = rect.width / 2;
@@ -475,11 +519,17 @@ mod tests {
         let grid = WorldGrid::stone_room(40, 16, 1024, None, None);
         let plan = plan_generated_chunks(&grid, StreamingChunkConfig::default());
 
-        assert!(plan.chunk_count() > 1);
+        assert_eq!(plan.chunk_count(), 21);
         assert!(plan
             .chunks
             .iter()
-            .all(|chunk| chunk.size[0] <= 16 && chunk.size[1] <= 16));
+            .all(|chunk| chunk.size[0] <= 6 && chunk.size[1] <= 6));
+        assert!(plan.chunks.iter().all(|chunk| {
+            chunk.size[0] == 6 || chunk.array_origin[0].saturating_add(chunk.size[0]) == 40
+        }));
+        assert!(plan.chunks.iter().all(|chunk| {
+            chunk.size[1] == 6 || chunk.array_origin[1].saturating_add(chunk.size[1]) == 16
+        }));
         assert_eq!(
             plan.chunks
                 .iter()

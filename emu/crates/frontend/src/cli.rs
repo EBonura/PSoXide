@@ -37,7 +37,10 @@ use psx_iso::{Disc, Exe};
 use psxed_project::{NodeId, ProjectDocument};
 use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
-use crate::app::bus_from_configured_bios;
+use crate::app::{
+    build_embedded_playtest_disc, bus_from_configured_bios, fast_boot_embedded_playtest_disc,
+};
+use crate::playtest_input::read_input_tape;
 
 const NTSC_CPU_CYCLES_PER_VBLANK: u64 = 33_868_800 / 60;
 const PACED20_INTERVAL_VBLANKS: u64 = 3;
@@ -103,6 +106,8 @@ pub enum Command {
     /// Run the emulator headlessly on a specific game or EXE and
     /// emit final state info.
     Launch(LaunchArgs),
+    /// Build the in-editor Play disc image from the current generated package.
+    BuildEditorPlaytestDisc,
     /// Render an editor 3D preview screenshot without opening the GUI.
     DumpEditorPreview(DumpEditorPreviewArgs),
 }
@@ -139,6 +144,14 @@ pub struct LaunchArgs {
     /// with `--guest-frames` as a fallback while cadence telemetry rolls out.
     #[arg(long)]
     pub guest_visual_frames: Option<u64>,
+    /// Replay a saved editor playtest input tape, applying one sample per
+    /// emitted guest frame-begin marker.
+    #[arg(long)]
+    pub input_tape: Option<PathBuf>,
+    /// Treat a `.bin` or `.iso` as an embedded editor Play disc and boot it
+    /// through the same no-BIOS HLE path used by the editor viewport.
+    #[arg(long)]
+    pub embedded_playtest: bool,
     /// Force the real BIOS disc boot path instead of direct
     /// SYSTEM.CNF fast boot.
     #[arg(long)]
@@ -212,6 +225,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::Scan(args) => cmd_scan(&paths, args),
         Command::List => cmd_list(&paths),
         Command::Launch(args) => cmd_launch(&paths, args),
+        Command::BuildEditorPlaytestDisc => cmd_build_editor_playtest_disc(),
         Command::DumpEditorPreview(args) => cmd_dump_editor_preview(args),
     }
 }
@@ -342,6 +356,11 @@ fn cmd_list(paths: &ConfigPaths) -> Result<(), String> {
 
 fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
     let settings = Settings::load(&paths.settings_file()).unwrap_or_default();
+    if args.input_tape.is_some() && (args.hold_forward || args.hold_run) {
+        return Err(
+            "--input-tape cannot be combined with --hold-forward or --hold-run".to_string(),
+        );
+    }
 
     // Resolve `path`: direct flag or lookup by game-id.
     let game_path = match (args.path, args.game_id) {
@@ -358,6 +377,24 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             return Err("Provide --path or --game-id".to_string());
         }
     };
+    let tape_samples = match args.input_tape.as_deref() {
+        Some(path) => {
+            let samples = read_input_tape(path)?;
+            if samples.is_empty() {
+                return Err(format!("input tape has no frames: {}", path.display()));
+            }
+            eprintln!(
+                "[cli] loaded input tape {} ({} frames)",
+                path.display(),
+                samples.len()
+            );
+            Some(samples)
+        }
+        None => None,
+    };
+    let guest_frame_limit = args
+        .guest_frames
+        .or_else(|| tape_samples.as_ref().map(|samples| samples.len() as u64));
 
     let mut cpu = Cpu::new();
 
@@ -393,25 +430,36 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus
         }
         "bin" | "iso" => {
-            let mut bus = bus_from_configured_bios(&settings)?;
+            let mut bus = if args.embedded_playtest {
+                Bus::new_without_bios()
+            } else {
+                bus_from_configured_bios(&settings)?
+            };
             if args.dump_hw.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
             let disc = Disc::from_bin(bytes);
-            maybe_fast_boot_disc(
-                &mut bus,
-                &mut cpu,
-                &disc,
-                &game_path,
-                settings.emulator.fast_boot_disc && !args.bios_boot,
-            );
+            if args.embedded_playtest {
+                fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &game_path);
+            } else {
+                maybe_fast_boot_disc(
+                    &mut bus,
+                    &mut cpu,
+                    &disc,
+                    &game_path,
+                    settings.emulator.fast_boot_disc && !args.bios_boot,
+                );
+            }
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus);
             eprintln!("[cli] mounted disc {}", game_path.display());
             bus
         }
         "cue" => {
+            if args.embedded_playtest {
+                return Err("--embedded-playtest supports .bin/.iso only".to_string());
+            }
             let mut bus = bus_from_configured_bios(&settings)?;
             if args.dump_hw.is_some() {
                 bus.gpu.enable_cmd_log();
@@ -430,6 +478,9 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus
         }
         "ccd" => {
+            if args.embedded_playtest {
+                return Err("--embedded-playtest supports .bin/.iso only".to_string());
+            }
             let mut bus = bus_from_configured_bios(&settings)?;
             if args.dump_hw.is_some() {
                 bus.gpu.enable_cmd_log();
@@ -462,6 +513,14 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus.set_port1_sticks(0x80, 0x80, 0x80, 0x00);
         }
     }
+    let mut tape_cursor = 0usize;
+    if let Some(samples) = tape_samples.as_ref() {
+        samples[tape_cursor].apply_to_bus(&mut bus);
+    }
+    let mut profile_summary = args
+        .dump_guest_profile
+        .then(telemetry::GuestTelemetrySummary::default);
+    let mut observed_guest_frames = bus.telemetry.frames_seen();
 
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
@@ -483,6 +542,24 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus.run_spu_samples(sample_count);
             let _ = bus.spu.drain_audio();
         }
+        let current_guest_frames = bus.telemetry.frames_seen();
+        if let Some(samples) = tape_samples.as_ref() {
+            if current_guest_frames > 0 {
+                let desired_cursor = (current_guest_frames - 1) as usize;
+                let desired_cursor = desired_cursor.min(samples.len().saturating_sub(1));
+                if desired_cursor != tape_cursor {
+                    tape_cursor = desired_cursor;
+                    samples[tape_cursor].apply_to_bus(&mut bus);
+                }
+            }
+        }
+        if current_guest_frames != observed_guest_frames {
+            if let Some(summary) = profile_summary.as_mut() {
+                let events = bus.telemetry.drain_events();
+                summary.add_events(&events);
+            }
+            observed_guest_frames = current_guest_frames;
+        }
         if let Some(target) = args.guest_visual_frames {
             if target > 0
                 && bus
@@ -494,7 +571,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
                 break;
             }
         }
-        if let Some(target) = args.guest_frames {
+        if let Some(target) = guest_frame_limit {
             if target > 0 && bus.telemetry.frames_seen() >= target {
                 stopped_at = Some(i + 1);
                 break;
@@ -530,8 +607,9 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
     if args.dump_guest_profile {
         let counter_totals = bus.telemetry.counter_totals();
         let counter_max_values = bus.telemetry.counter_max_values();
+        let mut summary = profile_summary.unwrap_or_default();
         let events = bus.telemetry.drain_events();
-        let mut summary = telemetry::GuestTelemetrySummary::from_events(&events);
+        summary.add_events(&events);
         summary.counters = counter_totals;
         summary.counter_max_values = counter_max_values;
         print_guest_profile(&summary);
@@ -563,6 +641,12 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn cmd_build_editor_playtest_disc() -> Result<(), String> {
+    let disc_path = build_embedded_playtest_disc()?;
+    println!("{}", disc_path.display());
     Ok(())
 }
 

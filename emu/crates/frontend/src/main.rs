@@ -21,6 +21,7 @@ mod embedded_playtest;
 mod gfx;
 mod icons;
 mod input;
+mod playtest_input;
 mod theme;
 mod ui;
 
@@ -37,10 +38,11 @@ use winit::window::{Window, WindowId};
 use crate::app::AppState;
 use crate::cli::Cli;
 use crate::gfx::Graphics;
+use crate::playtest_input::Port1PadSample;
 use crate::ui::profiler::FrameProfileSample;
 use crate::ui::{menu::MenuInput, MenuOutcome};
 
-use emulator_core::{button, pad::PadMode, spu::SAMPLE_CYCLES};
+use emulator_core::{button, pad::PadMode, spu::SAMPLE_CYCLES, telemetry::counter};
 use psoxide_settings::settings::{InputBinding, PortBindings};
 
 /// Default window size when not running fullscreen. Chosen big
@@ -560,20 +562,18 @@ impl ApplicationHandler for Shell {
                     // already has the Select+Start chord stripped for
                     // the frame the chord fires -- prevents in-game
                     // handlers from seeing the "open menu" combo.
-                    let pad_mask = self.pad1_mask | pad_frame.pad1_mask;
-                    let (rx, ry) = pad_frame.right_stick;
-                    let (lx, ly) = pad_frame.left_stick;
-                    if let Some(bus) = self.state.bus.as_mut() {
-                        bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
-                        // Forward analog sticks to the pad's analog
-                        // axes so DualShock-aware games see joystick
-                        // motion. Byte range is 0..=0xFF with 0x80 =
-                        // centre; gilrs gives us -1.0..=1.0. Y axis
-                        // is inverted on host gamepads (up = positive).
-                        let map = |v: f32| ((v.clamp(-1.0, 1.0) * 127.0) + 128.0) as u8;
-                        bus.set_port1_sticks(map(rx), map(-ry), map(lx), map(-ly));
-                    }
+                    let live_pad_sample = Port1PadSample::from_host(
+                        self.pad1_mask | pad_frame.pad1_mask,
+                        pad_frame.right_stick,
+                        pad_frame.left_stick,
+                    );
                     for _ in 0..frames_to_run {
+                        let pad_sample = self
+                            .state
+                            .editor_playtest_input_sample_for_frame(live_pad_sample);
+                        if let Some(bus) = self.state.bus.as_mut() {
+                            pad_sample.apply_to_bus(bus);
+                        }
                         let cycles_before =
                             self.state.bus.as_ref().map(|bus| bus.cycles()).unwrap_or(0);
                         let draw_log_start = self
@@ -829,6 +829,7 @@ impl ApplicationHandler for Shell {
                     psxed_ui::EditorViewport3dPresentation::play(
                         display_tex,
                         display_uv,
+                        state.editor_playtest_input_tape_status(),
                         editor_play_metrics(state),
                     )
                 } else {
@@ -976,6 +977,37 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         .profiler
         .average()
         .or_else(|| state.profiler.latest())?;
+    const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
+    const CHUNK_MAP_COUNTERS: &[u16] = &[
+        counter::ROOM_STREAM_RESIDENT_MASK_LO,
+        counter::ROOM_STREAM_RESIDENT_MASK_HI,
+        counter::ROOM_ACTIVE_CHUNK_MASK_LO,
+        counter::ROOM_ACTIVE_CHUNK_MASK_HI,
+        counter::ROOM_DRAWN_CHUNK_MASK_LO,
+        counter::ROOM_DRAWN_CHUNK_MASK_HI,
+        counter::ROOM_PLAYER_ROOM_INDEX,
+        counter::ROOM_PLAYER_LOCAL_X_BIASED,
+        counter::ROOM_PLAYER_LOCAL_Z_BIASED,
+        counter::ROOM_PLAYER_VIEW_YAW_Q12,
+    ];
+    let chunk_sample = state
+        .profiler
+        .latest_with_guest_counters(CHUNK_MAP_COUNTERS)
+        .unwrap_or(sample);
+    let recent_counter = |id: u16| profile_counter_u32(sample.guest.counter_max_value(id as usize));
+    let chunk_mask = |lo: u16, hi: u16| {
+        let lo = chunk_sample.guest.counter_latest_value(lo as usize) as u64;
+        let hi = chunk_sample.guest.counter_latest_value(hi as usize) as u64;
+        lo | (hi << 32)
+    };
+    let player_x_biased =
+        chunk_sample
+            .guest
+            .counter_latest_value(counter::ROOM_PLAYER_LOCAL_X_BIASED as usize);
+    let player_z_biased =
+        chunk_sample
+            .guest
+            .counter_latest_value(counter::ROOM_PLAYER_LOCAL_Z_BIASED as usize);
     Some(psxed_ui::EditorPlaytestMetrics {
         host_fps: sample.host_fps(),
         host_ms: sample.host_dt_ms,
@@ -987,7 +1019,52 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         hw_ms: sample.hw_render_ms,
         ui_ms: sample.egui.total_ms,
         step_budget_percent: sample.psx_budget_percent(),
+        chunk_visible: recent_counter(counter::ROOM_ACTIVE_CHUNKS),
+        chunk_loaded: recent_counter(counter::ROOM_STREAM_RESIDENT_SLOTS),
+        chunk_candidates: recent_counter(counter::ROOM_CHUNKS_CONSIDERED),
+        chunk_built: recent_counter(counter::ROOM_WINDOW_BUILT_CHUNKS),
+        chunk_cache_skips: recent_counter(counter::ROOM_CHUNK_CACHE_SKIPS),
+        stream_requests: recent_counter(counter::ROOM_STREAM_REQUESTS),
+        stream_misses: recent_counter(counter::ROOM_STREAM_MISSES),
+        stream_prefetches: recent_counter(counter::ROOM_STREAM_PREFETCH_REQUESTS),
+        stream_evictions: recent_counter(counter::ROOM_STREAM_EVICTIONS),
+        stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
+        stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
+        chunk_loaded_mask: chunk_mask(
+            counter::ROOM_STREAM_RESIDENT_MASK_LO,
+            counter::ROOM_STREAM_RESIDENT_MASK_HI,
+        ),
+        chunk_active_mask: chunk_mask(
+            counter::ROOM_ACTIVE_CHUNK_MASK_LO,
+            counter::ROOM_ACTIVE_CHUNK_MASK_HI,
+        ),
+        chunk_drawn_mask: chunk_mask(
+            counter::ROOM_DRAWN_CHUNK_MASK_LO,
+            counter::ROOM_DRAWN_CHUNK_MASK_HI,
+        ),
+        player_map_valid: player_x_biased > 0 || player_z_biased > 0,
+        player_room_index: chunk_sample
+            .guest
+            .counter_latest_value(counter::ROOM_PLAYER_ROOM_INDEX as usize),
+        player_local_x: profile_counter_i32_biased(player_x_biased, DEBUG_MAP_POSITION_BIAS),
+        player_local_z: profile_counter_i32_biased(player_z_biased, DEBUG_MAP_POSITION_BIAS),
+        player_view_yaw_q12: chunk_sample
+            .guest
+            .counter_latest_value(counter::ROOM_PLAYER_VIEW_YAW_Q12 as usize)
+            .min(u16::MAX as u32) as u16,
     })
+}
+
+fn profile_counter_u32(value: f32) -> u32 {
+    if value.is_finite() && value > 0.0 {
+        value.round().min(u32::MAX as f32) as u32
+    } else {
+        0
+    }
+}
+
+fn profile_counter_i32_biased(value: u32, bias: i32) -> i32 {
+    (value as i64 - bias as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 #[cfg(test)]
