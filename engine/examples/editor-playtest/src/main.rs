@@ -109,7 +109,9 @@ use generated::{
     VISIBILITY_CELLS, VISIBILITY_PVS, VISIBILITY_PVS_BITS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(feature = "cd-stream-bench")]
-use generated::{WORLD_PACK_START_LBA, WORLD_PACK_TOC};
+use generated::{
+    WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
+};
 
 // VRAM layout. Room materials and model atlases live in
 // disjoint regions so a model atlas upload never overwrites a
@@ -207,6 +209,7 @@ const IMAGE_PROP_DEPTH_BIAS: i32 = 256;
 const COLLISION_DEBUG_BUTTON: u16 = button::L3;
 const COLLISION_DEBUG_SEGMENTS: usize = 8;
 const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
+const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
 
 const CAMERA_Y_OFFSET: i32 = 1100;
 const CAMERA_START_RADIUS: i32 = 2400;
@@ -301,6 +304,62 @@ fn room_chunk_activation_radius_sectors(record: &LevelRoomRecord) -> i32 {
     record.chunk_activation_radius_sectors.max(1)
 }
 
+fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
+    (record.resident_chunk_limit as usize).clamp(1, MAX_RUNTIME_RESIDENT_CHUNKS)
+}
+
+fn room_visible_chunk_limit(record: &LevelRoomRecord) -> usize {
+    (record.visible_chunk_limit as usize)
+        .clamp(1, MAX_ACTIVE_ROOMS)
+        .min(room_resident_chunk_limit(record))
+}
+
+fn room_active_chunk_limit(record: &LevelRoomRecord) -> usize {
+    room_visible_chunk_limit(record)
+}
+
+fn room_index_debug_mask(index: RoomIndex) -> u64 {
+    let raw = index.to_usize();
+    if raw < u64::BITS as usize {
+        1u64 << raw
+    } else {
+        0
+    }
+}
+
+fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: u64) {
+    telemetry::counter(counter_lo, (mask & 0xffff_ffff) as u32);
+    telemetry::counter(counter_hi, (mask >> 32) as u32);
+}
+
+fn encode_debug_map_position(value: i32) -> u32 {
+    let encoded = value.saturating_add(DEBUG_MAP_POSITION_BIAS);
+    if encoded < 0 {
+        0
+    } else {
+        encoded as u32
+    }
+}
+
+fn emit_player_map_debug(room: RoomIndex, position: RoomPoint, view_yaw: Angle) {
+    telemetry::counter(
+        telemetry::counter::ROOM_PLAYER_ROOM_INDEX,
+        room.raw() as u32,
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_PLAYER_LOCAL_X_BIASED,
+        encode_debug_map_position(position.x),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_PLAYER_LOCAL_Z_BIASED,
+        encode_debug_map_position(position.z),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_PLAYER_VIEW_YAW_Q12,
+        view_yaw.as_q12() as u32,
+    );
+}
+
 #[cfg(feature = "world-grid-visible")]
 fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
     record.visibility_radius.max(1)
@@ -318,24 +377,63 @@ const MAX_TEXTURED_TRIS: usize = 3328;
 /// the cook report should also flag.
 const MAX_ROOM_MATERIALS: usize = 32;
 /// Current generated chunk plus the best cache-budgeted nearby chunks.
-const MAX_ACTIVE_ROOMS: usize = 4;
+///
+/// Upper bound for chunks that can be active, drawable, and collidable in one
+/// runtime window. The world-level resident chunk limit picks the effective
+/// count per cooked build; this cap only prevents the fixed arrays from
+/// growing past the editor-exposed maximum.
+const MAX_ACTIVE_ROOMS: usize = 32;
 /// Streamed room slot budget. A slot stores the room `.psxw` plus
 /// the room-local render cache records carried by the `.psxc` chunk.
 /// Keeping this at 16 sectors forces oversized authored rooms to be
 /// split at cook time instead of quietly reserving a larger RAM cache.
 #[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
+#[cfg(feature = "cd-stream-bench")]
+const MIN_STREAMED_ROOM_SLOT_BYTES: usize = 2048;
+#[cfg(feature = "cd-stream-bench")]
+const MAX_STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_SLOT_BYTES: usize = clamp_streamed_room_slot_bytes(WORLD_PACK_MAX_CHUNK_BYTES);
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
-/// CD-backed room residency cache. This is deliberately just larger than the
-/// visible active window so chunk-boundary traversal can retain overlap from
-/// the previous window without reserving a second full window.
 #[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_SLOT_COUNT: usize = 6;
+const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 32;
+/// CD-backed room residency cache. The cooked manifest selects the
+/// effective slot count so world-level streaming tuning can trade RAM
+/// residency against chunk churn without changing this runtime source.
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_SLOT_COUNT: usize = clamp_streamed_room_slot_count(WORLD_RESIDENT_CHUNK_LIMIT);
+#[cfg(feature = "cd-stream-bench")]
+const MAX_RUNTIME_RESIDENT_CHUNKS: usize = STREAMED_ROOM_SLOT_COUNT;
+#[cfg(not(feature = "cd-stream-bench"))]
+const MAX_RUNTIME_RESIDENT_CHUNKS: usize = MAX_ACTIVE_ROOMS;
 #[cfg(feature = "cd-stream-bench")]
 const MAX_COLLISION_ROOMS: usize = STREAMED_ROOM_SLOT_COUNT;
 #[cfg(not(feature = "cd-stream-bench"))]
 const MAX_COLLISION_ROOMS: usize = MAX_ACTIVE_ROOMS;
+
+#[cfg(feature = "cd-stream-bench")]
+const fn clamp_streamed_room_slot_count(raw: usize) -> usize {
+    if raw < 1 {
+        1
+    } else if raw > MAX_STREAMED_ROOM_SLOT_COUNT {
+        MAX_STREAMED_ROOM_SLOT_COUNT
+    } else {
+        raw
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+const fn clamp_streamed_room_slot_bytes(raw: usize) -> usize {
+    let clamped = if raw < MIN_STREAMED_ROOM_SLOT_BYTES {
+        MIN_STREAMED_ROOM_SLOT_BYTES
+    } else if raw > MAX_STREAMED_ROOM_SLOT_BYTES {
+        MAX_STREAMED_ROOM_SLOT_BYTES
+    } else {
+        raw
+    };
+    (clamped + 3) & !3
+}
 /// Opportunistic lookahead for CD-backed rooms. Prefetch is only allowed when
 /// WORLD.PAK metadata proves the extra read span is tiny, so it cannot turn a
 /// local active-window read into a broad sector sweep.
@@ -346,10 +444,12 @@ const STREAMED_ROOM_PREFETCH_MAX_EXTRA_SECTORS: u32 = 8;
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_PREFETCH_MAX_TOTAL_SECTORS: u32 = 48;
 #[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_LOAD_BATCH_COUNT: usize = 4;
+#[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_PUMP_SECTORS_PER_TICK: usize = 8;
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT: usize = 512;
-const MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES: usize = 24;
+const MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES: usize = 48;
 const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
 const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 
@@ -1053,6 +1153,7 @@ struct RoomStreamScheduler<const N: usize> {
     slots: [StreamedRoomSlot; N],
     job: cd_stream::WorldRoomSlotsReadJob<N>,
     job_plan: RoomStreamLoadPlan<N>,
+    slot_limit: usize,
     epoch: u32,
     window_requests: u16,
     window_misses: u16,
@@ -1069,6 +1170,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
             slots: [StreamedRoomSlot::EMPTY; N],
             job: cd_stream::WorldRoomSlotsReadJob::new(),
             job_plan: RoomStreamLoadPlan::EMPTY,
+            slot_limit: N,
             epoch: 0,
             window_requests: 0,
             window_misses: 0,
@@ -1077,6 +1179,14 @@ impl<const N: usize> RoomStreamScheduler<N> {
             window_failed_loads: 0,
             window_pending_loads: 0,
         }
+    }
+
+    fn set_slot_limit(&mut self, limit: usize) {
+        self.slot_limit = limit.clamp(1, N);
+    }
+
+    fn effective_slot_limit(&self) -> usize {
+        self.slot_limit.clamp(1, N)
     }
 
     fn begin_window(&mut self) {
@@ -1091,7 +1201,8 @@ impl<const N: usize> RoomStreamScheduler<N> {
 
     fn resident_slot_for(&mut self, room: RoomIndex) -> Option<usize> {
         let mut slot = 0usize;
-        while slot < N {
+        let limit = self.effective_slot_limit();
+        while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Resident && meta.room == room {
                 self.slots[slot].last_used = self.epoch;
@@ -1104,7 +1215,8 @@ impl<const N: usize> RoomStreamScheduler<N> {
 
     fn is_resident(&self, room: RoomIndex) -> bool {
         let mut slot = 0usize;
-        while slot < N {
+        let limit = self.effective_slot_limit();
+        while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Resident && meta.room == room {
                 return true;
@@ -1115,6 +1227,9 @@ impl<const N: usize> RoomStreamScheduler<N> {
     }
 
     fn resident_byte_count(&self, slot: usize) -> Option<usize> {
+        if slot >= self.effective_slot_limit() {
+            return None;
+        }
         let meta = *self.slots.get(slot)?;
         if meta.state == RoomStreamSlotState::Resident && meta.byte_count > 0 {
             Some(meta.byte_count)
@@ -1125,7 +1240,8 @@ impl<const N: usize> RoomStreamScheduler<N> {
 
     fn loading_slot_for(&self, room: RoomIndex) -> Option<usize> {
         let mut slot = 0usize;
-        while slot < N {
+        let limit = self.effective_slot_limit();
+        while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Loading && meta.room == room {
                 return Some(slot);
@@ -1143,7 +1259,10 @@ impl<const N: usize> RoomStreamScheduler<N> {
     ) -> RoomStreamLoadPlan<N> {
         let mut plan = RoomStreamLoadPlan::EMPTY;
         let can_schedule_new_loads = !self.job.is_active();
-        let limit = requested_count.min(N).min(STREAMED_ROOM_SLOT_COUNT);
+        let limit = requested_count
+            .min(self.effective_slot_limit())
+            .min(N)
+            .min(STREAMED_ROOM_SLOT_COUNT);
         let mut i = 0usize;
         while i < limit {
             let room = requested_rooms[i];
@@ -1168,6 +1287,10 @@ impl<const N: usize> RoomStreamScheduler<N> {
 
             self.window_misses = self.window_misses.saturating_add(1);
             if !can_schedule_new_loads {
+                i += 1;
+                continue;
+            }
+            if plan.count >= STREAMED_ROOM_LOAD_BATCH_COUNT {
                 i += 1;
                 continue;
             }
@@ -1320,6 +1443,11 @@ impl<const N: usize> RoomStreamScheduler<N> {
             telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
             self.resident_slot_count() as u32,
         );
+        emit_room_chunk_mask(
+            telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO,
+            telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI,
+            self.resident_room_mask(),
+        );
         telemetry::counter(
             telemetry::counter::ROOM_STREAM_EVICTIONS,
             self.window_evictions as u32,
@@ -1337,13 +1465,28 @@ impl<const N: usize> RoomStreamScheduler<N> {
     fn resident_slot_count(&self) -> usize {
         let mut count = 0usize;
         let mut slot = 0usize;
-        while slot < N {
+        let limit = self.effective_slot_limit();
+        while slot < limit {
             if self.slots[slot].state == RoomStreamSlotState::Resident {
                 count += 1;
             }
             slot += 1;
         }
         count
+    }
+
+    fn resident_room_mask(&self) -> u64 {
+        let mut mask = 0u64;
+        let mut slot = 0usize;
+        let limit = self.effective_slot_limit();
+        while slot < limit {
+            let meta = self.slots[slot];
+            if meta.state == RoomStreamSlotState::Resident {
+                mask |= room_index_debug_mask(meta.room);
+            }
+            slot += 1;
+        }
+        mask
     }
 
     fn choose_slot(
@@ -1354,7 +1497,8 @@ impl<const N: usize> RoomStreamScheduler<N> {
         reserved_count: usize,
     ) -> Option<usize> {
         let mut slot = 0usize;
-        while slot < N {
+        let slot_limit = self.effective_slot_limit();
+        while slot < slot_limit {
             let state = self.slots[slot].state;
             if (state == RoomStreamSlotState::Empty || state == RoomStreamSlotState::Failed)
                 && !streamed_slot_reserved(slot, reserved_slots, reserved_count)
@@ -1367,7 +1511,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
         let mut best_slot = None;
         let mut best_age = u32::MAX;
         let mut candidate = 0usize;
-        while candidate < N {
+        while candidate < slot_limit {
             let meta = self.slots[candidate];
             if streamed_slot_reserved(candidate, reserved_slots, reserved_count)
                 || room_requested(meta.room, requested_rooms, requested_count)
@@ -1872,6 +2016,8 @@ impl Scene for Playtest {
             let mut room_cache_surfaces = 0u32;
             let mut room_cache_fallback_draws = 0u32;
             let mut room_visibility_fallback_draws = 0u32;
+            let mut room_active_chunk_mask = 0u64;
+            let mut room_drawn_chunk_mask = 0u64;
             #[cfg(feature = "world-grid-visible")]
             let mut room_visible_cells = 0u32;
             #[cfg(feature = "world-grid-visible")]
@@ -1889,6 +2035,8 @@ impl Scene for Playtest {
                     continue;
                 };
                 room_active_chunks = room_active_chunks.saturating_add(1);
+                let chunk_mask = room_index_debug_mask(active.index);
+                room_active_chunk_mask |= chunk_mask;
                 if active.surface_cache.ready {
                     room_cache_cells =
                         room_cache_cells.saturating_add(active.surface_cache.cell_count as u32);
@@ -1924,9 +2072,11 @@ impl Scene for Playtest {
                         player.y,
                         global_visibility_anchor.z.saturating_sub(active.offset_z),
                     );
-                    let visibility =
-                        GridVisibility::around(visibility_anchor, room_visibility_radius(room_record))
-                            .with_screen_margin(ROOM_VISIBLE_CELL_SCREEN_MARGIN);
+                    let visibility = GridVisibility::around(
+                        visibility_anchor,
+                        room_visibility_radius(room_record),
+                    )
+                    .with_screen_margin(ROOM_VISIBLE_CELL_SCREEN_MARGIN);
                     telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
                     let visible_cells_result = self.cached_precomputed_visible_cells(
                         active_slot,
@@ -2046,6 +2196,9 @@ impl Scene for Playtest {
                         }
                         GridVisibilityStats::default()
                     };
+                    if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
+                        room_drawn_chunk_mask |= chunk_mask;
+                    }
                     accumulate_grid_visibility_stats(&mut room_stats_total, stats);
                 }
                 #[cfg(not(feature = "world-grid-visible"))]
@@ -2055,6 +2208,7 @@ impl Scene for Playtest {
                         room_cache_fallback_draws = room_cache_fallback_draws.saturating_add(1);
                     }
                     if let Some(render_room) = active.render() {
+                        room_drawn_chunk_mask |= chunk_mask;
                         draw_room_vertex_lit(
                             render_room,
                             materials,
@@ -2299,6 +2453,33 @@ impl Scene for Playtest {
             }
 
             telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_active_chunks);
+            emit_room_chunk_mask(
+                telemetry::counter::ROOM_ACTIVE_CHUNK_MASK_LO,
+                telemetry::counter::ROOM_ACTIVE_CHUNK_MASK_HI,
+                room_active_chunk_mask,
+            );
+            emit_room_chunk_mask(
+                telemetry::counter::ROOM_DRAWN_CHUNK_MASK_LO,
+                telemetry::counter::ROOM_DRAWN_CHUNK_MASK_HI,
+                room_drawn_chunk_mask,
+            );
+            emit_player_map_debug(
+                self.room_index,
+                self.motor.position(),
+                self.active_room_selection_view_yaw(),
+            );
+            #[cfg(feature = "cd-stream-bench")]
+            unsafe {
+                telemetry::counter(
+                    telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
+                    ROOM_STREAM_SCHEDULER.resident_slot_count() as u32,
+                );
+                emit_room_chunk_mask(
+                    telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO,
+                    telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI,
+                    ROOM_STREAM_SCHEDULER.resident_room_mask(),
+                );
+            }
             telemetry::counter(telemetry::counter::ROOM_CACHED_DRAWS, room_cached_draws);
             telemetry::counter(telemetry::counter::ROOM_UNCACHED_DRAWS, room_uncached_draws);
             telemetry::counter(telemetry::counter::ROOM_CACHE_CELLS, room_cache_cells);
@@ -2818,15 +2999,20 @@ impl Playtest {
     }
 
     fn chunked_level(&self) -> bool {
-        self.active_rooms
-            .iter()
-            .flatten()
-            .any(|room| room.index != self.room_index)
+        !ROOM_CHUNKS.is_empty()
+    }
+
+    fn active_room_selection_view_yaw(&self) -> Angle {
+        if self.free_orbit {
+            self.orbit_yaw
+        } else {
+            self.camera.yaw()
+        }
     }
 
     fn active_room_selection_view(&self) -> ActiveRoomView {
+        let yaw = self.active_room_selection_view_yaw();
         if self.free_orbit {
-            let yaw = self.orbit_yaw;
             let position = RoomPoint::new(
                 self.spawn
                     .x
@@ -2838,7 +3024,7 @@ impl Playtest {
             );
             ActiveRoomView::new(position, yaw)
         } else {
-            ActiveRoomView::new(self.camera.position(), self.camera.yaw())
+            ActiveRoomView::new(self.camera.position(), yaw)
         }
     }
 
@@ -2880,6 +3066,7 @@ impl Playtest {
         }
         let player = self.motor.position();
         let view = self.active_room_selection_view();
+        let active_limit = room_active_chunk_limit(current_record);
         self.active_room_view_sin_key = view.sin_key;
         self.active_room_view_cos_key = view.cos_key;
 
@@ -2902,7 +3089,7 @@ impl Playtest {
         if !ROOM_CHUNKS.is_empty() {
             self.active_room_candidates =
                 count_spatial_chunk_candidates(current_index, current_record, player, view);
-            while next_slot < MAX_ACTIVE_ROOMS {
+            while next_slot < active_limit {
                 let Some(candidate) = best_spatial_chunk_candidate(
                     current_index,
                     current_record,
@@ -2939,7 +3126,7 @@ impl Playtest {
                 telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
                 return;
             };
-            while next_slot < MAX_ACTIVE_ROOMS {
+            while next_slot < active_limit {
                 let Some(raw_index) = nearest_touching_room_index(
                     current_index,
                     current_record,
@@ -2982,46 +3169,69 @@ impl Playtest {
         skipped_rooms: &[RoomIndex; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES],
         skipped_count: usize,
     ) {
-        let active_count = active_count.min(MAX_ACTIVE_ROOMS);
+        let resident_limit = room_resident_chunk_limit(current_record);
+        let active_count = active_count.min(room_active_chunk_limit(current_record));
         let mut room_ids = [u16::MAX; MAX_ACTIVE_ROOMS];
         let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut requested_count = 0usize;
         let mut i = 0usize;
         while i < active_count {
             let Some(active) = self.active_rooms[i] else {
-                return;
+                break;
             };
             room_ids[i] = active.index.raw();
-            requested_rooms[requested_count] = active.index;
-            requested_count += 1;
             i += 1;
         }
-        if requested_count == 0 {
-            requested_rooms[requested_count] = self.room_index;
-            requested_count += 1;
+
+        let mut requested_count =
+            append_streamed_room_request(&mut requested_rooms, 0, resident_limit, self.room_index);
+        i = 0;
+        while i < active_count && requested_count < resident_limit {
+            let index = RoomIndex::new(room_ids[i]);
+            requested_count = append_streamed_room_request(
+                &mut requested_rooms,
+                requested_count,
+                resident_limit,
+                index,
+            );
+            i += 1;
         }
-        requested_count =
-            self.append_current_collision_neighbour_requests(&mut requested_rooms, requested_count);
+        requested_count = self.append_current_collision_neighbour_requests(
+            &mut requested_rooms,
+            requested_count,
+            resident_limit,
+        );
         let mut skipped = 0usize;
         while skipped < skipped_count
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
+            && requested_count < resident_limit
             && skipped < skipped_rooms.len()
         {
-            let room = skipped_rooms[skipped];
-            if room != INVALID_ROOM_INDEX
-                && !room_requested(room, &requested_rooms, requested_count)
-                && streamed_room_chunk_loadable(room)
-            {
-                requested_rooms[requested_count] = room;
-                requested_count += 1;
-            }
+            requested_count = append_streamed_room_request(
+                &mut requested_rooms,
+                requested_count,
+                resident_limit,
+                skipped_rooms[skipped],
+            );
             skipped += 1;
         }
+        requested_count = self.append_spatial_chunk_resident_requests(
+            &mut requested_rooms,
+            requested_count,
+            resident_limit,
+            current_record,
+        );
 
         let priority_count = requested_count;
-        let requested_count =
-            self.append_pack_aware_streamed_prefetches(&mut requested_rooms, requested_count);
-        self.ensure_streamed_room_residency(&requested_rooms, requested_count, priority_count);
+        let requested_count = self.append_pack_aware_streamed_prefetches(
+            &mut requested_rooms,
+            requested_count,
+            resident_limit,
+        );
+        self.ensure_streamed_room_residency(
+            &requested_rooms,
+            requested_count,
+            priority_count,
+            resident_limit,
+        );
 
         let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
         let mut slot = 0usize;
@@ -3047,19 +3257,68 @@ impl Playtest {
         &self,
         requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
         requested_count: usize,
+        request_limit: usize,
     ) -> usize {
         let Some(chunk) = chunk_record_for_room(self.room_index) else {
-            return requested_count.min(STREAMED_ROOM_SLOT_COUNT);
+            return requested_count
+                .min(request_limit)
+                .min(STREAMED_ROOM_SLOT_COUNT);
         };
-        let mut count = requested_count.min(STREAMED_ROOM_SLOT_COUNT);
+        let mut count = requested_count
+            .min(request_limit)
+            .min(STREAMED_ROOM_SLOT_COUNT);
         for room in [
             chunk.neighbours.north,
             chunk.neighbours.east,
             chunk.neighbours.south,
             chunk.neighbours.west,
         ] {
-            count = append_streamed_room_request(requested_rooms, count, room);
+            count = append_streamed_room_request(requested_rooms, count, request_limit, room);
         }
+        count
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn append_spatial_chunk_resident_requests(
+        &self,
+        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        requested_count: usize,
+        request_limit: usize,
+        current_record: &LevelRoomRecord,
+    ) -> usize {
+        let mut count = requested_count
+            .min(request_limit)
+            .min(STREAMED_ROOM_SLOT_COUNT);
+        let player = self.motor.position();
+        let view = self.active_room_selection_view();
+        let mut blocked = [INVALID_ROOM_INDEX; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES];
+        let mut blocked_count = 0usize;
+
+        while count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
+            let Some(candidate) = best_streamed_spatial_chunk_candidate(
+                self.room_index,
+                current_record,
+                player,
+                view,
+                requested_rooms,
+                count,
+                &blocked[..blocked_count],
+            ) else {
+                break;
+            };
+            let next =
+                append_streamed_room_request(requested_rooms, count, request_limit, candidate);
+            if next == count {
+                if blocked_count >= blocked.len() {
+                    break;
+                }
+                blocked[blocked_count] = candidate;
+                blocked_count += 1;
+            } else {
+                count = next;
+            }
+        }
+
         count
     }
 
@@ -3068,9 +3327,13 @@ impl Playtest {
         &self,
         requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
         active_count: usize,
+        request_limit: usize,
     ) -> usize {
-        let mut requested_count = active_count.min(STREAMED_ROOM_SLOT_COUNT);
+        let mut requested_count = active_count
+            .min(request_limit)
+            .min(STREAMED_ROOM_SLOT_COUNT);
         if requested_count == 0
+            || requested_count >= request_limit
             || requested_count >= STREAMED_ROOM_SLOT_COUNT
             || STREAMED_ROOM_PREFETCH_COUNT == 0
             || ROOM_CHUNKS.is_empty()
@@ -3085,7 +3348,10 @@ impl Playtest {
         let view = self.active_room_selection_view();
 
         let mut added = 0usize;
-        while added < STREAMED_ROOM_PREFETCH_COUNT && requested_count < STREAMED_ROOM_SLOT_COUNT {
+        while added < STREAMED_ROOM_PREFETCH_COUNT
+            && requested_count < request_limit
+            && requested_count < STREAMED_ROOM_SLOT_COUNT
+        {
             let Some((span_start, span_end)) =
                 streamed_request_sector_span(requested_rooms, requested_count)
             else {
@@ -3161,8 +3427,10 @@ impl Playtest {
         requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
         requested_count: usize,
         active_count: usize,
+        resident_limit: usize,
     ) {
         let plan = unsafe {
+            ROOM_STREAM_SCHEDULER.set_slot_limit(resident_limit);
             ROOM_STREAM_SCHEDULER.begin_window();
             ROOM_STREAM_SCHEDULER.plan_window_loads(
                 requested_rooms,
@@ -3254,6 +3522,29 @@ impl Playtest {
             self.active_room_view_sin_key = view.sin_key;
             self.active_room_view_cos_key = view.cos_key;
         } else {
+            #[cfg(feature = "cd-stream-bench")]
+            {
+                let mut missing = [INVALID_ROOM_INDEX; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES];
+                let missing_count = collect_missing_active_selection_chunks(
+                    self.room_index,
+                    record,
+                    player,
+                    view,
+                    &mut missing,
+                );
+                if missing_count > 0 {
+                    self.preload_streamed_active_room_window(
+                        active_room_count(&self.active_rooms),
+                        record,
+                        &missing,
+                        missing_count,
+                    );
+                    self.active_room_anchor = player;
+                    self.active_room_view_sin_key = view.sin_key;
+                    self.active_room_view_cos_key = view.cos_key;
+                    return;
+                }
+            }
             self.load_active_room_window();
         }
     }
@@ -3272,7 +3563,8 @@ impl Playtest {
         let mut selected = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
         selected[0] = current_index;
         let mut selected_count = 1usize;
-        while selected_count < MAX_ACTIVE_ROOMS {
+        let active_limit = room_active_chunk_limit(current_record);
+        while selected_count < active_limit {
             let Some(candidate) = best_spatial_chunk_candidate_from_indices(
                 current_index,
                 current_record,
@@ -4652,14 +4944,18 @@ fn room_requested(
 fn append_streamed_room_request(
     requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
     requested_count: usize,
+    request_limit: usize,
     room: RoomIndex,
 ) -> usize {
-    if requested_count >= STREAMED_ROOM_SLOT_COUNT
+    if requested_count >= request_limit
+        || requested_count >= STREAMED_ROOM_SLOT_COUNT
         || room == INVALID_ROOM_INDEX
         || room_requested(room, requested_rooms, requested_count)
         || !streamed_room_chunk_loadable(room)
     {
-        return requested_count.min(STREAMED_ROOM_SLOT_COUNT);
+        return requested_count
+            .min(request_limit)
+            .min(STREAMED_ROOM_SLOT_COUNT);
     }
     requested_rooms[requested_count] = room;
     requested_count + 1
@@ -4989,14 +5285,12 @@ fn write_visible_cell_candidate(
     if *written >= out.len() {
         return;
     }
-    let Some(depth) =
-        visible_cell_camera_depth_if_sphere_visible(
-            cell,
-            filter.camera,
-            filter.sector_size,
-            filter.far_z,
-        )
-    else {
+    let Some(depth) = visible_cell_camera_depth_if_sphere_visible(
+        cell,
+        filter.camera,
+        filter.sector_size,
+        filter.far_z,
+    ) else {
         return;
     };
     out[*written] = GridVisibleCell::with_cache_cell_index(
@@ -5707,6 +6001,78 @@ fn best_spatial_chunk_candidate_from_indices(
     best
 }
 
+#[cfg(feature = "cd-stream-bench")]
+fn best_streamed_spatial_chunk_candidate(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    view: ActiveRoomView,
+    requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    requested_count: usize,
+    blocked_rooms: &[RoomIndex],
+) -> Option<RoomIndex> {
+    let mut best = None;
+    let mut best_score = ChunkActivationScore::WORST;
+    for chunk in ROOM_CHUNKS {
+        if chunk.room == current_index
+            || room_requested(chunk.room, requested_rooms, requested_count)
+            || blocked_rooms.contains(&chunk.room)
+            || !streamed_room_chunk_loadable(chunk.room)
+        {
+            continue;
+        }
+        let Some(score) =
+            chunk_activation_score(*chunk, current_index, current_record, player, view)
+        else {
+            continue;
+        };
+        if best.is_none() || score.better_than(best_score) {
+            best_score = score;
+            best = Some(chunk.room);
+        }
+    }
+    best
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn collect_missing_active_selection_chunks(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    view: ActiveRoomView,
+    out: &mut [RoomIndex; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES],
+) -> usize {
+    let mut selected = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+    selected[0] = current_index;
+    let mut selected_count = 1usize;
+    let mut missing_count = 0usize;
+    if !streamed_room_is_resident(current_index) && missing_count < out.len() {
+        out[missing_count] = current_index;
+        missing_count += 1;
+    }
+
+    let active_limit = room_active_chunk_limit(current_record);
+    while selected_count < active_limit {
+        let Some(candidate) = best_spatial_chunk_candidate_from_indices(
+            current_index,
+            current_record,
+            player,
+            view,
+            &selected[..selected_count],
+        ) else {
+            break;
+        };
+        selected[selected_count] = candidate;
+        selected_count += 1;
+        if !streamed_room_is_resident(candidate) && missing_count < out.len() {
+            out[missing_count] = candidate;
+            missing_count += 1;
+        }
+    }
+
+    missing_count
+}
+
 #[derive(Copy, Clone)]
 struct ChunkActivationScore {
     tier: u8,
@@ -5989,6 +6355,10 @@ fn active_room_window_contains(
         .iter()
         .flatten()
         .any(|active| active.index == index)
+}
+
+fn active_room_count(active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS]) -> usize {
+    active_rooms.iter().flatten().count()
 }
 
 fn room_center_distance_sq(
