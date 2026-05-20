@@ -4092,7 +4092,7 @@ pub const DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = DEFAULT_WORLD_STREAMING_R
 pub const MAX_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 32;
 
 const fn default_world_draw_distance() -> i32 {
-    16_384
+    25_000
 }
 
 const fn default_world_chunk_activation_radius_sectors() -> i32 {
