@@ -18,12 +18,15 @@
 //! before creating the resource -- bad bundles never produce a
 //! half-broken Model entry.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use crate::{
-    default_model_collision_radius_for_height, AnimationClipResource, AnimationRole,
-    AnimationSetResource, ModelAnimationClip, ModelResource, ProjectDocument, ResourceData,
-    ResourceId, SkeletonResource,
+    default_model_collision_radius_for_height, AnimationClipBakeKind, AnimationClipResource,
+    AnimationRole, AnimationSetResource, AnimationSourceResource, CharacterAnimationAction,
+    ModelAnimationClip, ModelResource, ProjectDocument, ResourceData, ResourceId, SkeletonResource,
 };
 
 pub use psxed_format::texture::Depth as TextureDepth;
@@ -288,6 +291,17 @@ pub enum ModelImportError {
         /// Diagnostic message.
         detail: String,
     },
+    /// A model needs its original source to bake new retargeted
+    /// animation clips, but that path is not known.
+    MissingModelSource {
+        /// Model resource id.
+        model: ResourceId,
+    },
+    /// A source model + animation import produced no cooked clips.
+    NoCookedAnimationClips {
+        /// Animation source path.
+        source: PathBuf,
+    },
     /// `output_name` produced a path that already exists and
     /// holds non-bundle content. The caller should pick a fresh
     /// name or remove the directory first.
@@ -330,6 +344,14 @@ impl std::fmt::Display for ModelImportError {
             Self::Io { path, detail } => write!(f, "{}: {detail}", path.display()),
             Self::GlbConversionFailed { source, detail } => {
                 write!(f, "{}: model conversion failed: {detail}", source.display())
+            }
+            Self::MissingModelSource { model } => write!(
+                f,
+                "model resource #{} has no original source path; reimport it or set the source path in the Model inspector",
+                model.raw()
+            ),
+            Self::NoCookedAnimationClips { source } => {
+                write!(f, "{} produced no cooked animation clips", source.display())
             }
             Self::OutputExists(path) => write!(
                 f,
@@ -463,6 +485,7 @@ pub fn register_cooked_model_bundle(
         clips.push(ModelAnimationClip {
             name: clip_name_from_path(path),
             psxanim_path: relativise(path, project_root),
+            calibration: Default::default(),
         });
     }
 
@@ -474,6 +497,7 @@ pub fn register_cooked_model_bundle(
 
     let model_resource = ModelResource {
         model_path: relativise(&model_path, project_root),
+        source_path: None,
         texture_path: texture_path.as_ref().map(|p| relativise(p, project_root)),
         skeleton: Some(skeleton_id),
         clips,
@@ -490,7 +514,8 @@ pub fn register_cooked_model_bundle(
     };
 
     let model_id = project.add_resource(display_name, ResourceData::Model(model_resource.clone()));
-    let animation_ids = register_animation_clip_resources(project, skeleton_id, &model_resource);
+    let animation_ids =
+        register_animation_clip_resources(project, skeleton_id, model_id, &model_resource);
     if !animation_ids.is_empty() {
         register_animation_set_resource(project, display_name, skeleton_id, &animation_ids);
     }
@@ -537,29 +562,7 @@ pub fn import_model_with_animation_sources(
 
     let safe = safe_dir_name(output_name);
     let bundle_dir = project_root.join("assets").join("models").join(&safe);
-    if let Err(e) = std::fs::create_dir_all(&bundle_dir) {
-        return Err(ModelImportError::Io {
-            path: bundle_dir.clone(),
-            detail: e.to_string(),
-        });
-    }
-
-    // Reject pre-existing non-bundle content rather than
-    // silently merging.
-    if let Ok(read) = std::fs::read_dir(&bundle_dir) {
-        for entry in read.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let ok = matches!(
-                    path.extension().and_then(|e| e.to_str()),
-                    Some("psxmdl") | Some("psxt") | Some("psxanim")
-                );
-                if !ok {
-                    return Err(ModelImportError::OutputExists(bundle_dir));
-                }
-            }
-        }
-    }
+    prepare_import_bundle_dir(&bundle_dir)?;
 
     let model_path = bundle_dir.join(format!("{safe}.psxmdl"));
     std::fs::write(&model_path, &package.model).map_err(|e| ModelImportError::Io {
@@ -575,8 +578,13 @@ pub fn import_model_with_animation_sources(
         })?;
     }
 
+    let mut used_clip_stems = BTreeSet::new();
     for clip in &package.clips {
-        let clip_path = bundle_dir.join(format!("{}_{}.psxanim", safe, clip.sanitized_name));
+        let clip_stem = unique_clip_stem(
+            &mut used_clip_stems,
+            &format!("{}_{}", safe, clip.sanitized_name),
+        );
+        let clip_path = bundle_dir.join(format!("{clip_stem}.psxanim"));
         std::fs::write(&clip_path, &clip.bytes).map_err(|e| ModelImportError::Io {
             path: clip_path,
             detail: e.to_string(),
@@ -587,11 +595,65 @@ pub fn import_model_with_animation_sources(
         register_cooked_model_bundle(project, &bundle_dir, output_name, Some(project_root))?;
     if let Some(resource) = project.resource_mut(model_id) {
         if let ResourceData::Model(model) = &mut resource.data {
+            model.source_path = Some(relativise(source_path, Some(project_root)));
             model.world_height = config.world_height;
             model.collision_radius = default_model_collision_radius_for_height(config.world_height);
         }
     }
     Ok(model_id)
+}
+
+fn unique_clip_stem(used: &mut BTreeSet<String>, base: &str) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base}_{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn prepare_import_bundle_dir(bundle_dir: &Path) -> Result<(), ModelImportError> {
+    if let Err(e) = std::fs::create_dir_all(bundle_dir) {
+        return Err(ModelImportError::Io {
+            path: bundle_dir.to_path_buf(),
+            detail: e.to_string(),
+        });
+    }
+
+    // Reject pre-existing non-bundle content rather than silently
+    // merging, but clear old cooked bundle files so reimporting the
+    // same model cannot retain a stale atlas or obsolete clips.
+    if let Ok(read) = std::fs::read_dir(bundle_dir) {
+        let mut cooked_files = Vec::new();
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let ok = matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("psxmdl") | Some("psxt") | Some("psxanim")
+                );
+                if !ok {
+                    return Err(ModelImportError::OutputExists(bundle_dir.to_path_buf()));
+                }
+                cooked_files.push(path);
+            }
+        }
+        for path in cooked_files {
+            if let Err(e) = std::fs::remove_file(&path) {
+                return Err(ModelImportError::Io {
+                    path,
+                    detail: e.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Convert a GLB/glTF/FBX into the cooked model package without
@@ -615,6 +677,155 @@ pub fn preview_model_with_animation_sources(
     convert_rigid_model_source(source_path, extra_animation_paths, &config)
 }
 
+/// Bake one raw animation source against an existing model's original
+/// source and register the resulting cooked clip as a target-specific
+/// animation resource. The cooked model bytes from the conversion are
+/// intentionally discarded; this action only adds an animation clip.
+pub fn bake_animation_source_for_model(
+    project: &mut ProjectDocument,
+    model_id: ResourceId,
+    source_id: ResourceId,
+    model_source_path: &Path,
+    animation_source_path: &Path,
+    project_root: &Path,
+    config: psxed_gltf::RigidModelConfig,
+) -> Result<ResourceId, ModelImportError> {
+    let (model_name, model_path, skeleton) = {
+        let resource = project
+            .resource(model_id)
+            .ok_or(ModelImportError::MissingModelSource { model: model_id })?;
+        let ResourceData::Model(model) = &resource.data else {
+            return Err(ModelImportError::MissingModelSource { model: model_id });
+        };
+        (
+            resource.name.clone(),
+            model.model_path.clone(),
+            model.skeleton,
+        )
+    };
+    let (source_name, source_meta) = {
+        let resource =
+            project
+                .resource(source_id)
+                .ok_or(ModelImportError::NoCookedAnimationClips {
+                    source: animation_source_path.to_path_buf(),
+                })?;
+        let ResourceData::AnimationSource(source) = &resource.data else {
+            return Err(ModelImportError::NoCookedAnimationClips {
+                source: animation_source_path.to_path_buf(),
+            });
+        };
+        (resource.name.clone(), source.clone())
+    };
+    let existing_clip = project.resources.iter().find_map(|resource| {
+        let ResourceData::AnimationClip(clip) = &resource.data else {
+            return None;
+        };
+        (clip.source == Some(source_id) && clip.target_model == Some(model_id))
+            .then(|| (resource.id, clip.psxanim_path.clone()))
+    });
+
+    let package = convert_rigid_model_source(
+        model_source_path,
+        &[animation_source_path.to_path_buf()],
+        &config,
+    )?;
+    let clip = package
+        .clips
+        .last()
+        .ok_or_else(|| ModelImportError::NoCookedAnimationClips {
+            source: animation_source_path.to_path_buf(),
+        })?;
+
+    let cooked_model_path = resolve_path(&model_path, Some(project_root));
+    let bundle_dir = cooked_model_path
+        .parent()
+        .ok_or_else(|| ModelImportError::Io {
+            path: cooked_model_path.clone(),
+            detail: "model path has no parent directory".to_string(),
+        })?;
+    std::fs::create_dir_all(bundle_dir).map_err(|e| ModelImportError::Io {
+        path: bundle_dir.to_path_buf(),
+        detail: e.to_string(),
+    })?;
+
+    let model_prefix = cooked_model_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(safe_dir_name)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| safe_dir_name(&model_name));
+    let clip_path = if let Some((_, existing_path)) = &existing_clip {
+        resolve_path(existing_path, Some(project_root))
+    } else {
+        unique_animation_clip_path(
+            bundle_dir,
+            &format!("{}_{}", model_prefix, clip.sanitized_name),
+        )
+    };
+    let model_bytes = std::fs::read(&cooked_model_path).map_err(|e| ModelImportError::Io {
+        path: cooked_model_path.clone(),
+        detail: e.to_string(),
+    })?;
+    let model =
+        psx_asset::Model::from_bytes(&model_bytes).map_err(|e| ModelImportError::InvalidModel {
+            path: cooked_model_path.clone(),
+            detail: format!("{:?}", e),
+        })?;
+    let animation = psx_asset::Animation::from_bytes(&clip.bytes).map_err(|e| {
+        ModelImportError::InvalidAnimation {
+            path: clip_path.clone(),
+            detail: format!("{:?}", e),
+        }
+    })?;
+    if animation.joint_count() != model.joint_count() {
+        return Err(ModelImportError::JointCountMismatch {
+            path: clip_path,
+            animation_joints: animation.joint_count(),
+            model_joints: model.joint_count(),
+        });
+    }
+    std::fs::write(&clip_path, &clip.bytes).map_err(|e| ModelImportError::Io {
+        path: clip_path.clone(),
+        detail: e.to_string(),
+    })?;
+
+    let clip_name = if !source_meta.clip_name.trim().is_empty() {
+        source_meta.clip_name.trim().to_string()
+    } else if !source_name.trim().is_empty() {
+        source_name
+    } else {
+        clip.sanitized_name.clone()
+    };
+    let role = if matches!(source_meta.role, AnimationRole::Generic) {
+        AnimationRole::guess_from_name(&clip_name)
+    } else {
+        source_meta.role
+    };
+    let stored_path = relativise(&clip_path, Some(project_root));
+    let resource_name = format!("{model_name} / {clip_name}");
+    let clip_resource = AnimationClipResource {
+        psxanim_path: stored_path,
+        skeleton,
+        source: Some(source_id),
+        target_model: Some(model_id),
+        bake: AnimationClipBakeKind::Retargeted,
+        role,
+        looping: source_meta.looping,
+        tags: source_meta.tags,
+        calibration: Default::default(),
+    };
+    if let Some((existing_id, _)) = existing_clip {
+        if let Some(resource) = project.resource_mut(existing_id) {
+            resource.name = resource_name;
+            resource.data = ResourceData::AnimationClip(clip_resource);
+        }
+        Ok(existing_id)
+    } else {
+        Ok(project.add_resource(resource_name, ResourceData::AnimationClip(clip_resource)))
+    }
+}
+
 fn convert_rigid_model_source(
     source_path: &Path,
     extra_animation_paths: &[PathBuf],
@@ -624,26 +835,31 @@ fn convert_rigid_model_source(
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("fbx"));
-    let result = if is_fbx && !extra_animation_paths.is_empty() {
-        psxed_gltf::convert_fbx_rigid_model_path_with_animation_paths(
+    let result = if !extra_animation_paths.is_empty() {
+        psxed_gltf::convert_rigid_model_path_with_animation_paths(
             source_path,
             extra_animation_paths,
             config,
         )
     } else if is_fbx {
         psxed_gltf::convert_fbx_rigid_model_path(source_path, config)
-    } else if extra_animation_paths.is_empty() {
-        psxed_gltf::convert_rigid_model_path(source_path, config)
     } else {
-        return Err(ModelImportError::GlbConversionFailed {
-            source: source_path.to_path_buf(),
-            detail: "extra FBX animation takes currently require an FBX model source".to_string(),
-        });
+        psxed_gltf::convert_rigid_model_path(source_path, config)
     };
     result.map_err(|e| ModelImportError::GlbConversionFailed {
         source: source_path.to_path_buf(),
         detail: format!("{e}"),
     })
+}
+
+fn unique_animation_clip_path(bundle_dir: &Path, stem: &str) -> PathBuf {
+    let mut candidate = bundle_dir.join(format!("{stem}.psxanim"));
+    let mut index = 2usize;
+    while candidate.exists() {
+        candidate = bundle_dir.join(format!("{stem}_{index}.psxanim"));
+        index += 1;
+    }
+    candidate
 }
 
 /// Derive a clip display name from a `.psxanim` path. Strips the
@@ -722,6 +938,7 @@ fn find_or_add_skeleton(
 fn register_animation_clip_resources(
     project: &mut ProjectDocument,
     skeleton_id: ResourceId,
+    model_id: ResourceId,
     model: &ModelResource,
 ) -> Vec<ResourceId> {
     let mut ids = Vec::new();
@@ -743,22 +960,76 @@ fn register_animation_clip_resources(
             continue;
         }
         let role = AnimationRole::guess_from_name(&clip.name);
+        let source_id =
+            find_or_add_animation_source_for_clip(project, skeleton_id, model_id, clip, role);
         let id = project.add_resource(
             clip.name.clone(),
             ResourceData::AnimationClip(AnimationClipResource {
                 psxanim_path: clip.psxanim_path.clone(),
                 skeleton: Some(skeleton_id),
+                source: Some(source_id),
+                target_model: Some(model_id),
+                bake: AnimationClipBakeKind::ModelNative,
                 role,
                 looping: !matches!(
                     role,
-                    AnimationRole::Attack | AnimationRole::Hit | AnimationRole::Death
+                    AnimationRole::Roll
+                        | AnimationRole::Backstep
+                        | AnimationRole::Attack
+                        | AnimationRole::Hit
+                        | AnimationRole::Death
                 ),
                 tags: role_tag_list(role),
+                calibration: clip.calibration,
             }),
         );
         ids.push(id);
     }
     ids
+}
+
+fn find_or_add_animation_source_for_clip(
+    project: &mut ProjectDocument,
+    skeleton_id: ResourceId,
+    model_id: ResourceId,
+    clip: &ModelAnimationClip,
+    role: AnimationRole,
+) -> ResourceId {
+    if let Some(existing) = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::AnimationSource(source)
+                if source.source_path == clip.psxanim_path
+                    && source.clip_name == clip.name
+                    && source.target_model == Some(model_id) =>
+            {
+                Some(resource.id)
+            }
+            _ => None,
+        })
+    {
+        return existing;
+    }
+
+    let mut source =
+        AnimationSourceResource::from_path(clip.psxanim_path.clone(), clip.name.clone());
+    source.skeleton = Some(skeleton_id);
+    source.target_model = Some(model_id);
+    source.role = role;
+    source.looping = !matches!(
+        role,
+        AnimationRole::Roll
+            | AnimationRole::Backstep
+            | AnimationRole::Attack
+            | AnimationRole::Hit
+            | AnimationRole::Death
+    );
+    source.tags = role_tag_list(role);
+    project.add_resource(
+        format!("{} Source", clip.name),
+        ResourceData::AnimationSource(source),
+    )
 }
 
 fn register_animation_set_resource(
@@ -778,23 +1049,19 @@ fn register_animation_set_resource(
         let ResourceData::AnimationClip(clip) = &resource.data else {
             continue;
         };
-        match clip.role {
-            AnimationRole::Idle if set.idle_clip.is_none() => set.idle_clip = Some(*id),
-            AnimationRole::Walk if set.walk_clip.is_none() => set.walk_clip = Some(*id),
-            AnimationRole::Run if set.run_clip.is_none() => set.run_clip = Some(*id),
-            AnimationRole::Turn if set.turn_clip.is_none() => set.turn_clip = Some(*id),
-            AnimationRole::Generic
-            | AnimationRole::Attack
-            | AnimationRole::Hit
-            | AnimationRole::Death
-            | AnimationRole::Idle
-            | AnimationRole::Walk
-            | AnimationRole::Run
-            | AnimationRole::Turn => {
-                if !set.clips.contains(id) {
-                    set.clips.push(*id);
-                }
+        let action = CharacterAnimationAction::guess_from_name(&resource.name).or_else(|| {
+            CharacterAnimationAction::ALL
+                .iter()
+                .copied()
+                .find(|action| action.role_hint() == Some(clip.role))
+        });
+        if let Some(action) = action {
+            if set.action_clip(action).is_none() {
+                set.set_action_clip(action, Some(*id));
             }
+        }
+        if !set.clips.contains(id) {
+            set.clips.push(*id);
         }
     }
     let set_name = format!("{display_name} Animation Set");
@@ -824,6 +1091,8 @@ fn merge_animation_set(target: &mut AnimationSetResource, source: &AnimationSetR
         AnimationRole::Walk,
         AnimationRole::Run,
         AnimationRole::Turn,
+        AnimationRole::Roll,
+        AnimationRole::Backstep,
     ] {
         let source_clip = source.role_clip(role);
         if source_clip.is_some() {
@@ -832,6 +1101,11 @@ fn merge_animation_set(target: &mut AnimationSetResource, source: &AnimationSetR
                     *target_slot = source_clip;
                 }
             }
+        }
+    }
+    for binding in &source.action_clips {
+        if target.action_clip(binding.action).is_none() {
+            target.set_action_clip(binding.action, Some(binding.clip));
         }
     }
     for clip in &source.clips {
@@ -955,6 +1229,58 @@ mod tests {
         assert!(sorted_names.contains(&"idle"));
         assert_eq!(model.default_clip, Some(3));
         assert_eq!(model.preview_clip, Some(3));
+    }
+
+    #[test]
+    fn import_bundle_preparation_removes_stale_cooked_files() {
+        let dir = make_bundle(
+            "stale-cooked-files",
+            Some(b"PSMDbogus"),
+            1,
+            &[b"old atlas"],
+            &[("old_idle", b"old animation")],
+        );
+
+        prepare_import_bundle_dir(&dir).expect("bundle files are safe to clear");
+
+        assert!(!dir.join("model_0.psxmdl").exists());
+        assert!(!dir.join("atlas_0.psxt").exists());
+        assert!(!dir.join("old_idle.psxanim").exists());
+        assert!(dir.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_bundle_preparation_rejects_non_bundle_files() {
+        let dir = make_bundle("stale-non-bundle-files", Some(b"PSMDbogus"), 1, &[], &[]);
+        std::fs::write(dir.join("notes.txt"), b"do not delete").unwrap();
+
+        match prepare_import_bundle_dir(&dir) {
+            Err(ModelImportError::OutputExists(path)) => assert_eq!(path, dir),
+            other => panic!("expected OutputExists, got {other:?}"),
+        }
+        assert!(dir.join("model_0.psxmdl").exists());
+        assert!(dir.join("notes.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_clip_stem_preserves_duplicate_animation_names() {
+        let mut used = BTreeSet::new();
+        assert_eq!(
+            unique_clip_stem(&mut used, "knight_running"),
+            "knight_running"
+        );
+        assert_eq!(
+            unique_clip_stem(&mut used, "knight_running"),
+            "knight_running_2"
+        );
+        assert_eq!(
+            unique_clip_stem(&mut used, "knight_running"),
+            "knight_running_3"
+        );
     }
 
     #[test]

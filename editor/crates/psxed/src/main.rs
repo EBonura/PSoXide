@@ -416,6 +416,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         normalize_root_translation,
         strip_animation_scale: true,
         prune_detached_face_islands,
+        extra_animations_affect_bounds: true,
     };
     let package = convert_rigid_model_source(&input, &animation_paths, &cfg)
         .map_err(|e| format!("convert: {e}"))?;

@@ -134,6 +134,8 @@ Per-frame update:
 - SELECT: toggle a free-orbit debug camera.
 - Right stick: manual third-person camera orbit when the pad is in
   analog mode.
+- Keyboard defaults: arrow keys emulate left stick; I/J/K/L emulate
+  right stick.
 - L1: recenter the third-person camera behind the player.
 - R3: hard-lock / unlock the most central entity target in range.
 - L2 / R2: switch lock-on target left / right.
