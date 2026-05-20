@@ -1056,7 +1056,8 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         .average()
         .or_else(|| state.profiler.latest())?;
     const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
-    const CHUNK_MAP_COUNTERS: &[u16] = &[
+    let mut chunk_map_counters = Vec::with_capacity(10 + counter::ROOM_CHUNK_MASK_WORD_COUNT * 3);
+    chunk_map_counters.extend_from_slice(&[
         counter::ROOM_STREAM_RESIDENT_MASK_LO,
         counter::ROOM_STREAM_RESIDENT_MASK_HI,
         counter::ROOM_ACTIVE_CHUNK_MASK_LO,
@@ -1067,26 +1068,48 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::ROOM_PLAYER_LOCAL_X_BIASED,
         counter::ROOM_PLAYER_LOCAL_Z_BIASED,
         counter::ROOM_PLAYER_VIEW_YAW_Q12,
-    ];
+    ]);
+    for first in [
+        counter::ROOM_STREAM_RESIDENT_MASK_WORD_FIRST,
+        counter::ROOM_ACTIVE_CHUNK_MASK_WORD_FIRST,
+        counter::ROOM_DRAWN_CHUNK_MASK_WORD_FIRST,
+    ] {
+        for word in 0..counter::ROOM_CHUNK_MASK_WORD_COUNT {
+            chunk_map_counters.push(first + word as u16);
+        }
+    }
     let chunk_sample = state
         .profiler
-        .latest_with_guest_counters(CHUNK_MAP_COUNTERS)
+        .latest_with_guest_counters(&chunk_map_counters)
         .unwrap_or(sample);
     let recent_counter = |id: u16| profile_counter_u32(sample.guest.counter_max_value(id as usize));
-    let chunk_mask = |lo: u16, hi: u16| {
-        let lo = chunk_sample.guest.counter_latest_value(lo as usize) as u64;
-        let hi = chunk_sample.guest.counter_latest_value(hi as usize) as u64;
-        lo | (hi << 32)
+    let chunk_mask = |first: u16, legacy_lo: u16, legacy_hi: u16| {
+        let mut mask = [0u32; psxed_ui::CHUNK_DEBUG_MASK_WORD_COUNT];
+        for (word, value) in mask.iter_mut().enumerate() {
+            *value = chunk_sample
+                .guest
+                .counter_latest_value(first as usize + word) as u32;
+        }
+        if mask.iter().all(|word| *word == 0) {
+            mask[0] = chunk_sample.guest.counter_latest_value(legacy_lo as usize) as u32;
+            mask[1] = chunk_sample.guest.counter_latest_value(legacy_hi as usize) as u32;
+        }
+        mask
     };
+    let mask_count =
+        |mask: &psxed_ui::ChunkDebugMask| mask.iter().map(|word| word.count_ones()).sum();
     let chunk_resident_mask = chunk_mask(
+        counter::ROOM_STREAM_RESIDENT_MASK_WORD_FIRST,
         counter::ROOM_STREAM_RESIDENT_MASK_LO,
         counter::ROOM_STREAM_RESIDENT_MASK_HI,
     );
-    let chunk_active_mask = chunk_mask(
+    let chunk_visible_mask = chunk_mask(
+        counter::ROOM_ACTIVE_CHUNK_MASK_WORD_FIRST,
         counter::ROOM_ACTIVE_CHUNK_MASK_LO,
         counter::ROOM_ACTIVE_CHUNK_MASK_HI,
     );
     let chunk_drawn_mask = chunk_mask(
+        counter::ROOM_DRAWN_CHUNK_MASK_WORD_FIRST,
         counter::ROOM_DRAWN_CHUNK_MASK_LO,
         counter::ROOM_DRAWN_CHUNK_MASK_HI,
     );
@@ -1107,8 +1130,8 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         hw_ms: sample.hw_render_ms,
         ui_ms: sample.egui.total_ms,
         step_budget_percent: sample.psx_budget_percent(),
-        chunk_active: recent_counter(counter::ROOM_ACTIVE_CHUNKS),
-        chunk_drawn: chunk_drawn_mask.count_ones(),
+        chunk_visible: recent_counter(counter::ROOM_ACTIVE_CHUNKS),
+        chunk_drawn: mask_count(&chunk_drawn_mask),
         chunk_resident: recent_counter(counter::ROOM_STREAM_RESIDENT_SLOTS),
         chunk_candidates: recent_counter(counter::ROOM_CHUNKS_CONSIDERED),
         chunk_built: recent_counter(counter::ROOM_WINDOW_BUILT_CHUNKS),
@@ -1120,7 +1143,7 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
         stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
         chunk_resident_mask,
-        chunk_active_mask,
+        chunk_visible_mask,
         chunk_drawn_mask,
         player_map_valid: player_x_biased > 0 || player_z_biased > 0,
         player_room_index: chunk_sample

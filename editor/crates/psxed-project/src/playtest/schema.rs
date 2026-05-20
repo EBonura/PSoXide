@@ -92,13 +92,14 @@ pub struct PlaytestRoom {
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
     pub draw_distance: i32,
-    /// Runtime active-chunk radius in world sectors.
+    /// Runtime residency request radius in world sectors.
     pub chunk_activation_radius_sectors: i32,
     /// Cooked PVS traversal radius in room cells.
     pub visibility_radius: u16,
-    /// Runtime generated-chunk residency budget inherited from the World node.
+    /// Runtime sector-chunk residency memory budget inherited from the World node.
     pub resident_chunk_limit: u8,
-    /// Runtime generated-chunk visible/drawable budget inherited from the World node.
+    /// Legacy generated-chunk visible/drawable budget. Current playtest builds
+    /// derive visibility from resident sector chunks intersecting the camera.
     pub visible_chunk_limit: u8,
     /// First index into [`PlaytestPackage::materials`] for this
     /// room's slice.

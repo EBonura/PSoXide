@@ -11,9 +11,9 @@ mod play_mode;
 mod style;
 
 pub use play_mode::{
-    EditorPlaytestMetrics, EditorPlaytestRequest, EditorPlaytestStatus, EditorPlaytestTapeMode,
-    EditorPlaytestTapeStatus, EditorViewport3dMode, EditorViewport3dPresentation,
-    EditorViewportOverlayLine,
+    ChunkDebugMask, EditorPlaytestMetrics, EditorPlaytestRequest, EditorPlaytestStatus,
+    EditorPlaytestTapeMode, EditorPlaytestTapeStatus, EditorViewport3dMode,
+    EditorViewport3dPresentation, EditorViewportOverlayLine, CHUNK_DEBUG_MASK_WORD_COUNT,
 };
 
 use crate::history::UndoStack;
@@ -42,11 +42,9 @@ use psxed_project::{
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
     MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
     MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE,
-    MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MAX_WORLD_STREAMING_VISIBLE_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
+    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
     MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
-    MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MIN_WORLD_STREAMING_VISIBLE_CHUNKS, MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8,
+    MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8,
     SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN,
     SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
 };
@@ -4554,8 +4552,8 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "CHNK act/draw/res {:>2}/{:<2}/{:<2}",
-                        metrics.chunk_active, metrics.chunk_drawn, metrics.chunk_resident
+                        "CHNK vis/draw/res {:>2}/{:<2}/{:<2}",
+                        metrics.chunk_visible, metrics.chunk_drawn, metrics.chunk_resident
                     ),
                     STUDIO_TEXT,
                 );
@@ -15473,44 +15471,14 @@ fn draw_world_grid_settings(
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Sector Chunk").color(STUDIO_TEXT_WEAK))
-                    .on_hover_text("Cooked grid dimensions for each generated streaming chunk.");
-                let mut width = streaming.chunk_target_width as i32;
-                let mut depth = streaming.chunk_target_depth as i32;
-                let width_changed = ui
-                    .add(
-                        egui::DragValue::new(&mut width)
-                            .speed(1.0)
-                            .range(
-                                MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32
-                                    ..=MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32,
-                            )
-                            .prefix("W "),
-                    )
-                    .changed();
-                let depth_changed = ui
-                    .add(
-                        egui::DragValue::new(&mut depth)
-                            .speed(1.0)
-                            .range(
-                                MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32
-                                    ..=MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32,
-                            )
-                            .prefix("D "),
-                    )
-                    .changed();
-                if width_changed || depth_changed {
-                    streaming.chunk_target_width = width as u16;
-                    streaming.chunk_target_depth = depth as u16;
-                    *streaming = streaming.normalized();
-                    changed = true;
-                }
-                ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Chunking").color(STUDIO_TEXT_WEAK))
+                    .on_hover_text("Current runtime chunk identity is the authored world sector.");
+                ui.monospace("1 populated sector = 1 stream chunk");
             });
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Resident Memory").color(STUDIO_TEXT_WEAK))
                     .on_hover_text(
-                        "Memory budget for resident streaming chunks. Runtime slot count scales with cooked chunk payload size.",
+                        "Memory budget for resident sector chunks. Runtime slot count scales with cooked sector payload size.",
                     );
                 let mut limit = streaming.resident_chunk_limit as i32;
                 if ui
@@ -15527,30 +15495,7 @@ fn draw_world_grid_settings(
                 ui.label(RichText::new("×32 KiB").color(STUDIO_TEXT_WEAK))
                     .on_hover_text("This is a memory budget unit, not a fixed resident chunk count.");
             });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Active Chunks").color(STUDIO_TEXT_WEAK))
-                    .on_hover_text(
-                        "Maximum resident chunks selected around the player for drawing and collision. Screen culling decides which active chunks are drawn.",
-                    );
-                let mut limit = streaming.visible_chunk_limit as i32;
-                let max_visible = streaming.resident_chunk_limit.clamp(
-                    MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
-                    MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
-                );
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut limit)
-                            .speed(1.0)
-                            .range(MIN_WORLD_STREAMING_VISIBLE_CHUNKS as i32..=max_visible as i32),
-                    )
-                    .changed()
-                {
-                    streaming.visible_chunk_limit = limit as u8;
-                    *streaming = streaming.normalized();
-                    changed = true;
-                }
-                ui.label(RichText::new("draw/collision").color(STUDIO_TEXT_WEAK));
-            });
+            ui.weak("Visible chunks are the resident sector chunks intersecting the camera frustum.");
         });
     egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
         .default_open(true)
@@ -21069,17 +21014,18 @@ fn draw_play_chunk_debug_map(
         map_rect.right_top() + Vec2::new(-8.0, 7.0),
         Align2::RIGHT_TOP,
         format!(
-            "A{} D{} R{}",
-            metrics.chunk_active, metrics.chunk_drawn, metrics.chunk_resident
+            "V{} D{} R{}",
+            metrics.chunk_visible, metrics.chunk_drawn, metrics.chunk_resident
         ),
         FontId::monospace(10.0),
         STUDIO_TEXT_WEAK,
     );
-    if cells.len() > u64::BITS as usize {
+    let debug_mask_bits = CHUNK_DEBUG_MASK_WORD_COUNT * 32;
+    if cells.len() > debug_mask_bits {
         painter.text(
             map_rect.right_top() + Vec2::new(-8.0, 20.0),
             Align2::RIGHT_TOP,
-            "first 64 indexed",
+            format!("first {debug_mask_bits} indexed"),
             FontId::monospace(9.0),
             STUDIO_TEXT_WEAK,
         );
@@ -21102,10 +21048,11 @@ fn draw_play_chunk_debug_map(
     let map_z = |z: f32| origin.y + (z - min_z) * scale;
 
     for cell in &cells {
-        let bit = debug_chunk_bit(cell.runtime_room_index);
-        let resident = bit != 0 && metrics.chunk_resident_mask & bit != 0;
-        let active = bit != 0 && metrics.chunk_active_mask & bit != 0;
-        let drawn = bit != 0 && metrics.chunk_drawn_mask & bit != 0;
+        let resident =
+            debug_chunk_mask_contains(&metrics.chunk_resident_mask, cell.runtime_room_index);
+        let visible =
+            debug_chunk_mask_contains(&metrics.chunk_visible_mask, cell.runtime_room_index);
+        let drawn = debug_chunk_mask_contains(&metrics.chunk_drawn_mask, cell.runtime_room_index);
         let rect = Rect::from_min_max(
             Pos2::new(
                 map_x(cell.center[0] - cell.half[0]),
@@ -21119,7 +21066,7 @@ fn draw_play_chunk_debug_map(
         .shrink(0.75);
         let fill = if drawn {
             Color32::from_rgba_unmultiplied(40, 210, 112, 150)
-        } else if active {
+        } else if visible {
             Color32::from_rgba_unmultiplied(238, 184, 64, 122)
         } else if resident {
             Color32::from_rgba_unmultiplied(64, 148, 226, 86)
@@ -21131,7 +21078,7 @@ fn draw_play_chunk_debug_map(
         }
         let stroke = if drawn {
             Stroke::new(1.5, Color32::from_rgb(76, 255, 144))
-        } else if active {
+        } else if visible {
             Stroke::new(1.7, Color32::from_rgb(255, 206, 82))
         } else if resident {
             Stroke::new(1.2, Color32::from_rgb(102, 180, 255))
@@ -21187,7 +21134,7 @@ fn draw_play_chunk_debug_map(
         map_rect.left_bottom() + Vec2::new(76.0, -16.0),
         Color32::from_rgba_unmultiplied(238, 184, 64, 122),
         Color32::from_rgb(255, 206, 82),
-        "active",
+        "visible",
     );
     draw_chunk_map_legend_item(
         painter,
@@ -21245,12 +21192,9 @@ fn collect_play_chunk_debug_map_cells(project: &ProjectDocument) -> Vec<PlayChun
     cells
 }
 
-fn debug_chunk_bit(index: usize) -> u64 {
-    if index < u64::BITS as usize {
-        1u64 << index
-    } else {
-        0
-    }
+fn debug_chunk_mask_contains(mask: &ChunkDebugMask, index: usize) -> bool {
+    let word = index / 32;
+    word < mask.len() && (mask[word] & (1u32 << (index & 31))) != 0
 }
 
 fn rotate_vec2(v: Vec2, radians: f32) -> Vec2 {
@@ -27439,6 +27383,16 @@ fn draw_streaming_budget(
     let vram_budget = runtime_vram_budget(project, project_root, &resource_use);
     let model_budget = runtime_model_budget(project, project_root, &resource_use);
     let resident_budget_bytes = streaming.resident_chunk_limit as u64 * 32 * 1024;
+    let largest_sector_bytes = plan
+        .largest_room_asset_chunk()
+        .map(|chunk| chunk.budget.psxw_static_lit_bytes as u64)
+        .unwrap_or(0);
+    let runtime_slot_bytes = largest_sector_bytes.clamp(2 * 1024, 32 * 1024);
+    let estimated_resident_slots = if largest_sector_bytes == 0 {
+        0
+    } else {
+        (resident_budget_bytes / runtime_slot_bytes).min(128)
+    };
     let over = plan.over_budget_count() > 0;
     let header = if over {
         icons::label(icons::TRASH, "Streaming Budget — over limit")
@@ -27451,19 +27405,19 @@ fn draw_streaming_budget(
         .show(ui, |ui| {
             draw_budget_row(
                 ui,
-                "Generated chunks",
+                "Sector chunks",
                 format!("{}", plan.chunk_count()),
                 over,
             );
             draw_budget_row(
                 ui,
-                "Target chunk",
-                format!("{}×{} sectors", config.target_width, config.target_depth),
+                "Chunking",
+                "1 populated sector per stream chunk".to_string(),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Resident budget",
+                "Resident memory",
                 format!(
                     "{} × 32 KiB ({})",
                     streaming.resident_chunk_limit,
@@ -27473,22 +27427,32 @@ fn draw_streaming_budget(
             );
             draw_budget_row(
                 ui,
-                "Active chunks",
-                format!("{}", streaming.visible_chunk_limit),
+                "Resident slots est.",
+                format!(
+                    "{} sector chunks @ {} slot",
+                    estimated_resident_slots,
+                    human_bytes_u64(runtime_slot_bytes)
+                ),
                 false,
             );
             draw_budget_row(ui, "Runtime lookup", "Dense sector grid".to_string(), false);
             draw_budget_row(
                 ui,
+                "Visibility",
+                "Camera frustum over resident sector chunks".to_string(),
+                false,
+            );
+            draw_budget_row(
+                ui,
                 "Authored footprint",
                 format!(
-                    "{}×{} sectors (runtime cap {}×{} per generated chunk)",
-                    plan.source_size[0], plan.source_size[1], MAX_ROOM_WIDTH, MAX_ROOM_DEPTH
+                    "{}×{} sectors",
+                    plan.source_size[0], plan.source_size[1]
                 ),
                 false,
             );
             ui.weak(
-                "Embedded Play cooks this Room into streaming chunks. Resident is memory; active is the draw/collision window; drawn is decided by screen culling.",
+                "Embedded Play cooks this Room into streaming chunks. Resident is memory; visible/drawn chunks are derived at runtime from the sector grid and camera.",
             );
             if let Some(chunk) = plan.largest_room_asset_chunk() {
                 draw_budget_row(

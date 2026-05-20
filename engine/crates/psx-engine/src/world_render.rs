@@ -2047,7 +2047,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
 /// Draw every populated cell from a cached vertex-lit room.
 ///
 /// This bypasses cooked visible-cell/PVS filtering after the caller has
-/// already selected an active chunk. Cells are still depth-sorted for the
+/// already selected a visible chunk. Cells are still depth-sorted for the
 /// ordering-table painter path, and surfaces still run the usual projection,
 /// screen, near-plane, and backface checks.
 #[allow(clippy::too_many_arguments)]
