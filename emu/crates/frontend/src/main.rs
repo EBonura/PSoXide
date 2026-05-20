@@ -1078,6 +1078,18 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         let hi = chunk_sample.guest.counter_latest_value(hi as usize) as u64;
         lo | (hi << 32)
     };
+    let chunk_resident_mask = chunk_mask(
+        counter::ROOM_STREAM_RESIDENT_MASK_LO,
+        counter::ROOM_STREAM_RESIDENT_MASK_HI,
+    );
+    let chunk_active_mask = chunk_mask(
+        counter::ROOM_ACTIVE_CHUNK_MASK_LO,
+        counter::ROOM_ACTIVE_CHUNK_MASK_HI,
+    );
+    let chunk_drawn_mask = chunk_mask(
+        counter::ROOM_DRAWN_CHUNK_MASK_LO,
+        counter::ROOM_DRAWN_CHUNK_MASK_HI,
+    );
     let player_x_biased = chunk_sample
         .guest
         .counter_latest_value(counter::ROOM_PLAYER_LOCAL_X_BIASED as usize);
@@ -1095,8 +1107,9 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         hw_ms: sample.hw_render_ms,
         ui_ms: sample.egui.total_ms,
         step_budget_percent: sample.psx_budget_percent(),
-        chunk_visible: recent_counter(counter::ROOM_ACTIVE_CHUNKS),
-        chunk_loaded: recent_counter(counter::ROOM_STREAM_RESIDENT_SLOTS),
+        chunk_active: recent_counter(counter::ROOM_ACTIVE_CHUNKS),
+        chunk_drawn: chunk_drawn_mask.count_ones(),
+        chunk_resident: recent_counter(counter::ROOM_STREAM_RESIDENT_SLOTS),
         chunk_candidates: recent_counter(counter::ROOM_CHUNKS_CONSIDERED),
         chunk_built: recent_counter(counter::ROOM_WINDOW_BUILT_CHUNKS),
         chunk_cache_skips: recent_counter(counter::ROOM_CHUNK_CACHE_SKIPS),
@@ -1106,18 +1119,9 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         stream_evictions: recent_counter(counter::ROOM_STREAM_EVICTIONS),
         stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
         stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
-        chunk_loaded_mask: chunk_mask(
-            counter::ROOM_STREAM_RESIDENT_MASK_LO,
-            counter::ROOM_STREAM_RESIDENT_MASK_HI,
-        ),
-        chunk_active_mask: chunk_mask(
-            counter::ROOM_ACTIVE_CHUNK_MASK_LO,
-            counter::ROOM_ACTIVE_CHUNK_MASK_HI,
-        ),
-        chunk_drawn_mask: chunk_mask(
-            counter::ROOM_DRAWN_CHUNK_MASK_LO,
-            counter::ROOM_DRAWN_CHUNK_MASK_HI,
-        ),
+        chunk_resident_mask,
+        chunk_active_mask,
+        chunk_drawn_mask,
         player_map_valid: player_x_biased > 0 || player_z_biased > 0,
         player_room_index: chunk_sample
             .guest
