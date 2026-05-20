@@ -3366,8 +3366,46 @@ impl Playtest {
         self.active_room_anchor = player;
         let mut skipped_rooms = [INVALID_ROOM_INDEX; MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES];
         let mut skipped_count = 0usize;
+        let mut used_sector_grid_window = false;
 
-        if !ROOM_CHUNKS.is_empty() {
+        #[cfg(feature = "sector-grid-streaming")]
+        if !ROOM_CHUNKS.is_empty() && sector_grid_available() {
+            used_sector_grid_window = true;
+            let mut selected_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+            let (selected_count, considered) = select_sector_grid_active_rooms(
+                current_index,
+                current_record,
+                player,
+                view,
+                active_limit,
+                &mut selected_rooms,
+            );
+            self.active_room_candidates = considered;
+            let mut selected_slot = 1usize;
+            while next_slot < active_limit && selected_slot < selected_count {
+                let candidate = selected_rooms[selected_slot];
+                selected_slot += 1;
+                let Some(record) = ROOMS.get(candidate.to_usize()) else {
+                    continue;
+                };
+                if let Some(active) = reuse_or_build_active_room(
+                    next_slot,
+                    candidate,
+                    record,
+                    current_record,
+                    &previous_active_rooms,
+                ) {
+                    if active.surface_cache.ready {
+                        self.active_rooms[next_slot] = Some(active);
+                        next_slot += 1;
+                        continue;
+                    }
+                };
+                self.active_room_cache_skips = self.active_room_cache_skips.saturating_add(1);
+            }
+        }
+
+        if !used_sector_grid_window && !ROOM_CHUNKS.is_empty() {
             self.active_room_candidates =
                 ROOM_CHUNKS.len().saturating_sub(1).min(u16::MAX as usize) as u16;
             while next_slot < active_limit {
@@ -3404,7 +3442,7 @@ impl Playtest {
                 skipped_rooms[skipped_count] = candidate;
                 skipped_count += 1;
             }
-        } else {
+        } else if !used_sector_grid_window {
             #[cfg(feature = "cd-stream-bench")]
             let Some(current_room) = current_room
             else {
@@ -3820,22 +3858,57 @@ impl Playtest {
         }
 
         let mut selected = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        selected[0] = current_index;
-        let mut selected_count = 1usize;
         let active_limit = room_active_chunk_limit(current_record);
-        while selected_count < active_limit {
-            let Some(candidate) = best_grid_chunk_candidate_from_indices(
+
+        #[cfg(feature = "sector-grid-streaming")]
+        let selected_count = if sector_grid_available() {
+            select_sector_grid_active_rooms(
                 current_index,
                 current_record,
                 player,
                 view,
-                &selected[..selected_count],
-            ) else {
-                break;
-            };
-            selected[selected_count] = candidate;
-            selected_count += 1;
-        }
+                active_limit,
+                &mut selected,
+            )
+            .0
+        } else {
+            selected[0] = current_index;
+            let mut selected_count = 1usize;
+            while selected_count < active_limit {
+                let Some(candidate) = best_grid_chunk_candidate_from_indices(
+                    current_index,
+                    current_record,
+                    player,
+                    view,
+                    &selected[..selected_count],
+                ) else {
+                    break;
+                };
+                selected[selected_count] = candidate;
+                selected_count += 1;
+            }
+            selected_count
+        };
+
+        #[cfg(not(feature = "sector-grid-streaming"))]
+        let selected_count = {
+            selected[0] = current_index;
+            let mut selected_count = 1usize;
+            while selected_count < active_limit {
+                let Some(candidate) = best_grid_chunk_candidate_from_indices(
+                    current_index,
+                    current_record,
+                    player,
+                    view,
+                    &selected[..selected_count],
+                ) else {
+                    break;
+                };
+                selected[selected_count] = candidate;
+                selected_count += 1;
+            }
+            selected_count
+        };
 
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
@@ -6801,6 +6874,78 @@ where
         }
         dz += 1;
     }
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn select_sector_grid_active_rooms(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    view: ActiveRoomView,
+    active_limit: usize,
+    out: &mut [RoomIndex; MAX_ACTIVE_ROOMS],
+) -> (usize, u16) {
+    out.fill(INVALID_ROOM_INDEX);
+    let limit = active_limit.clamp(1, MAX_ACTIVE_ROOMS);
+    out[0] = current_index;
+    if !sector_grid_available() || limit <= 1 {
+        return (1, 0);
+    }
+
+    let mut scores = [ChunkActivationScore::WORST; MAX_ACTIVE_ROOMS];
+    let mut count = 1usize;
+    let mut considered = 0u16;
+    visit_sector_grid_candidate_rooms(current_record, player, |room| {
+        if room == current_index || !chunk_available_for_active_selection(room) {
+            return;
+        }
+        let Some(chunk) = chunk_record_for_room(room) else {
+            return;
+        };
+        let Some(score) =
+            chunk_activation_score(*chunk, current_index, current_record, player, view)
+        else {
+            return;
+        };
+        considered = considered.saturating_add(1);
+        insert_sector_grid_active_room(room, score, out, &mut scores, &mut count, limit);
+    });
+    (count, considered)
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn insert_sector_grid_active_room(
+    room: RoomIndex,
+    score: ChunkActivationScore,
+    rooms: &mut [RoomIndex; MAX_ACTIVE_ROOMS],
+    scores: &mut [ChunkActivationScore; MAX_ACTIVE_ROOMS],
+    count: &mut usize,
+    limit: usize,
+) {
+    if rooms[..(*count).min(rooms.len())].contains(&room) {
+        return;
+    }
+    let limit = limit.min(rooms.len()).min(scores.len());
+    if limit <= 1 {
+        return;
+    }
+    let mut insert = (*count).min(limit);
+    if *count < limit {
+        *count += 1;
+    } else {
+        let last = limit - 1;
+        if !score.better_than(scores[last]) {
+            return;
+        }
+        insert = last;
+    }
+    while insert > 1 && score.better_than(scores[insert - 1]) {
+        rooms[insert] = rooms[insert - 1];
+        scores[insert] = scores[insert - 1];
+        insert -= 1;
+    }
+    rooms[insert] = room;
+    scores[insert] = score;
 }
 
 #[cfg(feature = "sector-grid-streaming")]
