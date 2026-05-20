@@ -189,6 +189,8 @@ Default keyboard pad bindings:
 | PSX Control | Keyboard |
 | --- | --- |
 | D-pad | Arrow keys |
+| Left stick | Arrow keys |
+| Right stick | I / J / K / L |
 | Cross | X |
 | Circle | C |
 | Square | Z |
@@ -198,8 +200,8 @@ Default keyboard pad bindings:
 | Start / Select | Enter / Backspace |
 | Analog toggle | F9 |
 
-For the editor-playtest third-person movement work, a gamepad is the
-best current input path. Circle is run.
+For the editor-playtest third-person movement work, press F9 to toggle
+DualShock analog mode. Circle is run.
 
 ## Build Targets
 

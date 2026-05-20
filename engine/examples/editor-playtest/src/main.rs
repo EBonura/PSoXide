@@ -34,6 +34,8 @@
 extern crate psx_rt;
 
 use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
+#[cfg(feature = "vis-full-active-chunks")]
+use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
 use psx_engine::{
@@ -52,13 +54,18 @@ use psx_engine::{
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
-    cached_room_vertices_from_level_records, draw_indexed_cached_room_vertex_lit_visible_cells,
-    draw_room_vertex_lit,
+    cached_room_vertices_from_level_records, draw_room_vertex_lit,
+};
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+use psx_engine::{
+    draw_indexed_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit_visible_cells,
+    GridVisibility,
 };
 #[cfg(feature = "world-grid-visible")]
-use psx_engine::{
-    draw_room_vertex_lit_visible_cells, GridVisibility, GridVisibilityStats, GridVisibleCell,
-};
+use psx_engine::{GridVisibilityStats, GridVisibleCell};
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
     draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
@@ -304,8 +311,22 @@ fn room_chunk_activation_radius_sectors(record: &LevelRoomRecord) -> i32 {
     record.chunk_activation_radius_sectors.max(1)
 }
 
+#[cfg(feature = "cd-stream-bench")]
+fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
+    streamed_room_slot_count_for_budget_units(record.resident_chunk_limit as usize)
+        .min(MAX_RUNTIME_RESIDENT_CHUNKS)
+}
+
+#[cfg(not(feature = "cd-stream-bench"))]
 fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
     (record.resident_chunk_limit as usize).clamp(1, MAX_RUNTIME_RESIDENT_CHUNKS)
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn room_stream_request_chunk_limit(record: &LevelRoomRecord) -> usize {
+    (record.resident_chunk_limit as usize)
+        .clamp(1, STREAMED_ROOM_SLOT_COUNT)
+        .min(room_resident_chunk_limit(record))
 }
 
 fn room_visible_chunk_limit(record: &LevelRoomRecord) -> usize {
@@ -383,26 +404,34 @@ const MAX_ROOM_MATERIALS: usize = 32;
 /// count per cooked build; this cap only prevents the fixed arrays from
 /// growing past the editor-exposed maximum.
 const MAX_ACTIVE_ROOMS: usize = 32;
-/// Streamed room slot budget. A slot stores the room `.psxw` plus
-/// the room-local render cache records carried by the `.psxc` chunk.
-/// Keeping this at 16 sectors forces oversized authored rooms to be
-/// split at cook time instead of quietly reserving a larger RAM cache.
-#[cfg(feature = "cd-stream-bench")]
+/// Streamed room slot budget. A slot stores one generated chunk payload:
+/// the room `.psxw` plus the room-local render cache records carried by
+/// the `.psxc` chunk. Slots are sized to the largest payload in the cooked
+/// WORLD.PAK, while the slot count is derived from a fixed byte budget so
+/// smaller chunks can stay resident in larger numbers.
 #[cfg(feature = "cd-stream-bench")]
 const MIN_STREAMED_ROOM_SLOT_BYTES: usize = 2048;
 #[cfg(feature = "cd-stream-bench")]
 const MAX_STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 #[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_RESIDENT_BUDGET_UNIT_BYTES: usize = MAX_STREAMED_ROOM_SLOT_BYTES;
+#[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_SLOT_BYTES: usize = clamp_streamed_room_slot_bytes(WORLD_PACK_MAX_CHUNK_BYTES);
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
 #[cfg(feature = "cd-stream-bench")]
-const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 32;
-/// CD-backed room residency cache. The cooked manifest selects the
-/// effective slot count so world-level streaming tuning can trade RAM
-/// residency against chunk churn without changing this runtime source.
+const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 256;
 #[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_SLOT_COUNT: usize = clamp_streamed_room_slot_count(WORLD_RESIDENT_CHUNK_LIMIT);
+const STREAMED_ROOM_SLOT_NONE: u16 = u16::MAX;
+#[cfg(feature = "cd-stream-bench")]
+const MAX_STREAMED_ROOM_INDEX_COUNT: usize = 256;
+/// CD-backed room residency cache. The cooked manifest selects the byte
+/// budget, and the runtime converts that budget into slots sized for this
+/// particular chunk layout. This preserves the authored worst-case RAM cost
+/// while allowing smaller chunks to keep more neighbors resident.
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_ROOM_SLOT_COUNT: usize =
+    streamed_room_slot_count_for_budget_units(WORLD_RESIDENT_CHUNK_LIMIT);
 #[cfg(feature = "cd-stream-bench")]
 const MAX_RUNTIME_RESIDENT_CHUNKS: usize = STREAMED_ROOM_SLOT_COUNT;
 #[cfg(not(feature = "cd-stream-bench"))]
@@ -421,6 +450,17 @@ const fn clamp_streamed_room_slot_count(raw: usize) -> usize {
     } else {
         raw
     }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+const fn streamed_room_slot_count_for_budget_units(raw_units: usize) -> usize {
+    let units = if raw_units < 1 { 1 } else { raw_units };
+    let budget_bytes = if units > usize::MAX / STREAMED_ROOM_RESIDENT_BUDGET_UNIT_BYTES {
+        usize::MAX
+    } else {
+        units * STREAMED_ROOM_RESIDENT_BUDGET_UNIT_BYTES
+    };
+    clamp_streamed_room_slot_count(budget_bytes / STREAMED_ROOM_SLOT_BYTES)
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -1153,6 +1193,7 @@ impl<const N: usize> RoomStreamLoadPlan<N> {
 #[cfg(feature = "cd-stream-bench")]
 struct RoomStreamScheduler<const N: usize> {
     slots: [StreamedRoomSlot; N],
+    room_slots: [u16; MAX_STREAMED_ROOM_INDEX_COUNT],
     job: cd_stream::WorldRoomSlotsReadJob<N>,
     job_plan: RoomStreamLoadPlan<N>,
     slot_limit: usize,
@@ -1170,6 +1211,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
     const fn new() -> Self {
         Self {
             slots: [StreamedRoomSlot::EMPTY; N],
+            room_slots: [STREAMED_ROOM_SLOT_NONE; MAX_STREAMED_ROOM_INDEX_COUNT],
             job: cd_stream::WorldRoomSlotsReadJob::new(),
             job_plan: RoomStreamLoadPlan::EMPTY,
             slot_limit: N,
@@ -1202,30 +1244,16 @@ impl<const N: usize> RoomStreamScheduler<N> {
     }
 
     fn resident_slot_for(&mut self, room: RoomIndex) -> Option<usize> {
-        let mut slot = 0usize;
-        let limit = self.effective_slot_limit();
-        while slot < limit {
-            let meta = self.slots[slot];
-            if meta.state == RoomStreamSlotState::Resident && meta.room == room {
-                self.slots[slot].last_used = self.epoch;
-                return Some(slot);
-            }
-            slot += 1;
+        if let Some(slot) = self.mapped_slot_for(room, RoomStreamSlotState::Resident) {
+            self.slots[slot].last_used = self.epoch;
+            return Some(slot);
         }
         None
     }
 
     fn is_resident(&self, room: RoomIndex) -> bool {
-        let mut slot = 0usize;
-        let limit = self.effective_slot_limit();
-        while slot < limit {
-            let meta = self.slots[slot];
-            if meta.state == RoomStreamSlotState::Resident && meta.room == room {
-                return true;
-            }
-            slot += 1;
-        }
-        false
+        self.mapped_slot_for(room, RoomStreamSlotState::Resident)
+            .is_some()
     }
 
     fn resident_byte_count(&self, slot: usize) -> Option<usize> {
@@ -1241,16 +1269,39 @@ impl<const N: usize> RoomStreamScheduler<N> {
     }
 
     fn loading_slot_for(&self, room: RoomIndex) -> Option<usize> {
-        let mut slot = 0usize;
-        let limit = self.effective_slot_limit();
-        while slot < limit {
-            let meta = self.slots[slot];
-            if meta.state == RoomStreamSlotState::Loading && meta.room == room {
-                return Some(slot);
-            }
-            slot += 1;
+        self.mapped_slot_for(room, RoomStreamSlotState::Loading)
+    }
+
+    fn mapped_slot_for(&self, room: RoomIndex, state: RoomStreamSlotState) -> Option<usize> {
+        let room_index = room.to_usize();
+        if room_index >= MAX_STREAMED_ROOM_INDEX_COUNT {
+            return None;
         }
-        None
+        let slot = self.room_slots[room_index] as usize;
+        if slot >= self.effective_slot_limit() {
+            return None;
+        }
+        let meta = self.slots[slot];
+        if meta.room == room && meta.state == state {
+            Some(slot)
+        } else {
+            None
+        }
+    }
+
+    fn set_slot(&mut self, slot: usize, meta: StreamedRoomSlot) {
+        if slot >= N {
+            return;
+        }
+        let old_room = self.slots[slot].room.to_usize();
+        if old_room < MAX_STREAMED_ROOM_INDEX_COUNT && self.room_slots[old_room] as usize == slot {
+            self.room_slots[old_room] = STREAMED_ROOM_SLOT_NONE;
+        }
+        self.slots[slot] = meta;
+        let new_room = meta.room.to_usize();
+        if meta.state != RoomStreamSlotState::Empty && new_room < MAX_STREAMED_ROOM_INDEX_COUNT {
+            self.room_slots[new_room] = slot as u16;
+        }
     }
 
     fn plan_window_loads(
@@ -1305,12 +1356,15 @@ impl<const N: usize> RoomStreamScheduler<N> {
             if self.slots[target].state == RoomStreamSlotState::Resident {
                 self.window_evictions = self.window_evictions.saturating_add(1);
             }
-            self.slots[target] = StreamedRoomSlot {
-                room,
-                byte_count: 0,
-                last_used: self.epoch,
-                state: RoomStreamSlotState::Loading,
-            };
+            self.set_slot(
+                target,
+                StreamedRoomSlot {
+                    room,
+                    byte_count: 0,
+                    last_used: self.epoch,
+                    state: RoomStreamSlotState::Loading,
+                },
+            );
             plan.rooms[plan.count] = room;
             plan.slots[plan.count] = target;
             plan.count += 1;
@@ -1373,12 +1427,15 @@ impl<const N: usize> RoomStreamScheduler<N> {
                 && self.slots[target].state == RoomStreamSlotState::Loading
                 && self.slots[target].room == plan.rooms[i]
             {
-                self.slots[target] = StreamedRoomSlot {
-                    room: plan.rooms[i],
-                    byte_count: byte_counts[i],
-                    last_used: self.epoch,
-                    state: RoomStreamSlotState::Resident,
-                };
+                self.set_slot(
+                    target,
+                    StreamedRoomSlot {
+                        room: plan.rooms[i],
+                        byte_count: byte_counts[i],
+                        last_used: self.epoch,
+                        state: RoomStreamSlotState::Resident,
+                    },
+                );
                 committed = true;
             }
             i += 1;
@@ -1409,19 +1466,25 @@ impl<const N: usize> RoomStreamScheduler<N> {
                 continue;
             }
             if statuses[loaded] == cd_stream::ROOM_CHUNK_STATUS_OK && byte_counts[loaded] > 0 {
-                self.slots[target] = StreamedRoomSlot {
-                    room: plan.rooms[loaded],
-                    byte_count: byte_counts[loaded],
-                    last_used: self.epoch,
-                    state: RoomStreamSlotState::Resident,
-                };
+                self.set_slot(
+                    target,
+                    StreamedRoomSlot {
+                        room: plan.rooms[loaded],
+                        byte_count: byte_counts[loaded],
+                        last_used: self.epoch,
+                        state: RoomStreamSlotState::Resident,
+                    },
+                );
             } else {
-                self.slots[target] = StreamedRoomSlot {
-                    room: plan.rooms[loaded],
-                    byte_count: 0,
-                    last_used: self.epoch,
-                    state: RoomStreamSlotState::Failed,
-                };
+                self.set_slot(
+                    target,
+                    StreamedRoomSlot {
+                        room: plan.rooms[loaded],
+                        byte_count: 0,
+                        last_used: self.epoch,
+                        state: RoomStreamSlotState::Failed,
+                    },
+                );
                 self.window_failed_loads = self.window_failed_loads.saturating_add(1);
             }
             loaded += 1;
@@ -2067,38 +2130,9 @@ impl Scene for Playtest {
                 telemetry::stage_begin(telemetry::stage::ROOM);
                 #[cfg(feature = "world-grid-visible")]
                 {
-                    let player = self.motor.position();
-                    let global_visibility_anchor =
-                        RoomPoint::new(camera.position.x, player.y, camera.position.z);
-                    let visibility_anchor = RoomPoint::new(
-                        global_visibility_anchor.x.saturating_sub(active.offset_x),
-                        player.y,
-                        global_visibility_anchor.z.saturating_sub(active.offset_z),
-                    );
-                    let visibility = GridVisibility::around(
-                        visibility_anchor,
-                        room_visibility_radius(room_record),
-                    )
-                    .with_screen_margin(ROOM_VISIBLE_CELL_SCREEN_MARGIN);
-                    telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
-                    let visible_cells_result = self.cached_precomputed_visible_cells(
-                        active_slot,
-                        active.index,
-                        active.width,
-                        active.depth,
-                        active.sector_size,
-                        visibility_anchor,
-                        active.offset_x,
-                        active.offset_z,
-                        global_visibility_anchor,
-                        room_camera,
-                    );
-                    telemetry::stage_end(telemetry::stage::ROOM_VISIBLE_LIST);
-                    let stats = if let Some((cells, range_culled)) = visible_cells_result {
-                        room_range_culled_cells =
-                            room_range_culled_cells.saturating_add(range_culled as u32);
-                        room_visible_cells = room_visible_cells.saturating_add(cells.len() as u32);
-                        if active.surface_cache.ready {
+                    #[cfg(feature = "vis-full-active-chunks")]
+                    {
+                        let stats = if active.surface_cache.ready {
                             room_cached_draws = room_cached_draws.saturating_add(1);
                             if let Some((
                                 cached_cells,
@@ -2120,7 +2154,7 @@ impl Scene for Playtest {
                                     unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
                                 let accepted_cell_depths =
                                     unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
-                                draw_indexed_cached_room_vertex_lit_visible_cells(
+                                draw_indexed_cached_room_vertex_lit_all_cells(
                                     cached_cells,
                                     cached_cell_vertices,
                                     cached_vertices,
@@ -2131,19 +2165,165 @@ impl Scene for Playtest {
                                     projected_depths,
                                     accepted_cell_indices,
                                     accepted_cell_depths,
-                                    active.depth,
-                                    active.sector_size,
                                     materials,
                                     &lighting,
                                     &room_camera,
                                     room_options,
-                                    cells,
-                                    visibility.screen_margin,
+                                    ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                     &mut primitive_packets,
                                     &mut world,
                                 )
                             } else {
                                 room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                room_cache_fallback_draws =
+                                    room_cache_fallback_draws.saturating_add(1);
+                                if let Some(render_room) = active.render() {
+                                    room_drawn_chunk_mask |= chunk_mask;
+                                    draw_room_vertex_lit(
+                                        render_room,
+                                        materials,
+                                        &lighting,
+                                        &room_camera,
+                                        room_options,
+                                        &mut primitive_packets,
+                                        &mut world,
+                                    );
+                                }
+                                GridVisibilityStats::default()
+                            }
+                        } else {
+                            room_uncached_draws = room_uncached_draws.saturating_add(1);
+                            if active_surface_cache_failed(active.surface_cache) {
+                                room_cache_fallback_draws =
+                                    room_cache_fallback_draws.saturating_add(1);
+                            }
+                            if let Some(render_room) = active.render() {
+                                room_drawn_chunk_mask |= chunk_mask;
+                                draw_room_vertex_lit(
+                                    render_room,
+                                    materials,
+                                    &lighting,
+                                    &room_camera,
+                                    room_options,
+                                    &mut primitive_packets,
+                                    &mut world,
+                                );
+                            }
+                            GridVisibilityStats::default()
+                        };
+                        room_visible_cells =
+                            room_visible_cells.saturating_add(stats.cells_drawn as u32);
+                        if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
+                            room_drawn_chunk_mask |= chunk_mask;
+                        }
+                        accumulate_grid_visibility_stats(&mut room_stats_total, stats);
+                    }
+                    #[cfg(not(feature = "vis-full-active-chunks"))]
+                    {
+                        let player = self.motor.position();
+                        let global_visibility_anchor =
+                            RoomPoint::new(camera.position.x, player.y, camera.position.z);
+                        let visibility_anchor = RoomPoint::new(
+                            global_visibility_anchor.x.saturating_sub(active.offset_x),
+                            player.y,
+                            global_visibility_anchor.z.saturating_sub(active.offset_z),
+                        );
+                        let visibility = GridVisibility::around(
+                            visibility_anchor,
+                            room_visibility_radius(room_record),
+                        )
+                        .with_screen_margin(ROOM_VISIBLE_CELL_SCREEN_MARGIN);
+                        telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
+                        let visible_cells_result = self.cached_precomputed_visible_cells(
+                            active_slot,
+                            active.index,
+                            active.width,
+                            active.depth,
+                            active.sector_size,
+                            visibility_anchor,
+                            active.offset_x,
+                            active.offset_z,
+                            global_visibility_anchor,
+                            room_camera,
+                        );
+                        telemetry::stage_end(telemetry::stage::ROOM_VISIBLE_LIST);
+                        let stats = if let Some((cells, range_culled)) = visible_cells_result {
+                            room_range_culled_cells =
+                                room_range_culled_cells.saturating_add(range_culled as u32);
+                            room_visible_cells =
+                                room_visible_cells.saturating_add(cells.len() as u32);
+                            if active.surface_cache.ready {
+                                room_cached_draws = room_cached_draws.saturating_add(1);
+                                if let Some((
+                                    cached_cells,
+                                    cached_cell_vertices,
+                                    cached_vertices,
+                                    cached_surfaces,
+                                )) =
+                                    room_surface_cache_slices(active.index, active.surface_cache)
+                                {
+                                    let vertex_count = cached_vertices.len();
+                                    let projected_indices = unsafe {
+                                        &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count]
+                                    };
+                                    let projected_vertices = unsafe {
+                                        &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count]
+                                    };
+                                    let projected_ready =
+                                        unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
+                                    let projected_depths = unsafe {
+                                        &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count]
+                                    };
+                                    let accepted_cell_indices =
+                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
+                                    let accepted_cell_depths =
+                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
+                                    draw_indexed_cached_room_vertex_lit_visible_cells(
+                                        cached_cells,
+                                        cached_cell_vertices,
+                                        cached_vertices,
+                                        cached_surfaces,
+                                        projected_indices,
+                                        projected_vertices,
+                                        projected_ready,
+                                        projected_depths,
+                                        accepted_cell_indices,
+                                        accepted_cell_depths,
+                                        active.depth,
+                                        active.sector_size,
+                                        materials,
+                                        &lighting,
+                                        &room_camera,
+                                        room_options,
+                                        cells,
+                                        visibility.screen_margin,
+                                        &mut primitive_packets,
+                                        &mut world,
+                                    )
+                                } else {
+                                    room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                    if let Some(render_room) = active.render() {
+                                        draw_room_vertex_lit_visible_cells(
+                                            render_room,
+                                            materials,
+                                            &lighting,
+                                            &room_camera,
+                                            room_options,
+                                            cells,
+                                            visibility.screen_margin,
+                                            &mut primitive_packets,
+                                            &mut world,
+                                        )
+                                    } else {
+                                        GridVisibilityStats::default()
+                                    }
+                                }
+                            } else {
+                                room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                if active_surface_cache_failed(active.surface_cache) {
+                                    room_cache_fallback_draws =
+                                        room_cache_fallback_draws.saturating_add(1);
+                                }
                                 if let Some(render_room) = active.render() {
                                     draw_room_vertex_lit_visible_cells(
                                         render_room,
@@ -2162,47 +2342,26 @@ impl Scene for Playtest {
                             }
                         } else {
                             room_uncached_draws = room_uncached_draws.saturating_add(1);
-                            if active_surface_cache_failed(active.surface_cache) {
-                                room_cache_fallback_draws =
-                                    room_cache_fallback_draws.saturating_add(1);
-                            }
+                            room_visibility_fallback_draws =
+                                room_visibility_fallback_draws.saturating_add(1);
                             if let Some(render_room) = active.render() {
-                                draw_room_vertex_lit_visible_cells(
+                                draw_room_vertex_lit(
                                     render_room,
                                     materials,
                                     &lighting,
                                     &room_camera,
                                     room_options,
-                                    cells,
-                                    visibility.screen_margin,
                                     &mut primitive_packets,
                                     &mut world,
-                                )
-                            } else {
-                                GridVisibilityStats::default()
+                                );
                             }
+                            GridVisibilityStats::default()
+                        };
+                        if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
+                            room_drawn_chunk_mask |= chunk_mask;
                         }
-                    } else {
-                        room_uncached_draws = room_uncached_draws.saturating_add(1);
-                        room_visibility_fallback_draws =
-                            room_visibility_fallback_draws.saturating_add(1);
-                        if let Some(render_room) = active.render() {
-                            draw_room_vertex_lit(
-                                render_room,
-                                materials,
-                                &lighting,
-                                &room_camera,
-                                room_options,
-                                &mut primitive_packets,
-                                &mut world,
-                            );
-                        }
-                        GridVisibilityStats::default()
-                    };
-                    if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
-                        room_drawn_chunk_mask |= chunk_mask;
+                        accumulate_grid_visibility_stats(&mut room_stats_total, stats);
                     }
-                    accumulate_grid_visibility_stats(&mut room_stats_total, stats);
                 }
                 #[cfg(not(feature = "world-grid-visible"))]
                 {
@@ -3098,9 +3257,9 @@ impl Playtest {
 
         if !ROOM_CHUNKS.is_empty() {
             self.active_room_candidates =
-                count_spatial_chunk_candidates(current_index, current_record, player, view);
+                ROOM_CHUNKS.len().saturating_sub(1).min(u16::MAX as usize) as u16;
             while next_slot < active_limit {
-                let Some(candidate) = best_spatial_chunk_candidate(
+                let Some(candidate) = best_grid_chunk_candidate(
                     current_index,
                     current_record,
                     player,
@@ -3174,7 +3333,8 @@ impl Playtest {
         active_count: usize,
         current_record: &LevelRoomRecord,
     ) {
-        let resident_limit = room_resident_chunk_limit(current_record);
+        let resident_capacity = room_resident_chunk_limit(current_record);
+        let request_limit = room_stream_request_chunk_limit(current_record);
         let active_count = active_count.min(room_active_chunk_limit(current_record));
         let mut room_ids = [u16::MAX; MAX_ACTIVE_ROOMS];
         let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
@@ -3190,16 +3350,16 @@ impl Playtest {
         // Keep residency tied to player position. Camera yaw only changes which
         // already-resident chunks are selected for drawing.
         let mut requested_count =
-            append_streamed_room_request(&mut requested_rooms, 0, resident_limit, self.room_index);
+            append_streamed_room_request(&mut requested_rooms, 0, request_limit, self.room_index);
         requested_count = self.append_current_collision_neighbour_requests(
             &mut requested_rooms,
             requested_count,
-            resident_limit,
+            request_limit,
         );
         requested_count = self.append_spatial_chunk_resident_requests(
             &mut requested_rooms,
             requested_count,
-            resident_limit,
+            request_limit,
             current_record,
         );
 
@@ -3207,13 +3367,13 @@ impl Playtest {
         let requested_count = self.append_pack_aware_streamed_prefetches(
             &mut requested_rooms,
             requested_count,
-            resident_limit,
+            request_limit,
         );
         self.ensure_streamed_room_residency(
             &requested_rooms,
             requested_count,
             priority_count,
-            resident_limit,
+            resident_capacity,
         );
 
         let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
@@ -3274,6 +3434,21 @@ impl Playtest {
             .min(STREAMED_ROOM_SLOT_COUNT);
         let player = self.motor.position();
         while count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
+            let before = count;
+            let mut cursor = 0usize;
+            while cursor < count && count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
+                count = append_streamed_room_neighbour_requests(
+                    requested_rooms,
+                    count,
+                    request_limit,
+                    requested_rooms[cursor],
+                );
+                cursor += 1;
+            }
+            if count != before {
+                continue;
+            }
+
             let Some(candidate) = best_streamed_resident_chunk_candidate(
                 self.room_index,
                 current_record,
@@ -3287,9 +3462,8 @@ impl Playtest {
                 append_streamed_room_request(requested_rooms, count, request_limit, candidate);
             if next == count {
                 break;
-            } else {
-                count = next;
             }
+            count = next;
         }
 
         count
@@ -3447,7 +3621,7 @@ impl Playtest {
             return false;
         }
         let global = local_to_global_room_point(self.room_index, self.motor.position());
-        let Some(next_room) = room_index_containing_global(global) else {
+        let Some(next_room) = room_index_containing_global_from(self.room_index, global) else {
             return false;
         };
         if next_room == self.room_index {
@@ -3483,17 +3657,26 @@ impl Playtest {
         let view = self.active_room_selection_view();
         let moved_far = point_xz_distance_sq(player, self.active_room_anchor)
             >= (threshold as u64).saturating_mul(threshold as u64);
-        if !moved_far {
+        let view_changed = view.sin_key != self.active_room_view_sin_key
+            || view.cos_key != self.active_room_view_cos_key;
+        if !moved_far && !view_changed {
             return;
         }
         if self.active_room_window_matches_selection(self.room_index, record, player, view) {
             #[cfg(feature = "cd-stream-bench")]
-            self.preload_streamed_active_room_window(active_room_count(&self.active_rooms), record);
-            self.active_room_anchor = player;
+            if moved_far {
+                self.preload_streamed_active_room_window(
+                    active_room_count(&self.active_rooms),
+                    record,
+                );
+            }
+            if moved_far {
+                self.active_room_anchor = player;
+            }
             self.active_room_view_sin_key = view.sin_key;
             self.active_room_view_cos_key = view.cos_key;
         } else {
-            self.load_active_room_window();
+            self.rebuild_active_room_window(moved_far);
         }
     }
 
@@ -3513,7 +3696,7 @@ impl Playtest {
         let mut selected_count = 1usize;
         let active_limit = room_active_chunk_limit(current_record);
         while selected_count < active_limit {
-            let Some(candidate) = best_spatial_chunk_candidate_from_indices(
+            let Some(candidate) = best_grid_chunk_candidate_from_indices(
                 current_index,
                 current_record,
                 player,
@@ -4889,6 +5072,30 @@ fn room_requested(
 }
 
 #[cfg(feature = "cd-stream-bench")]
+fn append_streamed_room_neighbour_requests(
+    requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    requested_count: usize,
+    request_limit: usize,
+    room: RoomIndex,
+) -> usize {
+    let Some(chunk) = chunk_record_for_room(room) else {
+        return requested_count
+            .min(request_limit)
+            .min(STREAMED_ROOM_SLOT_COUNT);
+    };
+    let neighbours = chunk_neighbour_rooms(*chunk);
+    let mut count = requested_count
+        .min(request_limit)
+        .min(STREAMED_ROOM_SLOT_COUNT);
+    let mut i = 0usize;
+    while i < neighbours.len() {
+        count = append_streamed_room_request(requested_rooms, count, request_limit, neighbours[i]);
+        i += 1;
+    }
+    count
+}
+
+#[cfg(feature = "cd-stream-bench")]
 fn append_streamed_room_request(
     requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
     requested_count: usize,
@@ -5118,10 +5325,25 @@ fn fill_precomputed_visible_cells(
 
 #[cfg(feature = "world-grid-visible")]
 fn visible_cell_view_keys(camera: WorldCamera) -> (i16, i16) {
-    (
-        (camera.sin_yaw.raw() / 256) as i16,
-        (camera.cos_yaw.raw() / 256) as i16,
-    )
+    #[cfg(feature = "vis-anchor-cache")]
+    {
+        let _ = camera;
+        (0, 0)
+    }
+    #[cfg(all(not(feature = "vis-anchor-cache"), feature = "vis-coarse-yaw"))]
+    {
+        (
+            (camera.sin_yaw.raw() / 1024) as i16,
+            (camera.cos_yaw.raw() / 1024) as i16,
+        )
+    }
+    #[cfg(all(not(feature = "vis-anchor-cache"), not(feature = "vis-coarse-yaw")))]
+    {
+        (
+            (camera.sin_yaw.raw() / 256) as i16,
+            (camera.cos_yaw.raw() / 256) as i16,
+        )
+    }
 }
 
 #[cfg(feature = "world-grid-visible")]
@@ -5193,6 +5415,26 @@ fn visible_cell_camera_depth_if_sphere_visible(
 }
 
 #[cfg(feature = "world-grid-visible")]
+fn visible_cell_camera_depth(
+    cell: psx_level::LevelVisibilityCellRecord,
+    camera: WorldCamera,
+    sector_size: i32,
+) -> i32 {
+    let sector_size = sector_size.max(1);
+    let half = sector_size / 2;
+    let center = WorldVertex::new(
+        (cell.x as i32)
+            .saturating_mul(sector_size)
+            .saturating_add(half),
+        cell.min_y.saturating_add(cell.max_y) / 2,
+        (cell.z as i32)
+            .saturating_mul(sector_size)
+            .saturating_add(half),
+    );
+    camera.view_vertex(center).z
+}
+
+#[cfg(feature = "world-grid-visible")]
 #[derive(Copy, Clone)]
 struct VisibleCellFilter {
     anchor_x: i32,
@@ -5233,22 +5475,30 @@ fn write_visible_cell_candidate(
     if *written >= out.len() {
         return;
     }
-    let Some(depth) = visible_cell_camera_depth_if_sphere_visible(
-        cell,
-        filter.camera,
-        filter.sector_size,
-        filter.far_z,
-    ) else {
-        return;
-    };
-    out[*written] = GridVisibleCell::with_cache_cell_index(
+    let visible_cell = GridVisibleCell::with_cache_cell_index(
         cell.x,
         cell.z,
         cell.min_y,
         cell.max_y,
         cell.cache_cell_index,
-    )
-    .with_camera_depth(GridVisibleCell::CAMERA_DEPTH_PRECULLED);
+    );
+    let depth = if cfg!(feature = "vis-broad-pvs") {
+        visible_cell_camera_depth(cell, filter.camera, filter.sector_size)
+    } else {
+        let Some(depth) = visible_cell_camera_depth_if_sphere_visible(
+            cell,
+            filter.camera,
+            filter.sector_size,
+            filter.far_z,
+        ) else {
+            return;
+        };
+        out[*written] = visible_cell.with_camera_depth(GridVisibleCell::CAMERA_DEPTH_PRECULLED);
+        depths[*written] = depth;
+        *written += 1;
+        return;
+    };
+    out[*written] = visible_cell;
     depths[*written] = depth;
     *written += 1;
 }
@@ -5271,6 +5521,9 @@ fn visible_cell_reject_reason(
         filter.global_radius_sectors,
     ) {
         return Some(VisibleCellReject::GlobalRange);
+    }
+    if cfg!(feature = "vis-broad-pvs") {
+        return None;
     }
     if !visibility_cell_aabb_intersects_camera(
         cell,
@@ -5865,33 +6118,34 @@ impl ActiveRoomView {
     fn new(position: RoomPoint, yaw: Angle) -> Self {
         let sin_yaw = yaw.sin().raw();
         let cos_yaw = yaw.cos().raw();
+        let (sin_key, cos_key) = active_room_view_keys(sin_yaw, cos_yaw);
         Self {
             position,
             sin_yaw,
             cos_yaw,
-            sin_key: (sin_yaw / 512) as i16,
-            cos_key: (cos_yaw / 512) as i16,
+            sin_key,
+            cos_key,
         }
     }
 }
 
-fn count_spatial_chunk_candidates(
-    current_index: RoomIndex,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-    view: ActiveRoomView,
-) -> u16 {
-    let mut count = 0u16;
-    for chunk in ROOM_CHUNKS {
-        if chunk.room == current_index
-            || !chunk_available_for_active_selection(chunk.room)
-            || chunk_activation_score(*chunk, current_index, current_record, player, view).is_none()
-        {
-            continue;
-        }
-        count = count.saturating_add(1);
+fn active_room_view_keys(sin_yaw: i32, cos_yaw: i32) -> (i16, i16) {
+    #[cfg(feature = "vis-static-active-turn")]
+    {
+        let _ = (sin_yaw, cos_yaw);
+        (0, 0)
     }
-    count
+    #[cfg(all(not(feature = "vis-static-active-turn"), feature = "vis-coarse-yaw"))]
+    {
+        ((sin_yaw / 2048) as i16, (cos_yaw / 2048) as i16)
+    }
+    #[cfg(all(
+        not(feature = "vis-static-active-turn"),
+        not(feature = "vis-coarse-yaw")
+    ))]
+    {
+        ((sin_yaw / 512) as i16, (cos_yaw / 512) as i16)
+    }
 }
 
 fn chunk_available_for_active_selection(room: RoomIndex) -> bool {
@@ -5937,6 +6191,68 @@ fn best_spatial_chunk_candidate(
     best
 }
 
+fn best_grid_chunk_candidate(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    view: ActiveRoomView,
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    skipped_rooms: &[RoomIndex],
+) -> Option<RoomIndex> {
+    if active_rooms[0].is_none() {
+        return None;
+    }
+
+    let mut best = None;
+    let mut best_score = ChunkActivationScore::WORST;
+    let mut source_slot = 0usize;
+    while source_slot < MAX_ACTIVE_ROOMS {
+        let Some(source) = active_rooms[source_slot] else {
+            source_slot += 1;
+            continue;
+        };
+        let Some(chunk) = chunk_record_for_room(source.index) else {
+            source_slot += 1;
+            continue;
+        };
+        let neighbours = chunk_neighbour_rooms(*chunk);
+        let mut i = 0usize;
+        while i < neighbours.len() {
+            let room = neighbours[i];
+            if room != INVALID_ROOM_INDEX
+                && room != current_index
+                && !active_room_window_contains(active_rooms, room)
+                && !skipped_rooms.contains(&room)
+                && chunk_available_for_active_selection(room)
+            {
+                if let Some(chunk) = chunk_record_for_room(room) {
+                    if let Some(score) =
+                        chunk_activation_score(*chunk, current_index, current_record, player, view)
+                    {
+                        if best.is_none() || score.better_than(best_score) {
+                            best_score = score;
+                            best = Some(room);
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        source_slot += 1;
+    }
+
+    best.or_else(|| {
+        best_spatial_chunk_candidate(
+            current_index,
+            current_record,
+            player,
+            view,
+            active_rooms,
+            skipped_rooms,
+        )
+    })
+}
+
 fn best_spatial_chunk_candidate_from_indices(
     current_index: RoomIndex,
     current_record: &LevelRoomRecord,
@@ -5964,6 +6280,62 @@ fn best_spatial_chunk_candidate_from_indices(
         }
     }
     best
+}
+
+fn best_grid_chunk_candidate_from_indices(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    view: ActiveRoomView,
+    selected_rooms: &[RoomIndex],
+) -> Option<RoomIndex> {
+    let mut best = None;
+    let mut best_score = ChunkActivationScore::WORST;
+    let mut source_slot = 0usize;
+    while source_slot < selected_rooms.len() {
+        let source = selected_rooms[source_slot];
+        if source == INVALID_ROOM_INDEX {
+            source_slot += 1;
+            continue;
+        }
+        let Some(chunk) = chunk_record_for_room(source) else {
+            source_slot += 1;
+            continue;
+        };
+        let neighbours = chunk_neighbour_rooms(*chunk);
+        let mut i = 0usize;
+        while i < neighbours.len() {
+            let room = neighbours[i];
+            if room != INVALID_ROOM_INDEX
+                && room != current_index
+                && !selected_rooms.contains(&room)
+                && chunk_available_for_active_selection(room)
+            {
+                if let Some(chunk) = chunk_record_for_room(room) {
+                    if let Some(score) =
+                        chunk_activation_score(*chunk, current_index, current_record, player, view)
+                    {
+                        if best.is_none() || score.better_than(best_score) {
+                            best_score = score;
+                            best = Some(room);
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        source_slot += 1;
+    }
+
+    best.or_else(|| {
+        best_spatial_chunk_candidate_from_indices(
+            current_index,
+            current_record,
+            player,
+            view,
+            selected_rooms,
+        )
+    })
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -6012,13 +6384,12 @@ impl ChunkActivationScore {
     };
 
     fn better_than(self, other: Self) -> bool {
-        self.tier < other.tier
-            || (self.tier == other.tier
-                && (self.view_tier < other.view_tier
-                    || (self.view_tier == other.view_tier
-                        && (self.ray_distance < other.ray_distance
-                            || (self.ray_distance == other.ray_distance
-                                && self.distance < other.distance)))))
+        self.view_tier < other.view_tier
+            || (self.view_tier == other.view_tier
+                && (self.ray_distance < other.ray_distance
+                    || (self.ray_distance == other.ray_distance
+                        && (self.distance < other.distance
+                            || (self.distance == other.distance && self.tier < other.tier)))))
     }
 }
 
@@ -6138,7 +6509,21 @@ fn authored_room_for_chunk(index: RoomIndex) -> Option<u32> {
 }
 
 fn chunk_record_for_room(index: RoomIndex) -> Option<&'static LevelChunkRecord> {
+    if let Some(chunk) = ROOM_CHUNKS.get(index.to_usize()) {
+        if chunk.room == index {
+            return Some(chunk);
+        }
+    }
     ROOM_CHUNKS.iter().find(|chunk| chunk.room == index)
+}
+
+fn chunk_neighbour_rooms(chunk: LevelChunkRecord) -> [RoomIndex; 4] {
+    [
+        chunk.neighbours.north,
+        chunk.neighbours.east,
+        chunk.neighbours.south,
+        chunk.neighbours.west,
+    ]
 }
 
 fn authored_bounds_current_space(
@@ -6358,6 +6743,56 @@ fn room_index_containing_global(point: RoomPoint) -> Option<RoomIndex> {
         }
     }
     None
+}
+
+fn room_index_containing_global_from(current: RoomIndex, point: RoomPoint) -> Option<RoomIndex> {
+    if !ROOM_CHUNKS.is_empty() {
+        if let Some(room) = room_index_containing_global_by_neighbours(current, point) {
+            return Some(room);
+        }
+    }
+    room_index_containing_global(point)
+}
+
+fn room_index_containing_global_by_neighbours(
+    mut current: RoomIndex,
+    point: RoomPoint,
+) -> Option<RoomIndex> {
+    let mut steps = 0usize;
+    while steps < ROOM_CHUNKS.len() {
+        let chunk = chunk_record_for_room(current)?;
+        let record = ROOMS.get(current.to_usize())?;
+        let (x0, x1, z0, z1) = chunk_global_bounds(*chunk, record);
+        if point.x >= x0 && point.x < x1 && point.z >= z0 && point.z < z1 {
+            return Some(current);
+        }
+        let next = if point.x < x0 {
+            chunk.neighbours.west
+        } else if point.x >= x1 {
+            chunk.neighbours.east
+        } else if point.z < z0 {
+            chunk.neighbours.north
+        } else if point.z >= z1 {
+            chunk.neighbours.south
+        } else {
+            INVALID_ROOM_INDEX
+        };
+        if next == INVALID_ROOM_INDEX {
+            return None;
+        }
+        current = next;
+        steps += 1;
+    }
+    None
+}
+
+fn chunk_global_bounds(chunk: LevelChunkRecord, record: &LevelRoomRecord) -> (i32, i32, i32, i32) {
+    let sector_size = record.sector_size.max(1);
+    let x0 = room_origin_x(record);
+    let z0 = room_origin_z(record);
+    let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector_size));
+    let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector_size));
+    (x0, x1, z0, z1)
 }
 
 fn local_to_global_room_point(room: RoomIndex, point: RoomPoint) -> RoomPoint {
@@ -6878,7 +7313,7 @@ fn ensure_texture_uploaded_with_clut_mode(
     let page_index = placement.page_index();
     let tpage_x = ROOM_TPAGE_BASE_X.checked_add(page_index.checked_mul(ROOM_TPAGE_STRIDE_HW)?)?;
     let end_x = tpage_x.checked_add(ROOM_TPAGE_STRIDE_HW)?;
-    if end_x > ROOM_TPAGE_LIMIT_X {
+    if tpage_x % 64 != 0 || end_x > ROOM_TPAGE_LIMIT_X {
         return None;
     }
     let tpage = Tpage::new(tpage_x, SHARED_TPAGE.y(), TexDepth::Bit4);
@@ -7065,7 +7500,7 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     } else {
         MODEL_TPAGE_MAX_HALFWORDS
     };
-    if tpage_x.checked_add(slot_halfwords)? > MODEL_TPAGE_LIMIT_X {
+    if tpage_x % 64 != 0 || tpage_x.checked_add(slot_halfwords)? > MODEL_TPAGE_LIMIT_X {
         return None;
     }
     telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
