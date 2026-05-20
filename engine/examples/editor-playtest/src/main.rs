@@ -280,6 +280,8 @@ const ROOM_VISIBLE_CELL_WEDGE_NUM: u64 = 3;
 #[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_WEDGE_DEN: u64 = 4;
 #[cfg(feature = "world-grid-visible")]
+const ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES: bool = true;
+#[cfg(feature = "world-grid-visible")]
 const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
 #[cfg(feature = "world-grid-visible")]
 const MAX_ACTIVE_VISIBLE_CELLS: usize = 1024;
@@ -1638,6 +1640,7 @@ struct ActiveVisibleCellCache {
     anchor_z: i32,
     view_sin_key: i16,
     view_cos_key: i16,
+    camera_independent: bool,
     rejected_global: u16,
     first: u16,
     count: u16,
@@ -1652,6 +1655,7 @@ impl ActiveVisibleCellCache {
         anchor_z: 0,
         view_sin_key: 0,
         view_cos_key: 0,
+        camera_independent: false,
         rejected_global: 0,
         first: 0,
         count: 0,
@@ -1725,6 +1729,11 @@ struct Playtest {
     camera: ThirdPersonCameraState,
     /// Last visual camera produced by the simulation update.
     render_camera: WorldCamera,
+    /// Last movement result; stationary frames can use a broader cached
+    /// visibility candidate set without rebuilding it for camera-only turns.
+    player_moved_last_tick: bool,
+    /// True when the latest input frame is manually rotating the camera.
+    camera_turning_last_tick: bool,
     /// Index into `MODEL_INSTANCES` for the current lock-on target.
     /// Player-controlled characters are consumed by the player path,
     /// so remaining placed model instances are targetable actors for
@@ -1798,6 +1807,8 @@ impl Playtest {
                 Q12::ZERO,
                 Q12::ONE,
             ),
+            player_moved_last_tick: false,
+            camera_turning_last_tick: false,
             lock_target: None,
             lock_switch_stick_held: false,
             soft_lock_target: None,
@@ -1915,6 +1926,7 @@ impl Scene for Playtest {
         }
 
         if !ctx.pad.is_analog() {
+            self.camera_turning_last_tick = false;
             return;
         }
 
@@ -1924,6 +1936,7 @@ impl Scene for Playtest {
         let delta_vblanks = ctx.time.delta_vblanks();
         if self.free_orbit {
             let (right_x, right_y) = ctx.pad.sticks.right_centered();
+            self.camera_turning_last_tick = abs_i16(right_x) >= CAMERA_STICK_DEADZONE;
             self.orbit_yaw = self.orbit_yaw.add_signed_q12(scale_i16_by_vblanks(
                 stick_to_yaw_delta(psx_engine::InputAxis::new(right_x.saturating_neg())),
                 delta_vblanks,
@@ -1952,6 +1965,7 @@ impl Scene for Playtest {
                 self.orbit_radius = (self.orbit_radius + button_radius_step).min(CAMERA_RADIUS_MAX);
             }
             self.refresh_active_room_window_if_needed();
+            self.player_moved_last_tick = false;
             telemetry::stage_begin(telemetry::stage::CAMERA);
             self.render_camera = self.free_orbit_camera();
             telemetry::stage_end(telemetry::stage::CAMERA);
@@ -2015,6 +2029,7 @@ impl Scene for Playtest {
         let motor_frame =
             self.motor
                 .update_vblanks_with_collision(collision, input, config, delta_vblanks);
+        self.player_moved_last_tick = motor_frame.moved;
         if !self.update_current_room_from_player() {
             self.refresh_active_room_window_if_needed();
         }
@@ -2042,6 +2057,9 @@ impl Scene for Playtest {
                 self.update_lock_target_switch(ctx);
             }
         }
+        let (camera_right_x, _) = ctx.pad.sticks.right_centered();
+        self.camera_turning_last_tick =
+            self.lock_target.is_none() && abs_i16(camera_right_x) >= CAMERA_STICK_DEADZONE;
         if SOFT_LOCK_ENABLED {
             self.update_soft_lock(ctx);
         } else {
@@ -2232,11 +2250,7 @@ impl Scene for Playtest {
                     #[cfg(not(feature = "vis-full-active-chunks"))]
                     {
                         let player = self.motor.position();
-                        let global_visibility_anchor = if cfg!(feature = "vis-player-anchor") {
-                            player
-                        } else {
-                            RoomPoint::new(camera.position.x, player.y, camera.position.z)
-                        };
+                        let global_visibility_anchor = player;
                         let visibility_anchor = RoomPoint::new(
                             global_visibility_anchor.x.saturating_sub(active.offset_x),
                             player.y,
@@ -2259,6 +2273,10 @@ impl Scene for Playtest {
                             active.offset_z,
                             global_visibility_anchor,
                             room_camera,
+                            ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES
+                                && !self.player_moved_last_tick
+                                && self.camera_turning_last_tick
+                                && active.surface_cache.ready,
                         );
                         telemetry::stage_end(telemetry::stage::ROOM_VISIBLE_LIST);
                         let stats = if let Some((cells, range_culled)) = visible_cells_result {
@@ -5208,11 +5226,12 @@ impl Playtest {
         room_offset_z: i32,
         global_anchor: RoomPoint,
         camera: WorldCamera,
+        camera_independent: bool,
     ) -> Option<(&[GridVisibleCell], u16)> {
         let sector_size = room_sector_size.max(1);
         let anchor_x = grid_cell_for_room(anchor.x, sector_size).clamp(0, room_width as i32 - 1);
         let anchor_z = grid_cell_for_room(anchor.z, sector_size).clamp(0, room_depth as i32 - 1);
-        let (view_sin_key, view_cos_key) = visible_cell_view_keys(camera);
+        let (view_sin_key, view_cos_key) = visible_cell_view_keys(camera, camera_independent);
         let cache = *self.visible_cell_caches.get(active_slot)?;
         if cache.ready
             && cache.room == room_index
@@ -5220,6 +5239,7 @@ impl Playtest {
             && cache.anchor_z == anchor_z
             && cache.view_sin_key == view_sin_key
             && cache.view_cos_key == view_cos_key
+            && cache.camera_independent == camera_independent
         {
             let first = cache.first as usize;
             let count = cache.count as usize;
@@ -5247,6 +5267,7 @@ impl Playtest {
                 sector_size,
                 global_anchor,
                 camera,
+                camera_independent,
                 cells,
                 depths,
             )
@@ -5267,6 +5288,7 @@ impl Playtest {
                     sector_size,
                     global_anchor,
                     camera,
+                    camera_independent,
                     cells,
                     depths,
                 )
@@ -5282,6 +5304,7 @@ impl Playtest {
             anchor_z,
             view_sin_key,
             view_cos_key,
+            camera_independent,
             rejected_global,
             first: first as u16,
             count: count as u16,
@@ -5304,6 +5327,7 @@ fn fill_precomputed_visible_cells(
     sector_size: i32,
     global_anchor: RoomPoint,
     camera: WorldCamera,
+    camera_independent: bool,
     out: &mut [GridVisibleCell],
     depths: &mut [i32],
 ) -> Option<(usize, u16)> {
@@ -5335,6 +5359,7 @@ fn fill_precomputed_visible_cells(
         room_offset_z,
         global_anchor,
         camera,
+        camera_independent,
         far_z: room_draw_distance(room_record),
         global_radius_sectors: room_chunk_activation_radius_sectors(room_record),
     };
@@ -5359,20 +5384,33 @@ fn fill_precomputed_visible_cells(
 }
 
 #[cfg(feature = "world-grid-visible")]
-fn visible_cell_view_keys(camera: WorldCamera) -> (i16, i16) {
-    #[cfg(feature = "vis-anchor-cache")]
+fn visible_cell_view_keys(camera: WorldCamera, camera_independent: bool) -> (i16, i16) {
+    if camera_independent {
+        let _ = camera;
+        return (0, 0);
+    }
+    #[cfg(any(feature = "vis-anchor-cache", feature = "vis-anchor-pvs-candidates"))]
     {
         let _ = camera;
+        let _ = camera_independent;
         (0, 0)
     }
-    #[cfg(all(not(feature = "vis-anchor-cache"), feature = "vis-coarse-yaw"))]
+    #[cfg(all(
+        not(feature = "vis-anchor-cache"),
+        not(feature = "vis-anchor-pvs-candidates"),
+        feature = "vis-coarse-yaw"
+    ))]
     {
         (
             (camera.sin_yaw.raw() / 2048) as i16,
             (camera.cos_yaw.raw() / 2048) as i16,
         )
     }
-    #[cfg(all(not(feature = "vis-anchor-cache"), not(feature = "vis-coarse-yaw")))]
+    #[cfg(all(
+        not(feature = "vis-anchor-cache"),
+        not(feature = "vis-anchor-pvs-candidates"),
+        not(feature = "vis-coarse-yaw")
+    ))]
     {
         (
             (camera.sin_yaw.raw() / 256) as i16,
@@ -5479,6 +5517,7 @@ struct VisibleCellFilter {
     room_offset_z: i32,
     global_anchor: RoomPoint,
     camera: WorldCamera,
+    camera_independent: bool,
     far_z: i32,
     global_radius_sectors: i32,
 }
@@ -5517,6 +5556,12 @@ fn write_visible_cell_candidate(
         cell.max_y,
         cell.cache_cell_index,
     );
+    if filter.camera_independent || cfg!(feature = "vis-anchor-pvs-candidates") {
+        out[*written] = visible_cell;
+        depths[*written] = 0;
+        *written += 1;
+        return;
+    }
     let depth = if cfg!(feature = "vis-broad-pvs") {
         visible_cell_camera_depth(cell, filter.camera, filter.sector_size)
     } else {
@@ -5558,6 +5603,9 @@ fn visible_cell_reject_reason(
         return Some(VisibleCellReject::GlobalRange);
     }
     if cfg!(feature = "vis-broad-pvs") {
+        return None;
+    }
+    if filter.camera_independent || cfg!(feature = "vis-anchor-pvs-candidates") {
         return None;
     }
     if !visibility_cell_in_view_wedge(cell, filter) {

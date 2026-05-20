@@ -1911,6 +1911,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_CELL_SELECT);
     let mut projected_index_count = 0usize;
     let mut accepted_cell_count = 0usize;
+    let mut accepted_depths_need_sort = false;
 
     for visible in visible_cells.iter().copied() {
         let Some(cell_index) = cached_room_cell_index_for_visible(cached_cells, visible) else {
@@ -1945,6 +1946,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
                 continue;
             }
+            accepted_depths_need_sort = true;
             visibility_view.z
         } else {
             visible.camera_depth as i32
@@ -1961,6 +1963,12 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             projected_ready,
             projected_indices,
             projected_index_count,
+        );
+    }
+    if accepted_depths_need_sort {
+        sort_cached_room_cell_indices_by_depth(
+            &mut accepted_cell_indices[..accepted_cell_count],
+            &mut accepted_cell_depths[..accepted_cell_count],
         );
     }
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_CELL_SELECT);
