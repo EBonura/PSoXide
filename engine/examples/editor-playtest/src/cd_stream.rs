@@ -62,6 +62,8 @@ pub const ROOM_CHUNK_STATUS_OK: u32 = STATUS_OK;
 const COMMAND_ACK_POLL_LIMIT: u32 = 16_384;
 #[cfg(feature = "cd-stream-benchmark")]
 const DATA_READY_POLL_LIMIT: u32 = 1_000_000;
+#[cfg(target_arch = "mips")]
+const DATA_READY_STALL_POLL_LIMIT: u32 = 360;
 const DMA_POLL_LIMIT: u32 = 65_536;
 const CLEANUP_POLL_LIMIT: u32 = 16_384;
 
@@ -154,6 +156,7 @@ pub struct WorldRoomSlotsReadJob<const N: usize> {
     group_start: u32,
     group_end: u32,
     sector_offset: u32,
+    data_wait_polls: u32,
     world_pack_lba: u32,
     result: RoomChunkLoadResult,
     state: WorldRoomSlotsReadState,
@@ -175,6 +178,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             group_start: 0,
             group_end: 0,
             sector_offset: 0,
+            data_wait_polls: 0,
             world_pack_lba: 0,
             result: RoomChunkLoadResult {
                 status: STATUS_OK,
@@ -292,8 +296,18 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
 
                 let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
                 match try_read_stream_sector(buffer, &mut polls) {
-                    Ok(true) => {}
-                    Ok(false) => break,
+                    Ok(true) => {
+                        self.data_wait_polls = 0;
+                    }
+                    Ok(false) => {
+                        self.data_wait_polls = self.data_wait_polls.saturating_add(1);
+                        if self.data_wait_polls > DATA_READY_STALL_POLL_LIMIT {
+                            self.fail_all(STATUS_DATA_TIMEOUT);
+                            cleanup_read_stream(&mut polls);
+                            self.state = WorldRoomSlotsReadState::Done;
+                        }
+                        break;
+                    }
                     Err(status) => {
                         self.fail_all(status);
                         cleanup_read_stream(&mut polls);
@@ -408,6 +422,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
         self.group_start = group_start;
         self.group_end = group_end;
         self.sector_offset = group_start;
+        self.data_wait_polls = 0;
         self.group_entries = group_entries;
         self.state = WorldRoomSlotsReadState::Reading;
         true
@@ -900,6 +915,14 @@ unsafe fn try_read_stream_sector(buffer: *mut u32, polls: &mut u32) -> Result<bo
             cd_ack_all();
             Err(STATUS_CD_ERROR)
         }
+        IRQ_ACK | IRQ_COMPLETE => {
+            // A late command acknowledgement/completion can otherwise keep the
+            // drive IRQ flag occupied forever and starve the pending DataReady.
+            let stale_irq = cd_irq_flag();
+            drain_responses();
+            cd_ack(stale_irq);
+            Ok(false)
+        }
         _ => {
             *polls = (*polls).saturating_add(1);
             Ok(false)
@@ -987,6 +1010,7 @@ unsafe fn cleanup_read_stream(polls: &mut u32) {
         drain_responses();
         cd_ack(IRQ_COMPLETE);
     }
+    cd_ack_all();
 }
 
 #[cfg(target_arch = "mips")]
