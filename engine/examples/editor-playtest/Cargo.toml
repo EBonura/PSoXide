@@ -23,6 +23,7 @@ default = [
     "ot-2048",
     "vis-coarse-yaw",
     "vis-full-active-chunks",
+    "vis-static-active-turn",
     "sector-grid-streaming",
 ]
 cd-stream-bench = ["dep:psx-io"]
