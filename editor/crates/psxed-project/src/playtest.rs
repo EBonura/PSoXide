@@ -130,6 +130,19 @@ pub fn playtest_streaming_chunk_config(streaming: WorldStreamingSettings) -> Str
         .unwrap_or(default)
 }
 
+fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) -> u8 {
+    std::env::var("PSXED_PLAYTEST_RESIDENT_CHUNK_LIMIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u8>().ok())
+        .map(|limit| {
+            limit.clamp(
+                crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
+                crate::MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
+            )
+        })
+        .unwrap_or(streaming.resident_chunk_limit)
+}
+
 fn streaming_chunk_config_with_target(
     mut config: StreamingChunkConfig,
     raw: &str,
@@ -449,7 +462,7 @@ pub fn build_package(
                 draw_distance: resolved_culling.draw_distance,
                 chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
                 visibility_radius: resolved_culling.visibility_radius,
-                resident_chunk_limit: streaming.resident_chunk_limit,
+                resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
                 visible_chunk_limit: streaming.visible_chunk_limit,
                 material_first,
                 material_count,
