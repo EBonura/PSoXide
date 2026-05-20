@@ -8,7 +8,7 @@
 //! Builders (`new` constructors) zero the tag; [`crate::ot::OrderingTable::add`]
 //! fills it in during insertion with `(words_after_tag << 24) | next`.
 
-use crate::material::{TextureMaterial, TexturedGouraudPacketMaterial};
+use crate::material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial};
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 
 const fn pack_packet_texcoord(u: u8, v: u8, extra: u16) -> u32 {
@@ -348,6 +348,25 @@ impl TriTextured {
             uv0_clut: (uv_words[0] as u32) | ((clut as u32) << 16),
             v1: pack_vertex(verts[1].0, verts[1].1),
             uv1_tpage: (uv_words[1] as u32) | ((tpage as u32) << 16),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+        }
+    }
+
+    /// Build a textured triangle from UV words and prepacked material words.
+    pub const fn with_packet_material_packed_uv_words(
+        verts: [(i16, i16); 3],
+        uv_words: [u16; 3],
+        material: TexturedPacketMaterial,
+    ) -> Self {
+        Self {
+            tag: 0,
+            tex_window: material.tex_window_word,
+            color_cmd: material.color_command_word,
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: (uv_words[0] as u32) | material.clut_high_word,
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: (uv_words[1] as u32) | material.tpage_high_word,
             v2: pack_vertex(verts[2].0, verts[2].1),
             uv2: uv_words[2] as u32,
         }

@@ -19,7 +19,8 @@
 //! - The DualShock Analog button toggles analog mode. Frontend
 //!   default: F9 on keyboard, or gamepad Mode/Guide when the OS
 //!   exposes it. When analog mode is active, the bottom-left status
-//!   panel shows raw stick bytes.
+//!   panel shows raw stick bytes. Keyboard defaults: arrow keys for
+//!   left stick, I/J/K/L for right stick.
 
 #![no_std]
 #![no_main]

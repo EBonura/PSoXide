@@ -7,23 +7,24 @@
             next_node_id: 34,
             nodes: [
                 /*[0]*/ (id: (1), name: "Root", kind: Node3D, transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: None, children: [(2)]),
-                /*[1]*/ (id: (2), name: "World", kind: World(sector_size: 1024, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640, min_floor_clearance: 64)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((1)), children: [(18)]),
+                /*[1]*/ (id: (2), name: "World", kind: World(sector_size: 1024, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, horizon_thickness_percent: 8, horizon_glow_percent: 68, horizon_glow_yaw_degrees: 72, sun_enabled: false, sun_color: (255, 218, 150), sun_border_color: (255, 128, 78), sun_yaw_degrees: 72, sun_pitch_degrees: 22, sun_size_percent: 18, sun_glow_percent: 72, sun_glow_size_percent: 64, mountain_height_percent: 55, mountain_top_color: (84, 96, 124), mountain_base_color: (24, 28, 42), mountain_gap_percent: 22, mountain_roughness_percent: 78, mountain_layer_count: 2, skybox_columns: 16, skybox_rows: 10, match_room_fog: true, cloud_layer: (enabled: false, color: (220, 220, 232), density: 128, altitude: 6144, extent: 24576, scroll_speed: (4, 0), tile_count: 4, noise_seed: 1518061853)), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640, min_floor_clearance: 64)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((1)), children: [(18)]),
                 /*[2]*/ (id: (18), name: "Room", kind: Room(grid: (width: 1, depth: 1, sector_size: 1024, sectors: [Some((floor: Some((heights: (0, 0, 0, 0), split: NorthWestSouthEast, material: Some((133)), walkable: true, dropped_corner: None)), ceiling: None, walls: (north: [], east: [], south: [], west: [], north_west_south_east: [], north_east_south_west: [])))], origin: (0, 0), ambient_color: (48, 48, 48), fog_enabled: false, fog_color: (24, 28, 34), fog_near: 4096, fog_far: 16384)), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((2)), children: [(19), (28)]),
                 /*[3]*/ (id: (19), name: "Point Light", kind: PointLight(color: (255, 240, 200), intensity: 1.0, radius: 6.0), transform: (translation: (0.0, 2.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((18)), children: []),
                 /*[4]*/ (id: (28), name: "Player", kind: Entity, transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((18)), children: [(29), (30), (31), (32)]),
-                /*[5]*/ (id: (29), name: "Model Renderer", kind: ModelRenderer(model: Some((25)), material: None), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
-                /*[6]*/ (id: (30), name: "Animator", kind: Animator(clip: Some(0), autoplay: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
-                /*[7]*/ (id: (31), name: "Character Controller", kind: CharacterController(character: Some((6)), player: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
+                /*[5]*/ (id: (29), name: "Model Renderer", kind: ModelRenderer(model: Some((25)), material: None, visual_offset: (0, 0, 0), visual_scale_q8: 256), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
+                /*[6]*/ (id: (30), name: "Animator", kind: Animator(clip: Some(0), action_clips: [], autoplay: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
+                /*[7]*/ (id: (31), name: "Character Controller", kind: CharacterController(character: Some((6)), settings: (radius: 192, height: 1024, walk_speed: 48, run_speed: 96, turn_speed_degrees_per_second: 180, stamina_max_q12: 4096, sprint_min_q12: 384, sprint_drain_q12: 40, stamina_recover_q12: 36, roll_cost_q12: 768, roll_speed: 96, roll_active_frames: 14, roll_recovery_frames: 12, roll_invulnerable_frames: 10, backstep_cost_q12: 512, backstep_speed: 72, backstep_active_frames: 8, backstep_recovery_frames: 10, backstep_invulnerable_frames: 6), player: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
                 /*[8]*/ (id: (32), name: "Collider", kind: Collider(shape: Capsule(radius: 192, height: 1024), solid: true), transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)), parent: Some((28)), children: []),
             ],
         ),
     ],
     resources: [
-        /*[4]*/ (
+        /*[0]*/ (
             id: (5),
             name: "Obsidian Wraith",
             data: Model((
                 model_path: "assets/models/obsidian_wraith/obsidian_wraith.psxmdl",
+                source_path: None,
                 texture_path: Some("assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt"),
                 skeleton: Some((16)),
                 clips: [],
@@ -35,7 +36,7 @@
                 attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[5]*/ (
+        /*[1]*/ (
             id: (6),
             name: "Crimson Cross Knight Player",
             data: Character((
@@ -45,17 +46,34 @@
                 walk_clip: None,
                 run_clip: None,
                 turn_clip: None,
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: [],
                 radius: 192,
                 height: 1024,
                 walk_speed: 48,
                 run_speed: 96,
                 turn_speed_degrees_per_second: 180,
+                stamina_max_q12: 4096,
+                sprint_min_q12: 384,
+                sprint_drain_q12: 40,
+                stamina_recover_q12: 36,
+                roll_cost_q12: 768,
+                roll_speed: 96,
+                roll_active_frames: 14,
+                roll_recovery_frames: 12,
+                roll_invulnerable_frames: 10,
+                backstep_cost_q12: 512,
+                backstep_speed: 72,
+                backstep_active_frames: 8,
+                backstep_recovery_frames: 10,
+                backstep_invulnerable_frames: 6,
                 camera_distance: 6144,
                 camera_height: 1280,
                 camera_target_height: 640,
             )),
         ),
-        /*[6]*/ (
+        /*[2]*/ (
             id: (16),
             name: "Meshy Biped Skeleton",
             data: Skeleton((
@@ -65,11 +83,12 @@
                 note: "Shared by the Meshy biped player and enemy characters",
             )),
         ),
-        /*[7]*/ (
+        /*[3]*/ (
             id: (25),
             name: "Crimson Cross Knight",
             data: Model((
                 model_path: "assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl",
+                source_path: None,
                 texture_path: Some("assets/models/crimson_cross_knight/crimson_cross_knight_128x128_8bpp.psxt"),
                 skeleton: Some((16)),
                 clips: [],
@@ -81,11 +100,12 @@
                 attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[8]*/ (
+        /*[4]*/ (
             id: (29),
             name: "Hooded Wretch",
             data: Model((
                 model_path: "assets/models/hooded_wretch/hooded_wretch.psxmdl",
+                source_path: None,
                 texture_path: Some("assets/models/hooded_wretch/hooded_wretch_128x128_8bpp.psxt"),
                 skeleton: Some((16)),
                 clips: [],
@@ -97,11 +117,12 @@
                 attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[9]*/ (
+        /*[5]*/ (
             id: (32),
             name: "Crowned Wraith",
             data: Model((
                 model_path: "assets/models/crowned_wraith/crowned_wraith.psxmdl",
+                source_path: None,
                 texture_path: Some("assets/models/crowned_wraith/crowned_wraith.psxt"),
                 skeleton: Some((16)),
                 clips: [],
@@ -113,7 +134,7 @@
                 attachments: [(name: "right_hand_grip", joint: 0, translation: (96, 256, 0), rotation_q12: (0, 0, 0))],
             )),
         ),
-        /*[10]*/ (
+        /*[6]*/ (
             id: (38),
             name: "Obsidian Wraith Enemy Set",
             data: AnimationSet((
@@ -122,10 +143,13 @@
                 walk_clip: Some((46)),
                 run_clip: Some((46)),
                 turn_clip: None,
-                clips: [(47), (48), (49), (50), (51), (52), (53)],
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: [],
+                clips: [(47), (48), (49), (50), (51), (53)],
             )),
         ),
-        /*[11]*/ (
+        /*[7]*/ (
             id: (39),
             name: "Crimson Cross Knight Player Set",
             data: AnimationSet((
@@ -134,10 +158,13 @@
                 walk_clip: Some((46)),
                 run_clip: Some((46)),
                 turn_clip: None,
-                clips: [(47), (48), (49), (50), (51), (52), (53)],
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: [],
+                clips: [(47), (48), (49), (50), (51), (53)],
             )),
         ),
-        /*[12]*/ (
+        /*[8]*/ (
             id: (40),
             name: "Hooded Wretch Enemy Set",
             data: AnimationSet((
@@ -146,10 +173,13 @@
                 walk_clip: Some((46)),
                 run_clip: Some((46)),
                 turn_clip: None,
-                clips: [(47), (48), (49), (50), (51), (52), (53)],
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: [],
+                clips: [(47), (48), (49), (50), (51), (53)],
             )),
         ),
-        /*[13]*/ (
+        /*[9]*/ (
             id: (41),
             name: "Crowned Wraith Enemy Set",
             data: AnimationSet((
@@ -158,10 +188,13 @@
                 walk_clip: Some((46)),
                 run_clip: Some((46)),
                 turn_clip: None,
-                clips: [(47), (48), (49), (50), (51), (52), (53)],
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: [],
+                clips: [(47), (48), (49), (50), (51), (53)],
             )),
         ),
-        /*[14]*/ (
+        /*[10]*/ (
             id: (42),
             name: "Obsidian Wraith Enemy",
             data: Character((
@@ -171,17 +204,34 @@
                 walk_clip: None,
                 run_clip: None,
                 turn_clip: None,
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: [],
                 radius: 192,
                 height: 1024,
                 walk_speed: 48,
                 run_speed: 96,
                 turn_speed_degrees_per_second: 180,
+                stamina_max_q12: 4096,
+                sprint_min_q12: 384,
+                sprint_drain_q12: 40,
+                stamina_recover_q12: 36,
+                roll_cost_q12: 768,
+                roll_speed: 96,
+                roll_active_frames: 14,
+                roll_recovery_frames: 12,
+                roll_invulnerable_frames: 10,
+                backstep_cost_q12: 512,
+                backstep_speed: 72,
+                backstep_active_frames: 8,
+                backstep_recovery_frames: 10,
+                backstep_invulnerable_frames: 6,
                 camera_distance: 6144,
                 camera_height: 1280,
                 camera_target_height: 640,
             )),
         ),
-        /*[15]*/ (
+        /*[11]*/ (
             id: (43),
             name: "Hooded Wretch Enemy",
             data: Character((
@@ -191,17 +241,34 @@
                 walk_clip: None,
                 run_clip: None,
                 turn_clip: None,
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: [],
                 radius: 192,
                 height: 1024,
                 walk_speed: 48,
                 run_speed: 96,
                 turn_speed_degrees_per_second: 180,
+                stamina_max_q12: 4096,
+                sprint_min_q12: 384,
+                sprint_drain_q12: 40,
+                stamina_recover_q12: 36,
+                roll_cost_q12: 768,
+                roll_speed: 96,
+                roll_active_frames: 14,
+                roll_recovery_frames: 12,
+                roll_invulnerable_frames: 10,
+                backstep_cost_q12: 512,
+                backstep_speed: 72,
+                backstep_active_frames: 8,
+                backstep_recovery_frames: 10,
+                backstep_invulnerable_frames: 6,
                 camera_distance: 6144,
                 camera_height: 1280,
                 camera_target_height: 640,
             )),
         ),
-        /*[16]*/ (
+        /*[12]*/ (
             id: (44),
             name: "Crowned Wraith Enemy",
             data: Character((
@@ -211,123 +278,153 @@
                 walk_clip: None,
                 run_clip: None,
                 turn_clip: None,
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: [],
                 radius: 192,
                 height: 1024,
                 walk_speed: 48,
                 run_speed: 96,
                 turn_speed_degrees_per_second: 180,
+                stamina_max_q12: 4096,
+                sprint_min_q12: 384,
+                sprint_drain_q12: 40,
+                stamina_recover_q12: 36,
+                roll_cost_q12: 768,
+                roll_speed: 96,
+                roll_active_frames: 14,
+                roll_recovery_frames: 12,
+                roll_invulnerable_frames: 10,
+                backstep_cost_q12: 512,
+                backstep_speed: 72,
+                backstep_active_frames: 8,
+                backstep_recovery_frames: 10,
+                backstep_invulnerable_frames: 6,
                 camera_distance: 6144,
                 camera_height: 1280,
                 camera_target_height: 640,
             )),
         ),
-        /*[17]*/ (
+        /*[13]*/ (
             id: (45),
             name: "Standalone FBX / neutral idle",
             data: AnimationClip((
                 psxanim_path: "assets/animations/standalone_fbx/neutral_idle.psxanim",
                 skeleton: Some((16)),
+                source: None,
+                target_model: None,
+                bake: LegacyShared,
                 role: Idle,
                 looping: true,
                 tags: ["standalone", "idle"],
             )),
         ),
-        /*[18]*/ (
+        /*[14]*/ (
             id: (46),
             name: "Standalone FBX / walking",
             data: AnimationClip((
                 psxanim_path: "assets/animations/standalone_fbx/walking.psxanim",
                 skeleton: Some((16)),
+                source: None,
+                target_model: None,
+                bake: LegacyShared,
                 role: Walk,
                 looping: true,
                 tags: ["standalone", "walk"],
             )),
         ),
-        /*[19]*/ (
+        /*[15]*/ (
             id: (47),
             name: "Standalone FBX / walk backwards",
             data: AnimationClip((
                 psxanim_path: "assets/animations/standalone_fbx/walk_backwards.psxanim",
                 skeleton: Some((16)),
+                source: None,
+                target_model: None,
+                bake: LegacyShared,
                 role: Walk,
                 looping: true,
                 tags: ["standalone", "walk"],
             )),
         ),
-        /*[20]*/ (
+        /*[16]*/ (
             id: (48),
             name: "Standalone FBX / zombie reaction hit",
             data: AnimationClip((
                 psxanim_path: "assets/animations/standalone_fbx/zombie_reaction_hit.psxanim",
                 skeleton: Some((16)),
+                source: None,
+                target_model: None,
+                bake: LegacyShared,
                 role: Hit,
                 looping: false,
                 tags: ["standalone", "hit"],
             )),
         ),
-        /*[21]*/ (
+        /*[17]*/ (
             id: (49),
             name: "Standalone FBX / stand to roll",
             data: AnimationClip((
                 psxanim_path: "assets/animations/standalone_fbx/stand_to_roll.psxanim",
                 skeleton: Some((16)),
+                source: None,
+                target_model: None,
+                bake: LegacyShared,
                 role: Generic,
                 looping: false,
                 tags: ["standalone", "roll"],
             )),
         ),
-        /*[22]*/ (
+        /*[18]*/ (
             id: (50),
             name: "Standalone FBX / standing react death backward",
             data: AnimationClip((
                 psxanim_path: "assets/animations/standalone_fbx/standing_react_death_backward.psxanim",
                 skeleton: Some((16)),
+                source: None,
+                target_model: None,
+                bake: LegacyShared,
                 role: Death,
                 looping: false,
                 tags: ["standalone", "death"],
             )),
         ),
-        /*[23]*/ (
+        /*[19]*/ (
             id: (51),
             name: "Standalone FBX / standing melee combo attack ver 3",
             data: AnimationClip((
                 psxanim_path: "assets/animations/standalone_fbx/standing_melee_combo_attack_ver_3.psxanim",
                 skeleton: Some((16)),
+                source: None,
+                target_model: None,
+                bake: LegacyShared,
                 role: Attack,
                 looping: false,
                 tags: ["standalone", "attack"],
             )),
         ),
-        /*[24]*/ (
-            id: (52),
-            name: "Standalone FBX / sword and shield attack",
-            data: AnimationClip((
-                psxanim_path: "assets/animations/standalone_fbx/sword_and_shield_attack.psxanim",
-                skeleton: Some((16)),
-                role: Attack,
-                looping: false,
-                tags: ["standalone", "attack"],
-            )),
-        ),
-        /*[25]*/ (
+        /*[20]*/ (
             id: (53),
             name: "Standalone FBX / standing melee attack downward",
             data: AnimationClip((
                 psxanim_path: "assets/animations/standalone_fbx/standing_melee_attack_downward.psxanim",
                 skeleton: Some((16)),
+                source: None,
+                target_model: None,
+                bake: LegacyShared,
                 role: Attack,
                 looping: false,
                 tags: ["standalone", "attack"],
             )),
         ),
-        /*[26]*/ (
+        /*[21]*/ (
             id: (132),
             name: "Delven slateflr1a q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_01_slateflr1a_q2.psxt",
             ),
         ),
-        /*[27]*/ (
+        /*[22]*/ (
             id: (133),
             name: "Delven slateflr1a q2",
             data: Material((
@@ -338,14 +435,14 @@
                 double_sided: true,
             )),
         ),
-        /*[28]*/ (
+        /*[23]*/ (
             id: (134),
             name: "Delven slateflr1b q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_02_slateflr1b_q2.psxt",
             ),
         ),
-        /*[29]*/ (
+        /*[24]*/ (
             id: (135),
             name: "Delven slateflr1b q2",
             data: Material((
@@ -356,14 +453,14 @@
                 double_sided: true,
             )),
         ),
-        /*[30]*/ (
+        /*[25]*/ (
             id: (136),
             name: "Delven slateflr1e q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_03_slateflr1e_q0.psxt",
             ),
         ),
-        /*[31]*/ (
+        /*[26]*/ (
             id: (137),
             name: "Delven slateflr1e q0",
             data: Material((
@@ -374,14 +471,14 @@
                 double_sided: true,
             )),
         ),
-        /*[32]*/ (
+        /*[27]*/ (
             id: (138),
             name: "Delven slateflr2a q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_04_slateflr2a_q2.psxt",
             ),
         ),
-        /*[33]*/ (
+        /*[28]*/ (
             id: (139),
             name: "Delven slateflr2a q2",
             data: Material((
@@ -392,14 +489,14 @@
                 double_sided: false,
             )),
         ),
-        /*[34]*/ (
+        /*[29]*/ (
             id: (140),
             name: "Delven slateflr4a q1",
             data: Texture(
                 psxt_path: "assets/textures/delven_05_slateflr4a_q1.psxt",
             ),
         ),
-        /*[35]*/ (
+        /*[30]*/ (
             id: (141),
             name: "Delven slateflr4a q1",
             data: Material((
@@ -410,14 +507,14 @@
                 double_sided: true,
             )),
         ),
-        /*[36]*/ (
+        /*[31]*/ (
             id: (142),
             name: "Delven stonebrk1b q3",
             data: Texture(
                 psxt_path: "assets/textures/delven_06_stonebrk1b_q3.psxt",
             ),
         ),
-        /*[37]*/ (
+        /*[32]*/ (
             id: (143),
             name: "Delven stonebrk1b q3",
             data: Material((
@@ -428,14 +525,14 @@
                 double_sided: true,
             )),
         ),
-        /*[38]*/ (
+        /*[33]*/ (
             id: (144),
             name: "Delven stonebrk4a q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_07_stonebrk4a_q0.psxt",
             ),
         ),
-        /*[39]*/ (
+        /*[34]*/ (
             id: (145),
             name: "Delven stonebrk4a q0",
             data: Material((
@@ -446,14 +543,14 @@
                 double_sided: true,
             )),
         ),
-        /*[40]*/ (
+        /*[35]*/ (
             id: (146),
             name: "Delven stonebrk4b q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_08_stonebrk4b_q2.psxt",
             ),
         ),
-        /*[41]*/ (
+        /*[36]*/ (
             id: (147),
             name: "Delven stonebrk4b q2",
             data: Material((
@@ -464,14 +561,14 @@
                 double_sided: true,
             )),
         ),
-        /*[42]*/ (
+        /*[37]*/ (
             id: (148),
             name: "Delven stonebrk4c q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_09_stonebrk4c_q0.psxt",
             ),
         ),
-        /*[43]*/ (
+        /*[38]*/ (
             id: (149),
             name: "Delven stonebrk4c q0",
             data: Material((
@@ -482,14 +579,14 @@
                 double_sided: true,
             )),
         ),
-        /*[44]*/ (
+        /*[39]*/ (
             id: (150),
             name: "Delven stonebrk4d q1",
             data: Texture(
                 psxt_path: "assets/textures/delven_10_stonebrk4d_q1.psxt",
             ),
         ),
-        /*[45]*/ (
+        /*[40]*/ (
             id: (151),
             name: "Delven stonebrk4d q1",
             data: Material((
@@ -500,14 +597,14 @@
                 double_sided: true,
             )),
         ),
-        /*[46]*/ (
+        /*[41]*/ (
             id: (152),
             name: "Delven stonebrk5a q3",
             data: Texture(
                 psxt_path: "assets/textures/delven_11_stonebrk5a_q3.psxt",
             ),
         ),
-        /*[47]*/ (
+        /*[42]*/ (
             id: (153),
             name: "Delven stonebrk5a q3",
             data: Material((
@@ -518,14 +615,14 @@
                 double_sided: true,
             )),
         ),
-        /*[48]*/ (
+        /*[43]*/ (
             id: (154),
             name: "Delven stoneflr1c q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_12_stoneflr1c_q2.psxt",
             ),
         ),
-        /*[49]*/ (
+        /*[44]*/ (
             id: (155),
             name: "Delven stoneflr1c q2",
             data: Material((
@@ -536,14 +633,14 @@
                 double_sided: true,
             )),
         ),
-        /*[50]*/ (
+        /*[45]*/ (
             id: (156),
             name: "Delven stoneflr2a q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_13_stoneflr2a_q2.psxt",
             ),
         ),
-        /*[51]*/ (
+        /*[46]*/ (
             id: (157),
             name: "Delven stoneflr2a q2",
             data: Material((
@@ -554,14 +651,14 @@
                 double_sided: true,
             )),
         ),
-        /*[52]*/ (
+        /*[47]*/ (
             id: (158),
             name: "Delven stoneflr2c q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_14_stoneflr2c_q2.psxt",
             ),
         ),
-        /*[53]*/ (
+        /*[48]*/ (
             id: (159),
             name: "Delven stoneflr2c q2",
             data: Material((
@@ -572,14 +669,14 @@
                 double_sided: true,
             )),
         ),
-        /*[54]*/ (
+        /*[49]*/ (
             id: (160),
             name: "Delven stoneflr3a q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_15_stoneflr3a_q2.psxt",
             ),
         ),
-        /*[55]*/ (
+        /*[50]*/ (
             id: (161),
             name: "Delven stoneflr3a q2",
             data: Material((
@@ -590,14 +687,14 @@
                 double_sided: false,
             )),
         ),
-        /*[56]*/ (
+        /*[51]*/ (
             id: (162),
             name: "Delven stoneflr3c q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_16_stoneflr3c_q2.psxt",
             ),
         ),
-        /*[57]*/ (
+        /*[52]*/ (
             id: (163),
             name: "Delven stoneflr3c q2",
             data: Material((
@@ -608,14 +705,14 @@
                 double_sided: true,
             )),
         ),
-        /*[58]*/ (
+        /*[53]*/ (
             id: (164),
             name: "Delven stoneflr3c q3",
             data: Texture(
                 psxt_path: "assets/textures/delven_17_stoneflr3c_q3.psxt",
             ),
         ),
-        /*[59]*/ (
+        /*[54]*/ (
             id: (165),
             name: "Delven stoneflr3c q3",
             data: Material((
@@ -626,14 +723,14 @@
                 double_sided: true,
             )),
         ),
-        /*[60]*/ (
+        /*[55]*/ (
             id: (166),
             name: "Delven stoneflr4c q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_18_stoneflr4c_q2.psxt",
             ),
         ),
-        /*[61]*/ (
+        /*[56]*/ (
             id: (167),
             name: "Delven stoneflr4c q2",
             data: Material((
@@ -644,14 +741,14 @@
                 double_sided: true,
             )),
         ),
-        /*[62]*/ (
+        /*[57]*/ (
             id: (168),
             name: "Delven stoneflr4c q3",
             data: Texture(
                 psxt_path: "assets/textures/delven_19_stoneflr4c_q3.psxt",
             ),
         ),
-        /*[63]*/ (
+        /*[58]*/ (
             id: (169),
             name: "Delven stoneflr4c q3",
             data: Material((
@@ -662,14 +759,14 @@
                 double_sided: true,
             )),
         ),
-        /*[64]*/ (
+        /*[59]*/ (
             id: (170),
             name: "Delven stoneflr5a q3",
             data: Texture(
                 psxt_path: "assets/textures/delven_20_stoneflr5a_q3.psxt",
             ),
         ),
-        /*[65]*/ (
+        /*[60]*/ (
             id: (171),
             name: "Delven stoneflr5a q3",
             data: Material((
@@ -680,14 +777,14 @@
                 double_sided: true,
             )),
         ),
-        /*[66]*/ (
+        /*[61]*/ (
             id: (172),
             name: "Delven stoneflr6a q3",
             data: Texture(
                 psxt_path: "assets/textures/delven_21_stoneflr6a_q3.psxt",
             ),
         ),
-        /*[67]*/ (
+        /*[62]*/ (
             id: (173),
             name: "Delven stoneflr6a q3",
             data: Material((
@@ -698,14 +795,14 @@
                 double_sided: true,
             )),
         ),
-        /*[68]*/ (
+        /*[63]*/ (
             id: (174),
             name: "Delven stonegen1 q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_22_stonegen1_q2.psxt",
             ),
         ),
-        /*[69]*/ (
+        /*[64]*/ (
             id: (175),
             name: "Delven stonegen1 q2",
             data: Material((
@@ -716,14 +813,14 @@
                 double_sided: false,
             )),
         ),
-        /*[70]*/ (
+        /*[65]*/ (
             id: (176),
             name: "Delven stonetrm1b q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_23_stonetrm1b_q2.psxt",
             ),
         ),
-        /*[71]*/ (
+        /*[66]*/ (
             id: (177),
             name: "Delven stonetrm1b q2",
             data: Material((
@@ -734,14 +831,14 @@
                 double_sided: true,
             )),
         ),
-        /*[72]*/ (
+        /*[67]*/ (
             id: (178),
             name: "Delven stonetrm1c q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_24_stonetrm1c_q2.psxt",
             ),
         ),
-        /*[73]*/ (
+        /*[68]*/ (
             id: (179),
             name: "Delven stonetrm1c q2",
             data: Material((
@@ -752,14 +849,14 @@
                 double_sided: false,
             )),
         ),
-        /*[74]*/ (
+        /*[69]*/ (
             id: (180),
             name: "Delven stonetrm3b q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_25_stonetrm3b_q0.psxt",
             ),
         ),
-        /*[75]*/ (
+        /*[70]*/ (
             id: (181),
             name: "Delven stonetrm3b q0",
             data: Material((
@@ -770,14 +867,14 @@
                 double_sided: true,
             )),
         ),
-        /*[76]*/ (
+        /*[71]*/ (
             id: (182),
             name: "Delven stonetrm4b q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_26_stonetrm4b_q0.psxt",
             ),
         ),
-        /*[77]*/ (
+        /*[72]*/ (
             id: (183),
             name: "Delven stonetrm4b q0",
             data: Material((
@@ -788,14 +885,14 @@
                 double_sided: true,
             )),
         ),
-        /*[78]*/ (
+        /*[73]*/ (
             id: (184),
             name: "Delven stonetrm5 q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_27_stonetrm5_q0.psxt",
             ),
         ),
-        /*[79]*/ (
+        /*[74]*/ (
             id: (185),
             name: "Delven stonetrm5 q0",
             data: Material((
@@ -806,14 +903,14 @@
                 double_sided: true,
             )),
         ),
-        /*[80]*/ (
+        /*[75]*/ (
             id: (186),
             name: "Delven stonetrm5 q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_28_stonetrm5_q2.psxt",
             ),
         ),
-        /*[81]*/ (
+        /*[76]*/ (
             id: (187),
             name: "Delven stonetrm5 q2",
             data: Material((
@@ -824,14 +921,14 @@
                 double_sided: true,
             )),
         ),
-        /*[82]*/ (
+        /*[77]*/ (
             id: (188),
             name: "Delven ground1b q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_29_ground1b_q2.psxt",
             ),
         ),
-        /*[83]*/ (
+        /*[78]*/ (
             id: (189),
             name: "Delven ground1b q2",
             data: Material((
@@ -842,14 +939,14 @@
                 double_sided: false,
             )),
         ),
-        /*[84]*/ (
+        /*[79]*/ (
             id: (190),
             name: "Delven ground1c q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_30_ground1c_q0.psxt",
             ),
         ),
-        /*[85]*/ (
+        /*[80]*/ (
             id: (191),
             name: "Delven ground1c q0",
             data: Material((
@@ -860,14 +957,14 @@
                 double_sided: true,
             )),
         ),
-        /*[86]*/ (
+        /*[81]*/ (
             id: (192),
             name: "Delven ground1c q2",
             data: Texture(
                 psxt_path: "assets/textures/delven_31_ground1c_q2.psxt",
             ),
         ),
-        /*[87]*/ (
+        /*[82]*/ (
             id: (193),
             name: "Delven ground1c q2",
             data: Material((
@@ -878,14 +975,14 @@
                 double_sided: true,
             )),
         ),
-        /*[88]*/ (
+        /*[83]*/ (
             id: (194),
             name: "Delven ground1c q3",
             data: Texture(
                 psxt_path: "assets/textures/delven_32_ground1c_q3.psxt",
             ),
         ),
-        /*[89]*/ (
+        /*[84]*/ (
             id: (195),
             name: "Delven ground1c q3",
             data: Material((
@@ -896,14 +993,14 @@
                 double_sided: true,
             )),
         ),
-        /*[90]*/ (
+        /*[85]*/ (
             id: (196),
             name: "Delven ground2a q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_33_ground2a_q0.psxt",
             ),
         ),
-        /*[91]*/ (
+        /*[86]*/ (
             id: (197),
             name: "Delven ground2a q0",
             data: Material((
@@ -914,14 +1011,14 @@
                 double_sided: true,
             )),
         ),
-        /*[92]*/ (
+        /*[87]*/ (
             id: (198),
             name: "Delven ground2a q1",
             data: Texture(
                 psxt_path: "assets/textures/delven_34_ground2a_q1.psxt",
             ),
         ),
-        /*[93]*/ (
+        /*[88]*/ (
             id: (199),
             name: "Delven ground2a q1",
             data: Material((
@@ -932,14 +1029,14 @@
                 double_sided: true,
             )),
         ),
-        /*[94]*/ (
+        /*[89]*/ (
             id: (200),
             name: "Delven ground2a q3",
             data: Texture(
                 psxt_path: "assets/textures/delven_35_ground2a_q3.psxt",
             ),
         ),
-        /*[95]*/ (
+        /*[90]*/ (
             id: (201),
             name: "Delven ground2a q3",
             data: Material((
@@ -950,14 +1047,14 @@
                 double_sided: true,
             )),
         ),
-        /*[96]*/ (
+        /*[91]*/ (
             id: (202),
             name: "Delven ground3a q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_36_ground3a_q0.psxt",
             ),
         ),
-        /*[97]*/ (
+        /*[92]*/ (
             id: (203),
             name: "Delven ground3a q0",
             data: Material((
@@ -968,14 +1065,14 @@
                 double_sided: true,
             )),
         ),
-        /*[98]*/ (
+        /*[93]*/ (
             id: (204),
             name: "Delven ground3a q1",
             data: Texture(
                 psxt_path: "assets/textures/delven_37_ground3a_q1.psxt",
             ),
         ),
-        /*[99]*/ (
+        /*[94]*/ (
             id: (205),
             name: "Delven ground3a q1",
             data: Material((
@@ -986,14 +1083,14 @@
                 double_sided: true,
             )),
         ),
-        /*[100]*/ (
+        /*[95]*/ (
             id: (206),
             name: "Delven ground4b q0",
             data: Texture(
                 psxt_path: "assets/textures/delven_38_ground4b_q0.psxt",
             ),
         ),
-        /*[101]*/ (
+        /*[96]*/ (
             id: (207),
             name: "Delven ground4b q0",
             data: Material((
@@ -1004,14 +1101,14 @@
                 double_sided: true,
             )),
         ),
-        /*[102]*/ (
+        /*[97]*/ (
             id: (208),
             name: "Tomb 1",
             data: Texture(
                 psxt_path: "assets/textures/tomb1.psxt",
             ),
         ),
-        /*[103]*/ (
+        /*[98]*/ (
             id: (209),
             name: "Tomb 1",
             data: Material((
@@ -1022,14 +1119,14 @@
                 double_sided: true,
             )),
         ),
-        /*[104]*/ (
+        /*[99]*/ (
             id: (210),
             name: "Tomb 2",
             data: Texture(
                 psxt_path: "assets/textures/tomb2.psxt",
             ),
         ),
-        /*[105]*/ (
+        /*[100]*/ (
             id: (211),
             name: "Tomb 2",
             data: Material((
@@ -1040,14 +1137,14 @@
                 double_sided: true,
             )),
         ),
-        /*[106]*/ (
+        /*[101]*/ (
             id: (212),
             name: "Tomb 3",
             data: Texture(
                 psxt_path: "assets/textures/tomb3.psxt",
             ),
         ),
-        /*[107]*/ (
+        /*[102]*/ (
             id: (213),
             name: "Tomb 3",
             data: Material((

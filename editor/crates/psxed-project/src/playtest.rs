@@ -28,7 +28,7 @@
 //! care. The residency manager already tracks RAM/VRAM membership
 //! independently of where bytes live.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use psx_engine::{
@@ -36,8 +36,8 @@ use psx_engine::{
     WorldRenderMaterial, WorldVertex,
 };
 use psx_level::{
-    cloud_layer_flags, far_vista_flags, image_prop_flags, sky_flags, visibility_cell_flags,
-    visibility_edge_flags,
+    character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags, model_clip_flags,
+    room_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
@@ -46,8 +46,9 @@ use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
 use crate::{
-    spatial, AnimationRole, GridDirection, NodeId, NodeKind, ProjectDocument, ResourceData,
-    ResourceId, SceneNode, WorldGrid, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, GridDirection,
+    NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
+    WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -65,13 +66,33 @@ pub use manifest::{
 };
 pub use schema::*;
 
-const PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
+#[cfg(test)]
+const DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS: u16 = 32;
+const ATMOSPHERE_DENSITY_MAX: i32 = 96;
+const ATMOSPHERE_FALL_SPEED_MAX_Q4: i32 = 64;
+const ATMOSPHERE_WIND_SPEED_MIN_Q4: i32 = -64;
+const ATMOSPHERE_WIND_SPEED_MAX_Q4: i32 = 64;
 
 struct PlayerSpawnCandidate<'a> {
     node: &'a SceneNode,
     room_index: u16,
     position: [i32; 3],
     character: Option<ResourceId>,
+    controller_settings: Option<CharacterControllerSettings>,
+    renderer: Option<ModelRendererComponent>,
+    animator: Option<AnimatorComponent<'a>>,
+}
+
+fn clamp_atmosphere_density(value: i32) -> u8 {
+    value.clamp(0, ATMOSPHERE_DENSITY_MAX) as u8
+}
+
+fn clamp_atmosphere_fall_speed_q4(value: i32) -> i16 {
+    value.clamp(0, ATMOSPHERE_FALL_SPEED_MAX_Q4) as i16
+}
+
+fn clamp_atmosphere_wind_speed_q4(value: i32) -> i16 {
+    value.clamp(ATMOSPHERE_WIND_SPEED_MIN_Q4, ATMOSPHERE_WIND_SPEED_MAX_Q4) as i16
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,8 +120,52 @@ struct CookedRoomBakeInput {
 /// Chunking policy used by Embedded Play. Authored Rooms may grow
 /// beyond the runtime room cap, but generated `.psxw` chunks should be
 /// sized for render cost before the hard runtime limits are reached.
-pub fn playtest_streaming_chunk_config() -> StreamingChunkConfig {
-    StreamingChunkConfig::default()
+/// `PSXED_PLAYTEST_CHUNK_TARGET=8` or `8x6` overrides the target size
+/// for cook-time benchmark sweeps.
+pub fn playtest_streaming_chunk_config(streaming: WorldStreamingSettings) -> StreamingChunkConfig {
+    let default = streaming.chunk_config();
+    std::env::var("PSXED_PLAYTEST_CHUNK_TARGET")
+        .ok()
+        .and_then(|raw| streaming_chunk_config_with_target(default, &raw))
+        .unwrap_or(default)
+}
+
+fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) -> u8 {
+    std::env::var("PSXED_PLAYTEST_RESIDENT_CHUNK_LIMIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u8>().ok())
+        .map(|limit| {
+            limit.clamp(
+                crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
+                crate::MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
+            )
+        })
+        .unwrap_or(streaming.resident_chunk_limit)
+}
+
+fn streaming_chunk_config_with_target(
+    mut config: StreamingChunkConfig,
+    raw: &str,
+) -> Option<StreamingChunkConfig> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.split(['x', 'X', ',', ':']);
+    let width = parts.next()?.trim().parse::<u16>().ok()?.max(1);
+    let depth = parts
+        .next()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .and_then(|part| part.parse::<u16>().ok())
+        .unwrap_or(width)
+        .max(1);
+    if parts.next().is_some() {
+        return None;
+    }
+    config.target_width = width;
+    config.target_depth = depth;
+    Some(config)
 }
 
 /// Build a playtest package from `project`. Validates the scene
@@ -143,6 +208,7 @@ pub fn build_package(
     // only use it for presence tests.
     let mut texture_asset_for_resource: std::collections::HashMap<ResourceId, usize> =
         std::collections::HashMap::new();
+    let mut sky_texture_assets: Vec<(crate::ResolvedSkySettings, usize)> = Vec::new();
     let mut room_chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
     let mut room_bake_inputs: Vec<CookedRoomBakeInput> = Vec::new();
     let mut room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
@@ -166,7 +232,11 @@ pub fn build_package(
             ));
             continue;
         }
-        let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config());
+        let streaming = scene
+            .world_streaming_for_node(room_node.id)
+            .unwrap_or_default()
+            .normalized();
+        let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config(streaming));
         let chunk_count = plan.chunk_count();
         for chunk in plan.chunks {
             let Some(chunk_grid) = grid_rect(grid, chunk.array_origin, chunk.size) else {
@@ -292,9 +362,14 @@ pub fn build_package(
             let material_count =
                 u16::try_from(materials.len() - material_first as usize).unwrap_or(u16::MAX);
 
+            let resolved_culling = scene
+                .world_culling_for_node(room_node.id)
+                .unwrap_or_default()
+                .normalized();
             append_room_visibility(
                 room_index,
                 &cooked,
+                resolved_culling.visibility_radius,
                 &mut room_visibility,
                 &mut visibility_cells,
                 &mut visibility_pvs,
@@ -369,6 +444,14 @@ pub fn build_package(
                 Vec::new()
             };
             let far_vista_has_texture = far_vista_texture_asset_indices.iter().any(Option::is_some);
+            let sky_texture_asset_index =
+                cook_sky_panorama_texture_asset(resolved_sky, &mut sky_texture_assets, &mut assets);
+            let atmosphere_density = clamp_atmosphere_density(chunk_grid.atmosphere_density);
+            let atmosphere_fall_speed_q4 =
+                clamp_atmosphere_fall_speed_q4(chunk_grid.atmosphere_fall_speed_q4);
+            let atmosphere_wind_speed_q4 =
+                clamp_atmosphere_wind_speed_q4(chunk_grid.atmosphere_wind_speed_q4);
+            let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
 
             rooms.push(PlaytestRoom {
                 name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
@@ -376,22 +459,36 @@ pub fn build_package(
                 origin_x: chunk_grid.origin[0],
                 origin_z: chunk_grid.origin[1],
                 sector_size: chunk_grid.sector_size,
+                draw_distance: resolved_culling.draw_distance,
+                chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
+                visibility_radius: resolved_culling.visibility_radius,
+                resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
+                visible_chunk_limit: streaming.visible_chunk_limit,
                 material_first,
                 material_count,
                 fog_rgb: chunk_grid.fog_color,
                 fog_near: chunk_grid.fog_near,
                 fog_far: chunk_grid.fog_far,
+                atmosphere_rgb: chunk_grid.atmosphere_color,
+                atmosphere_density,
+                atmosphere_fall_speed_q4,
+                atmosphere_wind_speed_q4,
                 sky: PlaytestSky {
                     top_rgb: resolved_sky.top_color,
                     horizon_rgb: resolved_sky.horizon_color,
                     bottom_rgb: resolved_sky.lower_color,
                     horizon_percent: resolved_sky.horizon_percent,
+                    horizon_thickness_percent: resolved_sky.horizon_thickness_percent,
+                    skybox_columns: resolved_sky.skybox_columns,
+                    skybox_rows: resolved_sky.skybox_rows,
                     flags: if resolved_sky.enabled {
                         sky_flags::ENABLED
                     } else {
                         0
                     },
+                    cyclorama_quads: Vec::new(),
                     cloud_layer: PlaytestCloudLayer {
+                        texture_asset_index: sky_texture_asset_index,
                         color_rgb: resolved_sky.cloud_layer.color,
                         density: resolved_sky.cloud_layer.density,
                         altitude: resolved_sky.cloud_layer.altitude,
@@ -399,9 +496,7 @@ pub fn build_package(
                         tile_count: resolved_sky.cloud_layer.tile_count,
                         scroll_speed: resolved_sky.cloud_layer.scroll_speed,
                         noise_seed: resolved_sky.cloud_layer.noise_seed,
-                        flags: if resolved_sky.cloud_layer.enabled
-                            && resolved_sky.enabled
-                        {
+                        flags: if resolved_sky.cloud_layer.enabled && resolved_sky.enabled {
                             cloud_layer_flags::ENABLED
                         } else {
                             0
@@ -434,7 +529,11 @@ pub fn build_package(
                     min_floor_clearance: resolved_camera.min_floor_clearance,
                 },
                 flags: if chunk_grid.fog_enabled {
-                    psx_level::room_flags::FOG_ENABLED
+                    room_flags::FOG_ENABLED
+                } else {
+                    0
+                } | if atmosphere_enabled {
+                    room_flags::ATMOSPHERE_ENABLED
                 } else {
                     0
                 },
@@ -469,7 +568,9 @@ pub fn build_package(
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
     let mut lights: Vec<PlaytestLight> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
+    let runtime_model_clips = collect_runtime_model_clip_requirements(project, scene);
     let mut model_for_resource: HashMap<ResourceId, u16> = HashMap::new();
+    let mut model_clip_remaps: HashMap<ResourceId, Vec<Option<u16>>> = HashMap::new();
     let mut weapon_for_resource: HashMap<ResourceId, u16> = HashMap::new();
     let mut warned_unsupported: HashSet<&'static str> = HashSet::new();
 
@@ -527,16 +628,17 @@ pub fn build_package(
                 let is_player_controlled =
                     character_controller.is_some_and(|controller| controller.player);
                 if !is_player_controlled {
-                    if let Some((model_resource_id, _material)) =
-                        component_model_renderer(scene, node).and_then(|(model, material)| {
-                            model
+                    if let Some((model_resource_id, renderer)) =
+                        component_model_renderer(scene, node).and_then(|renderer| {
+                            renderer
+                                .model
                                 .and_then(|id| {
                                     project
                                         .resource(id)
                                         .filter(|r| matches!(r.data, ResourceData::Model(_)))
                                         .map(|_| id)
                                 })
-                                .map(|id| (id, material))
+                                .map(|id| (id, renderer))
                         })
                     {
                         let clip = component_animator(scene, node).and_then(|anim| anim.clip);
@@ -549,6 +651,9 @@ pub fn build_package(
                             room_index,
                             pos,
                             yaw,
+                            renderer.visual_yaw,
+                            renderer.visual_offset,
+                            renderer.visual_scale_q8,
                             &mut assets,
                             &mut models,
                             &mut model_clips,
@@ -557,6 +662,8 @@ pub fn build_package(
                             &mut model_sockets,
                             &mut model_instances,
                             &mut model_for_resource,
+                            &runtime_model_clips,
+                            &mut model_clip_remaps,
                             &mut report,
                         ) {
                             return (None, report);
@@ -571,6 +678,9 @@ pub fn build_package(
                             room_index,
                             position: pos,
                             character: controller.character,
+                            controller_settings: Some(controller.settings),
+                            renderer: component_model_renderer(scene, node),
+                            animator: component_animator(scene, node),
                         });
                     } else if component_model_renderer(scene, node).is_none() {
                         let Some(character_id) = controller.character else {
@@ -596,6 +706,8 @@ pub fn build_package(
                             &mut model_sockets,
                             &mut model_instances,
                             &mut model_for_resource,
+                            &runtime_model_clips,
+                            &mut model_clip_remaps,
                             &mut report,
                         ) {
                             return (None, report);
@@ -616,6 +728,8 @@ pub fn build_package(
                             &mut model_frame_bounds,
                             &mut model_sockets,
                             &mut model_for_resource,
+                            &runtime_model_clips,
+                            &mut model_clip_remaps,
                             &mut weapon_hitboxes,
                             &mut weapons,
                             &mut weapon_for_resource,
@@ -653,6 +767,9 @@ pub fn build_package(
                     room_index,
                     position: pos,
                     character: *character,
+                    controller_settings: None,
+                    renderer: None,
+                    animator: None,
                 });
             }
             NodeKind::SpawnPoint { player: false, .. } => {
@@ -699,6 +816,9 @@ pub fn build_package(
                         room_index,
                         pos,
                         yaw,
+                        0,
+                        [0; 3],
+                        crate::MODEL_SCALE_ONE_Q8,
                         &mut assets,
                         &mut models,
                         &mut model_clips,
@@ -707,6 +827,8 @@ pub fn build_package(
                         &mut model_sockets,
                         &mut model_instances,
                         &mut model_for_resource,
+                        &runtime_model_clips,
+                        &mut model_clip_remaps,
                         &mut report,
                     ) {
                         return (None, report);
@@ -845,77 +967,98 @@ pub fn build_package(
     let player_controller = match (spawn, &player_spawns[..]) {
         (Some(spawn_record), [candidate]) => {
             let spawn_node = candidate.node;
-            let resolved = match crate::resolve::resolve_spawn_character(
-                project,
-                candidate.character,
-            ) {
-                Ok(resolved) => {
-                    if resolved.auto_picked {
-                        report.warn(format!(
-                            "Player source '{}' had no Character — auto-picked the only one defined",
-                            spawn_node.name,
-                        ));
+            let renderer_model = candidate.renderer.and_then(|renderer| renderer.model);
+            let resolved = if renderer_model.is_some() {
+                candidate.character
+            } else {
+                match crate::resolve::resolve_spawn_character(project, candidate.character) {
+                    Ok(resolved) => {
+                        if resolved.auto_picked {
+                            report.warn(format!(
+                                "Player source '{}' had no Character -- auto-picked the only one defined",
+                                spawn_node.name,
+                            ));
+                        }
+                        Some(resolved.id)
                     }
-                    Some(resolved.id)
-                }
-                Err(crate::resolve::SpawnCharacterResolutionError::MissingExplicit(id)) => {
-                    report.error(format!(
-                        "Player source '{}' references Character #{} which doesn't exist",
-                        spawn_node.name,
-                        id.raw()
-                    ));
-                    None
-                }
-                Err(crate::resolve::SpawnCharacterResolutionError::ExplicitNotCharacter(id)) => {
-                    let name = project
-                        .resource(id)
-                        .map(|r| r.name.as_str())
-                        .unwrap_or("<missing>");
-                    report.error(format!(
-                        "Player source '{}' references resource '{}' which is not a Character",
-                        spawn_node.name, name
-                    ));
-                    None
-                }
-                Err(crate::resolve::SpawnCharacterResolutionError::NoCharacters) => {
-                    report.error(format!(
-                        "Player source '{}' has no Character assigned and no Character resources exist",
-                        spawn_node.name
-                    ));
-                    None
-                }
-                Err(crate::resolve::SpawnCharacterResolutionError::AmbiguousCharacters {
-                    count,
-                }) => {
-                    report.error(format!(
-                        "Player source '{}' has no Character assigned and {count} Characters are defined — pick one explicitly",
-                        spawn_node.name
-                    ));
-                    None
+                    Err(crate::resolve::SpawnCharacterResolutionError::MissingExplicit(id)) => {
+                        report.error(format!(
+                            "Player source '{}' references Character #{} which doesn't exist",
+                            spawn_node.name,
+                            id.raw()
+                        ));
+                        None
+                    }
+                    Err(crate::resolve::SpawnCharacterResolutionError::ExplicitNotCharacter(
+                        id,
+                    )) => {
+                        let name = project
+                            .resource(id)
+                            .map(|r| r.name.as_str())
+                            .unwrap_or("<missing>");
+                        report.error(format!(
+                            "Player source '{}' references resource '{}' which is not a Character",
+                            spawn_node.name, name
+                        ));
+                        None
+                    }
+                    Err(crate::resolve::SpawnCharacterResolutionError::NoCharacters) => {
+                        report.error(format!(
+                            "Player source '{}' has no Character assigned and no Character resources exist",
+                            spawn_node.name
+                        ));
+                        None
+                    }
+                    Err(crate::resolve::SpawnCharacterResolutionError::AmbiguousCharacters {
+                        count,
+                    }) => {
+                        report.error(format!(
+                            "Player source '{}' has no Character assigned and {count} Characters are defined -- pick one explicitly",
+                            spawn_node.name
+                        ));
+                        None
+                    }
                 }
             };
-            resolved
-                .and_then(|id| {
-                    cook_player_character(
-                        project,
-                        project_root,
-                        spawn_node,
-                        id,
-                        &mut assets,
-                        &mut models,
-                        &mut model_clips,
-                        &mut model_clip_bounds,
-                        &mut model_frame_bounds,
-                        &mut model_sockets,
-                        &mut model_for_resource,
-                        &mut characters,
-                        &mut report,
-                    )
-                })
-                .map(|character_index| PlaytestPlayerController {
-                    spawn: spawn_record,
-                    character: character_index,
-                })
+            cook_player_character(
+                project,
+                project_root,
+                spawn_node,
+                resolved,
+                renderer_model,
+                candidate
+                    .renderer
+                    .map(|renderer| renderer.visual_offset)
+                    .unwrap_or([0; 3]),
+                candidate
+                    .renderer
+                    .map(|renderer| renderer.visual_yaw)
+                    .unwrap_or(0),
+                candidate
+                    .renderer
+                    .map(|renderer| renderer.visual_scale_q8)
+                    .unwrap_or(crate::MODEL_SCALE_ONE_Q8),
+                candidate
+                    .animator
+                    .map(|animator| animator.action_clips)
+                    .unwrap_or(&[]),
+                candidate.controller_settings,
+                &mut assets,
+                &mut models,
+                &mut model_clips,
+                &mut model_clip_bounds,
+                &mut model_frame_bounds,
+                &mut model_sockets,
+                &mut model_for_resource,
+                &runtime_model_clips,
+                &mut model_clip_remaps,
+                &mut characters,
+                &mut report,
+            )
+            .map(|character_index| PlaytestPlayerController {
+                spawn: spawn_record,
+                character: character_index,
+            })
         }
         _ => None,
     };
@@ -926,6 +1069,7 @@ pub fn build_package(
 
     let lights = expand_lights_across_chunks(&room_bake_inputs, &lights);
     bake_static_surface_lights(&mut room_bake_inputs, &lights);
+    bake_static_image_prop_lights(&mut image_props, &room_bake_inputs, &lights);
     for room in &room_bake_inputs {
         let bytes = match room.cooked.to_psxw_bytes() {
             Ok(b) => b,
@@ -1032,6 +1176,33 @@ fn active_far_vista_panel_count(
         .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
 }
 
+fn cook_sky_panorama_texture_asset(
+    sky: crate::ResolvedSkySettings,
+    sky_texture_assets: &mut Vec<(crate::ResolvedSkySettings, usize)>,
+    assets: &mut Vec<PlaytestAsset>,
+) -> Option<usize> {
+    if !sky.enabled {
+        return None;
+    }
+    if let Some((_, existing)) = sky_texture_assets
+        .iter()
+        .find(|(existing_sky, _)| *existing_sky == sky)
+    {
+        return Some(*existing);
+    }
+    let bytes = crate::generate_sky_panorama_psxt(sky)?;
+    let sky_index = sky_texture_assets.len();
+    let asset_index = assets.len();
+    assets.push(PlaytestAsset {
+        kind: PlaytestAssetKind::Texture,
+        bytes,
+        filename: format!("sky/sky_{sky_index:03}.psxt"),
+        source_label: format!("Cooked Sky Panorama {sky_index}"),
+    });
+    sky_texture_assets.push((sky, asset_index));
+    Some(asset_index)
+}
+
 fn cook_far_vista_texture_asset(
     project: &ProjectDocument,
     project_root: &Path,
@@ -1075,6 +1246,259 @@ fn cook_far_vista_texture_asset(
     Some(new_index)
 }
 
+fn collect_runtime_model_clip_requirements(
+    project: &ProjectDocument,
+    scene: &crate::Scene,
+) -> HashMap<ResourceId, BTreeSet<u16>> {
+    let mut out = HashMap::new();
+
+    for resource in &project.resources {
+        match &resource.data {
+            ResourceData::Model(_) => {
+                add_model_clip_requirement(project, &mut out, resource.id, None);
+            }
+            ResourceData::Character(character) => {
+                add_character_clip_requirements(project, &mut out, character);
+            }
+            ResourceData::Weapon(weapon) => {
+                if let Some(model) = weapon.model {
+                    add_model_clip_requirement(project, &mut out, model, None);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for node in scene.nodes() {
+        match &node.kind {
+            NodeKind::Entity => {
+                if let Some(model) = component_model_renderer(scene, node).and_then(|r| r.model) {
+                    if let Some(animator) = component_animator(scene, node) {
+                        add_model_clip_requirement(project, &mut out, model, animator.clip);
+                        for binding in animator.action_clips {
+                            add_model_clip_requirement(
+                                project,
+                                &mut out,
+                                model,
+                                Some(binding.clip),
+                            );
+                        }
+                    } else {
+                        add_model_clip_requirement(project, &mut out, model, None);
+                    }
+                }
+                if let Some(controller) = component_character_controller(scene, node) {
+                    if let Some(character_id) = controller.character {
+                        if let Some(ResourceData::Character(character)) =
+                            project.resource(character_id).map(|r| &r.data)
+                        {
+                            add_character_clip_requirements(project, &mut out, character);
+                        }
+                    }
+                }
+                if let Some(equipment) = component_equipment(scene, node) {
+                    if let Some(weapon_id) = equipment.weapon {
+                        if let Some(ResourceData::Weapon(weapon)) =
+                            project.resource(weapon_id).map(|r| &r.data)
+                        {
+                            if let Some(model) = weapon.model {
+                                add_model_clip_requirement(project, &mut out, model, None);
+                            }
+                        }
+                    }
+                }
+            }
+            NodeKind::MeshInstance {
+                mesh: Some(model),
+                animation_clip,
+                ..
+            } => {
+                if project
+                    .resource(*model)
+                    .is_some_and(|r| matches!(r.data, ResourceData::Model(_)))
+                {
+                    add_model_clip_requirement(project, &mut out, *model, *animation_clip);
+                }
+            }
+            NodeKind::SpawnPoint {
+                character: Some(character_id),
+                ..
+            }
+            | NodeKind::CharacterController {
+                character: Some(character_id),
+                ..
+            } => {
+                if let Some(ResourceData::Character(character)) =
+                    project.resource(*character_id).map(|r| &r.data)
+                {
+                    add_character_clip_requirements(project, &mut out, character);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn add_character_clip_requirements(
+    project: &ProjectDocument,
+    out: &mut HashMap<ResourceId, BTreeSet<u16>>,
+    character: &crate::CharacterResource,
+) {
+    let Some(model) = character.model else {
+        return;
+    };
+    add_model_clip_requirement(project, out, model, None);
+
+    for legacy in [
+        character.idle_clip,
+        character.walk_clip,
+        character.run_clip,
+        character.turn_clip,
+        character.roll_clip,
+        character.backstep_clip,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        add_model_clip_requirement(project, out, model, Some(legacy));
+    }
+    for binding in &character.action_clips {
+        add_model_clip_requirement(project, out, model, Some(binding.clip));
+    }
+
+    let Some(set) = character.animation_set.and_then(|id| {
+        project
+            .resource(id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationSet(set) => Some(set),
+                _ => None,
+            })
+    }) else {
+        return;
+    };
+
+    for action in CharacterAnimationAction::ALL {
+        if let Some(animation_id) = animation_set_action_clip(project, set, action) {
+            if let Some(index) = project.resolved_model_animation_index(model, animation_id) {
+                add_model_clip_requirement(project, out, model, Some(index));
+            }
+        }
+    }
+}
+
+fn animation_set_action_clip(
+    project: &ProjectDocument,
+    set: &crate::AnimationSetResource,
+    action: CharacterAnimationAction,
+) -> Option<ResourceId> {
+    if let Some(id) = set.action_clip(action) {
+        return Some(id);
+    }
+    set.clips.iter().copied().find(|id| {
+        project
+            .resource(*id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationClip(clip) => {
+                    let role_matches = match action {
+                        CharacterAnimationAction::HeavyAttack
+                        | CharacterAnimationAction::ComboAttack
+                        | CharacterAnimationAction::Block => false,
+                        _ => action.role_hint().is_some_and(|role| {
+                            clip.role == role
+                                || AnimationRole::guess_from_name(&resource.name) == role
+                        }),
+                    };
+                    let action_matches =
+                        CharacterAnimationAction::guess_from_name(&resource.name) == Some(action);
+                    Some(role_matches || action_matches)
+                }
+                _ => None,
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn character_action_flags_for(
+    action: CharacterAnimationAction,
+    options: Option<crate::CharacterActionOptions>,
+) -> u8 {
+    let mut flags = 0;
+    if options
+        .map(|options| options.looping)
+        .unwrap_or_else(|| action.loops_by_default())
+    {
+        flags |= character_action_flags::LOOPING;
+    }
+    if let Some(options) = options {
+        flags |= character_action_flags::IN_PLACE_OVERRIDE;
+        if options.in_place {
+            flags |= character_action_flags::IN_PLACE;
+        }
+    }
+    flags
+}
+
+fn add_model_clip_requirement(
+    project: &ProjectDocument,
+    out: &mut HashMap<ResourceId, BTreeSet<u16>>,
+    model: ResourceId,
+    clip: Option<u16>,
+) {
+    let resolved_len = project.resolved_model_animation_clips(model).len();
+    if resolved_len == 0 {
+        return;
+    }
+    let index = clip
+        .or_else(|| {
+            project
+                .resource(model)
+                .and_then(|resource| match &resource.data {
+                    ResourceData::Model(model) => model.default_clip,
+                    _ => None,
+                })
+        })
+        .unwrap_or(0);
+    if (index as usize) < resolved_len {
+        out.entry(model).or_default().insert(index);
+    }
+}
+
+fn runtime_model_clip_indices(
+    resolved_len: usize,
+    required: Option<&BTreeSet<u16>>,
+    default_clip: u16,
+) -> Vec<u16> {
+    let mut selected = BTreeSet::new();
+    if (default_clip as usize) < resolved_len {
+        selected.insert(default_clip);
+    }
+    if let Some(required) = required {
+        for index in required {
+            if (*index as usize) < resolved_len {
+                selected.insert(*index);
+            }
+        }
+    }
+    if selected.is_empty() && resolved_len > 0 {
+        selected.insert(0);
+    }
+    selected.into_iter().collect()
+}
+
+fn remap_runtime_model_clip(
+    remaps: &HashMap<ResourceId, Vec<Option<u16>>>,
+    model: ResourceId,
+    authored_index: u16,
+) -> Option<u16> {
+    remaps
+        .get(&model)
+        .and_then(|model_remap| model_remap.get(authored_index as usize))
+        .copied()
+        .flatten()
+}
+
 /// Cook one Character resource into a [`PlaytestCharacter`],
 /// registering its backing model on first sight (deduped against
 /// MeshInstance placements). Validates clip indices land inside
@@ -1085,7 +1509,13 @@ fn cook_player_character(
     project: &ProjectDocument,
     project_root: &Path,
     spawn_node: &SceneNode,
-    character_id: ResourceId,
+    character_id: Option<ResourceId>,
+    model_override: Option<ResourceId>,
+    visual_offset: [i16; 3],
+    visual_yaw: i16,
+    visual_scale_q8: u16,
+    action_overrides: &[crate::CharacterActionClip],
+    controller_settings: Option<CharacterControllerSettings>,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
@@ -1093,37 +1523,47 @@ fn cook_player_character(
     model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut std::collections::HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     characters: &mut Vec<PlaytestCharacter>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
-    let resource = match project.resource(character_id) {
-        Some(r) => r,
-        None => {
-            report.error(format!(
-                "Player Spawn '{}' references Character #{} which doesn't exist",
-                spawn_node.name,
-                character_id.raw()
-            ));
-            return None;
+    let default_character = crate::CharacterResource::defaults();
+    let (character, character_name) = match character_id {
+        Some(character_id) => {
+            let resource = match project.resource(character_id) {
+                Some(r) => r,
+                None => {
+                    report.error(format!(
+                        "Player Spawn '{}' references Character #{} which doesn't exist",
+                        spawn_node.name,
+                        character_id.raw()
+                    ));
+                    return None;
+                }
+            };
+            match &resource.data {
+                ResourceData::Character(c) => (c, resource.name.as_str()),
+                _ => {
+                    report.error(format!(
+                        "Player Spawn '{}' references resource '{}' which is not a Character",
+                        spawn_node.name, resource.name
+                    ));
+                    return None;
+                }
+            }
         }
+        None => (&default_character, spawn_node.name.as_str()),
     };
-    let character = match &resource.data {
-        ResourceData::Character(c) => c,
-        _ => {
-            report.error(format!(
-                "Player Spawn '{}' references resource '{}' which is not a Character",
-                spawn_node.name, resource.name
-            ));
-            return None;
-        }
-    };
+    let settings = controller_settings
+        .unwrap_or_else(|| CharacterControllerSettings::from_character(character));
 
-    let model_resource_id = match character.model {
+    let model_resource_id = match model_override.or(character.model) {
         Some(id) => id,
         None => {
             report.error(format!(
-                "Character '{}' has no Model assigned — required for the player",
-                resource.name
+                "Character '{}' has no Model assigned -- add a Model Renderer or set a profile Model",
+                character_name
             ));
             return None;
         }
@@ -1139,11 +1579,12 @@ fn cook_player_character(
         model_frame_bounds,
         model_sockets,
         model_for_resource,
+        runtime_model_clips,
+        model_clip_remaps,
         report,
     )?;
     let model = &models[model_index as usize];
 
-    let clip_count = model.clip_count;
     let model_skeleton =
         project
             .resource(model_resource_id)
@@ -1162,34 +1603,58 @@ fn cook_player_character(
         if set.skeleton.is_some() && model_skeleton.is_some() && set.skeleton != model_skeleton {
             report.error(format!(
                 "Character '{}' clip role map '{}' targets a different skeleton than its model",
-                resource.name, set_name
+                character_name, set_name
             ));
             return None;
         }
     }
 
-    let resolve_role = |role: AnimationRole,
-                        legacy_slot: Option<u16>,
-                        required: bool,
-                        project: &ProjectDocument,
-                        report: &mut PlaytestValidationReport|
-     -> Option<u16> {
-        let role_label = role.label().to_ascii_lowercase();
+    let resolve_action = |action: CharacterAnimationAction,
+                          required: bool,
+                          project: &ProjectDocument,
+                          report: &mut PlaytestValidationReport|
+     -> Option<(u16, u8)> {
+        let action_label = action.label().to_ascii_lowercase();
+        if let Some(binding) = action_overrides
+            .iter()
+            .find(|binding| binding.action == action)
+        {
+            let idx = binding.clip;
+            return match remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx) {
+                Some(local) => Some((local, character_action_flags_for(action, binding.options))),
+                None => {
+                    report.error(format!(
+                        "Animator on '{}' maps {action_label} to clip {idx}, but that clip was not packaged for runtime",
+                        spawn_node.name
+                    ));
+                    None
+                }
+            };
+        }
+
         if let Some((_, set_name, set)) = animation_set {
-            if let Some(animation_id) = set.role_clip(role) {
+            if let Some(animation_id) = animation_set_action_clip(project, set, action) {
+                let options = set
+                    .action_binding(action)
+                    .filter(|binding| binding.clip == animation_id)
+                    .and_then(|binding| binding.options);
                 match project.resolved_model_animation_index(model_resource_id, animation_id) {
-                    Some(index) if index < clip_count => return Some(index),
                     Some(index) => {
+                        if let Some(local) =
+                            remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)
+                        {
+                            return Some((local, character_action_flags_for(action, options)));
+                        }
                         report.error(format!(
-                            "Character '{}' {role_label} clip resolves to {index}, out of range ({clip_count} clips on model)",
-                            resource.name
+                            "Character '{}' {action_label} clip resolves to {index}, but that clip was not packaged for runtime",
+                            character_name
                         ));
                         return None;
                     }
                     None => {
                         report.error(format!(
-                            "Character '{}' clip role map '{}' {role_label} clip is not compatible with model '{}'",
-                            resource.name, set_name, model.name
+                            "Character '{}' action map '{}' {action_label} clip is not compatible with model '{}'",
+                            character_name, set_name, model.name
                         ));
                         return None;
                     }
@@ -1197,117 +1662,168 @@ fn cook_player_character(
             }
         }
 
-        match legacy_slot {
-            Some(idx) if idx < clip_count => Some(idx),
+        let character_binding = character.action_binding(action);
+        match character_binding
+            .map(|binding| binding.clip)
+            .or_else(|| character.action_clip(action))
+        {
             Some(idx) => {
-                report.error(format!(
-                    "Character '{}' {role_label} clip {idx} out of range ({clip_count} clips on model)",
-                    resource.name
-                ));
-                None
+                match remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx) {
+                    Some(local) => Some((
+                        local,
+                        character_action_flags_for(
+                            action,
+                            character_binding.and_then(|binding| binding.options),
+                        ),
+                    )),
+                    None => {
+                        report.error(format!(
+                            "Character '{}' {action_label} clip {idx} was not packaged for runtime",
+                            character_name
+                        ));
+                        None
+                    }
+                }
             }
             None if required => {
                 report.error(format!(
-                    "Character '{}' has no {role_label} clip assigned",
-                    resource.name
+                    "Character '{}' has no {action_label} clip assigned",
+                    character_name
                 ));
                 None
             }
-            None => Some(CHARACTER_CLIP_NONE),
+            None => Some((
+                CHARACTER_CLIP_NONE,
+                character_action_flags_for(action, None),
+            )),
         }
     };
 
-    let idle_clip = resolve_role(
-        AnimationRole::Idle,
-        character.idle_clip,
-        true,
-        project,
-        report,
-    )?;
-    let walk_clip = resolve_role(
-        AnimationRole::Walk,
-        character.walk_clip,
-        true,
-        project,
-        report,
-    )?;
-    let run_clip = resolve_role(
-        AnimationRole::Run,
-        character.run_clip,
-        false,
-        project,
-        report,
-    )
-    .unwrap_or(CHARACTER_CLIP_NONE);
-    let turn_clip = resolve_role(
-        AnimationRole::Turn,
-        character.turn_clip,
-        false,
-        project,
-        report,
-    )
-    .unwrap_or(CHARACTER_CLIP_NONE);
+    let mut action_clips = [CHARACTER_CLIP_NONE; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut action_flags = [0u8; PLAYTEST_CHARACTER_ACTION_COUNT];
+    for action in CharacterAnimationAction::ALL {
+        let (clip, flags) = resolve_action(action, action.required_for_player(), project, report)?;
+        action_clips[action.to_index()] = clip;
+        action_flags[action.to_index()] = flags;
+    }
 
-    if character.radius == 0 {
-        report.error(format!("Character '{}' radius must be > 0", resource.name));
+    if settings.radius == 0 {
+        report.error(format!("Character '{character_name}' radius must be > 0"));
         return None;
     }
-    if character.height == 0 {
-        report.error(format!("Character '{}' height must be > 0", resource.name));
+    if settings.height == 0 {
+        report.error(format!("Character '{character_name}' height must be > 0"));
         return None;
     }
-    if character.walk_speed <= 0 {
+    if settings.walk_speed <= 0 || settings.run_speed <= 0 {
         report.error(format!(
-            "Character '{}' walk_speed must be > 0",
-            resource.name
+            "Character Controller for '{}' walk/run speeds must be > 0",
+            character_name
         ));
         return None;
     }
-    if character.turn_speed_degrees_per_second == 0 {
+    if settings.turn_speed_degrees_per_second == 0 {
         report.error(format!(
-            "Character '{}' turn_speed must be > 0",
-            resource.name
+            "Character Controller for '{}' turn_speed must be > 0",
+            character_name
+        ));
+        return None;
+    }
+    if settings.stamina_max_q12 <= 0 {
+        report.error(format!(
+            "Character Controller for '{}' stamina_max must be > 0",
+            character_name
+        ));
+        return None;
+    }
+    if settings.sprint_min_q12 < 0
+        || settings.sprint_drain_q12 < 0
+        || settings.stamina_recover_q12 < 0
+        || settings.roll_cost_q12 < 0
+        || settings.backstep_cost_q12 < 0
+    {
+        report.error(format!(
+            "Character Controller for '{}' stamina costs and recovery must be >= 0",
+            character_name
+        ));
+        return None;
+    }
+    if settings.roll_speed <= 0 || settings.backstep_speed <= 0 {
+        report.error(format!(
+            "Character Controller for '{}' evade speeds must be > 0",
+            character_name
+        ));
+        return None;
+    }
+    if settings.roll_active_frames == 0 || settings.backstep_active_frames == 0 {
+        report.error(format!(
+            "Character Controller for '{}' evade active frames must be > 0",
+            character_name
         ));
         return None;
     }
     if character.camera_distance <= 0 {
         report.error(format!(
             "Character '{}' camera_distance must be > 0",
-            resource.name
+            character_name
         ));
         return None;
     }
     if character.camera_height < 0 || character.camera_target_height < 0 {
         report.error(format!(
             "Character '{}' camera offsets must be >= 0",
-            resource.name
+            character_name
         ));
         return None;
     }
 
-    if run_clip == CHARACTER_CLIP_NONE {
+    if action_clips[CharacterAnimationAction::Run.to_index()] == CHARACTER_CLIP_NONE {
         report.warn(format!(
-            "Character '{}' has no run clip — runtime will fall back to walk for run input",
-            resource.name
+            "Character '{character_name}' has no run clip -- runtime will fall back to walk for run input",
         ));
     }
-    if turn_clip == CHARACTER_CLIP_NONE {
-        report.warn(format!("Character '{}' has no turn clip", resource.name));
+    if action_clips[CharacterAnimationAction::Turn.to_index()] == CHARACTER_CLIP_NONE {
+        report.warn(format!("Character '{character_name}' has no turn clip"));
+    }
+    if action_clips[CharacterAnimationAction::Roll.to_index()] == CHARACTER_CLIP_NONE {
+        report.warn(format!(
+            "Character '{character_name}' has no roll clip -- runtime will fall back to run/walk",
+        ));
+    }
+    if action_clips[CharacterAnimationAction::Backstep.to_index()] == CHARACTER_CLIP_NONE {
+        report.warn(format!(
+            "Character '{character_name}' has no backstep clip -- runtime will fall back to walk",
+        ));
     }
 
     let character_index = u16::try_from(characters.len()).unwrap_or(u16::MAX);
     characters.push(PlaytestCharacter {
-        source_resource: character_id,
+        source_resource: character_id.unwrap_or(model_resource_id),
         model: model_index,
-        idle_clip,
-        walk_clip,
-        run_clip,
-        turn_clip,
-        radius: character.radius,
-        height: character.height,
-        walk_speed: character.walk_speed,
-        run_speed: character.run_speed,
-        turn_speed_degrees_per_second: character.turn_speed_degrees_per_second,
+        action_clips,
+        action_flags,
+        visual_offset,
+        visual_yaw,
+        visual_scale_q8,
+        radius: settings.radius,
+        height: settings.height,
+        walk_speed: settings.walk_speed,
+        run_speed: settings.run_speed,
+        turn_speed_degrees_per_second: settings.turn_speed_degrees_per_second,
+        stamina_max_q12: settings.stamina_max_q12,
+        sprint_min_q12: settings.sprint_min_q12,
+        sprint_drain_q12: settings.sprint_drain_q12,
+        stamina_recover_q12: settings.stamina_recover_q12,
+        roll_cost_q12: settings.roll_cost_q12,
+        roll_speed: settings.roll_speed,
+        roll_active_frames: settings.roll_active_frames,
+        roll_recovery_frames: settings.roll_recovery_frames,
+        roll_invulnerable_frames: settings.roll_invulnerable_frames,
+        backstep_cost_q12: settings.backstep_cost_q12,
+        backstep_speed: settings.backstep_speed,
+        backstep_active_frames: settings.backstep_active_frames,
+        backstep_recovery_frames: settings.backstep_recovery_frames,
+        backstep_invulnerable_frames: settings.backstep_invulnerable_frames,
         camera_distance: character.camera_distance,
         camera_height: character.camera_height,
         camera_target_height: character.camera_target_height,
@@ -1334,6 +1850,8 @@ fn register_model_for_instance(
     model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut std::collections::HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     if let Some(&existing) = model_for_resource.get(&model_resource_id) {
@@ -1461,12 +1979,34 @@ fn register_model_for_instance(
         None
     };
 
-    // Clip assets -- one .psxanim per resolved clip, validated for
-    // joint parity. Legacy model-local clips stay first so existing
-    // clip indices keep working; compatible AnimationClip resources
-    // are appended for the new shared animation library path.
+    let authored_default_clip = match model.default_clip {
+        Some(idx) if (idx as usize) < resolved_clips.len() => idx,
+        Some(idx) => {
+            report.error(format!(
+                "Model '{}' default_clip {idx} is out of range ({} clips)",
+                resource.name,
+                resolved_clips.len()
+            ));
+            return None;
+        }
+        None => 0,
+    };
+    let selected_clip_indices = runtime_model_clip_indices(
+        resolved_clips.len(),
+        runtime_model_clips.get(&model_resource_id),
+        authored_default_clip,
+    );
+
+    // Clip assets -- one .psxanim per runtime-needed clip. The
+    // editor may keep a much larger animation library on the model;
+    // the PS1 package only needs defaults, placed overrides, and
+    // character role clips.
     let clip_first = u16::try_from(model_clips.len()).unwrap_or(u16::MAX);
-    for (i, clip) in resolved_clips.iter().enumerate() {
+    let mut clip_remap = vec![None; resolved_clips.len()];
+    for (local_i, resolved_i) in selected_clip_indices.iter().copied().enumerate() {
+        let Some(clip) = resolved_clips.get(resolved_i as usize) else {
+            continue;
+        };
         let abs = resolve_path(&clip.psxanim_path, project_root);
         let bytes = match std::fs::read(&abs) {
             Ok(b) => b,
@@ -1531,21 +2071,33 @@ fn register_model_for_instance(
                 return None;
             }
         };
+        let floor_y = baked_bounds
+            .first()
+            .map(|bounds| bounds.floor_y)
+            .unwrap_or(0);
         model_frame_bounds.extend(baked_bounds);
         model_clip_bounds.push(PlaytestModelClipBounds {
             model: model_index,
             clip: clip_index,
             first_frame: frame_first,
             frame_count,
+            floor_y,
+            pose_offset: clip.calibration.offset,
+            flags: if clip.calibration.in_place {
+                model_clip_flags::IN_PLACE
+            } else {
+                0
+            },
         });
         let asset_index = assets.len();
         let safe_clip = sanitise_model_dirname(&clip.name);
         assets.push(PlaytestAsset {
             kind: PlaytestAssetKind::ModelAnimation,
             bytes,
-            filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", i),
+            filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
             source_label: format!("{} / {}", resource.name, clip.name),
         });
+        clip_remap[resolved_i as usize] = u16::try_from(local_i).ok();
         model_clips.push(PlaytestModelClip {
             model: model_index,
             name: clip.name.clone(),
@@ -1561,18 +2113,16 @@ fn register_model_for_instance(
     //     silently pointing at clip 0.
     //   - `None` falls back to clip 0. Cooker has already
     //     refused empty-clip placed models, so `clip_count >= 1`.
-    let default_clip = match model.default_clip {
-        Some(idx) => {
-            if idx >= clip_count {
-                report.error(format!(
-                    "Model '{}' default_clip {idx} is out of range ({} clips)",
-                    resource.name, clip_count
-                ));
-                return None;
-            }
-            idx
-        }
-        None => 0,
+    let Some(default_clip) = clip_remap
+        .get(authored_default_clip as usize)
+        .copied()
+        .flatten()
+    else {
+        report.error(format!(
+            "Model '{}' default_clip {authored_default_clip} was not packaged for runtime",
+            resource.name
+        ));
+        return None;
     };
 
     let socket_first = u16::try_from(model_sockets.len()).unwrap_or(u16::MAX);
@@ -1628,6 +2178,7 @@ fn register_model_for_instance(
         collision_radius: model.collision_radius,
     });
     model_for_resource.insert(model_resource_id, model_index);
+    model_clip_remaps.insert(model_resource_id, clip_remap);
     Some(model_index)
 }
 
@@ -1667,15 +2218,17 @@ fn bake_model_frame_pair_bounds(
 ) -> PlaytestModelFrameBounds {
     let mut min = [i32::MAX; 3];
     let mut max = [i32::MIN; 3];
-    accumulate_model_frame_bounds(model, animation, a, &mut min, &mut max);
+    let mut floor_y = i32::MIN;
+    accumulate_model_frame_bounds(model, animation, a, &mut min, &mut max, &mut floor_y);
     if b != a {
-        accumulate_model_frame_bounds(model, animation, b, &mut min, &mut max);
+        accumulate_model_frame_bounds(model, animation, b, &mut min, &mut max, &mut floor_y);
     }
 
     if min[0] == i32::MAX {
         return PlaytestModelFrameBounds {
             center: [0, 0, 0],
             radius: MODEL_FRAME_BOUNDS_PAD_UNITS,
+            floor_y: 0,
         };
     }
 
@@ -1685,7 +2238,11 @@ fn bake_model_frame_pair_bounds(
         average_i32(min[2], max[2]),
     ];
     let radius = aabb_radius(min, max).saturating_add(MODEL_FRAME_BOUNDS_PAD_UNITS);
-    PlaytestModelFrameBounds { center, radius }
+    PlaytestModelFrameBounds {
+        center,
+        radius,
+        floor_y,
+    }
 }
 
 fn accumulate_model_frame_bounds(
@@ -1694,9 +2251,11 @@ fn accumulate_model_frame_bounds(
     frame: u16,
     min: &mut [i32; 3],
     max: &mut [i32; 3],
+    floor_y: &mut i32,
 ) {
     let joint_count = model.joint_count().min(animation.joint_count());
     let mut joints = Vec::with_capacity(joint_count as usize);
+    let mut raw_joints = Vec::with_capacity(joint_count as usize);
     let mut joint = 0u16;
     while joint < joint_count {
         if let Some(pose) = animation.pose(frame, joint) {
@@ -1704,6 +2263,7 @@ fn accumulate_model_frame_bounds(
                 pose,
                 model.local_to_world_q12(),
             ));
+            raw_joints.push(model_bounds_joint_transform(pose, 0x1000));
         }
         joint += 1;
     }
@@ -1719,6 +2279,10 @@ fn accumulate_model_frame_bounds(
             part_index += 1;
             continue;
         };
+        let Some(raw_primary) = raw_joints.get(primary_joint).copied() else {
+            part_index += 1;
+            continue;
+        };
         let first = part.first_vertex();
         let end = first
             .saturating_add(part.vertex_count())
@@ -1727,13 +2291,20 @@ fn accumulate_model_frame_bounds(
         while vertex_index < end {
             if let Some(vertex) = model.vertex(vertex_index) {
                 let mut point = transform_model_bounds_vertex(primary, vertex);
+                let mut raw_point = transform_model_bounds_vertex(raw_primary, vertex);
                 if vertex.is_blend() {
                     if let Some(secondary) = joints.get(vertex.joint1 as usize).copied() {
                         let secondary_point = transform_model_bounds_vertex(secondary, vertex);
                         point = lerp_bounds_point(point, secondary_point, vertex.blend);
                     }
+                    if let Some(raw_secondary) = raw_joints.get(vertex.joint1 as usize).copied() {
+                        let raw_secondary_point =
+                            transform_model_bounds_vertex(raw_secondary, vertex);
+                        raw_point = lerp_bounds_point(raw_point, raw_secondary_point, vertex.blend);
+                    }
                 }
                 include_bounds_point(point, min, max);
+                *floor_y = (*floor_y).max(raw_point[1]);
             }
             vertex_index += 1;
         }
@@ -1864,6 +2435,9 @@ fn push_model_instance_for_resource(
     room_index: u16,
     pos: [i32; 3],
     yaw: i16,
+    visual_yaw: i16,
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
@@ -1872,6 +2446,8 @@ fn push_model_instance_for_resource(
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_instances: &mut Vec<PlaytestModelInstance>,
     model_for_resource: &mut HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let Some(model_index) = register_model_for_instance(
@@ -1885,21 +2461,31 @@ fn push_model_instance_for_resource(
         model_frame_bounds,
         model_sockets,
         model_for_resource,
+        runtime_model_clips,
+        model_clip_remaps,
         report,
     ) else {
         return false;
     };
-    let model = &models[model_index as usize];
     let clip = match clip_override {
         Some(idx) => {
-            if idx >= model.clip_count {
+            let authored_clip_count = project
+                .resolved_model_animation_clips(model_resource_id)
+                .len();
+            if idx as usize >= authored_clip_count {
                 report.error(format!(
-                    "Model instance '{node_name}' clip override {idx} out of range (model has {})",
-                    model.clip_count
+                    "Model instance '{node_name}' clip override {idx} out of range (model has {authored_clip_count})"
                 ));
                 return false;
             }
-            idx
+            let Some(local) = remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
+            else {
+                report.error(format!(
+                    "Model instance '{node_name}' clip override {idx} was not packaged for runtime"
+                ));
+                return false;
+            };
+            local
         }
         None => MODEL_CLIP_INHERIT,
     };
@@ -1911,6 +2497,9 @@ fn push_model_instance_for_resource(
         y: pos[1],
         z: pos[2],
         yaw,
+        visual_yaw,
+        visual_offset,
+        visual_scale_q8,
         flags: 0,
     });
     true
@@ -1933,6 +2522,8 @@ fn push_character_controller_idle_instance(
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_instances: &mut Vec<PlaytestModelInstance>,
     model_for_resource: &mut HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let Some(resource) = project.resource(character_id) else {
@@ -1967,6 +2558,8 @@ fn push_character_controller_idle_instance(
         model_frame_bounds,
         model_sockets,
         model_for_resource,
+        runtime_model_clips,
+        model_clip_remaps,
         report,
     ) else {
         return false;
@@ -1977,6 +2570,7 @@ fn push_character_controller_idle_instance(
         character,
         model_resource_id,
         &models[model_index as usize],
+        model_clip_remaps,
         report,
     ) else {
         return false;
@@ -1989,6 +2583,9 @@ fn push_character_controller_idle_instance(
         y: pos[1],
         z: pos[2],
         yaw,
+        visual_yaw: 0,
+        visual_offset: [0; 3],
+        visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
         flags: 0,
     });
     true
@@ -2000,6 +2597,7 @@ fn character_idle_clip_for_model_instance(
     character: &crate::CharacterResource,
     model_resource_id: ResourceId,
     model: &PlaytestModel,
+    model_clip_remaps: &HashMap<ResourceId, Vec<Option<u16>>>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
     let model_skeleton =
@@ -2025,11 +2623,14 @@ fn character_idle_clip_for_model_instance(
         }
         if let Some(animation_id) = set.role_clip(AnimationRole::Idle) {
             return match project.resolved_model_animation_index(model_resource_id, animation_id) {
-                Some(index) if index < model.clip_count => Some(index),
                 Some(index) => {
+                    if let Some(local) =
+                        remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)
+                    {
+                        return Some(local);
+                    }
                     report.error(format!(
-                        "Character '{character_name}' idle clip resolves to {index}, out of range ({} clips on model)",
-                        model.clip_count
+                        "Character '{character_name}' idle clip resolves to {index}, but that clip was not packaged for runtime"
                     ));
                     None
                 }
@@ -2045,11 +2646,13 @@ fn character_idle_clip_for_model_instance(
     }
 
     match character.idle_clip {
-        Some(idx) if idx < model.clip_count => Some(idx),
         Some(idx) => {
+            if let Some(local) = remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
+            {
+                return Some(local);
+            }
             report.error(format!(
-                "Character '{character_name}' idle clip {idx} out of range ({} clips on model)",
-                model.clip_count
+                "Character '{character_name}' idle clip {idx} was not packaged for runtime"
             ));
             None
         }
@@ -2069,6 +2672,8 @@ fn register_weapon_for_equipment(
     model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
     model_sockets: &mut Vec<PlaytestModelSocket>,
     model_for_resource: &mut HashMap<ResourceId, u16>,
+    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
+    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
     weapon_hitboxes: &mut Vec<PlaytestWeaponHitbox>,
     weapons: &mut Vec<PlaytestWeapon>,
     weapon_for_resource: &mut HashMap<ResourceId, u16>,
@@ -2104,6 +2709,8 @@ fn register_weapon_for_equipment(
             model_frame_bounds,
             model_sockets,
             model_for_resource,
+            runtime_model_clips,
+            model_clip_remaps,
             report,
         )?),
         None => None,
@@ -2154,13 +2761,23 @@ fn playtest_weapon_shape(shape: &crate::WeaponHitShape) -> PlaytestWeaponHitShap
 }
 
 #[derive(Clone, Copy)]
-struct AnimatorComponent {
+struct ModelRendererComponent {
+    model: Option<ResourceId>,
+    visual_offset: [i16; 3],
+    visual_yaw: i16,
+    visual_scale_q8: u16,
+}
+
+#[derive(Clone, Copy)]
+struct AnimatorComponent<'a> {
     clip: Option<u16>,
+    action_clips: &'a [crate::CharacterActionClip],
 }
 
 #[derive(Clone, Copy)]
 struct CharacterControllerComponent {
     character: Option<ResourceId>,
+    settings: CharacterControllerSettings,
     player: bool,
 }
 
@@ -2173,16 +2790,34 @@ struct EquipmentComponent<'a> {
 fn component_model_renderer(
     scene: &crate::Scene,
     host: &SceneNode,
-) -> Option<(Option<ResourceId>, Option<ResourceId>)> {
+) -> Option<ModelRendererComponent> {
     component_children(scene, host).find_map(|node| match &node.kind {
-        NodeKind::ModelRenderer { model, material } => Some((*model, *material)),
+        NodeKind::ModelRenderer {
+            model,
+            material: _,
+            visual_offset,
+            visual_scale_q8,
+        } => Some(ModelRendererComponent {
+            model: *model,
+            visual_offset: *visual_offset,
+            visual_yaw: yaw_from_degrees(node.transform.rotation_degrees[1]),
+            visual_scale_q8: *visual_scale_q8,
+        }),
         _ => None,
     })
 }
 
-fn component_animator(scene: &crate::Scene, host: &SceneNode) -> Option<AnimatorComponent> {
+fn component_animator<'a>(
+    scene: &'a crate::Scene,
+    host: &'a SceneNode,
+) -> Option<AnimatorComponent<'a>> {
     component_children(scene, host).find_map(|node| match &node.kind {
-        NodeKind::Animator { clip, .. } => Some(AnimatorComponent { clip: *clip }),
+        NodeKind::Animator {
+            clip, action_clips, ..
+        } => Some(AnimatorComponent {
+            clip: *clip,
+            action_clips,
+        }),
         _ => None,
     })
 }
@@ -2192,8 +2827,13 @@ fn component_character_controller(
     host: &SceneNode,
 ) -> Option<CharacterControllerComponent> {
     component_children(scene, host).find_map(|node| match &node.kind {
-        NodeKind::CharacterController { character, player } => Some(CharacterControllerComponent {
+        NodeKind::CharacterController {
+            character,
+            settings,
+            player,
+        } => Some(CharacterControllerComponent {
             character: *character,
+            settings: *settings,
             player: *player,
         }),
         _ => None,
@@ -2319,6 +2959,7 @@ fn push_image_prop(
         width: width.max(1),
         height: height.max(1),
         tint_rgb: material.tint,
+        baked_vertex_rgb: [rgb_tuple(material.tint); 4],
         flags: if cylindrical_billboard {
             image_prop_flags::CYLINDRICAL_BILLBOARD
         } else {
@@ -2508,6 +3149,126 @@ fn bake_static_surface_lights(rooms: &mut [CookedRoomBakeInput], lights: &[Playt
     }
 }
 
+fn bake_static_image_prop_lights(
+    image_props: &mut [PlaytestImageProp],
+    rooms: &[CookedRoomBakeInput],
+    lights: &[PlaytestLight],
+) {
+    for prop in image_props {
+        let Some(room) = rooms.iter().find(|room| room.room_index == prop.room) else {
+            continue;
+        };
+        let room_lights: Vec<&PlaytestLight> = lights
+            .iter()
+            .filter(|light| light.room == prop.room)
+            .collect();
+        let ambient = room.cooked.ambient_color;
+        let base = prop.tint_rgb;
+        prop.baked_vertex_rgb = if prop.flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0 {
+            let bottom = [prop.x, prop.y, prop.z];
+            let top = [prop.x, prop.y.saturating_add(prop.height as i32), prop.z];
+            let top_rgb = rgb_tuple(bake_static_vertex_rgb(top, base, ambient, &room_lights));
+            let bottom_rgb = rgb_tuple(bake_static_vertex_rgb(bottom, base, ambient, &room_lights));
+            [top_rgb, top_rgb, bottom_rgb, bottom_rgb]
+        } else {
+            let vertices = image_prop_static_vertices(prop);
+            [
+                rgb_tuple(bake_static_vertex_rgb(
+                    vertices[0],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    vertices[1],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    vertices[2],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    vertices[3],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+            ]
+        };
+    }
+}
+
+fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
+    let half_width = (prop.width as i32) / 2;
+    let height = prop.height as i32;
+    let locals = [
+        [-half_width, height, 0],
+        [half_width, height, 0],
+        [half_width, 0, 0],
+        [-half_width, 0, 0],
+    ];
+    let mut out = [[0, 0, 0]; 4];
+    for (idx, local) in locals.iter().enumerate() {
+        let rotated =
+            rotate_image_prop_local(*local, prop.pitch as u16, prop.yaw as u16, prop.roll as u16);
+        out[idx] = [
+            prop.x.saturating_add(rotated[0]),
+            prop.y.saturating_add(rotated[1]),
+            prop.z.saturating_add(rotated[2]),
+        ];
+    }
+    out
+}
+
+fn rotate_image_prop_local(v: [i32; 3], pitch: u16, yaw: u16, roll: u16) -> [i32; 3] {
+    rotate_z_q12(rotate_y_q12(rotate_x_q12(v, pitch), yaw), roll)
+}
+
+fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = psx_engine::Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
+    [
+        v[0],
+        mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
+        mul_q12_i32(v[1], s) + mul_q12_i32(v[2], c),
+    ]
+}
+
+fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = psx_engine::Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
+    [
+        mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
+        v[1],
+        -mul_q12_i32(v[0], s) + mul_q12_i32(v[2], c),
+    ]
+}
+
+fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
+    let angle = psx_engine::Angle::from_q12(angle_q12);
+    let s = angle.sin().raw();
+    let c = angle.cos().raw();
+    [
+        mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
+        mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
+        v[2],
+    ]
+}
+
+fn mul_q12_i32(value: i32, q12: i32) -> i32 {
+    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
+    (rgb[0], rgb[1], rgb[2])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn bake_surface_vertex_rgb(
     materials: &[CookedWorldMaterial],
@@ -2675,6 +3436,7 @@ const FULL_HEIGHT_BLOCKER_TOLERANCE: i32 = 32;
 fn append_room_visibility(
     room_index: u16,
     cooked: &CookedWorldGrid,
+    visibility_radius: u16,
     room_visibility: &mut Vec<PlaytestRoomVisibility>,
     visibility_cells: &mut Vec<PlaytestVisibilityCell>,
     visibility_pvs: &mut Vec<PlaytestVisibilityPvs>,
@@ -2696,6 +3458,7 @@ fn append_room_visibility(
         cooked.depth,
         &local_cells,
         &index_by_coord,
+        visibility_radius,
         visibility_pvs,
         visibility_pvs_bits,
     );
@@ -3049,6 +3812,7 @@ fn append_visibility_pvs(
     depth: u16,
     cells: &[PlaytestVisibilityCell],
     index_by_coord: &[Option<usize>],
+    visibility_radius: u16,
     visibility_pvs: &mut Vec<PlaytestVisibilityPvs>,
     visibility_pvs_bits: &mut Vec<u8>,
 ) {
@@ -3056,7 +3820,15 @@ fn append_visibility_pvs(
     let mut bits = vec![0u8; bitset_bytes];
     for anchor_index in 0..cells.len() {
         bits.fill(0);
-        fill_visibility_pvs_bits(anchor_index, width, depth, cells, index_by_coord, &mut bits);
+        fill_visibility_pvs_bits(
+            anchor_index,
+            width,
+            depth,
+            cells,
+            index_by_coord,
+            visibility_radius,
+            &mut bits,
+        );
         let byte_first =
             find_existing_visibility_pvs_bits(visibility_pvs, visibility_pvs_bits, &bits)
                 .unwrap_or_else(|| {
@@ -3101,9 +3873,17 @@ fn fill_visibility_pvs_bits(
     depth: u16,
     cells: &[PlaytestVisibilityCell],
     index_by_coord: &[Option<usize>],
+    visibility_radius: u16,
     bits: &mut [u8],
 ) -> Vec<usize> {
-    let visible = visibility_indices_for_anchor(anchor_index, width, depth, cells, index_by_coord);
+    let visible = visibility_indices_for_anchor(
+        anchor_index,
+        width,
+        depth,
+        cells,
+        index_by_coord,
+        visibility_radius,
+    );
     for &index in &visible {
         set_visibility_pvs_bit(bits, index);
     }
@@ -3116,6 +3896,7 @@ fn visibility_indices_for_anchor(
     depth: u16,
     cells: &[PlaytestVisibilityCell],
     index_by_coord: &[Option<usize>],
+    visibility_radius: u16,
 ) -> Vec<usize> {
     if anchor_index >= cells.len() {
         return Vec::new();
@@ -3132,7 +3913,7 @@ fn visibility_indices_for_anchor(
     while let Some(&(cell_index, distance)) = queue.get(cursor) {
         cursor += 1;
         visible.push(cell_index);
-        if distance >= PLAYTEST_VISIBILITY_CELL_RADIUS {
+        if distance >= visibility_radius {
             continue;
         }
 
@@ -3663,6 +4444,22 @@ mod tests {
         project
     }
 
+    #[test]
+    fn streaming_chunk_target_override_accepts_square_and_rect_values() {
+        let default = WorldStreamingSettings::default().chunk_config();
+
+        let square = streaming_chunk_config_with_target(default, "8").expect("square target");
+        assert_eq!(square.target_width, 8);
+        assert_eq!(square.target_depth, 8);
+
+        let rect = streaming_chunk_config_with_target(default, "12x6").expect("rect target");
+        assert_eq!(rect.target_width, 12);
+        assert_eq!(rect.target_depth, 6);
+
+        assert!(streaming_chunk_config_with_target(default, "").is_none());
+        assert!(streaming_chunk_config_with_target(default, "8x8x8").is_none());
+    }
+
     fn is_player_spawn_node(scene: &crate::Scene, node: &SceneNode) -> bool {
         match &node.kind {
             NodeKind::SpawnPoint { player: true, .. } => true,
@@ -3712,6 +4509,7 @@ mod tests {
                 NodeKind::CharacterController {
                     player: true,
                     character: Some(character),
+                    ..
                 } => Some(*character),
                 _ => None,
             })
@@ -3752,7 +4550,9 @@ mod tests {
                     *player = false;
                     *character = None;
                 }
-                NodeKind::CharacterController { player, character } if *player => {
+                NodeKind::CharacterController {
+                    player, character, ..
+                } if *player => {
                     *player = false;
                     *character = None;
                 }
@@ -3981,19 +4781,21 @@ mod tests {
     #[test]
     fn visibility_pvs_adds_one_cell_boundary_shell() {
         let width = 1;
-        let depth = PLAYTEST_VISIBILITY_CELL_RADIUS + 6;
+        let radius = DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS;
+        let depth = radius + 6;
         let mut cells: Vec<PlaytestVisibilityCell> =
             (0..depth).map(|z| visibility_test_cell(0, z, 0)).collect();
         let index_by_coord = visibility_index_by_coord(width, depth, &cells);
         assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
 
-        let visible = visibility_indices_for_anchor(0, width, depth, &cells, &index_by_coord);
+        let visible =
+            visibility_indices_for_anchor(0, width, depth, &cells, &index_by_coord, radius);
 
-        assert_eq!(visible.len(), PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 2);
+        assert_eq!(visible.len(), radius as usize + 2);
         assert!(visible.contains(&0));
-        assert!(visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize)));
-        assert!(visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 1)));
-        assert!(!visible.contains(&(PLAYTEST_VISIBILITY_CELL_RADIUS as usize + 2)));
+        assert!(visible.contains(&(radius as usize)));
+        assert!(visible.contains(&(radius as usize + 1)));
+        assert!(!visible.contains(&(radius as usize + 2)));
     }
 
     #[test]
@@ -4007,7 +4809,14 @@ mod tests {
         let index_by_coord = visibility_index_by_coord(width, depth, &cells);
         assign_visibility_portals(width, depth, &index_by_coord, &mut cells);
 
-        let visible = visibility_indices_for_anchor(0, width, depth, &cells, &index_by_coord);
+        let visible = visibility_indices_for_anchor(
+            0,
+            width,
+            depth,
+            &cells,
+            &index_by_coord,
+            DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS,
+        );
 
         assert_eq!(visible, vec![1, 0]);
     }
@@ -4022,7 +4831,15 @@ mod tests {
         let mut pvs = Vec::new();
         let mut bits = Vec::new();
 
-        append_visibility_pvs(width, depth, &cells, &index_by_coord, &mut pvs, &mut bits);
+        append_visibility_pvs(
+            width,
+            depth,
+            &cells,
+            &index_by_coord,
+            DEFAULT_PLAYTEST_VISIBILITY_CELL_RADIUS,
+            &mut pvs,
+            &mut bits,
+        );
 
         assert_eq!(pvs.len(), 2);
         assert_eq!(bits.len(), 1);
@@ -4070,8 +4887,8 @@ mod tests {
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("package returned on ok report");
-        assert_eq!(package.rooms.len(), 4);
-        assert_eq!(package.room_asset_count(), 4);
+        assert_eq!(package.rooms.len(), 8);
+        assert_eq!(package.room_asset_count(), 8);
         assert!(package
             .spawn
             .is_some_and(|spawn| (spawn.room as usize) < package.rooms.len()));
@@ -4145,10 +4962,181 @@ mod tests {
         let character = &package.characters[0];
         // Starter characters use the shared standalone FBX
         // library rather than model-local Meshy clips.
-        assert_eq!(character.idle_clip, 0);
-        assert_eq!(character.walk_clip, 1);
-        assert_eq!(character.run_clip, 1);
-        assert_eq!(character.turn_clip, CHARACTER_CLIP_NONE);
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Idle.to_index()],
+            0
+        );
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Walk.to_index()],
+            1
+        );
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Run.to_index()],
+            1
+        );
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Turn.to_index()],
+            CHARACTER_CLIP_NONE
+        );
+    }
+
+    #[test]
+    fn animation_set_infers_evade_roles_from_extra_clip_names() {
+        let mut project = ProjectDocument::new("role inference");
+        let skeleton = project.add_resource(
+            "Skeleton",
+            ResourceData::Skeleton(crate::SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "test".to_string(),
+                note: String::new(),
+            }),
+        );
+        let roll = project.add_resource(
+            "Meshy Gold / roll dodge",
+            ResourceData::AnimationClip(crate::AnimationClipResource {
+                psxanim_path: "roll.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: crate::AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: Vec::new(),
+                calibration: Default::default(),
+            }),
+        );
+        let backstep = project.add_resource(
+            "Meshy Gold / step back",
+            ResourceData::AnimationClip(crate::AnimationClipResource {
+                psxanim_path: "backstep.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: crate::AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: Vec::new(),
+                calibration: Default::default(),
+            }),
+        );
+        let light_attack = project.add_resource(
+            "Standalone FBX / sword attack",
+            ResourceData::AnimationClip(crate::AnimationClipResource {
+                psxanim_path: "attack.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: crate::AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: Vec::new(),
+                calibration: Default::default(),
+            }),
+        );
+        let heavy_attack = project.add_resource(
+            "Custom flourish",
+            ResourceData::AnimationClip(crate::AnimationClipResource {
+                psxanim_path: "heavy.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: crate::AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: Vec::new(),
+                calibration: Default::default(),
+            }),
+        );
+        let mut set = crate::AnimationSetResource {
+            skeleton: Some(skeleton),
+            clips: vec![roll, backstep, light_attack],
+            ..crate::AnimationSetResource::default()
+        };
+        set.set_action_clip(CharacterAnimationAction::HeavyAttack, Some(heavy_attack));
+
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::Roll),
+            Some(roll)
+        );
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::Backstep),
+            Some(backstep)
+        );
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::LightAttack),
+            Some(light_attack)
+        );
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::HeavyAttack),
+            Some(heavy_attack)
+        );
+        assert_eq!(
+            animation_set_action_clip(&project, &set, CharacterAnimationAction::ComboAttack),
+            None,
+            "generic attack clips must not fill every combat action"
+        );
+    }
+
+    #[test]
+    fn player_character_controller_settings_drive_cooked_character() {
+        let mut project = project_with_one_room();
+        let controller_id = player_controller_component_id(&project);
+        let scene = project.active_scene_mut();
+        let controller = scene.node_mut(controller_id).unwrap();
+        let NodeKind::CharacterController { settings, .. } = &mut controller.kind else {
+            panic!("starter player controller must be a Character Controller");
+        };
+        settings.walk_speed = 61;
+        settings.run_speed = 133;
+        settings.turn_speed_degrees_per_second = 270;
+        settings.stamina_max_q12 = 2048;
+        settings.roll_speed = 144;
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let character = &package.expect("package returned on ok report").characters[0];
+        assert_eq!(character.walk_speed, 61);
+        assert_eq!(character.run_speed, 133);
+        assert_eq!(character.turn_speed_degrees_per_second, 270);
+        assert_eq!(character.stamina_max_q12, 2048);
+        assert_eq!(character.roll_speed, 144);
+    }
+
+    #[test]
+    fn player_model_renderer_visual_transform_drives_cooked_character() {
+        let mut project = project_with_one_room();
+        let spawn_id = player_spawn_node_id(&project);
+        let scene = project.active_scene_mut();
+        let renderer_id = scene
+            .node(spawn_id)
+            .and_then(|node| {
+                node.children.iter().find_map(|child| {
+                    scene.node(*child).and_then(|node| {
+                        matches!(node.kind, NodeKind::ModelRenderer { .. }).then_some(node.id)
+                    })
+                })
+            })
+            .expect("starter player has a model renderer");
+        let renderer = scene.node_mut(renderer_id).unwrap();
+        let NodeKind::ModelRenderer {
+            visual_offset,
+            visual_scale_q8,
+            ..
+        } = &mut renderer.kind
+        else {
+            panic!("expected model renderer");
+        };
+        *visual_offset = [32, -16, 48];
+        *visual_scale_q8 = crate::MODEL_SCALE_ONE_Q8 + 64;
+        renderer.transform.rotation_degrees[1] = 45.0;
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let character = &package.expect("package returned on ok report").characters[0];
+        assert_eq!(character.visual_offset, [32, -16, 48]);
+        assert_eq!(character.visual_yaw, 512);
+        assert_eq!(character.visual_scale_q8, crate::MODEL_SCALE_ONE_Q8 + 64);
     }
 
     #[test]
@@ -4310,40 +5298,131 @@ mod tests {
     }
 
     #[test]
-    fn player_spawn_without_character_assignment_auto_picks_when_one_exists() {
-        // Keep exactly one Character. Clear the spawn's explicit
-        // reference; cooker should auto-pick + warn.
+    fn legacy_spawn_without_character_assignment_auto_picks_when_one_exists() {
+        // Keep exactly one Character. Component-authored players use
+        // their Model Renderer directly, so this legacy auto-pick path
+        // is only for SpawnPoint-authored projects.
         let mut project = project_with_one_room();
         let player_character = player_character_resource_id(&project);
         project.resources.retain(|resource| {
             !matches!(resource.data, ResourceData::Character(_)) || resource.id == player_character
         });
-        let controller_id = player_controller_component_id(&project);
-        if let Some(node) = project.active_scene_mut().node_mut(controller_id) {
-            if let NodeKind::CharacterController { character, .. } = &mut node.kind {
-                *character = None;
-            }
+        demote_player_spawns(&mut project);
+        let room_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        let spawn_id = project.active_scene_mut().add_node(
+            room_id,
+            "Legacy Player Spawn",
+            NodeKind::SpawnPoint {
+                player: true,
+                character: None,
+            },
+        );
+        if let Some(node) = project.active_scene_mut().node_mut(spawn_id) {
+            node.transform.translation = [0.0, 0.0, 0.0];
         }
         let (package, report) = build_package(&project, &starter_project_root());
+        assert!(
+            report.is_ok(),
+            "errors: {:?}; warnings: {:?}",
+            report.errors,
+            report.warnings
+        );
         let package = package.expect("auto-pick should succeed");
         assert!(package.player_controller.is_some());
         assert!(report.warnings.iter().any(|w| w.contains("auto-picked")));
     }
 
     #[test]
-    fn character_with_zero_radius_fails_validation() {
+    fn component_player_without_profile_uses_model_renderer_and_animator() {
         let mut project = project_with_one_room();
-        let character_id = project
-            .resources
-            .iter()
-            .find_map(|r| match &r.data {
-                crate::ResourceData::Character(_) => Some(r.id),
-                _ => None,
+        let model = player_model_resource_id(&project);
+        let controller_id = player_controller_component_id(&project);
+        let scene = project.active_scene_mut();
+        if let Some(controller) = scene.node_mut(controller_id) {
+            let NodeKind::CharacterController {
+                character,
+                settings,
+                ..
+            } = &mut controller.kind
+            else {
+                panic!("starter player controller must be a Character Controller");
+            };
+            *character = None;
+            settings.walk_speed = 77;
+        }
+        let player = player_spawn_node_id(&project);
+        let animator_id = project
+            .active_scene()
+            .node(player)
+            .and_then(|node| {
+                node.children.iter().find_map(|id| {
+                    project.active_scene().node(*id).and_then(|child| {
+                        matches!(child.kind, NodeKind::Animator { .. }).then_some(child.id)
+                    })
+                })
             })
-            .expect("starter has a Character");
-        if let Some(resource) = project.resource_mut(character_id) {
-            if let crate::ResourceData::Character(c) = &mut resource.data {
-                c.radius = 0;
+            .expect("starter player has Animator component");
+        if let Some(animator) = project.active_scene_mut().node_mut(animator_id) {
+            let NodeKind::Animator { action_clips, .. } = &mut animator.kind else {
+                panic!("expected Animator component");
+            };
+            action_clips.push(crate::CharacterActionClip {
+                action: CharacterAnimationAction::Idle,
+                clip: 0,
+                options: None,
+            });
+            action_clips.push(crate::CharacterActionClip {
+                action: CharacterAnimationAction::Walk,
+                clip: 0,
+                options: None,
+            });
+            action_clips.push(crate::CharacterActionClip {
+                action: CharacterAnimationAction::Backstep,
+                clip: 0,
+                options: Some(crate::CharacterActionOptions {
+                    looping: true,
+                    in_place: false,
+                }),
+            });
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        assert!(
+            !report.warnings.iter().any(|w| w.contains("auto-picked")),
+            "component player should not secretly auto-pick a profile: {:?}",
+            report.warnings
+        );
+        let package = package.expect("component player cooks");
+        let character = &package.characters[0];
+        assert_eq!(character.walk_speed, 77);
+        assert_eq!(
+            package.models[character.model as usize].source_resource,
+            model
+        );
+        assert_eq!(
+            character.action_clips[CharacterAnimationAction::Backstep.to_index()],
+            0
+        );
+        assert_eq!(
+            character.action_flags[CharacterAnimationAction::Backstep.to_index()],
+            character_action_flags::LOOPING | character_action_flags::IN_PLACE_OVERRIDE
+        );
+    }
+
+    #[test]
+    fn character_controller_with_zero_radius_fails_validation() {
+        let mut project = project_with_one_room();
+        let controller_id = player_controller_component_id(&project);
+        if let Some(node) = project.active_scene_mut().node_mut(controller_id) {
+            if let NodeKind::CharacterController { settings, .. } = &mut node.kind {
+                settings.radius = 0;
             }
         }
         let (package, report) = build_package(&project, &starter_project_root());
@@ -4406,6 +5485,7 @@ mod tests {
                 camera_distance: 1500,
                 camera_height: 800,
                 camera_target_height: 600,
+                ..CharacterResource::defaults()
             }),
         );
         let serialized = project.to_ron_string().expect("serializes");
@@ -4417,6 +5497,10 @@ mod tests {
                 assert_eq!(c.walk_clip, Some(1));
                 assert_eq!(c.radius, 200);
                 assert_eq!(c.walk_speed, 50);
+                assert_eq!(
+                    c.roll_active_frames,
+                    CharacterResource::defaults().roll_active_frames
+                );
                 assert_eq!(c.camera_target_height, 600);
             }
             _ => panic!("character resource lost its variant after round-trip"),
@@ -4425,11 +5509,16 @@ mod tests {
 
     #[test]
     fn starter_project_emits_expected_texture_assets() {
-        // Starter cooks one room texture and the player atlas.
+        // Starter cooks one room texture, one sky panorama, and the player atlas.
         let project = project_with_one_room();
         let (package, _) = build_package(&project, &starter_project_root());
         let package = package.expect("starter cooks");
-        assert_eq!(package.texture_asset_count(), 2);
+        assert_eq!(package.texture_asset_count(), 3);
+        assert!(package.rooms[0]
+            .sky
+            .cloud_layer
+            .texture_asset_index
+            .is_some());
     }
 
     #[test]
@@ -4457,6 +5546,11 @@ mod tests {
             assert!(count > 0);
             assert!(first + count <= package.model_frame_bounds.len());
             assert!(package.model_frame_bounds[first].radius > 0);
+            assert_eq!(
+                bounds.floor_y, package.model_frame_bounds[first].floor_y,
+                "clip floor anchor should use its first cooked frame floor"
+            );
+            assert_ne!(package.model_frame_bounds[first].floor_y, i32::MIN);
         }
     }
 
@@ -4998,10 +6092,10 @@ mod tests {
 
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
-        assert_eq!(package.rooms.len(), 4);
+        assert_eq!(package.rooms.len(), 8);
         assert_eq!(package.lights.len(), 2);
-        assert!(package.lights.iter().any(|light| light.room == 0));
-        assert!(package.lights.iter().any(|light| light.room == 1));
+        let light_rooms: BTreeSet<u16> = package.lights.iter().map(|light| light.room).collect();
+        assert_eq!(light_rooms.len(), 2);
     }
 
     #[test]
@@ -5039,7 +6133,7 @@ mod tests {
 
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
-        assert_eq!(package.rooms.len(), 2);
+        assert_eq!(package.rooms.len(), 4);
         let mut transition_walls = 0usize;
         for room in &package.rooms {
             let world = psx_asset::World::from_bytes(&package.assets[room.world_asset_index].bytes)
@@ -5160,6 +6254,59 @@ mod tests {
     }
 
     #[test]
+    fn billboard_image_props_bake_vertical_static_lighting() {
+        let mut props = vec![PlaytestImageProp {
+            room: 0,
+            texture_asset_index: 0,
+            x: 0,
+            y: 0,
+            z: 0,
+            pitch: 0,
+            yaw: 0,
+            roll: 0,
+            width: 128,
+            height: 512,
+            tint_rgb: [128, 128, 128],
+            baked_vertex_rgb: [(128, 128, 128); 4],
+            flags: image_prop_flags::CYLINDRICAL_BILLBOARD,
+        }];
+        let room = CookedRoomBakeInput {
+            room_index: 0,
+            world_asset_index: 0,
+            world_origin: [0, 0],
+            cooked: CookedWorldGrid {
+                width: 0,
+                depth: 0,
+                sector_size: 1024,
+                sectors: Vec::new(),
+                materials: Vec::new(),
+                ambient_color: [32, 32, 32],
+                static_vertex_lighting: true,
+                fog_enabled: false,
+                fog_color: [0, 0, 0],
+                fog_near: 0,
+                fog_far: 0,
+            },
+        };
+        let lights = [PlaytestLight {
+            room: 0,
+            x: 0,
+            y: 512,
+            z: 0,
+            radius: 1024,
+            intensity_q8: 256,
+            color: [128, 128, 128],
+        }];
+
+        bake_static_image_prop_lights(&mut props, &[room], &lights);
+
+        assert_eq!(props[0].baked_vertex_rgb[0], (160, 160, 160));
+        assert_eq!(props[0].baked_vertex_rgb[1], (160, 160, 160));
+        assert_eq!(props[0].baked_vertex_rgb[2], (96, 96, 96));
+        assert_eq!(props[0].baked_vertex_rgb[3], (96, 96, 96));
+    }
+
+    #[test]
     fn light_with_zero_radius_fails() {
         let mut project = ProjectDocument::starter();
         let ids = starter_light_ids(&project);
@@ -5265,6 +6412,7 @@ mod tests {
         starter_model.clips.push(crate::ModelAnimationClip {
             name: "neutral idle".to_string(),
             psxanim_path: "assets/animations/standalone_fbx/neutral_idle.psxanim".to_string(),
+            calibration: Default::default(),
         });
         let mut project = ProjectDocument::new("equipment-test");
         let texture = project.add_resource(
@@ -5326,6 +6474,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
             },
         );
         scene.add_node(
@@ -5333,6 +6483,7 @@ mod tests {
             "Animator",
             NodeKind::Animator {
                 clip: Some(0),
+                action_clips: Vec::new(),
                 autoplay: true,
             },
         );
@@ -5341,6 +6492,7 @@ mod tests {
             "Character Controller",
             NodeKind::CharacterController {
                 character: Some(character),
+                settings: CharacterControllerSettings::default(),
                 player: true,
             },
         );
@@ -5429,6 +6581,46 @@ mod tests {
         assert_eq!(model.default_clip, 0);
         // Sanity: never emit the old u16::MAX sentinel.
         assert!(model.default_clip < model.clip_count);
+    }
+
+    #[test]
+    fn playtest_packages_only_runtime_required_player_clips() {
+        let project = ProjectDocument::starter();
+        let player_model = player_model_resource_id(&project);
+        let authored_clip_count = project.resolved_model_animation_clips(player_model).len();
+        assert!(
+            authored_clip_count > 4,
+            "starter should expose library clips for this regression"
+        );
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        let (model_index, model) = package
+            .models
+            .iter()
+            .enumerate()
+            .find(|(_, model)| model.source_resource == player_model)
+            .expect("player model is packaged");
+
+        assert!(
+            (model.clip_count as usize) < authored_clip_count,
+            "runtime should not package the full editor animation library"
+        );
+
+        let character = package
+            .characters
+            .iter()
+            .find(|character| character.model == model_index as u16)
+            .expect("player character is packaged");
+        for action in CharacterAnimationAction::ALL {
+            let clip = character.action_clips[action.to_index()];
+            if action.required_for_player() {
+                assert!(clip < model.clip_count);
+            } else if clip != CHARACTER_CLIP_NONE {
+                assert!(clip < model.clip_count);
+            }
+        }
     }
 
     #[test]
@@ -5586,14 +6778,31 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [24, 8, -12],
+                visual_scale_q8: crate::MODEL_SCALE_ONE_Q8 + 32,
             },
         );
+        let renderer_id = scene
+            .node(entity)
+            .and_then(|node| node.children.first().copied())
+            .expect("renderer child");
+        scene
+            .node_mut(renderer_id)
+            .expect("renderer exists")
+            .transform
+            .rotation_degrees[1] = 45.0;
 
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
         assert_eq!(package.model_instances.len(), 1);
         assert_eq!(package.model_instances[0].yaw, 1024);
+        assert_eq!(package.model_instances[0].visual_yaw, 512);
+        assert_eq!(package.model_instances[0].visual_offset, [24, 8, -12]);
+        assert_eq!(
+            package.model_instances[0].visual_scale_q8,
+            crate::MODEL_SCALE_ONE_Q8 + 32
+        );
     }
 
     #[test]
@@ -5662,6 +6871,7 @@ mod tests {
             "Character Controller",
             NodeKind::CharacterController {
                 character: Some(character_id),
+                settings: CharacterControllerSettings::default(),
                 player: false,
             },
         );
@@ -5681,7 +6891,10 @@ mod tests {
         let instance = package.model_instances[0];
         assert_eq!(instance.yaw, 2048);
         assert_eq!(instance.model, package.characters[0].model);
-        assert_eq!(instance.clip, package.characters[0].idle_clip);
+        assert_eq!(
+            instance.clip,
+            package.characters[0].action_clips[CharacterAnimationAction::Idle.to_index()]
+        );
     }
 
     #[test]
@@ -5718,6 +6931,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
             },
         );
 
@@ -5736,6 +6951,7 @@ mod tests {
         assert!(src.contains("LevelModelRecord"));
         assert!(src.contains("collision_radius:"));
         assert!(src.contains("LevelModelInstanceRecord"));
+        assert!(src.contains("visual_yaw:"));
         assert!(src.contains("LevelModelClipRecord"));
         assert!(src.contains("LevelModelClipBoundsRecord"));
         assert!(src.contains("LevelModelFrameBoundsRecord"));

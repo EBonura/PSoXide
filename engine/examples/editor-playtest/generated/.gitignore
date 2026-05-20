@@ -10,4 +10,5 @@ world_pack_order.txt
 rooms/*.psxw
 stream_chunks/*.psxc
 textures/*.psxt
+sky/*.psxt
 models/

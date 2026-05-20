@@ -47,11 +47,14 @@ use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
 /// 4096-cap caps the per-frame primitive count at a comfortable
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
-const SKY_QUAD_CAP: usize = 2;
+const SKY_QUAD_CAP: usize = psxed_project::SKY_CYCLORAMA_QUAD_MAX;
 const FAR_VISTA_QUAD_CAP: usize = 16;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
 /// editor preview exercises the same overflow behavior.
 const PREVIEW_MODEL_VERTEX_CAP: usize = 1024;
+const PREVIEW_MODEL_SOURCE_VERTEX_CAP: usize = PREVIEW_MODEL_VERTEX_CAP;
+const PREVIEW_MODEL_FACE_CAP: usize = 2048;
+const PREVIEW_MODEL_PART_CAP: usize = 128;
 const PREVIEW_MODEL_COMMAND_CAP: usize = TRI_CAP;
 /// Cap on placed model-rendering nodes the editor preview will
 /// render in one frame. Excess instances skip silently (the
@@ -88,6 +91,7 @@ const SCREEN_CX: i32 = SCREEN_W / 2;
 const SCREEN_CY: i32 = SCREEN_H / 2;
 /// Projection-plane distance (focal length). Bigger = narrower FOV.
 const PROJ_H: i32 = 320;
+const NEAR_Z: i32 = 64;
 const PSX_VERTEX_MIN: i16 = -1024;
 const PSX_VERTEX_MAX: i16 = 1023;
 const PSX_TRI_MAX_DX: i32 = 1023;
@@ -126,6 +130,9 @@ struct PreviewScratch {
     tris: [TriFlat; TRI_CAP],
     tex_tris: [TriTextured; TRI_CAP],
     model_vertices: [psx_engine::ProjectedVertex; PREVIEW_MODEL_VERTEX_CAP],
+    model_faces: [psx_engine::TexturedModelRenderFace; PREVIEW_MODEL_FACE_CAP],
+    model_parts: [psx_asset::ModelPart; PREVIEW_MODEL_PART_CAP],
+    model_source_vertices: [psx_asset::ModelVertex; PREVIEW_MODEL_SOURCE_VERTEX_CAP],
     model_joint_transforms: [psx_engine::JointViewTransform; PREVIEW_JOINT_CAP],
     /// `0` = next free slot in `tris` (flat-shaded);
     /// `tex_used` = next free slot in `tex_tris`.
@@ -168,6 +175,9 @@ static SCRATCH: Mutex<PreviewScratch> = Mutex::new(PreviewScratch {
     tris: [EMPTY_TRI; TRI_CAP],
     tex_tris: [EMPTY_TEX_TRI; TRI_CAP],
     model_vertices: [psx_engine::ProjectedVertex::new(0, 0, 0); PREVIEW_MODEL_VERTEX_CAP],
+    model_faces: [psx_engine::TexturedModelRenderFace::ZERO; PREVIEW_MODEL_FACE_CAP],
+    model_parts: [psx_asset::ModelPart::ZERO; PREVIEW_MODEL_PART_CAP],
+    model_source_vertices: [psx_asset::ModelVertex::ZERO; PREVIEW_MODEL_SOURCE_VERTEX_CAP],
     model_joint_transforms: [psx_engine::JointViewTransform::ZERO; PREVIEW_JOINT_CAP],
     used: 0,
     sky_used: 0,
@@ -197,6 +207,7 @@ pub fn build_phase1_frame(
     camera: ViewportCameraState,
     preview_fog: bool,
     preview_backface_wireframe: bool,
+    preview_bounds: bool,
     show_grid: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
@@ -227,14 +238,14 @@ pub fn build_phase1_frame(
     scratch.overlay_lines.clear();
     scratch.ot.clear();
 
+    let world_camera = setup_gte_for_camera(camera);
     let resolved_sky = project
         .active_scene()
         .world_sky_for_node(room_id)
         .unwrap_or_default()
         .resolved_for_room(grid.fog_enabled && preview_fog, grid.fog_color);
     push_clear(&mut scratch, resolved_sky.lower_color);
-    push_sky_gradient(&mut scratch, resolved_sky);
-    let world_camera = setup_gte_for_camera(camera);
+    push_cyclorama(&mut scratch, resolved_sky, world_camera);
     let resolved_far_vista = project
         .active_scene()
         .world_far_vista_for_node(room_id)
@@ -268,10 +279,11 @@ pub fn build_phase1_frame(
         hidden_scene_nodes,
         selected,
         hovered_entity_node,
+        preview_bounds,
         &mut scratch,
     );
     if show_grid {
-        push_streaming_chunk_boundaries(grid, &mut scratch);
+        push_streaming_chunk_boundaries(project, room_id, grid, &mut scratch);
     }
     walk_entities(project, grid, hidden_scene_nodes, selected, &mut scratch);
     walk_light_gizmos(
@@ -328,10 +340,12 @@ pub fn build_phase1_frame(
     // rendering left it set to the last joint's view, which
     // would project entity bound lines into junk.
     let _ = setup_gte_for_camera(camera);
-    walk_entity_bounds(entity_bounds, selected, hovered_entity_node, &mut scratch);
-    if let Some((center, half_extents)) = selected_bounds {
-        if !selected_node_is_image_prop(project, selected) {
-            push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
+    if preview_bounds {
+        walk_entity_bounds(entity_bounds, selected, hovered_entity_node, &mut scratch);
+        if let Some((center, half_extents)) = selected_bounds {
+            if !selected_node_is_image_prop(project, selected) {
+                push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
+            }
         }
     }
     for selection in validation_issue_primitives {
@@ -370,10 +384,10 @@ fn first_visible_room_grid<'a>(
 /// `project_triangle` calls produce screen-space coords for the
 /// requested editor camera.
 fn setup_gte_for_camera(camera: ViewportCameraState) -> psx_engine::WorldCamera {
-    let cos_p = psx_gte::transform::cos_1_3_12(camera.pitch_q12) as i32;
-    let sin_p = psx_gte::transform::sin_1_3_12(camera.pitch_q12) as i32;
-    let cos_y = psx_gte::transform::cos_1_3_12(camera.yaw_q12) as i32;
-    let sin_y = psx_gte::transform::sin_1_3_12(camera.yaw_q12) as i32;
+    let cos_p = cos_q12_turn(camera.pitch_q12);
+    let sin_p = sin_q12_turn(camera.pitch_q12);
+    let cos_y = cos_q12_turn(camera.yaw_q12);
+    let sin_y = sin_q12_turn(camera.yaw_q12);
     let anchor = camera.anchor_i32();
     let [cam_x, cam_y, cam_z] = camera.position_i32();
 
@@ -912,8 +926,12 @@ fn component_children<'a>(
 struct PreviewModelReference {
     model_id: ResourceId,
     clip_override: Option<u16>,
+    autoplay: bool,
     renderer_node: Option<NodeId>,
     animator_node: Option<NodeId>,
+    visual_offset: [i16; 3],
+    visual_yaw_q12: u16,
+    visual_scale_q8: u16,
 }
 
 fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewModelReference> {
@@ -925,8 +943,12 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
         } => Some(PreviewModelReference {
             model_id: *model_id,
             clip_override: *animation_clip,
+            autoplay: true,
             renderer_node: None,
             animator_node: None,
+            visual_offset: [0; 3],
+            visual_yaw_q12: 0,
+            visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         }),
         NodeKind::Entity => {
             let mut renderer = None;
@@ -935,22 +957,38 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                 match &child.kind {
                     NodeKind::ModelRenderer {
                         model: Some(model_id),
+                        visual_offset,
+                        visual_scale_q8,
                         ..
                     } if renderer.is_none() => {
-                        renderer = Some((child.id, *model_id));
+                        renderer = Some((
+                            child.id,
+                            *model_id,
+                            *visual_offset,
+                            yaw_to_q12(child.transform.rotation_degrees[1]),
+                            *visual_scale_q8,
+                        ));
                     }
-                    NodeKind::Animator { clip, .. } if animator.is_none() => {
-                        animator = Some((child.id, *clip));
+                    NodeKind::Animator { clip, autoplay, .. } if animator.is_none() => {
+                        animator = Some((child.id, *clip, *autoplay));
                     }
                     _ => {}
                 }
             }
-            renderer.map(|(renderer_node, model_id)| PreviewModelReference {
-                model_id,
-                clip_override: animator.and_then(|(_, clip)| clip),
-                renderer_node: Some(renderer_node),
-                animator_node: animator.map(|(node_id, _)| node_id),
-            })
+            renderer.map(
+                |(renderer_node, model_id, visual_offset, visual_yaw_q12, visual_scale_q8)| {
+                    PreviewModelReference {
+                        model_id,
+                        clip_override: animator.and_then(|(_, clip, _)| clip),
+                        autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
+                        renderer_node: Some(renderer_node),
+                        animator_node: animator.map(|(node_id, _, _)| node_id),
+                        visual_offset,
+                        visual_yaw_q12,
+                        visual_scale_q8,
+                    }
+                },
+            )
         }
         _ => None,
     }
@@ -972,7 +1010,15 @@ fn preview_static_model_reference(
 #[derive(Clone, Copy)]
 struct PreviewPlayerReference {
     character: Option<ResourceId>,
+    model_override: Option<ResourceId>,
+    clip_override: Option<u16>,
     controller_node: Option<NodeId>,
+    renderer_node: Option<NodeId>,
+    animator_node: Option<NodeId>,
+    autoplay: bool,
+    visual_offset: [i16; 3],
+    visual_yaw_q12: u16,
+    visual_scale_q8: u16,
 }
 
 fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPlayerReference> {
@@ -982,21 +1028,70 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
             character,
         } => Some(PreviewPlayerReference {
             character: *character,
+            model_override: None,
+            clip_override: None,
             controller_node: None,
+            renderer_node: None,
+            animator_node: None,
+            autoplay: true,
+            visual_offset: [0; 3],
+            visual_yaw_q12: 0,
+            visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         }),
-        NodeKind::Entity => component_children(scene, node).find_map(|child| {
-            let NodeKind::CharacterController {
-                character,
-                player: true,
-            } = &child.kind
-            else {
-                return None;
-            };
-            Some(PreviewPlayerReference {
-                character: *character,
-                controller_node: Some(child.id),
+        NodeKind::Entity => {
+            let mut controller = None;
+            let mut renderer = None;
+            let mut animator = None;
+            for child in component_children(scene, node) {
+                match &child.kind {
+                    NodeKind::CharacterController {
+                        character,
+                        player: true,
+                        ..
+                    } if controller.is_none() => {
+                        controller = Some((child.id, *character));
+                    }
+                    NodeKind::ModelRenderer {
+                        model,
+                        visual_offset,
+                        visual_scale_q8,
+                        ..
+                    } if renderer.is_none() => {
+                        renderer = Some((
+                            child.id,
+                            *model,
+                            *visual_offset,
+                            yaw_to_q12(child.transform.rotation_degrees[1]),
+                            *visual_scale_q8,
+                        ));
+                    }
+                    NodeKind::Animator { clip, autoplay, .. } if animator.is_none() => {
+                        animator = Some((child.id, *clip, *autoplay));
+                    }
+                    _ => {}
+                }
+            }
+            controller.map(|(controller_node, character)| {
+                let (renderer_node, model_override, visual_offset, visual_yaw_q12, visual_scale_q8) =
+                    renderer
+                        .map(|(node, model, offset, yaw, scale)| {
+                            (Some(node), model, offset, yaw, scale)
+                        })
+                        .unwrap_or((None, None, [0; 3], 0, psxed_project::MODEL_SCALE_ONE_Q8));
+                PreviewPlayerReference {
+                    character,
+                    model_override,
+                    clip_override: animator.and_then(|(_, clip, _)| clip),
+                    controller_node: Some(controller_node),
+                    renderer_node,
+                    animator_node: animator.map(|(node_id, _, _)| node_id),
+                    autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
+                    visual_offset,
+                    visual_yaw_q12,
+                    visual_scale_q8,
+                }
             })
-        }),
+        }
         _ => None,
     }
 }
@@ -1006,8 +1101,12 @@ fn preview_reference_selected(
     host_id: NodeId,
     component_a: Option<NodeId>,
     component_b: Option<NodeId>,
+    component_c: Option<NodeId>,
 ) -> bool {
-    selected == host_id || component_a == Some(selected) || component_b == Some(selected)
+    selected == host_id
+        || component_a == Some(selected)
+        || component_b == Some(selected)
+        || component_c == Some(selected)
 }
 
 fn preview_reference_hidden(
@@ -1016,10 +1115,12 @@ fn preview_reference_hidden(
     host_id: NodeId,
     component_a: Option<NodeId>,
     component_b: Option<NodeId>,
+    component_c: Option<NodeId>,
 ) -> bool {
     scene_node_hidden(scene, hidden_scene_nodes, host_id)
         || component_a.is_some_and(|id| scene_node_hidden(scene, hidden_scene_nodes, id))
         || component_b.is_some_and(|id| scene_node_hidden(scene, hidden_scene_nodes, id))
+        || component_c.is_some_and(|id| scene_node_hidden(scene, hidden_scene_nodes, id))
 }
 
 fn scene_node_hidden(scene: &Scene, hidden_scene_nodes: &HashSet<NodeId>, id: NodeId) -> bool {
@@ -1602,9 +1703,11 @@ fn walk_image_props(
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: NodeId,
     hovered: Option<NodeId>,
+    preview_bounds: bool,
     scratch: &mut PreviewScratch,
 ) {
     let scene = project.active_scene();
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
     for node in scene.nodes() {
         if scene_node_hidden(scene, hidden_scene_nodes, node.id)
             || !is_descendant_of_room(scene, node.id, room_id)
@@ -1651,9 +1754,9 @@ fn walk_image_props(
         let u_max = slot.texture_width.saturating_sub(1);
         let v_max = slot.texture_height.saturating_sub(1);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-        let material =
-            TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (tint[0], tint[1], tint[2]))
-                .with_texture_window(slot.texture_window);
+        let lit_tint = preview_lit_image_prop_tint(tint, verts, &lights, grid.ambient_color);
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, lit_tint)
+            .with_texture_window(slot.texture_window);
         let _ = push_textured_material_tri(
             scratch,
             [p[0], p[1], p[2]],
@@ -1670,27 +1773,53 @@ fn walk_image_props(
         );
         let is_selected = node.id == selected;
         let is_hovered = hovered == Some(node.id);
-        push_world_quad_wireframe(
-            scratch,
-            verts,
-            entity_bound_style(
-                psxed_ui::EntityBoundKind::ImageProp,
-                is_selected,
-                is_hovered,
-            ),
-        );
-        if *collision_enabled {
-            push_image_prop_collision_wireframe(
+        if preview_bounds {
+            push_world_quad_wireframe(
                 scratch,
-                origin,
-                *height,
-                *collision_size,
-                node.transform.rotation_degrees,
-                *cylindrical_billboard,
-                IMAGE_PROP_COLLISION_BOX,
+                verts,
+                entity_bound_style(
+                    psxed_ui::EntityBoundKind::ImageProp,
+                    is_selected,
+                    is_hovered,
+                ),
             );
+            if *collision_enabled {
+                push_image_prop_collision_wireframe(
+                    scratch,
+                    origin,
+                    *height,
+                    *collision_size,
+                    node.transform.rotation_degrees,
+                    *cylindrical_billboard,
+                    IMAGE_PROP_COLLISION_BOX,
+                );
+            }
         }
     }
+}
+
+fn preview_lit_image_prop_tint(
+    tint: [u8; 3],
+    verts: [psx_engine::WorldVertex; 4],
+    lights: &[psx_engine::PointLightSample],
+    ambient: [u8; 3],
+) -> (u8, u8, u8) {
+    let center = [
+        average_i32_4(verts[0].x, verts[1].x, verts[2].x, verts[3].x),
+        average_i32_4(verts[0].y, verts[1].y, verts[2].y, verts[3].y),
+        average_i32_4(verts[0].z, verts[1].z, verts[2].z, verts[3].z),
+    ];
+    psx_engine::shade_material_tint_with_lights(
+        psx_engine::MaterialTint::from_tuple((tint[0], tint[1], tint[2])),
+        center,
+        psx_engine::Rgb8::from_array(ambient),
+        lights.iter().copied(),
+    )
+    .to_tuple()
+}
+
+fn average_i32_4(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    ((a as i64 + b as i64 + c as i64 + d as i64) / 4).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 fn image_prop_vertices(
@@ -1821,8 +1950,8 @@ fn push_image_prop_collision_wireframe(
 }
 
 fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+    let s = sin_q12_turn(angle_q12);
+    let c = cos_q12_turn(angle_q12);
     [
         v[0],
         mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
@@ -1831,8 +1960,8 @@ fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
 }
 
 fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+    let s = sin_q12_turn(angle_q12);
+    let c = cos_q12_turn(angle_q12);
     [
         mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
         v[1],
@@ -1841,8 +1970,8 @@ fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
 }
 
 fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+    let s = sin_q12_turn(angle_q12);
+    let c = cos_q12_turn(angle_q12);
     [
         mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
         mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
@@ -1852,6 +1981,14 @@ fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
 
 fn mul_q12_i32(value: i32, q12: i32) -> i32 {
     (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn sin_q12_turn(angle_q12: u16) -> i32 {
+    psx_engine::Angle::from_q12(angle_q12).sin().raw()
+}
+
+fn cos_q12_turn(angle_q12: u16) -> i32 {
+    psx_engine::Angle::from_q12(angle_q12).cos().raw()
 }
 
 fn preview_projected_from_engine(
@@ -1888,11 +2025,16 @@ struct PreviewModelInstance<'a> {
     /// stays floor-anchored in `InstanceMeta`; this is lifted to
     /// the cooked model's centre before drawing.
     origin: psx_engine::WorldVertex,
-    /// Y-axis rotation matrix derived from the node's yaw.
-    instance_rotation: Mat3I16,
+    /// Y-axis rotation matrix used for mesh vertices.
+    model_rotation: Mat3I16,
+    /// Render-only scale from the ModelRenderer component.
+    visual_scale_q8: u16,
     /// Lit and fogged model texture tint, matching editor-playtest's
     /// single-material actor lighting path.
     tint: (u8, u8, u8),
+    /// Whether the editor preview should advance this instance's
+    /// animation phase. Disabled instances hold frame zero.
+    autoplay: bool,
 }
 
 /// Render every Model-backed legacy `MeshInstance` or component
@@ -1945,6 +2087,7 @@ fn walk_model_instances(
             node.id,
             reference.renderer_node,
             reference.animator_node,
+            None,
         ) {
             continue;
         }
@@ -1984,23 +2127,27 @@ fn walk_model_instances(
         let origin = floor_anchored_node_room_local_origin(grid, &node.transform);
 
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
-        let instance_rotation = yaw_rotation_q12(yaw_q12);
+        let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
 
         instances_meta.push(InstanceMeta {
             mesh_id: reference.model_id,
             clip_local,
             origin,
-            instance_rotation,
+            model_rotation,
             atlas: atlas_slot,
             is_selected: preview_reference_selected(
                 selected,
                 node.id,
                 reference.renderer_node,
                 reference.animator_node,
+                None,
             ),
+            autoplay: reference.autoplay,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
+            visual_offset: reference.visual_offset,
+            visual_scale_q8: reference.visual_scale_q8,
         });
     }
 
@@ -2037,14 +2184,22 @@ fn walk_model_instances(
         let Ok(animation) = psx_asset::Animation::from_bytes(anim_bytes) else {
             continue;
         };
-        let origin = floor_anchored_model_origin(meta.origin, meta.world_height);
+        let origin = visual_model_origin(
+            meta.origin,
+            meta.world_height,
+            meta.visual_offset,
+            meta.visual_scale_q8,
+            meta.model_rotation,
+        );
         instances.push(PreviewModelInstance {
             model,
             animation,
             atlas: meta.atlas,
             origin,
-            instance_rotation: meta.instance_rotation,
+            model_rotation: meta.model_rotation,
+            visual_scale_q8: meta.visual_scale_q8,
             tint: shade_model_tint(origin, *camera, fog, &lights, ambient),
+            autoplay: meta.autoplay,
         });
     }
 
@@ -2099,7 +2254,8 @@ fn walk_player_spawn_preview(
             hidden_scene_nodes,
             node.id,
             reference.controller_node,
-            None,
+            reference.renderer_node,
+            reference.animator_node,
         ) {
             continue;
         }
@@ -2113,7 +2269,7 @@ fn walk_player_spawn_preview(
         let ResourceData::Character(char_resource) = &character_resource.data else {
             continue;
         };
-        let Some(model_id) = char_resource.model else {
+        let Some(model_id) = reference.model_override.or(char_resource.model) else {
             continue;
         };
         let Some(model_resource) = project.resource(model_id) else {
@@ -2129,32 +2285,33 @@ fn walk_player_spawn_preview(
             continue;
         };
 
-        // Idle clip drives the preview loop -- the spec wants
-        // designers to see "what would the player be doing
-        // standing still here". Falls through to the model's
-        // preview / default clip if the Character has no idle
-        // assigned, so the surface still renders even when the
-        // Character is mid-author.
-        let clip_local = psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
-            project,
-            char_resource,
-            model_id,
-            model,
-        )
-        .unwrap_or(0);
+        // Animator clip drives the editor viewport when authored.
+        // Otherwise fall back to the player's idle action, then the
+        // model preview/default clip so partial characters still draw.
+        let clip_local = reference
+            .clip_override
+            .or_else(|| {
+                psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
+                    project,
+                    char_resource,
+                    model_id,
+                    model,
+                )
+            })
+            .unwrap_or(0);
         if (clip_local as usize) >= project.resolved_model_animation_clips(model_id).len() {
             continue;
         }
 
         let origin = floor_anchored_node_room_local_origin(grid, &node.transform);
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
-        let instance_rotation = yaw_rotation_q12(yaw_q12);
+        let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
 
         instances_meta.push(InstanceMeta {
             mesh_id: model_id,
             clip_local,
             origin,
-            instance_rotation,
+            model_rotation,
             atlas: atlas_slot,
             // Host/controller node is selected, not the model --
             // but the preview gizmo still helps designers see
@@ -2163,11 +2320,15 @@ fn walk_player_spawn_preview(
                 selected,
                 node.id,
                 reference.controller_node,
-                None,
+                reference.renderer_node,
+                reference.animator_node,
             ),
+            autoplay: reference.autoplay,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
+            visual_offset: reference.visual_offset,
+            visual_scale_q8: reference.visual_scale_q8,
         });
     }
 }
@@ -2238,8 +2399,8 @@ fn draw_model_selection_gizmo(meta: &InstanceMeta, scratch: &mut PreviewScratch)
     let top_w = [meta.origin.x, meta.origin.y - height, meta.origin.z];
     let mid_w = [meta.origin.x, meta.origin.y - height / 4, meta.origin.z];
     let len = (height / 3).max(128);
-    let s = psx_gte::transform::sin_1_3_12(meta.yaw_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(meta.yaw_q12) as i32;
+    let s = sin_q12_turn(meta.yaw_q12);
+    let c = cos_q12_turn(meta.yaw_q12);
     let forward_w = [
         meta.origin.x + ((s * len) >> 12),
         meta.origin.y - height / 4,
@@ -2337,7 +2498,7 @@ struct InstanceMeta {
     /// animation lands separately.
     clip_local: u16,
     origin: psx_engine::WorldVertex,
-    instance_rotation: Mat3I16,
+    model_rotation: Mat3I16,
     atlas: MaterialSlot,
     /// `true` when the placed instance is the currently
     /// selected scene node. Drives the selection gizmo.
@@ -2349,6 +2510,10 @@ struct InstanceMeta {
     /// Approximate world-space height for the facing arrow's
     /// vertical extent. Lifted from `ModelResource::world_height`.
     world_height: i32,
+    /// Render-only calibration copied from ModelRenderer.
+    visual_offset: [i16; 3],
+    visual_scale_q8: u16,
+    autoplay: bool,
 }
 
 fn floor_anchored_model_origin(
@@ -2364,12 +2529,39 @@ fn floor_anchored_model_origin(
     )
 }
 
+fn visual_model_origin(
+    origin: psx_engine::WorldVertex,
+    world_height: i32,
+    visual_offset: [i16; 3],
+    _visual_scale_q8: u16,
+    instance_rotation: Mat3I16,
+) -> psx_engine::WorldVertex {
+    let origin = floor_anchored_model_origin(origin, world_height);
+    let offset = rotate_visual_offset(instance_rotation, visual_offset);
+    psx_engine::WorldVertex::new(
+        origin.x.saturating_add(offset[0]),
+        origin.y.saturating_add(offset[1]),
+        origin.z.saturating_add(offset[2]),
+    )
+}
+
 fn model_origin_floor_lift(world_height: i32) -> i32 {
     // Imported model vertices are normalized around their bounds
     // centre, while editor placements describe the floor contact
     // point. The model path's projected Y convention needs the
     // render origin offset by +half height for that floor anchor.
     world_height.max(0) / 2
+}
+
+fn rotate_visual_offset(rotation: Mat3I16, offset: [i16; 3]) -> [i32; 3] {
+    let offset = [offset[0] as i32, offset[1] as i32, offset[2] as i32];
+    let row = |r: [i16; 3]| -> i32 {
+        let x = (r[0] as i32).saturating_mul(offset[0]);
+        let y = (r[1] as i32).saturating_mul(offset[1]);
+        let z = (r[2] as i32).saturating_mul(offset[2]);
+        x.saturating_add(y).saturating_add(z) >> 12
+    };
+    [row(rotation.m[0]), row(rotation.m[1]), row(rotation.m[2])]
 }
 
 /// Convert editor-Y rotation in degrees to PSX angle units
@@ -2383,8 +2575,8 @@ fn yaw_to_q12(degrees: f32) -> u16 {
 /// Y-axis rotation matrix in Q12. Mirrors `yaw_rotation_matrix`
 /// in editor-playtest's runtime.
 fn yaw_rotation_q12(yaw_q12: u16) -> Mat3I16 {
-    let s = psx_gte::transform::sin_1_3_12(yaw_q12);
-    let c = psx_gte::transform::cos_1_3_12(yaw_q12);
+    let s = clamp_i16(sin_q12_turn(yaw_q12));
+    let c = clamp_i16(cos_q12_turn(yaw_q12));
     Mat3I16 {
         m: [[c, 0, s], [0, 0x1000, 0], [-s, 0, c]],
     }
@@ -2423,6 +2615,9 @@ fn draw_preview_model_instances(
             tick,
             instance,
             &mut scratch.model_vertices,
+            &mut scratch.model_faces,
+            &mut scratch.model_parts,
+            &mut scratch.model_source_vertices,
             &mut scratch.model_joint_transforms,
         ) {
             break;
@@ -2441,31 +2636,134 @@ fn submit_preview_model_instance(
     tick: u32,
     instance: &PreviewModelInstance<'_>,
     projected_vertices: &mut [psx_engine::ProjectedVertex],
+    face_pool: &mut [psx_engine::TexturedModelRenderFace],
+    part_pool: &mut [psx_asset::ModelPart],
+    source_vertex_pool: &mut [psx_asset::ModelVertex],
     joint_view_transforms: &mut [psx_engine::JointViewTransform],
 ) -> bool {
-    let frame_q12 = instance.animation.phase_at_tick_q12(tick, 60);
+    let frame_q12 = if instance.autoplay {
+        instance.animation.phase_at_tick_q12(tick, 60)
+    } else {
+        0
+    };
     let material = TextureMaterial::opaque(
         instance.atlas.clut_word,
         instance.atlas.tpage_word,
         instance.tint,
     );
     let options = preview_model_surface_options(material);
+    let Some((geometry, faces)) = predecode_preview_model_geometry_faces(
+        instance.model,
+        face_pool,
+        part_pool,
+        source_vertex_pool,
+    ) else {
+        return false;
+    };
 
-    let stats = world.submit_textured_model(
+    let stats = world.submit_textured_model_predecoded_geometry_faces(
         triangles,
         instance.model,
         instance.animation,
         frame_q12,
         *camera,
         instance.origin,
-        instance.instance_rotation,
+        instance.model_rotation,
+        preview_model_local_to_world(instance.model, instance.visual_scale_q8),
+        psx_engine::ModelPoseTranslation::ZERO,
         projected_vertices,
         joint_view_transforms,
         material,
         options,
+        faces,
+        geometry,
     );
 
-    stats.primitive_overflow || stats.command_overflow
+    stats.primitive_overflow || stats.command_overflow || stats.vertex_overflow
+}
+
+fn preview_model_local_to_world(
+    model: psx_asset::Model<'_>,
+    visual_scale_q8: u16,
+) -> psx_engine::LocalToWorldScale {
+    let q12 = (model.local_to_world_q12() as u32)
+        .saturating_mul(visual_scale_q8.max(1) as u32)
+        .saturating_add((psxed_project::MODEL_SCALE_ONE_Q8 / 2) as u32)
+        / psxed_project::MODEL_SCALE_ONE_Q8 as u32;
+    psx_engine::LocalToWorldScale::from_q12(q12.clamp(1, u16::MAX as u32) as u16)
+}
+
+fn predecode_preview_model_geometry_faces<'a>(
+    model: psx_asset::Model<'_>,
+    face_pool: &'a mut [psx_engine::TexturedModelRenderFace],
+    part_pool: &'a mut [psx_asset::ModelPart],
+    vertex_pool: &'a mut [psx_asset::ModelVertex],
+) -> Option<(
+    psx_engine::TexturedModelGeometry<'a>,
+    &'a [psx_engine::TexturedModelRenderFace],
+)> {
+    let part_count = model.part_count() as usize;
+    let vertex_count = model.vertex_count() as usize;
+    let face_count = model.face_count() as usize;
+    if part_pool.len() < part_count
+        || vertex_pool.len() < vertex_count
+        || face_pool.len() < face_count
+    {
+        return None;
+    }
+
+    let mut i = 0usize;
+    while i < part_count {
+        part_pool[i] = model.part(i as u16)?;
+        i += 1;
+    }
+    i = 0;
+    while i < vertex_count {
+        vertex_pool[i] = model.vertex(i as u16)?;
+        i += 1;
+    }
+
+    let (max_u, max_v) = preview_model_uv_limits(model);
+    i = 0;
+    while i < face_count {
+        let face = model.face(i as u16)?;
+        face_pool[i] = psx_engine::TexturedModelRenderFace::new(
+            [
+                face.corners[0].vertex_index,
+                face.corners[1].vertex_index,
+                face.corners[2].vertex_index,
+            ],
+            [
+                clamp_preview_model_uv(face.corners[0].uv, max_u, max_v),
+                clamp_preview_model_uv(face.corners[1].uv, max_u, max_v),
+                clamp_preview_model_uv(face.corners[2].uv, max_u, max_v),
+            ],
+        );
+        i += 1;
+    }
+
+    Some((
+        psx_engine::TexturedModelGeometry::new(
+            &part_pool[..part_count],
+            &vertex_pool[..vertex_count],
+        ),
+        &face_pool[..face_count],
+    ))
+}
+
+fn preview_model_uv_limits(model: psx_asset::Model<'_>) -> (u8, u8) {
+    (
+        preview_model_uv_max(model.texture_width()),
+        preview_model_uv_max(model.texture_height()),
+    )
+}
+
+fn preview_model_uv_max(size: u16) -> u8 {
+    size.saturating_sub(1).min(u16::from(u8::MAX)) as u8
+}
+
+fn clamp_preview_model_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
+    (uv.0.min(max_u), uv.1.min(max_v))
 }
 
 fn preview_model_surface_options(material: TextureMaterial) -> psx_engine::WorldSurfaceOptions {
@@ -2515,9 +2813,9 @@ fn walk_light_gizmos(
     for light in preview_lights(scene, hidden_scene_nodes) {
         let center = node_room_local_origin(grid, &light.transform);
         let center_world = [center.x, center.y, center.z];
-        let is_selected = preview_reference_selected(selected, light.host_id, None, None);
-        let is_hovered =
-            hovered.is_some_and(|id| preview_reference_selected(id, light.host_id, None, None));
+        let is_selected = preview_reference_selected(selected, light.host_id, None, None, None);
+        let is_hovered = hovered
+            .is_some_and(|id| preview_reference_selected(id, light.host_id, None, None, None));
         let style = if is_selected {
             FaceOutlineStyle {
                 rgb: (0xFF, 0xE0, 0x80),
@@ -2719,8 +3017,8 @@ fn push_facing_arrow(
     style: FaceOutlineStyle,
 ) {
     let yaw_q12 = yaw_to_q12(yaw_degrees);
-    let s = psx_gte::transform::sin_1_3_12(yaw_q12) as i32;
-    let c = psx_gte::transform::cos_1_3_12(yaw_q12) as i32;
+    let s = sin_q12_turn(yaw_q12);
+    let c = cos_q12_turn(yaw_q12);
     // Arrow length = bound's horizontal half-extent + a small
     // overshoot so the head sits clearly outside the box.
     let reach = (half_extents[0].max(half_extents[2]) * 1.5).max(96.0) as i32;
@@ -2752,11 +3050,11 @@ fn push_horizontal_ring(
     let mut prev_world = [center[0] + radius, center[1], center[2]];
     let mut prev_proj = gte_scene::project_vertex(world_to_view(prev_world));
     for i in 1..=segments {
-        // PSX trig uses 4096 units per turn; sample the unit
-        // circle around the light origin once per segment.
+        // Authored editor angles use 4096 units per turn; sample
+        // the unit circle around the light origin once per segment.
         let angle_q12 = ((i as u32 * 4096) / segments as u32) as u16;
-        let s = psx_gte::transform::sin_1_3_12(angle_q12) as i32;
-        let c = psx_gte::transform::cos_1_3_12(angle_q12) as i32;
+        let s = sin_q12_turn(angle_q12);
+        let c = cos_q12_turn(angle_q12);
         let next_world = [
             center[0] + ((c * radius) >> 12),
             center[1],
@@ -3267,8 +3565,17 @@ fn push_triangle_outline(
     }
 }
 
-fn push_streaming_chunk_boundaries(grid: &WorldGrid, scratch: &mut PreviewScratch) {
-    let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config());
+fn push_streaming_chunk_boundaries(
+    project: &ProjectDocument,
+    room_id: NodeId,
+    grid: &WorldGrid,
+    scratch: &mut PreviewScratch,
+) {
+    let streaming = project
+        .active_scene()
+        .world_streaming_for_node(room_id)
+        .unwrap_or_default();
+    let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config(streaming));
     if plan.chunk_count() <= 1 {
         return;
     }
@@ -3628,43 +3935,83 @@ fn push_clear(scratch: &mut PreviewScratch, color: [u8; 3]) {
     }
 }
 
-fn push_sky_gradient(scratch: &mut PreviewScratch, sky: psxed_project::ResolvedSkySettings) {
+fn push_cyclorama(
+    scratch: &mut PreviewScratch,
+    sky: psxed_project::ResolvedSkySettings,
+    camera: psx_engine::WorldCamera,
+) {
     if !sky.enabled {
         return;
     }
-    let horizon_y = ((SCREEN_H * sky.horizon_percent as i32) / 100).clamp(1, SCREEN_H - 1) as i16;
-    push_sky_quad(scratch, 0, horizon_y, sky.top_color, sky.horizon_color);
-    push_sky_quad(
-        scratch,
-        horizon_y,
-        SCREEN_H as i16,
-        sky.horizon_color,
-        sky.lower_color,
-    );
+    for quad in psxed_project::generate_sky_cyclorama(sky).into_iter().rev() {
+        let Some(projected) = preview_project_cyclorama_quad(quad.direction_q12, camera) else {
+            continue;
+        };
+        if preview_cyclorama_quad_outside_screen(projected) {
+            continue;
+        }
+        push_sky_quad_corners(scratch, projected, quad.rgb);
+    }
 }
 
-fn push_sky_quad(
+fn preview_project_cyclorama_quad(
+    dirs: [[i16; 3]; 4],
+    camera: psx_engine::WorldCamera,
+) -> Option<[(i16, i16); 4]> {
+    Some([
+        preview_project_cyclorama_direction(dirs[0], camera)?,
+        preview_project_cyclorama_direction(dirs[1], camera)?,
+        preview_project_cyclorama_direction(dirs[2], camera)?,
+        preview_project_cyclorama_direction(dirs[3], camera)?,
+    ])
+}
+
+fn preview_project_cyclorama_direction(
+    dir: [i16; 3],
+    camera: psx_engine::WorldCamera,
+) -> Option<(i16, i16)> {
+    let x = i32::from(dir[0]);
+    let y = i32::from(dir[1]);
+    let z = i32::from(dir[2]);
+    let sin_yaw = camera.sin_yaw.raw();
+    let cos_yaw = camera.cos_yaw.raw();
+    let sin_pitch = camera.sin_pitch.raw();
+    let cos_pitch = camera.cos_pitch.raw();
+    let x1 = mul_q12_i32(x, cos_yaw) - mul_q12_i32(z, sin_yaw);
+    let z1 = -mul_q12_i32(x, sin_yaw) - mul_q12_i32(z, cos_yaw);
+    let y2 = mul_q12_i32(y, cos_pitch) - mul_q12_i32(z1, sin_pitch);
+    let z2 = mul_q12_i32(y, sin_pitch) + mul_q12_i32(z1, cos_pitch);
+    if z2 <= NEAR_Z {
+        return None;
+    }
+    let sx = SCREEN_CX + (x1 * PROJ_H) / z2;
+    let sy = SCREEN_CY - (y2 * PROJ_H) / z2;
+    Some((sx.clamp(-512, 831) as i16, sy.clamp(-256, 495) as i16))
+}
+
+fn preview_cyclorama_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
+    let min_x = points.iter().map(|p| p.0).min().unwrap_or(0);
+    let max_x = points.iter().map(|p| p.0).max().unwrap_or(0);
+    let min_y = points.iter().map(|p| p.1).min().unwrap_or(0);
+    let max_y = points.iter().map(|p| p.1).max().unwrap_or(0);
+    max_x < 0 || min_x >= SCREEN_W as i16 || max_y < 0 || min_y >= SCREEN_H as i16
+}
+
+fn push_sky_quad_corners(
     scratch: &mut PreviewScratch,
-    y0: i16,
-    y1: i16,
-    top_color: [u8; 3],
-    bottom_color: [u8; 3],
+    points: [(i16, i16); 4],
+    colors: [[u8; 3]; 4],
 ) {
-    if y1 <= y0 || scratch.sky_used >= scratch.sky_quads.len() {
+    if scratch.sky_used >= scratch.sky_quads.len() {
         return;
     }
     let quad = QuadGouraud::new(
+        points,
         [
-            (0, y0),
-            (SCREEN_W as i16, y0),
-            (0, y1),
-            (SCREEN_W as i16, y1),
-        ],
-        [
-            (top_color[0], top_color[1], top_color[2]),
-            (top_color[0], top_color[1], top_color[2]),
-            (bottom_color[0], bottom_color[1], bottom_color[2]),
-            (bottom_color[0], bottom_color[1], bottom_color[2]),
+            (colors[0][0], colors[0][1], colors[0][2]),
+            (colors[1][0], colors[1][1], colors[1][2]),
+            (colors[2][0], colors[2][1], colors[2][2]),
+            (colors[3][0], colors[3][1], colors[3][2]),
         ],
     );
     let idx = scratch.sky_used;
@@ -4159,10 +4506,10 @@ mod tests {
         preview_projected_triangle_hw_safe, preview_shadow_radius, preview_static_model_reference,
         preview_vertices_in_front, push_wall_face, room_depth_slot, rotate_image_prop_local,
         setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline,
-        wall_material_sidedness_for_edge, wall_side_visible, FaceShade, MaterialSlot, PreviewFog,
-        WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX,
-        PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX,
-        PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
+        wall_material_sidedness_for_edge, wall_side_visible, yaw_rotation_q12, FaceShade,
+        MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS,
+        PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
+        PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
@@ -4204,8 +4551,20 @@ mod tests {
 
     #[test]
     fn image_prop_overlay_rotation_applies_roll() {
-        let rotated = rotate_image_prop_local([0, 512, 0], [0, 0, 64]);
+        let rotated = rotate_image_prop_local([0, 512, 0], [0, 0, 1024]);
         assert_eq!(rotated, [-512, 0, 0]);
+    }
+
+    #[test]
+    fn image_prop_overlay_rotation_applies_yaw_q12_quarter_turn() {
+        let rotated = rotate_image_prop_local([512, 0, 0], [0, 1024, 0]);
+        assert_eq!(rotated, [0, 0, -512]);
+    }
+
+    #[test]
+    fn model_preview_yaw_matrix_uses_q12_quarter_turn() {
+        let rotation = yaw_rotation_q12(1024);
+        assert_eq!(rotation.m, [[0, 0, 4096], [0, 4096, 0], [-4096, 0, 0]]);
     }
 
     fn projected(sx: i16, sy: i16) -> Projected {
@@ -4271,6 +4630,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
             },
         );
         let animator = scene.add_node(
@@ -4278,6 +4639,7 @@ mod tests {
             "Animator",
             NodeKind::Animator {
                 clip: Some(3),
+                action_clips: Vec::new(),
                 autoplay: true,
             },
         );
@@ -4287,12 +4649,13 @@ mod tests {
 
         assert_eq!(reference.model_id, model_id);
         assert_eq!(reference.clip_override, Some(3));
+        assert!(reference.autoplay);
         assert_eq!(reference.renderer_node, Some(renderer));
         assert_eq!(reference.animator_node, Some(animator));
     }
 
     #[test]
-    fn component_player_reference_reads_controller_child() {
+    fn component_player_reference_reads_controller_renderer_and_animator_children() {
         let mut project = ProjectDocument::new("test");
         let character_id = project.add_resource(
             "Dummy",
@@ -4308,6 +4671,26 @@ mod tests {
             NodeKind::CharacterController {
                 character: Some(character_id),
                 player: true,
+                settings: Default::default(),
+            },
+        );
+        let renderer = scene.add_node(
+            actor,
+            "Model Renderer",
+            NodeKind::ModelRenderer {
+                model: None,
+                material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
+            },
+        );
+        let animator = scene.add_node(
+            actor,
+            "Animator",
+            NodeKind::Animator {
+                clip: Some(2),
+                action_clips: Vec::new(),
+                autoplay: false,
             },
         );
 
@@ -4316,6 +4699,10 @@ mod tests {
 
         assert_eq!(reference.character, Some(character_id));
         assert_eq!(reference.controller_node, Some(controller));
+        assert_eq!(reference.renderer_node, Some(renderer));
+        assert_eq!(reference.animator_node, Some(animator));
+        assert_eq!(reference.clip_override, Some(2));
+        assert!(!reference.autoplay);
     }
 
     #[test]
@@ -4341,6 +4728,8 @@ mod tests {
             NodeKind::ModelRenderer {
                 model: Some(model_id),
                 material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
             },
         );
         scene.add_node(
@@ -4349,6 +4738,7 @@ mod tests {
             NodeKind::CharacterController {
                 character: Some(character_id),
                 player: true,
+                settings: Default::default(),
             },
         );
 
@@ -4427,10 +4817,22 @@ mod tests {
     #[test]
     fn editor_cardinal_wall_front_material_renders_from_owning_cell() {
         let cases = [
-            (WallEdge::North, [512, 512, 512], 128, [512, 512, 1536], 0),
-            (WallEdge::East, [512, 512, 512], 192, [1536, 512, 512], 64),
-            (WallEdge::South, [512, 512, 512], 0, [512, 512, -512], 128),
-            (WallEdge::West, [512, 512, 512], 64, [-512, 512, 512], 192),
+            (WallEdge::North, [512, 512, 512], 2048, [512, 512, 1536], 0),
+            (
+                WallEdge::East,
+                [512, 512, 512],
+                3072,
+                [1536, 512, 512],
+                1024,
+            ),
+            (WallEdge::South, [512, 512, 512], 0, [512, 512, -512], 2048),
+            (
+                WallEdge::West,
+                [512, 512, 512],
+                1024,
+                [-512, 512, 512],
+                3072,
+            ),
         ];
 
         for (edge, inside_pos, inside_yaw, outside_pos, outside_yaw) in cases {

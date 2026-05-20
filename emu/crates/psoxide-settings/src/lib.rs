@@ -35,12 +35,12 @@ pub mod settings;
 pub use library::{Library, LibraryEntry, LibraryError};
 pub use paths::{ConfigPaths, PathError};
 pub use savestate::{SaveStateError, SaveStateV1, SAVESTATE_MAGIC};
-pub use settings::{EditorSettings, InputBinding, Settings, SettingsError};
+pub use settings::{EditorSettings, InputBinding, Settings, SettingsError, StickBindings};
 
 /// Current on-disk format version for `settings.ron`. Bumped when
 /// a breaking change lands; the loader migrates older versions in
 /// place rather than failing outright.
-pub const SETTINGS_VERSION: u32 = 3;
+pub const SETTINGS_VERSION: u32 = 4;
 
 /// Current version for `library.ron`. Cache files from older
 /// versions are discarded silently -- the scanner regenerates them.
