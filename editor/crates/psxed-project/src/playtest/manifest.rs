@@ -91,6 +91,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     );
     let _ = writeln!(
         out,
+        "pub const WORLD_ROOM_COUNT: usize = {};\n",
+        package.rooms.len()
+    );
+    let _ = writeln!(
+        out,
         "pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = {world_pack_max_chunk_bytes};\n",
     );
 

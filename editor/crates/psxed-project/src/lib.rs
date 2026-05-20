@@ -4064,31 +4064,34 @@ impl Default for WorldCameraSettings {
 pub const MIN_WORLD_DRAW_DISTANCE: i32 = 4_096;
 /// Maximum camera-space far plane exposed for playtest experimentation.
 pub const MAX_WORLD_DRAW_DISTANCE: i32 = 262_144;
-/// Minimum active streamed chunk radius, in world sectors.
+/// Minimum streamed chunk residency radius, in world sectors.
 pub const MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS: i32 = 4;
-/// Maximum active streamed chunk radius, in world sectors.
+/// Maximum streamed chunk residency radius, in world sectors.
 pub const MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS: i32 = 256;
 /// Minimum precomputed cell-visibility traversal radius.
 pub const MIN_WORLD_VISIBILITY_RADIUS: u16 = 4;
 /// Maximum precomputed cell-visibility traversal radius.
 pub const MAX_WORLD_VISIBILITY_RADIUS: u16 = 96;
-/// Smallest generated streaming chunk target accepted by the cooker.
-pub const MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = 1;
-/// Default generated streaming chunk target in sectors.
-pub const DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = 6;
-/// Largest generated streaming chunk target accepted by the cooker.
-pub const MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = MAX_ROOM_WIDTH;
+/// Runtime streaming chunks are one populated world-grid sector.
+pub const WORLD_STREAMING_SECTOR_CHUNK_SECTORS: u16 = 1;
+/// Smallest generated streaming chunk target accepted by legacy project files.
+pub const MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = WORLD_STREAMING_SECTOR_CHUNK_SECTORS;
+/// Default generated streaming chunk target in sectors. Current cooks keep this
+/// fixed at one sector; the name is retained for compatibility with older code.
+pub const DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = WORLD_STREAMING_SECTOR_CHUNK_SECTORS;
+/// Largest generated streaming chunk target accepted by legacy project files.
+pub const MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = WORLD_STREAMING_SECTOR_CHUNK_SECTORS;
 /// Smallest resident generated-chunk budget accepted by the runtime.
 pub const MIN_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 1;
 /// Default generated-chunk residency budget used by the playtest runtime.
 pub const DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 10;
 /// Largest generated-chunk residency budget supported by the current runtime.
 pub const MAX_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 32;
-/// Smallest generated-chunk visible-window budget accepted by the runtime.
+/// Smallest legacy generated-chunk visible-window budget accepted by old runtimes.
 pub const MIN_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 1;
-/// Default generated-chunk visible-window budget used by the playtest runtime.
+/// Default legacy generated-chunk visible-window budget.
 pub const DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS;
-/// Largest generated-chunk visible-window budget supported by the current runtime.
+/// Largest legacy generated-chunk visible-window budget supported by old runtimes.
 pub const MAX_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 32;
 
 const fn default_world_draw_distance() -> i32 {
@@ -4104,7 +4107,7 @@ const fn default_world_visibility_radius() -> u16 {
 }
 
 const fn default_world_streaming_chunk_target_sectors() -> u16 {
-    DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS
+    WORLD_STREAMING_SECTOR_CHUNK_SECTORS
 }
 
 const fn default_world_streaming_resident_chunks() -> u8 {
@@ -4123,7 +4126,7 @@ pub struct WorldCullingSettings {
     /// Camera-space far plane used for world, actor, and prop drawing.
     #[serde(default = "default_world_draw_distance")]
     pub draw_distance: i32,
-    /// Radius around the current room/player used to keep chunks active.
+    /// Radius around the current room/player used to request resident chunks.
     #[serde(default = "default_world_chunk_activation_radius_sectors")]
     pub chunk_activation_radius_sectors: i32,
     /// Radius used while cooking each room's visibility/PVS cell graph.
@@ -4159,26 +4162,41 @@ impl Default for WorldCullingSettings {
     }
 }
 
-/// Cook-time streaming chunk controls inherited by descendant Rooms from
-/// their nearest World node.
+/// Runtime streaming controls inherited by descendant Rooms from their nearest
+/// World node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldStreamingSettings {
-    /// Preferred generated chunk width in grid sectors.
-    #[serde(default = "default_world_streaming_chunk_target_sectors")]
+    /// Legacy preferred generated chunk width in grid sectors.
+    ///
+    /// Current cooks ignore this and always emit one populated sector per
+    /// streamable chunk. The field is still accepted when loading older project
+    /// files, then dropped again when saving.
+    #[serde(
+        default = "default_world_streaming_chunk_target_sectors",
+        skip_serializing
+    )]
     pub chunk_target_width: u16,
-    /// Preferred generated chunk depth in grid sectors.
-    #[serde(default = "default_world_streaming_chunk_target_sectors")]
+    /// Legacy preferred generated chunk depth in grid sectors.
+    ///
+    /// Current cooks ignore this and always emit one populated sector per
+    /// streamable chunk. The field is still accepted when loading older project
+    /// files, then dropped again when saving.
+    #[serde(
+        default = "default_world_streaming_chunk_target_sectors",
+        skip_serializing
+    )]
     pub chunk_target_depth: u16,
-    /// Resident streaming budget, measured in worst-case generated chunk units.
+    /// Resident streaming budget, measured in 32 KiB memory units.
     /// The playtest runtime converts this to more resident slots when the cooked
-    /// chunks are smaller than the maximum stream slot size.
+    /// sector chunks are smaller than the maximum stream slot size.
     #[serde(default = "default_world_streaming_resident_chunks")]
     pub resident_chunk_limit: u8,
-    /// Maximum generated chunks selected for drawing/collision by the runtime.
+    /// Legacy active-window cap kept for older project files.
     ///
-    /// A serialized zero is treated as a legacy project value and inherits the
-    /// resident chunk limit during normalization.
-    #[serde(default)]
+    /// The redesigned runtime ignores this and derives visible chunks from
+    /// resident chunks intersecting the camera frustum. A serialized zero is
+    /// still normalized to the resident chunk limit for compatibility.
+    #[serde(default, skip_serializing)]
     pub visible_chunk_limit: u8,
 }
 
@@ -4200,12 +4218,8 @@ impl WorldStreamingSettings {
         )
         .min(resident_chunk_limit);
         Self {
-            chunk_target_width: self
-                .chunk_target_width
-                .clamp(MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_WIDTH),
-            chunk_target_depth: self
-                .chunk_target_depth
-                .clamp(MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_DEPTH),
+            chunk_target_width: WORLD_STREAMING_SECTOR_CHUNK_SECTORS,
+            chunk_target_depth: WORLD_STREAMING_SECTOR_CHUNK_SECTORS,
             resident_chunk_limit,
             visible_chunk_limit,
         }
@@ -9063,15 +9077,23 @@ mod tests {
     }
 
     #[test]
-    fn world_streaming_settings_separate_resident_and_visible_limits() {
+    fn world_streaming_settings_preserve_legacy_visible_limit() {
         let settings = WorldStreamingSettings {
-            chunk_target_width: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
-            chunk_target_depth: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
+            chunk_target_width: 12,
+            chunk_target_depth: 8,
             resident_chunk_limit: 24,
             visible_chunk_limit: 8,
         }
         .normalized();
 
+        assert_eq!(
+            settings.chunk_target_width,
+            WORLD_STREAMING_SECTOR_CHUNK_SECTORS
+        );
+        assert_eq!(
+            settings.chunk_target_depth,
+            WORLD_STREAMING_SECTOR_CHUNK_SECTORS
+        );
         assert_eq!(settings.resident_chunk_limit, 24);
         assert_eq!(settings.visible_chunk_limit, 8);
     }
