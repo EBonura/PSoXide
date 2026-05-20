@@ -114,6 +114,8 @@ use generated::{
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY,
     VISIBILITY_CELLS, VISIBILITY_PVS, VISIBILITY_PVS_BITS, WEAPONS, WEAPON_HITBOXES,
+    WORLD_SECTOR_GRID, WORLD_SECTOR_GRID_DEPTH, WORLD_SECTOR_GRID_ORIGIN_X,
+    WORLD_SECTOR_GRID_ORIGIN_Z, WORLD_SECTOR_GRID_SECTOR_SIZE, WORLD_SECTOR_GRID_WIDTH,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -6833,6 +6835,11 @@ fn room_center_distance_sq(
 }
 
 fn room_index_containing_global(point: RoomPoint) -> Option<RoomIndex> {
+    #[cfg(feature = "sector-grid-streaming")]
+    if !WORLD_SECTOR_GRID.is_empty() {
+        return sector_grid_room_containing_global(point);
+    }
+
     if !ROOM_CHUNKS.is_empty() {
         for chunk in ROOM_CHUNKS {
             let Some(record) = ROOMS.get(chunk.room.to_usize()) else {
@@ -6862,12 +6869,56 @@ fn room_index_containing_global(point: RoomPoint) -> Option<RoomIndex> {
 }
 
 fn room_index_containing_global_from(current: RoomIndex, point: RoomPoint) -> Option<RoomIndex> {
+    #[cfg(feature = "sector-grid-streaming")]
+    if !WORLD_SECTOR_GRID.is_empty() {
+        return sector_grid_room_containing_global(point);
+    }
+
     if !ROOM_CHUNKS.is_empty() {
         if let Some(room) = room_index_containing_global_by_neighbours(current, point) {
             return Some(room);
         }
     }
     room_index_containing_global(point)
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn sector_grid_room_containing_global(point: RoomPoint) -> Option<RoomIndex> {
+    if WORLD_SECTOR_GRID_WIDTH == 0
+        || WORLD_SECTOR_GRID_DEPTH == 0
+        || WORLD_SECTOR_GRID.is_empty()
+    {
+        return None;
+    }
+
+    let sector_size = WORLD_SECTOR_GRID_SECTOR_SIZE.max(1);
+    let grid_x = point
+        .x
+        .div_euclid(sector_size)
+        .saturating_sub(WORLD_SECTOR_GRID_ORIGIN_X);
+    let grid_z = point
+        .z
+        .div_euclid(sector_size)
+        .saturating_sub(WORLD_SECTOR_GRID_ORIGIN_Z);
+    if grid_x < 0 || grid_z < 0 {
+        return None;
+    }
+
+    let grid_x = grid_x as usize;
+    let grid_z = grid_z as usize;
+    if grid_x >= WORLD_SECTOR_GRID_WIDTH || grid_z >= WORLD_SECTOR_GRID_DEPTH {
+        return None;
+    }
+
+    let index = grid_z
+        .checked_mul(WORLD_SECTOR_GRID_WIDTH)?
+        .checked_add(grid_x)?;
+    let room = *WORLD_SECTOR_GRID.get(index)?;
+    if room == INVALID_ROOM_INDEX || ROOMS.get(room.to_usize()).is_none() {
+        None
+    } else {
+        Some(room)
+    }
 }
 
 fn room_index_containing_global_by_neighbours(
