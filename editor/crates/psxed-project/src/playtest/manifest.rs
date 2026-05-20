@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use super::*;
 
 const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
+const SECTOR_GRID_EMPTY_ROOM: u16 = u16::MAX;
 
 pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io::Result<()> {
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
@@ -360,6 +361,45 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room_index_or_none(west),
             chunk.flags,
         );
+    }
+    out.push_str("];\n\n");
+
+    let sector_grid = sector_grid_from_chunks(package);
+    out.push_str("/// Dense authored-sector lookup for O(1) chunk id queries.\n");
+    let _ = writeln!(
+        out,
+        "pub const WORLD_SECTOR_GRID_ORIGIN_X: i32 = {};",
+        sector_grid.as_ref().map_or(0, |grid| grid.origin_x)
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_SECTOR_GRID_ORIGIN_Z: i32 = {};",
+        sector_grid.as_ref().map_or(0, |grid| grid.origin_z)
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_SECTOR_GRID_WIDTH: usize = {};",
+        sector_grid.as_ref().map_or(0, |grid| grid.width)
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_SECTOR_GRID_DEPTH: usize = {};",
+        sector_grid.as_ref().map_or(0, |grid| grid.depth)
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_SECTOR_GRID_SECTOR_SIZE: i32 = {};",
+        sector_grid.as_ref().map_or(1, |grid| grid.sector_size)
+    );
+    out.push_str("pub static WORLD_SECTOR_GRID: &[RoomIndex] = &[\n");
+    if let Some(grid) = &sector_grid {
+        for row in grid.cells.chunks(grid.width.max(1)) {
+            out.push_str("    ");
+            for room in row {
+                let _ = write!(out, "RoomIndex({room}), ");
+            }
+            out.push('\n');
+        }
     }
     out.push_str("];\n\n");
 
@@ -991,6 +1031,96 @@ fn world_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry
         .map(|(room, bytes)| (*room, bytes.as_slice()))
         .collect::<Vec<_>>();
     psx_iso::build_world_pack_layout(&refs).entries
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlaytestSectorGrid {
+    origin_x: i32,
+    origin_z: i32,
+    width: usize,
+    depth: usize,
+    sector_size: i32,
+    cells: Vec<u16>,
+}
+
+fn sector_grid_from_chunks(package: &PlaytestPackage) -> Option<PlaytestSectorGrid> {
+    if package.chunks.is_empty() {
+        return None;
+    }
+
+    let mut sector_size = None;
+    let mut bounds: Option<(i32, i32, i32, i32)> = None;
+    for chunk in &package.chunks {
+        if chunk.width == 0 || chunk.depth == 0 {
+            continue;
+        }
+        let room = package.rooms.get(chunk.room as usize)?;
+        let chunk_sector_size = room.sector_size.max(1);
+        match sector_size {
+            Some(size) if size != chunk_sector_size => return None,
+            Some(_) => {}
+            None => sector_size = Some(chunk_sector_size),
+        }
+
+        let x0 = chunk.origin_x;
+        let z0 = chunk.origin_z;
+        let x1 = x0.saturating_add(chunk.width as i32);
+        let z1 = z0.saturating_add(chunk.depth as i32);
+        bounds = Some(match bounds {
+            Some((min_x, max_x, min_z, max_z)) => {
+                (min_x.min(x0), max_x.max(x1), min_z.min(z0), max_z.max(z1))
+            }
+            None => (x0, x1, z0, z1),
+        });
+    }
+
+    let (origin_x, max_x, origin_z, max_z) = bounds?;
+    let width = usize::try_from(max_x.saturating_sub(origin_x)).ok()?;
+    let depth = usize::try_from(max_z.saturating_sub(origin_z)).ok()?;
+    if width == 0 || depth == 0 {
+        return None;
+    }
+    let cell_count = width.checked_mul(depth)?;
+    let mut cells = vec![SECTOR_GRID_EMPTY_ROOM; cell_count];
+
+    for chunk in &package.chunks {
+        let mut z = 0usize;
+        while z < chunk.depth as usize {
+            let grid_z = usize::try_from(
+                chunk
+                    .origin_z
+                    .saturating_add(z as i32)
+                    .saturating_sub(origin_z),
+            )
+            .ok()?;
+            let mut x = 0usize;
+            while x < chunk.width as usize {
+                let grid_x = usize::try_from(
+                    chunk
+                        .origin_x
+                        .saturating_add(x as i32)
+                        .saturating_sub(origin_x),
+                )
+                .ok()?;
+                let index = grid_z.checked_mul(width)?.checked_add(grid_x)?;
+                let cell = cells.get_mut(index)?;
+                if *cell == SECTOR_GRID_EMPTY_ROOM {
+                    *cell = chunk.room;
+                }
+                x += 1;
+            }
+            z += 1;
+        }
+    }
+
+    Some(PlaytestSectorGrid {
+        origin_x,
+        origin_z,
+        width,
+        depth,
+        sector_size: sector_size.unwrap_or(1),
+        cells,
+    })
 }
 
 fn streamed_room_chunk_filename(room: u16) -> String {
@@ -2248,6 +2378,53 @@ mod tests {
         assert_eq!(
             world_pack_order_from_chunks(3, Some(0), &chunks),
             vec![0, 2, 1]
+        );
+    }
+
+    #[test]
+    fn sector_grid_from_chunks_builds_dense_authored_sector_lookup() {
+        let mut package = PlaytestPackage::default();
+        package.rooms = vec![test_room(0), test_room(1), test_room(2)];
+        package.chunks = vec![
+            PlaytestChunk {
+                width: 2,
+                depth: 1,
+                ..test_chunk(0, 10, -1, 0, [None; 4])
+            },
+            PlaytestChunk {
+                width: 1,
+                depth: 2,
+                ..test_chunk(1, 10, 2, 0, [None; 4])
+            },
+            PlaytestChunk {
+                width: 2,
+                depth: 1,
+                ..test_chunk(2, 10, 0, 2, [None; 4])
+            },
+        ];
+
+        let grid = sector_grid_from_chunks(&package).expect("sector grid");
+        assert_eq!(grid.origin_x, -1);
+        assert_eq!(grid.origin_z, 0);
+        assert_eq!(grid.width, 4);
+        assert_eq!(grid.depth, 3);
+        assert_eq!(grid.sector_size, 1024);
+        assert_eq!(
+            grid.cells,
+            vec![
+                0,
+                0,
+                SECTOR_GRID_EMPTY_ROOM,
+                1,
+                SECTOR_GRID_EMPTY_ROOM,
+                SECTOR_GRID_EMPTY_ROOM,
+                SECTOR_GRID_EMPTY_ROOM,
+                1,
+                SECTOR_GRID_EMPTY_ROOM,
+                2,
+                2,
+                SECTOR_GRID_EMPTY_ROOM,
+            ]
         );
     }
 
