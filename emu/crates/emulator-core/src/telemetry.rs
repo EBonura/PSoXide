@@ -162,35 +162,35 @@ pub mod counter {
     pub const TEXTURED_MODEL_VERTICES: u16 = 30;
     /// Face records considered by textured model submits.
     pub const TEXTURED_MODEL_FACES: u16 = 31;
-    /// Active runtime room/chunk records walked this frame.
+    /// Runtime room/chunk records selected by screen visibility this frame.
     pub const ROOM_ACTIVE_CHUNKS: u16 = 32;
     /// Precomputed/grid-visible cells supplied to the room renderer.
     pub const ROOM_VISIBLE_CELLS: u16 = 33;
-    /// Active room/chunk draws that used the cached surface path.
+    /// Visible room/chunk draws that used the cached surface path.
     pub const ROOM_CACHED_DRAWS: u16 = 34;
-    /// Active room/chunk draws that used the direct uncached path.
+    /// Visible room/chunk draws that used the direct uncached path.
     pub const ROOM_UNCACHED_DRAWS: u16 = 35;
     /// Remaining primitive packet slots at the end of scene emission.
     pub const TRI_PRIMITIVE_REMAINING: u16 = 36;
-    /// Cached room cell headers resident in the active chunk window.
+    /// Cached room cell headers resident in the visible chunk cache.
     pub const ROOM_CACHE_CELLS: u16 = 37;
-    /// Cached room vertices resident in the active chunk window.
+    /// Cached room vertices resident in the visible chunk cache.
     pub const ROOM_CACHE_VERTICES: u16 = 38;
-    /// Cached room surfaces resident in the active chunk window.
+    /// Cached room surfaces resident in the visible chunk cache.
     pub const ROOM_CACHE_SURFACES: u16 = 39;
-    /// Active room/chunk draws that fell back because surface caching failed.
+    /// Visible room/chunk draws that fell back because surface caching failed.
     pub const ROOM_CACHE_FALLBACK_DRAWS: u16 = 40;
-    /// Active room/chunk draws that fell back because visibility cells were unavailable.
+    /// Visible room/chunk draws that fell back because visibility cells were unavailable.
     pub const ROOM_VISIBILITY_FALLBACK_DRAWS: u16 = 41;
     /// Room cells rejected by the global player/camera range gate.
     pub const ROOM_CELLS_RANGE_CULLED: u16 = 42;
     /// Candidate chunks that were within activation range this frame.
     pub const ROOM_CHUNKS_CONSIDERED: u16 = 43;
-    /// Candidate chunks skipped because the active cache budget was full.
+    /// Candidate chunks skipped because the visible cache budget was full.
     pub const ROOM_CHUNK_CACHE_SKIPS: u16 = 44;
-    /// Active room/chunk windows rebuilt.
+    /// Visible room/chunk windows rebuilt.
     pub const ROOM_WINDOW_REBUILDS: u16 = 45;
-    /// Active chunks successfully built during room-window rebuilds.
+    /// Visible chunks successfully built during room-window rebuilds.
     pub const ROOM_WINDOW_BUILT_CHUNKS: u16 = 46;
     /// Runtime room surface caches built.
     pub const ROOM_SURFACE_CACHE_BUILDS: u16 = 47;
@@ -360,9 +360,9 @@ pub mod counter {
     pub const ROOM_STREAM_RESIDENT_MASK_LO: u16 = 129;
     /// High 32 bits of the resident streamed room/chunk bitset.
     pub const ROOM_STREAM_RESIDENT_MASK_HI: u16 = 130;
-    /// Low 32 bits of the active drawable room/chunk bitset.
+    /// Low 32 bits of the visible drawable room/chunk bitset.
     pub const ROOM_ACTIVE_CHUNK_MASK_LO: u16 = 131;
-    /// High 32 bits of the active drawable room/chunk bitset.
+    /// High 32 bits of the visible drawable room/chunk bitset.
     pub const ROOM_ACTIVE_CHUNK_MASK_HI: u16 = 132;
     /// Low 32 bits of the room/chunk bitset that submitted room geometry.
     pub const ROOM_DRAWN_CHUNK_MASK_LO: u16 = 133;
@@ -376,10 +376,21 @@ pub mod counter {
     pub const ROOM_PLAYER_LOCAL_Z_BIASED: u16 = 137;
     /// Camera/view yaw used by player-centred chunk diagnostics, in Q12 angle units.
     pub const ROOM_PLAYER_VIEW_YAW_Q12: u16 = 138;
+    /// Number of 32-bit words emitted for each extended chunk-state bitset.
+    pub const ROOM_CHUNK_MASK_WORD_COUNT: usize = 32;
+    /// First counter id for the extended resident chunk bitset.
+    pub const ROOM_STREAM_RESIDENT_MASK_WORD_FIRST: u16 = 139;
+    /// First counter id for the extended visible chunk bitset.
+    pub const ROOM_ACTIVE_CHUNK_MASK_WORD_FIRST: u16 =
+        ROOM_STREAM_RESIDENT_MASK_WORD_FIRST + ROOM_CHUNK_MASK_WORD_COUNT as u16;
+    /// First counter id for the extended drawn chunk bitset.
+    pub const ROOM_DRAWN_CHUNK_MASK_WORD_FIRST: u16 =
+        ROOM_ACTIVE_CHUNK_MASK_WORD_FIRST + ROOM_CHUNK_MASK_WORD_COUNT as u16;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 139;
+pub const COUNTER_COUNT: usize =
+    counter::ROOM_DRAWN_CHUNK_MASK_WORD_FIRST as usize + counter::ROOM_CHUNK_MASK_WORD_COUNT;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -798,14 +809,35 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::MODEL_PROFILE_DRAWS_7 => "model7 draws",
         counter::ROOM_STREAM_RESIDENT_MASK_LO => "resident chunk mask lo",
         counter::ROOM_STREAM_RESIDENT_MASK_HI => "resident chunk mask hi",
-        counter::ROOM_ACTIVE_CHUNK_MASK_LO => "active chunk mask lo",
-        counter::ROOM_ACTIVE_CHUNK_MASK_HI => "active chunk mask hi",
+        counter::ROOM_ACTIVE_CHUNK_MASK_LO => "visible chunk mask lo",
+        counter::ROOM_ACTIVE_CHUNK_MASK_HI => "visible chunk mask hi",
         counter::ROOM_DRAWN_CHUNK_MASK_LO => "drawn chunk mask lo",
         counter::ROOM_DRAWN_CHUNK_MASK_HI => "drawn chunk mask hi",
         counter::ROOM_PLAYER_ROOM_INDEX => "player room index",
         counter::ROOM_PLAYER_LOCAL_X_BIASED => "player local x",
         counter::ROOM_PLAYER_LOCAL_Z_BIASED => "player local z",
         counter::ROOM_PLAYER_VIEW_YAW_Q12 => "player view yaw q12",
+        id if id >= counter::ROOM_STREAM_RESIDENT_MASK_WORD_FIRST
+            && id
+                < counter::ROOM_STREAM_RESIDENT_MASK_WORD_FIRST
+                    + counter::ROOM_CHUNK_MASK_WORD_COUNT as u16 =>
+        {
+            "resident chunk mask word"
+        }
+        id if id >= counter::ROOM_ACTIVE_CHUNK_MASK_WORD_FIRST
+            && id
+                < counter::ROOM_ACTIVE_CHUNK_MASK_WORD_FIRST
+                    + counter::ROOM_CHUNK_MASK_WORD_COUNT as u16 =>
+        {
+            "visible chunk mask word"
+        }
+        id if id >= counter::ROOM_DRAWN_CHUNK_MASK_WORD_FIRST
+            && id
+                < counter::ROOM_DRAWN_CHUNK_MASK_WORD_FIRST
+                    + counter::ROOM_CHUNK_MASK_WORD_COUNT as u16 =>
+        {
+            "drawn chunk mask word"
+        }
         _ => "unknown",
     }
 }

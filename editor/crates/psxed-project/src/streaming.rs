@@ -1,9 +1,9 @@
-//! Editor-side planning data for automatic streaming chunks.
+//! Editor-side planning data for automatic streaming sector chunks.
 //!
 //! The authored tree still stores one Room grid today, but budget
-//! reporting and future cook work should reason about generated
-//! streamable chunks. Keeping that plan in the project crate lets
-//! the editor, validation, and cooker converge on the same answer.
+//! reporting and cook work reason about streamable sector chunks.
+//! Keeping that plan in the project crate lets the editor,
+//! validation, and cooker converge on the same answer.
 
 use std::collections::HashSet;
 
@@ -13,14 +13,14 @@ use crate::{
     MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
 };
 
-/// Tunable limits for generated streaming chunks.
+/// Cook limits for generated streaming chunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamingChunkConfig {
-    /// Preferred chunk width in grid sectors before hard caps force
-    /// smaller splits.
+    /// Legacy chunk width in grid sectors. Current runtime cooks keep this at
+    /// one populated sector per streamable chunk.
     pub target_width: u16,
-    /// Preferred chunk depth in grid sectors before hard caps force
-    /// smaller splits.
+    /// Legacy chunk depth in grid sectors. Current runtime cooks keep this at
+    /// one populated sector per streamable chunk.
     pub target_depth: u16,
     /// Absolute maximum chunk width accepted by the current cooker.
     pub max_width: u16,
@@ -66,7 +66,7 @@ impl StreamingChunkConfig {
     }
 }
 
-/// One generated streamable chunk inside an authored grid.
+/// One generated streamable sector chunk inside an authored grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedChunk {
     /// Stable order within the plan.
@@ -75,7 +75,7 @@ pub struct GeneratedChunk {
     pub array_origin: [u16; 2],
     /// Top-left chunk origin in world-cell coordinates.
     pub world_origin: [i32; 2],
-    /// Chunk size in sectors.
+    /// Chunk size in sectors. Current runtime cooks use `[1, 1]`.
     pub size: [u16; 2],
     /// Geometry/byte estimate for this chunk only.
     pub budget: WorldGridBudget,
@@ -83,7 +83,7 @@ pub struct GeneratedChunk {
     pub over_budget: bool,
 }
 
-/// Deterministic chunk plan generated from one authored grid.
+/// Deterministic sector-chunk plan generated from one authored grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedChunkPlan {
     /// Config used to create the plan.
@@ -138,6 +138,11 @@ struct Rect {
 }
 
 /// Generate a deterministic streaming subdivision for one grid.
+///
+/// The redesigned runtime streams one populated grid sector per chunk. The
+/// splitter still exists behind the config to keep older tests and hard-cap
+/// logic honest, but empty chunks are filtered out so the plan matches the
+/// runtime room table exactly.
 pub fn plan_generated_chunks(grid: &WorldGrid, config: StreamingChunkConfig) -> GeneratedChunkPlan {
     let config = config.normalized();
     let mut rects = Vec::new();
@@ -158,20 +163,24 @@ pub fn plan_generated_chunks(grid: &WorldGrid, config: StreamingChunkConfig) -> 
 
     let chunks = rects
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, rect)| {
+        .filter_map(|rect| {
             let budget = grid.budget_for_rect(rect.x, rect.z, rect.width, rect.depth)?;
-            Some(GeneratedChunk {
-                index,
-                array_origin: [rect.x, rect.z],
-                world_origin: [
-                    grid.origin[0] + rect.x as i32,
-                    grid.origin[1] + rect.z as i32,
-                ],
-                size: [rect.width, rect.depth],
-                over_budget: config.over_budget(&budget),
-                budget,
-            })
+            if budget.populated_cells == 0 {
+                return None;
+            }
+            Some((rect, budget))
+        })
+        .enumerate()
+        .map(|(index, (rect, budget))| GeneratedChunk {
+            index,
+            array_origin: [rect.x, rect.z],
+            world_origin: [
+                grid.origin[0] + rect.x as i32,
+                grid.origin[1] + rect.z as i32,
+            ],
+            size: [rect.width, rect.depth],
+            over_budget: config.over_budget(&budget),
+            budget,
         })
         .collect();
 
@@ -504,32 +513,24 @@ mod tests {
     use crate::{CharacterResource, MaterialResource, NodeKind, ResourceData};
 
     #[test]
-    fn small_grid_stays_one_generated_chunk() {
+    fn small_grid_generates_one_chunk_per_sector() {
         let grid = WorldGrid::stone_room(4, 4, 1024, None, None);
         let plan = plan_generated_chunks(&grid, StreamingChunkConfig::default());
 
-        assert_eq!(plan.chunk_count(), 1);
+        assert_eq!(plan.chunk_count(), 16);
         assert_eq!(plan.chunks[0].array_origin, [0, 0]);
-        assert_eq!(plan.chunks[0].size, [4, 4]);
+        assert_eq!(plan.chunks[0].size, [1, 1]);
+        assert!(plan.chunks.iter().all(|chunk| chunk.size == [1, 1]));
         assert_eq!(plan.over_budget_count(), 0);
     }
 
     #[test]
-    fn wide_grid_splits_to_target_sized_chunks() {
+    fn wide_grid_uses_sector_sized_chunks() {
         let grid = WorldGrid::stone_room(40, 16, 1024, None, None);
         let plan = plan_generated_chunks(&grid, StreamingChunkConfig::default());
 
-        assert_eq!(plan.chunk_count(), 21);
-        assert!(plan
-            .chunks
-            .iter()
-            .all(|chunk| chunk.size[0] <= 6 && chunk.size[1] <= 6));
-        assert!(plan.chunks.iter().all(|chunk| {
-            chunk.size[0] == 6 || chunk.array_origin[0].saturating_add(chunk.size[0]) == 40
-        }));
-        assert!(plan.chunks.iter().all(|chunk| {
-            chunk.size[1] == 6 || chunk.array_origin[1].saturating_add(chunk.size[1]) == 16
-        }));
+        assert_eq!(plan.chunk_count(), 40 * 16);
+        assert!(plan.chunks.iter().all(|chunk| chunk.size == [1, 1]));
         assert_eq!(
             plan.chunks
                 .iter()
@@ -546,13 +547,16 @@ mod tests {
         grid.set_floor(13, 6, 0, None);
         let plan = plan_generated_chunks(&grid, StreamingChunkConfig::default());
 
-        assert_eq!(plan.chunk_count(), 1);
+        assert_eq!(plan.chunk_count(), 2);
         assert_eq!(plan.source_origin, [10, 4]);
         assert_eq!(plan.source_size, [4, 3]);
         assert_eq!(plan.chunks[0].array_origin, [10, 4]);
         assert_eq!(plan.chunks[0].world_origin, [10, 4]);
-        assert_eq!(plan.chunks[0].size, [4, 3]);
-        assert_eq!(plan.chunks[0].budget.total_cells, 12);
+        assert_eq!(plan.chunks[0].size, [1, 1]);
+        assert_eq!(plan.chunks[0].budget.total_cells, 1);
+        assert_eq!(plan.chunks[1].array_origin, [13, 6]);
+        assert_eq!(plan.chunks[1].world_origin, [13, 6]);
+        assert_eq!(plan.chunks[1].size, [1, 1]);
     }
 
     #[test]

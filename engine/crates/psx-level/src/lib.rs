@@ -465,13 +465,14 @@ pub struct LevelRoomRecord {
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
     pub draw_distance: i32,
-    /// Runtime active-chunk radius in world sectors.
+    /// Runtime residency request radius in world sectors.
     pub chunk_activation_radius_sectors: i32,
     /// Cooked PVS traversal radius in room cells.
     pub visibility_radius: u16,
-    /// Maximum generated chunks kept resident for this world.
+    /// Sector-chunk residency memory budget for this world.
     pub resident_chunk_limit: u8,
-    /// Maximum generated chunks selected for drawing/collision for this world.
+    /// Legacy active-window cap. Current playtest builds derive visibility
+    /// from resident sector chunks intersecting the camera frustum.
     pub visible_chunk_limit: u8,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.

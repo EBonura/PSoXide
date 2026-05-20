@@ -2,6 +2,9 @@
 
 use egui::{Color32, Pos2, Rect, Vec2};
 
+pub const CHUNK_DEBUG_MASK_WORD_COUNT: usize = 32;
+pub type ChunkDebugMask = [u32; CHUNK_DEBUG_MASK_WORD_COUNT];
+
 /// Request emitted by the editor UI for embedded play mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorPlaytestRequest {
@@ -162,17 +165,17 @@ pub struct EditorPlaytestMetrics {
     pub ui_ms: f32,
     /// Guest cycle budget consumed by stepped frames.
     pub step_budget_percent: f32,
-    /// Active room/chunk records selected for drawing/collision.
-    pub chunk_active: u32,
-    /// Active chunks that submitted room geometry.
+    /// Resident chunks selected by screen visibility for drawing/collision.
+    pub chunk_visible: u32,
+    /// Visible chunks that submitted room geometry.
     pub chunk_drawn: u32,
     /// Resident streamed room/chunk slots currently loaded.
     pub chunk_resident: u32,
-    /// Candidate chunks found by the active-room window builder.
+    /// Candidate chunks found by the visible-sector selector.
     pub chunk_candidates: u32,
-    /// Chunks built by the most recent active-room window rebuild.
+    /// Chunks built by the most recent visible-sector rebuild.
     pub chunk_built: u32,
-    /// Candidate chunks skipped because the active room cache was not ready.
+    /// Candidate chunks skipped because the visible room cache was not ready.
     pub chunk_cache_skips: u32,
     /// Stream scheduler requests considered by recent window refreshes.
     pub stream_requests: u32,
@@ -187,11 +190,11 @@ pub struct EditorPlaytestMetrics {
     /// Stream loads that failed validation or CD reads.
     pub stream_failed: u32,
     /// Resident streamed chunks, keyed by runtime room/chunk index.
-    pub chunk_resident_mask: u64,
-    /// Active drawable chunks, keyed by runtime room/chunk index.
-    pub chunk_active_mask: u64,
+    pub chunk_resident_mask: ChunkDebugMask,
+    /// Visible drawable chunks, keyed by runtime room/chunk index.
+    pub chunk_visible_mask: ChunkDebugMask,
     /// Chunks that submitted room geometry, keyed by runtime room/chunk index.
-    pub chunk_drawn_mask: u64,
+    pub chunk_drawn_mask: ChunkDebugMask,
     /// True when the profiler sample contains player map telemetry.
     pub player_map_valid: bool,
     /// Runtime room/chunk index containing the player.

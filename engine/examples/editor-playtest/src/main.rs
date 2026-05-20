@@ -118,8 +118,9 @@ use generated::{
     MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, WEAPONS,
-    WEAPON_HITBOXES, WORLD_SECTOR_GRID, WORLD_SECTOR_GRID_DEPTH, WORLD_SECTOR_GRID_ORIGIN_X,
-    WORLD_SECTOR_GRID_ORIGIN_Z, WORLD_SECTOR_GRID_SECTOR_SIZE, WORLD_SECTOR_GRID_WIDTH,
+    WEAPON_HITBOXES, WORLD_ROOM_COUNT, WORLD_SECTOR_GRID, WORLD_SECTOR_GRID_DEPTH,
+    WORLD_SECTOR_GRID_ORIGIN_X, WORLD_SECTOR_GRID_ORIGIN_Z, WORLD_SECTOR_GRID_SECTOR_SIZE,
+    WORLD_SECTOR_GRID_WIDTH,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -364,33 +365,42 @@ fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
 
 #[cfg(feature = "cd-stream-bench")]
 fn room_stream_request_chunk_limit(record: &LevelRoomRecord) -> usize {
-    (record.resident_chunk_limit as usize)
-        .clamp(1, STREAMED_ROOM_SLOT_COUNT)
-        .min(room_resident_chunk_limit(record))
+    room_resident_chunk_limit(record).clamp(1, STREAMED_ROOM_SLOT_COUNT)
 }
 
 fn room_visible_chunk_limit(record: &LevelRoomRecord) -> usize {
-    (record.visible_chunk_limit as usize)
-        .clamp(1, MAX_ACTIVE_ROOMS)
-        .min(room_resident_chunk_limit(record))
+    room_resident_chunk_limit(record).clamp(1, MAX_ACTIVE_ROOMS)
 }
 
-fn room_active_chunk_limit(record: &LevelRoomRecord) -> usize {
-    room_visible_chunk_limit(record)
-}
-
-fn room_index_debug_mask(index: RoomIndex) -> u64 {
-    let raw = index.to_usize();
-    if raw < u64::BITS as usize {
-        1u64 << raw
-    } else {
-        0
-    }
-}
+const ROOM_CHUNK_DEBUG_MASK_WORD_COUNT: usize = telemetry::counter::ROOM_CHUNK_MASK_WORD_COUNT;
+type RoomChunkDebugMask = [u32; ROOM_CHUNK_DEBUG_MASK_WORD_COUNT];
 
 fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: u64) {
     telemetry::counter(counter_lo, (mask & 0xffff_ffff) as u32);
     telemetry::counter(counter_hi, (mask >> 32) as u32);
+}
+
+fn set_room_chunk_debug_mask(mask: &mut RoomChunkDebugMask, index: RoomIndex) {
+    let raw = index.to_usize();
+    let word = raw / 32;
+    if word < mask.len() {
+        mask[word] |= 1u32 << (raw & 31);
+    }
+}
+
+fn emit_room_chunk_debug_mask(
+    counter_lo: u16,
+    counter_hi: u16,
+    counter_first: u16,
+    mask: &RoomChunkDebugMask,
+) {
+    let legacy = (mask[0] as u64) | ((mask[1] as u64) << 32);
+    emit_room_chunk_mask(counter_lo, counter_hi, legacy);
+    let mut word = 0usize;
+    while word < mask.len() {
+        telemetry::counter(counter_first + word as u16, mask[word]);
+        word += 1;
+    }
 }
 
 fn encode_debug_map_position(value: i32) -> u32 {
@@ -440,12 +450,9 @@ const MAX_TEXTURED_TRIS: usize = 3328;
 /// the runtime fails graceful (skips the over-cap material) and
 /// the cook report should also flag.
 const MAX_ROOM_MATERIALS: usize = 32;
-/// Current generated chunk plus the best cache-budgeted nearby chunks.
-///
-/// Upper bound for chunks that can be active, drawable, and collidable in one
-/// runtime window. The world-level resident chunk limit picks the effective
-/// count per cooked build; this cap only prevents the fixed arrays from
-/// growing past the editor-exposed maximum.
+/// Upper bound for generated chunks that can be selected for drawing in one
+/// frame. Residency is controlled by the streaming memory budget; this fixed
+/// array only caps the derived visible set.
 const MAX_ACTIVE_ROOMS: usize = 32;
 /// Streamed room slot budget. A slot stores one generated chunk payload:
 /// the room `.psxw` plus the room-local render cache records carried by
@@ -463,11 +470,15 @@ const STREAMED_ROOM_SLOT_BYTES: usize = clamp_streamed_room_slot_bytes(WORLD_PAC
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
 #[cfg(feature = "cd-stream-bench")]
-const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 256;
+const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 128;
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_SLOT_NONE: u16 = u16::MAX;
 #[cfg(feature = "cd-stream-bench")]
-const MAX_STREAMED_ROOM_INDEX_COUNT: usize = 256;
+const MAX_STREAMED_ROOM_INDEX_COUNT: usize = if WORLD_ROOM_COUNT == 0 {
+    1
+} else {
+    WORLD_ROOM_COUNT
+};
 /// CD-backed room residency cache. The cooked manifest selects the byte
 /// budget, and the runtime converts that budget into slots sized for this
 /// particular chunk layout. This preserves the authored worst-case RAM cost
@@ -480,7 +491,7 @@ const MAX_RUNTIME_RESIDENT_CHUNKS: usize = STREAMED_ROOM_SLOT_COUNT;
 #[cfg(not(feature = "cd-stream-bench"))]
 const MAX_RUNTIME_RESIDENT_CHUNKS: usize = MAX_ACTIVE_ROOMS;
 #[cfg(feature = "cd-stream-bench")]
-const MAX_COLLISION_ROOMS: usize = STREAMED_ROOM_SLOT_COUNT;
+const MAX_COLLISION_ROOMS: usize = 64;
 #[cfg(not(feature = "cd-stream-bench"))]
 const MAX_COLLISION_ROOMS: usize = MAX_ACTIVE_ROOMS;
 
@@ -536,14 +547,9 @@ const MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES: usize = 48;
 const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
 const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 #[cfg(feature = "sector-grid-streaming")]
-const SECTOR_GRID_MAX_CANDIDATES: usize = 96;
-#[cfg(feature = "sector-grid-streaming")]
 const SECTOR_GRID_MAX_SEARCH_RADIUS_SECTORS: i32 = 96;
-#[cfg(feature = "vis-full-active-chunks")]
 const ACTIVE_CHUNK_SCREEN_MARGIN: i32 = 0;
-#[cfg(feature = "vis-full-active-chunks")]
 const ACTIVE_CHUNK_MIN_Y: i32 = -2048;
-#[cfg(feature = "vis-full-active-chunks")]
 const ACTIVE_CHUNK_MAX_Y: i32 = 6144;
 
 /// Capacity of the residency manager's RAM table. Holds room
@@ -1561,10 +1567,12 @@ impl<const N: usize> RoomStreamScheduler<N> {
             telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
             self.resident_slot_count() as u32,
         );
-        emit_room_chunk_mask(
+        let resident_mask = self.resident_room_mask();
+        emit_room_chunk_debug_mask(
             telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO,
             telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI,
-            self.resident_room_mask(),
+            telemetry::counter::ROOM_STREAM_RESIDENT_MASK_WORD_FIRST,
+            &resident_mask,
         );
         telemetry::counter(
             telemetry::counter::ROOM_STREAM_EVICTIONS,
@@ -1593,14 +1601,14 @@ impl<const N: usize> RoomStreamScheduler<N> {
         count
     }
 
-    fn resident_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn resident_room_mask(&self) -> RoomChunkDebugMask {
+        let mut mask = [0u32; ROOM_CHUNK_DEBUG_MASK_WORD_COUNT];
         let mut slot = 0usize;
         let limit = self.effective_slot_limit();
         while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Resident {
-                mask |= room_index_debug_mask(meta.room);
+                set_room_chunk_debug_mask(&mut mask, meta.room);
             }
             slot += 1;
         }
@@ -1937,7 +1945,7 @@ impl Playtest {
 }
 
 impl Scene for Playtest {
-    fn init(&mut self, _ctx: &mut Ctx) {
+    fn init(&mut self, ctx: &mut Ctx) {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
         self.shadow_material = upload_shadow_texture();
 
@@ -1975,6 +1983,7 @@ impl Scene for Playtest {
             self.camera_config(),
             CAMERA_START_YAW,
         );
+        self.render_camera = self.update_follow_camera(ctx);
         self.load_active_room_window();
         #[cfg(feature = "cd-stream-bench")]
         self.bootstrap_streamed_room_window();
@@ -1985,7 +1994,8 @@ impl Scene for Playtest {
     fn update(&mut self, ctx: &mut Ctx) {
         #[cfg(feature = "cd-stream-bench")]
         if self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK) {
-            self.load_active_room_window();
+            self.queue_streamed_resident_window();
+            self.refresh_active_room_window_after_stream_update();
         }
 
         if ctx.just_pressed(button::R3) {
@@ -2039,11 +2049,11 @@ impl Scene for Playtest {
             if ctx.is_held(button::DOWN) {
                 self.orbit_radius = (self.orbit_radius + button_radius_step).min(CAMERA_RADIUS_MAX);
             }
-            self.refresh_active_room_window_if_needed();
             self.player_moved_last_tick = false;
             telemetry::stage_begin(telemetry::stage::CAMERA);
             self.render_camera = self.free_orbit_camera();
             telemetry::stage_end(telemetry::stage::CAMERA);
+            self.refresh_active_room_window_if_needed();
             return;
         }
 
@@ -2105,9 +2115,7 @@ impl Scene for Playtest {
             self.motor
                 .update_vblanks_with_collision(collision, input, config, delta_vblanks);
         self.player_moved_last_tick = motor_frame.moved;
-        if !self.update_current_room_from_player() {
-            self.refresh_active_room_window_if_needed();
-        }
+        self.update_current_room_from_player();
 
         let new_state = if self.anim_lock_until_tick > now {
             self.anim_state
@@ -2145,6 +2153,7 @@ impl Scene for Playtest {
         telemetry::stage_begin(telemetry::stage::CAMERA);
         self.render_camera = self.update_follow_camera(ctx);
         telemetry::stage_end(telemetry::stage::CAMERA);
+        self.refresh_active_room_window_if_needed();
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
@@ -2178,7 +2187,7 @@ impl Scene for Playtest {
 
         if self.current_collision_room.is_some() {
             let mut total_instance_stats = ModelInstanceDrawStats::default();
-            let mut room_active_chunks = 0u32;
+            let mut room_visible_chunks = 0u32;
             let mut room_cached_draws = 0u32;
             let mut room_uncached_draws = 0u32;
             let mut room_cache_cells = 0u32;
@@ -2187,8 +2196,8 @@ impl Scene for Playtest {
             let mut room_cache_fallback_draws = 0u32;
             #[allow(unused_mut)]
             let mut room_visibility_fallback_draws = 0u32;
-            let mut room_active_chunk_mask = 0u64;
-            let mut room_drawn_chunk_mask = 0u64;
+            let mut room_visible_chunk_mask = [0u32; ROOM_CHUNK_DEBUG_MASK_WORD_COUNT];
+            let mut room_drawn_chunk_mask = [0u32; ROOM_CHUNK_DEBUG_MASK_WORD_COUNT];
             #[cfg(feature = "world-grid-visible")]
             let mut room_visible_cells = 0u32;
             #[cfg(feature = "world-grid-visible")]
@@ -2206,9 +2215,8 @@ impl Scene for Playtest {
                 let Some(active) = self.active_rooms[active_slot] else {
                     continue;
                 };
-                room_active_chunks = room_active_chunks.saturating_add(1);
-                let chunk_mask = room_index_debug_mask(active.index);
-                room_active_chunk_mask |= chunk_mask;
+                room_visible_chunks = room_visible_chunks.saturating_add(1);
+                set_room_chunk_debug_mask(&mut room_visible_chunk_mask, active.index);
                 if active.surface_cache.ready {
                     room_cache_cells =
                         room_cache_cells.saturating_add(active.surface_cache.cell_count as u32);
@@ -2289,7 +2297,10 @@ impl Scene for Playtest {
                                 room_cache_fallback_draws =
                                     room_cache_fallback_draws.saturating_add(1);
                                 if let Some(render_room) = active.render() {
-                                    room_drawn_chunk_mask |= chunk_mask;
+                                    set_room_chunk_debug_mask(
+                                        &mut room_drawn_chunk_mask,
+                                        active.index,
+                                    );
                                     draw_room_vertex_lit(
                                         render_room,
                                         materials,
@@ -2309,7 +2320,7 @@ impl Scene for Playtest {
                                     room_cache_fallback_draws.saturating_add(1);
                             }
                             if let Some(render_room) = active.render() {
-                                room_drawn_chunk_mask |= chunk_mask;
+                                set_room_chunk_debug_mask(&mut room_drawn_chunk_mask, active.index);
                                 draw_room_vertex_lit(
                                     render_room,
                                     materials,
@@ -2325,7 +2336,7 @@ impl Scene for Playtest {
                         room_visible_cells =
                             room_visible_cells.saturating_add(stats.cells_drawn as u32);
                         if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
-                            room_drawn_chunk_mask |= chunk_mask;
+                            set_room_chunk_debug_mask(&mut room_drawn_chunk_mask, active.index);
                         }
                         accumulate_grid_visibility_stats(&mut room_stats_total, stats);
                     }
@@ -2472,7 +2483,7 @@ impl Scene for Playtest {
                             GridVisibilityStats::default()
                         };
                         if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
-                            room_drawn_chunk_mask |= chunk_mask;
+                            set_room_chunk_debug_mask(&mut room_drawn_chunk_mask, active.index);
                         }
                         accumulate_grid_visibility_stats(&mut room_stats_total, stats);
                     }
@@ -2484,7 +2495,7 @@ impl Scene for Playtest {
                         room_cache_fallback_draws = room_cache_fallback_draws.saturating_add(1);
                     }
                     if let Some(render_room) = active.render() {
-                        room_drawn_chunk_mask |= chunk_mask;
+                        set_room_chunk_debug_mask(&mut room_drawn_chunk_mask, active.index);
                         draw_room_vertex_lit(
                             render_room,
                             materials,
@@ -2728,16 +2739,18 @@ impl Scene for Playtest {
                 }
             }
 
-            telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_active_chunks);
-            emit_room_chunk_mask(
+            telemetry::counter(telemetry::counter::ROOM_ACTIVE_CHUNKS, room_visible_chunks);
+            emit_room_chunk_debug_mask(
                 telemetry::counter::ROOM_ACTIVE_CHUNK_MASK_LO,
                 telemetry::counter::ROOM_ACTIVE_CHUNK_MASK_HI,
-                room_active_chunk_mask,
+                telemetry::counter::ROOM_ACTIVE_CHUNK_MASK_WORD_FIRST,
+                &room_visible_chunk_mask,
             );
-            emit_room_chunk_mask(
+            emit_room_chunk_debug_mask(
                 telemetry::counter::ROOM_DRAWN_CHUNK_MASK_LO,
                 telemetry::counter::ROOM_DRAWN_CHUNK_MASK_HI,
-                room_drawn_chunk_mask,
+                telemetry::counter::ROOM_DRAWN_CHUNK_MASK_WORD_FIRST,
+                &room_drawn_chunk_mask,
             );
             emit_player_map_debug(
                 self.room_index,
@@ -2750,10 +2763,12 @@ impl Scene for Playtest {
                     telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
                     ROOM_STREAM_SCHEDULER.resident_slot_count() as u32,
                 );
-                emit_room_chunk_mask(
+                let resident_mask = ROOM_STREAM_SCHEDULER.resident_room_mask();
+                emit_room_chunk_debug_mask(
                     telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO,
                     telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI,
-                    ROOM_STREAM_SCHEDULER.resident_room_mask(),
+                    telemetry::counter::ROOM_STREAM_RESIDENT_MASK_WORD_FIRST,
+                    &resident_mask,
                 );
             }
             telemetry::counter(telemetry::counter::ROOM_CACHED_DRAWS, room_cached_draws);
@@ -3362,6 +3377,14 @@ impl Playtest {
         }
     }
 
+    fn active_room_selection_camera(&self) -> WorldCamera {
+        if self.free_orbit {
+            self.free_orbit_camera()
+        } else {
+            self.render_camera
+        }
+    }
+
     fn load_active_room_window(&mut self) {
         self.rebuild_active_room_window(true);
     }
@@ -3394,6 +3417,10 @@ impl Playtest {
             telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
             return;
         };
+        #[cfg(feature = "cd-stream-bench")]
+        if update_streaming {
+            self.preload_streamed_resident_window(current_record);
+        }
         #[cfg(not(feature = "cd-stream-bench"))]
         let current_room = parse_runtime_room(current_record);
         #[cfg(feature = "cd-stream-bench")]
@@ -3410,10 +3437,12 @@ impl Playtest {
             return;
         }
         let player = self.motor.position();
+        let camera = self.active_room_selection_camera();
         let view = self.active_room_selection_view();
-        let active_limit = room_active_chunk_limit(current_record);
-        self.active_room_view_sin_key = view.sin_key;
-        self.active_room_view_cos_key = view.cos_key;
+        let visible_limit = room_visible_chunk_limit(current_record);
+        let (view_sin_key, view_cos_key) = visible_chunk_view_keys(camera);
+        self.active_room_view_sin_key = view_sin_key;
+        self.active_room_view_cos_key = view_cos_key;
 
         let mut next_slot = 0usize;
         if let Some(active) = reuse_or_build_active_room(
@@ -3440,17 +3469,17 @@ impl Playtest {
         if !ROOM_CHUNKS.is_empty() && sector_grid_available() {
             used_sector_grid_window = true;
             let mut selected_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-            let (selected_count, considered) = select_sector_grid_active_rooms(
+            let (selected_count, considered) = select_sector_grid_visible_rooms(
                 current_index,
                 current_record,
                 player,
-                view,
-                active_limit,
+                camera,
+                visible_limit,
                 &mut selected_rooms,
             );
             self.active_room_candidates = considered;
             let mut selected_slot = 1usize;
-            while next_slot < active_limit && selected_slot < selected_count {
+            while next_slot < visible_limit && selected_slot < selected_count {
                 let candidate = selected_rooms[selected_slot];
                 selected_slot += 1;
                 let Some(record) = ROOMS.get(candidate.to_usize()) else {
@@ -3476,7 +3505,7 @@ impl Playtest {
         if !used_sector_grid_window && !ROOM_CHUNKS.is_empty() {
             self.active_room_candidates =
                 ROOM_CHUNKS.len().saturating_sub(1).min(u16::MAX as usize) as u16;
-            while next_slot < active_limit {
+            while next_slot < visible_limit {
                 let Some(candidate) = best_grid_chunk_candidate(
                     current_index,
                     current_record,
@@ -3517,7 +3546,7 @@ impl Playtest {
                 telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
                 return;
             };
-            while next_slot < active_limit {
+            while next_slot < visible_limit {
                 let Some(raw_index) = nearest_touching_room_index(
                     current_index,
                     current_record,
@@ -3548,35 +3577,15 @@ impl Playtest {
             telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
             next_slot as u32,
         );
-        #[cfg(feature = "cd-stream-bench")]
-        if update_streaming {
-            self.preload_streamed_active_room_window(next_slot, current_record);
-        }
         telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
     }
 
     #[cfg(feature = "cd-stream-bench")]
-    fn preload_streamed_active_room_window(
-        &mut self,
-        active_count: usize,
-        current_record: &LevelRoomRecord,
-    ) {
+    fn preload_streamed_resident_window(&mut self, current_record: &LevelRoomRecord) {
         let resident_capacity = room_resident_chunk_limit(current_record);
         let request_limit = room_stream_request_chunk_limit(current_record);
-        let active_count = active_count.min(room_active_chunk_limit(current_record));
-        let mut room_ids = [u16::MAX; MAX_ACTIVE_ROOMS];
         let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut i = 0usize;
-        while i < active_count {
-            let Some(active) = self.active_rooms[i] else {
-                break;
-            };
-            room_ids[i] = active.index.raw();
-            i += 1;
-        }
 
-        // Keep residency tied to player position. Camera yaw only changes which
-        // already-resident chunks are selected for drawing.
         let mut requested_count =
             append_streamed_room_request(&mut requested_rooms, 0, request_limit, self.room_index);
         requested_count = self.append_current_collision_neighbour_requests(
@@ -3603,30 +3612,6 @@ impl Playtest {
             priority_count,
             resident_capacity,
         );
-
-        let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
-        let mut slot = 0usize;
-        while slot < active_count {
-            let index = RoomIndex::new(room_ids[slot]);
-            if let Some(record) = ROOMS.get(index.to_usize()) {
-                rebuilt[slot] = reuse_or_build_active_room(
-                    slot,
-                    index,
-                    record,
-                    current_record,
-                    &self.active_rooms,
-                );
-            }
-            slot += 1;
-        }
-        self.active_rooms = rebuilt;
-        if let Some(active) = self.active_rooms[0] {
-            self.room = active.render_room;
-            self.current_collision_room = Some(active.collision_room);
-            self.current_ambient_rgb = active.ambient_rgb;
-            self.materials = active.materials;
-            self.material_count = active.material_count;
-        }
     }
 
     #[cfg(feature = "cd-stream-bench")]
@@ -3667,6 +3652,16 @@ impl Playtest {
             .min(request_limit)
             .min(STREAMED_ROOM_SLOT_COUNT);
         let player = self.motor.position();
+        #[cfg(feature = "sector-grid-streaming")]
+        if sector_grid_available() {
+            return append_sector_grid_spiral_resident_requests(
+                requested_rooms,
+                count,
+                request_limit,
+                current_record,
+                player,
+            );
+        }
         while count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
             let before = count;
             let mut cursor = 0usize;
@@ -3858,11 +3853,20 @@ impl Playtest {
     }
 
     #[cfg(feature = "cd-stream-bench")]
+    fn queue_streamed_resident_window(&mut self) {
+        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
+            return;
+        };
+        self.preload_streamed_resident_window(record);
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
     fn bootstrap_streamed_room_window(&mut self) {
         let mut pumps = 0usize;
         while pumps < STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT && streamed_room_stream_active() {
             if self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK) {
-                self.load_active_room_window();
+                self.queue_streamed_resident_window();
+                self.refresh_active_room_window_after_stream_update();
             }
             pumps += 1;
         }
@@ -3892,10 +3896,54 @@ impl Playtest {
         self.room_index = next_room;
         self.motor.relocate(local);
         self.camera.relocate_room_space(camera_delta);
+        self.active_room_anchor = RoomPoint::new(
+            self.active_room_anchor.x.saturating_add(camera_delta.x),
+            self.active_room_anchor.y.saturating_add(camera_delta.y),
+            self.active_room_anchor.z.saturating_add(camera_delta.z),
+        );
         self.lock_target = None;
         self.lock_switch_stick_held = false;
         self.soft_lock_target = None;
-        self.load_active_room_window();
+        #[cfg(feature = "cd-stream-bench")]
+        self.queue_streamed_resident_window();
+        if self.adopt_active_room_as_current(next_room) {
+            return true;
+        }
+        self.rebuild_active_room_window(false);
+        true
+    }
+
+    fn adopt_active_room_as_current(&mut self, current_index: RoomIndex) -> bool {
+        let Some(current_record) = ROOMS.get(current_index.to_usize()) else {
+            return false;
+        };
+        let mut current_active = None;
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            let Some(active) = self.active_rooms[slot] else {
+                slot += 1;
+                continue;
+            };
+            let Some(record) = ROOMS.get(active.index.to_usize()) else {
+                self.active_rooms[slot] = None;
+                slot += 1;
+                continue;
+            };
+            let rebased = active.with_current_room_offsets(record, current_record);
+            if rebased.index == current_index {
+                current_active = Some(rebased);
+            }
+            self.active_rooms[slot] = Some(rebased);
+            slot += 1;
+        }
+        let Some(active) = current_active else {
+            return false;
+        };
+        self.room = active.render_room;
+        self.current_collision_room = Some(active.collision_room);
+        self.current_ambient_rgb = active.ambient_rgb;
+        self.materials = active.materials;
+        self.material_count = active.material_count;
         true
     }
 
@@ -3909,30 +3957,51 @@ impl Playtest {
         let sector_size = record.sector_size.max(1);
         let threshold = sector_size.saturating_mul(ACTIVE_ROOM_REFRESH_SECTORS.max(1));
         let player = self.motor.position();
+        let camera = self.active_room_selection_camera();
         let view = self.active_room_selection_view();
+        let (view_sin_key, view_cos_key) = visible_chunk_view_keys(camera);
         let moved_far = point_xz_distance_sq(player, self.active_room_anchor)
             >= (threshold as u64).saturating_mul(threshold as u64);
-        let view_changed = view.sin_key != self.active_room_view_sin_key
-            || view.cos_key != self.active_room_view_cos_key;
+        let view_changed = view_sin_key != self.active_room_view_sin_key
+            || view_cos_key != self.active_room_view_cos_key;
         if !moved_far && !view_changed {
             return;
         }
-        if self.active_room_window_matches_selection(self.room_index, record, player, view) {
+        if self.active_room_window_matches_selection(self.room_index, record, player, view, camera)
+        {
             #[cfg(feature = "cd-stream-bench")]
             if moved_far {
-                self.preload_streamed_active_room_window(
-                    active_room_count(&self.active_rooms),
-                    record,
-                );
+                self.preload_streamed_resident_window(record);
+                self.active_room_anchor = player;
+                self.rebuild_active_room_window(false);
+                return;
             }
             if moved_far {
                 self.active_room_anchor = player;
             }
-            self.active_room_view_sin_key = view.sin_key;
-            self.active_room_view_cos_key = view.cos_key;
+            self.active_room_view_sin_key = view_sin_key;
+            self.active_room_view_cos_key = view_cos_key;
         } else {
             self.rebuild_active_room_window(moved_far);
         }
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn refresh_active_room_window_after_stream_update(&mut self) {
+        if !self.chunked_level() {
+            return;
+        }
+        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
+            return;
+        };
+        let player = self.motor.position();
+        let camera = self.active_room_selection_camera();
+        let view = self.active_room_selection_view();
+        if self.active_room_window_matches_selection(self.room_index, record, player, view, camera)
+        {
+            return;
+        }
+        self.rebuild_active_room_window(false);
     }
 
     fn active_room_window_matches_selection(
@@ -3941,29 +4010,30 @@ impl Playtest {
         current_record: &LevelRoomRecord,
         player: RoomPoint,
         view: ActiveRoomView,
+        camera: WorldCamera,
     ) -> bool {
         if ROOM_CHUNKS.is_empty() || self.active_rooms[0].is_none() {
             return false;
         }
 
         let mut selected = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        let active_limit = room_active_chunk_limit(current_record);
+        let visible_limit = room_visible_chunk_limit(current_record);
 
         #[cfg(feature = "sector-grid-streaming")]
         let selected_count = if sector_grid_available() {
-            select_sector_grid_active_rooms(
+            select_sector_grid_visible_rooms(
                 current_index,
                 current_record,
                 player,
-                view,
-                active_limit,
+                camera,
+                visible_limit,
                 &mut selected,
             )
             .0
         } else {
             selected[0] = current_index;
             let mut selected_count = 1usize;
-            while selected_count < active_limit {
+            while selected_count < visible_limit {
                 let Some(candidate) = best_grid_chunk_candidate_from_indices(
                     current_index,
                     current_record,
@@ -3983,7 +4053,7 @@ impl Playtest {
         let selected_count = {
             selected[0] = current_index;
             let mut selected_count = 1usize;
-            while selected_count < active_limit {
+            while selected_count < visible_limit {
                 let Some(candidate) = best_grid_chunk_candidate_from_indices(
                     current_index,
                     current_record,
@@ -6560,42 +6630,25 @@ struct ActiveRoomView {
     position: RoomPoint,
     sin_yaw: i32,
     cos_yaw: i32,
-    sin_key: i16,
-    cos_key: i16,
 }
 
 impl ActiveRoomView {
     fn new(position: RoomPoint, yaw: Angle) -> Self {
         let sin_yaw = yaw.sin().raw();
         let cos_yaw = yaw.cos().raw();
-        let (sin_key, cos_key) = active_room_view_keys(sin_yaw, cos_yaw);
         Self {
             position,
             sin_yaw,
             cos_yaw,
-            sin_key,
-            cos_key,
         }
     }
 }
 
-fn active_room_view_keys(sin_yaw: i32, cos_yaw: i32) -> (i16, i16) {
-    #[cfg(feature = "vis-static-active-turn")]
-    {
-        let _ = (sin_yaw, cos_yaw);
-        (0, 0)
-    }
-    #[cfg(all(not(feature = "vis-static-active-turn"), feature = "vis-coarse-yaw"))]
-    {
-        ((sin_yaw / 2048) as i16, (cos_yaw / 2048) as i16)
-    }
-    #[cfg(all(
-        not(feature = "vis-static-active-turn"),
-        not(feature = "vis-coarse-yaw")
-    ))]
-    {
-        ((sin_yaw / 512) as i16, (cos_yaw / 512) as i16)
-    }
+fn visible_chunk_view_keys(camera: WorldCamera) -> (i16, i16) {
+    (
+        (camera.sin_yaw.raw() / 512) as i16,
+        (camera.cos_yaw.raw() / 512) as i16,
+    )
 }
 
 fn chunk_available_for_active_selection(room: RoomIndex) -> bool {
@@ -6967,8 +7020,6 @@ where
         return;
     }
 
-    let mut seen = [INVALID_ROOM_INDEX; SECTOR_GRID_MAX_CANDIDATES];
-    let mut seen_count = 0usize;
     let (center_x, center_z) = sector_grid_player_sector(record, player);
     let radius = sector_grid_candidate_radius_sectors(record);
     let Some((min_x, max_x, min_z, max_z)) = sector_grid_clamped_cell_rect(
@@ -6979,29 +7030,148 @@ where
     ) else {
         return;
     };
-    let max_seen = ROOM_CHUNKS.len().min(seen.len());
-    if max_seen == 0 {
+    let mut grid_z = min_z;
+    while grid_z <= max_z {
+        let mut grid_x = min_x;
+        while grid_x <= max_x {
+            if let Some(room) = sector_grid_room_at_grid_cell(grid_x, grid_z) {
+                visit(room);
+            }
+            grid_x += 1;
+        }
+        grid_z += 1;
+    }
+}
+
+#[cfg(all(feature = "cd-stream-bench", feature = "sector-grid-streaming"))]
+fn append_sector_grid_spiral_resident_requests(
+    requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    requested_count: usize,
+    request_limit: usize,
+    record: &LevelRoomRecord,
+    player: RoomPoint,
+) -> usize {
+    let mut count = requested_count
+        .min(request_limit)
+        .min(STREAMED_ROOM_SLOT_COUNT);
+    let (center_x, center_z) = sector_grid_player_sector(record, player);
+    let max_radius = sector_grid_candidate_radius_sectors(record);
+    let mut radius = 0i32;
+    while radius <= max_radius && count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
+        if radius == 0 {
+            count = append_sector_grid_cell_resident_request(
+                requested_rooms,
+                count,
+                request_limit,
+                center_x,
+                center_z,
+            );
+            radius += 1;
+            continue;
+        }
+
+        let min_x = center_x.saturating_sub(radius);
+        let max_x = center_x.saturating_add(radius);
+        let min_z = center_z.saturating_sub(radius);
+        let max_z = center_z.saturating_add(radius);
+
+        let mut x = min_x;
+        while x <= max_x && count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
+            count = append_sector_grid_cell_resident_request(
+                requested_rooms,
+                count,
+                request_limit,
+                x,
+                min_z,
+            );
+            if min_z != max_z && count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
+                count = append_sector_grid_cell_resident_request(
+                    requested_rooms,
+                    count,
+                    request_limit,
+                    x,
+                    max_z,
+                );
+            }
+            x = x.saturating_add(1);
+        }
+
+        let mut z = min_z.saturating_add(1);
+        while z < max_z && count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
+            count = append_sector_grid_cell_resident_request(
+                requested_rooms,
+                count,
+                request_limit,
+                min_x,
+                z,
+            );
+            if min_x != max_x && count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
+                count = append_sector_grid_cell_resident_request(
+                    requested_rooms,
+                    count,
+                    request_limit,
+                    max_x,
+                    z,
+                );
+            }
+            z = z.saturating_add(1);
+        }
+
+        radius += 1;
+    }
+    count
+}
+
+#[cfg(all(feature = "cd-stream-bench", feature = "sector-grid-streaming"))]
+fn append_sector_grid_cell_resident_request(
+    requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    requested_count: usize,
+    request_limit: usize,
+    sector_x: i32,
+    sector_z: i32,
+) -> usize {
+    let Some(room) = sector_grid_room_at_world_sector(sector_x, sector_z) else {
+        return requested_count
+            .min(request_limit)
+            .min(STREAMED_ROOM_SLOT_COUNT);
+    };
+    append_streamed_room_request(requested_rooms, requested_count, request_limit, room)
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn visit_sector_grid_camera_candidate_rooms<F>(
+    current_record: &LevelRoomRecord,
+    camera: WorldCamera,
+    mut visit: F,
+) where
+    F: FnMut(RoomIndex),
+{
+    if !sector_grid_available() {
         return;
     }
+
+    let sector_size = WORLD_SECTOR_GRID_SECTOR_SIZE.max(1);
+    let global_x = room_origin_x(current_record).saturating_add(camera.position.x);
+    let global_z = room_origin_z(current_record).saturating_add(camera.position.z);
+    let radius = room_draw_distance(current_record)
+        .saturating_add(sector_size.saturating_mul(4))
+        .max(sector_size);
+    let min_sector_x = global_x.saturating_sub(radius).div_euclid(sector_size);
+    let max_sector_x = global_x.saturating_add(radius).div_euclid(sector_size);
+    let min_sector_z = global_z.saturating_sub(radius).div_euclid(sector_size);
+    let max_sector_z = global_z.saturating_add(radius).div_euclid(sector_size);
+    let Some((min_x, max_x, min_z, max_z)) =
+        sector_grid_clamped_cell_rect(min_sector_x, max_sector_x, min_sector_z, max_sector_z)
+    else {
+        return;
+    };
 
     let mut grid_z = min_z;
     while grid_z <= max_z {
         let mut grid_x = min_x;
         while grid_x <= max_x {
             if let Some(room) = sector_grid_room_at_grid_cell(grid_x, grid_z) {
-                if seen[..seen_count].contains(&room) {
-                    grid_x += 1;
-                    continue;
-                }
-                if seen_count >= max_seen {
-                    return;
-                }
-                seen[seen_count] = room;
-                seen_count += 1;
                 visit(room);
-                if seen_count >= max_seen {
-                    return;
-                }
             }
             grid_x += 1;
         }
@@ -7035,31 +7205,12 @@ fn visit_sector_grid_collision_window_rooms<F>(
     else {
         return;
     };
-    let mut seen = [INVALID_ROOM_INDEX; MAX_COLLISION_ROOMS];
-    let mut seen_count = 0usize;
-    let max_seen = ROOM_CHUNKS.len().min(seen.len());
-    if max_seen == 0 {
-        return;
-    }
-
     let mut grid_z = min_z;
     while grid_z <= max_z {
         let mut grid_x = min_x;
         while grid_x <= max_x {
             if let Some(room) = sector_grid_room_at_grid_cell(grid_x, grid_z) {
-                if seen[..seen_count].contains(&room) {
-                    grid_x += 1;
-                    continue;
-                }
-                if seen_count >= max_seen {
-                    return;
-                }
-                seen[seen_count] = room;
-                seen_count += 1;
                 visit(room);
-                if seen_count >= max_seen {
-                    return;
-                }
             }
             grid_x += 1;
         }
@@ -7068,48 +7219,67 @@ fn visit_sector_grid_collision_window_rooms<F>(
 }
 
 #[cfg(feature = "sector-grid-streaming")]
-fn select_sector_grid_active_rooms(
+fn select_sector_grid_visible_rooms(
     current_index: RoomIndex,
     current_record: &LevelRoomRecord,
     player: RoomPoint,
-    view: ActiveRoomView,
-    active_limit: usize,
+    camera: WorldCamera,
+    visible_limit: usize,
     out: &mut [RoomIndex; MAX_ACTIVE_ROOMS],
 ) -> (usize, u16) {
     out.fill(INVALID_ROOM_INDEX);
-    let limit = active_limit.clamp(1, MAX_ACTIVE_ROOMS);
+    let limit = visible_limit.clamp(1, MAX_ACTIVE_ROOMS);
     out[0] = current_index;
     if !sector_grid_available() || limit <= 1 {
         return (1, 0);
     }
 
-    let mut scores = [ChunkActivationScore::WORST; MAX_ACTIVE_ROOMS];
+    let mut scores = [ChunkVisibilityScore::WORST; MAX_ACTIVE_ROOMS];
     let mut count = 1usize;
     let mut considered = 0u16;
-    visit_sector_grid_candidate_rooms(current_record, player, |room| {
+    visit_sector_grid_camera_candidate_rooms(current_record, camera, |room| {
+        considered = considered.saturating_add(1);
         if room == current_index || !chunk_available_for_active_selection(room) {
             return;
         }
         let Some(chunk) = chunk_record_for_room(room) else {
             return;
         };
-        let Some(score) =
-            chunk_activation_score(*chunk, current_index, current_record, player, view)
-        else {
+        if !chunk_aabb_intersects_camera(*chunk, current_record, camera) {
             return;
         };
-        considered = considered.saturating_add(1);
-        insert_sector_grid_active_room(room, score, out, &mut scores, &mut count, limit);
+        let score = chunk_visibility_score(*chunk, current_record, player, camera);
+        insert_sector_grid_visible_room(room, score, out, &mut scores, &mut count, limit);
     });
     (count, considered)
 }
 
 #[cfg(feature = "sector-grid-streaming")]
-fn insert_sector_grid_active_room(
+#[derive(Copy, Clone)]
+struct ChunkVisibilityScore {
+    distance: u64,
+    depth: i32,
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+impl ChunkVisibilityScore {
+    const WORST: Self = Self {
+        distance: u64::MAX,
+        depth: i32::MIN,
+    };
+
+    fn better_than(self, other: Self) -> bool {
+        self.distance < other.distance
+            || (self.distance == other.distance && self.depth > other.depth)
+    }
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn insert_sector_grid_visible_room(
     room: RoomIndex,
-    score: ChunkActivationScore,
+    score: ChunkVisibilityScore,
     rooms: &mut [RoomIndex; MAX_ACTIVE_ROOMS],
-    scores: &mut [ChunkActivationScore; MAX_ACTIVE_ROOMS],
+    scores: &mut [ChunkVisibilityScore; MAX_ACTIVE_ROOMS],
     count: &mut usize,
     limit: usize,
 ) {
@@ -7137,6 +7307,46 @@ fn insert_sector_grid_active_room(
     }
     rooms[insert] = room;
     scores[insert] = score;
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn chunk_visibility_score(
+    chunk: LevelChunkRecord,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    camera: WorldCamera,
+) -> ChunkVisibilityScore {
+    let (x0, x1, z0, z1) = chunk_bounds_current_space(chunk, current_record);
+    let center_x = x0.saturating_add((x1.saturating_sub(x0)) / 2);
+    let center_z = z0.saturating_add((z1.saturating_sub(z0)) / 2);
+    ChunkVisibilityScore {
+        distance: rect_distance_sq(player.x, player.z, x0, x1, z0, z1),
+        depth: camera
+            .view_vertex(WorldVertex::new(center_x, 0, center_z))
+            .z,
+    }
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn chunk_aabb_intersects_camera(
+    chunk: LevelChunkRecord,
+    current_record: &LevelRoomRecord,
+    camera: WorldCamera,
+) -> bool {
+    let (x0, x1, z0, z1) = chunk_bounds_current_space(chunk, current_record);
+    let sector_size = current_record.sector_size.max(1);
+    let margin = sector_size;
+    aabb_intersects_camera_frustum(
+        x0.saturating_sub(margin),
+        x1.saturating_add(margin),
+        ACTIVE_CHUNK_MIN_Y,
+        ACTIVE_CHUNK_MAX_Y,
+        z0.saturating_sub(margin),
+        z1.saturating_add(margin),
+        camera,
+        room_draw_distance(current_record),
+        ACTIVE_CHUNK_SCREEN_MARGIN,
+    )
 }
 
 #[cfg(feature = "sector-grid-streaming")]
@@ -7559,10 +7769,6 @@ fn active_room_window_contains(
         .iter()
         .flatten()
         .any(|active| active.index == index)
-}
-
-fn active_room_count(active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS]) -> usize {
-    active_rooms.iter().flatten().count()
 }
 
 fn room_center_distance_sq(
