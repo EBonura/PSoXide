@@ -1598,6 +1598,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
 #[derive(Copy, Clone)]
 struct ActiveRuntimeRoom {
     index: RoomIndex,
+    stream_slot: u16,
     render_room: Option<RuntimeRoom<'static>>,
     collision_room: RuntimeCollisionRoom<'static>,
     width: u16,
@@ -1616,6 +1617,16 @@ struct ActiveRuntimeRoom {
 impl ActiveRuntimeRoom {
     fn render(&self) -> Option<RoomRender<'static, '_>> {
         self.render_room.as_ref().map(|room| room.render())
+    }
+
+    fn with_current_room_offsets(
+        mut self,
+        record: &LevelRoomRecord,
+        current_record: &LevelRoomRecord,
+    ) -> Self {
+        self.offset_x = room_origin_x(record).saturating_sub(room_origin_x(current_record));
+        self.offset_z = room_origin_z(record).saturating_sub(room_origin_z(current_record));
+        self
     }
 }
 
@@ -2221,8 +2232,11 @@ impl Scene for Playtest {
                     #[cfg(not(feature = "vis-full-active-chunks"))]
                     {
                         let player = self.motor.position();
-                        let global_visibility_anchor =
-                            RoomPoint::new(camera.position.x, player.y, camera.position.z);
+                        let global_visibility_anchor = if cfg!(feature = "vis-player-anchor") {
+                            player
+                        } else {
+                            RoomPoint::new(camera.position.x, player.y, camera.position.z)
+                        };
                         let visibility_anchor = RoomPoint::new(
                             global_visibility_anchor.x.saturating_sub(active.offset_x),
                             player.y,
@@ -3200,6 +3214,7 @@ impl Playtest {
 
         telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
         telemetry::counter(telemetry::counter::ROOM_WINDOW_REBUILDS, 1);
+        let previous_active_rooms = self.active_rooms;
         self.room = None;
         self.current_collision_room = None;
         self.current_ambient_rgb = [0x80, 0x80, 0x80];
@@ -3240,9 +3255,13 @@ impl Playtest {
         self.active_room_view_cos_key = view.cos_key;
 
         let mut next_slot = 0usize;
-        if let Some(active) =
-            build_active_room(next_slot, current_index, current_record, current_record)
-        {
+        if let Some(active) = reuse_or_build_active_room(
+            next_slot,
+            current_index,
+            current_record,
+            current_record,
+            &previous_active_rooms,
+        ) {
             self.room = active.render_room;
             self.current_collision_room = Some(active.collision_room);
             self.current_ambient_rgb = active.ambient_rgb;
@@ -3272,9 +3291,13 @@ impl Playtest {
                 let Some(record) = ROOMS.get(candidate.to_usize()) else {
                     break;
                 };
-                if let Some(active) =
-                    build_active_room(next_slot, candidate, record, current_record)
-                {
+                if let Some(active) = reuse_or_build_active_room(
+                    next_slot,
+                    candidate,
+                    record,
+                    current_record,
+                    &previous_active_rooms,
+                ) {
                     if active.surface_cache.ready {
                         self.active_rooms[next_slot] = Some(active);
                         next_slot += 1;
@@ -3308,7 +3331,13 @@ impl Playtest {
                     break;
                 };
                 let index = RoomIndex::new(raw_index as u16);
-                if let Some(active) = build_active_room(next_slot, index, record, current_record) {
+                if let Some(active) = reuse_or_build_active_room(
+                    next_slot,
+                    index,
+                    record,
+                    current_record,
+                    &previous_active_rooms,
+                ) {
                     self.active_rooms[next_slot] = Some(active);
                     next_slot += 1;
                 } else {
@@ -3381,7 +3410,13 @@ impl Playtest {
         while slot < active_count {
             let index = RoomIndex::new(room_ids[slot]);
             if let Some(record) = ROOMS.get(index.to_usize()) {
-                rebuilt[slot] = build_active_room(slot, index, record, current_record);
+                rebuilt[slot] = reuse_or_build_active_room(
+                    slot,
+                    index,
+                    record,
+                    current_record,
+                    &self.active_rooms,
+                );
             }
             slot += 1;
         }
@@ -5333,8 +5368,8 @@ fn visible_cell_view_keys(camera: WorldCamera) -> (i16, i16) {
     #[cfg(all(not(feature = "vis-anchor-cache"), feature = "vis-coarse-yaw"))]
     {
         (
-            (camera.sin_yaw.raw() / 1024) as i16,
-            (camera.cos_yaw.raw() / 1024) as i16,
+            (camera.sin_yaw.raw() / 2048) as i16,
+            (camera.cos_yaw.raw() / 2048) as i16,
         )
     }
     #[cfg(all(not(feature = "vis-anchor-cache"), not(feature = "vis-coarse-yaw")))]
@@ -5525,15 +5560,15 @@ fn visible_cell_reject_reason(
     if cfg!(feature = "vis-broad-pvs") {
         return None;
     }
+    if !visibility_cell_in_view_wedge(cell, filter) {
+        return Some(VisibleCellReject::Camera);
+    }
     if !visibility_cell_aabb_intersects_camera(
         cell,
         filter.sector_size,
         filter.camera,
         filter.far_z,
     ) {
-        return Some(VisibleCellReject::Camera);
-    }
-    if !visibility_cell_in_view_wedge(cell, filter) {
         return Some(VisibleCellReject::Camera);
     }
     None
@@ -5858,6 +5893,7 @@ fn build_active_room(
     let surface_cache = active_room_surface_cache_for(index);
     Some(ActiveRuntimeRoom {
         index,
+        stream_slot: active_room_stream_slot(index),
         render_room: payload.render_room,
         collision_room: payload.collision_room,
         width: payload.width,
@@ -5870,6 +5906,38 @@ fn build_active_room(
         offset_z: room_origin_z(record).saturating_sub(room_origin_z(current_record)),
         surface_cache,
     })
+}
+
+fn reuse_or_build_active_room(
+    slot: usize,
+    index: RoomIndex,
+    record: &LevelRoomRecord,
+    current_record: &LevelRoomRecord,
+    previous_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+) -> Option<ActiveRuntimeRoom> {
+    let stream_slot = active_room_stream_slot(index);
+    for previous in previous_rooms.iter().flatten().copied() {
+        if previous.index != index || previous.stream_slot != stream_slot {
+            continue;
+        }
+        return Some(previous.with_current_room_offsets(record, current_record));
+    }
+    build_active_room(slot, index, record, current_record)
+}
+
+fn active_room_stream_slot(index: RoomIndex) -> u16 {
+    #[cfg(feature = "cd-stream-bench")]
+    unsafe {
+        ROOM_STREAM_SCHEDULER
+            .resident_slot_for(index)
+            .and_then(|slot| u16::try_from(slot).ok())
+            .unwrap_or(STREAMED_ROOM_SLOT_NONE)
+    }
+    #[cfg(not(feature = "cd-stream-bench"))]
+    {
+        let _ = index;
+        u16::MAX
+    }
 }
 
 fn build_runtime_room_material_table(
