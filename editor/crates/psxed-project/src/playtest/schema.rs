@@ -1,6 +1,9 @@
 //! Host-side package schema for embedded editor play mode.
 
-use crate::{MaterialFaceSidedness, ResourceId};
+use crate::{MaterialFaceSidedness, ResourceId, SkyCycloramaQuad};
+
+/// Number of cooked character animation action slots.
+pub const PLAYTEST_CHARACTER_ACTION_COUNT: usize = psx_level::CHARACTER_ANIMATION_ACTION_COUNT;
 
 /// Generated subdirectory inside the playtest example that
 /// receives manifest source + `rooms/` + `textures/`. Stable
@@ -87,6 +90,16 @@ pub struct PlaytestRoom {
     pub origin_z: i32,
     /// Engine units per sector.
     pub sector_size: i32,
+    /// Camera-space far plane used for room/actor rendering.
+    pub draw_distance: i32,
+    /// Runtime active-chunk radius in world sectors.
+    pub chunk_activation_radius_sectors: i32,
+    /// Cooked PVS traversal radius in room cells.
+    pub visibility_radius: u16,
+    /// Runtime generated-chunk residency budget inherited from the World node.
+    pub resident_chunk_limit: u8,
+    /// Runtime generated-chunk visible/drawable budget inherited from the World node.
+    pub visible_chunk_limit: u8,
     /// First index into [`PlaytestPackage::materials`] for this
     /// room's slice.
     pub material_first: u16,
@@ -99,6 +112,14 @@ pub struct PlaytestRoom {
     pub fog_near: i32,
     /// Fog end distance in engine units.
     pub fog_far: i32,
+    /// Base colour for the cheap screen-space room atmosphere pass.
+    pub atmosphere_rgb: [u8; 3],
+    /// Number of screen-space particles to draw for this room.
+    pub atmosphere_density: u8,
+    /// Base vertical particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_fall_speed_q4: i16,
+    /// Base horizontal particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_wind_speed_q4: i16,
     /// Resolved world sky for this cooked room.
     pub sky: PlaytestSky,
     /// Resolved far-vista ring for this cooked room.
@@ -142,7 +163,7 @@ pub struct PlaytestChunk {
 }
 
 /// Resolved sky values written into one runtime room record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestSky {
     /// Zenith colour.
     pub top_rgb: [u8; 3],
@@ -152,26 +173,36 @@ pub struct PlaytestSky {
     pub bottom_rgb: [u8; 3],
     /// Horizon line as a percentage of screen height.
     pub horizon_percent: u8,
+    /// Angular thickness of the horizon colour band.
+    pub horizon_thickness_percent: u8,
+    /// Horizontal cyclorama subdivisions.
+    pub skybox_columns: u8,
+    /// Vertical cyclorama subdivisions.
+    pub skybox_rows: u8,
     /// Runtime sky flags.
     pub flags: u16,
-    /// Cloud-layer parameters (baked at scene init by the runtime).
+    /// Cooked panorama/cyclorama backdrop geometry.
+    pub cyclorama_quads: Vec<SkyCycloramaQuad>,
+    /// Cloud-layer parameters used to generate the cooked cyclorama.
     pub cloud_layer: PlaytestCloudLayer,
 }
 
 /// Resolved cloud-layer values written into one runtime room record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestCloudLayer {
+    /// Cooked 4bpp multi-CLUT sky panorama texture used by the runtime.
+    pub texture_asset_index: Option<usize>,
     /// Cloud highlight colour.
     pub color_rgb: [u8; 3],
-    /// CLUT pivot density 0..=255.
+    /// Cloud coverage density 0..=255.
     pub density: u8,
-    /// Plane altitude above world Y = 0 in engine units.
+    /// Cyclorama cloud-band vertical bias.
     pub altitude: u16,
-    /// Plane half-extent on each of X / Z in engine units.
+    /// Cyclorama cloud-band width.
     pub extent: u16,
-    /// Tile-repeats across the plane on each axis.
+    /// Noise/tile repeats across the cloud layer.
     pub tile_count: u8,
-    /// UV scroll speed per second on X / Z in PSX angle units.
+    /// Reserved cloud scroll speed.
     pub scroll_speed: [i16; 2],
     /// Perlin generator seed.
     pub noise_seed: u32,
@@ -396,6 +427,12 @@ pub struct PlaytestModelClipBounds {
     pub first_frame: u16,
     /// Number of frame-bound records for this clip.
     pub frame_count: u16,
+    /// Grounding floor in raw model-local units.
+    pub floor_y: i32,
+    /// Additional model-local pose offset in cooked pose units.
+    pub pose_offset: [i32; 3],
+    /// See `psx_level::model_clip_flags`.
+    pub flags: u16,
 }
 
 /// Conservative local-space sphere for one animation frame.
@@ -405,6 +442,8 @@ pub struct PlaytestModelFrameBounds {
     pub center: [i32; 3],
     /// Conservative radius in engine world units.
     pub radius: i32,
+    /// Grounding floor in raw model-local units.
+    pub floor_y: i32,
 }
 
 /// One named model attachment socket.
@@ -484,6 +523,13 @@ pub struct PlaytestModelInstance {
     pub z: i32,
     /// Yaw, PSX angle units.
     pub yaw: i16,
+    /// Render-only yaw from the Model Renderer component, PSX angle units.
+    pub visual_yaw: i16,
+    /// Render-only model offset from the authored floor anchor,
+    /// in entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
     /// Reserved.
     pub flags: u16,
 }
@@ -518,6 +564,8 @@ pub struct PlaytestImageProp {
     pub height: u16,
     /// Material modulation tint.
     pub tint_rgb: [u8; 3],
+    /// Baked static light base per quad vertex, in perimeter order.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
     /// Runtime flags.
     pub flags: u16,
 }
@@ -662,15 +710,18 @@ pub struct PlaytestCharacter {
     pub source_resource: ResourceId,
     /// Index into [`PlaytestPackage::models`].
     pub model: u16,
-    /// Idle clip index *within the model's clip slice*.
-    pub idle_clip: u16,
-    /// Walk clip index within the model's clip slice.
-    pub walk_clip: u16,
-    /// Optional run clip; `u16::MAX` (= `CHARACTER_CLIP_NONE`)
-    /// means "no run clip authored".
-    pub run_clip: u16,
-    /// Optional turn clip; same sentinel as `run_clip`.
-    pub turn_clip: u16,
+    /// Optional clip index per [`crate::CharacterAnimationAction`]
+    /// slot, within the model's runtime clip slice.
+    pub action_clips: [u16; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Per-action playback flags matching [`Self::action_clips`].
+    pub action_flags: [u8; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Render-only model offset from the player/controller root,
+    /// in entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only yaw from the Model Renderer component, PSX angle units.
+    pub visual_yaw: i16,
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
     /// Capsule radius in engine units.
     pub radius: u16,
     /// Capsule height in engine units.
@@ -681,6 +732,34 @@ pub struct PlaytestCharacter {
     pub run_speed: i32,
     /// Turn speed (degrees / second).
     pub turn_speed_degrees_per_second: u16,
+    /// Maximum stamina in Q12-style arbitrary units.
+    pub stamina_max_q12: i32,
+    /// Minimum stamina required to start sprinting.
+    pub sprint_min_q12: i32,
+    /// Stamina spent per sprinting 60 Hz frame.
+    pub sprint_drain_q12: i32,
+    /// Stamina recovered per grounded non-sprint 60 Hz frame.
+    pub stamina_recover_q12: i32,
+    /// Stamina spent to start a roll.
+    pub roll_cost_q12: i32,
+    /// Roll travel speed in engine units per 60 Hz frame.
+    pub roll_speed: i32,
+    /// Frames where the roll keeps moving.
+    pub roll_active_frames: u8,
+    /// Recovery frames after roll movement ends.
+    pub roll_recovery_frames: u8,
+    /// Invulnerable frames from roll start.
+    pub roll_invulnerable_frames: u8,
+    /// Stamina spent to start a backstep.
+    pub backstep_cost_q12: i32,
+    /// Backstep travel speed in engine units per 60 Hz frame.
+    pub backstep_speed: i32,
+    /// Frames where the backstep keeps moving.
+    pub backstep_active_frames: u8,
+    /// Recovery frames after backstep movement ends.
+    pub backstep_recovery_frames: u8,
+    /// Invulnerable frames from backstep start.
+    pub backstep_invulnerable_frames: u8,
     /// Camera follow distance (engine units).
     pub camera_distance: i32,
     /// Camera vertical offset above the character origin.

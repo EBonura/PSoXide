@@ -159,6 +159,30 @@ impl InputBinding {
     }
 }
 
+/// Keyboard bindings for one analog stick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StickBindings {
+    /// Full stick deflection toward the top edge.
+    #[serde(default)]
+    pub up: InputBinding,
+    /// Full stick deflection toward the bottom edge.
+    #[serde(default)]
+    pub down: InputBinding,
+    /// Full stick deflection toward the left edge.
+    #[serde(default)]
+    pub left: InputBinding,
+    /// Full stick deflection toward the right edge.
+    #[serde(default)]
+    pub right: InputBinding,
+}
+
+impl StickBindings {
+    /// All directions unbound.
+    pub fn unbound() -> Self {
+        Self::default()
+    }
+}
+
 /// Controller key bindings for a single port.
 ///
 /// Button naming follows the PSX convention: `cross` (X),
@@ -195,6 +219,12 @@ pub struct PortBindings {
     pub start: InputBinding,
     /// Select.
     pub select: InputBinding,
+    /// Keyboard keys that emulate the left analog stick.
+    #[serde(default)]
+    pub left_stick: StickBindings,
+    /// Keyboard keys that emulate the right analog stick.
+    #[serde(default)]
+    pub right_stick: StickBindings,
     /// Right stick click (DualShock R3). Used by the embedded playtest
     /// for lock-on / target toggling.
     #[serde(default)]
@@ -229,6 +259,8 @@ impl Default for PortBindings {
             r2: InputBinding::Character('3'),
             start: InputBinding::named("Enter"),
             select: InputBinding::named("Backspace"),
+            left_stick: default_port1_left_stick_bindings(),
+            right_stick: default_port1_right_stick_bindings(),
             r3: default_port1_r3_binding(),
             analog: default_port1_analog_binding(),
         }
@@ -241,6 +273,24 @@ fn default_port1_r3_binding() -> InputBinding {
 
 fn default_port1_analog_binding() -> InputBinding {
     InputBinding::named("F9")
+}
+
+fn default_port1_left_stick_bindings() -> StickBindings {
+    StickBindings {
+        up: InputBinding::named("ArrowUp"),
+        down: InputBinding::named("ArrowDown"),
+        left: InputBinding::named("ArrowLeft"),
+        right: InputBinding::named("ArrowRight"),
+    }
+}
+
+fn default_port1_right_stick_bindings() -> StickBindings {
+    StickBindings {
+        up: InputBinding::Character('i'),
+        down: InputBinding::Character('k'),
+        left: InputBinding::Character('j'),
+        right: InputBinding::Character('l'),
+    }
 }
 
 /// Input-related settings across all ports.
@@ -273,6 +323,8 @@ impl Default for InputSettings {
                 r2: InputBinding::Unbound,
                 start: InputBinding::Unbound,
                 select: InputBinding::Unbound,
+                left_stick: StickBindings::unbound(),
+                right_stick: StickBindings::unbound(),
                 r3: InputBinding::Unbound,
                 analog: InputBinding::Unbound,
             },
@@ -489,6 +541,12 @@ impl Settings {
             self.input.port1.r3 = default_port1_r3_binding();
             self.input.port2.r3 = InputBinding::Unbound;
         }
+        if self.version < 4 {
+            self.input.port1.left_stick = default_port1_left_stick_bindings();
+            self.input.port1.right_stick = default_port1_right_stick_bindings();
+            self.input.port2.left_stick = StickBindings::unbound();
+            self.input.port2.right_stick = StickBindings::unbound();
+        }
         self.version = SETTINGS_VERSION;
     }
 }
@@ -579,6 +637,14 @@ mod tests {
         assert_eq!(loaded.input.port2.start, InputBinding::Unbound);
         assert_eq!(loaded.input.port1.analog, default_port1_analog_binding());
         assert_eq!(loaded.input.port1.r3, default_port1_r3_binding());
+        assert_eq!(
+            loaded.input.port1.left_stick,
+            default_port1_left_stick_bindings()
+        );
+        assert_eq!(
+            loaded.input.port1.right_stick,
+            default_port1_right_stick_bindings()
+        );
     }
 
     #[test]
@@ -633,6 +699,16 @@ mod tests {
         assert_eq!(loaded.input.port2.analog, InputBinding::Unbound);
         assert_eq!(loaded.input.port1.r3, default_port1_r3_binding());
         assert_eq!(loaded.input.port2.r3, InputBinding::Unbound);
+        assert_eq!(
+            loaded.input.port1.left_stick,
+            default_port1_left_stick_bindings()
+        );
+        assert_eq!(
+            loaded.input.port1.right_stick,
+            default_port1_right_stick_bindings()
+        );
+        assert_eq!(loaded.input.port2.left_stick, StickBindings::unbound());
+        assert_eq!(loaded.input.port2.right_stick, StickBindings::unbound());
     }
 
     #[test]
