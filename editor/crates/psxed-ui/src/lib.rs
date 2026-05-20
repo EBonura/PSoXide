@@ -15507,7 +15507,7 @@ fn draw_world_grid_settings(
                 ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Resident Chunks").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Resident Budget").color(STUDIO_TEXT_WEAK));
                 let mut limit = streaming.resident_chunk_limit as i32;
                 if ui
                     .add(egui::DragValue::new(&mut limit).speed(1.0).range(
@@ -15520,7 +15520,7 @@ fn draw_world_grid_settings(
                     *streaming = streaming.normalized();
                     changed = true;
                 }
-                ui.label(RichText::new("chunks").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("32 KiB units").color(STUDIO_TEXT_WEAK));
             });
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Visible Chunks").color(STUDIO_TEXT_WEAK));
@@ -27426,8 +27426,8 @@ fn draw_streaming_budget(
             );
             draw_budget_row(
                 ui,
-                "Resident chunks",
-                format!("{}", streaming.resident_chunk_limit),
+                "Resident budget",
+                format!("{} × 32 KiB", streaming.resident_chunk_limit),
                 false,
             );
             draw_budget_row(

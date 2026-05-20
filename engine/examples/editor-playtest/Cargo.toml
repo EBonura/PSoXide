@@ -16,7 +16,14 @@ codegen-units = 1
 lto           = true
 
 [features]
-default = ["cd-stream-bench", "world-order-bucketed", "world-grid-visible", "ot-2048"]
+default = [
+    "cd-stream-bench",
+    "world-order-bucketed",
+    "world-grid-visible",
+    "ot-2048",
+    "vis-coarse-yaw",
+    "vis-static-active-turn",
+]
 cd-stream-bench = ["dep:psx-io"]
 cd-stream-benchmark = ["cd-stream-bench"]
 world-order-global = []
@@ -24,6 +31,11 @@ world-order-slot = []
 world-order-linked = []
 world-order-bucketed = []
 world-grid-visible = []
+vis-anchor-cache = []
+vis-broad-pvs = []
+vis-coarse-yaw = []
+vis-full-active-chunks = []
+vis-static-active-turn = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
 ot-1024 = []
 ot-2048 = []
