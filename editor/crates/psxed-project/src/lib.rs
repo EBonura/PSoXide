@@ -4169,7 +4169,9 @@ pub struct WorldStreamingSettings {
     /// Preferred generated chunk depth in grid sectors.
     #[serde(default = "default_world_streaming_chunk_target_sectors")]
     pub chunk_target_depth: u16,
-    /// Maximum generated chunks kept resident by the playtest runtime.
+    /// Resident streaming budget, measured in worst-case generated chunk units.
+    /// The playtest runtime converts this to more resident slots when the cooked
+    /// chunks are smaller than the maximum stream slot size.
     #[serde(default = "default_world_streaming_resident_chunks")]
     pub resident_chunk_limit: u8,
     /// Maximum generated chunks selected for drawing/collision by the runtime.
