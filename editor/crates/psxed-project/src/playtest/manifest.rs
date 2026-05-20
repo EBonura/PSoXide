@@ -2560,7 +2560,7 @@ mod tests {
             origin_x: 0,
             origin_z: 0,
             sector_size: 1024,
-            draw_distance: 16_384,
+            draw_distance: 25_000,
             chunk_activation_radius_sectors: 64,
             visibility_radius: 32,
             resident_chunk_limit: 10,

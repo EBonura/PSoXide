@@ -22,6 +22,7 @@
 //! subcommand, the GUI runs as normal.
 
 use std::collections::HashSet;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
@@ -161,6 +162,23 @@ pub struct LaunchArgs {
     /// should produce identical numbers.
     #[arg(long)]
     pub dump_hash: bool,
+    /// Write visible-display FNV-1a hashes at rendered visual-frame
+    /// checkpoints. The CSV is stable enough to diff across performance
+    /// experiments.
+    #[arg(long)]
+    pub visual_hash_log: Option<PathBuf>,
+    /// Capture every Nth rendered visual frame when `--visual-hash-log`
+    /// is enabled. Defaults to every frame.
+    #[arg(long, default_value_t = 1)]
+    pub visual_hash_interval: u64,
+    /// Write visible-display hashes at guest frame-begin checkpoints.
+    /// This is useful when performance changes alter visual cadence but
+    /// the simulation path should still render the same checkpoint image.
+    #[arg(long)]
+    pub guest_hash_log: Option<PathBuf>,
+    /// Capture every Nth guest frame when `--guest-hash-log` is enabled.
+    #[arg(long, default_value_t = 60)]
+    pub guest_hash_interval: u64,
     /// Optional path to dump the final VRAM as a raw PPM image.
     /// Lets you eyeball the boot state without firing up the GUI.
     #[arg(long)]
@@ -521,6 +539,20 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
         .dump_guest_profile
         .then(telemetry::GuestTelemetrySummary::default);
     let mut observed_guest_frames = bus.telemetry.frames_seen();
+    let mut visual_hash_log = DisplayHashLog::new(
+        args.visual_hash_log.as_deref(),
+        args.visual_hash_interval,
+        "visual",
+    )?;
+    let mut observed_visual_frames = bus
+        .telemetry
+        .counter_total(telemetry::counter::VISUAL_FRAMES);
+    let mut guest_hash_log = DisplayHashLog::new(
+        args.guest_hash_log.as_deref(),
+        args.guest_hash_interval,
+        "guest",
+    )?;
+    let mut observed_guest_hash_frames = observed_guest_frames;
 
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
@@ -560,6 +592,31 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             }
             observed_guest_frames = current_guest_frames;
         }
+        let current_visual_frames = bus
+            .telemetry
+            .counter_total(telemetry::counter::VISUAL_FRAMES);
+        while observed_guest_hash_frames < current_guest_frames {
+            observed_guest_hash_frames += 1;
+            guest_hash_log.record(
+                observed_guest_hash_frames,
+                current_guest_frames,
+                current_visual_frames,
+                cpu.tick(),
+                bus.cycles(),
+                &bus,
+            )?;
+        }
+        while observed_visual_frames < current_visual_frames {
+            observed_visual_frames += 1;
+            visual_hash_log.record(
+                observed_visual_frames,
+                current_guest_frames,
+                current_visual_frames,
+                cpu.tick(),
+                bus.cycles(),
+                &bus,
+            )?;
+        }
         if let Some(target) = args.guest_visual_frames {
             if target > 0
                 && bus
@@ -578,6 +635,8 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             }
         }
     }
+    visual_hash_log.flush()?;
+    guest_hash_log.flush()?;
 
     println!(
         "tick={}  cycles={}  pc=0x{:08x}{}",
@@ -653,6 +712,81 @@ fn cmd_build_editor_playtest_disc() -> Result<(), String> {
 fn attach_headless_playtest_pad(bus: &mut Bus) {
     bus.attach_digital_pad_port1();
     let _ = bus.force_port1_analog_mode();
+}
+
+struct DisplayHashLog {
+    writer: Option<BufWriter<std::fs::File>>,
+    interval: u64,
+    checkpoint_kind: &'static str,
+}
+
+impl DisplayHashLog {
+    fn new(
+        path: Option<&Path>,
+        interval: u64,
+        checkpoint_kind: &'static str,
+    ) -> Result<Self, String> {
+        let Some(path) = path else {
+            return Ok(Self {
+                writer: None,
+                interval: interval.max(1),
+                checkpoint_kind,
+            });
+        };
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let file =
+            std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        writeln!(
+            writer,
+            "checkpoint_kind,checkpoint_frame,guest_frame,visual_frame,cpu_tick,bus_cycles,display_hash,width,height,byte_len"
+        )
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(Self {
+            writer: Some(writer),
+            interval: interval.max(1),
+            checkpoint_kind,
+        })
+    }
+
+    fn record(
+        &mut self,
+        checkpoint_frame: u64,
+        guest_frame: u64,
+        visual_frame: u64,
+        cpu_tick: u64,
+        bus_cycles: u64,
+        bus: &Bus,
+    ) -> Result<(), String> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        if checkpoint_frame % self.interval != 0 {
+            return Ok(());
+        }
+        let (hash, width, height, byte_len) = bus.gpu.display_hash();
+        writeln!(
+            writer,
+            "{},{checkpoint_frame},{guest_frame},{visual_frame},{cpu_tick},{bus_cycles},0x{hash:016x},{width},{height},{byte_len}",
+            self.checkpoint_kind
+        )
+        .map_err(|e| format!("write visual hash log: {e}"))
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        if let Some(writer) = self.writer.as_mut() {
+            writer
+                .flush()
+                .map_err(|e| format!("flush visual hash log: {e}"))?;
+        }
+        Ok(())
+    }
 }
 
 fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
