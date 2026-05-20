@@ -1,11 +1,12 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
-use psx_asset::{Animation, Model, Texture};
+use psx_asset::{Animation, Texture};
 use psxed_project::{
-    model_import::resolve_path, AnimationRole, ProjectDocument, ResourceData, ResourceId,
+    model_import::resolve_path, AnimationClipCalibration, AnimationRole, ProjectDocument,
+    ResourceData, ResourceId,
 };
 
 use crate::icons;
@@ -14,9 +15,7 @@ use crate::style::{STUDIO_BORDER, STUDIO_PANEL_DARK, STUDIO_TEXT_WEAK};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModelAnimationViewerState {
-    selected_character: Option<ResourceId>,
     selected_model: Option<ResourceId>,
-    selected_animation_set: Option<ResourceId>,
     selected_clip_path: Option<String>,
     last_clip_path: Option<String>,
     playing: bool,
@@ -27,16 +26,13 @@ pub(crate) struct ModelAnimationViewerState {
     radius: i32,
     show_animation_root: bool,
     show_bones: bool,
-    show_info: bool,
     last_time_seconds: f64,
 }
 
 impl Default for ModelAnimationViewerState {
     fn default() -> Self {
         Self {
-            selected_character: None,
             selected_model: None,
-            selected_animation_set: None,
             selected_clip_path: None,
             last_clip_path: None,
             playing: true,
@@ -47,7 +43,6 @@ impl Default for ModelAnimationViewerState {
             radius: 0,
             show_animation_root: false,
             show_bones: false,
-            show_info: false,
             last_time_seconds: 0.0,
         }
     }
@@ -60,32 +55,21 @@ impl ModelAnimationViewerState {
         };
         match &resource.data {
             ResourceData::Character(character) => {
-                self.selected_character = Some(id);
                 self.selected_model = character.model;
-                self.selected_animation_set = character.animation_set;
-                self.selected_clip_path =
-                    role_clip_path(project, character.animation_set, AnimationRole::Idle)
-                        .or_else(|| self.first_model_clip_path(project));
+                self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
             }
             ResourceData::Model(_) => {
-                self.selected_character = None;
                 self.selected_model = Some(id);
-                self.selected_clip_path = self.first_model_clip_path(project);
-                self.reset_clip_clock();
-            }
-            ResourceData::AnimationSet(set) => {
-                self.selected_animation_set = Some(id);
-                self.selected_clip_path = role_clip_path(project, Some(id), AnimationRole::Idle)
-                    .or_else(|| {
-                        set.walk_clip
-                            .and_then(|clip| animation_clip_path(project, clip))
-                    })
-                    .or_else(|| self.first_model_clip_path(project));
+                self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
             }
             ResourceData::AnimationClip(clip) => {
                 self.selected_clip_path = Some(clip.psxanim_path.clone());
+                self.reset_clip_clock();
+            }
+            ResourceData::AnimationSource(source) => {
+                self.selected_clip_path = Some(source.source_path.clone());
                 self.reset_clip_clock();
             }
             _ => {}
@@ -94,14 +78,6 @@ impl ModelAnimationViewerState {
     }
 
     fn ensure_selection(&mut self, project: &ProjectDocument) {
-        if self.selected_character.is_some_and(|id| {
-            !matches!(
-                project.resource(id).map(|r| &r.data),
-                Some(ResourceData::Character(_))
-            )
-        }) {
-            self.selected_character = None;
-        }
         if self.selected_model.is_some_and(|id| {
             !matches!(
                 project.resource(id).map(|r| &r.data),
@@ -110,20 +86,9 @@ impl ModelAnimationViewerState {
         }) {
             self.selected_model = None;
         }
-        if self.selected_animation_set.is_some_and(|id| {
-            !matches!(
-                project.resource(id).map(|r| &r.data),
-                Some(ResourceData::AnimationSet(_))
-            )
-        }) {
-            self.selected_animation_set = None;
-        }
 
         if self.selected_model.is_none() {
             self.selected_model = first_model_id(project);
-        }
-        if self.selected_animation_set.is_none() {
-            self.selected_animation_set = first_animation_set_id(project);
         }
 
         let clip_options = self
@@ -135,19 +100,26 @@ impl ModelAnimationViewerState {
             .as_ref()
             .is_some_and(|path| clip_options.iter().any(|clip| clip.path == *path));
         if !selected_clip_still_exists {
-            self.selected_clip_path =
-                role_clip_path(project, self.selected_animation_set, AnimationRole::Idle)
-                    .filter(|path| clip_options.iter().any(|clip| clip.path == *path))
-                    .or_else(|| clip_options.first().map(|clip| clip.path.clone()));
+            self.selected_clip_path = self
+                .preferred_model_clip_path(project)
+                .or_else(|| clip_options.first().map(|clip| clip.path.clone()));
             self.reset_clip_clock();
         }
     }
 
-    fn first_model_clip_path(&self, project: &ProjectDocument) -> Option<String> {
-        self.selected_model.and_then(|model| {
-            build_clip_options(project, model)
-                .first()
-                .map(|clip| clip.path.clone())
+    fn preferred_model_clip_path(&self, project: &ProjectDocument) -> Option<String> {
+        self.selected_model.and_then(|model_id| {
+            let model = project
+                .resource(model_id)
+                .and_then(|resource| match &resource.data {
+                    ResourceData::Model(model) => Some(model),
+                    _ => None,
+                })?;
+            model
+                .effective_preview_clip()
+                .and_then(|index| model.clips.get(index as usize))
+                .map(|clip| clip.psxanim_path.clone())
+                .or_else(|| model.clips.first().map(|clip| clip.psxanim_path.clone()))
         })
     }
 
@@ -165,39 +137,50 @@ struct ViewerClipOption {
     role: AnimationRole,
     looping: bool,
     resource: Option<ResourceId>,
+    model_clip_index: Option<usize>,
+    calibration: AnimationClipCalibration,
+    previewable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClipOrigin {
-    Baked,
+    Model,
+    Target,
     Library,
+    Source,
 }
 
 impl ClipOrigin {
     const fn label(self) -> &'static str {
         match self {
-            Self::Baked => "baked",
+            Self::Model => "model",
+            Self::Target => "target",
             Self::Library => "library",
+            Self::Source => "source",
         }
     }
 }
 
+pub(crate) enum AnimationViewerAction {
+    BakeSourceForModel {
+        model_id: ResourceId,
+        source_id: ResourceId,
+    },
+    ProjectChanged,
+}
+
 pub(crate) fn draw_model_animation_viewer(
     ui: &mut egui::Ui,
-    project: &ProjectDocument,
+    project: &mut ProjectDocument,
     project_root: &Path,
     state: &mut ModelAnimationViewerState,
     preview_texture: &mut Option<egui::TextureHandle>,
-) {
+) -> Option<AnimationViewerAction> {
     state.ensure_selection(project);
+    let mut action = None;
 
-    let character_options =
-        collect_resource_options(project, |data| matches!(data, ResourceData::Character(_)));
     let model_options =
         collect_resource_options(project, |data| matches!(data, ResourceData::Model(_)));
-    let set_options = collect_resource_options(project, |data| {
-        matches!(data, ResourceData::AnimationSet(_))
-    });
     let clip_options = state
         .selected_model
         .map(|id| build_clip_options(project, id))
@@ -207,69 +190,16 @@ pub(crate) fn draw_model_animation_viewer(
         ui.horizontal_wrapped(|ui| {
             if resource_combo(
                 ui,
-                "Profile",
-                "animation-viewer-character",
-                &mut state.selected_character,
-                &character_options,
-            ) {
-                if let Some(id) = state.selected_character {
-                    state.focus_resource(project, id);
-                }
-            }
-            ui.separator();
-            if resource_combo(
-                ui,
                 "Model",
                 "animation-viewer-model",
                 &mut state.selected_model,
                 &model_options,
             ) {
-                state.selected_character = None;
                 state.selected_clip_path = None;
                 state.reset_clip_clock();
                 state.ensure_selection(project);
             }
-            if resource_combo(
-                ui,
-                "Clip Role Map",
-                "animation-viewer-set",
-                &mut state.selected_animation_set,
-                &set_options,
-            ) {
-                state.selected_clip_path =
-                    role_clip_path(project, state.selected_animation_set, AnimationRole::Idle);
-                state.reset_clip_clock();
-                state.ensure_selection(project);
-            }
-        });
-
-        ui.horizontal_wrapped(|ui| {
             clip_combo(ui, state, &clip_options);
-            if let Some(set_id) = state.selected_animation_set {
-                for role in [
-                    AnimationRole::Idle,
-                    AnimationRole::Walk,
-                    AnimationRole::Run,
-                    AnimationRole::Turn,
-                ] {
-                    let Some(path) = role_clip_path(project, Some(set_id), role) else {
-                        continue;
-                    };
-                    if ui
-                        .small_button(role.label())
-                        .on_hover_text(format!("Preview the role map's {} clip", role.label()))
-                        .clicked()
-                    {
-                        state.selected_clip_path = Some(path);
-                        state.reset_clip_clock();
-                    }
-                }
-            }
-            ui.separator();
-            ui.checkbox(&mut state.show_animation_root, "Root");
-            ui.checkbox(&mut state.show_bones, "Bones")
-                .on_hover_text("Draws mesh-owned joint centers; cooked models do not yet store exact bind-pose bone pivots.");
-            ui.checkbox(&mut state.show_info, "Info");
         });
 
         ui.separator();
@@ -277,7 +207,7 @@ pub(crate) fn draw_model_animation_viewer(
         let model_context = state
             .selected_model
             .and_then(|id| load_model_context(project, project_root, id));
-        let selected_clip = state
+        let mut selected_clip = state
             .selected_clip_path
             .as_ref()
             .and_then(|path| clip_options.iter().find(|clip| clip.path == *path))
@@ -292,14 +222,22 @@ pub(crate) fn draw_model_animation_viewer(
             state.last_time_seconds = ui.input(|input| input.time);
         }
 
-        draw_playback_controls(
+        let selected_model = state.selected_model;
+        action = draw_playback_controls(
             ui,
             state,
+            selected_model,
+            selected_clip.as_ref(),
             clip_context.as_ref().and_then(|clip| clip.animation_stats),
         );
+        if draw_selected_clip_calibration(ui, project, selected_model, selected_clip.as_mut()) {
+            preview_texture.take();
+            if action.is_none() {
+                action = Some(AnimationViewerAction::ProjectChanged);
+            }
+        }
 
-        let info_height = if state.show_info { 150.0 } else { 0.0 };
-        let preview_height = (ui.available_height() - info_height).max(320.0);
+        let preview_height = ui.available_height().max(320.0);
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), preview_height),
             egui::Layout::top_down(egui::Align::Min),
@@ -308,31 +246,24 @@ pub(crate) fn draw_model_animation_viewer(
                     ui,
                     state,
                     model_context.as_ref(),
+                    selected_clip.as_ref(),
                     clip_context.as_ref(),
                     preview_texture,
                 );
             },
         );
-
-        if state.show_info {
-            ui.separator();
-            draw_diagnostics(
-                ui,
-                project,
-                state,
-                model_context.as_ref(),
-                selected_clip.as_ref(),
-                clip_context.as_ref(),
-            );
-        }
     });
+    action
 }
 
 fn draw_playback_controls(
     ui: &mut egui::Ui,
     state: &mut ModelAnimationViewerState,
+    selected_model: Option<ResourceId>,
+    clip: Option<&ViewerClipOption>,
     animation: Option<LoadedAnimationStats>,
-) {
+) -> Option<AnimationViewerAction> {
+    let mut action = None;
     let now = ui.input(|input| input.time);
     if state.last_time_seconds <= 0.0 {
         state.last_time_seconds = now;
@@ -354,6 +285,27 @@ fn draw_playback_controls(
     state.last_time_seconds = now;
 
     ui.horizontal(|ui| {
+        let Some(animation) = animation else {
+            ui.add_enabled(false, egui::Button::new(icons::label(icons::PLAY, "Play")));
+            if let Some(clip) = clip.filter(|clip| !clip.previewable) {
+                ui.weak("Source is not baked yet");
+                if let (Some(model_id), Some(source_id)) = (selected_model, clip.resource) {
+                    if ui
+                        .button(icons::label(icons::PLUS, "Bake for Model"))
+                        .clicked()
+                    {
+                        action = Some(AnimationViewerAction::BakeSourceForModel {
+                            model_id,
+                            source_id,
+                        });
+                    }
+                }
+            } else {
+                ui.weak("No cooked animation loaded");
+            }
+            draw_overlay_toggles(ui, state);
+            return;
+        };
         if ui
             .button(if state.playing {
                 icons::label(icons::PLAY, "Pause")
@@ -365,10 +317,6 @@ fn draw_playback_controls(
             state.playing = !state.playing;
             state.last_time_seconds = now;
         }
-        let Some(animation) = animation else {
-            ui.weak("No clip loaded");
-            return;
-        };
         let max_frame = animation.frame_count.saturating_sub(1).max(1);
         let mut frame = state.frame.round() as u16;
         if ui
@@ -393,13 +341,133 @@ fn draw_playback_controls(
                 .text("Speed")
                 .step_by(0.1),
         );
+        draw_overlay_toggles(ui, state);
     });
+    action
+}
+
+fn draw_overlay_toggles(ui: &mut egui::Ui, state: &mut ModelAnimationViewerState) {
+    ui.separator();
+    ui.toggle_value(
+        &mut state.show_bones,
+        icons::label(icons::WAYPOINT, "Bones"),
+    )
+    .on_hover_text("Draw the cooked skeleton overlay");
+    ui.toggle_value(
+        &mut state.show_animation_root,
+        icons::label(icons::CIRCLE_DOT, "Anchor"),
+    )
+    .on_hover_text("Draw the body-derived preview anchor");
+}
+
+fn draw_selected_clip_calibration(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    selected_model: Option<ResourceId>,
+    clip: Option<&mut ViewerClipOption>,
+) -> bool {
+    let Some(clip) = clip else {
+        return false;
+    };
+    let editable = clip_calibration_editable(project, selected_model, clip);
+    let mut calibration = clip.calibration;
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Placement").color(STUDIO_TEXT_WEAK));
+        changed |= ui
+            .add_enabled(
+                editable,
+                egui::Checkbox::new(&mut calibration.in_place, "In-place"),
+            )
+            .on_hover_text("Cancels this clip's root translation while previewing and at runtime")
+            .changed();
+        ui.separator();
+        for (axis, label) in ["X", "Y", "Z"].iter().enumerate() {
+            ui.label(RichText::new(*label).color(STUDIO_TEXT_WEAK));
+            changed |= ui
+                .add_enabled(
+                    editable,
+                    egui::DragValue::new(&mut calibration.offset[axis])
+                        .speed(4.0)
+                        .range(-8192..=8192),
+                )
+                .changed();
+        }
+        if ui
+            .add_enabled(editable, egui::Button::new("Reset"))
+            .clicked()
+        {
+            calibration = AnimationClipCalibration::default();
+            changed = true;
+        }
+        if !editable {
+            ui.weak("Bake this source before editing placement.");
+        }
+    });
+    if changed && store_clip_calibration(project, selected_model, clip, calibration) {
+        clip.calibration = calibration;
+        return true;
+    }
+    false
+}
+
+fn clip_calibration_editable(
+    project: &ProjectDocument,
+    selected_model: Option<ResourceId>,
+    clip: &ViewerClipOption,
+) -> bool {
+    if let Some(resource_id) = clip.resource {
+        if project
+            .resource(resource_id)
+            .is_some_and(|resource| matches!(&resource.data, ResourceData::AnimationClip(_)))
+        {
+            return true;
+        }
+    }
+    selected_model.is_some()
+        && clip.model_clip_index.is_some()
+        && selected_model.is_some_and(|model_id| {
+            project
+                .resource(model_id)
+                .is_some_and(|resource| matches!(&resource.data, ResourceData::Model(_)))
+        })
+}
+
+fn store_clip_calibration(
+    project: &mut ProjectDocument,
+    selected_model: Option<ResourceId>,
+    clip: &ViewerClipOption,
+    calibration: AnimationClipCalibration,
+) -> bool {
+    if let Some(resource_id) = clip.resource {
+        if let Some(resource) = project.resource_mut(resource_id) {
+            if let ResourceData::AnimationClip(animation) = &mut resource.data {
+                animation.calibration = calibration;
+                return true;
+            }
+        }
+    }
+    let (Some(model_id), Some(index)) = (selected_model, clip.model_clip_index) else {
+        return false;
+    };
+    let Some(resource) = project.resource_mut(model_id) else {
+        return false;
+    };
+    let ResourceData::Model(model) = &mut resource.data else {
+        return false;
+    };
+    let Some(model_clip) = model.clips.get_mut(index) else {
+        return false;
+    };
+    model_clip.calibration = calibration;
+    true
 }
 
 fn draw_preview(
     ui: &mut egui::Ui,
     state: &mut ModelAnimationViewerState,
     model: Option<&LoadedModelContext>,
+    selected_clip: Option<&ViewerClipOption>,
     clip: Option<&LoadedClipContext>,
     preview_texture: &mut Option<egui::TextureHandle>,
 ) {
@@ -423,13 +491,61 @@ fn draw_preview(
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, STUDIO_PANEL_DARK);
 
-    let (Some(model), Some(clip)) = (model, clip) else {
+    let Some(model) = model else {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
-            "Select a model and animation clip",
+            "Select a model",
             FontId::proportional(14.0),
             STUDIO_TEXT_WEAK,
+        );
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0, STUDIO_BORDER),
+            StrokeKind::Inside,
+        );
+        return;
+    };
+    let Some(selected_clip) = selected_clip else {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Select an animation",
+            FontId::proportional(14.0),
+            STUDIO_TEXT_WEAK,
+        );
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0, STUDIO_BORDER),
+            StrokeKind::Inside,
+        );
+        return;
+    };
+    if !selected_clip.previewable {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Animation source needs baking before preview",
+            FontId::proportional(14.0),
+            STUDIO_TEXT_WEAK,
+        );
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0, STUDIO_BORDER),
+            StrokeKind::Inside,
+        );
+        return;
+    }
+    let Some(clip) = clip else {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Animation clip failed to load",
+            FontId::proportional(14.0),
+            Color32::from_rgb(220, 120, 100),
         );
         painter.rect_stroke(
             rect,
@@ -482,7 +598,10 @@ fn draw_preview(
             time_seconds: seconds,
             yaw_q12: state.yaw_q12.rem_euclid(4096) as u16,
             pitch_q12: state.pitch_q12.rem_euclid(4096) as u16,
-            radius: effective_radius(state, Some(model)),
+            radius: state.radius,
+            focus_on_animated_bounds: true,
+            preview_in_place: selected_clip.calibration.in_place,
+            pose_offset: selected_clip.calibration.offset,
             show_animation_root: state.show_animation_root,
             show_bones: state.show_bones,
         },
@@ -536,119 +655,6 @@ fn draw_preview(
     );
 }
 
-fn draw_diagnostics(
-    ui: &mut egui::Ui,
-    project: &ProjectDocument,
-    state: &ModelAnimationViewerState,
-    model: Option<&LoadedModelContext>,
-    clip: Option<&ViewerClipOption>,
-    clip_context: Option<&LoadedClipContext>,
-) {
-    egui::ScrollArea::vertical()
-        .id_salt("animation-viewer-diagnostics")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.label(RichText::new("Diagnostics").strong());
-            ui.separator();
-
-            if let Some(model) = model {
-                metric(ui, "Model", &model.name);
-                if let Some(parsed) = &model.model_stats {
-                    metric(ui, "Joints", &parsed.joint_count.to_string());
-                    metric(ui, "Parts", &parsed.part_count.to_string());
-                    metric(
-                        ui,
-                        "Bone Points",
-                        &format!("{}/{}", parsed.overlay_joint_points, parsed.joint_count),
-                    );
-                    metric(ui, "Vertices", &parsed.vertex_count.to_string());
-                    metric(ui, "Faces", &parsed.face_count.to_string());
-                } else {
-                    warning(ui, "Model parse failed.");
-                }
-                if model.atlas.is_none() {
-                    warning(ui, "Atlas is missing or failed to parse.");
-                }
-            } else {
-                warning(ui, "No model selected.");
-            }
-
-            ui.add_space(8.0);
-            if let Some(clip) = clip {
-                metric(ui, "Clip", &clip.label);
-                metric(ui, "Origin", clip.origin.label());
-                metric(ui, "Role", clip.role.label());
-                metric(ui, "Looping", if clip.looping { "yes" } else { "no" });
-                if let Some(resource_id) = clip.resource {
-                    metric(ui, "Resource", &format!("#{}", resource_id.raw()));
-                }
-            } else {
-                warning(ui, "No clip selected.");
-            }
-
-            if let Some(clip_context) = clip_context {
-                if let Some(animation) = &clip_context.animation_stats {
-                    metric(ui, "Frames", &animation.frame_count.to_string());
-                    metric(
-                        ui,
-                        "Sample Rate",
-                        &format!("{} Hz", animation.sample_rate_hz),
-                    );
-                    metric(ui, "Clip Joints", &animation.joint_count.to_string());
-                    if let Some(model) = model.and_then(|ctx| ctx.model_stats.as_ref()) {
-                        if model.joint_count != animation.joint_count {
-                            warning(
-                                ui,
-                                &format!(
-                                    "Joint mismatch: model {} vs clip {}.",
-                                    model.joint_count, animation.joint_count
-                                ),
-                            );
-                        }
-                    }
-                    if animation.identity_first_pose {
-                        warning(ui, "First pose is bind/identity; this is risky for idle.");
-                    }
-                } else {
-                    warning(ui, "Animation parse failed.");
-                }
-            }
-
-            if let (Some(model_id), Some(clip)) = (state.selected_model, clip) {
-                if let Some(resource_id) = clip.resource {
-                    let model_skeleton =
-                        project
-                            .resource(model_id)
-                            .and_then(|resource| match &resource.data {
-                                ResourceData::Model(model) => model.skeleton,
-                                _ => None,
-                            });
-                    let clip_skeleton =
-                        project
-                            .resource(resource_id)
-                            .and_then(|resource| match &resource.data {
-                                ResourceData::AnimationClip(clip) => clip.skeleton,
-                                _ => None,
-                            });
-                    if model_skeleton != clip_skeleton {
-                        warning(ui, "Skeleton resource differs from the selected model.");
-                    }
-                }
-            }
-        });
-}
-
-fn metric(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK));
-        ui.label(RichText::new(value).monospace());
-    });
-}
-
-fn warning(ui: &mut egui::Ui, text: &str) {
-    ui.colored_label(Color32::from_rgb(220, 160, 80), text);
-}
-
 fn resource_combo(
     ui: &mut egui::Ui,
     label: &str,
@@ -665,7 +671,7 @@ fn resource_combo(
             .unwrap_or("(none)");
         egui::ComboBox::from_id_salt(id_salt)
             .selected_text(selected)
-            .width(180.0)
+            .width(280.0)
             .show_ui(ui, |ui| {
                 if ui.selectable_label(current.is_none(), "(none)").clicked() {
                     *current = None;
@@ -688,7 +694,7 @@ fn clip_combo(
     options: &[ViewerClipOption],
 ) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Clip").color(STUDIO_TEXT_WEAK));
+        ui.label(RichText::new("Animation").color(STUDIO_TEXT_WEAK));
         let selected = state
             .selected_clip_path
             .as_ref()
@@ -697,16 +703,38 @@ fn clip_combo(
             .unwrap_or("(none)");
         egui::ComboBox::from_id_salt("animation-viewer-clip")
             .selected_text(selected)
-            .width(280.0)
+            .width(520.0)
             .show_ui(ui, |ui| {
                 for option in options {
-                    if ui
-                        .selectable_label(
-                            state.selected_clip_path.as_deref() == Some(option.path.as_str()),
-                            format!("{} · {}", option.label, option.origin.label()),
+                    let selected = state.selected_clip_path.as_deref() == Some(option.path.as_str());
+                    let suffix = if option.previewable {
+                        option.origin.label().to_string()
+                    } else {
+                        format!("{} · source only", option.origin.label())
+                    };
+                    let response = ui.selectable_label(
+                        selected,
+                        format!("{} · {}", option.label, suffix),
+                    );
+                    let resource = option
+                        .resource
+                        .map(|id| format!("resource #{}", id.raw()))
+                        .unwrap_or_else(|| "model-local clip".to_string());
+                    let response = response.on_hover_text(format!(
+                        "{} · {} · {} · {}",
+                        option.origin.label(),
+                        option.role.label(),
+                        if option.looping { "looping" } else { "one-shot" },
+                        resource,
+                    ));
+                    let response = if option.previewable {
+                        response
+                    } else {
+                        response.on_hover_text(
+                            "Catalogued source only. Bake or retarget it before previewing on this model.",
                         )
-                        .clicked()
-                    {
+                    };
+                    if response.clicked() {
                         state.selected_clip_path = Some(option.path.clone());
                         state.reset_clip_clock();
                     }
@@ -734,44 +762,92 @@ fn first_model_id(project: &ProjectDocument) -> Option<ResourceId> {
         .find_map(|resource| matches!(resource.data, ResourceData::Model(_)).then_some(resource.id))
 }
 
-fn first_animation_set_id(project: &ProjectDocument) -> Option<ResourceId> {
-    project.resources.iter().find_map(|resource| {
-        matches!(resource.data, ResourceData::AnimationSet(_)).then_some(resource.id)
-    })
-}
-
 fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<ViewerClipOption> {
-    project
-        .resolved_model_animation_clips(model_id)
-        .into_iter()
-        .map(|clip| {
-            let (role, looping) = clip
-                .animation_resource
-                .and_then(|id| project.resource(id))
-                .and_then(|resource| match &resource.data {
-                    ResourceData::AnimationClip(clip) => Some((clip.role, clip.looping)),
-                    _ => None,
-                })
-                .unwrap_or_else(|| {
-                    (
-                        AnimationRole::guess_from_name(&clip.name),
-                        AnimationRole::guess_from_name(&clip.name).matches_looping_default(),
-                    )
-                });
-            ViewerClipOption {
-                label: clip.name,
-                path: clip.psxanim_path,
-                origin: if clip.animation_resource.is_some() {
-                    ClipOrigin::Library
-                } else {
-                    ClipOrigin::Baked
-                },
-                role,
-                looping,
-                resource: clip.animation_resource,
-            }
-        })
-        .collect()
+    let mut out = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut seen_resources = HashSet::new();
+
+    for clip in project.resolved_model_animation_clips(model_id) {
+        let (role, looping, origin) = clip
+            .animation_resource
+            .and_then(|id| project.resource(id).map(|resource| (id, resource)))
+            .and_then(|(id, resource)| match &resource.data {
+                ResourceData::AnimationClip(clip) => {
+                    let origin = if clip.target_model == Some(model_id) {
+                        ClipOrigin::Target
+                    } else {
+                        ClipOrigin::Library
+                    };
+                    seen_resources.insert(id);
+                    Some((clip.role, clip.looping, origin))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                let role = AnimationRole::guess_from_name(&clip.name);
+                (role, role.matches_looping_default(), ClipOrigin::Model)
+            });
+        seen_paths.insert(clip.psxanim_path.clone());
+        out.push(ViewerClipOption {
+            label: clip.name,
+            path: clip.psxanim_path,
+            origin,
+            role,
+            looping,
+            resource: clip.animation_resource,
+            model_clip_index: clip.model_clip_index,
+            calibration: clip.calibration,
+            previewable: true,
+        });
+    }
+
+    for resource in &project.resources {
+        let ResourceData::AnimationClip(clip) = &resource.data else {
+            continue;
+        };
+        if seen_resources.contains(&resource.id) || seen_paths.contains(&clip.psxanim_path) {
+            continue;
+        }
+        seen_resources.insert(resource.id);
+        seen_paths.insert(clip.psxanim_path.clone());
+        out.push(ViewerClipOption {
+            label: resource.name.clone(),
+            path: clip.psxanim_path.clone(),
+            origin: if clip.target_model == Some(model_id) {
+                ClipOrigin::Target
+            } else {
+                ClipOrigin::Library
+            },
+            role: clip.role,
+            looping: clip.looping,
+            resource: Some(resource.id),
+            model_clip_index: None,
+            calibration: clip.calibration,
+            previewable: true,
+        });
+    }
+
+    for resource in &project.resources {
+        let ResourceData::AnimationSource(source) = &resource.data else {
+            continue;
+        };
+        if seen_paths.contains(&source.source_path) {
+            continue;
+        }
+        out.push(ViewerClipOption {
+            label: resource.name.clone(),
+            path: source.source_path.clone(),
+            origin: ClipOrigin::Source,
+            role: source.role,
+            looping: source.looping,
+            resource: Some(resource.id),
+            model_clip_index: None,
+            calibration: AnimationClipCalibration::default(),
+            previewable: is_cooked_animation_path(&source.source_path),
+        });
+    }
+
+    out
 }
 
 trait AnimationRoleLoopingDefault {
@@ -787,44 +863,10 @@ impl AnimationRoleLoopingDefault for AnimationRole {
     }
 }
 
-fn animation_clip_path(project: &ProjectDocument, id: ResourceId) -> Option<String> {
-    project
-        .resource(id)
-        .and_then(|resource| match &resource.data {
-            ResourceData::AnimationClip(clip) => Some(clip.psxanim_path.clone()),
-            _ => None,
-        })
-}
-
-fn role_clip_path(
-    project: &ProjectDocument,
-    set_id: Option<ResourceId>,
-    role: AnimationRole,
-) -> Option<String> {
-    let set = set_id
-        .and_then(|id| project.resource(id))
-        .and_then(|resource| match &resource.data {
-            ResourceData::AnimationSet(set) => Some(set),
-            _ => None,
-        })?;
-    set.role_clip(role)
-        .and_then(|clip_id| animation_clip_path(project, clip_id))
-}
-
 struct LoadedModelContext {
-    name: String,
     model_bytes: Vec<u8>,
-    model_stats: Option<LoadedModelStats>,
     atlas: Option<ColorImage>,
     world_height: u16,
-}
-
-struct LoadedModelStats {
-    joint_count: u16,
-    part_count: u16,
-    overlay_joint_points: u16,
-    vertex_count: u16,
-    face_count: u16,
 }
 
 fn load_model_context(
@@ -838,41 +880,16 @@ fn load_model_context(
     };
     let model_path = resolve_path(&model_resource.model_path, Some(project_root));
     let model_bytes = std::fs::read(model_path).ok()?;
-    let model_stats = Model::from_bytes(&model_bytes)
-        .ok()
-        .map(|model| LoadedModelStats {
-            joint_count: model.joint_count(),
-            part_count: model.part_count(),
-            overlay_joint_points: count_mesh_owned_joint_points(&model),
-            vertex_count: model.vertex_count(),
-            face_count: model.face_count(),
-        });
     let atlas = model_resource
         .texture_path
         .as_ref()
         .and_then(|path| std::fs::read(resolve_path(path, Some(project_root))).ok())
         .and_then(|bytes| decode_psxt_image(&bytes));
     Some(LoadedModelContext {
-        name: resource.name.clone(),
         model_bytes,
-        model_stats,
         atlas,
         world_height: model_resource.world_height,
     })
-}
-
-fn count_mesh_owned_joint_points(model: &Model<'_>) -> u16 {
-    let mut has_vertices = vec![false; model.joint_count() as usize];
-    for part_index in 0..model.part_count() {
-        let Some(part) = model.part(part_index) else {
-            continue;
-        };
-        let joint = part.joint_index() as usize;
-        if joint < has_vertices.len() && part.vertex_count() > 0 {
-            has_vertices[joint] = true;
-        }
-    }
-    has_vertices.iter().filter(|has| **has).count() as u16
 }
 
 struct LoadedClipContext {
@@ -882,28 +899,31 @@ struct LoadedClipContext {
 
 #[derive(Debug, Clone, Copy)]
 struct LoadedAnimationStats {
-    joint_count: u16,
     frame_count: u16,
     sample_rate_hz: u16,
-    identity_first_pose: bool,
 }
 
 fn load_clip_context(project_root: &Path, clip: &ViewerClipOption) -> Option<LoadedClipContext> {
+    if !clip.previewable {
+        return None;
+    }
     let path = resolve_path(&clip.path, Some(project_root));
     let bytes = std::fs::read(path).ok()?;
     let animation_stats =
         Animation::from_bytes(&bytes)
             .ok()
             .map(|animation| LoadedAnimationStats {
-                joint_count: animation.joint_count(),
                 frame_count: animation.frame_count(),
                 sample_rate_hz: animation.sample_rate_hz(),
-                identity_first_pose: is_identity_first_pose(&animation),
             });
     Some(LoadedClipContext {
         bytes,
         animation_stats,
     })
+}
+
+fn is_cooked_animation_path(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".psxanim") && !path.contains("::")
 }
 
 fn decode_psxt_image(bytes: &[u8]) -> Option<ColorImage> {
@@ -995,25 +1015,6 @@ fn decode_psxt_image(bytes: &[u8]) -> Option<ColorImage> {
     })
 }
 
-fn is_identity_first_pose(animation: &Animation<'_>) -> bool {
-    if animation.frame_count() != 1 {
-        return false;
-    }
-    for joint in 0..animation.joint_count() {
-        let Some(pose) = animation.pose(0, joint) else {
-            return false;
-        };
-        let identity = [[4096, 0, 0], [0, 4096, 0], [0, 0, 4096]];
-        if pose.matrix != identity {
-            return false;
-        }
-        if pose.translation.x != 0 || pose.translation.y != 0 || pose.translation.z != 0 {
-            return false;
-        }
-    }
-    true
-}
-
 fn effective_radius(state: &ModelAnimationViewerState, model: Option<&LoadedModelContext>) -> i32 {
     if state.radius > 0 {
         state.radius
@@ -1036,4 +1037,217 @@ fn centered_aspect_rect(container: Rect, aspect: f32) -> Rect {
         (size.x, size.x / aspect)
     };
     Rect::from_center_size(container.center(), Vec2::new(width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use psxed_project::{
+        default_model_collision_radius_for_height, AnimationClipBakeKind, AnimationClipResource,
+        AnimationSourceProvider, AnimationSourceResource, ModelAnimationClip, ModelResource,
+        ProjectDocument, SkeletonResource, MODEL_SCALE_ONE_Q8,
+    };
+
+    fn test_model(path: &str, skeleton: ResourceId) -> ModelResource {
+        ModelResource {
+            model_path: path.to_string(),
+            source_path: None,
+            texture_path: None,
+            skeleton: Some(skeleton),
+            clips: Vec::new(),
+            default_clip: None,
+            preview_clip: None,
+            world_height: 1024,
+            collision_radius: default_model_collision_radius_for_height(1024),
+            scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn clip_options_include_target_library_and_source_entries() {
+        let mut project = ProjectDocument::new("Animation Viewer Test");
+        let skeleton = project.add_resource(
+            "Humanoid Skeleton",
+            ResourceData::Skeleton(SkeletonResource {
+                joint_count: 24,
+                parents: vec![None],
+                signature: "psx-parent-v1:24:root".to_string(),
+                note: String::new(),
+            }),
+        );
+        let model_a = project.add_resource(
+            "Knight",
+            ResourceData::Model(test_model("assets/models/knight.psxmdl", skeleton)),
+        );
+        let model_b = project.add_resource(
+            "Wraith",
+            ResourceData::Model(test_model("assets/models/wraith.psxmdl", skeleton)),
+        );
+
+        let target_clip = project.add_resource(
+            "Knight Native Walk",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/models/knight/walk.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: Some(model_a),
+                bake: AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Walk,
+                looping: true,
+                tags: vec!["meshy".to_string()],
+                calibration: Default::default(),
+            }),
+        );
+        let shared_clip = project.add_resource(
+            "Mixamo Idle",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/animations/mixamo/idle.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: AnimationClipBakeKind::LegacyShared,
+                role: AnimationRole::Idle,
+                looping: true,
+                tags: vec!["mixamo".to_string()],
+                calibration: Default::default(),
+            }),
+        );
+        let other_model_clip = project.add_resource(
+            "Wraith Native Attack",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/models/wraith/attack.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: Some(model_b),
+                bake: AnimationClipBakeKind::ModelNative,
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: vec!["meshy".to_string()],
+                calibration: Default::default(),
+            }),
+        );
+        let source = project.add_resource(
+            "Synty Sword Slash",
+            ResourceData::AnimationSource(AnimationSourceResource {
+                source_path:
+                    "ANIMATION_Sword_Combat_SourceFiles_v5.zip::SourceFiles/Animations/slash.fbx"
+                        .to_string(),
+                clip_name: "slash".to_string(),
+                provider: AnimationSourceProvider::Synty,
+                skeleton: None,
+                target_model: None,
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: vec!["synty".to_string(), "sword".to_string()],
+            }),
+        );
+
+        let options = build_clip_options(&project, model_a);
+        let target_index = options
+            .iter()
+            .position(|option| option.resource == Some(target_clip))
+            .expect("target clip should be listed");
+        let shared_index = options
+            .iter()
+            .position(|option| option.resource == Some(shared_clip))
+            .expect("shared library clip should be listed");
+        let other_model = options
+            .iter()
+            .find(|option| option.resource == Some(other_model_clip))
+            .expect("other model cooked clip should still be visible");
+        let source_only = options
+            .iter()
+            .find(|option| option.resource == Some(source))
+            .expect("catalogued source should be visible");
+
+        assert!(
+            target_index < shared_index,
+            "target-native clips should remain easy to find before generic clips",
+        );
+        assert_eq!(other_model.origin, ClipOrigin::Library);
+        assert!(other_model.previewable);
+        assert_eq!(source_only.origin, ClipOrigin::Source);
+        assert!(!source_only.previewable);
+    }
+
+    #[test]
+    fn model_selection_prefers_model_preview_clip() {
+        let mut project = ProjectDocument::new("Animation Viewer Test");
+        let skeleton = project.add_resource(
+            "Humanoid Skeleton",
+            ResourceData::Skeleton(SkeletonResource {
+                joint_count: 24,
+                parents: vec![None],
+                signature: "psx-parent-v1:24:root".to_string(),
+                note: String::new(),
+            }),
+        );
+        let mut model = test_model("assets/models/knight.psxmdl", skeleton);
+        model.clips = vec![
+            ModelAnimationClip {
+                name: "a_tpose".to_string(),
+                psxanim_path: "assets/models/knight/a_tpose.psxanim".to_string(),
+                calibration: Default::default(),
+            },
+            ModelAnimationClip {
+                name: "idle".to_string(),
+                psxanim_path: "assets/models/knight/idle.psxanim".to_string(),
+                calibration: Default::default(),
+            },
+        ];
+        model.default_clip = Some(1);
+        model.preview_clip = Some(1);
+        let model_id = project.add_resource("Knight", ResourceData::Model(model));
+
+        let mut state = ModelAnimationViewerState::default();
+        state.focus_resource(&project, model_id);
+
+        assert_eq!(
+            state.selected_clip_path.as_deref(),
+            Some("assets/models/knight/idle.psxanim")
+        );
+    }
+
+    #[test]
+    fn clip_options_do_not_duplicate_baked_source_paths() {
+        let mut project = ProjectDocument::new("Animation Viewer Test");
+        let skeleton = project.add_resource(
+            "Humanoid Skeleton",
+            ResourceData::Skeleton(SkeletonResource {
+                joint_count: 24,
+                parents: vec![None],
+                signature: "psx-parent-v1:24:root".to_string(),
+                note: String::new(),
+            }),
+        );
+        let mut model = test_model("assets/models/knight.psxmdl", skeleton);
+        model.clips = vec![ModelAnimationClip {
+            name: "idle".to_string(),
+            psxanim_path: "assets/models/knight/idle.psxanim".to_string(),
+            calibration: Default::default(),
+        }];
+        let model_id = project.add_resource("Knight", ResourceData::Model(model));
+        project.add_resource(
+            "Idle Source",
+            ResourceData::AnimationSource(AnimationSourceResource {
+                source_path: "assets/models/knight/idle.psxanim".to_string(),
+                clip_name: "idle".to_string(),
+                provider: AnimationSourceProvider::Unknown,
+                skeleton: Some(skeleton),
+                target_model: Some(model_id),
+                role: AnimationRole::Idle,
+                looping: true,
+                tags: vec![],
+            }),
+        );
+
+        let options = build_clip_options(&project, model_id);
+        let matching_paths = options
+            .iter()
+            .filter(|option| option.path == "assets/models/knight/idle.psxanim")
+            .count();
+
+        assert_eq!(matching_paths, 1);
+    }
 }
