@@ -6,7 +6,12 @@ use psx_engine::{
 
 use super::*;
 
-pub(crate) fn motor_input(ctx: &Ctx, camera_yaw: Angle) -> CharacterMotorInput {
+pub(crate) fn motor_input(
+    ctx: &Ctx,
+    camera_yaw: Angle,
+    sprint: bool,
+    evade: bool,
+) -> CharacterMotorInput {
     let movement = camera_relative_move_axes(local_move_axes(ctx), camera_yaw, move_axis_profile());
 
     CharacterMotorInput {
@@ -14,8 +19,8 @@ pub(crate) fn motor_input(ctx: &Ctx, camera_yaw: Angle) -> CharacterMotorInput {
         walk: movement.forward,
         move_x: movement.x,
         move_z: movement.z,
-        sprint: ctx.is_held(RUN_BUTTON),
-        evade: false,
+        sprint,
+        evade,
     }
 }
 
@@ -49,8 +54,8 @@ pub(crate) fn player_anim_from_motor(anim: CharacterMotorAnim) -> PlayerAnim {
         CharacterMotorAnim::Idle => PlayerAnim::Idle,
         CharacterMotorAnim::Walk => PlayerAnim::Walk,
         CharacterMotorAnim::Run => PlayerAnim::Run,
-        CharacterMotorAnim::Roll => PlayerAnim::Run,
-        CharacterMotorAnim::Backstep => PlayerAnim::Walk,
+        CharacterMotorAnim::Roll => PlayerAnim::Roll,
+        CharacterMotorAnim::Backstep => PlayerAnim::Backstep,
     }
 }
 

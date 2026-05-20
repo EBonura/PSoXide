@@ -15,6 +15,8 @@ use psx_level::{
     WeaponHitboxRecord,
 };
 
+pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
+pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = 0;
 pub static ASSETS: &[LevelAssetRecord] = &[];
 pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
