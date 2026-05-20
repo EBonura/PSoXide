@@ -1343,6 +1343,7 @@ mod tests {
                 far_vista,
                 camera: Default::default(),
                 culling: Default::default(),
+                streaming: Default::default(),
             },
         );
 
@@ -1387,6 +1388,7 @@ mod tests {
                 far_vista,
                 camera: Default::default(),
                 culling: Default::default(),
+                streaming: Default::default(),
             },
         );
 

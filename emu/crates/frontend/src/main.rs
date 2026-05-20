@@ -43,7 +43,7 @@ use crate::ui::profiler::FrameProfileSample;
 use crate::ui::{menu::MenuInput, MenuOutcome};
 
 use emulator_core::{button, pad::PadMode, spu::SAMPLE_CYCLES, telemetry::counter};
-use psoxide_settings::settings::{InputBinding, PortBindings};
+use psoxide_settings::settings::{InputBinding, PortBindings, StickBindings};
 
 /// Default window size when not running fullscreen. Chosen big
 /// enough to show the Menu + a framebuffer comfortably on a
@@ -107,6 +107,10 @@ struct Shell {
     /// frame before running CPU steps so the guest always sees the
     /// latest state.
     pad1_mask: u16,
+    /// Keyboard-emulated left analog stick state.
+    keyboard_left_stick: KeyboardStickState,
+    /// Keyboard-emulated right analog stick state.
+    keyboard_right_stick: KeyboardStickState,
     /// Whether to open the window in borderless-fullscreen mode.
     /// Decision is made at startup via CLI flag and then captured
     /// here; changing it at runtime would need a window recreation.
@@ -195,6 +199,8 @@ impl Shell {
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
             pad1_mask: 0,
+            keyboard_left_stick: KeyboardStickState::default(),
+            keyboard_right_stick: KeyboardStickState::default(),
             fullscreen,
             audio,
             input,
@@ -256,6 +262,68 @@ fn key_to_pad_button(key: &Key, bindings: &PortBindings) -> Option<u16> {
 /// `true` when the key should act as the DualShock Analog button.
 fn key_is_analog_button(key: &Key, bindings: &PortBindings) -> bool {
     binding_matches_key(&bindings.analog, key)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct KeyboardStickState {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+impl KeyboardStickState {
+    fn update_key(&mut self, key: &Key, state: ElementState, bindings: &StickBindings) -> bool {
+        let pressed = state == ElementState::Pressed;
+        let mut matched = false;
+        if binding_matches_key(&bindings.up, key) {
+            self.up = pressed;
+            matched = true;
+        }
+        if binding_matches_key(&bindings.down, key) {
+            self.down = pressed;
+            matched = true;
+        }
+        if binding_matches_key(&bindings.left, key) {
+            self.left = pressed;
+            matched = true;
+        }
+        if binding_matches_key(&bindings.right, key) {
+            self.right = pressed;
+            matched = true;
+        }
+        matched
+    }
+
+    fn vector(self) -> (f32, f32) {
+        (
+            keyboard_axis(self.left, self.right),
+            keyboard_axis(self.down, self.up),
+        )
+    }
+}
+
+fn keyboard_axis(negative: bool, positive: bool) -> f32 {
+    match (negative, positive) {
+        (true, false) => -1.0,
+        (false, true) => 1.0,
+        _ => 0.0,
+    }
+}
+
+fn merge_sticks(gamepad: (f32, f32), keyboard: (f32, f32)) -> (f32, f32) {
+    (
+        merge_axis(gamepad.0, keyboard.0),
+        merge_axis(gamepad.1, keyboard.1),
+    )
+}
+
+fn merge_axis(gamepad: f32, keyboard: f32) -> f32 {
+    if keyboard != 0.0 {
+        keyboard
+    } else {
+        gamepad
+    }
 }
 
 fn binding_matches_key(binding: &InputBinding, key: &Key) -> bool {
@@ -371,17 +439,23 @@ impl ApplicationHandler for Shell {
                 let route_keyboard_to_game = !self.state.workspace.is_editor()
                     || self.state.embedded_playtest_input_captured();
                 if !repeat && route_keyboard_to_game {
-                    if let Some(mask) =
-                        key_to_pad_button(&logical_key, &self.state.settings.input.port1)
-                    {
+                    let bindings = &self.state.settings.input.port1;
+                    if let Some(mask) = key_to_pad_button(&logical_key, bindings) {
                         match state {
                             ElementState::Pressed => self.pad1_mask |= mask,
                             ElementState::Released => self.pad1_mask &= !mask,
                         }
                     }
-                    if state == ElementState::Pressed
-                        && key_is_analog_button(&logical_key, &self.state.settings.input.port1)
-                    {
+                    self.keyboard_left_stick
+                        .update_key(&logical_key, state, &bindings.left_stick);
+                    self.keyboard_right_stick.update_key(
+                        &logical_key,
+                        state,
+                        &bindings.right_stick,
+                    );
+                    let press_analog = state == ElementState::Pressed
+                        && key_is_analog_button(&logical_key, bindings);
+                    if press_analog {
                         press_port1_analog_button(&mut self.state);
                     }
                 }
@@ -562,10 +636,14 @@ impl ApplicationHandler for Shell {
                     // already has the Select+Start chord stripped for
                     // the frame the chord fires -- prevents in-game
                     // handlers from seeing the "open menu" combo.
+                    let right_stick =
+                        merge_sticks(pad_frame.right_stick, self.keyboard_right_stick.vector());
+                    let left_stick =
+                        merge_sticks(pad_frame.left_stick, self.keyboard_left_stick.vector());
                     let live_pad_sample = Port1PadSample::from_host(
                         self.pad1_mask | pad_frame.pad1_mask,
-                        pad_frame.right_stick,
-                        pad_frame.left_stick,
+                        right_stick,
+                        left_stick,
                     );
                     for _ in 0..frames_to_run {
                         let pad_sample = self
@@ -1000,14 +1078,12 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         let hi = chunk_sample.guest.counter_latest_value(hi as usize) as u64;
         lo | (hi << 32)
     };
-    let player_x_biased =
-        chunk_sample
-            .guest
-            .counter_latest_value(counter::ROOM_PLAYER_LOCAL_X_BIASED as usize);
-    let player_z_biased =
-        chunk_sample
-            .guest
-            .counter_latest_value(counter::ROOM_PLAYER_LOCAL_Z_BIASED as usize);
+    let player_x_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_PLAYER_LOCAL_X_BIASED as usize);
+    let player_z_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_PLAYER_LOCAL_Z_BIASED as usize);
     Some(psxed_ui::EditorPlaytestMetrics {
         host_fps: sample.host_fps(),
         host_ms: sample.host_dt_ms,
@@ -1099,6 +1175,50 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_stick_mapping_uses_default_settings() {
+        let bindings = PortBindings::default();
+        let mut left = KeyboardStickState::default();
+        let mut right = KeyboardStickState::default();
+
+        assert!(left.update_key(
+            &Key::Named(NamedKey::ArrowUp),
+            ElementState::Pressed,
+            &bindings.left_stick,
+        ));
+        assert_eq!(left.vector(), (0.0, 1.0));
+        assert!(left.update_key(
+            &Key::Named(NamedKey::ArrowDown),
+            ElementState::Pressed,
+            &bindings.left_stick,
+        ));
+        assert_eq!(left.vector(), (0.0, 0.0));
+        assert!(left.update_key(
+            &Key::Named(NamedKey::ArrowUp),
+            ElementState::Released,
+            &bindings.left_stick,
+        ));
+        assert_eq!(left.vector(), (0.0, -1.0));
+
+        assert!(right.update_key(
+            &Key::Character("j".into()),
+            ElementState::Pressed,
+            &bindings.right_stick,
+        ));
+        assert_eq!(right.vector(), (-1.0, 0.0));
+        assert!(right.update_key(
+            &Key::Character("l".into()),
+            ElementState::Pressed,
+            &bindings.right_stick,
+        ));
+        assert_eq!(right.vector(), (0.0, 0.0));
+        assert!(!right.update_key(
+            &Key::Character("x".into()),
+            ElementState::Pressed,
+            &bindings.right_stick,
+        ));
+    }
+
+    #[test]
     fn keyboard_mapping_honors_rebound_button() {
         let bindings = PortBindings {
             cross: InputBinding::Character('j'),
@@ -1113,6 +1233,36 @@ mod tests {
             key_to_pad_button(&Key::Character("x".into()), &bindings),
             None
         );
+    }
+
+    #[test]
+    fn keyboard_stick_mapping_honors_rebound_direction() {
+        let bindings = PortBindings {
+            right_stick: StickBindings {
+                left: InputBinding::Character('u'),
+                ..StickBindings::default()
+            },
+            ..PortBindings::default()
+        };
+        let mut right = KeyboardStickState::default();
+
+        assert!(right.update_key(
+            &Key::Character("u".into()),
+            ElementState::Pressed,
+            &bindings.right_stick,
+        ));
+        assert_eq!(right.vector(), (-1.0, 0.0));
+        assert!(!right.update_key(
+            &Key::Character("j".into()),
+            ElementState::Pressed,
+            &bindings.right_stick,
+        ));
+    }
+
+    #[test]
+    fn keyboard_stick_axes_override_matching_gamepad_axes() {
+        assert_eq!(merge_sticks((0.25, -0.5), (0.0, 1.0)), (0.25, 1.0));
+        assert_eq!(merge_sticks((0.25, -0.5), (-1.0, 0.0)), (-1.0, -0.5));
     }
 
     #[test]
