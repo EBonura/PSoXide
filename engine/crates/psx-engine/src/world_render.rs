@@ -2036,6 +2036,183 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     stats
 }
 
+/// Draw every populated cell from a cached vertex-lit room.
+///
+/// This bypasses cooked visible-cell/PVS filtering after the caller has
+/// already selected an active chunk. Cells are still depth-sorted for the
+/// ordering-table painter path, and surfaces still run the usual projection,
+/// screen, near-plane, and backface checks.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSurfaceLighting>(
+    cached_cells: &[CachedRoomCell],
+    cached_cell_vertices: &[u16],
+    cached_vertices: &[WorldVertex],
+    cached_surfaces: &[CachedRoomSurface],
+    projected_indices: &mut [u16],
+    projected_vertices: &mut [ProjectedVertex],
+    projected_ready: &mut [bool],
+    projected_depths: &mut [i32],
+    accepted_cell_indices: &mut [u16],
+    accepted_cell_depths: &mut [i32],
+    materials: &[WorldRenderMaterial],
+    lighting: &L,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    screen_margin: i32,
+    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> GridVisibilityStats {
+    let mut stats = GridVisibilityStats::default();
+    if projected_indices.len() < cached_vertices.len()
+        || projected_vertices.len() < cached_vertices.len()
+        || projected_ready.len() < cached_vertices.len()
+        || projected_depths.len() < cached_vertices.len()
+        || accepted_cell_indices.len() < cached_cells.len()
+        || accepted_cell_depths.len() < cached_cells.len()
+    {
+        return stats;
+    }
+    if cached_cells.is_empty() || cached_surfaces.is_empty() {
+        return stats;
+    }
+
+    let use_vertex_depths = lighting.uses_vertex_depths();
+    let use_direct_baked_rgb = lighting.uses_direct_baked_vertex_rgb();
+    let screen_bounds = projected_screen_bounds(camera, screen_margin);
+    crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_CELL_SELECT);
+    let mut projected_index_count = 0usize;
+    let mut accepted_cell_count = 0usize;
+
+    for (cell_index, cell) in cached_cells.iter().copied().enumerate() {
+        if cell.surface_count == 0 || cell_index > u16::MAX as usize {
+            continue;
+        }
+        stats.cells_considered = stats.cells_considered.saturating_add(1);
+        let visibility_center = WorldVertex::new(
+            cell.visibility_center[0],
+            cell.visibility_center[1],
+            cell.visibility_center[2],
+        );
+        let cell_depth = camera.view_vertex(visibility_center).z;
+        stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        accepted_cell_indices[accepted_cell_count] = cell_index as u16;
+        accepted_cell_depths[accepted_cell_count] = cell_depth;
+        accepted_cell_count += 1;
+    }
+    sort_cached_room_cell_indices_by_depth(
+        &mut accepted_cell_indices[..accepted_cell_count],
+        &mut accepted_cell_depths[..accepted_cell_count],
+    );
+    for &cell_index in &accepted_cell_indices[..accepted_cell_count] {
+        let Some(cell) = cached_cells.get(cell_index as usize).copied() else {
+            continue;
+        };
+        projected_index_count = collect_cached_cell_vertex_indices(
+            cell,
+            cached_cell_vertices,
+            cached_surfaces,
+            projected_ready,
+            projected_indices,
+            projected_index_count,
+        );
+    }
+    crate::telemetry::stage_end(crate::telemetry::stage::ROOM_CELL_SELECT);
+
+    let projected_indices = &projected_indices[..projected_index_count];
+    stats.projected_vertices = projected_index_count.min(u16::MAX as usize) as u16;
+    crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_PROJECT);
+    project_world_vertex_indices_gte(
+        *camera,
+        cached_vertices,
+        projected_indices,
+        projected_vertices,
+    );
+    crate::telemetry::stage_end(crate::telemetry::stage::ROOM_PROJECT);
+    if use_vertex_depths {
+        crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_DEPTH_PREP);
+        for raw_index in projected_indices {
+            let index = *raw_index as usize;
+            projected_depths[index] = lighting.prepare_vertex_depth(projected_vertices[index].sz);
+        }
+        crate::telemetry::stage_end(crate::telemetry::stage::ROOM_DEPTH_PREP);
+    }
+
+    let mut surface_profile = RoomSurfaceMicroProfile::default();
+    crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_SURFACE_DRAW);
+    for accepted_index in 0..accepted_cell_count {
+        let Some(&cell_index) = accepted_cell_indices.get(accepted_index) else {
+            continue;
+        };
+        let Some(&cell_depth) = accepted_cell_depths.get(accepted_index) else {
+            continue;
+        };
+        let Some(cell) = cached_cells.get(cell_index as usize).copied() else {
+            continue;
+        };
+        let cell_options = tile_depth_options_from_depth(options, cell_depth);
+        let submit_depths = CachedRoomSubmitDepths::from_cell_options::<OT>(cell_options);
+        let first = cell.surface_first as usize;
+        let end = first
+            .saturating_add(cell.surface_count as usize)
+            .min(cached_surfaces.len());
+        let mut i = first;
+        while i < end {
+            stats.surfaces_considered =
+                stats
+                    .surfaces_considered
+                    .saturating_add(draw_indexed_cached_room_surface(
+                        cached_surfaces[i],
+                        cached_vertices,
+                        projected_vertices,
+                        projected_depths,
+                        use_vertex_depths,
+                        use_direct_baked_rgb,
+                        screen_bounds,
+                        materials,
+                        lighting,
+                        cell_options,
+                        submit_depths,
+                        triangles,
+                        world,
+                        &mut surface_profile,
+                    ));
+            i += 1;
+        }
+    }
+    crate::telemetry::stage_end(crate::telemetry::stage::ROOM_SURFACE_DRAW);
+    surface_profile.emit();
+    for raw_index in projected_indices {
+        if let Some(ready) = projected_ready.get_mut(*raw_index as usize) {
+            *ready = false;
+        }
+    }
+    stats
+}
+
+fn sort_cached_room_cell_indices_by_depth(indices: &mut [u16], depths: &mut [i32]) {
+    if indices.len() > depths.len() {
+        return;
+    }
+    let mut gap = indices.len() / 2;
+    while gap > 0 {
+        let mut i = gap;
+        while i < indices.len() {
+            let index = indices[i];
+            let depth = depths[i];
+            let mut j = i;
+            while j >= gap && depths[j - gap] < depth {
+                indices[j] = indices[j - gap];
+                depths[j] = depths[j - gap];
+                j -= gap;
+            }
+            indices[j] = index;
+            depths[j] = depth;
+            i += 1;
+        }
+        gap /= 2;
+    }
+}
+
 fn cached_room_cell_index(cells: &[CachedRoomCell], x: u16, z: u16) -> Option<usize> {
     let key = cached_room_cell_key(x, z);
     let mut low = 0usize;
