@@ -107,6 +107,8 @@ typed_index! {
 pub mod room_flags {
     /// Per-room fog/depth cue is enabled.
     pub const FOG_ENABLED: u16 = 1 << 0;
+    /// Per-room screen-space falling atmosphere is enabled.
+    pub const ATMOSPHERE_ENABLED: u16 = 1 << 1;
 }
 
 /// Sky record flags.
@@ -141,6 +143,24 @@ pub mod equipment_flags {
 pub mod image_prop_flags {
     /// Prop rotates around Y to face the active camera while staying upright.
     pub const CYLINDRICAL_BILLBOARD: u16 = 1 << 0;
+}
+
+/// Model clip bounds/calibration flags.
+pub mod model_clip_flags {
+    /// Runtime should cancel root translation for this clip.
+    pub const IN_PLACE: u16 = 1 << 0;
+}
+
+/// Per-character action playback flags.
+pub mod character_action_flags {
+    /// The action should loop while the gameplay state remains active.
+    pub const LOOPING: u8 = 1 << 0;
+    /// The action binding explicitly overrides the clip's baked
+    /// in-place calibration.
+    pub const IN_PLACE_OVERRIDE: u8 = 1 << 1;
+    /// When [`IN_PLACE_OVERRIDE`] is set, cancel root translation
+    /// for this action.
+    pub const IN_PLACE: u8 = 1 << 2;
 }
 
 typed_index! {
@@ -274,6 +294,19 @@ pub struct LevelAssetRecord {
     pub flags: u16,
 }
 
+/// One cooked cyclorama backdrop quad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCycloramaQuadRecord {
+    /// Unit direction vectors in Q0.12-ish scale, ordered as
+    /// top-left, top-right, bottom-left, bottom-right in angular
+    /// cyclorama space. Runtime applies camera rotation only.
+    pub direction_q12: [[i16; 3]; 4],
+    /// Per-corner Gouraud colours.
+    pub rgb: [[u8; 3]; 4],
+    /// Reserved.
+    pub flags: u16,
+}
+
 /// Resolved sky settings for one cooked room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelSkyRecord {
@@ -285,9 +318,17 @@ pub struct LevelSkyRecord {
     pub bottom_rgb: [u8; 3],
     /// Horizon line as a percentage of screen height.
     pub horizon_percent: u8,
+    /// Angular thickness of the horizon colour band.
+    pub horizon_thickness_percent: u8,
+    /// Horizontal cyclorama subdivisions.
+    pub skybox_columns: u8,
+    /// Vertical cyclorama subdivisions.
+    pub skybox_rows: u8,
     /// Sky flags.
     pub flags: u16,
-    /// Optional cloud layer baked from Perlin noise at scene init.
+    /// Cooked panorama/cyclorama backdrop geometry.
+    pub cyclorama_quads: &'static [LevelCycloramaQuadRecord],
+    /// Optional authored cloud layer used by the cooked cyclorama.
     pub cloud_layer: LevelCloudLayerRecord,
 }
 
@@ -298,7 +339,11 @@ impl LevelSkyRecord {
         horizon_rgb: [32, 30, 34],
         bottom_rgb: [5, 7, 12],
         horizon_percent: 58,
+        horizon_thickness_percent: 8,
+        skybox_columns: 16,
+        skybox_rows: 10,
         flags: sky_flags::ENABLED,
+        cyclorama_quads: &[],
         cloud_layer: LevelCloudLayerRecord::DEFAULT,
     };
 }
@@ -306,19 +351,21 @@ impl LevelSkyRecord {
 /// Resolved cloud-layer settings for one cooked room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelCloudLayerRecord {
-    /// Cloud highlight colour blended through the bake CLUT.
+    /// Cooked 4bpp multi-CLUT sky panorama texture, or `AssetId(u16::MAX)`.
+    pub texture_asset: AssetId,
+    /// Cloud highlight colour used by cyclorama cloud streaks.
     pub color_rgb: [u8; 3],
-    /// CLUT-ramp threshold pivot, 0..=255.
+    /// Cloud coverage threshold, 0..=255.
     pub density: u8,
-    /// Plane altitude above world Y = 0, in engine units.
+    /// Cyclorama cloud-band vertical bias.
     pub altitude: u16,
-    /// Plane half-extent on each of X / Z in engine units.
+    /// Cyclorama cloud-band width.
     pub extent: u16,
-    /// Texture tile-repeats across the plane on each axis.
+    /// Noise/tile repeats across the cloud layer.
     pub tile_count: u8,
-    /// UV scroll speed per second in PSX angle units.
+    /// Reserved cloud scroll speed.
     pub scroll_speed: [i16; 2],
-    /// Perlin generator seed used at bake time.
+    /// Cloud-noise seed used by the cooked cyclorama.
     pub noise_seed: u32,
     /// Cloud-layer flags.
     pub flags: u16,
@@ -327,6 +374,7 @@ pub struct LevelCloudLayerRecord {
 impl LevelCloudLayerRecord {
     /// Disabled-by-default placeholder.
     pub const DEFAULT: Self = Self {
+        texture_asset: AssetId(u16::MAX),
         color_rgb: [220, 220, 232],
         density: 128,
         altitude: 6_144,
@@ -415,6 +463,16 @@ pub struct LevelRoomRecord {
     pub origin_z: i32,
     /// Engine units per sector.
     pub sector_size: i32,
+    /// Camera-space far plane used for room/actor rendering.
+    pub draw_distance: i32,
+    /// Runtime active-chunk radius in world sectors.
+    pub chunk_activation_radius_sectors: i32,
+    /// Cooked PVS traversal radius in room cells.
+    pub visibility_radius: u16,
+    /// Maximum generated chunks kept resident for this world.
+    pub resident_chunk_limit: u8,
+    /// Maximum generated chunks selected for drawing/collision for this world.
+    pub visible_chunk_limit: u8,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.
     pub material_first: MaterialIndex,
@@ -427,6 +485,14 @@ pub struct LevelRoomRecord {
     pub fog_near: i32,
     /// Fog end distance in engine units.
     pub fog_far: i32,
+    /// Base colour for the cheap screen-space room atmosphere pass.
+    pub atmosphere_rgb: [u8; 3],
+    /// Number of screen-space particles to draw for this room.
+    pub atmosphere_density: u8,
+    /// Base vertical particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_fall_speed_q4: i16,
+    /// Base horizontal particle speed, in 1/16 pixel-per-vblank units.
+    pub atmosphere_wind_speed_q4: i16,
     /// Resolved world sky for this room.
     pub sky: LevelSkyRecord,
     /// Resolved distant scenery ring for this room.
@@ -991,7 +1057,11 @@ pub struct LevelModelClipBoundsRecord {
     pub first_frame: ModelFrameBoundsIndex,
     /// Number of frame-bound records.
     pub frame_count: u16,
-    /// Reserved.
+    /// Grounding floor in raw model-local units.
+    pub floor_y: i32,
+    /// Additional model-local pose offset in cooked pose units.
+    pub pose_offset: [i32; 3],
+    /// See [`model_clip_flags`].
     pub flags: u16,
 }
 
@@ -1086,6 +1156,13 @@ pub struct LevelModelInstanceRecord {
     pub z: i32,
     /// Yaw, PSX angle units.
     pub yaw: i16,
+    /// Render-only yaw from the Model Renderer component, PSX angle units.
+    pub visual_yaw: i16,
+    /// Render-only model offset from the authored floor anchor,
+    /// in entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
     /// Reserved.
     pub flags: u16,
 }
@@ -1123,6 +1200,8 @@ pub struct LevelImagePropRecord {
     pub height: u16,
     /// Per-material modulation tint.
     pub tint_rgb: [u8; 3],
+    /// Baked static light base per quad vertex, in perimeter order.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
     /// Runtime flags.
     pub flags: u16,
 }
@@ -1251,6 +1330,66 @@ pub struct PointLightRecord {
 /// idle as appropriate.
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
+/// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 12;
+
+/// Runtime animation action slot.
+///
+/// The editor is free to bind any compatible clip to any slot. The
+/// runtime only relies on stable numeric indices so cooked
+/// characters stay compact and heap-free.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharacterAnimationAction {
+    /// Standing still.
+    Idle = 0,
+    /// Normal locomotion.
+    Walk = 1,
+    /// Fast locomotion.
+    Run = 2,
+    /// In-place turn, when authored.
+    Turn = 3,
+    /// Forward evade.
+    Roll = 4,
+    /// Backward evade.
+    Backstep = 5,
+    /// Primary attack.
+    LightAttack = 6,
+    /// Secondary attack.
+    HeavyAttack = 7,
+    /// Follow-up / combo attack.
+    ComboAttack = 8,
+    /// Guard / block pose.
+    Block = 9,
+    /// Damage reaction.
+    HitReact = 10,
+    /// Death / collapse.
+    Death = 11,
+}
+
+impl CharacterAnimationAction {
+    /// Ordered list matching [`CHARACTER_ANIMATION_ACTION_COUNT`].
+    pub const ALL: [Self; CHARACTER_ANIMATION_ACTION_COUNT] = [
+        Self::Idle,
+        Self::Walk,
+        Self::Run,
+        Self::Turn,
+        Self::Roll,
+        Self::Backstep,
+        Self::LightAttack,
+        Self::HeavyAttack,
+        Self::ComboAttack,
+        Self::Block,
+        Self::HitReact,
+        Self::Death,
+    ];
+
+    /// Convert to the cooked action slot index.
+    pub const fn to_index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Gameplay character -- backing model + role-clip mapping +
 /// capsule / camera / controller defaults. Layered on top of
 /// a [`LevelModelRecord`]; the player spawn references one of
@@ -1262,19 +1401,19 @@ pub struct LevelCharacterRecord {
     /// as. The cooker guarantees this resolves; runtime trusts
     /// the contract.
     pub model: ModelIndex,
-    /// Idle clip index *within the model's clip slice*. The
-    /// cooker rejects characters whose idle clip is out of
-    /// range -- runtime never has to fall back to bind pose.
-    pub idle_clip: ModelClipIndex,
-    /// Walk clip index within the model's clip slice. Required
-    /// (same validation as `idle_clip`).
-    pub walk_clip: ModelClipIndex,
-    /// Optional run clip index. [`CHARACTER_CLIP_NONE`] means
-    /// "no run clip authored -- runtime should fall back to
-    /// `walk_clip` when the controller wants to run".
-    pub run_clip: OptionalModelClipIndex,
-    /// Optional turn clip index. Same sentinel as `run_clip`.
-    pub turn_clip: OptionalModelClipIndex,
+    /// Optional clip per [`CharacterAnimationAction`] slot.
+    /// Required slots are validated by the cooker; optional slots
+    /// use [`CHARACTER_CLIP_NONE`] and runtime fallbacks.
+    pub action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Per-action playback flags matching [`Self::action_clips`].
+    pub action_flags: [u8; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Render-only model offset from the controller root, in
+    /// entity-local engine units.
+    pub visual_offset: [i16; 3],
+    /// Render-only yaw from the Model Renderer component, PSX angle units.
+    pub visual_yaw: i16,
+    /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
+    pub visual_scale_q8: u16,
     /// Capsule radius in engine units. Used by collision +
     /// any future debug draw.
     pub radius: u16,
@@ -1286,6 +1425,34 @@ pub struct LevelCharacterRecord {
     pub run_speed: i32,
     /// Yaw rate the controller applies when turning.
     pub turn_speed_degrees_per_second: u16,
+    /// Maximum stamina, in Q12-style arbitrary units.
+    pub stamina_max_q12: i32,
+    /// Minimum stamina required to start sprinting.
+    pub sprint_min_q12: i32,
+    /// Stamina spent per sprinting display frame.
+    pub sprint_drain_q12: i32,
+    /// Stamina recovered per grounded non-sprint display frame.
+    pub stamina_recover_q12: i32,
+    /// Stamina spent to start a roll.
+    pub roll_cost_q12: i32,
+    /// Roll travel speed in world units per display frame.
+    pub roll_speed: i32,
+    /// Display frames where roll keeps moving.
+    pub roll_active_frames: u8,
+    /// Recovery display frames after roll movement ends.
+    pub roll_recovery_frames: u8,
+    /// Roll invulnerability display frames from action start.
+    pub roll_invulnerable_frames: u8,
+    /// Stamina spent to start a backstep.
+    pub backstep_cost_q12: i32,
+    /// Backstep travel speed in world units per display frame.
+    pub backstep_speed: i32,
+    /// Display frames where backstep keeps moving.
+    pub backstep_active_frames: u8,
+    /// Recovery display frames after backstep movement ends.
+    pub backstep_recovery_frames: u8,
+    /// Backstep invulnerability display frames from action start.
+    pub backstep_invulnerable_frames: u8,
     /// Distance the third-person camera trails the character.
     pub camera_distance: i32,
     /// Camera vertical offset above the character origin.
