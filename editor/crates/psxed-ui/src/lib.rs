@@ -4554,8 +4554,8 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "CHNK vis/load {:>2}/{:<2}",
-                        metrics.chunk_visible, metrics.chunk_loaded
+                        "CHNK act/draw/res {:>2}/{:<2}/{:<2}",
+                        metrics.chunk_active, metrics.chunk_drawn, metrics.chunk_resident
                     ),
                     STUDIO_TEXT,
                 );
@@ -4564,7 +4564,7 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "WIN  cand/built/skip {:>2}/{:<2}/{:<2}",
+                        "GRID cand/built/skip {:>2}/{:<2}/{:<2}",
                         metrics.chunk_candidates, metrics.chunk_built, metrics.chunk_cache_skips
                     ),
                     STUDIO_TEXT_WEAK,
@@ -15473,7 +15473,8 @@ fn draw_world_grid_settings(
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Chunk Target").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Sector Chunk").color(STUDIO_TEXT_WEAK))
+                    .on_hover_text("Cooked grid dimensions for each generated streaming chunk.");
                 let mut width = streaming.chunk_target_width as i32;
                 let mut depth = streaming.chunk_target_depth as i32;
                 let width_changed = ui
@@ -15507,7 +15508,10 @@ fn draw_world_grid_settings(
                 ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Resident Budget").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Resident Memory").color(STUDIO_TEXT_WEAK))
+                    .on_hover_text(
+                        "Memory budget for resident streaming chunks. Runtime slot count scales with cooked chunk payload size.",
+                    );
                 let mut limit = streaming.resident_chunk_limit as i32;
                 if ui
                     .add(egui::DragValue::new(&mut limit).speed(1.0).range(
@@ -15520,10 +15524,14 @@ fn draw_world_grid_settings(
                     *streaming = streaming.normalized();
                     changed = true;
                 }
-                ui.label(RichText::new("32 KiB units").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("×32 KiB").color(STUDIO_TEXT_WEAK))
+                    .on_hover_text("This is a memory budget unit, not a fixed resident chunk count.");
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Visible Chunks").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Active Chunks").color(STUDIO_TEXT_WEAK))
+                    .on_hover_text(
+                        "Maximum resident chunks selected around the player for drawing and collision. Screen culling decides which active chunks are drawn.",
+                    );
                 let mut limit = streaming.visible_chunk_limit as i32;
                 let max_visible = streaming.resident_chunk_limit.clamp(
                     MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -15541,7 +15549,7 @@ fn draw_world_grid_settings(
                     *streaming = streaming.normalized();
                     changed = true;
                 }
-                ui.label(RichText::new("chunks").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("draw/collision").color(STUDIO_TEXT_WEAK));
             });
         });
     egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
@@ -21011,7 +21019,7 @@ fn draw_play_chunk_debug_map(
         return;
     }
 
-    let map_size = Vec2::new(230.0, 180.0);
+    let map_size = Vec2::new(300.0, 190.0);
     let mut map_rect = Rect::from_min_size(
         Pos2::new(
             viewport_rect.right() - map_size.x - 8.0,
@@ -21019,7 +21027,7 @@ fn draw_play_chunk_debug_map(
         ),
         map_size,
     );
-    if map_rect.left() < viewport_rect.left() + 270.0 {
+    if map_rect.left() < viewport_rect.left() + 330.0 {
         map_rect = Rect::from_min_size(
             Pos2::new(
                 viewport_rect.right() - map_size.x - 8.0,
@@ -21053,14 +21061,33 @@ fn draw_play_chunk_debug_map(
     painter.text(
         map_rect.left_top() + Vec2::new(8.0, 7.0),
         Align2::LEFT_TOP,
-        "Chunk map",
+        "Chunk state",
         FontId::monospace(11.0),
         STUDIO_TEXT,
     );
+    painter.text(
+        map_rect.right_top() + Vec2::new(-8.0, 7.0),
+        Align2::RIGHT_TOP,
+        format!(
+            "A{} D{} R{}",
+            metrics.chunk_active, metrics.chunk_drawn, metrics.chunk_resident
+        ),
+        FontId::monospace(10.0),
+        STUDIO_TEXT_WEAK,
+    );
+    if cells.len() > u64::BITS as usize {
+        painter.text(
+            map_rect.right_top() + Vec2::new(-8.0, 20.0),
+            Align2::RIGHT_TOP,
+            "first 64 indexed",
+            FontId::monospace(9.0),
+            STUDIO_TEXT_WEAK,
+        );
+    }
 
     let plot = Rect::from_min_max(
         map_rect.left_top() + Vec2::new(8.0, 24.0),
-        map_rect.right_bottom() - Vec2::new(8.0, 24.0),
+        map_rect.right_bottom() - Vec2::new(8.0, 28.0),
     );
     let world_w = (max_x - min_x).max(1.0);
     let world_h = (max_z - min_z).max(1.0);
@@ -21076,7 +21103,7 @@ fn draw_play_chunk_debug_map(
 
     for cell in &cells {
         let bit = debug_chunk_bit(cell.runtime_room_index);
-        let loaded = bit != 0 && metrics.chunk_loaded_mask & bit != 0;
+        let resident = bit != 0 && metrics.chunk_resident_mask & bit != 0;
         let active = bit != 0 && metrics.chunk_active_mask & bit != 0;
         let drawn = bit != 0 && metrics.chunk_drawn_mask & bit != 0;
         let rect = Rect::from_min_max(
@@ -21092,8 +21119,10 @@ fn draw_play_chunk_debug_map(
         .shrink(0.75);
         let fill = if drawn {
             Color32::from_rgba_unmultiplied(40, 210, 112, 150)
-        } else if loaded {
-            Color32::from_rgba_unmultiplied(220, 56, 64, 104)
+        } else if active {
+            Color32::from_rgba_unmultiplied(238, 184, 64, 122)
+        } else if resident {
+            Color32::from_rgba_unmultiplied(64, 148, 226, 86)
         } else {
             Color32::from_rgba_unmultiplied(0, 0, 0, 0)
         };
@@ -21104,8 +21133,8 @@ fn draw_play_chunk_debug_map(
             Stroke::new(1.5, Color32::from_rgb(76, 255, 144))
         } else if active {
             Stroke::new(1.7, Color32::from_rgb(255, 206, 82))
-        } else if loaded {
-            Stroke::new(1.2, Color32::from_rgb(255, 84, 92))
+        } else if resident {
+            Stroke::new(1.2, Color32::from_rgb(102, 180, 255))
         } else {
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 120))
         };
@@ -21155,17 +21184,24 @@ fn draw_play_chunk_debug_map(
     );
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(74.0, -16.0),
-        Color32::from_rgba_unmultiplied(220, 56, 64, 104),
-        Color32::from_rgb(255, 84, 92),
-        "loaded",
+        map_rect.left_bottom() + Vec2::new(76.0, -16.0),
+        Color32::from_rgba_unmultiplied(238, 184, 64, 122),
+        Color32::from_rgb(255, 206, 82),
+        "active",
     );
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(140.0, -16.0),
+        map_rect.left_bottom() + Vec2::new(142.0, -16.0),
+        Color32::from_rgba_unmultiplied(64, 148, 226, 86),
+        Color32::from_rgb(102, 180, 255),
+        "resident",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        map_rect.left_bottom() + Vec2::new(226.0, -16.0),
         Color32::from_rgba_unmultiplied(0, 0, 0, 0),
         Color32::from_rgba_unmultiplied(210, 220, 235, 120),
-        "unloaded",
+        "not res",
     );
 }
 
@@ -27402,6 +27438,7 @@ fn draw_streaming_budget(
     let file_budget = resource_file_budget(project, project_root, &resource_use);
     let vram_budget = runtime_vram_budget(project, project_root, &resource_use);
     let model_budget = runtime_model_budget(project, project_root, &resource_use);
+    let resident_budget_bytes = streaming.resident_chunk_limit as u64 * 32 * 1024;
     let over = plan.over_budget_count() > 0;
     let header = if over {
         icons::label(icons::TRASH, "Streaming Budget — over limit")
@@ -27427,15 +27464,20 @@ fn draw_streaming_budget(
             draw_budget_row(
                 ui,
                 "Resident budget",
-                format!("{} × 32 KiB", streaming.resident_chunk_limit),
+                format!(
+                    "{} × 32 KiB ({})",
+                    streaming.resident_chunk_limit,
+                    human_bytes_u64(resident_budget_bytes)
+                ),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Visible chunks",
+                "Active chunks",
                 format!("{}", streaming.visible_chunk_limit),
                 false,
             );
+            draw_budget_row(ui, "Runtime lookup", "Dense sector grid".to_string(), false);
             draw_budget_row(
                 ui,
                 "Authored footprint",
@@ -27445,7 +27487,9 @@ fn draw_streaming_budget(
                 ),
                 false,
             );
-            ui.weak("Embedded Play cooks this Room as generated chunks.");
+            ui.weak(
+                "Embedded Play cooks this Room into streaming chunks. Resident is memory; active is the draw/collision window; drawn is decided by screen culling.",
+            );
             if let Some(chunk) = plan.largest_room_asset_chunk() {
                 draw_budget_row(
                     ui,

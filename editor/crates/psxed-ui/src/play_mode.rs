@@ -162,10 +162,12 @@ pub struct EditorPlaytestMetrics {
     pub ui_ms: f32,
     /// Guest cycle budget consumed by stepped frames.
     pub step_budget_percent: f32,
-    /// Active room/chunk records submitted by the runtime renderer.
-    pub chunk_visible: u32,
+    /// Active room/chunk records selected for drawing/collision.
+    pub chunk_active: u32,
+    /// Active chunks that submitted room geometry.
+    pub chunk_drawn: u32,
     /// Resident streamed room/chunk slots currently loaded.
-    pub chunk_loaded: u32,
+    pub chunk_resident: u32,
     /// Candidate chunks found by the active-room window builder.
     pub chunk_candidates: u32,
     /// Chunks built by the most recent active-room window rebuild.
@@ -185,7 +187,7 @@ pub struct EditorPlaytestMetrics {
     /// Stream loads that failed validation or CD reads.
     pub stream_failed: u32,
     /// Resident streamed chunks, keyed by runtime room/chunk index.
-    pub chunk_loaded_mask: u64,
+    pub chunk_resident_mask: u64,
     /// Active drawable chunks, keyed by runtime room/chunk index.
     pub chunk_active_mask: u64,
     /// Chunks that submitted room geometry, keyed by runtime room/chunk index.
