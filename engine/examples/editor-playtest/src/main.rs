@@ -65,7 +65,12 @@ use psx_engine::{
     GridVisibility,
 };
 #[cfg(feature = "world-grid-visible")]
-use psx_engine::{GridVisibilityStats, GridVisibleCell};
+use psx_engine::GridVisibilityStats;
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+use psx_engine::GridVisibleCell;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
     draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
@@ -112,11 +117,16 @@ use generated::{
     ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
     MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
-    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY,
-    VISIBILITY_CELLS, VISIBILITY_PVS, VISIBILITY_PVS_BITS, WEAPONS, WEAPON_HITBOXES,
+    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, WEAPONS,
+    WEAPON_HITBOXES,
     WORLD_SECTOR_GRID, WORLD_SECTOR_GRID_DEPTH, WORLD_SECTOR_GRID_ORIGIN_X,
     WORLD_SECTOR_GRID_ORIGIN_Z, WORLD_SECTOR_GRID_SECTOR_SIZE, WORLD_SECTOR_GRID_WIDTH,
 };
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+use generated::{ROOM_VISIBILITY, VISIBILITY_CELLS, VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
     WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
@@ -267,25 +277,52 @@ const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_CAMERA_MARGIN: i32 = 96;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_SAFETY_RING: i32 = 1;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_NEAR_RING: i32 = 4;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_REAR_RING: i32 = 6;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS: i32 = 3;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_WEDGE_NUM: u64 = 3;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_WEDGE_DEN: u64 = 4;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES: bool = true;
 #[cfg(feature = "world-grid-visible")]
 const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const MAX_ACTIVE_VISIBLE_CELLS: usize = 1024;
 
 fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
@@ -385,7 +422,10 @@ fn emit_player_map_debug(room: RoomIndex, position: RoomPoint, view_yaw: Angle) 
     );
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
     record.visibility_radius.max(1)
 }
@@ -496,6 +536,10 @@ const STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT: usize = 512;
 const MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES: usize = 48;
 const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
 const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
+#[cfg(feature = "sector-grid-streaming")]
+const SECTOR_GRID_MAX_CANDIDATES: usize = 96;
+#[cfg(feature = "sector-grid-streaming")]
+const SECTOR_GRID_MAX_SEARCH_RADIUS_SECTORS: i32 = 96;
 
 /// Capacity of the residency manager's RAM table. Holds room
 /// world + model meshes + animation clips.
@@ -1634,7 +1678,10 @@ impl ActiveRuntimeRoom {
     }
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 #[derive(Copy, Clone)]
 struct ActiveVisibleCellCache {
     room: RoomIndex,
@@ -1649,7 +1696,10 @@ struct ActiveVisibleCellCache {
     ready: bool,
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 impl ActiveVisibleCellCache {
     const EMPTY: Self = Self {
         room: RoomIndex::ZERO,
@@ -1678,11 +1728,20 @@ struct Playtest {
     /// Cache-budgeted draw chunks, all expressed relative to
     /// `room_index`.
     active_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
-    #[cfg(feature = "world-grid-visible")]
+    #[cfg(all(
+        feature = "world-grid-visible",
+        not(feature = "vis-full-active-chunks")
+    ))]
     visible_cell_caches: [ActiveVisibleCellCache; MAX_ACTIVE_ROOMS],
-    #[cfg(feature = "world-grid-visible")]
+    #[cfg(all(
+        feature = "world-grid-visible",
+        not(feature = "vis-full-active-chunks")
+    ))]
     visible_cell_cache_cells: [GridVisibleCell; MAX_ACTIVE_VISIBLE_CELLS],
-    #[cfg(feature = "world-grid-visible")]
+    #[cfg(all(
+        feature = "world-grid-visible",
+        not(feature = "vis-full-active-chunks")
+    ))]
     visible_cell_cache_cursor: usize,
     active_room_candidates: u16,
     active_room_cache_skips: u16,
@@ -1776,11 +1835,20 @@ impl Playtest {
             current_collision_room: None,
             current_ambient_rgb: [0x80, 0x80, 0x80],
             active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
-            #[cfg(feature = "world-grid-visible")]
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
             visible_cell_caches: [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS],
-            #[cfg(feature = "world-grid-visible")]
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
             visible_cell_cache_cells: [GridVisibleCell::EMPTY; MAX_ACTIVE_VISIBLE_CELLS],
-            #[cfg(feature = "world-grid-visible")]
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
             visible_cell_cache_cursor: 0,
             active_room_candidates: 0,
             active_room_cache_skips: 0,
@@ -2112,12 +2180,14 @@ impl Scene for Playtest {
             let mut room_cache_vertices = 0u32;
             let mut room_cache_surfaces = 0u32;
             let mut room_cache_fallback_draws = 0u32;
+            #[allow(unused_mut)]
             let mut room_visibility_fallback_draws = 0u32;
             let mut room_active_chunk_mask = 0u64;
             let mut room_drawn_chunk_mask = 0u64;
             #[cfg(feature = "world-grid-visible")]
             let mut room_visible_cells = 0u32;
             #[cfg(feature = "world-grid-visible")]
+            #[allow(unused_mut)]
             let mut room_range_culled_cells = 0u32;
             #[cfg(feature = "world-grid-visible")]
             let mut room_stats_total = GridVisibilityStats::default();
@@ -3243,7 +3313,10 @@ impl Playtest {
         self.active_rooms = [const { None }; MAX_ACTIVE_ROOMS];
         self.active_room_candidates = 0;
         self.active_room_cache_skips = 0;
-        #[cfg(feature = "world-grid-visible")]
+        #[cfg(all(
+            feature = "world-grid-visible",
+            not(feature = "vis-full-active-chunks")
+        ))]
         {
             self.clear_visible_cell_caches();
         }
@@ -5209,7 +5282,10 @@ const fn room_material_fallback() -> WorldRenderMaterial {
     WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 impl Playtest {
     fn clear_visible_cell_caches(&mut self) {
         self.visible_cell_caches = [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS];
@@ -5319,7 +5395,10 @@ impl Playtest {
     }
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn fill_precomputed_visible_cells(
     room_index: RoomIndex,
     anchor_x: i32,
@@ -5385,7 +5464,10 @@ fn fill_precomputed_visible_cells(
     Some((written, rejected_global))
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visible_cell_view_keys(camera: WorldCamera, camera_independent: bool) -> (i16, i16) {
     if camera_independent {
         let _ = camera;
@@ -5421,7 +5503,10 @@ fn visible_cell_view_keys(camera: WorldCamera, camera_independent: bool) -> (i16
     }
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn sort_visible_cells_for_camera(cells: &mut [GridVisibleCell], depths: &mut [i32]) {
     if cells.len() > depths.len() {
         return;
@@ -5446,7 +5531,10 @@ fn sort_visible_cells_for_camera(cells: &mut [GridVisibleCell], depths: &mut [i3
     }
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visible_cell_camera_depth_if_sphere_visible(
     cell: psx_level::LevelVisibilityCellRecord,
     camera: WorldCamera,
@@ -5489,7 +5577,10 @@ fn visible_cell_camera_depth_if_sphere_visible(
     Some(view.z)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visible_cell_camera_depth(
     cell: psx_level::LevelVisibilityCellRecord,
     camera: WorldCamera,
@@ -5509,7 +5600,10 @@ fn visible_cell_camera_depth(
     camera.view_vertex(center).z
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 #[derive(Copy, Clone)]
 struct VisibleCellFilter {
     anchor_x: i32,
@@ -5524,14 +5618,20 @@ struct VisibleCellFilter {
     global_radius_sectors: i32,
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum VisibleCellReject {
     GlobalRange,
     Camera,
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn write_visible_cell_candidate(
     cell: psx_level::LevelVisibilityCellRecord,
     filter: VisibleCellFilter,
@@ -5585,7 +5685,10 @@ fn write_visible_cell_candidate(
     *written += 1;
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visible_cell_reject_reason(
     cell: psx_level::LevelVisibilityCellRecord,
     filter: VisibleCellFilter,
@@ -5624,7 +5727,10 @@ fn visible_cell_reject_reason(
     None
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_safety_ring(
     cell: psx_level::LevelVisibilityCellRecord,
     anchor_x: i32,
@@ -5633,7 +5739,10 @@ fn visibility_cell_safety_ring(
     visibility_cell_anchor_distance(cell, anchor_x, anchor_z) <= ROOM_VISIBLE_CELL_SAFETY_RING
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_anchor_distance(
     cell: psx_level::LevelVisibilityCellRecord,
     anchor_x: i32,
@@ -5644,7 +5753,10 @@ fn visibility_cell_anchor_distance(
     dx.max(dz)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_in_view_wedge(
     cell: psx_level::LevelVisibilityCellRecord,
     filter: VisibleCellFilter,
@@ -5701,7 +5813,10 @@ fn visibility_cell_in_view_wedge(
     lateral <= lateral_limit
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_aabb_intersects_camera(
     cell: psx_level::LevelVisibilityCellRecord,
     sector_size: i32,
@@ -5729,7 +5844,10 @@ fn visibility_cell_aabb_intersects_camera(
     aabb_intersects_camera_frustum(x0, x1, y0, y1, z0, z1, camera, far_z)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn aabb_intersects_camera_frustum(
     x0: i32,
     x1: i32,
@@ -5793,7 +5911,10 @@ fn aabb_intersects_camera_frustum(
     !(all_right || all_left || all_above || all_below)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_in_global_range(
     x: u16,
     z: u16,
@@ -5812,7 +5933,10 @@ fn visibility_cell_in_global_range(
         <= (radius as u64).saturating_mul(radius as u64)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_pvs_bit(bits: &[u8], index: usize) -> bool {
     let byte = index / 8;
     let bit = index % 8;
@@ -5821,7 +5945,10 @@ fn visibility_pvs_bit(bits: &[u8], index: usize) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_index_for_anchor(
     cells: &[psx_level::LevelVisibilityCellRecord],
     x: i32,
@@ -5833,7 +5960,10 @@ fn visibility_cell_index_for_anchor(
     visibility_cell_index_by_coord(cells, x as u16, z as u16)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_index_by_coord(
     cells: &[psx_level::LevelVisibilityCellRecord],
     x: u16,
@@ -5855,7 +5985,10 @@ fn visibility_cell_index_by_coord(
     (visibility_cell_key(cell.x, cell.z) == key).then_some(low)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const fn visibility_cell_key(x: u16, z: u16) -> u32 {
     ((x as u32) << 16) | z as u32
 }
@@ -5901,7 +6034,10 @@ fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32
         .z
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn nearest_runtime_visibility_cell(
     cells: &[psx_level::LevelVisibilityCellRecord],
     x: i32,
@@ -5921,6 +6057,10 @@ fn nearest_runtime_visibility_cell(
     best_index
 }
 
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn grid_cell_for_room(value: i32, sector_size: i32) -> i32 {
     if value >= 0 {
         value / sector_size
@@ -6321,6 +6461,18 @@ fn best_grid_chunk_candidate(
         return None;
     }
 
+    #[cfg(feature = "sector-grid-streaming")]
+    if let Some(candidate) = best_sector_grid_chunk_candidate(
+        current_index,
+        current_record,
+        player,
+        view,
+        active_rooms,
+        skipped_rooms,
+    ) {
+        return Some(candidate);
+    }
+
     let mut best = None;
     let mut best_score = ChunkActivationScore::WORST;
     let mut source_slot = 0usize;
@@ -6407,6 +6559,17 @@ fn best_grid_chunk_candidate_from_indices(
     view: ActiveRoomView,
     selected_rooms: &[RoomIndex],
 ) -> Option<RoomIndex> {
+    #[cfg(feature = "sector-grid-streaming")]
+    if let Some(candidate) = best_sector_grid_chunk_candidate_from_indices(
+        current_index,
+        current_record,
+        player,
+        view,
+        selected_rooms,
+    ) {
+        return Some(candidate);
+    }
+
     let mut best = None;
     let mut best_score = ChunkActivationScore::WORST;
     let mut source_slot = 0usize;
@@ -6464,6 +6627,17 @@ fn best_streamed_resident_chunk_candidate(
     requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
     requested_count: usize,
 ) -> Option<RoomIndex> {
+    #[cfg(feature = "sector-grid-streaming")]
+    if let Some(candidate) = best_sector_grid_resident_chunk_candidate(
+        current_index,
+        current_record,
+        player,
+        requested_rooms,
+        requested_count,
+    ) {
+        return Some(candidate);
+    }
+
     let mut best = None;
     let mut best_score = ChunkResidencyScore::WORST;
     for chunk in ROOM_CHUNKS {
@@ -6483,6 +6657,208 @@ fn best_streamed_resident_chunk_candidate(
         }
     }
     best
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn best_sector_grid_chunk_candidate(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    view: ActiveRoomView,
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    skipped_rooms: &[RoomIndex],
+) -> Option<RoomIndex> {
+    if !sector_grid_available() {
+        return None;
+    }
+
+    let mut best = None;
+    let mut best_score = ChunkActivationScore::WORST;
+    visit_sector_grid_candidate_rooms(current_record, player, |room| {
+        if room == current_index
+            || active_room_window_contains(active_rooms, room)
+            || skipped_rooms.contains(&room)
+            || !chunk_available_for_active_selection(room)
+        {
+            return;
+        }
+        if let Some(chunk) = chunk_record_for_room(room) {
+            if let Some(score) =
+                chunk_activation_score(*chunk, current_index, current_record, player, view)
+            {
+                if best.is_none() || score.better_than(best_score) {
+                    best_score = score;
+                    best = Some(room);
+                }
+            }
+        }
+    });
+    best
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn best_sector_grid_chunk_candidate_from_indices(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    view: ActiveRoomView,
+    selected_rooms: &[RoomIndex],
+) -> Option<RoomIndex> {
+    if !sector_grid_available() {
+        return None;
+    }
+
+    let mut best = None;
+    let mut best_score = ChunkActivationScore::WORST;
+    visit_sector_grid_candidate_rooms(current_record, player, |room| {
+        if room == current_index
+            || selected_rooms.contains(&room)
+            || !chunk_available_for_active_selection(room)
+        {
+            return;
+        }
+        if let Some(chunk) = chunk_record_for_room(room) {
+            if let Some(score) =
+                chunk_activation_score(*chunk, current_index, current_record, player, view)
+            {
+                if best.is_none() || score.better_than(best_score) {
+                    best_score = score;
+                    best = Some(room);
+                }
+            }
+        }
+    });
+    best
+}
+
+#[cfg(all(feature = "sector-grid-streaming", feature = "cd-stream-bench"))]
+fn best_sector_grid_resident_chunk_candidate(
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    requested_count: usize,
+) -> Option<RoomIndex> {
+    if !sector_grid_available() {
+        return None;
+    }
+
+    let mut best = None;
+    let mut best_score = ChunkResidencyScore::WORST;
+    visit_sector_grid_candidate_rooms(current_record, player, |room| {
+        if room == current_index
+            || room_requested(room, requested_rooms, requested_count)
+            || !streamed_room_chunk_loadable(room)
+        {
+            return;
+        }
+        if let Some(chunk) = chunk_record_for_room(room) {
+            if let Some(score) = chunk_residency_score(*chunk, current_index, current_record, player)
+            {
+                if best.is_none() || score.better_than(best_score) {
+                    best_score = score;
+                    best = Some(room);
+                }
+            }
+        }
+    });
+    best
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn visit_sector_grid_candidate_rooms<F>(record: &LevelRoomRecord, player: RoomPoint, mut visit: F)
+where
+    F: FnMut(RoomIndex),
+{
+    if !sector_grid_available() {
+        return;
+    }
+
+    let mut seen = [INVALID_ROOM_INDEX; SECTOR_GRID_MAX_CANDIDATES];
+    let mut seen_count = 0usize;
+    let (center_x, center_z) = sector_grid_player_sector(record, player);
+    let radius = sector_grid_candidate_radius_sectors(record);
+    let mut dz = -radius;
+    while dz <= radius {
+        let mut dx = -radius;
+        while dx <= radius {
+            if let Some(room) = sector_grid_room_at_world_sector(
+                center_x.saturating_add(dx),
+                center_z.saturating_add(dz),
+            ) {
+                if seen[..seen_count].contains(&room) {
+                    dx += 1;
+                    continue;
+                }
+                if seen_count >= seen.len() {
+                    return;
+                }
+                seen[seen_count] = room;
+                seen_count += 1;
+                visit(room);
+            }
+            dx += 1;
+        }
+        dz += 1;
+    }
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn sector_grid_candidate_radius_sectors(record: &LevelRoomRecord) -> i32 {
+    let sector_size = WORLD_SECTOR_GRID_SECTOR_SIZE.max(1);
+    let draw_radius = room_draw_distance(record)
+        .div_euclid(sector_size)
+        .saturating_add(4);
+    room_chunk_activation_radius_sectors(record)
+        .min(draw_radius)
+        .clamp(1, SECTOR_GRID_MAX_SEARCH_RADIUS_SECTORS)
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn sector_grid_player_sector(record: &LevelRoomRecord, player: RoomPoint) -> (i32, i32) {
+    let sector_size = WORLD_SECTOR_GRID_SECTOR_SIZE.max(1);
+    (
+        room_origin_x(record)
+            .saturating_add(player.x)
+            .div_euclid(sector_size),
+        room_origin_z(record)
+            .saturating_add(player.z)
+            .div_euclid(sector_size),
+    )
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn sector_grid_available() -> bool {
+    WORLD_SECTOR_GRID_WIDTH != 0 && WORLD_SECTOR_GRID_DEPTH != 0 && !WORLD_SECTOR_GRID.is_empty()
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn sector_grid_room_at_world_sector(sector_x: i32, sector_z: i32) -> Option<RoomIndex> {
+    if !sector_grid_available() {
+        return None;
+    }
+
+    let grid_x = sector_x.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_X);
+    let grid_z = sector_z.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_Z);
+    if grid_x < 0 || grid_z < 0 {
+        return None;
+    }
+
+    let grid_x = grid_x as usize;
+    let grid_z = grid_z as usize;
+    if grid_x >= WORLD_SECTOR_GRID_WIDTH || grid_z >= WORLD_SECTOR_GRID_DEPTH {
+        return None;
+    }
+
+    let index = grid_z
+        .checked_mul(WORLD_SECTOR_GRID_WIDTH)?
+        .checked_add(grid_x)?;
+    let room = *WORLD_SECTOR_GRID.get(index)?;
+    if room == INVALID_ROOM_INDEX || ROOMS.get(room.to_usize()).is_none() {
+        None
+    } else {
+        Some(room)
+    }
 }
 
 #[derive(Copy, Clone)]
