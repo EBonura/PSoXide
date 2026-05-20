@@ -68,6 +68,30 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
+    let world_pack_toc = world_pack_toc(package);
+    let world_pack_max_chunk_bytes = world_pack_toc
+        .iter()
+        .map(|entry| entry.byte_size as usize)
+        .max()
+        .unwrap_or(0);
+    let resident_chunk_limit = package
+        .rooms
+        .iter()
+        .map(|room| room.resident_chunk_limit as usize)
+        .max()
+        .unwrap_or(crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS as usize)
+        .clamp(
+            crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
+            crate::MAX_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
+        );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = {resident_chunk_limit};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = {world_pack_max_chunk_bytes};\n",
+    );
 
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
@@ -174,6 +198,63 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out.push('\n');
     }
 
+    let mut sky_cyclorama_defs: Vec<&[crate::SkyCycloramaQuad]> = Vec::new();
+    let mut sky_cyclorama_refs: Vec<String> = Vec::with_capacity(package.rooms.len());
+    for room in &package.rooms {
+        if room.sky.cyclorama_quads.is_empty() {
+            sky_cyclorama_refs.push("&[]".to_string());
+        } else if let Some(index) = sky_cyclorama_defs
+            .iter()
+            .position(|quads| *quads == room.sky.cyclorama_quads.as_slice())
+        {
+            sky_cyclorama_refs.push(format!("SKY_CYCLORAMA_QUADS_{index}"));
+        } else {
+            let index = sky_cyclorama_defs.len();
+            sky_cyclorama_defs.push(room.sky.cyclorama_quads.as_slice());
+            sky_cyclorama_refs.push(format!("SKY_CYCLORAMA_QUADS_{index}"));
+        }
+    }
+    for (cyclorama_index, quads) in sky_cyclorama_defs.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "static SKY_CYCLORAMA_QUADS_{cyclorama_index}: &[LevelCycloramaQuadRecord] = &["
+        );
+        for quad in *quads {
+            let _ = writeln!(
+                out,
+                "    LevelCycloramaQuadRecord {{ direction_q12: [[{}, {}, {}], [{}, {}, {}], [{}, {}, {}], [{}, {}, {}]], rgb: [[{}, {}, {}], [{}, {}, {}], [{}, {}, {}], [{}, {}, {}]], flags: 0 }},",
+                quad.direction_q12[0][0],
+                quad.direction_q12[0][1],
+                quad.direction_q12[0][2],
+                quad.direction_q12[1][0],
+                quad.direction_q12[1][1],
+                quad.direction_q12[1][2],
+                quad.direction_q12[2][0],
+                quad.direction_q12[2][1],
+                quad.direction_q12[2][2],
+                quad.direction_q12[3][0],
+                quad.direction_q12[3][1],
+                quad.direction_q12[3][2],
+                quad.rgb[0][0],
+                quad.rgb[0][1],
+                quad.rgb[0][2],
+                quad.rgb[1][0],
+                quad.rgb[1][1],
+                quad.rgb[1][2],
+                quad.rgb[2][0],
+                quad.rgb[2][1],
+                quad.rgb[2][2],
+                quad.rgb[3][0],
+                quad.rgb[3][1],
+                quad.rgb[3][2],
+            );
+        }
+        out.push_str("];\n");
+    }
+    if !sky_cyclorama_defs.is_empty() {
+        out.push('\n');
+    }
+
     out.push_str("/// Rooms with material-slice metadata.\n");
     out.push_str("pub static ROOMS: &[LevelRoomRecord] = &[\n");
     for (room_index, room) in package.rooms.iter().enumerate() {
@@ -182,14 +263,20 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         } else {
             format!("FAR_VISTA_TEXTURES_{room_index}")
         };
+        let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, flags: {}, cloud_layer: LevelCloudLayerRecord {{ color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
             room.origin_z,
             room.sector_size,
+            room.draw_distance,
+            room.chunk_activation_radius_sectors,
+            room.visibility_radius,
+            room.resident_chunk_limit,
+            room.visible_chunk_limit,
             room.material_first,
             room.material_count,
             room.fog_rgb[0],
@@ -197,6 +284,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.fog_rgb[2],
             room.fog_near,
             room.fog_far,
+            room.atmosphere_rgb[0],
+            room.atmosphere_rgb[1],
+            room.atmosphere_rgb[2],
+            room.atmosphere_density,
+            room.atmosphere_fall_speed_q4,
+            room.atmosphere_wind_speed_q4,
             room.sky.top_rgb[0],
             room.sky.top_rgb[1],
             room.sky.top_rgb[2],
@@ -207,7 +300,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.sky.bottom_rgb[1],
             room.sky.bottom_rgb[2],
             room.sky.horizon_percent,
+            room.sky.horizon_thickness_percent,
+            room.sky.skybox_columns,
+            room.sky.skybox_rows,
             room.sky.flags,
+            sky_cyclorama_quads,
+            room.sky
+                .cloud_layer
+                .texture_asset_index
+                .map(|index| index.to_string())
+                .unwrap_or_else(|| "u16::MAX".to_string()),
             room.sky.cloud_layer.color_rgb[0],
             room.sky.cloud_layer.color_rgb[1],
             room.sky.cloud_layer.color_rgb[2],
@@ -273,7 +375,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         "/// Cooked WORLD.PAK room table generated from the same layout as the ISO packer.\n",
     );
     out.push_str("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[\n");
-    for entry in world_pack_toc(package) {
+    for entry in &world_pack_toc {
         let _ = writeln!(
             out,
             "    LevelWorldPackEntryRecord {{ room: RoomIndex({}), sector_offset: {}, sector_count: {}, byte_size: {}, checksum: {} }},",
@@ -565,8 +667,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for bounds in &package.model_clip_bounds {
         let _ = writeln!(
             out,
-            "    LevelModelClipBoundsRecord {{ model: ModelIndex({}), clip: ModelClipTableIndex({}), first_frame: ModelFrameBoundsIndex({}), frame_count: {}, flags: 0 }},",
-            bounds.model, bounds.clip, bounds.first_frame, bounds.frame_count,
+            "    LevelModelClipBoundsRecord {{ model: ModelIndex({}), clip: ModelClipTableIndex({}), first_frame: ModelFrameBoundsIndex({}), frame_count: {}, floor_y: {}, pose_offset: [{}, {}, {}], flags: {} }},",
+            bounds.model,
+            bounds.clip,
+            bounds.first_frame,
+            bounds.frame_count,
+            bounds.floor_y,
+            bounds.pose_offset[0],
+            bounds.pose_offset[1],
+            bounds.pose_offset[2],
+            bounds.flags,
         );
     }
     out.push_str("];\n\n");
@@ -637,8 +747,19 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, x: {}, y: {}, z: {}, yaw: {}, flags: {} }},",
-            inst.room, inst.model, inst.x, inst.y, inst.z, inst.yaw, inst.flags,
+            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
+            inst.room,
+            inst.model,
+            inst.x,
+            inst.y,
+            inst.z,
+            inst.yaw,
+            inst.visual_yaw,
+            inst.visual_offset[0],
+            inst.visual_offset[1],
+            inst.visual_offset[2],
+            inst.visual_scale_q8,
+            inst.flags,
         );
     }
     out.push_str("];\n\n");
@@ -648,7 +769,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     for prop in &package.image_props {
         let _ = writeln!(
             out,
-            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], flags: {} }},",
+            "    LevelImagePropRecord {{ room: RoomIndex({}), texture_asset: AssetId({}), x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, width: {}, height: {}, tint_rgb: [{}, {}, {}], baked_vertex_rgb: [({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})], flags: {} }},",
             prop.room,
             prop.texture_asset_index,
             prop.x,
@@ -662,6 +783,18 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             prop.tint_rgb[0],
             prop.tint_rgb[1],
             prop.tint_rgb[2],
+            prop.baked_vertex_rgb[0].0,
+            prop.baked_vertex_rgb[0].1,
+            prop.baked_vertex_rgb[0].2,
+            prop.baked_vertex_rgb[1].0,
+            prop.baked_vertex_rgb[1].1,
+            prop.baked_vertex_rgb[1].2,
+            prop.baked_vertex_rgb[2].0,
+            prop.baked_vertex_rgb[2].1,
+            prop.baked_vertex_rgb[2].2,
+            prop.baked_vertex_rgb[3].0,
+            prop.baked_vertex_rgb[3].1,
+            prop.baked_vertex_rgb[3].2,
             prop.flags,
         );
     }
@@ -752,19 +885,48 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
                 format!("OptionalModelClipIndex::some(ModelClipIndex({slot}))")
             }
         };
+        let action_clips = character
+            .action_clips
+            .iter()
+            .map(|slot| clip_or_none(*slot))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let action_flags = character
+            .action_flags
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), idle_clip: ModelClipIndex({}), walk_clip: ModelClipIndex({}), run_clip: {}, turn_clip: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
             character.model,
-            character.idle_clip,
-            character.walk_clip,
-            clip_or_none(character.run_clip),
-            clip_or_none(character.turn_clip),
+            action_clips,
+            action_flags,
+            character.visual_offset[0],
+            character.visual_offset[1],
+            character.visual_offset[2],
+            character.visual_yaw,
+            character.visual_scale_q8,
             character.radius,
             character.height,
             character.walk_speed,
             character.run_speed,
             character.turn_speed_degrees_per_second,
+            character.stamina_max_q12,
+            character.sprint_min_q12,
+            character.sprint_drain_q12,
+            character.stamina_recover_q12,
+            character.roll_cost_q12,
+            character.roll_speed,
+            character.roll_active_frames,
+            character.roll_recovery_frames,
+            character.roll_invulnerable_frames,
+            character.backstep_cost_q12,
+            character.backstep_speed,
+            character.backstep_active_frames,
+            character.backstep_recovery_frames,
+            character.backstep_invulnerable_frames,
             character.camera_distance,
             character.camera_height,
             character.camera_target_height,
@@ -1802,6 +1964,9 @@ fn room_required_assets(
     for asset_index in room.far_vista.texture_asset_indices.iter().flatten() {
         push_unique(&mut required_vram, *asset_index);
     }
+    if let Some(asset_index) = room.sky.cloud_layer.texture_asset_index {
+        push_unique(&mut required_vram, asset_index);
+    }
     for prop in &package.image_props {
         if prop.room == room_index as u16 {
             push_unique(&mut required_vram, prop.texture_asset_index);
@@ -2130,6 +2295,7 @@ mod tests {
         );
 
         let manifest = render_manifest_source(&package);
+        assert!(manifest.contains("pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 10;"));
         assert!(manifest.contains("pub const WORLD_PACK_START_LBA: u32 = 54;"));
         assert!(manifest.contains("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord]"));
         assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 1, byte_size: 144"));
@@ -2394,18 +2560,32 @@ mod tests {
             origin_x: 0,
             origin_z: 0,
             sector_size: 1024,
+            draw_distance: 25_000,
+            chunk_activation_radius_sectors: 64,
+            visibility_radius: 32,
+            resident_chunk_limit: 10,
+            visible_chunk_limit: 10,
             material_first: 0,
             material_count: 0,
             fog_rgb: [0, 0, 0],
             fog_near: 0,
             fog_far: 0,
+            atmosphere_rgb: [0, 0, 0],
+            atmosphere_density: 0,
+            atmosphere_fall_speed_q4: 0,
+            atmosphere_wind_speed_q4: 0,
             sky: PlaytestSky {
                 top_rgb: [0, 0, 0],
                 horizon_rgb: [0, 0, 0],
                 bottom_rgb: [0, 0, 0],
                 horizon_percent: 50,
+                horizon_thickness_percent: 8,
+                skybox_columns: 16,
+                skybox_rows: 10,
                 flags: 0,
+                cyclorama_quads: Vec::new(),
                 cloud_layer: PlaytestCloudLayer {
+                    texture_asset_index: None,
                     color_rgb: [0, 0, 0],
                     density: 0,
                     altitude: 0,
@@ -2536,6 +2716,7 @@ use psx_level::{
     LevelCharacterRecord,
     LevelChunkNeighbours,
     LevelChunkRecord,
+    LevelCycloramaQuadRecord,
     LevelFarVistaRecord,
     LevelImagePropRecord,
     LevelMaterialRecord,

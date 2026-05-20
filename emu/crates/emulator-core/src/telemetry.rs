@@ -81,6 +81,12 @@ pub mod stage {
     pub const ROOM_DEPTH_PREP: u16 = 30;
     /// Cached-room surface culling, lighting, packet build, and command enqueue.
     pub const ROOM_SURFACE_DRAW: u16 = 31;
+    /// Cooked sky/cyclorama backdrop rendering.
+    pub const SKY: u16 = 32;
+    /// Distant far-vista ring rendering.
+    pub const FAR_VISTA: u16 = 33;
+    /// Editor-authored image/card prop rendering.
+    pub const IMAGE_PROPS: u16 = 34;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -90,7 +96,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 32;
+pub const STAGE_COUNT: usize = 35;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -318,10 +324,62 @@ pub mod counter {
     pub const ROOM_SUBMIT_COMMAND_OVERFLOWS: u16 = 111;
     /// Cached room triangle submits rejected by primitive-buffer capacity.
     pub const ROOM_SUBMIT_PRIMITIVE_OVERFLOWS: u16 = 112;
+    /// Guest cycles spent rendering runtime model slot 0.
+    pub const MODEL_PROFILE_CYCLES_0: u16 = 113;
+    /// Guest cycles spent rendering runtime model slot 1.
+    pub const MODEL_PROFILE_CYCLES_1: u16 = 114;
+    /// Guest cycles spent rendering runtime model slot 2.
+    pub const MODEL_PROFILE_CYCLES_2: u16 = 115;
+    /// Guest cycles spent rendering runtime model slot 3.
+    pub const MODEL_PROFILE_CYCLES_3: u16 = 116;
+    /// Guest cycles spent rendering runtime model slot 4.
+    pub const MODEL_PROFILE_CYCLES_4: u16 = 117;
+    /// Guest cycles spent rendering runtime model slot 5.
+    pub const MODEL_PROFILE_CYCLES_5: u16 = 118;
+    /// Guest cycles spent rendering runtime model slot 6.
+    pub const MODEL_PROFILE_CYCLES_6: u16 = 119;
+    /// Guest cycles spent rendering runtime model slot 7.
+    pub const MODEL_PROFILE_CYCLES_7: u16 = 120;
+    /// Runtime model slot 0 draw submits.
+    pub const MODEL_PROFILE_DRAWS_0: u16 = 121;
+    /// Runtime model slot 1 draw submits.
+    pub const MODEL_PROFILE_DRAWS_1: u16 = 122;
+    /// Runtime model slot 2 draw submits.
+    pub const MODEL_PROFILE_DRAWS_2: u16 = 123;
+    /// Runtime model slot 3 draw submits.
+    pub const MODEL_PROFILE_DRAWS_3: u16 = 124;
+    /// Runtime model slot 4 draw submits.
+    pub const MODEL_PROFILE_DRAWS_4: u16 = 125;
+    /// Runtime model slot 5 draw submits.
+    pub const MODEL_PROFILE_DRAWS_5: u16 = 126;
+    /// Runtime model slot 6 draw submits.
+    pub const MODEL_PROFILE_DRAWS_6: u16 = 127;
+    /// Runtime model slot 7 draw submits.
+    pub const MODEL_PROFILE_DRAWS_7: u16 = 128;
+    /// Low 32 bits of the resident streamed room/chunk bitset.
+    pub const ROOM_STREAM_RESIDENT_MASK_LO: u16 = 129;
+    /// High 32 bits of the resident streamed room/chunk bitset.
+    pub const ROOM_STREAM_RESIDENT_MASK_HI: u16 = 130;
+    /// Low 32 bits of the active drawable room/chunk bitset.
+    pub const ROOM_ACTIVE_CHUNK_MASK_LO: u16 = 131;
+    /// High 32 bits of the active drawable room/chunk bitset.
+    pub const ROOM_ACTIVE_CHUNK_MASK_HI: u16 = 132;
+    /// Low 32 bits of the room/chunk bitset that submitted room geometry.
+    pub const ROOM_DRAWN_CHUNK_MASK_LO: u16 = 133;
+    /// High 32 bits of the room/chunk bitset that submitted room geometry.
+    pub const ROOM_DRAWN_CHUNK_MASK_HI: u16 = 134;
+    /// Runtime room/chunk index containing the player.
+    pub const ROOM_PLAYER_ROOM_INDEX: u16 = 135;
+    /// Player room-local X, biased for unsigned telemetry transport.
+    pub const ROOM_PLAYER_LOCAL_X_BIASED: u16 = 136;
+    /// Player room-local Z, biased for unsigned telemetry transport.
+    pub const ROOM_PLAYER_LOCAL_Z_BIASED: u16 = 137;
+    /// Camera/view yaw used by player-centred chunk diagnostics, in Q12 angle units.
+    pub const ROOM_PLAYER_VIEW_YAW_Q12: u16 = 138;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 113;
+pub const COUNTER_COUNT: usize = 139;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -597,6 +655,9 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::ROOM_PROJECT => "room project",
         stage::ROOM_DEPTH_PREP => "room depth prep",
         stage::ROOM_SURFACE_DRAW => "room surface draw",
+        stage::SKY => "sky",
+        stage::FAR_VISTA => "far vista",
+        stage::IMAGE_PROPS => "image props",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
@@ -719,6 +780,32 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_SUBMIT_FALLBACK_CALLS => "room submit fallback calls",
         counter::ROOM_SUBMIT_COMMAND_OVERFLOWS => "room submit command overflows",
         counter::ROOM_SUBMIT_PRIMITIVE_OVERFLOWS => "room submit prim overflows",
+        counter::MODEL_PROFILE_CYCLES_0 => "model0 cycles",
+        counter::MODEL_PROFILE_CYCLES_1 => "model1 cycles",
+        counter::MODEL_PROFILE_CYCLES_2 => "model2 cycles",
+        counter::MODEL_PROFILE_CYCLES_3 => "model3 cycles",
+        counter::MODEL_PROFILE_CYCLES_4 => "model4 cycles",
+        counter::MODEL_PROFILE_CYCLES_5 => "model5 cycles",
+        counter::MODEL_PROFILE_CYCLES_6 => "model6 cycles",
+        counter::MODEL_PROFILE_CYCLES_7 => "model7 cycles",
+        counter::MODEL_PROFILE_DRAWS_0 => "model0 draws",
+        counter::MODEL_PROFILE_DRAWS_1 => "model1 draws",
+        counter::MODEL_PROFILE_DRAWS_2 => "model2 draws",
+        counter::MODEL_PROFILE_DRAWS_3 => "model3 draws",
+        counter::MODEL_PROFILE_DRAWS_4 => "model4 draws",
+        counter::MODEL_PROFILE_DRAWS_5 => "model5 draws",
+        counter::MODEL_PROFILE_DRAWS_6 => "model6 draws",
+        counter::MODEL_PROFILE_DRAWS_7 => "model7 draws",
+        counter::ROOM_STREAM_RESIDENT_MASK_LO => "resident chunk mask lo",
+        counter::ROOM_STREAM_RESIDENT_MASK_HI => "resident chunk mask hi",
+        counter::ROOM_ACTIVE_CHUNK_MASK_LO => "active chunk mask lo",
+        counter::ROOM_ACTIVE_CHUNK_MASK_HI => "active chunk mask hi",
+        counter::ROOM_DRAWN_CHUNK_MASK_LO => "drawn chunk mask lo",
+        counter::ROOM_DRAWN_CHUNK_MASK_HI => "drawn chunk mask hi",
+        counter::ROOM_PLAYER_ROOM_INDEX => "player room index",
+        counter::ROOM_PLAYER_LOCAL_X_BIASED => "player local x",
+        counter::ROOM_PLAYER_LOCAL_Z_BIASED => "player local z",
+        counter::ROOM_PLAYER_VIEW_YAW_Q12 => "player view yaw q12",
         _ => "unknown",
     }
 }
@@ -828,6 +915,9 @@ mod tests {
         assert_eq!(stage_name(stage::ROOM_VISIBLE_LIST), "room visible list");
         assert_eq!(stage_name(stage::ROOM_CELL_SELECT), "room cell select");
         assert_eq!(stage_name(stage::ROOM_SURFACE_DRAW), "room surface draw");
+        assert_eq!(stage_name(stage::SKY), "sky");
+        assert_eq!(stage_name(stage::FAR_VISTA), "far vista");
+        assert_eq!(stage_name(stage::IMAGE_PROPS), "image props");
         assert_eq!(
             counter_name(counter::CD_STREAM_BENCH_STATUS),
             "cd stream status"
