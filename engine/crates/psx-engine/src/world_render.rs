@@ -1881,7 +1881,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     accepted_cell_indices: &mut [u16],
     accepted_cell_depths: &mut [i32],
     _room_depth: u16,
-    _sector_size: i32,
+    sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
     camera: &WorldCamera,
@@ -1940,7 +1940,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 camera,
                 options,
                 visibility_view,
-                cell.visibility_radius,
+                cached_cell_screen_radius(cell, sector_size),
                 screen_margin,
             ) {
                 stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
@@ -2062,6 +2062,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     projected_depths: &mut [i32],
     accepted_cell_indices: &mut [u16],
     accepted_cell_depths: &mut [i32],
+    sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
     camera: &WorldCamera,
@@ -2101,7 +2102,18 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             cell.visibility_center[1],
             cell.visibility_center[2],
         );
-        let cell_depth = camera.view_vertex(visibility_center).z;
+        let visibility_view = camera.view_vertex(visibility_center);
+        if !cell_visibility_view_visible_to_camera(
+            camera,
+            options,
+            visibility_view,
+            cached_cell_screen_radius(cell, sector_size),
+            screen_margin,
+        ) {
+            stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
+            continue;
+        }
+        let cell_depth = visibility_view.z;
         stats.cells_drawn = stats.cells_drawn.saturating_add(1);
         accepted_cell_indices[accepted_cell_count] = cell_index as u16;
         accepted_cell_depths[accepted_cell_count] = cell_depth;
@@ -3491,9 +3503,22 @@ fn cell_visibility_bounds(
 ) -> (WorldVertex, i32) {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
     let center = WorldVertex::new((x0 + x1) / 2, (min_y + max_y) / 2, (z0 + z1) / 2);
-    let half_height = ((max_y - min_y).abs() / 2).max(sector_size / 2);
-    let radius = sector_size.saturating_add(half_height);
+    let half_height = (max_y - min_y).abs() / 2;
+    let horizontal_radius = sector_size.saturating_mul(3) / 4;
+    let radius = horizontal_radius
+        .saturating_add(half_height)
+        .max(sector_size / 2);
     (center, radius)
+}
+
+#[inline(always)]
+fn cached_cell_screen_radius(cell: CachedRoomCell, sector_size: i32) -> i32 {
+    let sector_size = sector_size.max(1);
+    let half_height = (cell.max_y - cell.min_y).abs() / 2;
+    let horizontal_radius = sector_size.saturating_mul(3) / 4;
+    horizontal_radius
+        .saturating_add(half_height)
+        .max(sector_size / 2)
 }
 
 #[inline(always)]
