@@ -18,6 +18,13 @@ bios/
 roms/
 discs/
 
+# Local raw/source art, purchased packs, and import experiments.
+# Keep this near the repo for organization, but never commit it.
+local-assets/
+
+# Local share/export packages for external review.
+handoff/
+
 # Texture sources under `sdk/examples/*/vendor/` ARE committed —
 # but only as pre-cropped 512×512 JPGs, ~50-150 KB each. The
 # cooker's centre-square-crop default means feeding it the full
@@ -30,6 +37,7 @@ discs/
 # Run artifacts
 run/
 traces/
+screenshots/
 goldens/*.bin
 goldens/*.raw
 /build/examples/**/.cargo-build-lock
