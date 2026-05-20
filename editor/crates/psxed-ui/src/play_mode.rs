@@ -18,6 +18,14 @@ pub enum EditorPlaytestRequest {
     BuildProject,
     /// The playable viewport was clicked; capture game input there.
     CaptureInput,
+    /// Begin recording the pad state applied to embedded Play.
+    StartInputRecording,
+    /// Stop recording and save the current embedded Play tape.
+    StopInputRecording,
+    /// Replay the saved embedded Play input tape.
+    StartInputReplay,
+    /// Stop input replay and return to live input.
+    StopInputReplay,
 }
 
 /// Frontend-owned embedded playtest state, mirrored into the editor
@@ -68,6 +76,8 @@ pub struct EditorViewport3dPresentation {
     /// Frontend-profiler metrics for live embedded play. These are
     /// emulator measurements, not egui repaint cadence.
     pub play_metrics: Option<EditorPlaytestMetrics>,
+    /// Current embedded-play input tape state.
+    pub play_tape: EditorPlaytestTapeStatus,
 }
 
 impl EditorViewport3dPresentation {
@@ -83,6 +93,7 @@ impl EditorViewport3dPresentation {
             overlay_lines,
             overlay_source_size: egui::vec2(320.0, 240.0),
             play_metrics: None,
+            play_tape: EditorPlaytestTapeStatus::default(),
         }
     }
 
@@ -90,6 +101,7 @@ impl EditorViewport3dPresentation {
     pub fn play(
         texture: egui::TextureId,
         uv: Rect,
+        play_tape: EditorPlaytestTapeStatus,
         play_metrics: Option<EditorPlaytestMetrics>,
     ) -> Self {
         Self {
@@ -99,8 +111,32 @@ impl EditorViewport3dPresentation {
             overlay_lines: Vec::new(),
             overlay_source_size: Vec2::ZERO,
             play_metrics,
+            play_tape,
         }
     }
+}
+
+/// Current mode for the embedded Play input tape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EditorPlaytestTapeMode {
+    /// Live host input is driving the game.
+    #[default]
+    Idle,
+    /// Live input is being appended to a tape.
+    Recording,
+    /// Saved tape input is driving the game.
+    Replaying,
+}
+
+/// Editor-facing summary of the current input tape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EditorPlaytestTapeStatus {
+    /// Current tape mode.
+    pub mode: EditorPlaytestTapeMode,
+    /// Number of recorded frames in the active tape.
+    pub frames: u32,
+    /// Current replay cursor, in frames.
+    pub cursor: u32,
 }
 
 /// Rolling emulator metrics shown over the live editor Play viewport.
@@ -126,6 +162,44 @@ pub struct EditorPlaytestMetrics {
     pub ui_ms: f32,
     /// Guest cycle budget consumed by stepped frames.
     pub step_budget_percent: f32,
+    /// Active room/chunk records submitted by the runtime renderer.
+    pub chunk_visible: u32,
+    /// Resident streamed room/chunk slots currently loaded.
+    pub chunk_loaded: u32,
+    /// Candidate chunks found by the active-room window builder.
+    pub chunk_candidates: u32,
+    /// Chunks built by the most recent active-room window rebuild.
+    pub chunk_built: u32,
+    /// Candidate chunks skipped because the active room cache was not ready.
+    pub chunk_cache_skips: u32,
+    /// Stream scheduler requests considered by recent window refreshes.
+    pub stream_requests: u32,
+    /// Stream scheduler requests that were missing from resident slots.
+    pub stream_misses: u32,
+    /// Prefetch-only stream scheduler requests.
+    pub stream_prefetches: u32,
+    /// Resident stream slots evicted by recent window refreshes.
+    pub stream_evictions: u32,
+    /// Stream loads currently pending.
+    pub stream_pending: u32,
+    /// Stream loads that failed validation or CD reads.
+    pub stream_failed: u32,
+    /// Resident streamed chunks, keyed by runtime room/chunk index.
+    pub chunk_loaded_mask: u64,
+    /// Active drawable chunks, keyed by runtime room/chunk index.
+    pub chunk_active_mask: u64,
+    /// Chunks that submitted room geometry, keyed by runtime room/chunk index.
+    pub chunk_drawn_mask: u64,
+    /// True when the profiler sample contains player map telemetry.
+    pub player_map_valid: bool,
+    /// Runtime room/chunk index containing the player.
+    pub player_room_index: u32,
+    /// Player room-local X in engine units.
+    pub player_local_x: i32,
+    /// Player room-local Z in engine units.
+    pub player_local_z: i32,
+    /// Camera/view yaw in Q12 angle units for player-centred chunk diagnostics.
+    pub player_view_yaw_q12: u16,
 }
 
 /// One host-drawn editor overlay segment over the 3D preview.

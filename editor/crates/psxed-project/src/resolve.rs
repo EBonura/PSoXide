@@ -1,7 +1,8 @@
 //! Shared editor/cooker resource resolution rules.
 
 use crate::{
-    AnimationRole, CharacterResource, ModelResource, ProjectDocument, ResourceData, ResourceId,
+    CharacterAnimationAction, CharacterResource, ModelResource, ProjectDocument, ResourceData,
+    ResourceId,
 };
 
 /// A player spawn's resolved Character resource.
@@ -93,7 +94,7 @@ pub fn resolve_character_idle_preview_clip(
     model: &ModelResource,
 ) -> Option<u16> {
     character
-        .idle_clip
+        .action_clip(CharacterAnimationAction::Idle)
         .or(model.effective_preview_clip())
         .or_else(|| (!model.clips.is_empty()).then_some(0))
 }
@@ -110,7 +111,7 @@ pub fn resolve_character_idle_preview_clip_for_model(
         project
             .resource(set_id)
             .and_then(|resource| match &resource.data {
-                ResourceData::AnimationSet(set) => set.role_clip(AnimationRole::Idle),
+                ResourceData::AnimationSet(set) => set.action_clip(CharacterAnimationAction::Idle),
                 _ => None,
             })
     }) {

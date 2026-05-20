@@ -158,6 +158,40 @@ pub struct TextureMaterial {
     dither: bool,
 }
 
+/// Prepacked material words for flat textured triangle packets.
+///
+/// Animated model render paths can emit hundreds of textured triangles with
+/// one resolved atlas material. Keeping the invariant GP0 words together avoids
+/// rebuilding texture-window, command, CLUT, and tpage state for every face.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TexturedPacketMaterial {
+    /// GP0(E2) texture-window word.
+    pub tex_window_word: u32,
+    /// Flat textured triangle command word.
+    pub color_command_word: u32,
+    /// CLUT word shifted into the high half of vertex-0 UV.
+    pub clut_high_word: u32,
+    /// Tpage word shifted into the high half of vertex-1 UV.
+    pub tpage_high_word: u32,
+}
+
+impl TexturedPacketMaterial {
+    /// Build prepacked packet words from a texture material.
+    pub const fn from_texture(material: TextureMaterial) -> Self {
+        Self {
+            tex_window_word: material.texture_window_word(),
+            color_command_word: material.flat_textured_polygon_header(false),
+            clut_high_word: (material.clut_word() as u32) << 16,
+            tpage_high_word: (material.tpage_word() as u32) << 16,
+        }
+    }
+
+    /// True when packets using this material need the transparent render layer.
+    pub const fn is_translucent(self) -> bool {
+        self.color_command_word & (1 << 25) != 0
+    }
+}
+
 /// Prepacked material words for textured Gouraud triangle packets.
 ///
 /// Hot cached-room paths emit many triangles with the same material.
@@ -320,6 +354,11 @@ impl TextureMaterial {
     /// Prepacked words for textured Gouraud triangle packet emission.
     pub const fn textured_gouraud_packet_material(self) -> TexturedGouraudPacketMaterial {
         TexturedGouraudPacketMaterial::from_texture(self)
+    }
+
+    /// Prepacked words for flat textured triangle packet emission.
+    pub const fn textured_packet_material(self) -> TexturedPacketMaterial {
+        TexturedPacketMaterial::from_texture(self)
     }
 
     /// Textured polygon header with the material's flat tint.

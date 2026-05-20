@@ -37,6 +37,8 @@ use image::{imageops, DynamicImage, GenericImageView};
 use psxed_format::texture::{Depth, TextureHeader, MAGIC, VERSION};
 use psxed_format::AssetHeader;
 
+pub use psxed_format::texture::Depth as PsxtDepth;
+
 const TRANSPARENT_ALPHA_THRESHOLD: u8 = 128;
 
 /// Rectangle into the source image, pre-resize.
@@ -140,6 +142,9 @@ pub enum Error {
     },
     /// Target dimensions are zero.
     ZeroSize,
+    /// Indexed-bake input length doesn't match `width * height`, or
+    /// the requested depth has no CLUT (e.g. Bit15).
+    InvalidIndexedInput,
 }
 
 impl core::fmt::Display for Error {
@@ -156,11 +161,125 @@ impl core::fmt::Display for Error {
                 source.1,
             ),
             Error::ZeroSize => write!(f, "target width/height is zero"),
+            Error::InvalidIndexedInput => {
+                write!(f, "indexed bake: index buffer or depth is invalid")
+            }
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// Encode an indexed-color image (4bpp or 8bpp) into a PSXT blob
+/// without going through PNG / median-cut quantization. Lets callers
+/// that already know their palette (procedural noise bakes, palette
+/// transcoders, etc.) skip the lossy image-to-indexed step.
+///
+/// `indices` must contain `width * height` palette indices, each
+/// `< palette.len()`. `palette` must hold at most `depth.clut_entries()`
+/// entries; missing entries are padded as black (transparent).
+pub fn encode_indexed_psxt(
+    width: u16,
+    height: u16,
+    depth: Depth,
+    indices: &[u8],
+    palette: &[[u8; 3]],
+    transparent_index_zero: bool,
+) -> Result<Vec<u8>, Error> {
+    if width == 0 || height == 0 {
+        return Err(Error::ZeroSize);
+    }
+    let Some(n_entries) = depth.clut_entries() else {
+        // Bit15 has no CLUT — caller should use `convert` for direct
+        // 15bpp instead.
+        return Err(Error::InvalidIndexedInput);
+    };
+    let n_entries = n_entries as usize;
+    let pixel_count = (width as usize) * (height as usize);
+    if indices.len() != pixel_count {
+        return Err(Error::InvalidIndexedInput);
+    }
+    let mut padded_palette: Vec<[u8; 3]> = Vec::with_capacity(n_entries);
+    padded_palette.extend(palette.iter().take(n_entries).copied());
+    while padded_palette.len() < n_entries {
+        padded_palette.push([0, 0, 0]);
+    }
+    let pixel_halfwords = pack_indices(indices, width, height, depth);
+    let clut_halfwords = encode_clut(&padded_palette, n_entries);
+    let flags = if transparent_index_zero {
+        psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT
+    } else {
+        0
+    };
+    Ok(assemble_blob(
+        width,
+        height,
+        depth,
+        flags,
+        n_entries as u16,
+        &pixel_halfwords,
+        &clut_halfwords,
+    ))
+}
+
+/// Encode an indexed-color image with multiple CLUT rows.
+///
+/// This is useful for PS1-style skies and backdrops where each
+/// horizontal band can use its own 16-colour 4bpp palette while the
+/// pixel data stays one continuous texture. `palette_rows` are
+/// concatenated in order in the CLUT block; runtime code chooses the
+/// row-specific CLUT handle per primitive.
+pub fn encode_indexed_psxt_with_clut_rows(
+    width: u16,
+    height: u16,
+    depth: Depth,
+    indices: &[u8],
+    palette_rows: &[Vec<[u8; 3]>],
+    transparent_index_zero: bool,
+) -> Result<Vec<u8>, Error> {
+    if width == 0 || height == 0 {
+        return Err(Error::ZeroSize);
+    }
+    let Some(entries_per_row) = depth.clut_entries() else {
+        return Err(Error::InvalidIndexedInput);
+    };
+    if palette_rows.is_empty() {
+        return Err(Error::InvalidIndexedInput);
+    }
+    let entries_per_row = entries_per_row as usize;
+    let pixel_count = (width as usize) * (height as usize);
+    if indices.len() != pixel_count {
+        return Err(Error::InvalidIndexedInput);
+    }
+    let mut clut_halfwords = Vec::with_capacity(entries_per_row * palette_rows.len());
+    for palette in palette_rows {
+        let mut padded_palette: Vec<[u8; 3]> = Vec::with_capacity(entries_per_row);
+        padded_palette.extend(palette.iter().take(entries_per_row).copied());
+        while padded_palette.len() < entries_per_row {
+            padded_palette.push([0, 0, 0]);
+        }
+        clut_halfwords.extend(encode_clut(&padded_palette, entries_per_row));
+    }
+    let clut_entries = entries_per_row
+        .checked_mul(palette_rows.len())
+        .and_then(|entries| u16::try_from(entries).ok())
+        .ok_or(Error::InvalidIndexedInput)?;
+    let pixel_halfwords = pack_indices(indices, width, height, depth);
+    let flags = if transparent_index_zero {
+        psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT
+    } else {
+        0
+    };
+    Ok(assemble_blob(
+        width,
+        height,
+        depth,
+        flags,
+        clut_entries,
+        &pixel_halfwords,
+        &clut_halfwords,
+    ))
+}
 
 /// End-to-end convert: bytes of a PNG/JPG/BMP → bytes of a PSXT
 /// blob. The returned `Vec<u8>` is ready to write to disk and
@@ -630,6 +749,30 @@ mod tests {
         assert_eq!(
             u32::from_le_bytes([psxt[24], psxt[25], psxt[26], psxt[27]]),
             32
+        );
+    }
+
+    #[test]
+    fn indexed_multi_clut_rows_concatenate_palettes() {
+        let indices = vec![1, 2, 3, 4, 4, 3, 2, 1];
+        let rows = vec![
+            vec![[0, 0, 0], [255, 0, 0]],
+            vec![[0, 0, 0], [0, 0, 255]],
+        ];
+        let psxt =
+            encode_indexed_psxt_with_clut_rows(4, 2, Depth::Bit4, &indices, &rows, false).unwrap();
+
+        assert_eq!(psxt[12], 4); // depth
+        assert_eq!(u16::from_le_bytes([psxt[14], psxt[15]]), 4); // width
+        assert_eq!(u16::from_le_bytes([psxt[16], psxt[17]]), 2); // height
+        assert_eq!(u16::from_le_bytes([psxt[18], psxt[19]]), 32); // 2 x 16-entry CLUT rows
+        assert_eq!(
+            u32::from_le_bytes([psxt[20], psxt[21], psxt[22], psxt[23]]),
+            4
+        );
+        assert_eq!(
+            u32::from_le_bytes([psxt[24], psxt[25], psxt[26], psxt[27]]),
+            64
         );
     }
 
