@@ -7247,6 +7247,7 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
     }
 }
 
+#[inline(always)]
 fn room_fog_weight(depth: i32, enabled: bool, fog_near: i32, fog_far: i32) -> i32 {
     if !enabled || fog_far <= fog_near || depth <= fog_near {
         return 0;
@@ -7254,9 +7255,13 @@ fn room_fog_weight(depth: i32, enabled: bool, fog_near: i32, fog_far: i32) -> i3
     (((depth - fog_near).saturating_mul(256)) / (fog_far - fog_near)).clamp(0, 256)
 }
 
+#[inline(always)]
 fn apply_room_fog_weight(tint: (u8, u8, u8), fog_rgb: Rgb8, weight: i32) -> (u8, u8, u8) {
     if weight <= 0 {
         return tint;
+    }
+    if weight >= 256 {
+        return (fog_rgb.r, fog_rgb.g, fog_rgb.b);
     }
     let keep = 256 - weight;
     (
@@ -7266,8 +7271,9 @@ fn apply_room_fog_weight(tint: (u8, u8, u8), fog_rgb: Rgb8, weight: i32) -> (u8,
     )
 }
 
+#[inline(always)]
 fn blend_channel(src: u8, fog: u8, keep: i32, weight: i32) -> u8 {
-    (((src as i32) * keep + (fog as i32) * weight) >> 8).clamp(0, 255) as u8
+    (((src as i32) * keep + (fog as i32) * weight) >> 8) as u8
 }
 
 const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
