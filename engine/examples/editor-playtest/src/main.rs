@@ -38,6 +38,13 @@ use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
+#[cfg(feature = "world-grid-visible")]
+use psx_engine::GridVisibilityStats;
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+use psx_engine::GridVisibleCell;
 use psx_engine::{
     apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
     CachedRoomCell, CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder,
@@ -64,13 +71,6 @@ use psx_engine::{
     draw_indexed_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit_visible_cells,
     GridVisibility,
 };
-#[cfg(feature = "world-grid-visible")]
-use psx_engine::GridVisibilityStats;
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-use psx_engine::GridVisibleCell;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
     draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
@@ -118,8 +118,7 @@ use generated::{
     MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, WEAPONS,
-    WEAPON_HITBOXES,
-    WORLD_SECTOR_GRID, WORLD_SECTOR_GRID_DEPTH, WORLD_SECTOR_GRID_ORIGIN_X,
+    WEAPON_HITBOXES, WORLD_SECTOR_GRID, WORLD_SECTOR_GRID_DEPTH, WORLD_SECTOR_GRID_ORIGIN_X,
     WORLD_SECTOR_GRID_ORIGIN_Z, WORLD_SECTOR_GRID_SECTOR_SIZE, WORLD_SECTOR_GRID_WIDTH,
 };
 #[cfg(all(
@@ -540,6 +539,12 @@ const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 const SECTOR_GRID_MAX_CANDIDATES: usize = 96;
 #[cfg(feature = "sector-grid-streaming")]
 const SECTOR_GRID_MAX_SEARCH_RADIUS_SECTORS: i32 = 96;
+#[cfg(feature = "vis-full-active-chunks")]
+const ACTIVE_CHUNK_SCREEN_MARGIN: i32 = 0;
+#[cfg(feature = "vis-full-active-chunks")]
+const ACTIVE_CHUNK_MIN_Y: i32 = -2048;
+#[cfg(feature = "vis-full-active-chunks")]
+const ACTIVE_CHUNK_MAX_Y: i32 = 6144;
 
 /// Capacity of the residency manager's RAM table. Holds room
 /// world + model meshes + animation clips.
@@ -2219,6 +2224,10 @@ impl Scene for Playtest {
                 let room_options = room_surface_options(room_record);
                 let actor_options = room_options;
                 let room_camera = camera_for_room(camera, active);
+                #[cfg(feature = "vis-full-active-chunks")]
+                if !active_room_aabb_intersects_camera(active, room_camera, room_record) {
+                    continue;
+                }
                 let lighting = RuntimeRoomLighting {
                     room_index: active.index,
                     ambient: Rgb8::from_array(active.ambient_rgb),
@@ -2266,6 +2275,7 @@ impl Scene for Playtest {
                                     projected_depths,
                                     accepted_cell_indices,
                                     accepted_cell_depths,
+                                    active.sector_size,
                                     materials,
                                     &lighting,
                                     &room_camera,
@@ -3092,6 +3102,20 @@ impl Playtest {
         let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
             return count;
         };
+
+        #[cfg(feature = "sector-grid-streaming")]
+        if sector_grid_available() {
+            self.visit_sector_grid_resident_collision_rooms(
+                current_record,
+                current_authored,
+                anchor,
+                margin,
+                out,
+                &mut count,
+            );
+            return count;
+        }
+
         for chunk in ROOM_CHUNKS {
             if count >= out.len() {
                 break;
@@ -3124,6 +3148,50 @@ impl Playtest {
             count += 1;
         }
         count
+    }
+
+    #[cfg(all(feature = "cd-stream-bench", feature = "sector-grid-streaming"))]
+    fn visit_sector_grid_resident_collision_rooms(
+        &self,
+        current_record: &LevelRoomRecord,
+        current_authored: Option<u32>,
+        anchor: RoomPoint,
+        margin: i32,
+        out: &mut [CharacterCollisionRoom<'static>],
+        count: &mut usize,
+    ) {
+        visit_sector_grid_collision_window_rooms(current_record, anchor, margin, |room_index| {
+            if *count >= out.len()
+                || room_index == self.room_index
+                || active_room_window_contains(&self.active_rooms, room_index)
+            {
+                return;
+            }
+            let Some(chunk) = chunk_record_for_room(room_index) else {
+                return;
+            };
+            if current_authored.is_some() && Some(chunk.authored_room) != current_authored {
+                return;
+            }
+            if !streamed_room_is_resident(room_index) {
+                return;
+            }
+            let Some(record) = ROOMS.get(room_index.to_usize()) else {
+                return;
+            };
+            if !chunk_overlaps_collision_window(*chunk, current_record, record, anchor, margin) {
+                return;
+            }
+            let Some(room) = parse_streamed_compact_collision_room(0, room_index) else {
+                return;
+            };
+            out[*count] = CharacterCollisionRoom::from_collision(
+                RuntimeCollisionRoom::Compact(room),
+                room_origin_x(record).saturating_sub(room_origin_x(current_record)),
+                room_origin_z(record).saturating_sub(room_origin_z(current_record)),
+            );
+            *count += 1;
+        });
     }
 
     fn draw_collision_debug_overlay(&self, camera: WorldCamera) {
@@ -3675,27 +3743,30 @@ impl Playtest {
             let mut best_extra_sectors = u32::MAX;
             let mut best_total_sectors = u32::MAX;
 
-            for chunk in ROOM_CHUNKS {
-                if chunk.room == self.room_index
-                    || room_requested(chunk.room, requested_rooms, requested_count)
-                    || streamed_room_is_resident(chunk.room)
+            let mut evaluate = |room: RoomIndex| {
+                if room == self.room_index
+                    || room_requested(room, requested_rooms, requested_count)
+                    || streamed_room_is_resident(room)
                 {
-                    continue;
+                    return;
                 }
+                let Some(chunk) = chunk_record_for_room(room) else {
+                    return;
+                };
                 let Some(score) =
                     chunk_residency_score(*chunk, self.room_index, current_record, player)
                 else {
-                    continue;
+                    return;
                 };
-                let Some(info) = cd_stream::world_room_chunk_info(chunk.room.raw(), WORLD_PACK_TOC)
+                let Some(info) = cd_stream::world_room_chunk_info(room.raw(), WORLD_PACK_TOC)
                 else {
-                    continue;
+                    return;
                 };
                 if info.sector_count == 0
                     || info.byte_size == 0
                     || info.byte_size > STREAMED_ROOM_SLOT_BYTES
                 {
-                    continue;
+                    return;
                 }
                 let candidate_end = info.sector_offset.saturating_add(info.sector_count);
                 let total_sectors = span_end
@@ -3706,7 +3777,7 @@ impl Playtest {
                     || (extra_sectors > 0
                         && total_sectors > STREAMED_ROOM_PREFETCH_MAX_TOTAL_SECTORS)
                 {
-                    continue;
+                    return;
                 }
                 let better = best_room == INVALID_ROOM_INDEX
                     || extra_sectors < best_extra_sectors
@@ -3715,10 +3786,28 @@ impl Playtest {
                             || (best_total_sectors > total_sectors
                                 && !best_score.better_than(score))));
                 if better {
-                    best_room = chunk.room;
+                    best_room = room;
                     best_score = score;
                     best_extra_sectors = extra_sectors;
                     best_total_sectors = total_sectors;
+                }
+            };
+
+            #[cfg(feature = "sector-grid-streaming")]
+            let used_sector_grid = if sector_grid_available() {
+                visit_sector_grid_candidate_rooms(current_record, player, |room| {
+                    evaluate(room);
+                });
+                true
+            } else {
+                false
+            };
+            #[cfg(not(feature = "sector-grid-streaming"))]
+            let used_sector_grid = false;
+
+            if !used_sector_grid {
+                for chunk in ROOM_CHUNKS {
+                    evaluate(chunk.room);
                 }
             }
 
@@ -5914,13 +6003,19 @@ fn visibility_cell_aabb_intersects_camera(
         .saturating_add(margin);
     let y0 = cell.min_y.saturating_sub(margin);
     let y1 = cell.max_y.saturating_add(margin);
-    aabb_intersects_camera_frustum(x0, x1, y0, y1, z0, z1, camera, far_z)
+    aabb_intersects_camera_frustum(
+        x0,
+        x1,
+        y0,
+        y1,
+        z0,
+        z1,
+        camera,
+        far_z,
+        ROOM_VISIBLE_CELL_CAMERA_MARGIN,
+    )
 }
 
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
 fn aabb_intersects_camera_frustum(
     x0: i32,
     x1: i32,
@@ -5930,15 +6025,16 @@ fn aabb_intersects_camera_frustum(
     z1: i32,
     camera: WorldCamera,
     far_z: i32,
+    screen_margin: i32,
 ) -> bool {
     let near = camera.projection.near_z.max(1);
     let far = far_z.max(near);
     let focal = camera.projection.focal_length.max(1) as i64;
     let half_w = (camera.projection.screen_x as i32)
-        .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
+        .saturating_add(screen_margin)
         .max(1) as i64;
     let half_h = (camera.projection.screen_y as i32)
-        .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
+        .saturating_add(screen_margin)
         .max(1) as i64;
     let mut max_depth = i32::MIN;
     let mut min_depth = i32::MAX;
@@ -6105,6 +6201,29 @@ fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32
     camera
         .view_vertex(WorldVertex::new(center_x, 0, center_z))
         .z
+}
+
+#[cfg(feature = "vis-full-active-chunks")]
+fn active_room_aabb_intersects_camera(
+    active: ActiveRuntimeRoom,
+    camera: WorldCamera,
+    record: &LevelRoomRecord,
+) -> bool {
+    let sector_size = active.sector_size.max(1);
+    let width = (active.width as i32).saturating_mul(sector_size);
+    let depth = (active.depth as i32).saturating_mul(sector_size);
+    let margin = sector_size;
+    aabb_intersects_camera_frustum(
+        0i32.saturating_sub(margin),
+        width.saturating_add(margin),
+        ACTIVE_CHUNK_MIN_Y,
+        ACTIVE_CHUNK_MAX_Y,
+        0i32.saturating_sub(margin),
+        depth.saturating_add(margin),
+        camera,
+        room_draw_distance(record),
+        ACTIVE_CHUNK_SCREEN_MARGIN,
+    )
 }
 
 #[cfg(all(
@@ -6826,7 +6945,8 @@ fn best_sector_grid_resident_chunk_candidate(
             return;
         }
         if let Some(chunk) = chunk_record_for_room(room) {
-            if let Some(score) = chunk_residency_score(*chunk, current_index, current_record, player)
+            if let Some(score) =
+                chunk_residency_score(*chunk, current_index, current_record, player)
             {
                 if best.is_none() || score.better_than(best_score) {
                     best_score = score;
@@ -6851,28 +6971,99 @@ where
     let mut seen_count = 0usize;
     let (center_x, center_z) = sector_grid_player_sector(record, player);
     let radius = sector_grid_candidate_radius_sectors(record);
-    let mut dz = -radius;
-    while dz <= radius {
-        let mut dx = -radius;
-        while dx <= radius {
-            if let Some(room) = sector_grid_room_at_world_sector(
-                center_x.saturating_add(dx),
-                center_z.saturating_add(dz),
-            ) {
+    let Some((min_x, max_x, min_z, max_z)) = sector_grid_clamped_cell_rect(
+        center_x.saturating_sub(radius),
+        center_x.saturating_add(radius),
+        center_z.saturating_sub(radius),
+        center_z.saturating_add(radius),
+    ) else {
+        return;
+    };
+    let max_seen = ROOM_CHUNKS.len().min(seen.len());
+    if max_seen == 0 {
+        return;
+    }
+
+    let mut grid_z = min_z;
+    while grid_z <= max_z {
+        let mut grid_x = min_x;
+        while grid_x <= max_x {
+            if let Some(room) = sector_grid_room_at_grid_cell(grid_x, grid_z) {
                 if seen[..seen_count].contains(&room) {
-                    dx += 1;
+                    grid_x += 1;
                     continue;
                 }
-                if seen_count >= seen.len() {
+                if seen_count >= max_seen {
                     return;
                 }
                 seen[seen_count] = room;
                 seen_count += 1;
                 visit(room);
+                if seen_count >= max_seen {
+                    return;
+                }
             }
-            dx += 1;
+            grid_x += 1;
         }
-        dz += 1;
+        grid_z += 1;
+    }
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn visit_sector_grid_collision_window_rooms<F>(
+    current_record: &LevelRoomRecord,
+    anchor: RoomPoint,
+    margin: i32,
+    mut visit: F,
+) where
+    F: FnMut(RoomIndex),
+{
+    if !sector_grid_available() {
+        return;
+    }
+
+    let sector_size = WORLD_SECTOR_GRID_SECTOR_SIZE.max(1);
+    let margin = margin.max(0).saturating_add(sector_size);
+    let global_x = room_origin_x(current_record).saturating_add(anchor.x);
+    let global_z = room_origin_z(current_record).saturating_add(anchor.z);
+    let min_sector_x = global_x.saturating_sub(margin).div_euclid(sector_size);
+    let max_sector_x = global_x.saturating_add(margin).div_euclid(sector_size);
+    let min_sector_z = global_z.saturating_sub(margin).div_euclid(sector_size);
+    let max_sector_z = global_z.saturating_add(margin).div_euclid(sector_size);
+    let Some((min_x, max_x, min_z, max_z)) =
+        sector_grid_clamped_cell_rect(min_sector_x, max_sector_x, min_sector_z, max_sector_z)
+    else {
+        return;
+    };
+    let mut seen = [INVALID_ROOM_INDEX; MAX_COLLISION_ROOMS];
+    let mut seen_count = 0usize;
+    let max_seen = ROOM_CHUNKS.len().min(seen.len());
+    if max_seen == 0 {
+        return;
+    }
+
+    let mut grid_z = min_z;
+    while grid_z <= max_z {
+        let mut grid_x = min_x;
+        while grid_x <= max_x {
+            if let Some(room) = sector_grid_room_at_grid_cell(grid_x, grid_z) {
+                if seen[..seen_count].contains(&room) {
+                    grid_x += 1;
+                    continue;
+                }
+                if seen_count >= max_seen {
+                    return;
+                }
+                seen[seen_count] = room;
+                seen_count += 1;
+                visit(room);
+                if seen_count >= max_seen {
+                    return;
+                }
+            }
+            grid_x += 1;
+        }
+        grid_z += 1;
     }
 }
 
@@ -6978,19 +7169,40 @@ fn sector_grid_available() -> bool {
 }
 
 #[cfg(feature = "sector-grid-streaming")]
-fn sector_grid_room_at_world_sector(sector_x: i32, sector_z: i32) -> Option<RoomIndex> {
-    if !sector_grid_available() {
+fn sector_grid_clamped_cell_rect(
+    min_sector_x: i32,
+    max_sector_x: i32,
+    min_sector_z: i32,
+    max_sector_z: i32,
+) -> Option<(usize, usize, usize, usize)> {
+    if !sector_grid_available() || min_sector_x > max_sector_x || min_sector_z > max_sector_z {
         return None;
     }
 
-    let grid_x = sector_x.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_X);
-    let grid_z = sector_z.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_Z);
-    if grid_x < 0 || grid_z < 0 {
+    let width = WORLD_SECTOR_GRID_WIDTH.min(i32::MAX as usize) as i32;
+    let depth = WORLD_SECTOR_GRID_DEPTH.min(i32::MAX as usize) as i32;
+    if width <= 0 || depth <= 0 {
         return None;
     }
 
-    let grid_x = grid_x as usize;
-    let grid_z = grid_z as usize;
+    let min_grid_x = min_sector_x.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_X);
+    let max_grid_x = max_sector_x.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_X);
+    let min_grid_z = min_sector_z.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_Z);
+    let max_grid_z = max_sector_z.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_Z);
+    if max_grid_x < 0 || max_grid_z < 0 || min_grid_x >= width || min_grid_z >= depth {
+        return None;
+    }
+
+    Some((
+        min_grid_x.max(0) as usize,
+        max_grid_x.min(width - 1) as usize,
+        min_grid_z.max(0) as usize,
+        max_grid_z.min(depth - 1) as usize,
+    ))
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn sector_grid_room_at_grid_cell(grid_x: usize, grid_z: usize) -> Option<RoomIndex> {
     if grid_x >= WORLD_SECTOR_GRID_WIDTH || grid_z >= WORLD_SECTOR_GRID_DEPTH {
         return None;
     }
@@ -7004,6 +7216,23 @@ fn sector_grid_room_at_world_sector(sector_x: i32, sector_z: i32) -> Option<Room
     } else {
         Some(room)
     }
+}
+
+#[cfg(feature = "sector-grid-streaming")]
+fn sector_grid_room_at_world_sector(sector_x: i32, sector_z: i32) -> Option<RoomIndex> {
+    if !sector_grid_available() {
+        return None;
+    }
+
+    let grid_x = sector_x.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_X);
+    let grid_z = sector_z.saturating_sub(WORLD_SECTOR_GRID_ORIGIN_Z);
+    if grid_x < 0 || grid_z < 0 {
+        return None;
+    }
+
+    let grid_x = grid_x as usize;
+    let grid_z = grid_z as usize;
+    sector_grid_room_at_grid_cell(grid_x, grid_z)
 }
 
 #[derive(Copy, Clone)]
@@ -7405,41 +7634,15 @@ fn room_index_containing_global_from(current: RoomIndex, point: RoomPoint) -> Op
 
 #[cfg(feature = "sector-grid-streaming")]
 fn sector_grid_room_containing_global(point: RoomPoint) -> Option<RoomIndex> {
-    if WORLD_SECTOR_GRID_WIDTH == 0
-        || WORLD_SECTOR_GRID_DEPTH == 0
-        || WORLD_SECTOR_GRID.is_empty()
-    {
+    if !sector_grid_available() {
         return None;
     }
 
     let sector_size = WORLD_SECTOR_GRID_SECTOR_SIZE.max(1);
-    let grid_x = point
-        .x
-        .div_euclid(sector_size)
-        .saturating_sub(WORLD_SECTOR_GRID_ORIGIN_X);
-    let grid_z = point
-        .z
-        .div_euclid(sector_size)
-        .saturating_sub(WORLD_SECTOR_GRID_ORIGIN_Z);
-    if grid_x < 0 || grid_z < 0 {
-        return None;
-    }
-
-    let grid_x = grid_x as usize;
-    let grid_z = grid_z as usize;
-    if grid_x >= WORLD_SECTOR_GRID_WIDTH || grid_z >= WORLD_SECTOR_GRID_DEPTH {
-        return None;
-    }
-
-    let index = grid_z
-        .checked_mul(WORLD_SECTOR_GRID_WIDTH)?
-        .checked_add(grid_x)?;
-    let room = *WORLD_SECTOR_GRID.get(index)?;
-    if room == INVALID_ROOM_INDEX || ROOMS.get(room.to_usize()).is_none() {
-        None
-    } else {
-        Some(room)
-    }
+    sector_grid_room_at_world_sector(
+        point.x.div_euclid(sector_size),
+        point.z.div_euclid(sector_size),
+    )
 }
 
 fn room_index_containing_global_by_neighbours(
@@ -8845,16 +9048,6 @@ fn draw_image_props<T>(
         if prop.room != current_room {
             continue;
         }
-        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
-            continue;
-        };
-        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-            asset.id,
-            asset.bytes,
-            VramSlotClutMode::TransparentZero,
-        ) else {
-            continue;
-        };
         let origin = WorldVertex::new(prop.x, prop.y, prop.z);
         let verts = image_prop_vertices(
             origin,
@@ -8870,6 +9063,16 @@ fn draw_image_props<T>(
         if !sphere_visible_to_camera(camera, options, center, radius, 96) {
             continue;
         }
+        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
+            continue;
+        };
+        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
+            asset.id,
+            asset.bytes,
+            VramSlotClutMode::TransparentZero,
+        ) else {
+            continue;
+        };
         let sort_depth = image_prop_sort_depth(camera, verts);
         let colors = [
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[0], verts[0]),
