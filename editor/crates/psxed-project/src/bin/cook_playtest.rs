@@ -21,7 +21,7 @@ use psxed_project::{
     playtest::{
         build_package, cook_to_dir, default_generated_dir, streamed_room_chunk_memory_report,
     },
-    ProjectDocument,
+    NodeKind, ProjectDocument,
 };
 
 fn main() -> ExitCode {
@@ -69,6 +69,12 @@ fn main() -> ExitCode {
             // cook_to_dir) and gives operators a quick read on
             // what landed in generated/.
             if let (Some(package), _) = build_package(&project, &project_root) {
+                let portal_marker_count = project
+                    .active_scene()
+                    .nodes()
+                    .iter()
+                    .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
+                    .count();
                 // Per-room residency counts: room world is
                 // always RAM-required; deduped texture assets
                 // (room materials + model atlases) are
@@ -123,8 +129,9 @@ fn main() -> ExitCode {
                     total_vram_refs += vram_seen.len();
                 }
                 println!(
-                    "[cook-playtest] Rooms: {}  Assets: {}  Textures: {}  Models: {}  Model instances: {}  Materials: {}  RAM residency refs: {}  VRAM residency refs: {}  Entities: {}",
+                    "[cook-playtest] Rooms: {}  Portal markers: {}  Assets: {}  Textures: {}  Models: {}  Model instances: {}  Materials: {}  RAM residency refs: {}  VRAM residency refs: {}  Entities: {}",
                     package.rooms.len(),
+                    portal_marker_count,
                     package.assets.len(),
                     package.texture_asset_count(),
                     package.models.len(),
