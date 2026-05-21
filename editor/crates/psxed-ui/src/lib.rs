@@ -26,10 +26,10 @@ use std::path::{Path, PathBuf};
 use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
-use psxed_project::playtest::playtest_streaming_chunk_config;
-use psxed_project::streaming::{
-    collect_scene_resource_use, plan_generated_chunks, SceneResourceUse, StreamingChunkConfig,
+use psxed_project::portal_rooms::{
+    extract_portal_room_grid, plan_portal_rooms, PortalRoomConfig, DEFAULT_PORTAL_ROOM_MAX_SECTORS,
 };
+use psxed_project::streaming::{collect_scene_resource_use, SceneResourceUse};
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
     default_model_collision_radius_for_height, snap_height, CharacterControllerSettings,
@@ -42,13 +42,12 @@ use psxed_project::{
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
     MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
     MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE,
-    MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MAX_WORLD_STREAMING_VISIBLE_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
+    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+    MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
     MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
-    MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MIN_WORLD_STREAMING_VISIBLE_CHUNKS, MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8,
-    SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN,
-    SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
+    MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
+    MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
+    SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -883,32 +882,6 @@ impl Selection {
 enum MaterialTarget {
     Face(FaceRef),
     Triangle(HorizontalTriangleRef),
-}
-
-fn grid_rect_for_validation_issue(
-    grid: &WorldGrid,
-    origin: [u16; 2],
-    size: [u16; 2],
-) -> Option<WorldGrid> {
-    let mut out = WorldGrid::empty(size[0], size[1], grid.sector_size);
-    out.origin = [
-        grid.origin[0] + origin[0] as i32,
-        grid.origin[1] + origin[1] as i32,
-    ];
-    out.ambient_color = grid.ambient_color;
-    out.fog_enabled = grid.fog_enabled;
-    out.fog_color = grid.fog_color;
-    out.fog_near = grid.fog_near;
-    out.fog_far = grid.fog_far;
-
-    for x in 0..size[0] {
-        for z in 0..size[1] {
-            let src = grid.sector_index(origin[0] + x, origin[1] + z)?;
-            let dst = out.sector_index(x, z)?;
-            out.sectors[dst] = grid.sectors[src].clone();
-        }
-    }
-    Some(out)
 }
 
 fn world_cook_error_primitives(
@@ -1911,6 +1884,9 @@ enum PlaceKind {
     ImageProp,
     /// `PointLight` with default color / intensity / radius.
     PointLightMarker,
+    /// `Portal` marker. Runtime cooking snaps it to the nearest
+    /// cardinal sector edge and treats that edge as an open seam.
+    Portal,
 }
 
 impl PlaceKind {
@@ -1922,6 +1898,7 @@ impl PlaceKind {
             Self::Character => "Character",
             Self::ImageProp => "Image Prop",
             Self::PointLightMarker => "Point Light",
+            Self::Portal => "Portal",
         }
     }
 }
@@ -7470,6 +7447,14 @@ impl EditorWorkspace {
                         radius: 4.0,
                     },
                 ),
+                PlaceKind::Portal => (
+                    format!("Portal {sx},{sz}"),
+                    NodeKind::Portal {
+                        target_room: None,
+                        target_entry: String::new(),
+                        entry_name: format!("portal_{sx}_{sz}"),
+                    },
+                ),
             };
             let id = self
                 .project
@@ -7884,23 +7869,22 @@ impl EditorWorkspace {
             if grid.populated_sector_count() == 0 {
                 continue;
             }
-            let config = playtest_streaming_chunk_config_for_room(project, room_node.id);
-            let plan = plan_generated_chunks(grid, config);
-            for chunk in plan.chunks {
-                let Some(chunk_grid) =
-                    grid_rect_for_validation_issue(grid, chunk.array_origin, chunk.size)
-                else {
-                    continue;
-                };
+            let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
+            for roomlet in plan.rooms {
+                let chunk_grid = extract_portal_room_grid(grid, &roomlet);
                 match world_cook::cook_world_grid(project, &chunk_grid) {
                     Ok(cooked) => {
                         if let Err(error) = cooked.to_psxw_bytes() {
-                            self.record_world_cook_error(room_node.id, &error, chunk.array_origin);
+                            self.record_world_cook_error(
+                                room_node.id,
+                                &error,
+                                roomlet.array_origin,
+                            );
                             return;
                         }
                     }
                     Err(error) => {
-                        self.record_world_cook_error(room_node.id, &error, chunk.array_origin);
+                        self.record_world_cook_error(room_node.id, &error, roomlet.array_origin);
                         return;
                     }
                 }
@@ -9481,7 +9465,7 @@ impl EditorWorkspace {
                                 // project so it can edit the active Room's grid.
                                 if let Some(room_id) = active_room {
                                     if let Some(grid) = self.room_grid_view(room_id) {
-                                        draw_streaming_budget(
+                                        draw_portal_room_budget(
                                             ui,
                                             &self.project,
                                             self.project_root(),
@@ -11769,6 +11753,7 @@ impl EditorWorkspace {
                     PlaceKind::Character,
                     PlaceKind::ImageProp,
                     PlaceKind::PointLightMarker,
+                    PlaceKind::Portal,
                 ] {
                     ui.selectable_value(&mut self.place_kind, kind, kind.label());
                 }
@@ -15469,45 +15454,18 @@ fn draw_world_grid_settings(
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
             });
         });
-    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Streaming"))
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Portal Rooms"))
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Chunk Target").color(STUDIO_TEXT_WEAK));
-                let mut width = streaming.chunk_target_width as i32;
-                let mut depth = streaming.chunk_target_depth as i32;
-                let width_changed = ui
-                    .add(
-                        egui::DragValue::new(&mut width)
-                            .speed(1.0)
-                            .range(
-                                MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32
-                                    ..=MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32,
-                            )
-                            .prefix("W "),
-                    )
-                    .changed();
-                let depth_changed = ui
-                    .add(
-                        egui::DragValue::new(&mut depth)
-                            .speed(1.0)
-                            .range(
-                                MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32
-                                    ..=MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32,
-                            )
-                            .prefix("D "),
-                    )
-                    .changed();
-                if width_changed || depth_changed {
-                    streaming.chunk_target_width = width as u16;
-                    streaming.chunk_target_depth = depth as u16;
-                    *streaming = streaming.normalized();
-                    changed = true;
-                }
-                ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Runtime Room Cap").color(STUDIO_TEXT_WEAK));
+                ui.label(format!(
+                    "{}×{} sectors",
+                    DEFAULT_PORTAL_ROOM_MAX_SECTORS, DEFAULT_PORTAL_ROOM_MAX_SECTORS
+                ));
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Resident Budget").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Resident Rooms").color(STUDIO_TEXT_WEAK));
                 let mut limit = streaming.resident_chunk_limit as i32;
                 if ui
                     .add(egui::DragValue::new(&mut limit).speed(1.0).range(
@@ -15520,10 +15478,10 @@ fn draw_world_grid_settings(
                     *streaming = streaming.normalized();
                     changed = true;
                 }
-                ui.label(RichText::new("32 KiB units").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("rooms").color(STUDIO_TEXT_WEAK));
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Visible Chunks").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Visible Rooms").color(STUDIO_TEXT_WEAK));
                 let mut limit = streaming.visible_chunk_limit as i32;
                 let max_visible = streaming.resident_chunk_limit.clamp(
                     MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -15541,7 +15499,7 @@ fn draw_world_grid_settings(
                     *streaming = streaming.normalized();
                     changed = true;
                 }
-                ui.label(RichText::new("chunks").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("rooms").color(STUDIO_TEXT_WEAK));
             });
         });
     egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
@@ -21053,7 +21011,7 @@ fn draw_play_chunk_debug_map(
     painter.text(
         map_rect.left_top() + Vec2::new(8.0, 7.0),
         Align2::LEFT_TOP,
-        "Chunk map",
+        "Room map",
         FontId::monospace(11.0),
         STUDIO_TEXT,
     );
@@ -21180,20 +21138,11 @@ fn collect_play_chunk_debug_map_cells(project: &ProjectDocument) -> Vec<PlayChun
         if grid.populated_sector_count() == 0 {
             continue;
         }
-        let config = playtest_streaming_chunk_config_for_room(project, node.id);
-        let plan = plan_generated_chunks(grid, config);
+        let plan = plan_portal_rooms(scene, node.id, grid, PortalRoomConfig::default());
         let node_center = node_world(node);
-        for chunk in plan.chunks {
-            let Some(chunk_grid) =
-                grid_rect_for_validation_issue(grid, chunk.array_origin, chunk.size)
-            else {
-                continue;
-            };
-            if chunk_grid.populated_sector_count() == 0 {
-                continue;
-            }
+        for roomlet in plan.rooms {
             let (local_center, half) =
-                grid_rect_editor_center_half(grid, chunk.array_origin, chunk.size);
+                grid_rect_editor_center_half(grid, roomlet.array_origin, roomlet.size);
             cells.push(PlayChunkDebugMapCell {
                 runtime_room_index,
                 center: [
@@ -22038,7 +21987,7 @@ fn node_draw_mode(kind: &NodeKind) -> &'static str {
         NodeKind::AiController { .. } => "AI Component",
         NodeKind::Combat { .. } => "Combat Component",
         NodeKind::Equipment { .. } => "Equipment Component",
-        NodeKind::World { .. } => "Streaming Region",
+        NodeKind::World { .. } => "Portal Region",
         NodeKind::Entity => "Entity Host",
         NodeKind::Room { .. } => "Sector Grid",
         NodeKind::PointLight { .. } => "Static Light",
@@ -23206,7 +23155,7 @@ fn draw_room(
         }
     }
 
-    draw_streaming_chunk_boundaries_2d(painter, transform, project, node.id, grid, node_center);
+    draw_portal_room_boundaries_2d(painter, transform, project, node.id, grid, node_center);
     draw_validation_issue_primitives_2d(
         painter,
         transform,
@@ -23234,7 +23183,7 @@ fn draw_room(
     );
 }
 
-fn draw_streaming_chunk_boundaries_2d(
+fn draw_portal_room_boundaries_2d(
     painter: &egui::Painter,
     transform: ViewportTransform,
     project: &ProjectDocument,
@@ -23242,15 +23191,19 @@ fn draw_streaming_chunk_boundaries_2d(
     grid: &WorldGrid,
     node_center: [f32; 2],
 ) {
-    let config = playtest_streaming_chunk_config_for_room(project, room_id);
-    let plan = plan_generated_chunks(grid, config);
-    if plan.chunk_count() <= 1 {
+    let plan = plan_portal_rooms(
+        project.active_scene(),
+        room_id,
+        grid,
+        PortalRoomConfig::default(),
+    );
+    if plan.room_count() <= 1 {
         return;
     }
     let stroke = Stroke::new(2.0, Color32::from_rgb(96, 255, 196));
-    for chunk in plan.chunks {
+    for roomlet in plan.rooms {
         let (local_center, chunk_half) =
-            grid_rect_editor_center_half(grid, chunk.array_origin, chunk.size);
+            grid_rect_editor_center_half(grid, roomlet.array_origin, roomlet.size);
         let chunk_center = [
             node_center[0] + local_center[0],
             node_center[1] + local_center[1],
@@ -27374,13 +27327,6 @@ fn collect_weapon_options(project: &ProjectDocument) -> Vec<(ResourceId, String)
         .collect()
 }
 
-fn playtest_streaming_chunk_config_for_room(
-    project: &ProjectDocument,
-    room_id: NodeId,
-) -> StreamingChunkConfig {
-    playtest_streaming_chunk_config(world_streaming_for_room(project, room_id))
-}
-
 fn world_streaming_for_room(project: &ProjectDocument, room_id: NodeId) -> WorldStreamingSettings {
     project
         .active_scene()
@@ -27388,7 +27334,7 @@ fn world_streaming_for_room(project: &ProjectDocument, room_id: NodeId) -> World
         .unwrap_or_default()
 }
 
-fn draw_streaming_budget(
+fn draw_portal_room_budget(
     ui: &mut egui::Ui,
     project: &ProjectDocument,
     project_root: &Path,
@@ -27396,91 +27342,96 @@ fn draw_streaming_budget(
     grid: &WorldGrid,
 ) {
     let streaming = world_streaming_for_room(project, room_id);
-    let config = playtest_streaming_chunk_config(streaming);
-    let plan = plan_generated_chunks(grid, config);
+    let plan = plan_portal_rooms(
+        project.active_scene(),
+        room_id,
+        grid,
+        PortalRoomConfig::default(),
+    );
     let resource_use = collect_scene_resource_use(project);
     let file_budget = resource_file_budget(project, project_root, &resource_use);
     let vram_budget = runtime_vram_budget(project, project_root, &resource_use);
     let model_budget = runtime_model_budget(project, project_root, &resource_use);
     let over = plan.over_budget_count() > 0;
     let header = if over {
-        icons::label(icons::TRASH, "Streaming Budget — over limit")
+        icons::label(icons::TRASH, "Portal Rooms — over limit")
     } else {
-        icons::label(icons::SCAN, "Streaming Budget")
+        icons::label(icons::SCAN, "Portal Rooms")
     };
 
     egui::CollapsingHeader::new(header)
         .default_open(true)
         .show(ui, |ui| {
+            draw_budget_row(ui, "Runtime rooms", format!("{}", plan.room_count()), over);
             draw_budget_row(
                 ui,
-                "Generated chunks",
-                format!("{}", plan.chunk_count()),
-                over,
-            );
-            draw_budget_row(
-                ui,
-                "Target chunk",
-                format!("{}×{} sectors", config.target_width, config.target_depth),
+                "Room cap",
+                format!(
+                    "{}×{} sectors",
+                    plan.config.max_width, plan.config.max_depth
+                ),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Resident budget",
-                format!("{} × 32 KiB", streaming.resident_chunk_limit),
+                "Resident rooms",
+                format!("{}", streaming.resident_chunk_limit),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Visible chunks",
+                "Visible rooms",
                 format!("{}", streaming.visible_chunk_limit),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Authored footprint",
-                format!(
-                    "{}×{} sectors (runtime cap {}×{} per generated chunk)",
-                    plan.source_size[0], plan.source_size[1], MAX_ROOM_WIDTH, MAX_ROOM_DEPTH
-                ),
+                "Portal markers",
+                format!("{}", plan.portal_count),
                 false,
             );
-            ui.weak("Embedded Play cooks this Room as generated chunks.");
-            if let Some(chunk) = plan.largest_room_asset_chunk() {
+            draw_budget_row(
+                ui,
+                "Authored footprint",
+                format!("{}×{} sectors", plan.source_size[0], plan.source_size[1]),
+                false,
+            );
+            ui.weak("Embedded Play cooks this world into wall/portal-delimited runtime rooms.");
+            if let Some(room) = plan.largest_room_asset() {
                 draw_budget_row(
                     ui,
-                    "Largest chunk asset",
+                    "Largest room asset",
                     format!(
                         "#{} {}×{}, {} total",
-                        chunk.index,
-                        chunk.size[0],
-                        chunk.size[1],
-                        human_bytes_u64(chunk.budget.psxw_static_lit_bytes as u64)
+                        room.index,
+                        room.size[0],
+                        room.size[1],
+                        human_bytes_u64(room.budget.psxw_static_lit_bytes as u64)
                     ),
-                    chunk.over_budget,
+                    room.over_budget,
                 );
             }
-            if let Some(chunk) = plan.largest_psxw_chunk() {
+            if let Some(room) = plan.largest_geometry() {
                 draw_budget_row(
                     ui,
                     "Largest geometry",
                     format!(
                         "#{} {}",
-                        chunk.index,
-                        human_bytes_u64(chunk.budget.psxw_bytes as u64)
+                        room.index,
+                        human_bytes_u64(room.budget.psxw_bytes as u64)
                     ),
-                    chunk.budget.psxw_bytes > MAX_ROOM_BYTES,
+                    room.budget.psxw_bytes > MAX_ROOM_BYTES,
                 );
             }
-            if let Some(chunk) = plan.largest_triangle_chunk() {
+            if let Some(room) = plan.largest_triangle_room() {
                 draw_budget_row(
                     ui,
                     "Most triangles",
                     format!(
                         "#{} {} / {}",
-                        chunk.index, chunk.budget.triangles, MAX_ROOM_TRIANGLES
+                        room.index, room.budget.triangles, MAX_ROOM_TRIANGLES
                     ),
-                    chunk.budget.triangles > MAX_ROOM_TRIANGLES,
+                    room.budget.triangles > MAX_ROOM_TRIANGLES,
                 );
             }
 
@@ -27578,7 +27529,7 @@ fn draw_streaming_budget(
             }
 
             ui.add_space(4.0);
-            egui::Grid::new(format!("streaming_chunks_{}", room_id.raw()))
+            egui::Grid::new(format!("portal_rooms_{}", room_id.raw()))
                 .num_columns(7)
                 .striped(true)
                 .show(ui, |ui| {
@@ -27591,8 +27542,8 @@ fn draw_streaming_budget(
                     ui.label(RichText::new("Total").color(STUDIO_TEXT_WEAK));
                     ui.end_row();
 
-                    for chunk in plan.chunks.iter().take(8) {
-                        let color = chunk
+                    for room in plan.rooms.iter().take(8) {
+                        let color = room
                             .over_budget
                             .then_some(Color32::from_rgb(0xE0, 0x60, 0x60));
                         let text = |value: String| {
@@ -27603,25 +27554,25 @@ fn draw_streaming_budget(
                                 text
                             }
                         };
-                        ui.label(text(format!("{}", chunk.index)));
+                        ui.label(text(format!("{}", room.index)));
                         ui.label(text(format!(
                             "{},{}",
-                            chunk.world_origin[0], chunk.world_origin[1]
+                            room.world_origin[0], room.world_origin[1]
                         )));
-                        ui.label(text(format!("{}×{}", chunk.size[0], chunk.size[1])));
-                        ui.label(text(format!("{}", chunk.budget.triangles)));
-                        ui.label(text(human_bytes_u64(chunk.budget.psxw_bytes as u64)));
+                        ui.label(text(format!("{}×{}", room.size[0], room.size[1])));
+                        ui.label(text(format!("{}", room.budget.triangles)));
+                        ui.label(text(human_bytes_u64(room.budget.psxw_bytes as u64)));
                         ui.label(text(human_bytes_u64(
-                            chunk.budget.static_light_table_bytes as u64,
+                            room.budget.static_light_table_bytes as u64,
                         )));
                         ui.label(text(human_bytes_u64(
-                            chunk.budget.psxw_static_lit_bytes as u64,
+                            room.budget.psxw_static_lit_bytes as u64,
                         )));
                         ui.end_row();
                     }
                 });
-            if plan.chunks.len() > 8 {
-                ui.weak(format!("{} more chunks", plan.chunks.len() - 8));
+            if plan.rooms.len() > 8 {
+                ui.weak(format!("{} more rooms", plan.rooms.len() - 8));
             }
         });
 }

@@ -6369,35 +6369,6 @@ fn best_grid_chunk_candidate(
     })
 }
 
-fn best_spatial_chunk_candidate_from_indices(
-    current_index: RoomIndex,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-    view: ActiveRoomView,
-    selected_rooms: &[RoomIndex],
-) -> Option<RoomIndex> {
-    let mut best = None;
-    let mut best_score = ChunkActivationScore::WORST;
-    for chunk in ROOM_CHUNKS {
-        if chunk.room == current_index
-            || selected_rooms.contains(&chunk.room)
-            || !chunk_available_for_active_selection(chunk.room)
-        {
-            continue;
-        }
-        let Some(score) =
-            chunk_activation_score(*chunk, current_index, current_record, player, view)
-        else {
-            continue;
-        };
-        if best.is_none() || score.better_than(best_score) {
-            best_score = score;
-            best = Some(chunk.room);
-        }
-    }
-    best
-}
-
 fn best_grid_chunk_candidate_from_indices(
     current_index: RoomIndex,
     current_record: &LevelRoomRecord,
@@ -6443,15 +6414,7 @@ fn best_grid_chunk_candidate_from_indices(
         source_slot += 1;
     }
 
-    best.or_else(|| {
-        best_spatial_chunk_candidate_from_indices(
-            current_index,
-            current_record,
-            player,
-            view,
-            selected_rooms,
-        )
-    })
+    best
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -6863,9 +6826,7 @@ fn room_index_containing_global(point: RoomPoint) -> Option<RoomIndex> {
 
 fn room_index_containing_global_from(current: RoomIndex, point: RoomPoint) -> Option<RoomIndex> {
     if !ROOM_CHUNKS.is_empty() {
-        if let Some(room) = room_index_containing_global_by_neighbours(current, point) {
-            return Some(room);
-        }
+        return room_index_containing_global_by_neighbours(current, point);
     }
     room_index_containing_global(point)
 }
