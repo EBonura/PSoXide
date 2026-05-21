@@ -28,6 +28,10 @@ use core::ptr;
 #[repr(C, align(4))]
 pub struct OrderingTable<const N: usize> {
     entries: [u32; N],
+    dirty_slots: [u16; N],
+    dirty_len: usize,
+    dirty_overflow: bool,
+    wired: bool,
 }
 
 impl<const N: usize> OrderingTable<N> {
@@ -37,6 +41,10 @@ impl<const N: usize> OrderingTable<N> {
     pub const fn new() -> Self {
         Self {
             entries: [0x00FF_FFFF; N],
+            dirty_slots: [0; N],
+            dirty_len: 0,
+            dirty_overflow: false,
+            wired: false,
         }
     }
 
@@ -45,11 +53,48 @@ impl<const N: usize> OrderingTable<N> {
     /// to the slot below. Submission starts at `[N-1]` so the
     /// DMA walker visits `[N-1] → [N-2] → … → [0] → end`.
     pub fn clear(&mut self) {
+        if !self.wired || self.dirty_overflow {
+            self.wire_all_slots();
+            self.dirty_len = 0;
+            self.dirty_overflow = false;
+            self.wired = true;
+            return;
+        }
+
+        let mut i = 0usize;
+        while i < self.dirty_len {
+            self.restore_slot(self.dirty_slots[i] as usize);
+            i += 1;
+        }
+        self.dirty_len = 0;
+    }
+
+    fn wire_all_slots(&mut self) {
         // Slot 0 is the sentinel; chain walks stop here.
         self.entries[0] = 0x00FF_FFFF;
         for i in 1..N {
             let prev = &self.entries[i - 1] as *const u32 as u32 & 0x00FF_FFFF;
             self.entries[i] = prev;
+        }
+    }
+
+    fn restore_slot(&mut self, slot: usize) {
+        if slot == 0 {
+            self.entries[0] = 0x00FF_FFFF;
+            return;
+        }
+        if slot < N {
+            let prev = &self.entries[slot - 1] as *const u32 as u32 & 0x00FF_FFFF;
+            self.entries[slot] = prev;
+        }
+    }
+
+    fn mark_dirty(&mut self, slot: usize) {
+        if self.dirty_len < self.dirty_slots.len() {
+            self.dirty_slots[self.dirty_len] = slot.min(u16::MAX as usize) as u16;
+            self.dirty_len += 1;
+        } else {
+            self.dirty_overflow = true;
         }
     }
 
@@ -64,6 +109,7 @@ impl<const N: usize> OrderingTable<N> {
     /// [`crate::prim`] satisfy this.
     pub unsafe fn insert(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
         let z = z.min(N - 1);
+        self.mark_dirty(z);
         let old_head = self.entries[z] & 0x00FF_FFFF;
         let tag = ((words as u32) << 24) | old_head;
         unsafe { ptr::write_volatile(packet_ptr, tag) };

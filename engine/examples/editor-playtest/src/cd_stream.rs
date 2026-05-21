@@ -64,6 +64,8 @@ const COMMAND_ACK_POLL_LIMIT: u32 = 16_384;
 const DATA_READY_POLL_LIMIT: u32 = 1_000_000;
 #[cfg(target_arch = "mips")]
 const DATA_READY_STALL_POLL_LIMIT: u32 = 360;
+#[cfg(target_arch = "mips")]
+const DATA_READY_POLL_SLICE_LIMIT: u32 = 256;
 const DMA_POLL_LIMIT: u32 = 65_536;
 const CLEANUP_POLL_LIMIT: u32 = 16_384;
 
@@ -505,6 +507,7 @@ pub fn run_benchmark() {
     telemetry::stage_end(telemetry::stage::CD_STREAM_BENCH);
 }
 
+#[allow(dead_code)]
 pub fn world_room_chunk_info(
     room_id: u16,
     toc: &[LevelWorldPackEntryRecord],
@@ -775,22 +778,22 @@ unsafe fn prepare_cd_read(polls: &mut u32) -> Result<(), u32> {
         // not consume stale sector data.
         cleanup_read_stream(polls);
         cd_ack_all();
+        let Some(stat) = get_stat(polls) else {
+            return Err(STATUS_CD_ERROR);
+        };
+        if stat & DRIVE_STATUS_MOTOR_ON == 0 || stat & DRIVE_STATUS_SHELL_OPEN != 0 {
+            return Err(STATUS_CD_ERROR);
+        }
+        if !send_command(
+            CMD_SETMODE,
+            &[CD_MODE_DOUBLE_SPEED_2048],
+            IRQ_ACK,
+            COMMAND_ACK_POLL_LIMIT,
+            polls,
+        ) {
+            return Err(classify_command_failure(STATUS_SETMODE_TIMEOUT));
+        }
         CD_READ_PREPARED = true;
-    }
-    let Some(stat) = get_stat(polls) else {
-        return Err(STATUS_CD_ERROR);
-    };
-    if stat & DRIVE_STATUS_MOTOR_ON == 0 || stat & DRIVE_STATUS_SHELL_OPEN != 0 {
-        return Err(STATUS_CD_ERROR);
-    }
-    if !send_command(
-        CMD_SETMODE,
-        &[CD_MODE_DOUBLE_SPEED_2048],
-        IRQ_ACK,
-        COMMAND_ACK_POLL_LIMIT,
-        polls,
-    ) {
-        return Err(classify_command_failure(STATUS_SETMODE_TIMEOUT));
     }
     Ok(())
 }
@@ -903,31 +906,34 @@ unsafe fn read_stream_sector(buffer: *mut u32, polls: &mut u32) -> Result<(), u3
 
 #[cfg(target_arch = "mips")]
 unsafe fn try_read_stream_sector(buffer: *mut u32, polls: &mut u32) -> Result<bool, u32> {
-    match cd_irq_flag() {
-        IRQ_DATA_READY => {
-            dma_read_sector(buffer, polls);
-            drain_responses();
-            cd_ack(IRQ_DATA_READY);
-            Ok(true)
-        }
-        IRQ_ERROR => {
-            drain_responses();
-            cd_ack_all();
-            Err(STATUS_CD_ERROR)
-        }
-        IRQ_ACK | IRQ_COMPLETE => {
-            // A late command acknowledgement/completion can otherwise keep the
-            // drive IRQ flag occupied forever and starve the pending DataReady.
-            let stale_irq = cd_irq_flag();
-            drain_responses();
-            cd_ack(stale_irq);
-            Ok(false)
-        }
-        _ => {
-            *polls = (*polls).saturating_add(1);
-            Ok(false)
+    let mut waited = 0;
+    while waited < DATA_READY_POLL_SLICE_LIMIT {
+        match cd_irq_flag() {
+            IRQ_DATA_READY => {
+                dma_read_sector(buffer, polls);
+                drain_responses();
+                cd_ack(IRQ_DATA_READY);
+                return Ok(true);
+            }
+            IRQ_ERROR => {
+                drain_responses();
+                cd_ack_all();
+                return Err(STATUS_CD_ERROR);
+            }
+            IRQ_ACK | IRQ_COMPLETE => {
+                // A late command acknowledgement/completion can otherwise keep the
+                // drive IRQ flag occupied forever and starve the pending DataReady.
+                let stale_irq = cd_irq_flag();
+                drain_responses();
+                cd_ack(stale_irq);
+            }
+            _ => {
+                *polls = (*polls).saturating_add(1);
+                waited += 1;
+            }
         }
     }
+    Ok(false)
 }
 
 #[cfg(all(feature = "cd-stream-benchmark", target_arch = "mips"))]

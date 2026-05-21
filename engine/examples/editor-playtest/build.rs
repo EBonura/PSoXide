@@ -7,10 +7,12 @@ fn main() {
     let generated_dir = manifest_dir.join("generated");
     let placeholder_manifest = generated_dir.join("level_manifest.rs");
     let cooked_manifest = generated_dir.join("level_manifest.cooked.rs");
+    let linker_script = manifest_dir.join("../../../sdk/psoxide.ld");
 
     println!("cargo:rerun-if-changed={}", generated_dir.display());
     println!("cargo:rerun-if-changed={}", placeholder_manifest.display());
     println!("cargo:rerun-if-changed={}", cooked_manifest.display());
+    println!("cargo:rerun-if-changed={}", linker_script.display());
 
     let selected = if cooked_manifest.is_file() {
         cooked_manifest

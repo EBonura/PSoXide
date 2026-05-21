@@ -87,6 +87,24 @@ pub mod stage {
     pub const FAR_VISTA: u16 = 33;
     /// Editor-authored image/card prop rendering.
     pub const IMAGE_PROPS: u16 = 34;
+    /// Camera collision room-set lookup/materialization.
+    pub const CAMERA_COLLISION_COLLECT: u16 = 35;
+    /// Third-person camera state advance/collision solve.
+    pub const CAMERA_SOLVE: u16 = 36;
+    /// Guest profiler/debug counter emission.
+    pub const DEBUG_COUNTERS: u16 = 37;
+    /// Non-world atmosphere overlay rendering.
+    pub const ATMOSPHERE: u16 = 38;
+    /// Post-world HUD and gameplay overlay rendering.
+    pub const RENDER_OVERLAYS: u16 = 39;
+    /// Character/motor collision room and blocker collection.
+    pub const CHARACTER_COLLISION_COLLECT: u16 = 40;
+    /// Character motor movement and collision resolution.
+    pub const CHARACTER_MOTOR: u16 = 41;
+    /// Streaming residency planning and scheduler updates.
+    pub const STREAMING_WINDOW: u16 = 42;
+    /// Player room transition lookup, adoption, and fallback activation.
+    pub const ROOM_TRANSITION: u16 = 43;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -96,7 +114,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 35;
+pub const STAGE_COUNT: usize = 44;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -669,6 +687,15 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::SKY => "sky",
         stage::FAR_VISTA => "far vista",
         stage::IMAGE_PROPS => "image props",
+        stage::CAMERA_COLLISION_COLLECT => "camera collision rooms",
+        stage::CAMERA_SOLVE => "camera solve",
+        stage::DEBUG_COUNTERS => "debug counters",
+        stage::ATMOSPHERE => "atmosphere",
+        stage::RENDER_OVERLAYS => "render overlays",
+        stage::CHARACTER_COLLISION_COLLECT => "character collision rooms",
+        stage::CHARACTER_MOTOR => "character motor",
+        stage::STREAMING_WINDOW => "stream window",
+        stage::ROOM_TRANSITION => "room transition",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
