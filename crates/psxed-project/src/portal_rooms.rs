@@ -136,11 +136,32 @@ struct EdgeKey {
     direction: GridDirection,
 }
 
+/// Canonical grid edge selected by an authored portal marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalEdge {
+    /// Array-sector X coordinate of the canonical edge owner.
+    pub x: u16,
+    /// Array-sector Z coordinate of the canonical edge owner.
+    pub z: u16,
+    /// Canonical edge direction. Only north/east are emitted.
+    pub direction: GridDirection,
+}
+
 impl Hash for EdgeKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.x.hash(state);
         self.z.hash(state);
         direction_slot(self.direction).hash(state);
+    }
+}
+
+impl From<EdgeKey> for PortalEdge {
+    fn from(edge: EdgeKey) -> Self {
+        Self {
+            x: edge.x,
+            z: edge.z,
+            direction: edge.direction,
+        }
     }
 }
 
@@ -210,6 +231,11 @@ pub fn extract_portal_room_grid(grid: &WorldGrid, room: &PortalRoom) -> WorldGri
     extract_portal_room_grid_from_cells(grid, room.array_origin, &cells)
 }
 
+/// Snap an authored Portal node to the grid edge it opens.
+pub fn portal_edge_for_node(grid: &WorldGrid, node: &SceneNode) -> Option<PortalEdge> {
+    portal_edge_key_for_node(grid, node).map(Into::into)
+}
+
 fn extract_portal_room_grid_from_cells(
     grid: &WorldGrid,
     origin: [u16; 2],
@@ -255,11 +281,11 @@ fn collect_portal_edges(scene: &Scene, room_node: NodeId, grid: &WorldGrid) -> H
         .iter()
         .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
         .filter(|node| scene.is_descendant_of(node.id, room_node))
-        .filter_map(|node| portal_edge_for_node(grid, node))
+        .filter_map(|node| portal_edge_key_for_node(grid, node))
         .collect()
 }
 
-fn portal_edge_for_node(grid: &WorldGrid, node: &SceneNode) -> Option<EdgeKey> {
+fn portal_edge_key_for_node(grid: &WorldGrid, node: &SceneNode) -> Option<EdgeKey> {
     let world =
         grid.editor_to_world_cells([node.transform.translation[0], node.transform.translation[2]]);
     let ax = world[0] - grid.origin[0] as f32;
