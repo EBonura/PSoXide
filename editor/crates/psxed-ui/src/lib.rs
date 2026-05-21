@@ -280,6 +280,10 @@ pub struct EditorWorkspace {
     /// `active_tool == Place`. Player Spawn enforces uniqueness
     /// at place-time; the others are additive markers.
     place_kind: PlaceKind,
+    /// Cardinal edge used by the dedicated Portal placement tool.
+    /// The marker is written at the edge midpoint so the cooker can
+    /// snap it back to the authored seam.
+    portal_place_direction: GridDirection,
     /// Resource chosen in the Place toolbar. Kept separate from the
     /// resource browser selection so repeated placement doesn't lose
     /// the chosen Model/Profile/Image after each click.
@@ -603,6 +607,16 @@ pub enum PaintTargetPreview {
         world_cell_z: i32,
         dir: GridDirection,
         stack: u8,
+    },
+    /// Portal placement -- highlights the cardinal edge that will
+    /// become an open seam. `valid` is false when either side of the
+    /// edge is missing authored geometry, so the click will be
+    /// rejected instead of creating a marker the cooker ignores.
+    PortalEdge {
+        world_cell_x: i32,
+        world_cell_z: i32,
+        dir: GridDirection,
+        valid: bool,
     },
 }
 
@@ -2140,6 +2154,7 @@ impl EditorWorkspace {
             resource_delete_confirm: None,
             active_tool: ViewTool::Select,
             place_kind: PlaceKind::PlayerSpawn,
+            portal_place_direction: GridDirection::North,
             place_resource: None,
             brush_material: None,
             snap_to_grid: true,
@@ -4899,6 +4914,21 @@ impl EditorWorkspace {
         fallback_hit: Option<[f32; 2]>,
     ) -> Option<PaintTargetPreview> {
         let grid = self.room_grid_view(room_id)?;
+        if self.portal_place_active() {
+            let (world_cell_x, world_cell_z) =
+                self.paint_preview_world_cell(room_id, grid, face_hit, fallback_hit)?;
+            return Some(PaintTargetPreview::PortalEdge {
+                world_cell_x,
+                world_cell_z,
+                dir: self.portal_place_direction,
+                valid: portal_edge_valid_for_world_cell(
+                    grid,
+                    world_cell_x,
+                    world_cell_z,
+                    self.portal_place_direction,
+                ),
+            });
+        }
         let is_paint_wall = matches!(self.active_tool, ViewTool::PaintWall);
         let face_hit = self.face_hit_for_paint_tool(face_hit);
 
@@ -5165,6 +5195,91 @@ impl EditorWorkspace {
                 );
             }
         }
+    }
+
+    fn portal_place_active(&self) -> bool {
+        matches!(self.active_tool, ViewTool::Place) && matches!(self.place_kind, PlaceKind::Portal)
+    }
+
+    fn rotate_portal_place_direction(&mut self) {
+        if !self.portal_place_active() {
+            return;
+        }
+        self.portal_place_direction = next_cardinal_direction(self.portal_place_direction);
+        self.status = format!(
+            "Portal edge: {}",
+            direction_label(self.portal_place_direction)
+        );
+    }
+
+    fn draw_portal_place_preview_2d(
+        &self,
+        painter: &egui::Painter,
+        transform: ViewportTransform,
+        world: [f32; 2],
+    ) {
+        if !self.portal_place_active() {
+            return;
+        }
+        let Some(room_id) = self.active_room_id() else {
+            return;
+        };
+        let scene = self.project.active_scene();
+        let Some(room) = scene.node(room_id) else {
+            return;
+        };
+        let NodeKind::Room { grid } = &room.kind else {
+            return;
+        };
+        let room_center = node_world(room);
+        let editor = [world[0] - room_center[0], world[1] - room_center[1]];
+        let world_cells = grid.editor_to_world_cells(editor);
+        let wcx = world_cells[0].floor() as i32;
+        let wcz = world_cells[1].floor() as i32;
+        let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+            return;
+        };
+        let valid = portal_edge_valid_for_array_cell(grid, sx, sz, self.portal_place_direction);
+        let Some((local_a, local_b)) =
+            portal_edge_editor_segment_for_array(grid, sx, sz, self.portal_place_direction)
+        else {
+            return;
+        };
+        let a =
+            transform.world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]);
+        let b =
+            transform.world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]);
+        let color = if valid {
+            PORTAL_PINK
+        } else {
+            Color32::from_rgb(255, 64, 96)
+        };
+        painter.line_segment(
+            [a, b],
+            Stroke::new(
+                8.0,
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 48),
+            ),
+        );
+        painter.line_segment([a, b], Stroke::new(3.0, color));
+    }
+
+    fn paint_preview_world_cell(
+        &self,
+        room_id: NodeId,
+        grid: &WorldGrid,
+        face_hit: Option<(FaceRef, [f32; 3])>,
+        fallback_hit: Option<[f32; 2]>,
+    ) -> Option<(i32, i32)> {
+        if let Some((face, _)) = self.face_hit_for_paint_tool(face_hit) {
+            return Some((
+                grid.origin[0] + face.sx as i32,
+                grid.origin[1] + face.sz as i32,
+            ));
+        }
+        let editor = fallback_hit?;
+        let hit = self.editor_world_to_world3(room_id, editor);
+        Some((grid.world_x_to_cell(hit[0]), grid.world_z_to_cell(hit[2])))
     }
 
     fn update_primitive_grid_drag(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
@@ -6838,6 +6953,7 @@ impl EditorWorkspace {
                 | ViewTool::Erase
                 | ViewTool::Place
         );
+        let portal_tool = self.portal_place_active();
         let face_hit = self.face_hit_for_paint_tool(face_hit);
         let (cell, hit_world) = match face_hit {
             Some((face, hit)) => ((face.sx, face.sz), hit),
@@ -6850,7 +6966,7 @@ impl EditorWorkspace {
                 // by stamping a floor in empty space -- Sims-style.
                 // Move just bails (it never made sense for it to
                 // grow the room).
-                let cell = if paint_tool {
+                let cell = if paint_tool && !portal_tool {
                     self.ensure_cell_in_grid(room_id, world)
                 } else {
                     self.world_to_sector(room_id, world)
@@ -7186,7 +7302,9 @@ impl EditorWorkspace {
         face_hit: Option<(FaceRef, [f32; 3])>,
         hit_world: [f32; 3],
     ) -> PaintStamp {
-        let edge = if matches!(self.active_tool, ViewTool::PaintWall) {
+        let edge = if self.portal_place_active() {
+            Some(self.portal_place_direction)
+        } else if matches!(self.active_tool, ViewTool::PaintWall) {
             match face_hit {
                 Some((
                     FaceRef {
@@ -7333,6 +7451,11 @@ impl EditorWorkspace {
                 (sz as f32 + 0.5) * sector_size,
             ]);
 
+        if matches!(tool, ViewTool::Place) && matches!(self.place_kind, PlaceKind::Portal) {
+            self.place_portal_marker(room_id, sx, sz);
+            return;
+        }
+
         if matches!(tool, ViewTool::Place) {
             self.push_undo();
             // World → editor (room-centre-relative, sector units)
@@ -7449,14 +7572,7 @@ impl EditorWorkspace {
                         radius: 4.0,
                     },
                 ),
-                PlaceKind::Portal => (
-                    format!("Portal {sx},{sz}"),
-                    NodeKind::Portal {
-                        target_room: None,
-                        target_entry: String::new(),
-                        entry_name: format!("portal_{sx}_{sz}"),
-                    },
-                ),
+                PlaceKind::Portal => return,
             };
             let id = self
                 .project
@@ -7553,6 +7669,51 @@ impl EditorWorkspace {
         };
         self.dirty = true;
         self.status = status;
+    }
+
+    fn place_portal_marker(&mut self, room_id: NodeId, sx: u16, sz: u16) {
+        let dir = self.portal_place_direction;
+        let Some((editor, entry_name)) = self.room_grid_view(room_id).and_then(|grid| {
+            if !portal_edge_valid_for_array_cell(grid, sx, sz, dir) {
+                return None;
+            }
+            let editor = portal_edge_midpoint_editor(grid, sx, sz, dir);
+            let entry_name = format!(
+                "portal_{}_{}_{}",
+                sx,
+                sz,
+                direction_label(dir).to_ascii_lowercase()
+            );
+            Some((editor, entry_name))
+        }) else {
+            self.status = format!(
+                "Portal needs populated sectors on both sides of the {} edge",
+                direction_label(dir)
+            );
+            return;
+        };
+
+        self.push_undo();
+        let id = self.project.active_scene_mut().add_node(
+            room_id,
+            format!("Portal {}", direction_label(dir)),
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name,
+            },
+        );
+        if let Some(node) = self.project.active_scene_mut().node_mut(id) {
+            node.transform.translation = [editor[0], 0.0, editor[1]];
+        }
+        self.replace_node_selection(id);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.status = format!(
+            "Placed Portal on {} edge at {sx},{sz}",
+            direction_label(dir)
+        );
+        self.mark_dirty();
     }
 
     /// Material id currently applied to `face`, or `None` if the
@@ -8451,7 +8612,11 @@ impl EditorWorkspace {
         if bare_shortcuts_available(focus_taken, modifiers) {
             let rot = ctx.input_mut(|i| i.key_pressed(egui::Key::R));
             if rot && self.renaming.is_none() {
-                self.rotate_current_selection_90();
+                if self.portal_place_active() {
+                    self.rotate_portal_place_direction();
+                } else {
+                    self.rotate_current_selection_90();
+                }
             }
             let flip = ctx.input_mut(|i| i.key_pressed(egui::Key::F));
             if flip && self.floating_geometry.is_some() {
@@ -11315,8 +11480,12 @@ impl EditorWorkspace {
                         );
 
                         let pointer_world = response
-                            .interact_pointer_pos()
+                            .hover_pos()
+                            .or_else(|| response.interact_pointer_pos())
                             .map(|pos| transform.screen_to_world(pos));
+                        if let Some(world) = pointer_world {
+                            self.draw_portal_place_preview_2d(&painter, transform, world);
+                        }
                         if let (Some(room), Some(world)) = (
                             self.floating_geometry.as_ref().map(|preview| preview.room),
                             pointer_world,
@@ -11498,19 +11667,21 @@ impl EditorWorkspace {
                         ),
                     ] {
                         let enabled = room_active || !tool.requires_room_context();
+                        let active = self.active_tool == tool
+                            && (!matches!(tool, ViewTool::Place)
+                                || !matches!(self.place_kind, PlaceKind::Portal));
                         let clicked = ui
                             .add_enabled_ui(enabled, |ui| {
-                                toolbar_icon_button(
-                                    ui,
-                                    self.active_tool == tool,
-                                    tool.icon(),
-                                    tool.label(),
-                                    hint,
-                                )
+                                toolbar_icon_button(ui, active, tool.icon(), tool.label(), hint)
                             })
                             .inner;
                         if clicked {
                             self.active_tool = tool;
+                            if matches!(tool, ViewTool::Place)
+                                && matches!(self.place_kind, PlaceKind::Portal)
+                            {
+                                self.place_kind = PlaceKind::PlayerSpawn;
+                            }
                         }
                     }
                     let portal_enabled = room_active;
@@ -11522,7 +11693,7 @@ impl EditorWorkspace {
                                     && self.place_kind == PlaceKind::Portal,
                                 icons::WAYPOINT,
                                 "Portal",
-                                "Place a portal seam marker. The cooker snaps it to the nearest grid edge.",
+                                "Place a portal seam on the highlighted grid edge. Press R to rotate the edge.",
                             )
                         })
                         .inner;
@@ -11539,7 +11710,9 @@ impl EditorWorkspace {
                         self.draw_horizontal_edit_mode_picker(ui);
                         ui.separator();
                         self.draw_vertex_connectivity_picker(ui);
-                    } else if matches!(self.active_tool, ViewTool::Place) {
+                    } else if matches!(self.active_tool, ViewTool::Place)
+                        && !matches!(self.place_kind, PlaceKind::Portal)
+                    {
                         self.draw_place_kind_picker(ui);
                     } else if matches!(self.active_tool, ViewTool::PaintWall) {
                         self.draw_wall_paint_shape_picker(ui);
@@ -11769,7 +11942,6 @@ impl EditorWorkspace {
                     PlaceKind::Character,
                     PlaceKind::ImageProp,
                     PlaceKind::PointLightMarker,
-                    PlaceKind::Portal,
                 ] {
                     ui.selectable_value(&mut self.place_kind, kind, kind.label());
                 }
@@ -21731,7 +21903,7 @@ fn scene_tree_kind_label(kind: &'static str) -> &'static str {
 
 /// Default `(menu label, kind template)` pairs for "Add Child" menus.
 /// Each menu entry uses the label as the new node's display name.
-fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
+fn default_addable_kinds() -> [(&'static str, NodeKind); 16] {
     [
         (
             "World",
@@ -21839,14 +22011,6 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
             "Trigger",
             NodeKind::Trigger {
                 trigger_id: String::new(),
-            },
-        ),
-        (
-            "Portal",
-            NodeKind::Portal {
-                target_room: None,
-                target_entry: String::new(),
-                entry_name: String::new(),
             },
         ),
     ]
@@ -23715,22 +23879,43 @@ fn draw_portal_seam_2d(
 }
 
 fn portal_edge_editor_segment(grid: &WorldGrid, edge: PortalEdge) -> Option<([f32; 2], [f32; 2])> {
-    match edge.direction {
-        GridDirection::North => {
-            let z = edge.z.checked_add(1)? as f32 - grid.depth as f32 * 0.5;
-            let x0 = edge.x as f32 - grid.width as f32 * 0.5;
-            Some(([x0, z], [x0 + 1.0, z]))
-        }
-        GridDirection::East => {
-            let x = edge.x.checked_add(1)? as f32 - grid.width as f32 * 0.5;
-            let z0 = edge.z as f32 - grid.depth as f32 * 0.5;
-            Some(([x, z0], [x, z0 + 1.0]))
-        }
-        GridDirection::South
-        | GridDirection::West
-        | GridDirection::NorthWestSouthEast
-        | GridDirection::NorthEastSouthWest => None,
-    }
+    portal_edge_editor_segment_for_array(grid, edge.x, edge.z, edge.direction)
+}
+
+fn portal_edge_editor_segment_for_array(
+    grid: &WorldGrid,
+    sx: u16,
+    sz: u16,
+    dir: GridDirection,
+) -> Option<([f32; 2], [f32; 2])> {
+    let wcx = grid.origin[0] + sx as i32;
+    let wcz = grid.origin[1] + sz as i32;
+    portal_edge_editor_segment_for_world_cell(grid, wcx, wcz, dir)
+}
+
+fn portal_edge_editor_segment_for_world_cell(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+) -> Option<([f32; 2], [f32; 2])> {
+    let world = match dir {
+        GridDirection::North => (
+            [wcx as f32, wcz as f32 + 1.0],
+            [wcx as f32 + 1.0, wcz as f32 + 1.0],
+        ),
+        GridDirection::East => (
+            [wcx as f32 + 1.0, wcz as f32],
+            [wcx as f32 + 1.0, wcz as f32 + 1.0],
+        ),
+        GridDirection::South => ([wcx as f32, wcz as f32], [wcx as f32 + 1.0, wcz as f32]),
+        GridDirection::West => ([wcx as f32, wcz as f32], [wcx as f32, wcz as f32 + 1.0]),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => return None,
+    };
+    Some((
+        grid.world_cells_to_editor(world.0),
+        grid.world_cells_to_editor(world.1),
+    ))
 }
 
 fn draw_portal_marker(
@@ -24959,6 +25144,69 @@ fn direction_label(dir: GridDirection) -> &'static str {
         GridDirection::West => "West",
         GridDirection::NorthWestSouthEast => "NW-SE",
         GridDirection::NorthEastSouthWest => "NE-SW",
+    }
+}
+
+const fn next_cardinal_direction(dir: GridDirection) -> GridDirection {
+    match dir {
+        GridDirection::North => GridDirection::East,
+        GridDirection::East => GridDirection::South,
+        GridDirection::South => GridDirection::West,
+        GridDirection::West
+        | GridDirection::NorthWestSouthEast
+        | GridDirection::NorthEastSouthWest => GridDirection::North,
+    }
+}
+
+fn portal_edge_midpoint_editor(grid: &WorldGrid, sx: u16, sz: u16, dir: GridDirection) -> [f32; 2] {
+    let wcx = grid.origin[0] + sx as i32;
+    let wcz = grid.origin[1] + sz as i32;
+    let world = match dir {
+        GridDirection::North => [wcx as f32 + 0.5, wcz as f32 + 1.0],
+        GridDirection::East => [wcx as f32 + 1.0, wcz as f32 + 0.5],
+        GridDirection::South => [wcx as f32 + 0.5, wcz as f32],
+        GridDirection::West => [wcx as f32, wcz as f32 + 0.5],
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => {
+            [wcx as f32 + 0.5, wcz as f32 + 0.5]
+        }
+    };
+    grid.world_cells_to_editor(world)
+}
+
+fn portal_edge_valid_for_world_cell(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+) -> bool {
+    let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+        return false;
+    };
+    portal_edge_valid_for_array_cell(grid, sx, sz, dir)
+}
+
+fn portal_edge_valid_for_array_cell(
+    grid: &WorldGrid,
+    sx: u16,
+    sz: u16,
+    dir: GridDirection,
+) -> bool {
+    let Some((nx, nz)) = portal_edge_neighbour(sx, sz, dir) else {
+        return false;
+    };
+    nx < grid.width
+        && nz < grid.depth
+        && grid.sector(sx, sz).is_some_and(GridSector::has_geometry)
+        && grid.sector(nx, nz).is_some_and(GridSector::has_geometry)
+}
+
+fn portal_edge_neighbour(sx: u16, sz: u16, dir: GridDirection) -> Option<(u16, u16)> {
+    match dir {
+        GridDirection::North => Some((sx, sz.checked_add(1)?)),
+        GridDirection::East => Some((sx.checked_add(1)?, sz)),
+        GridDirection::South => Some((sx, sz.checked_sub(1)?)),
+        GridDirection::West => Some((sx.checked_sub(1)?, sz)),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
     }
 }
 
@@ -31834,6 +32082,69 @@ mod tests {
         assert_eq!(material_resource.texture, Some(texture));
         assert_eq!(workspace.status, "Placed Image Prop at 0,0");
         assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn portal_icon_place_writes_edge_midpoint_marker() {
+        let mut project = ProjectDocument::new("portal-edge-place");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Map", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let scene = workspace.project.active_scene();
+        let node = scene
+            .node(workspace.selected_node_id())
+            .expect("placed portal is selected");
+        assert!(matches!(node.kind, NodeKind::Portal { .. }));
+        assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+        let grid = workspace.room_grid_view(room).unwrap();
+        let edge = portal_edge_for_node(grid, node).expect("portal snaps to edge");
+        assert_eq!(edge.x, 0);
+        assert_eq!(edge.z, 0);
+        assert_eq!(edge.direction, GridDirection::East);
+        assert_eq!(workspace.status, "Placed Portal on East edge at 0,0");
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn portal_icon_place_rejects_edges_without_populated_neighbour() {
+        let mut project = ProjectDocument::new("portal-edge-invalid");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Map", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let portal_count = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
+            .count();
+        assert_eq!(portal_count, 0);
+        assert_eq!(
+            workspace.status,
+            "Portal needs populated sectors on both sides of the East edge"
+        );
+        assert!(!workspace.is_dirty());
     }
 
     #[test]
