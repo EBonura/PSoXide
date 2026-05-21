@@ -6917,7 +6917,7 @@ impl std::error::Error for ResourceDeleteError {}
 /// Node type used by the editor scene tree.
 ///
 /// Hierarchy convention for level authoring:
-/// `Scene root → World (macro) → Room (sector grid) → entity nodes`.
+/// `Scene root -> World (macro) -> Map (sector grid) -> entity nodes`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     /// Plain organisational node.
@@ -6930,33 +6930,33 @@ pub enum NodeKind {
     /// [`Animator`](Self::Animator), and
     /// [`Collider`](Self::Collider).
     Entity,
-    /// Macro-node grouping every Room that belongs to one streamed
+    /// Macro-node grouping every authored map that belongs to one streamed
     /// region. Owns the global sector size inherited by descendant
-    /// Room grids.
+    /// map grids.
     World {
         /// Shared sector size in engine units, snapped to
         /// [`WORLD_SECTOR_SIZE_QUANTUM`].
         #[serde(default = "default_world_sector_size")]
         sector_size: i32,
-        /// Background sky drawn before room geometry.
+        /// Background sky drawn before map geometry.
         #[serde(default)]
         sky: SkySettings,
-        /// Distant scenery ring drawn between sky and room geometry.
+        /// Distant scenery ring drawn between sky and map geometry.
         #[serde(default)]
         far_vista: FarVistaSettings,
-        /// Third-person camera defaults inherited by descendant Rooms.
+        /// Third-person camera defaults inherited by descendant maps.
         #[serde(default)]
         camera: WorldCameraSettings,
-        /// Runtime culling controls inherited by descendant Rooms.
+        /// Runtime culling controls inherited by descendant maps.
         #[serde(default)]
         culling: WorldCullingSettings,
-        /// Cook-time streaming chunk controls inherited by descendant Rooms.
+        /// Cook-time streaming controls inherited by descendant maps.
         #[serde(default)]
         streaming: WorldStreamingSettings,
     },
-    /// One streamed level chunk: a sector grid plus its child
-    /// entities. Cooks to a single `.psxw` blob the runtime loads
-    /// in isolation.
+    /// One authored contiguous map: a sector grid plus its child
+    /// entities. The cooker partitions this into runtime room payloads.
+    #[serde(rename = "Map", alias = "Room")]
     Room {
         /// Authored grid-world payload.
         grid: WorldGrid,
@@ -7152,19 +7152,14 @@ pub enum NodeKind {
         /// Playback radius.
         radius: f32,
     },
-    /// Streaming-graph edge: when the player crosses this volume, the
-    /// runtime streams the named entry point of `target_room` into
-    /// the World's residency set.
+    /// Streaming-graph edge: the cooker snaps the marker to a grid
+    /// edge and treats that edge as a room-to-room portal.
     Portal {
-        /// Target Room node by id, or `None` when not yet wired.
+        /// Legacy target map node by id, or `None` when not wired.
         target_room: Option<NodeId>,
-        /// Entry-portal label on the target room. The runtime matches
-        /// this against a same-named Portal in the destination so the
-        /// player spawns at the right side of the door.
+        /// Legacy entry-portal label on the target map.
         target_entry: String,
-        /// Identifier this Portal is known by in its own Room. The
-        /// matching Portal in another Room sets `target_entry` to
-        /// this string.
+        /// Identifier this portal marker is known by in its own map.
         entry_name: String,
     },
 }
@@ -7177,7 +7172,7 @@ impl NodeKind {
             Self::Node3D => "Node3D",
             Self::Entity => "Entity",
             Self::World { .. } => "World",
-            Self::Room { .. } => "Room",
+            Self::Room { .. } => "Map",
             Self::MeshInstance { .. } => "Mesh Instance",
             Self::ImageProp { .. } => "Image Prop",
             Self::ModelRenderer { .. } => "Model Renderer",
