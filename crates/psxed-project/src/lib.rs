@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod model_import;
 pub mod playtest;
+pub mod portal_rooms;
 pub mod resolve;
 pub mod spatial;
 pub mod streaming;
