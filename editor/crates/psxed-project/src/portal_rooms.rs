@@ -136,6 +136,12 @@ struct EdgeKey {
     direction: GridDirection,
 }
 
+struct PortalSeams {
+    openings: HashSet<EdgeKey>,
+    cuts: HashSet<EdgeKey>,
+    marker_count: usize,
+}
+
 /// Canonical grid edge selected by an authored portal marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortalEdge {
@@ -173,8 +179,8 @@ pub fn plan_portal_rooms(
     config: PortalRoomConfig,
 ) -> PortalRoomPlan {
     let config = config.normalized();
-    let portal_edges = collect_portal_edges(scene, room_node, grid);
-    let mut raw_regions = flood_regions(grid, &portal_edges);
+    let portal_seams = collect_portal_seams(scene, room_node, grid);
+    let mut raw_regions = flood_regions(grid, &portal_seams.cuts);
     let mut room_cells = Vec::new();
     for region in raw_regions.drain(..) {
         split_region_to_budget(region, config, &mut room_cells);
@@ -193,7 +199,14 @@ pub fn plan_portal_rooms(
         let (origin, size) = cells_bounds(&cells).unwrap_or(([0, 0], [0, 0]));
         let extracted = extract_portal_room_grid_from_cells(grid, origin, &cells);
         let budget = extracted.budget();
-        let neighbours = room_neighbours(index, &cells, grid, &cell_to_room);
+        let neighbours = room_neighbours(
+            index,
+            &cells,
+            grid,
+            &cell_to_room,
+            &portal_seams.cuts,
+            &portal_seams.openings,
+        );
         rooms.push(PortalRoom {
             index,
             array_origin: origin,
@@ -214,7 +227,7 @@ pub fn plan_portal_rooms(
         source_origin: grid.origin,
         source_size: [grid.width, grid.depth],
         rooms,
-        portal_count: portal_edges.len(),
+        portal_count: portal_seams.marker_count,
     }
 }
 
@@ -234,6 +247,29 @@ pub fn extract_portal_room_grid(grid: &WorldGrid, room: &PortalRoom) -> WorldGri
 /// Snap an authored Portal node to the grid edge it opens.
 pub fn portal_edge_for_node(grid: &WorldGrid, node: &SceneNode) -> Option<PortalEdge> {
     portal_edge_key_for_node(grid, node).map(Into::into)
+}
+
+/// Expand an authored Portal node to every connected edge on the seam it cuts.
+pub fn portal_seam_edges_for_node(grid: &WorldGrid, node: &SceneNode) -> Vec<PortalEdge> {
+    let Some(edge) = portal_edge_key_for_node(grid, node) else {
+        return Vec::new();
+    };
+    sorted_portal_edges(expand_portal_seam(grid, edge))
+}
+
+/// Expand a canonical portal edge to every connected edge on the seam it cuts.
+pub fn portal_seam_edges_for_edge(grid: &WorldGrid, edge: PortalEdge) -> Vec<PortalEdge> {
+    if !matches!(edge.direction, GridDirection::North | GridDirection::East) {
+        return Vec::new();
+    }
+    sorted_portal_edges(expand_portal_seam(
+        grid,
+        EdgeKey {
+            x: edge.x,
+            z: edge.z,
+            direction: edge.direction,
+        },
+    ))
 }
 
 fn extract_portal_room_grid_from_cells(
@@ -275,14 +311,28 @@ fn extract_portal_room_grid_from_cells(
     out
 }
 
-fn collect_portal_edges(scene: &Scene, room_node: NodeId, grid: &WorldGrid) -> HashSet<EdgeKey> {
-    scene
+fn collect_portal_seams(scene: &Scene, room_node: NodeId, grid: &WorldGrid) -> PortalSeams {
+    let mut openings = HashSet::new();
+    let mut cuts = HashSet::new();
+    let mut marker_count = 0;
+    for node in scene
         .nodes()
         .iter()
         .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
         .filter(|node| scene.is_descendant_of(node.id, room_node))
-        .filter_map(|node| portal_edge_key_for_node(grid, node))
-        .collect()
+    {
+        let Some(edge) = portal_edge_key_for_node(grid, node) else {
+            continue;
+        };
+        marker_count += 1;
+        openings.insert(edge);
+        cuts.extend(expand_portal_seam(grid, edge));
+    }
+    PortalSeams {
+        openings,
+        cuts,
+        marker_count,
+    }
 }
 
 fn portal_edge_key_for_node(grid: &WorldGrid, node: &SceneNode) -> Option<EdgeKey> {
@@ -404,6 +454,8 @@ fn room_neighbours(
     cells: &[Cell],
     grid: &WorldGrid,
     cell_to_room: &HashMap<Cell, usize>,
+    seam_cuts: &HashSet<EdgeKey>,
+    portal_openings: &HashSet<EdgeKey>,
 ) -> [Option<usize>; 4] {
     let mut neighbours = [None; 4];
     let mut scores = [0u16; 4];
@@ -422,6 +474,9 @@ fn room_neighbours(
                 continue;
             };
             if edge_has_wall(grid, edge) {
+                continue;
+            }
+            if seam_cuts.contains(&edge) && !portal_openings.contains(&edge) {
                 continue;
             }
             let slot = direction_slot(direction);
@@ -496,6 +551,66 @@ fn mirrored_wall(wall: &GridVerticalFace) -> GridVerticalFace {
 
 fn populated(grid: &WorldGrid, x: u16, z: u16) -> bool {
     grid.sector(x, z).is_some_and(GridSector::has_geometry)
+}
+
+fn expand_portal_seam(grid: &WorldGrid, edge: EdgeKey) -> HashSet<EdgeKey> {
+    let mut out = HashSet::new();
+    if !edge_between_populated(grid, edge) {
+        return out;
+    }
+    out.insert(edge);
+    match edge.direction {
+        GridDirection::North => {
+            expand_portal_seam_axis(grid, edge, -1, 0, &mut out);
+            expand_portal_seam_axis(grid, edge, 1, 0, &mut out);
+        }
+        GridDirection::East => {
+            expand_portal_seam_axis(grid, edge, 0, -1, &mut out);
+            expand_portal_seam_axis(grid, edge, 0, 1, &mut out);
+        }
+        GridDirection::South
+        | GridDirection::West
+        | GridDirection::NorthWestSouthEast
+        | GridDirection::NorthEastSouthWest => {}
+    }
+    out
+}
+
+fn expand_portal_seam_axis(
+    grid: &WorldGrid,
+    start: EdgeKey,
+    step_x: i32,
+    step_z: i32,
+    out: &mut HashSet<EdgeKey>,
+) {
+    let mut x = start.x as i32 + step_x;
+    let mut z = start.z as i32 + step_z;
+    while x >= 0 && z >= 0 && x < grid.width as i32 && z < grid.depth as i32 {
+        let edge = EdgeKey {
+            x: x as u16,
+            z: z as u16,
+            direction: start.direction,
+        };
+        if !edge_between_populated(grid, edge) {
+            break;
+        }
+        out.insert(edge);
+        x += step_x;
+        z += step_z;
+    }
+}
+
+fn edge_between_populated(grid: &WorldGrid, edge: EdgeKey) -> bool {
+    let Some((nx, nz, _)) = neighbour_across(grid, edge.x, edge.z, edge.direction) else {
+        return false;
+    };
+    populated(grid, edge.x, edge.z) && populated(grid, nx, nz)
+}
+
+fn sorted_portal_edges(edges: HashSet<EdgeKey>) -> Vec<PortalEdge> {
+    let mut out: Vec<PortalEdge> = edges.into_iter().map(Into::into).collect();
+    out.sort_by_key(|edge| (edge.z, edge.x, direction_slot(edge.direction)));
+    out
 }
 
 fn edge_has_wall(grid: &WorldGrid, edge: EdgeKey) -> bool {
@@ -679,6 +794,86 @@ mod tests {
         assert_eq!(plan.portal_count, 1);
         assert_eq!(plan.rooms[0].neighbours[1], Some(1));
         assert_eq!(plan.rooms[1].neighbours[3], Some(0));
+    }
+
+    #[test]
+    fn portal_marker_cuts_full_connected_seam_with_one_opening() {
+        let mut project = ProjectDocument::new("test");
+        let mat = material(&mut project);
+        let grid = WorldGrid::stone_room(3, 2, 1024, Some(mat), None);
+        let room = project.active_scene_mut().add_node(
+            crate::NodeId::ROOT,
+            "Room",
+            NodeKind::Room { grid },
+        );
+        let portal = project.active_scene_mut().add_node(
+            room,
+            "Portal",
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name: String::new(),
+            },
+        );
+        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+            panic!("expected room");
+        };
+        let editor =
+            grid.world_cells_to_editor([grid.origin[0] as f32 + 1.5, grid.origin[1] as f32 + 1.0]);
+        project
+            .active_scene_mut()
+            .node_mut(portal)
+            .unwrap()
+            .transform
+            .translation = [editor[0], 0.0, editor[1]];
+        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+            panic!("expected room");
+        };
+
+        let seam = portal_seam_edges_for_node(grid, project.active_scene().node(portal).unwrap());
+        assert_eq!(
+            seam,
+            vec![
+                PortalEdge {
+                    x: 0,
+                    z: 0,
+                    direction: GridDirection::North,
+                },
+                PortalEdge {
+                    x: 1,
+                    z: 0,
+                    direction: GridDirection::North,
+                },
+                PortalEdge {
+                    x: 2,
+                    z: 0,
+                    direction: GridDirection::North,
+                },
+            ]
+        );
+
+        let plan = plan_portal_rooms(
+            project.active_scene(),
+            room,
+            grid,
+            PortalRoomConfig::default(),
+        );
+        assert_eq!(plan.portal_count, 1);
+        assert_eq!(plan.room_count(), 2);
+        let south = plan
+            .rooms
+            .iter()
+            .find(|room| room.array_origin == [0, 0])
+            .expect("south room");
+        let north = plan
+            .rooms
+            .iter()
+            .find(|room| room.array_origin == [0, 1])
+            .expect("north room");
+        assert_eq!(south.cells.len(), 3);
+        assert_eq!(north.cells.len(), 3);
+        assert_eq!(south.neighbours[0], Some(north.index));
+        assert_eq!(north.neighbours[2], Some(south.index));
     }
 
     #[test]
