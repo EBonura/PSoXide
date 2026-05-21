@@ -3381,15 +3381,13 @@ fn push_paint_preview(
                     if let Some(edge) = canonical_portal_edge_for_array_cell(sx, sz, dir) {
                         let seam = portal_seam_edges_for_edge(grid, edge);
                         if !seam.is_empty() {
-                            for edge in seam {
-                                push_portal_edge_record(grid, edge, style, scratch);
-                            }
+                            push_portal_seam_edges(grid, seam, style, scratch);
                             return;
                         }
                     }
                 }
             }
-            push_portal_edge_line(grid, world_cell_x, world_cell_z, dir, style, scratch);
+            push_portal_edge_wall_outline(grid, world_cell_x, world_cell_z, dir, style, scratch);
         }
     }
 }
@@ -3490,29 +3488,123 @@ fn walk_portal_seams(
         if node.id == selected || hovered == Some(node.id) {
             style.thickness_px = 4.0;
         }
-        for edge in portal_seam_edges_for_node(grid, node) {
-            push_portal_edge_record(grid, edge, style, scratch);
-        }
+        push_portal_seam_edges(grid, portal_seam_edges_for_node(grid, node), style, scratch);
     }
 }
 
-fn push_portal_edge_record(
+fn push_portal_seam_edges(
     grid: &WorldGrid,
-    edge: PortalEdge,
+    edges: Vec<PortalEdge>,
     style: FaceOutlineStyle,
     scratch: &mut PreviewScratch,
 ) {
-    push_portal_edge_line(
-        grid,
-        grid.origin[0] + edge.x as i32,
-        grid.origin[1] + edge.z as i32,
-        edge.direction,
-        style,
-        scratch,
-    );
+    for run in portal_seam_runs(edges) {
+        push_portal_seam_run(grid, run, style, scratch);
+    }
 }
 
-fn push_portal_edge_line(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PortalSeamRun {
+    start: PortalEdge,
+    len: u16,
+}
+
+fn portal_seam_runs(mut edges: Vec<PortalEdge>) -> Vec<PortalSeamRun> {
+    edges.retain(|edge| matches!(edge.direction, GridDirection::North | GridDirection::East));
+    edges.sort_by_key(|edge| match edge.direction {
+        GridDirection::North => (0, edge.z, edge.x),
+        GridDirection::East => (1, edge.x, edge.z),
+        _ => (2, edge.z, edge.x),
+    });
+    let mut runs = Vec::new();
+    for edge in edges {
+        if let Some(run) = runs.last_mut() {
+            if portal_edge_continues_run(run, edge) {
+                run.len = run.len.saturating_add(1);
+                continue;
+            }
+        }
+        runs.push(PortalSeamRun {
+            start: edge,
+            len: 1,
+        });
+    }
+    runs
+}
+
+fn portal_edge_continues_run(run: &PortalSeamRun, edge: PortalEdge) -> bool {
+    if edge.direction != run.start.direction {
+        return false;
+    }
+    match edge.direction {
+        GridDirection::North => {
+            edge.z == run.start.z && run.start.x.checked_add(run.len) == Some(edge.x)
+        }
+        GridDirection::East => {
+            edge.x == run.start.x && run.start.z.checked_add(run.len) == Some(edge.z)
+        }
+        _ => false,
+    }
+}
+
+fn push_portal_seam_run(
+    grid: &WorldGrid,
+    run: PortalSeamRun,
+    style: FaceOutlineStyle,
+    scratch: &mut PreviewScratch,
+) {
+    if run.len == 0 {
+        return;
+    }
+    let mut first: Option<[spatial::RoomPoint; 4]> = None;
+    let mut last: Option<[spatial::RoomPoint; 4]> = None;
+    for offset in 0..run.len {
+        let edge = match run.start.direction {
+            GridDirection::North => {
+                let Some(x) = run.start.x.checked_add(offset) else {
+                    return;
+                };
+                PortalEdge { x, ..run.start }
+            }
+            GridDirection::East => {
+                let Some(z) = run.start.z.checked_add(offset) else {
+                    return;
+                };
+                PortalEdge { z, ..run.start }
+            }
+            _ => return,
+        };
+        let Some(corners) = portal_edge_wall_corners(grid, edge) else {
+            continue;
+        };
+        push_portal_segment(scratch, corners[0], corners[1], style);
+        push_portal_segment(scratch, corners[3], corners[2], style);
+        if first.is_none() {
+            first = Some(corners);
+        }
+        last = Some(corners);
+    }
+
+    let Some(first) = first else {
+        return;
+    };
+    let Some(last) = last else {
+        return;
+    };
+    match run.start.direction {
+        GridDirection::North => {
+            push_portal_segment(scratch, first[0], first[3], style);
+            push_portal_segment(scratch, last[1], last[2], style);
+        }
+        GridDirection::East => {
+            push_portal_segment(scratch, first[1], first[2], style);
+            push_portal_segment(scratch, last[0], last[3], style);
+        }
+        _ => {}
+    }
+}
+
+fn push_portal_edge_wall_outline(
     grid: &WorldGrid,
     wcx: i32,
     wcz: i32,
@@ -3520,32 +3612,45 @@ fn push_portal_edge_line(
     style: FaceOutlineStyle,
     scratch: &mut PreviewScratch,
 ) {
-    let s = grid.sector_size;
-    let x0 = wcx * s;
-    let x1 = x0 + s;
-    let z0 = wcz * s;
-    let z1 = z0 + s;
-    let heights = grid.floor_heights_aligned_to_neighbors_for_world_cell(wcx, wcz, 0);
-    const LIFT: i32 = 24;
-    let (a, b) = match dir {
-        GridDirection::North => (
-            [x0, heights[Corner::NW.idx()] + LIFT, z1],
-            [x1, heights[Corner::NE.idx()] + LIFT, z1],
-        ),
-        GridDirection::East => (
-            [x1, heights[Corner::NE.idx()] + LIFT, z1],
-            [x1, heights[Corner::SE.idx()] + LIFT, z0],
-        ),
-        GridDirection::South => (
-            [x1, heights[Corner::SE.idx()] + LIFT, z0],
-            [x0, heights[Corner::SW.idx()] + LIFT, z0],
-        ),
-        GridDirection::West => (
-            [x0, heights[Corner::SW.idx()] + LIFT, z0],
-            [x0, heights[Corner::NW.idx()] + LIFT, z1],
-        ),
-        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => return,
+    let Some(corners) = portal_edge_wall_corners_for_world_cell(grid, wcx, wcz, dir) else {
+        return;
     };
+    push_portal_segment(scratch, corners[0], corners[1], style);
+    push_portal_segment(scratch, corners[1], corners[2], style);
+    push_portal_segment(scratch, corners[2], corners[3], style);
+    push_portal_segment(scratch, corners[3], corners[0], style);
+}
+
+fn portal_edge_wall_corners(grid: &WorldGrid, edge: PortalEdge) -> Option<[spatial::RoomPoint; 4]> {
+    portal_edge_wall_corners_for_world_cell(
+        grid,
+        grid.origin[0] + edge.x as i32,
+        grid.origin[1] + edge.z as i32,
+        edge.direction,
+    )
+}
+
+fn portal_edge_wall_corners_for_world_cell(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+) -> Option<[spatial::RoomPoint; 4]> {
+    const BOTTOM_LIFT: i32 = 24;
+    let bounds = spatial::cell_bounds_from_world_cell(wcx, wcz, grid.sector_size);
+    let heights = grid.wall_heights_aligned_to_surfaces_for_world_cell(wcx, wcz, dir);
+    let mut corners = spatial::editor_wall_outline_corners(bounds, dir, heights, 0)?;
+    corners[0][1] = corners[0][1].saturating_add(BOTTOM_LIFT);
+    corners[1][1] = corners[1][1].saturating_add(BOTTOM_LIFT);
+    Some(corners)
+}
+
+fn push_portal_segment(
+    scratch: &mut PreviewScratch,
+    a: spatial::RoomPoint,
+    b: spatial::RoomPoint,
+    style: FaceOutlineStyle,
+) {
     let pa = gte_scene::project_vertex(world_to_view(a));
     let pb = gte_scene::project_vertex(world_to_view(b));
     if pa.sz == 0 || pb.sz == 0 {
@@ -4676,9 +4781,10 @@ mod tests {
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
+    use psxed_project::portal_rooms::PortalEdge;
     use psxed_project::{
-        Corner, GridSplit, GridUvTransform, MaterialFaceSidedness, MaterialResource, NodeKind,
-        ProjectDocument, ResourceData, WorldGrid,
+        Corner, GridDirection, GridSplit, GridUvTransform, MaterialFaceSidedness, MaterialResource,
+        NodeKind, ProjectDocument, ResourceData, WorldGrid,
     };
     use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
@@ -4773,6 +4879,59 @@ mod tests {
         assert_eq!(
             horizontal_triangle_world_points([0, 1024, 0, 1024], corners, [64, 128, 192]),
             [[0, 64, 1024], [1024, 128, 1024], [1024, 192, 0]]
+        );
+    }
+
+    #[test]
+    fn portal_seam_runs_coalesce_connected_edges() {
+        let runs = super::portal_seam_runs(vec![
+            PortalEdge {
+                x: 2,
+                z: 0,
+                direction: GridDirection::North,
+            },
+            PortalEdge {
+                x: 0,
+                z: 0,
+                direction: GridDirection::North,
+            },
+            PortalEdge {
+                x: 1,
+                z: 0,
+                direction: GridDirection::North,
+            },
+            PortalEdge {
+                x: 4,
+                z: 2,
+                direction: GridDirection::East,
+            },
+            PortalEdge {
+                x: 4,
+                z: 3,
+                direction: GridDirection::East,
+            },
+        ]);
+
+        assert_eq!(
+            runs,
+            vec![
+                super::PortalSeamRun {
+                    start: PortalEdge {
+                        x: 0,
+                        z: 0,
+                        direction: GridDirection::North,
+                    },
+                    len: 3,
+                },
+                super::PortalSeamRun {
+                    start: PortalEdge {
+                        x: 4,
+                        z: 2,
+                        direction: GridDirection::East,
+                    },
+                    len: 2,
+                },
+            ]
         );
     }
 
