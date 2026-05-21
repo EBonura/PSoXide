@@ -921,7 +921,8 @@ pub fn build_package(
             }
             NodeKind::Portal { .. } => {
                 if warned_unsupported.insert("Portal") {
-                    report.warn("Portal nodes are skipped (no streaming yet)");
+                    report
+                        .warn("Portal markers define runtime-room seams; not emitted as entities");
                 }
             }
             NodeKind::Node
