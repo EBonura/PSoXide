@@ -1031,6 +1031,11 @@ fn print_guest_pacing_profile(summary: &telemetry::GuestTelemetrySummary) {
         summary.stage_cycles[telemetry::stage::RENDER as usize],
         visual_frames,
     );
+    let total_update_render_per_visual = div_u64(
+        summary.stage_cycles[telemetry::stage::UPDATE as usize]
+            .saturating_add(summary.stage_cycles[telemetry::stage::RENDER as usize]),
+        visual_frames,
+    );
 
     println!("guest_profile_pacing:");
     println!("  sim_ticks={}", fmt_known_u64(sim_ticks));
@@ -1048,12 +1053,24 @@ fn print_guest_pacing_profile(summary: &telemetry::GuestTelemetrySummary) {
         fmt_optional_f64(render_per_visual)
     );
     println!(
+        "  update_render_cycles_per_visual_frame={}",
+        fmt_optional_f64(total_update_render_per_visual)
+    );
+    println!(
         "  paced20_budget_cycles={}  vblanks={}  cycles_per_vblank={}",
         PACED20_VISUAL_BUDGET_CYCLES, PACED20_INTERVAL_VBLANKS, NTSC_CPU_CYCLES_PER_VBLANK
     );
     println!(
-        "  paced20_budget_status={}",
+        "  paced20_render_budget_status={}",
         paced20_budget_status(render_per_visual)
+    );
+    println!(
+        "  paced20_budget_status={}",
+        paced20_budget_status(total_update_render_per_visual)
+    );
+    println!(
+        "  paced20_total_budget_status={}",
+        paced20_budget_status(total_update_render_per_visual)
     );
     println!(
         "  cadence_status={}",
@@ -1096,8 +1113,8 @@ fn fmt_optional_f64(value: Option<f64>) -> String {
     }
 }
 
-fn paced20_budget_status(render_per_visual: Option<f64>) -> &'static str {
-    match render_per_visual {
+fn paced20_budget_status(cycles_per_visual: Option<f64>) -> &'static str {
+    match cycles_per_visual {
         Some(cycles) if cycles <= PACED20_VISUAL_BUDGET_CYCLES as f64 => "pass",
         Some(_) => "fail",
         None => "unknown",

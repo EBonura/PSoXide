@@ -64,8 +64,10 @@ pub struct Config {
     /// set this to black and draw their own full-screen quad.
     pub clear_color: (u8, u8, u8),
     /// Visual render cadence. The default renders every display
-    /// VBlank; paced modes keep update/control ticking every VBlank
-    /// while rendering only on selected VBlanks.
+    /// VBlank. [`EveryNVBlanks`](VisualPacing::EveryNVBlanks) keeps
+    /// update/control ticking every VBlank while rendering only on
+    /// selected VBlanks; [`EveryNVideoFrames`](VisualPacing::EveryNVideoFrames)
+    /// runs update and render together at the paced cadence.
     pub visual_pacing: VisualPacing,
 }
 
@@ -78,6 +80,10 @@ pub enum VisualPacing {
     /// VBlanks. Values less than `2` are normalized to
     /// [`EveryVBlank`](Self::EveryVBlank).
     EveryNVBlanks(u16),
+    /// Run one update and one render every `N` display VBlanks.
+    /// `Ctx::time.delta_vblanks()` reports the elapsed VBlanks so
+    /// scenes can scale movement and animation by real display time.
+    EveryNVideoFrames(u16),
 }
 
 impl Config {
@@ -111,6 +117,8 @@ impl VisualPacing {
             Self::EveryVBlank => 1,
             Self::EveryNVBlanks(n) if n > 1 => n,
             Self::EveryNVBlanks(_) => 1,
+            Self::EveryNVideoFrames(n) if n > 1 => n,
+            Self::EveryNVideoFrames(_) => 1,
         }
     }
 }
@@ -213,10 +221,21 @@ impl App {
         scene.init(&mut ctx);
 
         let visual_interval = config.visual_pacing.interval_vblanks();
-        if visual_interval <= 1 {
-            Self::run_every_vblank(config, scene, clock, ctx);
+        match config.visual_pacing {
+            VisualPacing::EveryVBlank => Self::run_every_vblank(config, scene, clock, ctx),
+            VisualPacing::EveryNVBlanks(_) if visual_interval <= 1 => {
+                Self::run_every_vblank(config, scene, clock, ctx)
+            }
+            VisualPacing::EveryNVBlanks(_) => {
+                Self::run_paced_visuals(config, scene, clock, ctx, visual_interval)
+            }
+            VisualPacing::EveryNVideoFrames(_) if visual_interval <= 1 => {
+                Self::run_every_vblank(config, scene, clock, ctx)
+            }
+            VisualPacing::EveryNVideoFrames(_) => {
+                Self::run_paced_updates_and_visuals(config, scene, clock, ctx, visual_interval)
+            }
         }
-        Self::run_paced_visuals(config, scene, clock, ctx, visual_interval);
     }
 
     fn run_every_vblank<S: Scene>(
@@ -334,6 +353,91 @@ impl App {
             ctx.frame = ctx.frame.wrapping_add(1);
         }
     }
+
+    fn run_paced_updates_and_visuals<S: Scene>(
+        config: Config,
+        scene: &mut S,
+        mut clock: EngineClock,
+        mut ctx: Ctx,
+        visual_interval: u16,
+    ) -> ! {
+        let interval = visual_interval.max(1) as u32;
+        let start_tick = clock.elapsed_vblanks();
+        let mut next_visual_tick = start_tick;
+        let mut last_update_tick = start_tick;
+        let mut first_update = true;
+
+        loop {
+            let elapsed_vblanks = clock.elapsed_vblanks();
+            if next_visual_tick > elapsed_vblanks {
+                clock.wait_next_vblank();
+                continue;
+            }
+
+            let due = elapsed_vblanks
+                .wrapping_sub(next_visual_tick)
+                .checked_div(interval)
+                .unwrap_or(0)
+                .saturating_add(1);
+            let due = due.min(u16::MAX as u32);
+            let simulation_tick =
+                next_visual_tick.saturating_add(due.saturating_sub(1).saturating_mul(interval));
+            let delta = if first_update {
+                first_update = false;
+                1
+            } else {
+                simulation_tick
+                    .wrapping_sub(last_update_tick)
+                    .clamp(1, u16::MAX as u32) as u16
+            };
+            last_update_tick = simulation_tick;
+            next_visual_tick = simulation_tick.saturating_add(interval);
+
+            telemetry::frame_begin(simulation_tick);
+            ctx.simulation_tick = simulation_tick;
+            ctx.time = EngineTime::fixed_delta_tick(
+                ctx.frame,
+                simulation_tick,
+                simulation_tick,
+                delta,
+                config.video_hz(),
+            );
+            ctx.missed_visual_intervals = due.saturating_sub(1) as u16;
+            emit_sim_tick_counters(visual_interval);
+            if visual_interval > 1 {
+                telemetry::counter(
+                    telemetry::counter::VISUAL_SKIPPED_VBLANKS,
+                    visual_interval.saturating_sub(1) as u32,
+                );
+            }
+            ctx.pad_prev = ctx.pad;
+            ctx.pad = poll_port1();
+
+            telemetry::stage_begin(telemetry::stage::UPDATE);
+            scene.update(&mut ctx);
+            telemetry::stage_end(telemetry::stage::UPDATE);
+
+            telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+            ctx.fb.clear(
+                config.clear_color.0,
+                config.clear_color.1,
+                config.clear_color.2,
+            );
+            telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
+
+            telemetry::stage_begin(telemetry::stage::RENDER);
+            scene.render(&mut ctx);
+            telemetry::stage_end(telemetry::stage::RENDER);
+
+            telemetry::stage_begin(telemetry::stage::PRESENT);
+            clock.wait_next_vblank();
+            gpu::draw_sync();
+            ctx.fb.swap();
+            telemetry::stage_end(telemetry::stage::PRESENT);
+            emit_visual_frame_counters(ctx.missed_visual_intervals);
+            ctx.frame = ctx.frame.wrapping_add(1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +450,9 @@ mod tests {
         assert_eq!(VisualPacing::EveryNVBlanks(0).interval_vblanks(), 1);
         assert_eq!(VisualPacing::EveryNVBlanks(1).interval_vblanks(), 1);
         assert_eq!(VisualPacing::EveryNVBlanks(3).interval_vblanks(), 3);
+        assert_eq!(VisualPacing::EveryNVideoFrames(0).interval_vblanks(), 1);
+        assert_eq!(VisualPacing::EveryNVideoFrames(1).interval_vblanks(), 1);
+        assert_eq!(VisualPacing::EveryNVideoFrames(3).interval_vblanks(), 3);
     }
 
     #[test]

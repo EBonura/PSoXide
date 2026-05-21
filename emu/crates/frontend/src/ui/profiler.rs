@@ -201,11 +201,23 @@ impl GuestRuntimeProfile {
         }
     }
 
+    fn update_render_cycles_per_visual_frame(self) -> f32 {
+        let visual_frames =
+            self.counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize);
+        if visual_frames > 0.0 {
+            (self.stage_cycles[emulator_core::telemetry::stage::UPDATE as usize]
+                + self.stage_cycles[emulator_core::telemetry::stage::RENDER as usize])
+                / visual_frames
+        } else {
+            0.0
+        }
+    }
+
     fn paced20_budget_status(self) -> &'static str {
-        let render_cycles = self.render_cycles_per_visual_frame();
-        if render_cycles <= 0.0 {
+        let update_render_cycles = self.update_render_cycles_per_visual_frame();
+        if update_render_cycles <= 0.0 {
             "?"
-        } else if render_cycles <= PACED20_VISUAL_BUDGET_CYCLES {
+        } else if update_render_cycles <= PACED20_VISUAL_BUDGET_CYCLES {
             "pass"
         } else {
             "fail"
@@ -789,6 +801,11 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                     "REN/V",
                     format!("{:.0}", avg.guest.render_cycles_per_visual_frame()),
                 );
+                metric(
+                    ui,
+                    "U+R/V",
+                    format!("{:.0}", avg.guest.update_render_cycles_per_visual_frame()),
+                );
                 metric(ui, "3VB", avg.guest.paced20_budget_status().to_string());
             });
         }
@@ -1108,7 +1125,7 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
          guest_frames={:.1} guest_render_hit={:.0} guest_models_hit={:.0} guest_player_hit={:.0} \
          guest_flush_hit={:.0} guest_prims_f={:.0} guest_cmds_f={:.0} \
          guest_sim={:.0} guest_visual={:.0} guest_int={:.2} guest_miss={:.0} \
-         guest_late={:.0} guest_render_visual={:.0} guest_20hz={} \
+         guest_late={:.0} guest_render_visual={:.0} guest_update_render_visual={:.0} guest_20hz={} \
          scale={:.0}x ticks={:.0} cycles={:.0}",
         sample.total_ms,
         sample.host_dt_ms,
@@ -1168,6 +1185,7 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
             emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS as usize,
         ),
         sample.guest.render_cycles_per_visual_frame(),
+        sample.guest.update_render_cycles_per_visual_frame(),
         sample.guest.paced20_budget_status(),
         sample.hw_scale.max(1.0),
         sample.cpu_ticks,
@@ -1273,11 +1291,23 @@ mod tests {
             GuestTelemetryEvent {
                 cycles: 20,
                 kind: emulator_core::telemetry::GuestTelemetryKind::StageBegin,
+                id: emulator_core::telemetry::stage::UPDATE,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 70,
+                kind: emulator_core::telemetry::GuestTelemetryKind::StageEnd,
+                id: emulator_core::telemetry::stage::UPDATE,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 80,
+                kind: emulator_core::telemetry::GuestTelemetryKind::StageBegin,
                 id: emulator_core::telemetry::stage::RENDER,
                 value: 0,
             },
             GuestTelemetryEvent {
-                cycles: 120,
+                cycles: 180,
                 kind: emulator_core::telemetry::GuestTelemetryKind::StageEnd,
                 id: emulator_core::telemetry::stage::RENDER,
                 value: 0,
@@ -1323,6 +1353,7 @@ mod tests {
         );
         assert_eq!(guest.visual_interval_vblanks(), 3.0);
         assert_eq!(guest.render_cycles_per_visual_frame(), 100.0);
+        assert_eq!(guest.update_render_cycles_per_visual_frame(), 150.0);
         assert_eq!(guest.paced20_budget_status(), "pass");
     }
 
