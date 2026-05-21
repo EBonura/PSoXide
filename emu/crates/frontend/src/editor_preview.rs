@@ -33,7 +33,8 @@ use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene as gte_scene;
 
 use psxed_project::portal_rooms::{
-    plan_portal_rooms, portal_edge_for_node, PortalEdge, PortalRoomConfig,
+    plan_portal_rooms, portal_seam_edges_for_edge, portal_seam_edges_for_node, PortalEdge,
+    PortalRoomConfig,
 };
 use psxed_project::{
     spatial, Corner, GridDirection, GridSplit, GridUvTransform, NodeId, NodeKind, ProjectDocument,
@@ -3375,6 +3376,19 @@ fn push_paint_preview(
             } else {
                 PORTAL_SEAM_INVALID_STYLE
             };
+            if valid {
+                if let Some((sx, sz)) = grid.world_cell_to_array(world_cell_x, world_cell_z) {
+                    if let Some(edge) = canonical_portal_edge_for_array_cell(sx, sz, dir) {
+                        let seam = portal_seam_edges_for_edge(grid, edge);
+                        if !seam.is_empty() {
+                            for edge in seam {
+                                push_portal_edge_record(grid, edge, style, scratch);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
             push_portal_edge_line(grid, world_cell_x, world_cell_z, dir, style, scratch);
         }
     }
@@ -3472,14 +3486,13 @@ fn walk_portal_seams(
         {
             continue;
         }
-        let Some(edge) = portal_edge_for_node(grid, node) else {
-            continue;
-        };
         let mut style = PORTAL_SEAM_STYLE;
         if node.id == selected || hovered == Some(node.id) {
             style.thickness_px = 4.0;
         }
-        push_portal_edge_record(grid, edge, style, scratch);
+        for edge in portal_seam_edges_for_node(grid, node) {
+            push_portal_edge_record(grid, edge, style, scratch);
+        }
     }
 }
 
@@ -3539,6 +3552,36 @@ fn push_portal_edge_line(
         return;
     }
     push_screen_line(scratch, pa, pb, style);
+}
+
+fn canonical_portal_edge_for_array_cell(
+    sx: u16,
+    sz: u16,
+    dir: GridDirection,
+) -> Option<PortalEdge> {
+    match dir {
+        GridDirection::North => Some(PortalEdge {
+            x: sx,
+            z: sz,
+            direction: GridDirection::North,
+        }),
+        GridDirection::East => Some(PortalEdge {
+            x: sx,
+            z: sz,
+            direction: GridDirection::East,
+        }),
+        GridDirection::South => Some(PortalEdge {
+            x: sx,
+            z: sz.checked_sub(1)?,
+            direction: GridDirection::North,
+        }),
+        GridDirection::West => Some(PortalEdge {
+            x: sx.checked_sub(1)?,
+            z: sz,
+            direction: GridDirection::East,
+        }),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+    }
 }
 
 /// Hover and Selected outline styling. RGB plus screen-space line
