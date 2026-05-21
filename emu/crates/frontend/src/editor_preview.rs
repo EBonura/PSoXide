@@ -32,7 +32,9 @@ use psx_gpu::prim::TriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene as gte_scene;
 
-use psxed_project::portal_rooms::{plan_portal_rooms, PortalRoomConfig};
+use psxed_project::portal_rooms::{
+    plan_portal_rooms, portal_edge_for_node, PortalEdge, PortalRoomConfig,
+};
 use psxed_project::{
     spatial, Corner, GridDirection, GridSplit, GridUvTransform, NodeId, NodeKind, ProjectDocument,
     ResourceData, ResourceId, Scene, SceneNode, Transform3, WallCorner, WorldGrid,
@@ -287,6 +289,15 @@ pub fn build_phase1_frame(
     walk_entities(project, grid, hidden_scene_nodes, selected, &mut scratch);
     walk_light_gizmos(
         project,
+        grid,
+        hidden_scene_nodes,
+        selected,
+        hovered_entity_node,
+        &mut scratch,
+    );
+    walk_portal_seams(
+        project,
+        room_id,
         grid,
         hidden_scene_nodes,
         selected,
@@ -2878,7 +2889,9 @@ fn walk_entity_bounds(
     for b in bounds {
         if matches!(
             b.kind,
-            psxed_ui::EntityBoundKind::PointLight | psxed_ui::EntityBoundKind::ImageProp
+            psxed_ui::EntityBoundKind::PointLight
+                | psxed_ui::EntityBoundKind::ImageProp
+                | psxed_ui::EntityBoundKind::Portal
         ) {
             continue;
         }
@@ -2924,7 +2937,7 @@ fn entity_bound_style(
         psxed_ui::EntityBoundKind::SpawnPoint => (0x60, 0xE0, 0x80),
         psxed_ui::EntityBoundKind::PointLight => (0xFF, 0xD8, 0x70),
         psxed_ui::EntityBoundKind::Trigger => (0xC8, 0x80, 0xE0),
-        psxed_ui::EntityBoundKind::Portal => (0xFF, 0xB0, 0x60),
+        psxed_ui::EntityBoundKind::Portal => PORTAL_SEAM_STYLE.rgb,
         psxed_ui::EntityBoundKind::AudioSource => (0x70, 0xD8, 0xC0),
     };
     FaceOutlineStyle {
@@ -3189,7 +3202,7 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         // makes them read like ordinary markers.
         NodeKind::PointLight { .. } => None,
         NodeKind::Trigger { .. } => Some((0xC8, 0x80, 0xE0)),
-        NodeKind::Portal { .. } => Some((0xFF, 0xB0, 0x60)),
+        NodeKind::Portal { .. } => None,
         NodeKind::AudioSource { .. } => Some((0x70, 0xD8, 0xC0)),
         NodeKind::ModelRenderer { .. }
         | NodeKind::Animator { .. }
@@ -3351,6 +3364,19 @@ fn push_paint_preview(
                 push_face_outline(grid, face, FACE_OUTLINE_WALL_PAINT, scratch);
             }
         }
+        psxed_ui::PaintTargetPreview::PortalEdge {
+            world_cell_x,
+            world_cell_z,
+            dir,
+            valid,
+        } => {
+            let style = if valid {
+                PORTAL_SEAM_STYLE
+            } else {
+                PORTAL_SEAM_INVALID_STYLE
+            };
+            push_portal_edge_line(grid, world_cell_x, world_cell_z, dir, style, scratch);
+        }
     }
 }
 
@@ -3429,6 +3455,92 @@ fn push_ghost_wall_outline(
     }
 }
 
+fn walk_portal_seams(
+    project: &ProjectDocument,
+    room_id: NodeId,
+    grid: &WorldGrid,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+    hovered: Option<NodeId>,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    for node in scene.nodes() {
+        if !matches!(node.kind, NodeKind::Portal { .. })
+            || scene_node_hidden(scene, hidden_scene_nodes, node.id)
+            || !is_descendant_of_room(scene, node.id, room_id)
+        {
+            continue;
+        }
+        let Some(edge) = portal_edge_for_node(grid, node) else {
+            continue;
+        };
+        let mut style = PORTAL_SEAM_STYLE;
+        if node.id == selected || hovered == Some(node.id) {
+            style.thickness_px = 4.0;
+        }
+        push_portal_edge_record(grid, edge, style, scratch);
+    }
+}
+
+fn push_portal_edge_record(
+    grid: &WorldGrid,
+    edge: PortalEdge,
+    style: FaceOutlineStyle,
+    scratch: &mut PreviewScratch,
+) {
+    push_portal_edge_line(
+        grid,
+        grid.origin[0] + edge.x as i32,
+        grid.origin[1] + edge.z as i32,
+        edge.direction,
+        style,
+        scratch,
+    );
+}
+
+fn push_portal_edge_line(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+    style: FaceOutlineStyle,
+    scratch: &mut PreviewScratch,
+) {
+    let s = grid.sector_size;
+    let x0 = wcx * s;
+    let x1 = x0 + s;
+    let z0 = wcz * s;
+    let z1 = z0 + s;
+    let heights = grid.floor_heights_aligned_to_neighbors_for_world_cell(wcx, wcz, 0);
+    const LIFT: i32 = 24;
+    let (a, b) = match dir {
+        GridDirection::North => (
+            [x0, heights[Corner::NW.idx()] + LIFT, z1],
+            [x1, heights[Corner::NE.idx()] + LIFT, z1],
+        ),
+        GridDirection::East => (
+            [x1, heights[Corner::NE.idx()] + LIFT, z1],
+            [x1, heights[Corner::SE.idx()] + LIFT, z0],
+        ),
+        GridDirection::South => (
+            [x1, heights[Corner::SE.idx()] + LIFT, z0],
+            [x0, heights[Corner::SW.idx()] + LIFT, z0],
+        ),
+        GridDirection::West => (
+            [x0, heights[Corner::SW.idx()] + LIFT, z0],
+            [x0, heights[Corner::NW.idx()] + LIFT, z1],
+        ),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => return,
+    };
+    let pa = gte_scene::project_vertex(world_to_view(a));
+    let pb = gte_scene::project_vertex(world_to_view(b));
+    if pa.sz == 0 || pb.sz == 0 {
+        return;
+    }
+    push_screen_line(scratch, pa, pb, style);
+}
+
 /// Hover and Selected outline styling. RGB plus screen-space line
 /// thickness in pixels. Keep these light: they are editor affordances,
 /// not scene geometry, and thick strokes obscure PS1-scale surfaces.
@@ -3477,6 +3589,14 @@ const FACE_OUTLINE_FLOOR_PAINT: FaceOutlineStyle = FaceOutlineStyle {
 const FACE_OUTLINE_CEILING_PAINT: FaceOutlineStyle = FaceOutlineStyle {
     rgb: (0x80, 0xC8, 0xFF),
     thickness_px: EDITOR_PREVIEW_PAINT_STROKE_WIDTH,
+};
+const PORTAL_SEAM_STYLE: FaceOutlineStyle = FaceOutlineStyle {
+    rgb: (0xFF, 0x48, 0xD6),
+    thickness_px: 3.0,
+};
+const PORTAL_SEAM_INVALID_STYLE: FaceOutlineStyle = FaceOutlineStyle {
+    rgb: (0xFF, 0x40, 0x60),
+    thickness_px: 2.0,
 };
 const STREAMING_CHUNK_BOUNDARY: FaceOutlineStyle = FaceOutlineStyle {
     rgb: (0x60, 0xFF, 0xC4),
