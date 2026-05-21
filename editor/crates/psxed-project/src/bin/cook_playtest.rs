@@ -154,7 +154,7 @@ fn main() -> ExitCode {
                     .max_by_key(|chunk| chunk.static_lit_bytes)
                 {
                     println!(
-                        "[cook-playtest] Chunks: {}  Populated cells: {}  Triangle est: {}  Room bytes: {}  Visibility bytes: {}  Largest: room {} chunk {} {}x{} cells={} tris={} bytes={}",
+                        "[cook-playtest] Runtime rooms: {}  Populated cells: {}  Triangle est: {}  Room bytes: {}  Visibility bytes: {}  Largest: room {} roomlet {} {}x{} cells={} tris={} bytes={}",
                         package.chunks.len(),
                         total_populated_cells,
                         total_triangles,

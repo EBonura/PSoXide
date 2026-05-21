@@ -32,8 +32,7 @@ use psx_gpu::prim::TriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene as gte_scene;
 
-use psxed_project::playtest::playtest_streaming_chunk_config;
-use psxed_project::streaming::plan_generated_chunks;
+use psxed_project::portal_rooms::{plan_portal_rooms, PortalRoomConfig};
 use psxed_project::{
     spatial, Corner, GridDirection, GridSplit, GridUvTransform, NodeId, NodeKind, ProjectDocument,
     ResourceData, ResourceId, Scene, SceneNode, Transform3, WallCorner, WorldGrid,
@@ -3571,21 +3570,22 @@ fn push_streaming_chunk_boundaries(
     grid: &WorldGrid,
     scratch: &mut PreviewScratch,
 ) {
-    let streaming = project
-        .active_scene()
-        .world_streaming_for_node(room_id)
-        .unwrap_or_default();
-    let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config(streaming));
-    if plan.chunk_count() <= 1 {
+    let plan = plan_portal_rooms(
+        project.active_scene(),
+        room_id,
+        grid,
+        PortalRoomConfig::default(),
+    );
+    if plan.room_count() <= 1 {
         return;
     }
     let s = grid.sector_size;
     let y = 10;
-    for chunk in plan.chunks {
-        let x0 = chunk.world_origin[0] * s;
-        let z0 = chunk.world_origin[1] * s;
-        let x1 = x0 + chunk.size[0] as i32 * s;
-        let z1 = z0 + chunk.size[1] as i32 * s;
+    for room in plan.rooms {
+        let x0 = room.world_origin[0] * s;
+        let z0 = room.world_origin[1] * s;
+        let x1 = x0 + room.size[0] as i32 * s;
+        let z1 = z0 + room.size[1] as i32 * s;
         let projected: [psx_gte::scene::Projected; 4] = [
             gte_scene::project_vertex(world_to_view([x0, y, z1])),
             gte_scene::project_vertex(world_to_view([x1, y, z1])),
