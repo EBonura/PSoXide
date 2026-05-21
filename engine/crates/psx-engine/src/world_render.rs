@@ -1460,21 +1460,29 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
             continue;
         };
         stats.cells_considered = stats.cells_considered.saturating_add(1);
-        if !cell_visible_to_camera(
-            camera,
-            options,
-            cell.x,
-            cell.z,
-            sector_size.max(1),
-            cell.min_y,
-            cell.max_y,
-            screen_margin,
-        ) {
+        let cell_preculled = cell.camera_depth == GridVisibleCell::CAMERA_DEPTH_PRECULLED;
+        if !cell_preculled
+            && !cell_visible_to_camera(
+                camera,
+                options,
+                cell.x,
+                cell.z,
+                sector_size.max(1),
+                cell.min_y,
+                cell.max_y,
+                screen_margin,
+            )
+        {
             stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
             continue;
         }
         stats.cells_drawn = stats.cells_drawn.saturating_add(1);
-        let cell_options = tile_depth_options(options, camera, *cell, sector_size);
+        let cell_options =
+            if cell_preculled || cell.camera_depth == GridVisibleCell::CAMERA_DEPTH_UNKNOWN {
+                tile_depth_options(options, camera, *cell, sector_size)
+            } else {
+                tile_depth_options_from_depth(options, cell.camera_depth as i32)
+            };
         stats.surfaces_considered =
             stats
                 .surfaces_considered

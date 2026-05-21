@@ -301,6 +301,8 @@ impl App {
                 } else {
                     due_visual_intervals =
                         due_visual_intervals.saturating_add(tick_visual_intervals);
+                    next_simulation_tick = next_simulation_tick.wrapping_add(1);
+                    break;
                 }
                 next_simulation_tick = next_simulation_tick.wrapping_add(1);
             }
