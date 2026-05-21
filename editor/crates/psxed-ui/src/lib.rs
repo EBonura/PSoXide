@@ -27,8 +27,8 @@ use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
 use psxed_project::portal_rooms::{
-    extract_portal_room_grid, plan_portal_rooms, portal_edge_for_node, PortalEdge,
-    PortalRoomConfig, DEFAULT_PORTAL_ROOM_MAX_SECTORS,
+    extract_portal_room_grid, plan_portal_rooms, portal_edge_for_node, portal_seam_edges_for_edge,
+    portal_seam_edges_for_node, PortalEdge, PortalRoomConfig, DEFAULT_PORTAL_ROOM_MAX_SECTORS,
 };
 use psxed_project::streaming::{collect_scene_resource_use, SceneResourceUse};
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
@@ -4037,7 +4037,7 @@ impl EditorWorkspace {
         // entity bounds occlude the grid hover in Select mode. Click
         // and drag already give entity bounds priority; the hover
         // affordance should match that hit-testing model.
-        self.hovered_primitive = if hover_entity_hit.is_some() {
+        self.hovered_primitive = if self.portal_place_active() || hover_entity_hit.is_some() {
             None
         } else {
             face_hit.map(|(face, hit)| self.pick_primitive_from_hit(face, hit))
@@ -5239,29 +5239,45 @@ impl EditorWorkspace {
         let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
             return;
         };
-        let valid = portal_edge_valid_for_array_cell(grid, sx, sz, self.portal_place_direction);
-        let Some((local_a, local_b)) =
-            portal_edge_editor_segment_for_array(grid, sx, sz, self.portal_place_direction)
-        else {
-            return;
-        };
-        let a =
-            transform.world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]);
-        let b =
-            transform.world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]);
+        let dir = self.portal_place_direction;
+        let valid = portal_edge_valid_for_array_cell(grid, sx, sz, dir);
         let color = if valid {
             PORTAL_PINK
         } else {
             Color32::from_rgb(255, 64, 96)
         };
-        painter.line_segment(
-            [a, b],
-            Stroke::new(
-                8.0,
-                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 48),
-            ),
+        let halo = Stroke::new(
+            8.0,
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 48),
         );
-        painter.line_segment([a, b], Stroke::new(3.0, color));
+        let stroke = Stroke::new(3.0, color);
+        if valid {
+            if let Some(edge) = canonical_portal_edge_for_array_cell(sx, sz, dir) {
+                let seam = portal_seam_edges_for_edge(grid, edge);
+                if !seam.is_empty() {
+                    for edge in seam {
+                        draw_portal_edge_segment_2d(
+                            painter,
+                            transform,
+                            grid,
+                            room_center,
+                            edge,
+                            halo,
+                            stroke,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some((local_a, local_b)) = portal_edge_editor_segment_for_array(grid, sx, sz, dir) {
+            let a = transform
+                .world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]);
+            let b = transform
+                .world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]);
+            painter.line_segment([a, b], halo);
+            painter.line_segment([a, b], stroke);
+        }
     }
 
     fn paint_preview_world_cell(
@@ -6984,7 +7000,11 @@ impl EditorWorkspace {
             return;
         }
         self.last_paint_stamp = Some(stamp);
-        self.selected_sector = Some((sx, sz));
+        if portal_tool {
+            self.clear_sector_selection();
+        } else {
+            self.selected_sector = Some((sx, sz));
+        }
         let tool = self.active_tool;
         self.run_paint_action(tool, room_id, sx, sz, face_hit.map(|(f, _)| f), hit_world)
     }
@@ -11700,6 +11720,9 @@ impl EditorWorkspace {
                     if portal_clicked {
                         self.active_tool = ViewTool::Place;
                         self.place_kind = PlaceKind::Portal;
+                        self.clear_sector_selection();
+                        self.clear_primitive_selection_state();
+                        self.hovered_primitive = None;
                     }
                     ui.separator();
                     if matches!(self.active_tool, ViewTool::Select) {
@@ -13520,9 +13543,13 @@ impl EditorWorkspace {
                     self.clear_sector_selection();
                     return;
                 };
-                self.selected_sector = Some((x, z));
-                self.selected_sectors.clear();
-                self.selected_sectors.insert((room_id, x, z));
+                if self.portal_place_active() {
+                    self.clear_sector_selection();
+                } else {
+                    self.selected_sector = Some((x, z));
+                    self.selected_sectors.clear();
+                    self.selected_sectors.insert((room_id, x, z));
+                }
                 self.apply_paint(tool, room_id, x, z, world);
             }
         }
@@ -23857,29 +23884,59 @@ fn draw_portal_seam_2d(
     let NodeKind::Room { grid } = &room.kind else {
         return;
     };
-    let Some(edge) = portal_edge_for_node(grid, node) else {
+    let seam = portal_seam_edges_for_node(grid, node);
+    if seam.is_empty() {
         return;
-    };
-    let Some((local_a, local_b)) = portal_edge_editor_segment(grid, edge) else {
-        return;
-    };
+    }
     let room_center = node_world(room);
-    let a = transform.world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]);
-    let b = transform.world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]);
     let halo = Stroke::new(
         if selected { 9.0 } else { 7.0 },
         Color32::from_rgba_unmultiplied(PORTAL_PINK.r(), PORTAL_PINK.g(), PORTAL_PINK.b(), 54),
     );
     let stroke = Stroke::new(if selected { 4.0 } else { 3.0 }, PORTAL_PINK);
-    painter.line_segment([a, b], halo);
-    painter.line_segment([a, b], stroke);
-    let mid = Pos2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
-    painter.circle_filled(mid, 4.5, PORTAL_PINK);
-    painter.circle_stroke(mid, 5.5, Stroke::new(1.0, Color32::from_rgb(28, 8, 24)));
+    for edge in seam {
+        draw_portal_edge_segment_2d(painter, transform, grid, room_center, edge, halo, stroke);
+    }
+    if let Some(edge) = portal_edge_for_node(grid, node) {
+        if let Some((a, b)) = portal_edge_screen_segment(transform, grid, room_center, edge) {
+            let mid = Pos2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            painter.circle_filled(mid, 4.5, PORTAL_PINK);
+            painter.circle_stroke(mid, 5.5, Stroke::new(1.0, Color32::from_rgb(28, 8, 24)));
+        }
+    }
 }
 
 fn portal_edge_editor_segment(grid: &WorldGrid, edge: PortalEdge) -> Option<([f32; 2], [f32; 2])> {
     portal_edge_editor_segment_for_array(grid, edge.x, edge.z, edge.direction)
+}
+
+fn draw_portal_edge_segment_2d(
+    painter: &egui::Painter,
+    transform: ViewportTransform,
+    grid: &WorldGrid,
+    room_center: [f32; 2],
+    edge: PortalEdge,
+    halo: Stroke,
+    stroke: Stroke,
+) {
+    let Some((a, b)) = portal_edge_screen_segment(transform, grid, room_center, edge) else {
+        return;
+    };
+    painter.line_segment([a, b], halo);
+    painter.line_segment([a, b], stroke);
+}
+
+fn portal_edge_screen_segment(
+    transform: ViewportTransform,
+    grid: &WorldGrid,
+    room_center: [f32; 2],
+    edge: PortalEdge,
+) -> Option<(Pos2, Pos2)> {
+    let (local_a, local_b) = portal_edge_editor_segment(grid, edge)?;
+    Some((
+        transform.world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]),
+        transform.world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]),
+    ))
 }
 
 fn portal_edge_editor_segment_for_array(
@@ -25198,6 +25255,36 @@ fn portal_edge_valid_for_array_cell(
         && nz < grid.depth
         && grid.sector(sx, sz).is_some_and(GridSector::has_geometry)
         && grid.sector(nx, nz).is_some_and(GridSector::has_geometry)
+}
+
+fn canonical_portal_edge_for_array_cell(
+    sx: u16,
+    sz: u16,
+    dir: GridDirection,
+) -> Option<PortalEdge> {
+    match dir {
+        GridDirection::North => Some(PortalEdge {
+            x: sx,
+            z: sz,
+            direction: GridDirection::North,
+        }),
+        GridDirection::East => Some(PortalEdge {
+            x: sx,
+            z: sz,
+            direction: GridDirection::East,
+        }),
+        GridDirection::South => Some(PortalEdge {
+            x: sx,
+            z: sz.checked_sub(1)?,
+            direction: GridDirection::North,
+        }),
+        GridDirection::West => Some(PortalEdge {
+            x: sx.checked_sub(1)?,
+            z: sz,
+            direction: GridDirection::East,
+        }),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+    }
 }
 
 fn portal_edge_neighbour(sx: u16, sz: u16, dir: GridDirection) -> Option<(u16, u16)> {
