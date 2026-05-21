@@ -41,13 +41,14 @@ use psx_level::{
 };
 use psxed_format::world as psxw;
 
-use crate::streaming::{plan_generated_chunks, StreamingChunkConfig};
+use crate::portal_rooms::{extract_portal_room_grid, plan_portal_rooms, PortalRoomConfig};
+use crate::streaming::StreamingChunkConfig;
 use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
 use crate::{
-    spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, GridDirection,
-    NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
+    spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
+    NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
     WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
@@ -95,14 +96,15 @@ fn clamp_atmosphere_wind_speed_q4(value: i32) -> i16 {
     value.clamp(ATMOSPHERE_WIND_SPEED_MIN_Q4, ATMOSPHERE_WIND_SPEED_MAX_Q4) as i16
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct AuthoredRoomChunk {
     room_index: u16,
     authored_room: u32,
     chunk_index: u16,
-    array_origin: [u16; 2],
     world_origin: [i32; 2],
     size: [u16; 2],
+    cells: Vec<[u16; 2]>,
+    neighbours: [Option<u16>; 4],
     triangles: usize,
     psxw_bytes: usize,
     static_lit_bytes: usize,
@@ -236,12 +238,18 @@ pub fn build_package(
             .world_streaming_for_node(room_node.id)
             .unwrap_or_default()
             .normalized();
-        let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config(streaming));
-        let chunk_count = plan.chunk_count();
-        for chunk in plan.chunks {
-            let Some(chunk_grid) = grid_rect(grid, chunk.array_origin, chunk.size) else {
-                continue;
-            };
+        let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
+        if plan.over_budget_count() > 0 {
+            report.warn(format!(
+                "Room '{}' produced {} portal room(s) still over budget",
+                room_node.name,
+                plan.over_budget_count()
+            ));
+        }
+        let roomlet_count = plan.room_count();
+        let room_index_base = rooms.len();
+        for portal_room in plan.rooms {
+            let chunk_grid = extract_portal_room_grid(grid, &portal_room);
             if chunk_grid.populated_sector_count() == 0 {
                 continue;
             }
@@ -259,13 +267,18 @@ pub fn build_package(
                 .push(AuthoredRoomChunk {
                     room_index,
                     authored_room: room_node.id.raw() as u32,
-                    chunk_index: u16::try_from(chunk.index).unwrap_or(u16::MAX),
-                    array_origin: chunk.array_origin,
-                    world_origin: chunk.world_origin,
-                    size: chunk.size,
-                    triangles: chunk.budget.triangles,
-                    psxw_bytes: chunk.budget.psxw_bytes,
-                    static_lit_bytes: chunk.budget.psxw_static_lit_bytes,
+                    chunk_index: u16::try_from(portal_room.index).unwrap_or(u16::MAX),
+                    world_origin: portal_room.world_origin,
+                    size: portal_room.size,
+                    cells: portal_room.cells.clone(),
+                    neighbours: portal_room.neighbours.map(|neighbour| {
+                        neighbour.and_then(|index| {
+                            u16::try_from(room_index_base.saturating_add(index)).ok()
+                        })
+                    }),
+                    triangles: portal_room.budget.triangles,
+                    psxw_bytes: portal_room.budget.psxw_bytes,
+                    static_lit_bytes: portal_room.budget.psxw_static_lit_bytes,
                     populated_cells: u16::try_from(chunk_grid.populated_sector_count())
                         .unwrap_or(u16::MAX),
                 });
@@ -277,7 +290,7 @@ pub fn build_package(
                 kind: PlaytestAssetKind::RoomWorld,
                 bytes: Vec::new(),
                 filename: format!("room_{:03}.psxw", room_index),
-                source_label: chunk_room_name(&room_node.name, chunk_count, chunk.index),
+                source_label: runtime_room_name(&room_node.name, roomlet_count, portal_room.index),
             });
 
             // Walk material slots in slot order. The cooker emits
@@ -454,7 +467,7 @@ pub fn build_package(
             let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
 
             rooms.push(PlaytestRoom {
-                name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
+                name: runtime_room_name(&room_node.name, roomlet_count, portal_room.index),
                 world_asset_index,
                 origin_x: chunk_grid.origin[0],
                 origin_z: chunk_grid.origin[1],
@@ -541,7 +554,7 @@ pub fn build_package(
             room_bake_inputs.push(CookedRoomBakeInput {
                 room_index,
                 world_asset_index,
-                world_origin: chunk.world_origin,
+                world_origin: portal_room.world_origin,
                 cooked,
             });
         }
@@ -4131,90 +4144,11 @@ fn has_full_height_solid_wall(
     })
 }
 
-fn grid_rect(grid: &WorldGrid, origin: [u16; 2], size: [u16; 2]) -> Option<WorldGrid> {
-    if size[0] == 0 || size[1] == 0 {
-        return None;
-    }
-    let end_x = origin[0].checked_add(size[0])?;
-    let end_z = origin[1].checked_add(size[1])?;
-    if end_x > grid.width || end_z > grid.depth {
-        return None;
-    }
-
-    let mut out = WorldGrid::empty(size[0], size[1], grid.sector_size);
-    out.origin = [
-        grid.origin[0] + origin[0] as i32,
-        grid.origin[1] + origin[1] as i32,
-    ];
-    out.ambient_color = grid.ambient_color;
-    out.fog_enabled = grid.fog_enabled;
-    out.fog_color = grid.fog_color;
-    out.fog_near = grid.fog_near;
-    out.fog_far = grid.fog_far;
-
-    for x in 0..size[0] {
-        for z in 0..size[1] {
-            let src = grid.sector_index(origin[0] + x, origin[1] + z)?;
-            let dst = out.sector_index(x, z)?;
-            out.sectors[dst] = grid.sectors[src].clone();
-        }
-    }
-    append_chunk_boundary_floor_transition_walls(grid, &mut out, origin, size);
-    Some(out)
-}
-
-fn append_chunk_boundary_floor_transition_walls(
-    source: &WorldGrid,
-    chunk: &mut WorldGrid,
-    origin: [u16; 2],
-    size: [u16; 2],
-) {
-    for x in 0..size[0] {
-        append_boundary_floor_transition_wall(
-            source,
-            chunk,
-            origin,
-            x,
-            size[1] - 1,
-            GridDirection::North,
-        );
-    }
-    for z in 0..size[1] {
-        append_boundary_floor_transition_wall(
-            source,
-            chunk,
-            origin,
-            size[0] - 1,
-            z,
-            GridDirection::East,
-        );
-    }
-}
-
-fn append_boundary_floor_transition_wall(
-    source: &WorldGrid,
-    chunk: &mut WorldGrid,
-    origin: [u16; 2],
-    local_x: u16,
-    local_z: u16,
-    direction: GridDirection,
-) {
-    let source_x = origin[0].saturating_add(local_x);
-    let source_z = origin[1].saturating_add(local_z);
-    let Some(wall) = source.floor_transition_wall_for_edge(source_x, source_z, direction) else {
-        return;
-    };
-    let Some(sector) = chunk.ensure_sector(local_x, local_z) else {
-        return;
-    };
-    sector.walls.get_mut(direction).push(wall);
-}
-
-fn chunk_room_name(room_name: &str, chunk_count: usize, chunk_index: usize) -> String {
-    if chunk_count <= 1 {
+fn runtime_room_name(room_name: &str, room_count: usize, room_index: usize) -> String {
+    if room_count <= 1 {
         room_name.to_string()
     } else {
-        format!("{room_name} / Chunk {chunk_index}")
+        format!("{room_name} / Roomlet {room_index}")
     }
 }
 
@@ -4241,11 +4175,10 @@ fn chunk_for_node<'a>(
     let wcz = world_cells[1].floor() as i32;
     let (sx, sz) = grid.world_cell_to_array(wcx, wcz)?;
     chunks.iter().find(|chunk| {
-        let x0 = chunk.array_origin[0];
-        let z0 = chunk.array_origin[1];
-        let x1 = x0.saturating_add(chunk.size[0]);
-        let z1 = z0.saturating_add(chunk.size[1]);
-        sx >= x0 && sx < x1 && sz >= z0 && sz < z1
+        chunk
+            .cells
+            .iter()
+            .any(|cell| cell[0] == sx && cell[1] == sz)
     })
 }
 
@@ -4285,7 +4218,7 @@ fn build_playtest_chunks(
                 origin_z: chunk.world_origin[1],
                 width: chunk.size[0],
                 depth: chunk.size[1],
-                neighbours: chunk_neighbours(chunk, node_chunks),
+                neighbours: chunk.neighbours,
                 triangles: chunk.triangles,
                 psxw_bytes: chunk.psxw_bytes,
                 static_lit_bytes: chunk.static_lit_bytes,
@@ -4296,57 +4229,6 @@ fn build_playtest_chunks(
     }
 
     chunks
-}
-
-fn chunk_neighbours(chunk: &AuthoredRoomChunk, chunks: &[AuthoredRoomChunk]) -> [Option<u16>; 4] {
-    let mut neighbours = [None; 4];
-    let mut scores = [0u16; 4];
-    for candidate in chunks {
-        if candidate.room_index == chunk.room_index {
-            continue;
-        }
-        if let Some((direction, score)) = chunk_cardinal_touch_score(chunk, candidate) {
-            if score > scores[direction] {
-                neighbours[direction] = Some(candidate.room_index);
-                scores[direction] = score;
-            }
-        }
-    }
-    neighbours
-}
-
-fn chunk_cardinal_touch_score(
-    a: &AuthoredRoomChunk,
-    b: &AuthoredRoomChunk,
-) -> Option<(usize, u16)> {
-    let ax0 = a.array_origin[0];
-    let az0 = a.array_origin[1];
-    let ax1 = ax0.saturating_add(a.size[0]);
-    let az1 = az0.saturating_add(a.size[1]);
-    let bx0 = b.array_origin[0];
-    let bz0 = b.array_origin[1];
-    let bx1 = bx0.saturating_add(b.size[0]);
-    let bz1 = bz0.saturating_add(b.size[1]);
-    let x_overlap = overlap_len(ax0, ax1, bx0, bx1);
-    let z_overlap = overlap_len(az0, az1, bz0, bz1);
-
-    if x_overlap > 0 && az0 == bz1 {
-        return Some((0, x_overlap));
-    }
-    if z_overlap > 0 && ax1 == bx0 {
-        return Some((1, z_overlap));
-    }
-    if x_overlap > 0 && az1 == bz0 {
-        return Some((2, x_overlap));
-    }
-    if z_overlap > 0 && ax0 == bx1 {
-        return Some((3, z_overlap));
-    }
-    None
-}
-
-fn overlap_len(a0: u16, a1: u16, b0: u16, b1: u16) -> u16 {
-    a1.min(b1).saturating_sub(a0.max(b0))
 }
 
 /// Convert a node's editor-space transform to its generated

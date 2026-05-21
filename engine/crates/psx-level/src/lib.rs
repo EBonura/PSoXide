@@ -465,13 +465,13 @@ pub struct LevelRoomRecord {
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
     pub draw_distance: i32,
-    /// Runtime active-chunk radius in world sectors.
+    /// Runtime room activation radius in world sectors.
     pub chunk_activation_radius_sectors: i32,
     /// Cooked PVS traversal radius in room cells.
     pub visibility_radius: u16,
-    /// Maximum generated chunks kept resident for this world.
+    /// Maximum cooked room payloads kept resident for this world.
     pub resident_chunk_limit: u8,
-    /// Maximum generated chunks selected for drawing/collision for this world.
+    /// Maximum cooked rooms selected for drawing/collision for this world.
     pub visible_chunk_limit: u8,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.
@@ -503,19 +503,19 @@ pub struct LevelRoomRecord {
     pub flags: u16,
 }
 
-/// Cardinal neighbours for one cooked room chunk.
+/// Cardinal open-portal neighbours for one cooked room.
 ///
 /// Missing neighbours are encoded as `RoomIndex(u16::MAX)` so the
 /// record stays plain data in generated manifests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelChunkNeighbours {
-    /// Chunk touching the north edge, if any.
+    /// Room reachable through the north edge, if any.
     pub north: RoomIndex,
-    /// Chunk touching the east edge, if any.
+    /// Room reachable through the east edge, if any.
     pub east: RoomIndex,
-    /// Chunk touching the south edge, if any.
+    /// Room reachable through the south edge, if any.
     pub south: RoomIndex,
-    /// Chunk touching the west edge, if any.
+    /// Room reachable through the west edge, if any.
     pub west: RoomIndex,
 }
 
@@ -532,12 +532,12 @@ impl LevelChunkNeighbours {
     };
 }
 
-/// Runtime chunk metadata emitted by the playtest cooker.
+/// Runtime room metadata emitted by the playtest cooker.
 ///
-/// Authored editor Rooms may be arbitrarily large; the cooker splits
-/// them into these runtime chunks. This table lets the engine stream
-/// and render by cooked chunk identity instead of deriving active
-/// neighbours from broad room bounds.
+/// Authored editor Rooms may be contiguous worlds; the cooker derives
+/// small wall/portal-delimited runtime rooms from them. This table lets
+/// the engine stream and render by explicit portal connectivity instead
+/// of deriving active neighbours from broad room bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelChunkRecord {
     /// Owning room/chunk index in the generated `ROOMS` table.
@@ -545,17 +545,17 @@ pub struct LevelChunkRecord {
     /// Stable authored Room node id, truncated to 32 bits for a
     /// compact runtime diagnostic key.
     pub authored_room: u32,
-    /// Stable chunk order inside the authored Room's cook plan.
+    /// Stable runtime-room order inside the authored Room's cook plan.
     pub chunk_index: u16,
-    /// Chunk origin X in authored grid sectors.
+    /// Runtime room origin X in authored grid sectors.
     pub origin_x: i32,
-    /// Chunk origin Z in authored grid sectors.
+    /// Runtime room origin Z in authored grid sectors.
     pub origin_z: i32,
-    /// Chunk width in sectors.
+    /// Runtime room width in sectors.
     pub width: u16,
-    /// Chunk depth in sectors.
+    /// Runtime room depth in sectors.
     pub depth: u16,
-    /// Cardinal chunk links inside the same authored Room.
+    /// Cardinal portal links inside the same authored Room.
     pub neighbours: LevelChunkNeighbours,
     /// Reserved.
     pub flags: u16,
