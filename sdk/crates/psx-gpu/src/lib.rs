@@ -214,6 +214,19 @@ pub fn draw_tri_flat_blended(verts: [(i16, i16); 3], r: u8, g: u8, b: u8, blend_
     write_gp0(pack_vertex(verts[2].0, verts[2].1));
 }
 
+/// Draw a semi-transparent flat-shaded triangle using the currently
+/// configured GPU draw mode.
+///
+/// Use this after applying a shared [`BlendMode`] once for a batch of
+/// translucent flat triangles.
+pub fn draw_tri_flat_current_blend(verts: [(i16, i16); 3], r: u8, g: u8, b: u8) {
+    wait_cmd_ready();
+    write_gp0(gp0::polygon_opcode(false, false, false, true, false) | pack_color(r, g, b));
+    write_gp0(pack_vertex(verts[0].0, verts[0].1));
+    write_gp0(pack_vertex(verts[1].0, verts[1].1));
+    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+}
+
 /// Draw a Gouraud-shaded triangle. `colors[i]` is the color at `verts[i]`;
 /// the GPU interpolates across the triangle.
 pub fn draw_tri_gouraud(verts: [(i16, i16); 3], colors: [(u8, u8, u8); 3]) {

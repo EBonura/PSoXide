@@ -503,6 +503,11 @@ impl<'a> RuntimeRoom<'a> {
         self.inner.sector_size()
     }
 
+    /// Number of wall records in the room.
+    pub fn wall_count(&self) -> u16 {
+        self.inner.wall_count()
+    }
+
     /// Sector by `(x, z)` cell index, or `None` for empty cells
     /// or out-of-range coords.
     pub fn sector(&self, x: u16, z: u16) -> Option<psx_asset::WorldSector> {
@@ -655,6 +660,11 @@ impl<'a> CompactCollisionRoom<'a> {
     /// Engine units per sector.
     pub const fn sector_size(self) -> i32 {
         self.sector_size
+    }
+
+    /// Number of wall records in the compact collision payload.
+    pub const fn wall_count(self) -> u16 {
+        self.wall_count
     }
 
     /// Ambient room RGB used for actor lighting while this chunk is active.
@@ -924,6 +934,14 @@ impl<'a> RuntimeCollisionRoom<'a> {
         }
     }
 
+    /// Number of wall records in the collision room.
+    pub fn wall_count(self) -> u16 {
+        match self {
+            Self::Runtime(room) => room.wall_count(),
+            Self::Compact(room) => room.wall_count(),
+        }
+    }
+
     /// Ambient room RGB used for actor lighting while this room is active.
     pub fn ambient_color(self) -> [u8; 3] {
         match self {
@@ -1071,6 +1089,14 @@ impl<'a, 'b> RoomCollision<'a, 'b> {
         match self {
             Self::Runtime(room) => room.sector_size(),
             Self::Compact(room) => room.sector_size(),
+        }
+    }
+
+    /// Number of wall records in the collision room.
+    pub fn wall_count(self) -> u16 {
+        match self {
+            Self::Runtime(room) => room.wall_count(),
+            Self::Compact(room) => room.wall_count(),
         }
     }
 

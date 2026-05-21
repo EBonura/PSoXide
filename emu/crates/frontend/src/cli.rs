@@ -55,8 +55,11 @@ const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (telemetry::stage::MODEL_INSTANCES, "models"),
     (telemetry::stage::PLAYER, "player"),
     (telemetry::stage::EQUIPMENT, "equipment"),
+    (telemetry::stage::DEBUG_COUNTERS, "debug counters"),
     (telemetry::stage::WORLD_FLUSH, "flush/sort"),
+    (telemetry::stage::ATMOSPHERE, "atmosphere"),
     (telemetry::stage::OT_SUBMIT, "ot submit"),
+    (telemetry::stage::RENDER_OVERLAYS, "overlays"),
 ];
 
 /// Top-level argument parser. Passed to `clap::Parser::parse()`

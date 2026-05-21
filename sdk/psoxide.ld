@@ -103,6 +103,8 @@ SECTIONS {
     . = ALIGN(4);
     __heap_start = .;
     __heap_end   = STACK_INIT - 0x100;   /* 256-byte guard before SP */
+    ASSERT(__heap_start <= __heap_end, "PSoXide RAM overflow: BSS overlaps the stack guard")
+    ASSERT(__heap_end - __heap_start >= 64K, "PSoXide RAM overflow: less than 64 KiB remains for heap/stack margin")
 
     /* Discard MIPS ABI glue not needed on bare metal. */
     /DISCARD/ : {

@@ -190,7 +190,7 @@ impl App {
     /// ```
     pub fn run<S: Scene>(config: Config, scene: &mut S) -> ! {
         gpu::init(config.video_mode, config.resolution);
-        let clock = EngineClock::new(config.video_hz());
+        let mut clock = EngineClock::new(config.video_hz());
         let fb = FrameBuffer::new(config.screen_w, config.screen_h);
         gpu::set_draw_area(
             0,
@@ -211,6 +211,7 @@ impl App {
         };
 
         scene.init(&mut ctx);
+        clock.reset();
 
         let visual_interval = config.visual_pacing.interval_vblanks();
         if visual_interval <= 1 {
@@ -268,48 +269,33 @@ impl App {
         visual_interval: u16,
     ) -> ! {
         let mut pacer = VisualPacer::new(visual_interval);
-        let mut next_simulation_tick = 0u32;
 
         loop {
             let elapsed_vblanks = clock.elapsed_vblanks();
-            if next_simulation_tick > elapsed_vblanks {
+            if elapsed_vblanks < pacer.next_visual_tick {
                 clock.wait_next_vblank();
                 continue;
             }
 
-            let mut due_visual_intervals = 0u16;
-            while next_simulation_tick <= elapsed_vblanks {
-                telemetry::frame_begin(next_simulation_tick);
-                ctx.simulation_tick = next_simulation_tick;
-                ctx.time = EngineTime::fixed_simulation_tick(
-                    ctx.frame,
-                    next_simulation_tick,
-                    config.video_hz(),
-                );
-                ctx.missed_visual_intervals = 0;
-                emit_sim_tick_counters(visual_interval);
-                ctx.pad_prev = ctx.pad;
-                ctx.pad = poll_port1();
-
-                telemetry::stage_begin(telemetry::stage::UPDATE);
-                scene.update(&mut ctx);
-                telemetry::stage_end(telemetry::stage::UPDATE);
-
-                let tick_visual_intervals = pacer.mark_due_intervals(next_simulation_tick);
-                if tick_visual_intervals == 0 {
-                    telemetry::counter(telemetry::counter::VISUAL_SKIPPED_VBLANKS, 1);
-                } else {
-                    due_visual_intervals =
-                        due_visual_intervals.saturating_add(tick_visual_intervals);
-                }
-                next_simulation_tick = next_simulation_tick.wrapping_add(1);
-            }
-
+            let due_visual_intervals = pacer.mark_due_intervals(elapsed_vblanks);
             if due_visual_intervals == 0 {
                 continue;
             }
-
             ctx.missed_visual_intervals = due_visual_intervals.saturating_sub(1);
+            telemetry::frame_begin(elapsed_vblanks);
+            ctx.simulation_tick = elapsed_vblanks;
+            ctx.time = clock.begin_frame(ctx.frame, elapsed_vblanks);
+            emit_sim_tick_counters(visual_interval);
+            telemetry::counter(
+                telemetry::counter::VISUAL_SKIPPED_VBLANKS,
+                visual_interval.saturating_sub(1) as u32,
+            );
+            ctx.pad_prev = ctx.pad;
+            ctx.pad = poll_port1();
+
+            telemetry::stage_begin(telemetry::stage::UPDATE);
+            scene.update(&mut ctx);
+            telemetry::stage_end(telemetry::stage::UPDATE);
 
             telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
             ctx.fb.clear(
