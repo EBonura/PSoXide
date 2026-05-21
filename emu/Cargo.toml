@@ -60,3 +60,34 @@ pollster    = "0.3"
 cpal        = "0.15"
 gilrs       = "0.11"
 rfd         = "0.15"
+
+# The live frontend is often launched with `cargo run -p frontend`
+# while iterating on editor/gameplay work. Keep dev builds debuggable,
+# but avoid a fully unoptimized emulator shell.
+[profile.dev]
+opt-level = 1
+
+# Release is the path used by `make run`; thin LTO lets the frontend
+# inline across the emulator/renderer crates without the full build-time
+# cost of fat LTO.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# The emulator and renderer hot path still need full optimization in
+# dev builds so live playtest does not spend seconds retiring guest
+# instructions between VBlanks.
+[profile.dev.package.emulator-core]
+opt-level = 3
+
+[profile.dev.package.frontend]
+opt-level = 3
+
+[profile.dev.package.psx-gte]
+opt-level = 3
+
+[profile.dev.package.psx-gte-core]
+opt-level = 3
+
+[profile.dev.package.psx-gpu-render]
+opt-level = 3

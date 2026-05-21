@@ -675,7 +675,7 @@ impl Bus {
         // doesn't touch timers anymore; this is the only path that
         // matters for IRQ visibility. Mirrors Redux's
         // `Counters::update` call at the top of `branchTest`.
-        self.service_timers();
+        self.service_timers_for_branch_test();
         self.drain_scheduler_events();
         let cdrom_irq_pending =
             self.irq.stat() & self.irq.mask() & (1 << (IrqSource::Cdrom as u32)) != 0;
@@ -721,6 +721,10 @@ impl Bus {
     fn drain_scheduler_events_inner(&mut self, include_cdr_dma: bool, include_sio: bool) {
         use crate::scheduler::EventSlot;
         let now = self.cycles;
+        if !self.scheduler.has_due_inclusive(now) {
+            return;
+        }
+
         let mut dma_edge = false;
         // NOTE: `service_timers()` is intentionally NOT called here.
         // This function runs from the per-instruction `Bus::tick`
@@ -934,6 +938,12 @@ impl Bus {
         }
         if fired & 4 != 0 {
             self.irq.raise(IrqSource::Timer2);
+        }
+    }
+
+    fn service_timers_for_branch_test(&mut self) {
+        if self.timers.irq_armed() {
+            self.service_timers();
         }
     }
 
@@ -1730,7 +1740,7 @@ impl Bus {
         // counter reads zero from the io[] echo buffer and the loop
         // never sees the tick advance.
         if Timers::contains(phys) {
-            self.service_timers();
+            self.service_timers_for_branch_test();
             return self.timers.read32(phys) as u16;
         }
         if Dma::contains(phys) {

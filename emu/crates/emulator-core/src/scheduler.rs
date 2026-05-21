@@ -189,6 +189,14 @@ impl Scheduler {
         self.active
     }
 
+    /// `true` when at least one scheduled slot is due at or before
+    /// `now`. Used by the bus branch-test hot path to skip the slot
+    /// walk entirely in the common no-event case.
+    #[inline]
+    pub fn has_due_inclusive(&self, now: u64) -> bool {
+        self.active != 0 && self.lowest_target <= now
+    }
+
     /// Fetch the scheduled deadline for `slot`, or `None` if the
     /// slot isn't pending.
     pub fn target(&self, slot: EventSlot) -> Option<u64> {

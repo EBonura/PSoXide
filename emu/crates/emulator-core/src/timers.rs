@@ -96,6 +96,16 @@ impl Timers {
         (Self::BASE..Self::BASE + Self::SIZE).contains(&phys)
     }
 
+    /// `true` when any timer can currently raise an IRQ without a
+    /// mode write re-arming it first.
+    #[inline]
+    pub fn irq_armed(&self) -> bool {
+        self.timers.iter().any(|timer| {
+            timer.mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) != 0
+                && timer.mode & MODE_IRQ_ACTIVE_LOW != 0
+        })
+    }
+
     /// Read a 32-bit word. `phys` must be inside `BASE..BASE+SIZE`.
     pub fn read32(&mut self, phys: u32) -> u32 {
         let (idx, off) = decode(phys);
