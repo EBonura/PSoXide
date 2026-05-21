@@ -45,6 +45,22 @@ impl EngineTime {
         }
     }
 
+    pub(crate) const fn fixed_delta_tick(
+        rendered_frame: u32,
+        simulation_tick: u32,
+        elapsed_vblanks: u32,
+        delta_vblanks: u16,
+        video_hz: u16,
+    ) -> Self {
+        Self {
+            rendered_frame,
+            simulation_tick,
+            elapsed_vblanks,
+            delta_vblanks,
+            video_hz,
+        }
+    }
+
     /// Rendered app frame index, matching `ctx.frame`.
     #[inline]
     pub const fn rendered_frame(self) -> u32 {

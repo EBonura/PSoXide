@@ -68,6 +68,18 @@ pub(crate) fn camera_input(ctx: &Ctx) -> ThirdPersonCameraInput {
     }
 }
 
+pub(crate) fn camera_collision_delta_vblanks(ctx: &Ctx) -> u16 {
+    #[cfg(feature = "cd-stream-bench")]
+    {
+        let _ = ctx;
+        1
+    }
+    #[cfg(not(feature = "cd-stream-bench"))]
+    {
+        ctx.time.delta_vblanks()
+    }
+}
+
 pub(crate) fn stick_to_yaw_delta(axis: InputAxis) -> i16 {
     stick_axis_delta(axis, CAMERA_STICK_YAW_STEP)
 }
