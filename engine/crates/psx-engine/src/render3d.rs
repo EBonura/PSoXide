@@ -16,6 +16,7 @@ use crate::render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, OtFrame, PrimitiveArena, PrimitiveSink,
 };
 use crate::{Angle, WorldVertex, Q12};
+use core::mem::MaybeUninit;
 use psx_asset::{Animation, JointPose, Mesh, Model, ModelPart, ModelVertex};
 use psx_gpu::{
     material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
@@ -1013,8 +1014,8 @@ pub struct TexturedModelRenderStats {
 pub struct WorldRenderPass<'a, 'ot, const OT_DEPTH: usize> {
     ot: &'a mut OtFrame<'ot, OT_DEPTH>,
     commands: &'a mut [WorldTriCommand],
-    slot_heads: [u16; OT_DEPTH],
-    slot_tails: [u16; OT_DEPTH],
+    slot_heads: MaybeUninit<[u16; OT_DEPTH]>,
+    slot_tails: MaybeUninit<[u16; OT_DEPTH]>,
     command_len: usize,
     next_order: usize,
     ordering: WorldCommandOrdering,
@@ -1026,8 +1027,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
+            slot_tails: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::LinkedSorted,
@@ -1046,8 +1047,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::uninit(),
+            slot_tails: MaybeUninit::uninit(),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::DeferredSorted,
@@ -1067,8 +1068,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
+            slot_tails: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::DeferredSlotSorted,
@@ -1088,12 +1089,44 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::uninit(),
+            slot_tails: MaybeUninit::uninit(),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::Bucketed,
         }
+    }
+
+    fn slot_heads(&self) -> &[u16; OT_DEPTH] {
+        debug_assert!(
+            self.ordering == WorldCommandOrdering::LinkedSorted
+                || self.ordering == WorldCommandOrdering::DeferredSlotSorted
+        );
+        unsafe { self.slot_heads.assume_init_ref() }
+    }
+
+    fn slot_heads_mut(&mut self) -> &mut [u16; OT_DEPTH] {
+        debug_assert!(
+            self.ordering == WorldCommandOrdering::LinkedSorted
+                || self.ordering == WorldCommandOrdering::DeferredSlotSorted
+        );
+        unsafe { self.slot_heads.assume_init_mut() }
+    }
+
+    fn slot_tails(&self) -> &[u16; OT_DEPTH] {
+        debug_assert!(
+            self.ordering == WorldCommandOrdering::LinkedSorted
+                || self.ordering == WorldCommandOrdering::DeferredSlotSorted
+        );
+        unsafe { self.slot_tails.assume_init_ref() }
+    }
+
+    fn slot_tails_mut(&mut self) -> &mut [u16; OT_DEPTH] {
+        debug_assert!(
+            self.ordering == WorldCommandOrdering::LinkedSorted
+                || self.ordering == WorldCommandOrdering::DeferredSlotSorted
+        );
+        unsafe { self.slot_tails.assume_init_mut() }
     }
 
     /// Number of world/model triangle commands queued in this pass.
@@ -3447,13 +3480,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
         let command_link = command_index as u16;
-        let tail = self.slot_tails[slot];
+        let tail = self.slot_tails()[slot];
         if tail == WORLD_COMMAND_NONE {
-            self.slot_heads[slot] = command_link;
+            self.slot_heads_mut()[slot] = command_link;
         } else {
             self.commands[tail as usize].next = command_link;
         }
-        self.slot_tails[slot] = command_link;
+        self.slot_tails_mut()[slot] = command_link;
     }
 
     fn insert_command_in_slot(&mut self, command_index: usize) {
@@ -3463,7 +3496,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
         let command_link = command_index as u16;
-        let head = self.slot_heads[slot];
+        let head = self.slot_heads()[slot];
         if head == WORLD_COMMAND_NONE
             || should_insert_world_before(
                 self.commands[command_index],
@@ -3471,7 +3504,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             )
         {
             self.commands[command_index].next = head;
-            self.slot_heads[slot] = command_link;
+            self.slot_heads_mut()[slot] = command_link;
             return;
         }
 
@@ -3495,8 +3528,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn sort_slot_links(&mut self) {
         let mut slot = 0;
         while slot < OT_DEPTH {
-            self.slot_heads[slot] = self.merge_sort_slot_links(self.slot_heads[slot]);
-            self.slot_tails[slot] = WORLD_COMMAND_NONE;
+            let head = self.slot_heads()[slot];
+            let sorted = self.merge_sort_slot_links(head);
+            self.slot_heads_mut()[slot] = sorted;
+            self.slot_tails_mut()[slot] = WORLD_COMMAND_NONE;
             slot += 1;
         }
     }
@@ -3628,7 +3663,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let mut slot = 0;
         while slot < OT_DEPTH {
-            let mut command_index = self.slot_heads[slot];
+            let mut command_index = self.slot_heads()[slot];
             while command_index != WORLD_COMMAND_NONE {
                 let command = self.commands[command_index as usize];
                 if !command.packet_ptr.is_null() {
@@ -4960,7 +4995,7 @@ mod tests {
         );
 
         assert_eq!(pass.command_len, 3);
-        assert_eq!(pass.slot_heads[4], WORLD_COMMAND_NONE);
+        assert_eq!(pass.slot_heads()[4], WORLD_COMMAND_NONE);
         assert_eq!(pass.commands[0].next, WORLD_COMMAND_NONE);
         assert_eq!(pass.commands[1].next, WORLD_COMMAND_NONE);
         assert_eq!(pass.commands[2].next, WORLD_COMMAND_NONE);

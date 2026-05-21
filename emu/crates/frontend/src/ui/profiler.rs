@@ -34,8 +34,11 @@ const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (stage::MODEL_INSTANCES, "models"),
     (stage::PLAYER, "player"),
     (stage::EQUIPMENT, "equipment"),
+    (stage::DEBUG_COUNTERS, "debug counters"),
     (stage::WORLD_FLUSH, "flush/sort"),
+    (stage::ATMOSPHERE, "atmosphere"),
     (stage::OT_SUBMIT, "ot submit"),
+    (stage::RENDER_OVERLAYS, "overlays"),
 ];
 
 /// Timing breakdown returned by [`crate::gfx::Graphics::render`].

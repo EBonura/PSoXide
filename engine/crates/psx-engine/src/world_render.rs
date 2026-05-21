@@ -2062,7 +2062,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     projected_depths: &mut [i32],
     accepted_cell_indices: &mut [u16],
     accepted_cell_depths: &mut [i32],
-    sector_size: i32,
+    _sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
     camera: &WorldCamera,
@@ -2097,23 +2097,13 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             continue;
         }
         stats.cells_considered = stats.cells_considered.saturating_add(1);
-        let visibility_center = WorldVertex::new(
-            cell.visibility_center[0],
-            cell.visibility_center[1],
-            cell.visibility_center[2],
-        );
-        let visibility_view = camera.view_vertex(visibility_center);
-        if !cell_visibility_view_visible_to_camera(
-            camera,
-            options,
-            visibility_view,
-            cached_cell_screen_radius(cell, sector_size),
-            screen_margin,
-        ) {
-            stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
-            continue;
-        }
-        let cell_depth = visibility_view.z;
+        let cell_depth = camera
+            .view_vertex(WorldVertex::new(
+                cell.visibility_center[0],
+                cell.visibility_center[1],
+                cell.visibility_center[2],
+            ))
+            .z;
         stats.cells_drawn = stats.cells_drawn.saturating_add(1);
         accepted_cell_indices[accepted_cell_count] = cell_index as u16;
         accepted_cell_depths[accepted_cell_count] = cell_depth;

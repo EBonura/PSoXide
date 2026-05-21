@@ -17,6 +17,7 @@ const fn pack_packet_texcoord(u: u8, v: u8, extra: u16) -> u32 {
 
 /// Flat-shaded triangle. 5 words (tag + 4 data).
 #[repr(C, align(4))]
+#[derive(Copy, Clone)]
 pub struct TriFlat {
     /// DMA / OT linkage word. Written by the OT at insert time.
     pub tag: u32,
@@ -39,6 +40,19 @@ impl TriFlat {
         Self {
             tag: 0,
             color_cmd: gp0::polygon_opcode(false, false, false, false, false) | pack_color(r, g, b),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+        }
+    }
+
+    /// Build a semi-transparent flat triangle. The caller must ensure
+    /// the desired GPU blend mode is already configured before the
+    /// containing ordering table is submitted.
+    pub const fn new_blended(verts: [(i16, i16); 3], r: u8, g: u8, b: u8) -> Self {
+        Self {
+            tag: 0,
+            color_cmd: gp0::polygon_opcode(false, false, false, true, false) | pack_color(r, g, b),
             v0: pack_vertex(verts[0].0, verts[0].1),
             v1: pack_vertex(verts[1].0, verts[1].1),
             v2: pack_vertex(verts[2].0, verts[2].1),

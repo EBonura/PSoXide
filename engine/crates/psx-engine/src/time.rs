@@ -144,6 +144,14 @@ impl EngineClock {
         platform::vblank_count().wrapping_sub(self.origin_vblank)
     }
 
+    pub(crate) fn reset(&mut self) {
+        let now = platform::vblank_count();
+        self.origin_vblank = now;
+        self.last_frame_vblank = now;
+        self.last_present_vblank = now;
+        self.first_frame = true;
+    }
+
     pub(crate) fn wait_next_vblank(&mut self) {
         self.last_present_vblank = platform::wait_present_vblank(self.last_present_vblank);
     }

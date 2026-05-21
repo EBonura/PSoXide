@@ -27391,7 +27391,7 @@ fn draw_streaming_budget(
     let estimated_resident_slots = if largest_sector_bytes == 0 {
         0
     } else {
-        (resident_budget_bytes / runtime_slot_bytes).min(128)
+        (resident_budget_bytes / runtime_slot_bytes).min(224)
     };
     let over = plan.over_budget_count() > 0;
     let header = if over {
