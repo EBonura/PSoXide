@@ -3272,6 +3272,7 @@ impl Playtest {
         self.active_room_view_sin_key = view.sin_key;
         self.active_room_view_cos_key = view.cos_key;
 
+        let mut streaming_manager = RoomStreamingManager::<MAX_ACTIVE_ROOMS>::new();
         let mut next_slot = 0usize;
         if let Some(active) = reuse_or_build_active_room(
             next_slot,
@@ -3286,6 +3287,7 @@ impl Playtest {
             self.materials = active.materials;
             self.material_count = active.material_count;
             self.active_rooms[next_slot] = Some(active);
+            streaming_manager.push_room(current_index);
             next_slot += 1;
         }
         self.active_room_anchor = player;
@@ -3296,12 +3298,11 @@ impl Playtest {
             self.active_room_candidates =
                 ROOM_CHUNKS.len().saturating_sub(1).min(u16::MAX as usize) as u16;
             while next_slot < active_limit {
-                let Some(candidate) = best_grid_chunk_candidate(
+                let Some(candidate) = streaming_manager.next_active_candidate(
                     current_index,
                     current_record,
                     player,
                     view,
-                    &self.active_rooms,
                     &skipped_rooms[..skipped_count],
                 ) else {
                     break;
@@ -3318,6 +3319,7 @@ impl Playtest {
                 ) {
                     if active.surface_cache.ready {
                         self.active_rooms[next_slot] = Some(active);
+                        streaming_manager.push_room(candidate);
                         next_slot += 1;
                         continue;
                     }
@@ -3396,18 +3398,13 @@ impl Playtest {
 
         // Keep residency tied to player position. Camera yaw only changes which
         // already-resident chunks are selected for drawing.
-        let mut requested_count =
-            append_streamed_room_request(&mut requested_rooms, 0, request_limit, self.room_index);
-        requested_count = self.append_current_collision_neighbour_requests(
+        let mut residency_manager = RoomStreamingManager::<STREAMED_ROOM_SLOT_COUNT>::new();
+        let requested_count = residency_manager.build_residency_requests(
             &mut requested_rooms,
-            requested_count,
-            request_limit,
-        );
-        requested_count = self.append_spatial_chunk_resident_requests(
-            &mut requested_rooms,
-            requested_count,
-            request_limit,
+            self.room_index,
             current_record,
+            self.motor.position(),
+            request_limit,
         );
 
         let priority_count = requested_count;
@@ -3446,80 +3443,6 @@ impl Playtest {
             self.materials = active.materials;
             self.material_count = active.material_count;
         }
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn append_current_collision_neighbour_requests(
-        &self,
-        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-        requested_count: usize,
-        request_limit: usize,
-    ) -> usize {
-        let Some(chunk) = chunk_record_for_room(self.room_index) else {
-            return requested_count
-                .min(request_limit)
-                .min(STREAMED_ROOM_SLOT_COUNT);
-        };
-        let mut count = requested_count
-            .min(request_limit)
-            .min(STREAMED_ROOM_SLOT_COUNT);
-        for room in [
-            chunk.neighbours.north,
-            chunk.neighbours.east,
-            chunk.neighbours.south,
-            chunk.neighbours.west,
-        ] {
-            count = append_streamed_room_request(requested_rooms, count, request_limit, room);
-        }
-        count
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn append_spatial_chunk_resident_requests(
-        &self,
-        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-        requested_count: usize,
-        request_limit: usize,
-        current_record: &LevelRoomRecord,
-    ) -> usize {
-        let mut count = requested_count
-            .min(request_limit)
-            .min(STREAMED_ROOM_SLOT_COUNT);
-        let player = self.motor.position();
-        while count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
-            let before = count;
-            let mut cursor = 0usize;
-            while cursor < count && count < request_limit && count < STREAMED_ROOM_SLOT_COUNT {
-                count = append_streamed_room_neighbour_requests(
-                    requested_rooms,
-                    count,
-                    request_limit,
-                    requested_rooms[cursor],
-                );
-                cursor += 1;
-            }
-            if count != before {
-                continue;
-            }
-
-            let Some(candidate) = best_streamed_resident_chunk_candidate(
-                self.room_index,
-                current_record,
-                player,
-                requested_rooms,
-                count,
-            ) else {
-                break;
-            };
-            let next =
-                append_streamed_room_request(requested_rooms, count, request_limit, candidate);
-            if next == count {
-                break;
-            }
-            count = next;
-        }
-
-        count
     }
 
     #[cfg(feature = "cd-stream-bench")]
@@ -3744,29 +3667,20 @@ impl Playtest {
             return false;
         }
 
-        let mut selected = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        selected[0] = current_index;
-        let mut selected_count = 1usize;
         let active_limit = room_active_chunk_limit(current_record);
-        while selected_count < active_limit {
-            let Some(candidate) = best_grid_chunk_candidate_from_indices(
-                current_index,
-                current_record,
-                player,
-                view,
-                &selected[..selected_count],
-            ) else {
-                break;
-            };
-            selected[selected_count] = candidate;
-            selected_count += 1;
-        }
+        let selected = RoomStreamingManager::<MAX_ACTIVE_ROOMS>::select_active_window(
+            current_index,
+            current_record,
+            player,
+            view,
+            active_limit,
+        );
 
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
             match self.active_rooms[slot] {
-                Some(active) if slot < selected_count && active.index == selected[slot] => {}
-                None if slot >= selected_count => {}
+                Some(active) if slot < selected.count && active.index == selected.rooms[slot] => {}
+                None if slot >= selected.count => {}
                 _ => return false,
             }
             slot += 1;
@@ -5125,51 +5039,6 @@ fn room_requested(
 }
 
 #[cfg(feature = "cd-stream-bench")]
-fn append_streamed_room_neighbour_requests(
-    requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    requested_count: usize,
-    request_limit: usize,
-    room: RoomIndex,
-) -> usize {
-    let Some(chunk) = chunk_record_for_room(room) else {
-        return requested_count
-            .min(request_limit)
-            .min(STREAMED_ROOM_SLOT_COUNT);
-    };
-    let neighbours = chunk_neighbour_rooms(*chunk);
-    let mut count = requested_count
-        .min(request_limit)
-        .min(STREAMED_ROOM_SLOT_COUNT);
-    let mut i = 0usize;
-    while i < neighbours.len() {
-        count = append_streamed_room_request(requested_rooms, count, request_limit, neighbours[i]);
-        i += 1;
-    }
-    count
-}
-
-#[cfg(feature = "cd-stream-bench")]
-fn append_streamed_room_request(
-    requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    requested_count: usize,
-    request_limit: usize,
-    room: RoomIndex,
-) -> usize {
-    if requested_count >= request_limit
-        || requested_count >= STREAMED_ROOM_SLOT_COUNT
-        || room == INVALID_ROOM_INDEX
-        || room_requested(room, requested_rooms, requested_count)
-        || !streamed_room_chunk_loadable(room)
-    {
-        return requested_count
-            .min(request_limit)
-            .min(STREAMED_ROOM_SLOT_COUNT);
-    }
-    requested_rooms[requested_count] = room;
-    requested_count + 1
-}
-
-#[cfg(feature = "cd-stream-bench")]
 fn streamed_request_sector_span(
     requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
     requested_count: usize,
@@ -6264,6 +6133,255 @@ fn active_room_view_keys(sin_yaw: i32, cos_yaw: i32) -> (i16, i16) {
     }
 }
 
+struct RoomStreamingManager<const N: usize> {
+    rooms: [RoomIndex; N],
+    count: usize,
+}
+
+impl<const N: usize> RoomStreamingManager<N> {
+    fn new() -> Self {
+        Self {
+            rooms: [INVALID_ROOM_INDEX; N],
+            count: 0,
+        }
+    }
+
+    fn as_slice(&self) -> &[RoomIndex] {
+        &self.rooms[..self.count.min(N)]
+    }
+
+    fn contains(&self, room: RoomIndex) -> bool {
+        self.as_slice().contains(&room)
+    }
+
+    fn push_room(&mut self, room: RoomIndex) -> bool {
+        if room == INVALID_ROOM_INDEX || self.count >= N || self.contains(room) {
+            return false;
+        }
+        self.rooms[self.count] = room;
+        self.count += 1;
+        true
+    }
+
+    fn next_active_candidate(
+        &self,
+        current_index: RoomIndex,
+        current_record: &LevelRoomRecord,
+        player: RoomPoint,
+        view: ActiveRoomView,
+        skipped_rooms: &[RoomIndex],
+    ) -> Option<RoomIndex> {
+        if self.count == 0 {
+            return None;
+        }
+
+        let mut best = None;
+        let mut best_score = ChunkActivationScore::WORST;
+        let mut source_slot = 0usize;
+        while source_slot < self.count {
+            let Some(chunk) = chunk_record_for_room(self.rooms[source_slot]) else {
+                source_slot += 1;
+                continue;
+            };
+            let neighbours = chunk_neighbour_rooms(*chunk);
+            let mut i = 0usize;
+            while i < neighbours.len() {
+                let room = neighbours[i];
+                if room != INVALID_ROOM_INDEX
+                    && room != current_index
+                    && !self.contains(room)
+                    && !skipped_rooms.contains(&room)
+                    && chunk_available_for_active_selection(room)
+                {
+                    if let Some(chunk) = chunk_record_for_room(room) {
+                        if let Some(score) = chunk_activation_score(
+                            *chunk,
+                            current_index,
+                            current_record,
+                            player,
+                            view,
+                        ) {
+                            if best.is_none() || score.better_than(best_score) {
+                                best_score = score;
+                                best = Some(room);
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+            source_slot += 1;
+        }
+
+        best.or_else(|| {
+            self.best_spatial_active_candidate(
+                current_index,
+                current_record,
+                player,
+                view,
+                skipped_rooms,
+            )
+        })
+    }
+
+    fn best_spatial_active_candidate(
+        &self,
+        current_index: RoomIndex,
+        current_record: &LevelRoomRecord,
+        player: RoomPoint,
+        view: ActiveRoomView,
+        skipped_rooms: &[RoomIndex],
+    ) -> Option<RoomIndex> {
+        let mut best = None;
+        let mut best_score = ChunkActivationScore::WORST;
+        for chunk in ROOM_CHUNKS {
+            if chunk.room == current_index
+                || self.contains(chunk.room)
+                || skipped_rooms.contains(&chunk.room)
+                || !chunk_available_for_active_selection(chunk.room)
+            {
+                continue;
+            }
+            let Some(score) =
+                chunk_activation_score(*chunk, current_index, current_record, player, view)
+            else {
+                continue;
+            };
+            if best.is_none() || score.better_than(best_score) {
+                best_score = score;
+                best = Some(chunk.room);
+            }
+        }
+        best
+    }
+
+    fn select_active_window(
+        current_index: RoomIndex,
+        current_record: &LevelRoomRecord,
+        player: RoomPoint,
+        view: ActiveRoomView,
+        active_limit: usize,
+    ) -> Self {
+        let mut manager = Self::new();
+        manager.push_room(current_index);
+        while manager.count < active_limit.min(N) {
+            let Some(candidate) =
+                manager.next_active_candidate(current_index, current_record, player, view, &[])
+            else {
+                break;
+            };
+            if !manager.push_room(candidate) {
+                break;
+            }
+        }
+        manager
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn build_residency_requests(
+        &mut self,
+        out: &mut [RoomIndex],
+        current_index: RoomIndex,
+        current_record: &LevelRoomRecord,
+        player: RoomPoint,
+        request_limit: usize,
+    ) -> usize {
+        let limit = request_limit.min(out.len()).min(N);
+        if limit == 0 {
+            return 0;
+        }
+        self.push_room(current_index);
+        while self.count < limit {
+            let Some(candidate) =
+                self.next_residency_candidate(current_index, current_record, player)
+            else {
+                break;
+            };
+            if !self.push_room(candidate) {
+                break;
+            }
+        }
+        let mut i = 0usize;
+        while i < self.count.min(out.len()) {
+            out[i] = self.rooms[i];
+            i += 1;
+        }
+        self.count.min(out.len())
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn next_residency_candidate(
+        &self,
+        current_index: RoomIndex,
+        current_record: &LevelRoomRecord,
+        player: RoomPoint,
+    ) -> Option<RoomIndex> {
+        let mut best = None;
+        let mut best_score = ChunkResidencyScore::WORST;
+        let mut source_slot = 0usize;
+        while source_slot < self.count {
+            let Some(chunk) = chunk_record_for_room(self.rooms[source_slot]) else {
+                source_slot += 1;
+                continue;
+            };
+            let neighbours = chunk_neighbour_rooms(*chunk);
+            let mut i = 0usize;
+            while i < neighbours.len() {
+                let room = neighbours[i];
+                if room != INVALID_ROOM_INDEX
+                    && !self.contains(room)
+                    && streamed_room_chunk_loadable(room)
+                {
+                    if let Some(chunk) = chunk_record_for_room(room) {
+                        if let Some(score) =
+                            chunk_residency_score(*chunk, current_index, current_record, player)
+                        {
+                            if best.is_none() || score.better_than(best_score) {
+                                best_score = score;
+                                best = Some(room);
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+            source_slot += 1;
+        }
+
+        best.or_else(|| {
+            self.best_spatial_residency_candidate(current_index, current_record, player)
+        })
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn best_spatial_residency_candidate(
+        &self,
+        current_index: RoomIndex,
+        current_record: &LevelRoomRecord,
+        player: RoomPoint,
+    ) -> Option<RoomIndex> {
+        let mut best = None;
+        let mut best_score = ChunkResidencyScore::WORST;
+        for chunk in ROOM_CHUNKS {
+            if chunk.room == current_index
+                || self.contains(chunk.room)
+                || !streamed_room_chunk_loadable(chunk.room)
+            {
+                continue;
+            }
+            let Some(score) = chunk_residency_score(*chunk, current_index, current_record, player)
+            else {
+                continue;
+            };
+            if best.is_none() || score.better_than(best_score) {
+                best_score = score;
+                best = Some(chunk.room);
+            }
+        }
+        best
+    }
+}
+
 fn chunk_available_for_active_selection(room: RoomIndex) -> bool {
     #[cfg(feature = "cd-stream-bench")]
     {
@@ -6274,176 +6392,6 @@ fn chunk_available_for_active_selection(room: RoomIndex) -> bool {
         let _ = room;
         true
     }
-}
-
-fn best_spatial_chunk_candidate(
-    current_index: RoomIndex,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-    view: ActiveRoomView,
-    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
-    skipped_rooms: &[RoomIndex],
-) -> Option<RoomIndex> {
-    let mut best = None;
-    let mut best_score = ChunkActivationScore::WORST;
-    for chunk in ROOM_CHUNKS {
-        if chunk.room == current_index
-            || active_room_window_contains(active_rooms, chunk.room)
-            || skipped_rooms.contains(&chunk.room)
-            || !chunk_available_for_active_selection(chunk.room)
-        {
-            continue;
-        }
-        let Some(score) =
-            chunk_activation_score(*chunk, current_index, current_record, player, view)
-        else {
-            continue;
-        };
-        if best.is_none() || score.better_than(best_score) {
-            best_score = score;
-            best = Some(chunk.room);
-        }
-    }
-    best
-}
-
-fn best_grid_chunk_candidate(
-    current_index: RoomIndex,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-    view: ActiveRoomView,
-    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
-    skipped_rooms: &[RoomIndex],
-) -> Option<RoomIndex> {
-    if active_rooms[0].is_none() {
-        return None;
-    }
-
-    let mut best = None;
-    let mut best_score = ChunkActivationScore::WORST;
-    let mut source_slot = 0usize;
-    while source_slot < MAX_ACTIVE_ROOMS {
-        let Some(source) = active_rooms[source_slot] else {
-            source_slot += 1;
-            continue;
-        };
-        let Some(chunk) = chunk_record_for_room(source.index) else {
-            source_slot += 1;
-            continue;
-        };
-        let neighbours = chunk_neighbour_rooms(*chunk);
-        let mut i = 0usize;
-        while i < neighbours.len() {
-            let room = neighbours[i];
-            if room != INVALID_ROOM_INDEX
-                && room != current_index
-                && !active_room_window_contains(active_rooms, room)
-                && !skipped_rooms.contains(&room)
-                && chunk_available_for_active_selection(room)
-            {
-                if let Some(chunk) = chunk_record_for_room(room) {
-                    if let Some(score) =
-                        chunk_activation_score(*chunk, current_index, current_record, player, view)
-                    {
-                        if best.is_none() || score.better_than(best_score) {
-                            best_score = score;
-                            best = Some(room);
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
-        source_slot += 1;
-    }
-
-    best.or_else(|| {
-        best_spatial_chunk_candidate(
-            current_index,
-            current_record,
-            player,
-            view,
-            active_rooms,
-            skipped_rooms,
-        )
-    })
-}
-
-fn best_grid_chunk_candidate_from_indices(
-    current_index: RoomIndex,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-    view: ActiveRoomView,
-    selected_rooms: &[RoomIndex],
-) -> Option<RoomIndex> {
-    let mut best = None;
-    let mut best_score = ChunkActivationScore::WORST;
-    let mut source_slot = 0usize;
-    while source_slot < selected_rooms.len() {
-        let source = selected_rooms[source_slot];
-        if source == INVALID_ROOM_INDEX {
-            source_slot += 1;
-            continue;
-        }
-        let Some(chunk) = chunk_record_for_room(source) else {
-            source_slot += 1;
-            continue;
-        };
-        let neighbours = chunk_neighbour_rooms(*chunk);
-        let mut i = 0usize;
-        while i < neighbours.len() {
-            let room = neighbours[i];
-            if room != INVALID_ROOM_INDEX
-                && room != current_index
-                && !selected_rooms.contains(&room)
-                && chunk_available_for_active_selection(room)
-            {
-                if let Some(chunk) = chunk_record_for_room(room) {
-                    if let Some(score) =
-                        chunk_activation_score(*chunk, current_index, current_record, player, view)
-                    {
-                        if best.is_none() || score.better_than(best_score) {
-                            best_score = score;
-                            best = Some(room);
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
-        source_slot += 1;
-    }
-
-    best
-}
-
-#[cfg(feature = "cd-stream-bench")]
-fn best_streamed_resident_chunk_candidate(
-    current_index: RoomIndex,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-    requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    requested_count: usize,
-) -> Option<RoomIndex> {
-    let mut best = None;
-    let mut best_score = ChunkResidencyScore::WORST;
-    for chunk in ROOM_CHUNKS {
-        if chunk.room == current_index
-            || room_requested(chunk.room, requested_rooms, requested_count)
-            || !streamed_room_chunk_loadable(chunk.room)
-        {
-            continue;
-        }
-        let Some(score) = chunk_residency_score(*chunk, current_index, current_record, player)
-        else {
-            continue;
-        };
-        if best.is_none() || score.better_than(best_score) {
-            best_score = score;
-            best = Some(chunk.room);
-        }
-    }
-    best
 }
 
 #[derive(Copy, Clone)]
