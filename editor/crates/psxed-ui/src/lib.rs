@@ -27,7 +27,8 @@ use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
 use psxed_project::portal_rooms::{
-    extract_portal_room_grid, plan_portal_rooms, PortalRoomConfig, DEFAULT_PORTAL_ROOM_MAX_SECTORS,
+    extract_portal_room_grid, plan_portal_rooms, portal_edge_for_node, PortalEdge,
+    PortalRoomConfig, DEFAULT_PORTAL_ROOM_MAX_SECTORS,
 };
 use psxed_project::streaming::{collect_scene_resource_use, SceneResourceUse};
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
@@ -59,6 +60,7 @@ const EDITOR_OUTLINE_STROKE_WIDTH: f32 = 1.25;
 const EDITOR_SELECTED_OUTLINE_STROKE_WIDTH: f32 = 3.0;
 const EDITOR_OUTLINE_ACCENT: Color32 = Color32::from_rgb(165, 238, 255);
 const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
+const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
 const MAX_IMAGE_PROP_SIZE: u16 = 4096;
@@ -1961,7 +1963,7 @@ enum WorkspaceView {
 impl WorkspaceView {
     const fn label(self) -> &'static str {
         match self {
-            Self::Room => "Room",
+            Self::Room => "Map",
             Self::Animation => "Animation Viewer",
         }
     }
@@ -1986,7 +1988,7 @@ impl ResourceFilter {
             Self::Character => "Character Profiles",
             Self::Weapon => "Weapon",
             Self::Mesh => "Mesh",
-            Self::Room => "Room",
+            Self::Room => "Map",
             Self::Other => "Other",
         }
     }
@@ -11145,10 +11147,7 @@ impl EditorWorkspace {
             return vec!["Animation Viewer".to_string()];
         }
 
-        let mut chips = vec![
-            "Room Edit".to_string(),
-            self.active_tool.label().to_string(),
-        ];
+        let mut chips = vec!["Map Edit".to_string(), self.active_tool.label().to_string()];
         match self.active_tool {
             ViewTool::Select => {
                 chips.push(self.selection_mode.label().to_string());
@@ -11429,8 +11428,8 @@ impl EditorWorkspace {
             .active_room_id()
             .and_then(|id| self.project.active_scene().node(id))
             .map(|node| node.name.as_str())
-            .unwrap_or("(no room)");
-        let title = format!("{room_label}.room");
+            .unwrap_or("(no map)");
+        let title = format!("{room_label}.map");
         let context_chips = self.viewport_context_chips();
         let header_status = self.viewport_header_status();
         egui::Frame::new()
@@ -11495,7 +11494,7 @@ impl EditorWorkspace {
                         (ViewTool::Erase, "Clear floor/walls/ceiling from the cell."),
                         (
                             ViewTool::Place,
-                            "Drop a Spawn Point or entity marker at the clicked cell.",
+                            "Drop a Spawn Point, entity marker, or portal seam marker at the clicked cell.",
                         ),
                     ] {
                         let enabled = room_active || !tool.requires_room_context();
@@ -11513,6 +11512,23 @@ impl EditorWorkspace {
                         if clicked {
                             self.active_tool = tool;
                         }
+                    }
+                    let portal_enabled = room_active;
+                    let portal_clicked = ui
+                        .add_enabled_ui(portal_enabled, |ui| {
+                            toolbar_icon_button(
+                                ui,
+                                self.active_tool == ViewTool::Place
+                                    && self.place_kind == PlaceKind::Portal,
+                                icons::WAYPOINT,
+                                "Portal",
+                                "Place a portal seam marker. The cooker snaps it to the nearest grid edge.",
+                            )
+                        })
+                        .inner;
+                    if portal_clicked {
+                        self.active_tool = ViewTool::Place;
+                        self.place_kind = PlaceKind::Portal;
                     }
                     ui.separator();
                     if matches!(self.active_tool, ViewTool::Select) {
@@ -17283,7 +17299,7 @@ fn node_lucide_icon(kind: &str, root: bool) -> char {
         "Node3D" => icons::CIRCLE_DOT,
         "Entity" => icons::BOX,
         "World" => icons::HOUSE,
-        "Room" => icons::GRID,
+        "Room" | "Map" => icons::GRID,
         "Mesh Instance" | "MeshInstance" => icons::BOX,
         "Image Prop" | "ImageProp" => icons::PALETTE,
         "Model Renderer" | "ModelRenderer" => icons::BOX,
@@ -17315,7 +17331,7 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
     match kind {
         "Entity" => Color32::from_rgb(156, 174, 190),
         "World" => Color32::from_rgb(232, 152, 96),
-        "Room" => Color32::from_rgb(209, 118, 71),
+        "Room" | "Map" => Color32::from_rgb(209, 118, 71),
         "Mesh Instance" | "MeshInstance" => Color32::from_rgb(156, 174, 190),
         "Image Prop" | "ImageProp" => Color32::from_rgb(210, 170, 120),
         "Model Renderer" | "ModelRenderer" => Color32::from_rgb(134, 168, 196),
@@ -17331,7 +17347,7 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
         "Spawn Point" | "SpawnPoint" => Color32::from_rgb(236, 188, 104),
         "Trigger" => Color32::from_rgb(190, 128, 232),
         "Audio Source" | "AudioSource" => Color32::from_rgb(104, 202, 188),
-        "Portal" => Color32::from_rgb(255, 188, 100),
+        "Portal" => PORTAL_PINK,
         _ => Color32::from_rgb(141, 160, 180),
     }
 }
@@ -21272,6 +21288,7 @@ fn draw_scene_node_row(
     );
     let painter = ui.painter_at(rect);
     let hovered = response.hovered();
+    let display_kind = scene_tree_kind_label(row.kind);
 
     if selected {
         painter.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 3.0, STUDIO_ACCENT_DIM);
@@ -21336,9 +21353,9 @@ fn draw_scene_node_row(
     painter.text(
         icon_rect.center(),
         Align2::CENTER_CENTER,
-        node_lucide_icon(row.kind, row.id == NodeId::ROOT).to_string(),
+        node_lucide_icon(display_kind, row.id == NodeId::ROOT).to_string(),
         icons::font(15.0),
-        node_lucide_color(row.kind, row.id == NodeId::ROOT, selected),
+        node_lucide_color(display_kind, row.id == NodeId::ROOT, selected),
     );
 
     let text_color = if effectively_hidden {
@@ -21350,7 +21367,7 @@ fn draw_scene_node_row(
     };
     let in_rename = matches!(renaming, Some((id, _)) if *id == row.id);
     let label = if row.id == NodeId::ROOT {
-        format!("Root: {}", row.kind)
+        format!("Root: {display_kind}")
     } else {
         row.name.clone()
     };
@@ -21415,7 +21432,7 @@ fn draw_scene_node_row(
                 rect.center().y,
             ),
             Align2::LEFT_CENTER,
-            row.kind,
+            display_kind,
             FontId::proportional(11.0),
             if effectively_hidden {
                 Color32::from_rgb(84, 96, 108)
@@ -21634,9 +21651,11 @@ fn scene_node_hidden(
 }
 
 fn scene_tree_row_matches_filter(row: &NodeRow, filter: &str) -> bool {
+    let display_kind = scene_tree_kind_label(row.kind);
     filter.is_empty()
         || row.name.to_ascii_lowercase().contains(filter)
         || row.kind.to_ascii_lowercase().contains(filter)
+        || display_kind.to_ascii_lowercase().contains(filter)
 }
 
 fn scene_tree_display_rows<'a>(
@@ -21697,9 +21716,16 @@ fn max_resizable_bottom_dock_height(ctx: &egui::Context) -> f32 {
 /// Friendly label for the drag-tooltip preview.
 fn label_for_drag(row: &NodeRow) -> String {
     if row.name.is_empty() {
-        row.kind.to_string()
+        scene_tree_kind_label(row.kind).to_string()
     } else {
         row.name.clone()
+    }
+}
+
+fn scene_tree_kind_label(kind: &'static str) -> &'static str {
+    match kind {
+        "Room" => "Map",
+        other => other,
     }
 }
 
@@ -21719,7 +21745,7 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
             },
         ),
         (
-            "Room",
+            "Map",
             NodeKind::Room {
                 grid: WorldGrid::empty(3, 3, 1024),
             },
@@ -21989,12 +22015,12 @@ fn node_draw_mode(kind: &NodeKind) -> &'static str {
         NodeKind::Equipment { .. } => "Equipment Component",
         NodeKind::World { .. } => "Portal Region",
         NodeKind::Entity => "Entity Host",
-        NodeKind::Room { .. } => "Sector Grid",
+        NodeKind::Room { .. } => "Editable Map Grid",
         NodeKind::PointLight { .. } => "Static Light",
         NodeKind::SpawnPoint { .. } => "Spawn Marker",
         NodeKind::Trigger { .. } => "Trigger Volume",
         NodeKind::AudioSource { .. } => "Audio Marker",
-        NodeKind::Portal { .. } => "Portal Volume",
+        NodeKind::Portal { .. } => "Portal Seam",
         NodeKind::Node | NodeKind::Node3D => "None",
     }
 }
@@ -22036,14 +22062,14 @@ fn project_filesystem_rows(project: &ProjectDocument) -> Vec<ProjectFileRow> {
     });
     rows.push(ProjectFileRow {
         depth: 1,
-        name: "rooms".to_string(),
+        name: "maps".to_string(),
         folder: true,
         icon: icons::FOLDER,
         resource: None,
     });
     rows.push(ProjectFileRow {
         depth: 2,
-        name: format!("{}.room", snake_name(&project.active_scene().name)),
+        name: format!("{}.map", snake_name(&project.active_scene().name)),
         folder: false,
         icon: icons::GRID,
         resource: None,
@@ -22718,7 +22744,7 @@ fn resource_detail(resource: &Resource) -> &'static str {
         ResourceData::Character(_) => "Character Profile",
         ResourceData::Weapon(_) => "Weapon",
         ResourceData::Mesh { .. } => "Mesh",
-        ResourceData::Scene { .. } => "Room",
+        ResourceData::Scene { .. } => "Map",
         ResourceData::Script { .. } => "Script",
         ResourceData::Audio { .. } => "Audio",
     }
@@ -23046,14 +23072,21 @@ fn draw_scene_viewport(
                 );
             }
             NodeKind::Portal { .. } => {
-                draw_simple_marker(
+                draw_portal_seam_2d(
                     painter,
                     transform,
+                    scene,
                     node,
                     selected_nodes.contains(&node.id)
                         || (selected_nodes.is_empty() && selected == node.id),
-                    "P",
-                    Color32::from_rgb(255, 188, 100),
+                );
+                draw_portal_marker(
+                    painter,
+                    transform,
+                    scene,
+                    node,
+                    selected_nodes.contains(&node.id)
+                        || (selected_nodes.is_empty() && selected == node.id),
                     &mut hits,
                 );
             }
@@ -23642,6 +23675,123 @@ fn draw_light_bulb_marker(
         [Pos2::new(mid, y + glass_radius * 0.18), Pos2::new(right, y)],
         filament,
     );
+}
+
+fn draw_portal_seam_2d(
+    painter: &egui::Painter,
+    transform: ViewportTransform,
+    scene: &psxed_project::Scene,
+    node: &psxed_project::SceneNode,
+    selected: bool,
+) {
+    let Some(room_id) = enclosing_room_id(scene, node.id) else {
+        return;
+    };
+    let Some(room) = scene.node(room_id) else {
+        return;
+    };
+    let NodeKind::Room { grid } = &room.kind else {
+        return;
+    };
+    let Some(edge) = portal_edge_for_node(grid, node) else {
+        return;
+    };
+    let Some((local_a, local_b)) = portal_edge_editor_segment(grid, edge) else {
+        return;
+    };
+    let room_center = node_world(room);
+    let a = transform.world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]);
+    let b = transform.world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]);
+    let halo = Stroke::new(
+        if selected { 9.0 } else { 7.0 },
+        Color32::from_rgba_unmultiplied(PORTAL_PINK.r(), PORTAL_PINK.g(), PORTAL_PINK.b(), 54),
+    );
+    let stroke = Stroke::new(if selected { 4.0 } else { 3.0 }, PORTAL_PINK);
+    painter.line_segment([a, b], halo);
+    painter.line_segment([a, b], stroke);
+    let mid = Pos2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+    painter.circle_filled(mid, 4.5, PORTAL_PINK);
+    painter.circle_stroke(mid, 5.5, Stroke::new(1.0, Color32::from_rgb(28, 8, 24)));
+}
+
+fn portal_edge_editor_segment(grid: &WorldGrid, edge: PortalEdge) -> Option<([f32; 2], [f32; 2])> {
+    match edge.direction {
+        GridDirection::North => {
+            let z = edge.z.checked_add(1)? as f32 - grid.depth as f32 * 0.5;
+            let x0 = edge.x as f32 - grid.width as f32 * 0.5;
+            Some(([x0, z], [x0 + 1.0, z]))
+        }
+        GridDirection::East => {
+            let x = edge.x.checked_add(1)? as f32 - grid.width as f32 * 0.5;
+            let z0 = edge.z as f32 - grid.depth as f32 * 0.5;
+            Some(([x, z0], [x, z0 + 1.0]))
+        }
+        GridDirection::South
+        | GridDirection::West
+        | GridDirection::NorthWestSouthEast
+        | GridDirection::NorthEastSouthWest => None,
+    }
+}
+
+fn draw_portal_marker(
+    painter: &egui::Painter,
+    transform: ViewportTransform,
+    scene: &psxed_project::Scene,
+    node: &psxed_project::SceneNode,
+    selected: bool,
+    hits: &mut Vec<ViewportHit>,
+) {
+    let center = portal_marker_world_2d(scene, node);
+    let screen = transform.world_to_screen(center);
+    let radius = transform.screen_radius(0.2).max(9.0);
+    let points = vec![
+        screen + Vec2::new(0.0, -radius),
+        screen + Vec2::new(radius, 0.0),
+        screen + Vec2::new(0.0, radius),
+        screen + Vec2::new(-radius, 0.0),
+    ];
+    let fill =
+        Color32::from_rgba_unmultiplied(PORTAL_PINK.r(), PORTAL_PINK.g(), PORTAL_PINK.b(), 64);
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        fill,
+        Stroke::new(if selected { 3.0 } else { 1.5 }, PORTAL_PINK),
+    ));
+    painter.text(
+        screen,
+        Align2::CENTER_CENTER,
+        "P",
+        FontId::monospace(12.0),
+        Color32::WHITE,
+    );
+    painter.text(
+        screen + Vec2::new(0.0, radius + 5.0),
+        Align2::CENTER_TOP,
+        &node.name,
+        FontId::monospace(10.0),
+        PORTAL_PINK,
+    );
+    hits.push(ViewportHit::circle(
+        node.id,
+        node.name.clone(),
+        center,
+        0.2_f32.max(radius / transform.zoom),
+    ));
+}
+
+fn portal_marker_world_2d(
+    scene: &psxed_project::Scene,
+    node: &psxed_project::SceneNode,
+) -> [f32; 2] {
+    let local = node_world(node);
+    let Some(room_id) = enclosing_room_id(scene, node.id) else {
+        return local;
+    };
+    let Some(room) = scene.node(room_id) else {
+        return local;
+    };
+    let room_center = node_world(room);
+    [room_center[0] + local[0], room_center[1] + local[1]]
 }
 
 fn draw_simple_marker(
@@ -32699,7 +32849,7 @@ mod tests {
         let rows = project_filesystem_rows(&project);
 
         assert!(rows.iter().any(|row| row.name == "res://"));
-        assert!(rows.iter().any(|row| row.name == "main.room"));
+        assert!(rows.iter().any(|row| row.name == "main.map"));
         assert!(rows
             .iter()
             .any(|row| row.name == "delven_01_slateflr1a_q2.psxt"));
