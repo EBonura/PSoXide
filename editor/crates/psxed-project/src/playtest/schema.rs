@@ -92,13 +92,13 @@ pub struct PlaytestRoom {
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
     pub draw_distance: i32,
-    /// Runtime active-chunk radius in world sectors.
+    /// Runtime room activation radius in world sectors.
     pub chunk_activation_radius_sectors: i32,
     /// Cooked PVS traversal radius in room cells.
     pub visibility_radius: u16,
-    /// Runtime generated-chunk residency budget inherited from the World node.
+    /// Runtime room residency budget inherited from the World node.
     pub resident_chunk_limit: u8,
-    /// Runtime generated-chunk visible/drawable budget inherited from the World node.
+    /// Runtime room visible/drawable budget inherited from the World node.
     pub visible_chunk_limit: u8,
     /// First index into [`PlaytestPackage::materials`] for this
     /// room's slice.
@@ -130,33 +130,33 @@ pub struct PlaytestRoom {
     pub flags: u16,
 }
 
-/// One cooked runtime chunk emitted from an authored Room.
+/// One cooked runtime roomlet emitted from an authored Room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestChunk {
-    /// Owning room/chunk index in [`PlaytestPackage::rooms`].
+    /// Owning roomlet index in [`PlaytestPackage::rooms`].
     pub room: u16,
     /// Stable editor Room node id, truncated for compact runtime
     /// diagnostics.
     pub authored_room: u32,
-    /// Stable order inside the authored Room's generated chunk plan.
+    /// Stable order inside the authored Room's portal-room plan.
     pub chunk_index: u16,
-    /// Chunk origin X in authored grid sectors.
+    /// Roomlet origin X in authored grid sectors.
     pub origin_x: i32,
-    /// Chunk origin Z in authored grid sectors.
+    /// Roomlet origin Z in authored grid sectors.
     pub origin_z: i32,
-    /// Chunk width in sectors.
+    /// Roomlet width in sectors.
     pub width: u16,
-    /// Chunk depth in sectors.
+    /// Roomlet depth in sectors.
     pub depth: u16,
-    /// Cardinal neighbour chunk rooms. `None` means no link.
+    /// Cardinal portal-neighbour roomlets. `None` means no link.
     pub neighbours: [Option<u16>; 4],
-    /// Estimated triangle count from the chunk budget.
+    /// Estimated triangle count from the roomlet budget.
     pub triangles: usize,
     /// Estimated base `.psxw` byte count.
     pub psxw_bytes: usize,
     /// Estimated static-lit `.psxw` byte count.
     pub static_lit_bytes: usize,
-    /// Number of populated cells in the cooked chunk.
+    /// Number of populated cells in the cooked roomlet.
     pub populated_cells: u16,
     /// Runtime flags.
     pub flags: u16,
