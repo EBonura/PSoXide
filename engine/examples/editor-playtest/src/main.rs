@@ -48,9 +48,9 @@ use psx_engine::{
     PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom,
     Scene, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
     ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, ViewVertex, VisualPacing, WorldCamera, WorldProjection, WorldRenderMaterial,
-    WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions, WorldSurfaceSample,
-    WorldTriCommand, WorldVertex, Q12, Q8,
+    ThirdPersonCameraTarget, ViewVertex, VisualPacing, WorldCamera, WorldProjection,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
+    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -495,8 +495,13 @@ const STREAMED_ROOM_LOAD_BATCH_COUNT: usize = 4;
 const STREAMED_ROOM_PUMP_SECTORS_PER_TICK: usize = 8;
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT: usize = 512;
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_CAMERA_CONE_DISTANCE_SECTORS: i32 = 48;
+#[cfg(feature = "cd-stream-bench")]
+const STREAMED_CAMERA_CONE_MARGIN_SECTORS: i32 = 2;
 const MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES: usize = 48;
 const MAX_RANKED_ACTIVE_ROOM_CANDIDATES: usize = MAX_SKIPPED_ACTIVE_ROOM_CANDIDATES;
+const MAX_CHUNK_CONNECTIVITY_ROOMS: usize = 256;
 const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
 const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 
@@ -1409,12 +1414,12 @@ impl<const N: usize> RoomStreamScheduler<N> {
         }
         self.job
             .poll_words::<STREAMED_ROOM_SLOT_WORDS>(dst, max_sectors);
-        let committed = self.commit_ready_job_entries();
+        let _ = self.commit_ready_job_entries();
         if self.job.is_done() {
             self.commit_completed_job();
             true
         } else {
-            committed
+            false
         }
     }
 
@@ -1658,6 +1663,7 @@ impl<const N: usize> MapStreamingManager<N> {
         current_record: &LevelRoomRecord,
         player: RoomPoint,
         view: ActiveRoomView,
+        reachable_rooms: &[RoomIndex],
         request_limit: usize,
     ) {
         let limit = request_limit.min(STREAMED_ROOM_SLOT_COUNT);
@@ -1667,6 +1673,7 @@ impl<const N: usize> MapStreamingManager<N> {
                 current_record,
                 player,
                 view,
+                reachable_rooms,
                 &self.requested_rooms,
                 self.requested_count,
             ) else {
@@ -1698,6 +1705,7 @@ impl<const N: usize> MapStreamingManager<N> {
         current_index: RoomIndex,
         current_record: &LevelRoomRecord,
         player: RoomPoint,
+        reachable_rooms: &[RoomIndex],
         request_limit: usize,
     ) {
         let limit = request_limit.min(STREAMED_ROOM_SLOT_COUNT);
@@ -1716,6 +1724,7 @@ impl<const N: usize> MapStreamingManager<N> {
                 current_index,
                 current_record,
                 player,
+                reachable_rooms,
                 &self.requested_rooms,
                 self.requested_count,
             ) else {
@@ -1746,6 +1755,7 @@ impl<const N: usize> MapStreamingManager<N> {
         current_index: RoomIndex,
         current_record: &LevelRoomRecord,
         player: RoomPoint,
+        reachable_rooms: &[RoomIndex],
         request_limit: usize,
     ) {
         let limit = request_limit.min(STREAMED_ROOM_SLOT_COUNT);
@@ -1774,6 +1784,7 @@ impl<const N: usize> MapStreamingManager<N> {
                 if chunk.room == current_index
                     || room_requested(chunk.room, &self.requested_rooms, self.requested_count)
                     || self.is_resident(chunk.room)
+                    || !reachable_chunk_set_contains(reachable_rooms, chunk.room)
                 {
                     continue;
                 }
@@ -1838,11 +1849,7 @@ impl<const N: usize> MapStreamingManager<N> {
         self.scheduler.emit_counters();
     }
 
-    fn pump(
-        &mut self,
-        dst: &mut [[u32; STREAMED_ROOM_SLOT_WORDS]; N],
-        max_sectors: usize,
-    ) -> bool {
+    fn pump(&mut self, dst: &mut [[u32; STREAMED_ROOM_SLOT_WORDS]; N], max_sectors: usize) -> bool {
         self.scheduler.pump(dst, max_sectors)
     }
 
@@ -2193,8 +2200,12 @@ impl Scene for Playtest {
 
     fn update(&mut self, ctx: &mut Ctx) {
         #[cfg(feature = "cd-stream-bench")]
-        if self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK) {
-            self.load_active_room_window();
+        {
+            let pump_sectors = STREAMED_ROOM_PUMP_SECTORS_PER_TICK
+                .saturating_mul(ctx.time.delta_vblanks().max(1) as usize);
+            if self.pump_room_stream(pump_sectors) {
+                self.load_active_room_window();
+            }
         }
 
         if ctx.just_pressed(button::R3) {
@@ -3452,7 +3463,7 @@ impl Playtest {
                     target,
                     input,
                     config,
-                    ctx.time.delta_vblanks(),
+                    camera_collision_delta_vblanks(ctx),
                 )
                 .camera;
         }
@@ -3470,7 +3481,7 @@ impl Playtest {
                 target,
                 input,
                 config,
-                ctx.time.delta_vblanks(),
+                camera_collision_delta_vblanks(ctx),
             )
             .camera
     }
@@ -3562,13 +3573,17 @@ impl Playtest {
         self.active_room_anchor = player;
 
         if !ROOM_CHUNKS.is_empty() {
-            let mut candidates =
-                [RankedChunkCandidate::EMPTY; MAX_RANKED_ACTIVE_ROOM_CANDIDATES];
+            let mut reachable_rooms = [INVALID_ROOM_INDEX; MAX_CHUNK_CONNECTIVITY_ROOMS];
+            let reachable_count =
+                collect_reachable_chunk_rooms(current_index, &mut reachable_rooms);
+            let reachable_rooms = &reachable_rooms[..reachable_count];
+            let mut candidates = [RankedChunkCandidate::EMPTY; MAX_RANKED_ACTIVE_ROOM_CANDIDATES];
             let candidate_count = collect_ranked_active_chunk_candidates(
                 current_index,
                 current_record,
                 player,
                 view,
+                reachable_rooms,
                 &[],
                 &mut candidates,
             );
@@ -3661,6 +3676,9 @@ impl Playtest {
 
         let player = self.motor.position();
         let view = self.active_room_selection_view();
+        let mut reachable_rooms = [INVALID_ROOM_INDEX; MAX_CHUNK_CONNECTIVITY_ROOMS];
+        let reachable_count = collect_reachable_chunk_rooms(self.room_index, &mut reachable_rooms);
+        let reachable_rooms = &reachable_rooms[..reachable_count];
         unsafe {
             MAP_STREAMING_MANAGER.begin_plan(resident_capacity);
             MAP_STREAMING_MANAGER.push_priority(self.room_index);
@@ -3669,6 +3687,7 @@ impl Playtest {
                 current_record,
                 player,
                 view,
+                reachable_rooms,
                 request_limit,
             );
             MAP_STREAMING_MANAGER.push_collision_neighbours(self.room_index, request_limit);
@@ -3676,12 +3695,14 @@ impl Playtest {
                 self.room_index,
                 current_record,
                 player,
+                reachable_rooms,
                 request_limit,
             );
             MAP_STREAMING_MANAGER.push_pack_prefetches(
                 self.room_index,
                 current_record,
                 player,
+                reachable_rooms,
                 request_limit,
             );
             MAP_STREAMING_MANAGER.submit_plan();
@@ -3782,7 +3803,16 @@ impl Playtest {
         if !moved_far && !view_changed {
             return;
         }
-        let update_streaming = moved_far;
+        #[cfg(feature = "cd-stream-bench")]
+        if view_changed && !moved_far {
+            self.preload_streamed_active_room_window(active_room_count(&self.active_rooms), record);
+            self.active_room_view_x_key = view.x_key;
+            self.active_room_view_z_key = view.z_key;
+            self.active_room_view_sin_key = view.sin_key;
+            self.active_room_view_cos_key = view.cos_key;
+            return;
+        }
+        let update_streaming = moved_far || view_changed;
         if self.active_room_window_matches_selection(self.room_index, record, player, view) {
             #[cfg(feature = "cd-stream-bench")]
             if update_streaming {
@@ -3818,12 +3848,16 @@ impl Playtest {
         selected[0] = current_index;
         let mut selected_count = 1usize;
         let active_limit = room_active_chunk_limit(current_record);
+        let mut reachable_rooms = [INVALID_ROOM_INDEX; MAX_CHUNK_CONNECTIVITY_ROOMS];
+        let reachable_count = collect_reachable_chunk_rooms(current_index, &mut reachable_rooms);
+        let reachable_rooms = &reachable_rooms[..reachable_count];
         let mut candidates = [RankedChunkCandidate::EMPTY; MAX_RANKED_ACTIVE_ROOM_CANDIDATES];
         let candidate_count = collect_ranked_active_chunk_candidates(
             current_index,
             current_record,
             player,
             view,
+            reachable_rooms,
             &[],
             &mut candidates,
         );
@@ -6373,6 +6407,7 @@ fn collect_ranked_active_chunk_candidates(
     current_record: &LevelRoomRecord,
     player: RoomPoint,
     view: ActiveRoomView,
+    reachable_rooms: &[RoomIndex],
     excluded_rooms: &[RoomIndex],
     candidates: &mut [RankedChunkCandidate],
 ) -> usize {
@@ -6380,6 +6415,7 @@ fn collect_ranked_active_chunk_candidates(
     for chunk in ROOM_CHUNKS {
         if chunk.room == current_index
             || excluded_rooms.contains(&chunk.room)
+            || !reachable_chunk_set_contains(reachable_rooms, chunk.room)
             || !chunk_available_for_active_selection(chunk.room)
         {
             continue;
@@ -6450,6 +6486,7 @@ fn best_streamed_camera_chunk_candidate(
     current_record: &LevelRoomRecord,
     player: RoomPoint,
     view: ActiveRoomView,
+    reachable_rooms: &[RoomIndex],
     requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
     requested_count: usize,
 ) -> Option<RoomIndex> {
@@ -6458,18 +6495,16 @@ fn best_streamed_camera_chunk_candidate(
     for chunk in ROOM_CHUNKS {
         if chunk.room == current_index
             || room_requested(chunk.room, requested_rooms, requested_count)
+            || !reachable_chunk_set_contains(reachable_rooms, chunk.room)
             || !streamed_room_chunk_loadable(chunk.room)
         {
             continue;
         }
         let Some(score) =
-            chunk_selection_score(*chunk, current_index, current_record, player, view)
+            chunk_stream_cone_selection_score(*chunk, current_index, current_record, player, view)
         else {
             continue;
         };
-        if !score.camera_visible() {
-            continue;
-        }
         if best.is_none() || score.better_than(best_score) {
             best_score = score;
             best = Some(chunk.room);
@@ -6483,6 +6518,7 @@ fn best_streamed_resident_chunk_candidate(
     current_index: RoomIndex,
     current_record: &LevelRoomRecord,
     player: RoomPoint,
+    reachable_rooms: &[RoomIndex],
     requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
     requested_count: usize,
 ) -> Option<RoomIndex> {
@@ -6491,6 +6527,7 @@ fn best_streamed_resident_chunk_candidate(
     for chunk in ROOM_CHUNKS {
         if chunk.room == current_index
             || room_requested(chunk.room, requested_rooms, requested_count)
+            || !reachable_chunk_set_contains(reachable_rooms, chunk.room)
             || !streamed_room_chunk_loadable(chunk.room)
         {
             continue;
@@ -6545,6 +6582,13 @@ struct ChunkActivationScore {
     view_tier: u8,
     ray_distance: u64,
     distance: u64,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone)]
+struct ChunkStreamConeScore {
+    view_tier: u8,
+    ray_distance: u64,
 }
 
 #[derive(Copy, Clone)]
@@ -6605,10 +6649,30 @@ fn chunk_selection_score(
     }
     let activation = chunk_activation_score(chunk, current_index, current_record, player, view)?;
     Some(ChunkSelectionScore {
-        tier: 2u8.saturating_add(activation.view_tier).saturating_add(activation.tier),
+        tier: 2u8
+            .saturating_add(activation.view_tier)
+            .saturating_add(activation.tier),
         view_tier: activation.view_tier,
         ray_distance: activation.ray_distance,
         distance: activation.distance,
+    })
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn chunk_stream_cone_selection_score(
+    chunk: LevelChunkRecord,
+    current_index: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player: RoomPoint,
+    view: ActiveRoomView,
+) -> Option<ChunkSelectionScore> {
+    let residency = chunk_residency_score(chunk, current_index, current_record, player)?;
+    let cone = chunk_stream_cone_score_current_space(chunk, current_record, view)?;
+    Some(ChunkSelectionScore {
+        tier: residency.tier,
+        view_tier: cone.view_tier,
+        ray_distance: cone.ray_distance,
+        distance: residency.distance,
     })
 }
 
@@ -6683,6 +6747,68 @@ fn chunk_view_score_current_space(
     (view_tier, ray_distance)
 }
 
+#[cfg(feature = "cd-stream-bench")]
+fn chunk_stream_cone_score_current_space(
+    chunk: LevelChunkRecord,
+    current_record: &LevelRoomRecord,
+    view: ActiveRoomView,
+) -> Option<ChunkStreamConeScore> {
+    let (x0, x1, z0, z1) = chunk_bounds_current_space(chunk, current_record);
+    let center_x = x0.saturating_add((x1.saturating_sub(x0)) / 2);
+    let center_z = z0.saturating_add((z1.saturating_sub(z0)) / 2);
+    let radius = (x1.saturating_sub(x0).abs()).max(z1.saturating_sub(z0).abs()) / 2;
+    let dx = center_x.saturating_sub(view.position.x) as i64;
+    let dz = center_z.saturating_sub(view.position.z) as i64;
+    let forward_x = -(view.sin_yaw as i64);
+    let forward_z = -(view.cos_yaw as i64);
+    let depth = (dx
+        .saturating_mul(forward_x)
+        .saturating_add(dz.saturating_mul(forward_z)))
+        >> 12;
+    let radius = radius.max(0) as u64;
+    if depth.saturating_add(radius.min(i64::MAX as u64) as i64) < 0 {
+        return None;
+    }
+    let max_depth = room_stream_camera_cone_distance(current_record) as i64;
+    if depth.saturating_sub(radius.min(i64::MAX as u64) as i64) > max_depth {
+        return None;
+    }
+
+    let lateral = (dx
+        .saturating_mul(view.cos_yaw as i64)
+        .saturating_sub(dz.saturating_mul(view.sin_yaw as i64))
+        >> 12)
+        .unsigned_abs();
+    let sector_size = current_record.sector_size.max(1) as u64;
+    let cone_limit = (depth.max(0) as u64).saturating_add(radius).saturating_add(
+        sector_size.saturating_mul(STREAMED_CAMERA_CONE_MARGIN_SECTORS.max(0) as u64),
+    );
+    if lateral > cone_limit {
+        return None;
+    }
+    let lateral_gap = lateral.saturating_sub(radius);
+    let behind_gap = if depth < 0 { (-depth) as u64 } else { 0 };
+    Some(ChunkStreamConeScore {
+        view_tier: if lateral <= radius.saturating_add(sector_size) {
+            0
+        } else {
+            1
+        },
+        ray_distance: lateral_gap
+            .saturating_mul(lateral_gap)
+            .saturating_add(behind_gap.saturating_mul(behind_gap)),
+    })
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn room_stream_camera_cone_distance(record: &LevelRoomRecord) -> i32 {
+    let sector_size = record.sector_size.max(1);
+    room_draw_distance(record)
+        .min(room_chunk_activation_radius_sectors(record).saturating_mul(sector_size))
+        .min(STREAMED_CAMERA_CONE_DISTANCE_SECTORS.saturating_mul(sector_size))
+        .max(sector_size)
+}
+
 #[derive(Copy, Clone)]
 struct ChunkCameraScore {
     ray_distance: u64,
@@ -6697,8 +6823,13 @@ fn chunk_camera_score_current_space(
     let (mut x0, mut x1, mut z0, mut z1) =
         chunk_bounds_current_space_with_record(chunk, chunk_record, current_record);
     let (mut y0, mut y1) = room_vertical_bounds(chunk.room, chunk_record);
-    let world_margin = ACTIVE_ROOM_CHUNK_WORLD_MARGIN
-        .max(chunk_record.sector_size.max(current_record.sector_size).max(1) / 4);
+    let world_margin = ACTIVE_ROOM_CHUNK_WORLD_MARGIN.max(
+        chunk_record
+            .sector_size
+            .max(current_record.sector_size)
+            .max(1)
+            / 4,
+    );
     x0 = x0.saturating_sub(world_margin);
     x1 = x1.saturating_add(world_margin);
     y0 = y0.saturating_sub(world_margin);
@@ -6894,6 +7025,40 @@ fn chunk_neighbour_rooms(chunk: LevelChunkRecord) -> [RoomIndex; 4] {
         chunk.neighbours.south,
         chunk.neighbours.west,
     ]
+}
+
+fn collect_reachable_chunk_rooms(current_index: RoomIndex, out: &mut [RoomIndex]) -> usize {
+    if out.is_empty() || chunk_record_for_room(current_index).is_none() {
+        return 0;
+    }
+    out[0] = current_index;
+    let mut count = 1usize;
+    let mut cursor = 0usize;
+    while cursor < count {
+        let Some(chunk) = chunk_record_for_room(out[cursor]).copied() else {
+            cursor += 1;
+            continue;
+        };
+        for neighbour in chunk_neighbour_rooms(chunk) {
+            if neighbour == INVALID_ROOM_INDEX
+                || chunk_record_for_room(neighbour).is_none()
+                || reachable_chunk_set_contains(&out[..count], neighbour)
+            {
+                continue;
+            }
+            if count >= out.len() {
+                return count;
+            }
+            out[count] = neighbour;
+            count += 1;
+        }
+        cursor += 1;
+    }
+    count
+}
+
+fn reachable_chunk_set_contains(reachable_rooms: &[RoomIndex], room: RoomIndex) -> bool {
+    reachable_rooms.iter().any(|reachable| *reachable == room)
 }
 
 fn authored_bounds_current_space(
@@ -8960,11 +9125,11 @@ fn atmosphere_seed(index: u32) -> u32 {
 
 fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
     match video_mode {
-        VideoMode::Ntsc => VisualPacing::EveryNVBlanks(3),
+        VideoMode::Ntsc => VisualPacing::EveryNVideoFrames(3),
         // PAL is 50Hz, so exact 20Hz pacing does not divide cleanly.
         // Use a deterministic 25Hz fallback instead of a jittery 2/3
         // cadence; PAL-specific 20Hz interpolation can be added later.
-        VideoMode::Pal => VisualPacing::EveryNVBlanks(2),
+        VideoMode::Pal => VisualPacing::EveryNVideoFrames(2),
     }
 }
 
