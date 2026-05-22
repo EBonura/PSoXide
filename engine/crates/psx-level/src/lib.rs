@@ -27,6 +27,9 @@
 #![no_std]
 #![warn(missing_docs)]
 
+/// Fixed-pool runtime traversal over cooked room portals.
+pub mod portal_visibility;
+
 /// Stable identifier assigned to every level asset by the editor
 /// compiler. `AssetId` values are deterministic across runs:
 /// rooms first (in scene-tree order), then textures (ordered by
@@ -479,6 +482,18 @@ pub struct LevelRoomRecord {
     /// Number of `LevelMaterialRecord`s in this room's slice.
     /// Matches the cooked `.psxw`'s material count.
     pub material_count: u16,
+    /// First directed portal in `ROOM_PORTALS` whose source is this room.
+    pub portal_first: u16,
+    /// Number of directed portal records sourced from this room.
+    pub portal_count: u8,
+    /// First room index in `ROOM_NEAR_ROOMS`.
+    pub near_room_first: u16,
+    /// Number of near-room records.
+    pub near_room_count: u8,
+    /// First room index in `ROOM_OVERLAPPED_ROOMS`.
+    pub overlapped_room_first: u16,
+    /// Number of overlapped-room records.
+    pub overlapped_room_count: u8,
     /// Fog/depth-cue far colour.
     pub fog_rgb: [u8; 3],
     /// Fog start distance in engine units.
@@ -501,6 +516,33 @@ pub struct LevelRoomRecord {
     pub camera: LevelCameraRecord,
     /// Reserved.
     pub flags: u16,
+}
+
+/// One directed portal between two cooked runtime rooms.
+///
+/// `normal_*` points back toward `source_room`, away from
+/// `destination_room`, and the vertex arrays encode the portal
+/// rectangle as `[BL, BR, TR, TL]` in world-space engine units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelRoomPortalRecord {
+    /// Source room in the generated `ROOMS` table.
+    pub source_room: RoomIndex,
+    /// Destination room in the generated `ROOMS` table.
+    pub destination_room: RoomIndex,
+    /// Portal kind: `0` wall, `1` vertical placeholder.
+    pub kind: u8,
+    /// Source-facing normal X.
+    pub normal_x: i16,
+    /// Source-facing normal Y.
+    pub normal_y: i16,
+    /// Source-facing normal Z.
+    pub normal_z: i16,
+    /// X coordinate for each portal vertex.
+    pub vertex_x: [i32; 4],
+    /// Y coordinate for each portal vertex.
+    pub vertex_y: [i32; 4],
+    /// Z coordinate for each portal vertex.
+    pub vertex_z: [i32; 4],
 }
 
 /// Cardinal open-portal neighbours for one cooked room.
