@@ -435,6 +435,26 @@ pub mod counter {
     pub const PORTAL_VIS_BUILD_FAILED_MASK_LO: u16 = 177;
     /// High 32 bits of visible resident rooms that failed active-room build.
     pub const PORTAL_VIS_BUILD_FAILED_MASK_HI: u16 = 178;
+    /// Low 32 bits of directed portal records tested this frame.
+    pub const PORTAL_VIS_TESTED_PORTAL_MASK_LO: u16 = 179;
+    /// High 32 bits of directed portal records tested this frame.
+    pub const PORTAL_VIS_TESTED_PORTAL_MASK_HI: u16 = 180;
+    /// Low 32 bits of directed portal records accepted this frame.
+    pub const PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO: u16 = 181;
+    /// High 32 bits of directed portal records accepted this frame.
+    pub const PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI: u16 = 182;
+    /// Low 32 bits of directed portal records rejected by camera/window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO: u16 = 183;
+    /// High 32 bits of directed portal records rejected by camera/window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI: u16 = 184;
+    /// Low 32 bits of directed portal records accepted by occupied-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO: u16 = 185;
+    /// High 32 bits of directed portal records accepted by occupied-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI: u16 = 186;
+    /// Render camera yaw sine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED: u16 = 187;
+    /// Render camera yaw cosine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED: u16 = 188;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;

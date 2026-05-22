@@ -174,7 +174,7 @@ pub struct EditorPlaytestMetrics {
     pub chunk_cache_skips: u32,
     /// Runtime rooms accepted by portal traversal.
     pub portal_visible_rooms: u32,
-    /// Rooms one portal beyond the currently visible set.
+    /// Portal-clipped rooms beyond the traversal depth/capacity edge.
     pub portal_frontier_rooms: u32,
     /// Portal-visible rooms neither resident nor loading when the active window was built.
     pub portal_missing_resident: u32,
@@ -216,7 +216,7 @@ pub struct EditorPlaytestMetrics {
     pub chunk_drawn_mask: u64,
     /// Portal-accepted rooms, keyed by runtime room index.
     pub portal_visible_mask: u64,
-    /// Portal-frontier rooms, keyed by runtime room index.
+    /// Portal depth/capacity frontier rooms, keyed by runtime room index.
     pub portal_frontier_mask: u64,
     /// Portal-accepted rooms missing residency and not loading, keyed by runtime room index.
     pub portal_missing_mask: u64,
@@ -230,6 +230,14 @@ pub struct EditorPlaytestMetrics {
     pub portal_reject_frustum_mask: u64,
     /// Destination rooms recovered by occupied-room-bounds fallback in the latest traversal.
     pub portal_bounds_fallback_mask: u64,
+    /// Directed portal records tested in the latest traversal.
+    pub portal_tested_portal_mask: u64,
+    /// Directed portal records accepted in the latest traversal.
+    pub portal_accepted_portal_mask: u64,
+    /// Directed portal records rejected by camera/window clipping.
+    pub portal_reject_frustum_portal_mask: u64,
+    /// Directed portal records recovered by occupied-room-bounds fallback.
+    pub portal_bounds_fallback_portal_mask: u64,
     /// True when the profiler sample contains player map telemetry.
     pub player_map_valid: bool,
     /// Runtime room/chunk index containing the player.
@@ -240,6 +248,12 @@ pub struct EditorPlaytestMetrics {
     pub player_local_z: i32,
     /// Camera/view yaw in Q12 angle units for player-centred chunk diagnostics.
     pub player_view_yaw_q12: u16,
+    /// True when the profiler sample contains exact render-camera yaw basis telemetry.
+    pub camera_view_basis_valid: bool,
+    /// Render camera yaw sine in Q12 basis units.
+    pub camera_view_sin_yaw_q12: i32,
+    /// Render camera yaw cosine in Q12 basis units.
+    pub camera_view_cos_yaw_q12: i32,
     /// True when the profiler sample contains render-camera map telemetry.
     pub camera_map_valid: bool,
     /// Render camera room-local X in engine units.
