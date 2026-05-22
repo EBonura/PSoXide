@@ -172,16 +172,20 @@ pub struct EditorPlaytestMetrics {
     pub chunk_built: u32,
     /// Candidate chunks skipped because the active room cache was not ready.
     pub chunk_cache_skips: u32,
-    /// Portal-visible rooms accepted by the runtime traversal.
+    /// Runtime rooms accepted by portal traversal.
     pub portal_visible_rooms: u32,
     /// Rooms one portal beyond the currently visible set.
     pub portal_frontier_rooms: u32,
-    /// Portal-visible rooms not resident when the active window was built.
+    /// Portal-visible rooms neither resident nor loading when the active window was built.
     pub portal_missing_resident: u32,
+    /// Portal-visible rooms resident in stream cache but not buildable.
+    pub portal_build_failed: u32,
     /// Directed portals tested by the runtime traversal.
     pub portal_tests: u32,
     /// Directed portals accepted by the runtime traversal.
     pub portal_accepts: u32,
+    /// Directed portals recovered by occupied-room-bounds fallback.
+    pub portal_bounds_fallbacks: u32,
     /// Portal rejections from backface, frustum, and tiny-cone tests.
     pub portal_rejects: [u32; 3],
     /// Portal traversal capacity hits for rooms, frustums, and depth.
@@ -196,22 +200,36 @@ pub struct EditorPlaytestMetrics {
     pub stream_prefetches: u32,
     /// Resident stream slots evicted by recent window refreshes.
     pub stream_evictions: u32,
+    /// Effective resident stream slot limit for the latest active window.
+    pub stream_slot_limit: u32,
     /// Stream loads currently pending.
     pub stream_pending: u32,
     /// Stream loads that failed validation or CD reads.
     pub stream_failed: u32,
     /// Resident streamed chunks, keyed by runtime room/chunk index.
     pub chunk_loaded_mask: u64,
+    /// Streamed chunks with in-flight loads, keyed by runtime room/chunk index.
+    pub chunk_loading_mask: u64,
     /// Active drawable chunks, keyed by runtime room/chunk index.
     pub chunk_active_mask: u64,
     /// Chunks that submitted room geometry, keyed by runtime room/chunk index.
     pub chunk_drawn_mask: u64,
-    /// Portal-visible rooms, keyed by runtime room index.
+    /// Portal-accepted rooms, keyed by runtime room index.
     pub portal_visible_mask: u64,
     /// Portal-frontier rooms, keyed by runtime room index.
     pub portal_frontier_mask: u64,
-    /// Portal-visible rooms missing residency, keyed by runtime room index.
+    /// Portal-accepted rooms missing residency and not loading, keyed by runtime room index.
     pub portal_missing_mask: u64,
+    /// Portal-accepted resident rooms that failed active-room build.
+    pub portal_build_failed_mask: u64,
+    /// Destination rooms whose portals were tested by the latest traversal.
+    pub portal_tested_mask: u64,
+    /// Destination rooms whose portals were accepted by the latest traversal.
+    pub portal_accepted_mask: u64,
+    /// Destination rooms rejected by portal window clipping in the latest traversal.
+    pub portal_reject_frustum_mask: u64,
+    /// Destination rooms recovered by occupied-room-bounds fallback in the latest traversal.
+    pub portal_bounds_fallback_mask: u64,
     /// True when the profiler sample contains player map telemetry.
     pub player_map_valid: bool,
     /// Runtime room/chunk index containing the player.
@@ -222,6 +240,12 @@ pub struct EditorPlaytestMetrics {
     pub player_local_z: i32,
     /// Camera/view yaw in Q12 angle units for player-centred chunk diagnostics.
     pub player_view_yaw_q12: u16,
+    /// True when the profiler sample contains render-camera map telemetry.
+    pub camera_map_valid: bool,
+    /// Render camera room-local X in engine units.
+    pub camera_local_x: i32,
+    /// Render camera room-local Z in engine units.
+    pub camera_local_z: i32,
 }
 
 /// One host-drawn editor overlay segment over the 3D preview.
