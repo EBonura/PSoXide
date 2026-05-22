@@ -995,7 +995,16 @@ fn collision_room_contains_point(
     let Some((x0, x1, z0, z1)) = collision_room_bounds(collision_room, room) else {
         return false;
     };
-    x >= x0 && x < x1 && z >= z0 && z < z1
+    if x < x0 || x >= x1 || z < z0 || z >= z1 {
+        return false;
+    }
+    let sector_size = room.sector_size();
+    if sector_size <= 0 {
+        return false;
+    }
+    let sx = (x.saturating_sub(x0) / sector_size) as u16;
+    let sz = (z.saturating_sub(z0) / sector_size) as u16;
+    room.collision().sector_probe(sx, sz).is_some()
 }
 
 fn collision_room_bounds(
@@ -1441,6 +1450,27 @@ mod tests {
         buf
     }
 
+    fn sparse_two_sector_world() -> [u8; 152] {
+        const ASSET_HEADER: usize = 12;
+        const WORLD_HEADER: usize = 20;
+        const SECTOR_RECORD: usize = 60;
+        const SECTOR0: usize = ASSET_HEADER + WORLD_HEADER;
+        let payload_len = (WORLD_HEADER + SECTOR_RECORD * 2) as u32;
+        let mut buf = [0u8; 152];
+        buf[0..4].copy_from_slice(b"PSXW");
+        buf[4..6].copy_from_slice(&3u16.to_le_bytes());
+        buf[8..12].copy_from_slice(&payload_len.to_le_bytes());
+        buf[12..14].copy_from_slice(&2u16.to_le_bytes());
+        buf[14..16].copy_from_slice(&1u16.to_le_bytes());
+        buf[16..20].copy_from_slice(&1024i32.to_le_bytes());
+        buf[20..22].copy_from_slice(&2u16.to_le_bytes());
+        buf[22..24].copy_from_slice(&1u16.to_le_bytes());
+
+        buf[SECTOR0] = 1 | 4;
+        buf[SECTOR0 + 4..SECTOR0 + 6].copy_from_slice(&0u16.to_le_bytes());
+        buf
+    }
+
     #[test]
     fn forward_input_moves_along_yaw() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
@@ -1606,6 +1636,26 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(1088, 0, 512));
         assert!(frame.moved);
         assert!(!frame.blocked);
+    }
+
+    #[test]
+    fn collision_room_membership_ignores_empty_cells_inside_bounds() {
+        let bytes = sparse_two_sector_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("sparse room parses");
+        let collision = CharacterCollisionRoom::new(room, 0, 0);
+
+        assert!(collision_room_contains_point(
+            collision,
+            RuntimeCollisionRoom::Runtime(room),
+            512,
+            512
+        ));
+        assert!(!collision_room_contains_point(
+            collision,
+            RuntimeCollisionRoom::Runtime(room),
+            1536,
+            512
+        ));
     }
 
     #[test]
