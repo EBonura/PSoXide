@@ -4548,7 +4548,7 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "PORT acc/fr/unld {:>2}/{:<2}/{:<2}",
+                        "PORT acc/edge/unld {:>2}/{:<2}/{:<2}",
                         metrics.portal_visible_rooms,
                         metrics.portal_frontier_rooms,
                         metrics.portal_missing_resident
@@ -4560,10 +4560,8 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "PORT ok/fb/fail {:>2}/{:<2}/{:<2}",
-                        metrics.portal_accepts,
-                        metrics.portal_bounds_fallbacks,
-                        metrics.portal_build_failed
+                        "PORT ok/build {:>2}/{:<2}",
+                        metrics.portal_accepts, metrics.portal_build_failed
                     ),
                     STUDIO_TEXT_WEAK,
                 );
@@ -8118,21 +8116,25 @@ impl EditorWorkspace {
                 continue;
             }
             let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
-            for roomlet in plan.rooms {
-                let chunk_grid = extract_portal_room_grid(grid, &roomlet);
+            for portal_room in plan.rooms {
+                let chunk_grid = extract_portal_room_grid(grid, &portal_room);
                 match world_cook::cook_world_grid(project, &chunk_grid) {
                     Ok(cooked) => {
                         if let Err(error) = cooked.to_psxw_bytes() {
                             self.record_world_cook_error(
                                 room_node.id,
                                 &error,
-                                roomlet.array_origin,
+                                portal_room.array_origin,
                             );
                             return;
                         }
                     }
                     Err(error) => {
-                        self.record_world_cook_error(room_node.id, &error, roomlet.array_origin);
+                        self.record_world_cook_error(
+                            room_node.id,
+                            &error,
+                            portal_room.array_origin,
+                        );
                         return;
                     }
                 }
@@ -15734,11 +15736,11 @@ fn draw_world_grid_settings(
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
             });
         });
-    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Portal Rooms"))
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Manual Portal Rooms"))
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Runtime Room Cap").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Room Hard Cap").color(STUDIO_TEXT_WEAK));
                 ui.label(format!(
                     "{}×{} sectors",
                     DEFAULT_PORTAL_ROOM_MAX_SECTORS, DEFAULT_PORTAL_ROOM_MAX_SECTORS
@@ -21241,6 +21243,7 @@ struct PlayChunkDebugMapCell {
 
 #[derive(Clone)]
 struct PlayChunkDebugMapPortal {
+    portal_index: usize,
     source_room_index: usize,
     destination_room_index: usize,
     a: [f32; 2],
@@ -21334,10 +21337,6 @@ fn draw_play_chunk_debug_map(
         let frontier = bit != 0 && metrics.portal_frontier_mask & bit != 0;
         let missing = bit != 0 && metrics.portal_missing_mask & bit != 0;
         let build_failed = bit != 0 && metrics.portal_build_failed_mask & bit != 0;
-        let fallback = bit != 0 && metrics.portal_bounds_fallback_mask & bit != 0;
-        let rejected = bit != 0
-            && metrics.portal_reject_frustum_mask & bit != 0
-            && metrics.portal_accepted_mask & bit == 0;
         let drawn = bit != 0 && metrics.chunk_drawn_mask & bit != 0;
         let rect = Rect::from_min_max(
             Pos2::new(
@@ -21358,10 +21357,6 @@ fn draw_play_chunk_debug_map(
             Color32::from_rgba_unmultiplied(226, 54, 74, 112)
         } else if loading {
             Color32::from_rgba_unmultiplied(72, 150, 255, 96)
-        } else if rejected {
-            Color32::from_rgba_unmultiplied(255, 124, 36, 84)
-        } else if fallback {
-            Color32::from_rgba_unmultiplied(68, 210, 226, 84)
         } else if visible {
             Color32::from_rgba_unmultiplied(244, 170, 48, 96)
         } else if loaded {
@@ -21380,10 +21375,6 @@ fn draw_play_chunk_debug_map(
             Stroke::new(1.8, Color32::from_rgb(255, 82, 104))
         } else if loading {
             Stroke::new(1.8, Color32::from_rgb(96, 178, 255))
-        } else if rejected {
-            Stroke::new(1.8, Color32::from_rgb(255, 142, 48))
-        } else if fallback {
-            Stroke::new(1.8, Color32::from_rgb(68, 220, 238))
         } else if visible {
             Stroke::new(1.7, Color32::from_rgb(255, 184, 58))
         } else if frontier {
@@ -21394,46 +21385,44 @@ fn draw_play_chunk_debug_map(
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 120))
         };
         painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
-        if rejected {
-            draw_rejected_map_marker(painter, rect);
-        }
     }
 
     let clipped = painter.with_clip_rect(plot);
     for portal in &map.portals {
         let source_bit = debug_chunk_bit(portal.source_room_index);
         let dest_bit = debug_chunk_bit(portal.destination_room_index);
+        let portal_bit = debug_chunk_bit(portal.portal_index);
         let source_visible = source_bit != 0 && metrics.portal_visible_mask & source_bit != 0;
-        let dest_visible = dest_bit != 0 && metrics.portal_visible_mask & dest_bit != 0;
         let dest_frontier = dest_bit != 0 && metrics.portal_frontier_mask & dest_bit != 0;
         let dest_loading = dest_bit != 0 && metrics.chunk_loading_mask & dest_bit != 0;
         let dest_build_failed = dest_bit != 0 && metrics.portal_build_failed_mask & dest_bit != 0;
-        let dest_fallback = dest_bit != 0 && metrics.portal_bounds_fallback_mask & dest_bit != 0;
-        let dest_rejected = dest_bit != 0
-            && metrics.portal_reject_frustum_mask & dest_bit != 0
-            && metrics.portal_accepted_mask & dest_bit == 0;
-        let color = if source_visible && dest_visible {
+        let portal_accepted =
+            portal_bit != 0 && metrics.portal_accepted_portal_mask & portal_bit != 0;
+        let portal_rejected =
+            portal_bit != 0 && metrics.portal_reject_frustum_portal_mask & portal_bit != 0;
+        let color = if source_visible && portal_accepted {
             Color32::from_rgb(255, 190, 72)
         } else if source_visible && dest_build_failed {
             Color32::from_rgb(255, 92, 214)
         } else if source_visible && dest_loading {
             Color32::from_rgb(96, 178, 255)
-        } else if source_visible && dest_fallback {
-            Color32::from_rgb(68, 220, 238)
-        } else if source_visible && dest_rejected {
+        } else if source_visible && portal_rejected {
             Color32::from_rgb(255, 142, 48)
         } else if source_visible && dest_frontier {
             Color32::from_rgb(172, 128, 255)
         } else {
             Color32::from_rgba_unmultiplied(210, 220, 235, 112)
         };
-        clipped.line_segment(
-            [
-                Pos2::new(map_x(portal.a[0]), map_z(portal.a[1])),
-                Pos2::new(map_x(portal.b[0]), map_z(portal.b[1])),
-            ],
-            Stroke::new(2.0, color),
+        let (a, b) = directed_portal_map_segment(
+            Pos2::new(map_x(portal.a[0]), map_z(portal.a[1])),
+            Pos2::new(map_x(portal.b[0]), map_z(portal.b[1])),
+            portal.source_room_index,
+            portal.destination_room_index,
         );
+        clipped.line_segment([a, b], Stroke::new(2.0, color));
+        if source_visible && portal_rejected && !portal_accepted {
+            draw_rejected_portal_marker(&clipped, a, b);
+        }
     }
 
     if metrics.player_map_valid {
@@ -21460,7 +21449,20 @@ fn draw_play_chunk_debug_map(
                 && camera_pos.y.is_finite()
             {
                 let yaw = metrics.player_view_yaw_q12 as f32 * std::f32::consts::TAU / 4096.0;
-                let forward = Vec2::new(-yaw.sin(), -yaw.cos());
+                let forward = if metrics.camera_view_basis_valid {
+                    let basis = Vec2::new(
+                        -(metrics.camera_view_sin_yaw_q12 as f32) / 4096.0,
+                        -(metrics.camera_view_cos_yaw_q12 as f32) / 4096.0,
+                    );
+                    let len = basis.length();
+                    if len > 0.001 {
+                        basis / len
+                    } else {
+                        Vec2::new(-yaw.sin(), -yaw.cos())
+                    }
+                } else {
+                    Vec2::new(-yaw.sin(), -yaw.cos())
+                };
                 let cone_len = (content_w * content_w + content_h * content_h)
                     .sqrt()
                     .max(42.0);
@@ -21513,7 +21515,7 @@ fn draw_play_chunk_debug_map(
         legend_row0 + Vec2::new(158.0, 0.0),
         Color32::from_rgba_unmultiplied(0, 0, 0, 0),
         Color32::from_rgb(172, 128, 255),
-        "frontier",
+        "depth/cap",
     );
     draw_chunk_map_legend_item(
         painter,
@@ -21548,18 +21550,11 @@ fn draw_play_chunk_debug_map(
         legend_row2 + Vec2::new(94.0, 0.0),
         Color32::from_rgba_unmultiplied(255, 124, 36, 84),
         Color32::from_rgb(255, 142, 48),
-        "clip reject",
+        "rejected",
     );
     draw_rejected_map_marker(
         painter,
         Rect::from_min_size(legend_row2 + Vec2::new(94.0, 0.0), Vec2::new(9.0, 9.0)),
-    );
-    draw_chunk_map_legend_item(
-        painter,
-        legend_row2 + Vec2::new(188.0, 0.0),
-        Color32::from_rgba_unmultiplied(68, 210, 226, 84),
-        Color32::from_rgb(68, 220, 238),
-        "bounds fb",
     );
 }
 
@@ -21584,12 +21579,12 @@ fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap 
         let plan = plan_portal_rooms(scene, node.id, grid, PortalRoomConfig::default());
         let node_center = node_world(node);
         let room_base_index = runtime_room_index;
-        for roomlet in &plan.rooms {
+        for portal_room in &plan.rooms {
             let room_origin = [
-                node_center[0] + roomlet.array_origin[0] as f32 - grid.width as f32 * 0.5,
-                node_center[1] + roomlet.array_origin[1] as f32 - grid.depth as f32 * 0.5,
+                node_center[0] + portal_room.array_origin[0] as f32 - grid.width as f32 * 0.5,
+                node_center[1] + portal_room.array_origin[1] as f32 - grid.depth as f32 * 0.5,
             ];
-            for [cell_x, cell_z] in &roomlet.cells {
+            for [cell_x, cell_z] in &portal_room.cells {
                 let local_center = grid_cell_editor_center(grid, *cell_x, *cell_z);
                 cells.push(PlayChunkDebugMapCell {
                     runtime_room_index,
@@ -21605,15 +21600,14 @@ fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap 
             runtime_room_index += 1;
         }
         let sector_size = grid.sector_size.max(1) as f32;
+        let room_portal_base = portals.len();
         for portal in plan.portals {
-            if portal.source_room > portal.destination_room {
-                continue;
-            }
             let a =
                 portal_debug_map_point(grid, node_center, sector_size, portal.vertices_world[0]);
             let b =
                 portal_debug_map_point(grid, node_center, sector_size, portal.vertices_world[1]);
             portals.push(PlayChunkDebugMapPortal {
+                portal_index: room_portal_base + portal.index,
                 source_room_index: room_base_index + portal.source_room,
                 destination_room_index: room_base_index + portal.destination_room,
                 a,
@@ -21653,6 +21647,26 @@ fn rotate_vec2(v: Vec2, radians: f32) -> Vec2 {
     Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos)
 }
 
+fn directed_portal_map_segment(
+    a: Pos2,
+    b: Pos2,
+    source_room_index: usize,
+    destination_room_index: usize,
+) -> (Pos2, Pos2) {
+    let edge = b - a;
+    let len = (edge.x * edge.x + edge.y * edge.y).sqrt();
+    if len <= 0.001 {
+        return (a, b);
+    }
+    let side = if source_room_index <= destination_room_index {
+        1.0
+    } else {
+        -1.0
+    };
+    let offset = Vec2::new(-edge.y / len, edge.x / len) * (1.6 * side);
+    (a + offset, b + offset)
+}
+
 fn draw_rejected_map_marker(painter: &egui::Painter, rect: Rect) {
     let inset = (rect.width().min(rect.height()) * 0.22).clamp(1.0, 4.0);
     let a = rect.left_top() + Vec2::splat(inset);
@@ -21662,6 +21676,35 @@ fn draw_rejected_map_marker(painter: &egui::Painter, rect: Rect) {
         Stroke::new(2.4, Color32::from_rgba_unmultiplied(20, 14, 10, 160)),
     );
     painter.line_segment([a, b], Stroke::new(1.2, Color32::from_rgb(255, 238, 204)));
+}
+
+fn draw_rejected_portal_marker(painter: &egui::Painter, a: Pos2, b: Pos2) {
+    let edge = b - a;
+    let len = (edge.x * edge.x + edge.y * edge.y).sqrt();
+    if len <= 0.001 {
+        return;
+    }
+    let tangent = edge / len;
+    let normal = Vec2::new(-tangent.y, tangent.x);
+    let center = a + edge * 0.5;
+    let half_a = tangent * 4.5 + normal * 4.5;
+    let half_b = tangent * 4.5 - normal * 4.5;
+    painter.line_segment(
+        [center - half_a, center + half_a],
+        Stroke::new(2.4, Color32::from_rgba_unmultiplied(20, 14, 10, 170)),
+    );
+    painter.line_segment(
+        [center - half_a, center + half_a],
+        Stroke::new(1.2, Color32::from_rgb(255, 238, 204)),
+    );
+    painter.line_segment(
+        [center - half_b, center + half_b],
+        Stroke::new(2.4, Color32::from_rgba_unmultiplied(20, 14, 10, 170)),
+    );
+    painter.line_segment(
+        [center - half_b, center + half_b],
+        Stroke::new(1.2, Color32::from_rgb(255, 238, 204)),
+    );
 }
 
 fn draw_chunk_map_legend_item(
@@ -23703,9 +23746,9 @@ fn draw_portal_room_boundaries_2d(
         return;
     }
     let stroke = Stroke::new(2.0, Color32::from_rgb(96, 255, 196));
-    for roomlet in plan.rooms {
+    for portal_room in plan.rooms {
         let (local_center, chunk_half) =
-            grid_rect_editor_center_half(grid, roomlet.array_origin, roomlet.size);
+            grid_rect_editor_center_half(grid, portal_room.array_origin, portal_room.size);
         let chunk_center = [
             node_center[0] + local_center[0],
             node_center[1] + local_center[1],
@@ -28117,18 +28160,18 @@ fn draw_portal_room_budget(
     let model_budget = runtime_model_budget(project, project_root, &resource_use);
     let over = plan.over_budget_count() > 0;
     let header = if over {
-        icons::label(icons::TRASH, "Portal Rooms — over limit")
+        icons::label(icons::TRASH, "Manual Portal Rooms — over limit")
     } else {
-        icons::label(icons::SCAN, "Portal Rooms")
+        icons::label(icons::SCAN, "Manual Portal Rooms")
     };
 
     egui::CollapsingHeader::new(header)
         .default_open(true)
         .show(ui, |ui| {
-            draw_budget_row(ui, "Runtime rooms", format!("{}", plan.room_count()), over);
+            draw_budget_row(ui, "Manual rooms", format!("{}", plan.room_count()), over);
             draw_budget_row(
                 ui,
-                "Room cap",
+                "Hard cap",
                 format!(
                     "{}×{} sectors",
                     plan.config.max_width, plan.config.max_depth
@@ -28159,7 +28202,7 @@ fn draw_portal_room_budget(
                 format!("{}×{} sectors", plan.source_size[0], plan.source_size[1]),
                 false,
             );
-            ui.weak("Embedded Play cooks this world into wall/portal-delimited runtime rooms.");
+            ui.weak("Embedded Play cooks this world into manual portal-delimited runtime rooms.");
             if let Some(room) = plan.largest_room_asset() {
                 draw_budget_row(
                     ui,

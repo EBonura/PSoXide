@@ -1,9 +1,8 @@
 //! Portal-room planning for the playtest cooker and editor overlays.
 //!
-//! The authored editor still presents one contiguous [`WorldGrid`], but the
-//! runtime wants small room payloads with explicit connectivity. Walls are
-//! sealed seams. `Portal` scene nodes placed on grid edges create open seams
-//! that keep the rooms separate while allowing visibility/residency traversal.
+//! The authored editor presents one contiguous [`WorldGrid`]. Runtime portal
+//! rooms are split only by authored `Portal` scene nodes placed on grid edges;
+//! the planner must not invent chunk boundaries for size, walls, or streaming.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -13,8 +12,8 @@ use crate::{
     WorldGridBudget, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH,
 };
 
-/// Default maximum runtime portal-room span, in authored sectors.
-pub const DEFAULT_PORTAL_ROOM_MAX_SECTORS: u16 = 5;
+/// Default hard portal-room span limit, in authored sectors.
+pub const DEFAULT_PORTAL_ROOM_MAX_SECTORS: u16 = MAX_ROOM_WIDTH;
 
 /// Portal-room planning limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +31,8 @@ pub struct PortalRoomConfig {
 impl Default for PortalRoomConfig {
     fn default() -> Self {
         Self {
-            max_width: DEFAULT_PORTAL_ROOM_MAX_SECTORS.min(MAX_ROOM_WIDTH),
-            max_depth: DEFAULT_PORTAL_ROOM_MAX_SECTORS.min(MAX_ROOM_DEPTH),
+            max_width: MAX_ROOM_WIDTH,
+            max_depth: MAX_ROOM_DEPTH,
             max_triangles: MAX_ROOM_TRIANGLES,
             max_bytes: MAX_ROOM_BYTES,
         }
@@ -204,7 +203,7 @@ impl From<EdgeKey> for PortalEdge {
     }
 }
 
-/// Plan small runtime rooms from one contiguous authored world grid.
+/// Plan manual portal rooms from one contiguous authored world grid.
 pub fn plan_portal_rooms(
     scene: &Scene,
     room_node: NodeId,
@@ -213,11 +212,7 @@ pub fn plan_portal_rooms(
 ) -> PortalRoomPlan {
     let config = config.normalized();
     let portal_seams = collect_portal_seams(scene, room_node, grid);
-    let mut raw_regions = flood_regions(grid, &portal_seams.cuts);
-    let mut room_cells = Vec::new();
-    for region in raw_regions.drain(..) {
-        split_region_to_budget(region, config, &mut room_cells);
-    }
+    let mut room_cells = portal_regions(grid, &portal_seams.cuts);
     room_cells.sort_by_key(|cells| region_sort_key(cells));
 
     let mut cell_to_room = HashMap::new();
@@ -404,6 +399,30 @@ fn portal_edge_key_for_node(grid: &WorldGrid, node: &SceneNode) -> Option<EdgeKe
         .map(|(_, edge)| edge)
 }
 
+fn portal_regions(grid: &WorldGrid, portal_edges: &HashSet<EdgeKey>) -> Vec<Vec<Cell>> {
+    let populated_cells = all_populated_cells(grid);
+    if populated_cells.is_empty() {
+        return Vec::new();
+    }
+    if portal_edges.is_empty() {
+        return vec![populated_cells];
+    }
+
+    flood_regions(grid, portal_edges)
+}
+
+fn all_populated_cells(grid: &WorldGrid) -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for x in 0..grid.width {
+        for z in 0..grid.depth {
+            if populated(grid, x, z) {
+                cells.push(Cell { x, z });
+            }
+        }
+    }
+    cells
+}
+
 fn flood_regions(grid: &WorldGrid, portal_edges: &HashSet<EdgeKey>) -> Vec<Vec<Cell>> {
     let mut visited = HashSet::new();
     let mut regions = Vec::new();
@@ -431,7 +450,7 @@ fn flood_regions(grid: &WorldGrid, portal_edges: &HashSet<EdgeKey>) -> Vec<Vec<C
                     let Some(edge) = canonical_edge(cell.x, cell.z, direction) else {
                         continue;
                     };
-                    if portal_edges.contains(&edge) || edge_has_wall(grid, edge) {
+                    if portal_edges.contains(&edge) {
                         continue;
                     }
                     visited.insert(next);
@@ -442,50 +461,6 @@ fn flood_regions(grid: &WorldGrid, portal_edges: &HashSet<EdgeKey>) -> Vec<Vec<C
         }
     }
     regions
-}
-
-fn split_region_to_budget(cells: Vec<Cell>, config: PortalRoomConfig, out: &mut Vec<Vec<Cell>>) {
-    let Some((origin, size)) = cells_bounds(&cells) else {
-        return;
-    };
-    if size[0] <= config.max_width && size[1] <= config.max_depth {
-        out.push(cells);
-        return;
-    }
-
-    let split_x = size[0] >= size[1] && size[0] > config.max_width;
-    let split_z = !split_x && size[1] > config.max_depth;
-    if !split_x && !split_z {
-        out.push(cells);
-        return;
-    }
-
-    let cut = if split_x {
-        origin[0].saturating_add(size[0] / 2)
-    } else {
-        origin[1].saturating_add(size[1] / 2)
-    };
-    let mut low = Vec::new();
-    let mut high = Vec::new();
-    for cell in cells {
-        if (split_x && cell.x < cut) || (split_z && cell.z < cut) {
-            low.push(cell);
-        } else {
-            high.push(cell);
-        }
-    }
-
-    if low.is_empty() || high.is_empty() {
-        let mut sorted = if low.is_empty() { high } else { low };
-        sorted.sort_by_key(|cell| (cell.x, cell.z));
-        for chunk in sorted.chunks(config.max_width as usize * config.max_depth as usize) {
-            out.push(chunk.to_vec());
-        }
-        return;
-    }
-
-    split_region_to_budget(low, config, out);
-    split_region_to_budget(high, config, out);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,6 +494,9 @@ fn build_room_portals(
             let Some(edge) = canonical_edge(cell.x, cell.z, direction) else {
                 continue;
             };
+            let Some(&source_marker) = portal_seams.source_marker_for_edge.get(&edge) else {
+                continue;
+            };
             if edge_has_wall(grid, edge) {
                 continue;
             }
@@ -526,7 +504,7 @@ fn build_room_portals(
                 edge,
                 source_room,
                 destination_room,
-                source_marker: portal_seams.source_marker_for_edge.get(&edge).copied(),
+                source_marker: Some(source_marker),
             });
         }
     }
@@ -980,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn wall_splits_portal_rooms() {
+    fn walls_do_not_split_manual_portal_rooms() {
         let mut project = ProjectDocument::new("test");
         let mat = material(&mut project);
         let mut grid = WorldGrid::stone_room(2, 1, 1024, Some(mat), None);
@@ -1003,10 +981,10 @@ mod tests {
             grid,
             PortalRoomConfig::default(),
         );
-        assert_eq!(plan.room_count(), 2);
+        assert_eq!(plan.room_count(), 1);
+        assert_eq!(plan.rooms[0].cells.len(), 2);
         assert!(plan.portals.is_empty());
         assert_eq!(plan.rooms[0].neighbours, [None; 4]);
-        assert_eq!(plan.rooms[1].neighbours, [None; 4]);
     }
 
     #[test]
@@ -1183,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_open_region_gets_safety_split() {
+    fn oversized_open_region_stays_one_manual_portal_room() {
         let mut project = ProjectDocument::new("test");
         let mat = material(&mut project);
         let grid = WorldGrid::stone_room(1, 8, 1024, Some(mat), None);
@@ -1201,13 +1179,13 @@ mod tests {
             grid,
             PortalRoomConfig::default(),
         );
-        assert_eq!(plan.room_count(), 2);
-        assert!(plan.rooms.iter().all(|room| room.size[1] <= 5));
-        assert!(plan.rooms.iter().any(|room| room.neighbours[0].is_some()));
+        assert_eq!(plan.room_count(), 1);
+        assert_eq!(plan.rooms[0].size, [1, 8]);
+        assert!(plan.portals.is_empty());
     }
 
     #[test]
-    fn safety_split_keeps_canonical_floor_transition_wall() {
+    fn manual_portal_split_keeps_canonical_floor_transition_wall() {
         let mut project = ProjectDocument::new("test");
         let mat = material(&mut project);
         let mut grid = WorldGrid::empty(6, 1, 1024);
@@ -1220,6 +1198,26 @@ mod tests {
             "Room",
             NodeKind::Room { grid },
         );
+        let portal = project.active_scene_mut().add_node(
+            room,
+            "Portal",
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name: String::new(),
+            },
+        );
+        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+            panic!("expected room");
+        };
+        let editor =
+            grid.world_cells_to_editor([grid.origin[0] as f32 + 3.0, grid.origin[1] as f32 + 0.5]);
+        project
+            .active_scene_mut()
+            .node_mut(portal)
+            .unwrap()
+            .transform
+            .translation = [editor[0], 0.0, editor[1]];
         let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
             panic!("expected room");
         };
@@ -1234,7 +1232,7 @@ mod tests {
             .rooms
             .iter()
             .find(|room| room.array_origin == [0, 0])
-            .expect("west roomlet");
+            .expect("west room");
         let extracted = extract_portal_room_grid(grid, west);
         assert_eq!(
             extracted
