@@ -172,6 +172,22 @@ pub struct EditorPlaytestMetrics {
     pub chunk_built: u32,
     /// Candidate chunks skipped because the active room cache was not ready.
     pub chunk_cache_skips: u32,
+    /// Portal-visible rooms accepted by the runtime traversal.
+    pub portal_visible_rooms: u32,
+    /// Rooms one portal beyond the currently visible set.
+    pub portal_frontier_rooms: u32,
+    /// Portal-visible rooms not resident when the active window was built.
+    pub portal_missing_resident: u32,
+    /// Directed portals tested by the runtime traversal.
+    pub portal_tests: u32,
+    /// Directed portals accepted by the runtime traversal.
+    pub portal_accepts: u32,
+    /// Portal rejections from backface, frustum, and tiny-cone tests.
+    pub portal_rejects: [u32; 3],
+    /// Portal traversal capacity hits for rooms, frustums, and depth.
+    pub portal_caps: [u32; 3],
+    /// Stream request priorities for current, visible, and frontier rooms.
+    pub stream_priorities: [u32; 3],
     /// Stream scheduler requests considered by recent window refreshes.
     pub stream_requests: u32,
     /// Stream scheduler requests that were missing from resident slots.
@@ -190,6 +206,12 @@ pub struct EditorPlaytestMetrics {
     pub chunk_active_mask: u64,
     /// Chunks that submitted room geometry, keyed by runtime room/chunk index.
     pub chunk_drawn_mask: u64,
+    /// Portal-visible rooms, keyed by runtime room index.
+    pub portal_visible_mask: u64,
+    /// Portal-frontier rooms, keyed by runtime room index.
+    pub portal_frontier_mask: u64,
+    /// Portal-visible rooms missing residency, keyed by runtime room index.
+    pub portal_missing_mask: u64,
     /// True when the profiler sample contains player map telemetry.
     pub player_map_valid: bool,
     /// Runtime room/chunk index containing the player.

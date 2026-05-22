@@ -222,6 +222,9 @@ pub fn build_package(
     let mut room_cache_cell_vertices: Vec<u16> = Vec::new();
     let mut room_cache_vertices: Vec<PlaytestCachedRoomVertex> = Vec::new();
     let mut room_cache_surfaces: Vec<PlaytestCachedRoomSurface> = Vec::new();
+    let mut room_portals: Vec<PlaytestRoomPortal> = Vec::new();
+    let room_near_rooms: Vec<u16> = Vec::new();
+    let room_overlapped_rooms: Vec<u16> = Vec::new();
 
     for room_node in &room_nodes {
         let NodeKind::Room { grid } = &room_node.kind else {
@@ -248,6 +251,18 @@ pub fn build_package(
         }
         let roomlet_count = plan.room_count();
         let room_index_base = rooms.len();
+        let room_portal_base = room_portals.len();
+        for portal in &plan.portals {
+            let source_room = room_index_base.saturating_add(portal.source_room);
+            let destination_room = room_index_base.saturating_add(portal.destination_room);
+            room_portals.push(PlaytestRoomPortal {
+                source_room: u16::try_from(source_room).unwrap_or(u16::MAX),
+                destination_room: u16::try_from(destination_room).unwrap_or(u16::MAX),
+                kind: if portal.vertical { 1 } else { 0 },
+                normal: portal.normal_world,
+                vertices: portal.vertices_world,
+            });
+        }
         for portal_room in plan.rooms {
             let chunk_grid = extract_portal_room_grid(grid, &portal_room);
             if chunk_grid.populated_sector_count() == 0 {
@@ -479,6 +494,17 @@ pub fn build_package(
                 visible_chunk_limit: streaming.visible_chunk_limit,
                 material_first,
                 material_count,
+                portal_first: if portal_room.portal_count == 0 {
+                    0
+                } else {
+                    u16::try_from(room_portal_base.saturating_add(portal_room.portal_first))
+                        .unwrap_or(u16::MAX)
+                },
+                portal_count: u8::try_from(portal_room.portal_count).unwrap_or(u8::MAX),
+                near_room_first: 0,
+                near_room_count: 0,
+                overlapped_room_first: 0,
+                overlapped_room_count: 0,
                 fog_rgb: chunk_grid.fog_color,
                 fog_near: chunk_grid.fog_near,
                 fog_far: chunk_grid.fog_far,
@@ -1147,6 +1173,9 @@ pub fn build_package(
             assets,
             rooms,
             chunks,
+            room_portals,
+            room_near_rooms,
+            room_overlapped_rooms,
             materials,
             room_visibility,
             visibility_cells,
@@ -4297,6 +4326,587 @@ mod tests {
         crate::default_project_dir()
     }
 
+    const PORTAL_SWEEP_MAX_ROOMS: usize = 32;
+    const PORTAL_SWEEP_MAX_FRUSTUMS: usize = 64;
+    const PORTAL_SWEEP_MAX_FRONTIER: usize = 32;
+    const PORTAL_SWEEP_MAX_DEPTH: u8 = 8;
+    const PORTAL_SWEEP_HALF_FOV_Q12: i32 = 2048;
+    const PORTAL_SWEEP_MIN_WIDTH_Q12: i32 = 4;
+    const PORTAL_SWEEP_NEAR_Z: i32 = 64;
+    const PORTAL_SWEEP_YAW_STEPS: usize = 32;
+
+    type PortalSweepResult = psx_level::portal_visibility::PortalVisibilityResult<
+        PORTAL_SWEEP_MAX_ROOMS,
+        PORTAL_SWEEP_MAX_FRUSTUMS,
+        PORTAL_SWEEP_MAX_FRONTIER,
+    >;
+
+    fn demo7_project_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/demo7/project.ron")
+    }
+
+    fn load_demo7_package() -> PlaytestPackage {
+        let path = demo7_project_path();
+        let source = std::fs::read_to_string(&path).expect("read demo7 project.ron");
+        let project = ProjectDocument::from_ron_str(&source).expect("demo7 project parses");
+        let project_root = path.parent().expect("demo7 has parent dir");
+        let (package, report) = build_package(&project, project_root);
+        assert!(
+            report.errors.is_empty(),
+            "demo7 playtest validation errors: {:?}",
+            report.errors
+        );
+        package.expect("demo7 package cooks")
+    }
+
+    fn level_room_records_for_sweep(package: &PlaytestPackage) -> Vec<psx_level::LevelRoomRecord> {
+        package
+            .rooms
+            .iter()
+            .map(|room| {
+                let name: &'static str = Box::leak(room.name.clone().into_boxed_str());
+                psx_level::LevelRoomRecord {
+                    name,
+                    world_asset: psx_level::AssetId(room.world_asset_index as u16),
+                    origin_x: room.origin_x,
+                    origin_z: room.origin_z,
+                    sector_size: room.sector_size,
+                    draw_distance: room.draw_distance,
+                    chunk_activation_radius_sectors: room.chunk_activation_radius_sectors,
+                    visibility_radius: room.visibility_radius,
+                    resident_chunk_limit: room.resident_chunk_limit,
+                    visible_chunk_limit: room.visible_chunk_limit,
+                    material_first: psx_level::MaterialIndex(room.material_first),
+                    material_count: room.material_count,
+                    portal_first: room.portal_first,
+                    portal_count: room.portal_count,
+                    near_room_first: room.near_room_first,
+                    near_room_count: room.near_room_count,
+                    overlapped_room_first: room.overlapped_room_first,
+                    overlapped_room_count: room.overlapped_room_count,
+                    fog_rgb: room.fog_rgb,
+                    fog_near: room.fog_near,
+                    fog_far: room.fog_far,
+                    atmosphere_rgb: room.atmosphere_rgb,
+                    atmosphere_density: room.atmosphere_density,
+                    atmosphere_fall_speed_q4: room.atmosphere_fall_speed_q4,
+                    atmosphere_wind_speed_q4: room.atmosphere_wind_speed_q4,
+                    sky: psx_level::LevelSkyRecord::DEFAULT,
+                    far_vista: psx_level::LevelFarVistaRecord::DEFAULT,
+                    camera: psx_level::LevelCameraRecord::DEFAULT,
+                    flags: room.flags,
+                }
+            })
+            .collect()
+    }
+
+    fn level_portal_records_for_sweep(
+        package: &PlaytestPackage,
+    ) -> Vec<psx_level::LevelRoomPortalRecord> {
+        package
+            .room_portals
+            .iter()
+            .map(|portal| psx_level::LevelRoomPortalRecord {
+                source_room: psx_level::RoomIndex(portal.source_room),
+                destination_room: psx_level::RoomIndex(portal.destination_room),
+                kind: portal.kind,
+                normal_x: portal.normal[0],
+                normal_y: portal.normal[1],
+                normal_z: portal.normal[2],
+                vertex_x: [
+                    portal.vertices[0][0],
+                    portal.vertices[1][0],
+                    portal.vertices[2][0],
+                    portal.vertices[3][0],
+                ],
+                vertex_y: [
+                    portal.vertices[0][1],
+                    portal.vertices[1][1],
+                    portal.vertices[2][1],
+                    portal.vertices[3][1],
+                ],
+                vertex_z: [
+                    portal.vertices[0][2],
+                    portal.vertices[1][2],
+                    portal.vertices[2][2],
+                    portal.vertices[3][2],
+                ],
+            })
+            .collect()
+    }
+
+    fn portal_sweep_yaws() -> impl Iterator<Item = (i32, i32, String)> {
+        (0..PORTAL_SWEEP_YAW_STEPS).map(|step| {
+            let radians = (step as f64) * std::f64::consts::TAU / (PORTAL_SWEEP_YAW_STEPS as f64);
+            let sin_yaw = (-(radians.sin()) * 4096.0).round() as i32;
+            let cos_yaw = (-(radians.cos()) * 4096.0).round() as i32;
+            let degrees = step * 360 / PORTAL_SWEEP_YAW_STEPS;
+            (sin_yaw, cos_yaw, format!("{degrees}deg"))
+        })
+    }
+
+    fn cell_global_center(
+        package: &PlaytestPackage,
+        cell: PlaytestVisibilityCell,
+    ) -> Option<(i32, i32, i32)> {
+        let room = package.rooms.get(cell.room as usize)?;
+        let sector = room.sector_size.max(1);
+        let x = room
+            .origin_x
+            .saturating_add(cell.x as i32)
+            .saturating_mul(sector)
+            .saturating_add(sector / 2);
+        let z = room
+            .origin_z
+            .saturating_add(cell.z as i32)
+            .saturating_mul(sector)
+            .saturating_add(sector / 2);
+        let y = cell
+            .min_y
+            .saturating_add(cell.max_y.saturating_sub(cell.min_y) / 2)
+            .max(1024);
+        Some((x, y, z))
+    }
+
+    fn portal_visibility_at(
+        rooms: &[psx_level::LevelRoomRecord],
+        portals: &[psx_level::LevelRoomPortalRecord],
+        room: u16,
+        x: i32,
+        y: i32,
+        z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+    ) -> PortalSweepResult {
+        let Some(record) = rooms.get(room as usize) else {
+            return PortalSweepResult::EMPTY;
+        };
+        let camera = psx_level::portal_visibility::PortalVisibilityCamera::new(
+            x,
+            y,
+            z,
+            sin_yaw_q12,
+            cos_yaw_q12,
+            PORTAL_SWEEP_NEAR_Z,
+            record.draw_distance.max(PORTAL_SWEEP_NEAR_Z + 1),
+            PORTAL_SWEEP_HALF_FOV_Q12,
+            PORTAL_SWEEP_MIN_WIDTH_Q12,
+        );
+        let mut out = PortalSweepResult::EMPTY;
+        psx_level::portal_visibility::build_portal_visibility(
+            rooms,
+            portals,
+            psx_level::RoomIndex(room),
+            camera,
+            PORTAL_SWEEP_MAX_DEPTH,
+            &mut out,
+        );
+        out
+    }
+
+    fn visible_room_ids(result: &PortalSweepResult) -> Vec<u16> {
+        result
+            .rooms
+            .iter()
+            .take(result.room_count)
+            .map(|room| room.room.raw())
+            .collect()
+    }
+
+    fn frontier_room_ids(result: &PortalSweepResult) -> Vec<u16> {
+        result
+            .frontier_rooms
+            .iter()
+            .take(result.frontier_count)
+            .map(|room| room.room.raw())
+            .collect()
+    }
+
+    fn push_unique_room(out: &mut Vec<u16>, room: u16, limit: usize) {
+        if out.len() < limit && !out.contains(&room) {
+            out.push(room);
+        }
+    }
+
+    fn current_room_portal_destinations(package: &PlaytestPackage, source_room: u16) -> Vec<u16> {
+        package
+            .room_portals
+            .iter()
+            .filter(|portal| portal.source_room == source_room)
+            .map(|portal| portal.destination_room)
+            .collect()
+    }
+
+    fn sweep_stream_requests(
+        package: &PlaytestPackage,
+        current_room: u16,
+        result: &PortalSweepResult,
+    ) -> Vec<u16> {
+        let Some(record) = package.rooms.get(current_room as usize) else {
+            return Vec::new();
+        };
+        let request_limit = (record.resident_chunk_limit as usize)
+            .max(1)
+            .min(PORTAL_SWEEP_MAX_ROOMS);
+        let mut out = Vec::new();
+        push_unique_room(&mut out, current_room, request_limit);
+        let visible_limit = result
+            .room_count
+            .min(record.visible_chunk_limit as usize)
+            .min(PORTAL_SWEEP_MAX_ROOMS);
+        for room in result.rooms.iter().take(visible_limit) {
+            push_unique_room(&mut out, room.room.raw(), request_limit);
+        }
+        for destination in current_room_portal_destinations(package, current_room) {
+            push_unique_room(&mut out, destination, request_limit);
+        }
+        for room in result.frontier_rooms.iter().take(result.frontier_count) {
+            push_unique_room(&mut out, room.room.raw(), request_limit);
+        }
+        out
+    }
+
+    fn chunk_for_room(package: &PlaytestPackage, room: u16) -> Option<&PlaytestChunk> {
+        package.chunks.iter().find(|chunk| chunk.room == room)
+    }
+
+    fn chunks_share_authored_room(package: &PlaytestPackage, a: u16, b: u16) -> bool {
+        chunk_for_room(package, a)
+            .zip(chunk_for_room(package, b))
+            .is_some_and(|(a, b)| a.authored_room == b.authored_room)
+    }
+
+    fn chunk_bounds(
+        package: &PlaytestPackage,
+        chunk: PlaytestChunk,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let room = package.rooms.get(chunk.room as usize)?;
+        let sector = room.sector_size.max(1);
+        let x0 = room.origin_x.saturating_mul(sector);
+        let z0 = room.origin_z.saturating_mul(sector);
+        let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector));
+        let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector));
+        Some((x0, x1, z0, z1))
+    }
+
+    fn chunk_contains_point(
+        package: &PlaytestPackage,
+        chunk: PlaytestChunk,
+        x: i32,
+        z: i32,
+    ) -> bool {
+        chunk_bounds(package, chunk)
+            .is_some_and(|(x0, x1, z0, z1)| x >= x0 && x < x1 && z >= z0 && z < z1)
+    }
+
+    fn chunk_containing_global(package: &PlaytestPackage, x: i32, z: i32) -> Option<u16> {
+        package
+            .chunks
+            .iter()
+            .copied()
+            .find(|chunk| chunk_contains_point(package, *chunk, x, z))
+            .map(|chunk| chunk.room)
+    }
+
+    fn chunk_containing_global_by_neighbours(
+        package: &PlaytestPackage,
+        mut current: u16,
+        x: i32,
+        z: i32,
+    ) -> Option<u16> {
+        for _ in 0..package.chunks.len() {
+            let chunk = *chunk_for_room(package, current)?;
+            let (x0, x1, z0, z1) = chunk_bounds(package, chunk)?;
+            if x >= x0 && x < x1 && z >= z0 && z < z1 {
+                return Some(current);
+            }
+            let next = if x < x0 {
+                chunk.neighbours[3]
+            } else if x >= x1 {
+                chunk.neighbours[1]
+            } else if z < z0 {
+                chunk.neighbours[2]
+            } else if z >= z1 {
+                chunk.neighbours[0]
+            } else {
+                None
+            }?;
+            current = next;
+        }
+        None
+    }
+
+    fn chunk_containing_global_from(
+        package: &PlaytestPackage,
+        current: u16,
+        x: i32,
+        z: i32,
+    ) -> Option<u16> {
+        chunk_containing_global_by_neighbours(package, current, x, z).or_else(|| {
+            let candidate = chunk_containing_global(package, x, z)?;
+            chunks_share_authored_room(package, current, candidate).then_some(candidate)
+        })
+    }
+
+    fn portal_center(portal: &PlaytestRoomPortal) -> [i32; 3] {
+        let mut out = [0i32; 3];
+        for vertex in portal.vertices {
+            out[0] = out[0].saturating_add(vertex[0] / 4);
+            out[1] = out[1].saturating_add(vertex[1] / 4);
+            out[2] = out[2].saturating_add(vertex[2] / 4);
+        }
+        out
+    }
+
+    fn nearest_source_cell_for_portal(
+        package: &PlaytestPackage,
+        portal: &PlaytestRoomPortal,
+    ) -> Option<PlaytestVisibilityCell> {
+        let center = portal_center(portal);
+        let mut best = None;
+        let mut best_score = i64::MAX;
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.room == portal.source_room)
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            let Some((x, _, z)) = cell_global_center(package, cell) else {
+                continue;
+            };
+            let dot = (x as i64 - portal.vertices[0][0] as i64)
+                .saturating_mul(portal.normal[0] as i64)
+                .saturating_add(
+                    (z as i64 - portal.vertices[0][2] as i64)
+                        .saturating_mul(portal.normal[2] as i64),
+                );
+            if dot < 0 {
+                continue;
+            }
+            let dx = x as i64 - center[0] as i64;
+            let dz = z as i64 - center[2] as i64;
+            let score = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
+            if best.is_none() || score < best_score {
+                best = Some(cell);
+                best_score = score;
+            }
+        }
+        best
+    }
+
+    fn portal_forward_yaw(portal: &PlaytestRoomPortal) -> (i32, i32) {
+        (
+            (portal.normal[0] as i32).saturating_mul(4096),
+            (portal.normal[2] as i32).saturating_mul(4096),
+        )
+    }
+
+    fn assert_portal_slices_match_package(package: &PlaytestPackage) {
+        for (room_index, room) in package.rooms.iter().enumerate() {
+            let first = room.portal_first as usize;
+            let end = first.saturating_add(room.portal_count as usize);
+            assert!(
+                end <= package.room_portals.len(),
+                "room {room_index} portal slice {first}..{end} exceeds {} portals",
+                package.room_portals.len()
+            );
+            for portal in &package.room_portals[first..end] {
+                assert_eq!(
+                    portal.source_room, room_index as u16,
+                    "room {room_index} portal slice contains source room {}",
+                    portal.source_room
+                );
+            }
+        }
+    }
+
+    fn assert_chunk_neighbours_have_portals(package: &PlaytestPackage) {
+        for chunk in &package.chunks {
+            for destination in chunk.neighbours.into_iter().flatten() {
+                assert!(
+                    package.room_portals.iter().any(|portal| {
+                        portal.source_room == chunk.room && portal.destination_room == destination
+                    }),
+                    "chunk room {} has neighbour {} without a directed portal",
+                    chunk.room,
+                    destination
+                );
+            }
+        }
+    }
+
+    fn assert_portals_are_reciprocal(package: &PlaytestPackage) {
+        for portal in &package.room_portals {
+            assert!(
+                package.room_portals.iter().any(|other| {
+                    other.source_room == portal.destination_room
+                        && other.destination_room == portal.source_room
+                }),
+                "portal {}->{} has no reciprocal portal",
+                portal.source_room,
+                portal.destination_room
+            );
+        }
+    }
+
+    #[test]
+    fn demo7_portal_visibility_sweep_covers_every_cell_center() {
+        let package = load_demo7_package();
+        assert!(
+            package.rooms.len() > 1,
+            "demo7 must keep multiple runtime rooms for this regression"
+        );
+        assert!(
+            package.room_portals.len() >= 2,
+            "demo7 must contain directed portal records"
+        );
+        assert_portal_slices_match_package(&package);
+        assert_chunk_neighbours_have_portals(&package);
+        assert_portals_are_reciprocal(&package);
+
+        let rooms = level_room_records_for_sweep(&package);
+        let portals = level_portal_records_for_sweep(&package);
+        let mut failures = Vec::new();
+        let mut swept_samples = 0usize;
+
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            let Some((x, y, z)) = cell_global_center(&package, cell) else {
+                failures.push(format!(
+                    "cell room={} ({},{}) has no room record",
+                    cell.room, cell.x, cell.z
+                ));
+                continue;
+            };
+            for source in &package.chunks {
+                if chunks_share_authored_room(&package, source.room, cell.room) {
+                    let located = chunk_containing_global_from(&package, source.room, x, z);
+                    if located != Some(cell.room) {
+                        failures.push(format!(
+                            "room lookup mismatch: start_room={} target_room={} cell=({},{}) pos=({x},{z}) located={located:?}",
+                            source.room, cell.room, cell.x, cell.z
+                        ));
+                    }
+                }
+            }
+            for (sin_yaw, cos_yaw, yaw_label) in portal_sweep_yaws() {
+                let result =
+                    portal_visibility_at(&rooms, &portals, cell.room, x, y, z, sin_yaw, cos_yaw);
+                let visible = visible_room_ids(&result);
+                let frontier = frontier_room_ids(&result);
+                let stream = sweep_stream_requests(&package, cell.room, &result);
+                if !visible.contains(&cell.room) {
+                    failures.push(format!(
+                        "current room missing: room={} cell=({},{}) yaw={} visible={visible:?} frontier={frontier:?} loaded={stream:?}",
+                        cell.room, cell.x, cell.z, yaw_label
+                    ));
+                }
+                if result.room_count
+                    > package.rooms[cell.room as usize].visible_chunk_limit as usize
+                {
+                    failures.push(format!(
+                        "visible budget exceeded: room={} cell=({},{}) yaw={} visible={visible:?} limit={}",
+                        cell.room,
+                        cell.x,
+                        cell.z,
+                        yaw_label,
+                        package.rooms[cell.room as usize].visible_chunk_limit
+                    ));
+                }
+                for room in &visible {
+                    if !stream.contains(room) {
+                        failures.push(format!(
+                            "visible room not loaded: room={} cell=({},{}) yaw={} missing={} visible={visible:?} frontier={frontier:?} loaded={stream:?}",
+                            cell.room, cell.x, cell.z, yaw_label, room
+                        ));
+                    }
+                }
+                for destination in current_room_portal_destinations(&package, cell.room) {
+                    if !stream.contains(&destination) {
+                        failures.push(format!(
+                            "portal neighbour not loaded/protected: room={} cell=({},{}) yaw={} destination={} visible={visible:?} frontier={frontier:?} loaded={stream:?}",
+                            cell.room, cell.x, cell.z, yaw_label, destination
+                        ));
+                    }
+                }
+                if result.stats.cap_room != 0
+                    || result.stats.cap_frustum != 0
+                    || result.stats.cap_depth != 0
+                {
+                    failures.push(format!(
+                        "portal traversal cap hit: room={} cell=({},{}) yaw={} visible={visible:?} frontier={frontier:?} stats={:?}",
+                        cell.room, cell.x, cell.z, yaw_label, result.stats
+                    ));
+                }
+                swept_samples += 1;
+            }
+        }
+
+        let mut portal_samples = 0usize;
+        for portal in &package.room_portals {
+            let Some(cell) = nearest_source_cell_for_portal(&package, portal) else {
+                failures.push(format!(
+                    "portal {}->{} has no source-side visibility cell",
+                    portal.source_room, portal.destination_room
+                ));
+                continue;
+            };
+            let Some((x, _, z)) = cell_global_center(&package, cell) else {
+                failures.push(format!(
+                    "portal {}->{} source cell has no center",
+                    portal.source_room, portal.destination_room
+                ));
+                continue;
+            };
+            let center = portal_center(portal);
+            let (sin_yaw, cos_yaw) = portal_forward_yaw(portal);
+            let result = portal_visibility_at(
+                &rooms,
+                &portals,
+                portal.source_room,
+                x,
+                center[1],
+                z,
+                sin_yaw,
+                cos_yaw,
+            );
+            let visible = visible_room_ids(&result);
+            if !visible.contains(&portal.destination_room) {
+                failures.push(format!(
+                    "facing portal did not reveal destination: {}->{} source_cell=({},{}) pos=({x},{z}) visible={visible:?} frontier={:?} stats={:?}",
+                    portal.source_room,
+                    portal.destination_room,
+                    cell.x,
+                    cell.z,
+                    frontier_room_ids(&result),
+                    result.stats
+                ));
+            }
+            portal_samples += 1;
+        }
+
+        assert_eq!(
+            portal_samples,
+            package.room_portals.len(),
+            "not every directed portal was sampled"
+        );
+        assert!(
+            swept_samples > 0,
+            "demo7 portal sweep did not visit any cells"
+        );
+        assert!(
+            failures.is_empty(),
+            "demo7 portal sweep found {} failures across {swept_samples} cell-yaw samples and {portal_samples} portal-facing samples:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
     fn visibility_test_cell(x: u16, z: u16, blocker_mask: u8) -> PlaytestVisibilityCell {
         PlaytestVisibilityCell {
             room: 0,
@@ -4538,6 +5148,9 @@ mod tests {
         assert!(manifest.contains("pub static ASSETS: &[LevelAssetRecord] = &[];"));
         assert!(manifest.contains("pub static ROOMS: &[LevelRoomRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
+        assert!(manifest.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];"));
+        assert!(manifest.contains("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[];"));
+        assert!(manifest.contains("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[];"));
         assert!(manifest.contains("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[];"));
         assert!(manifest.contains("pub static VISIBILITY_PVS_BITS: &[u8] = &[];"));
         assert!(manifest
@@ -4775,6 +5388,69 @@ mod tests {
         assert!(package
             .spawn
             .is_some_and(|spawn| (spawn.room as usize) < package.rooms.len()));
+    }
+
+    #[test]
+    fn portal_room_cook_emits_directed_room_portals() {
+        let mut project = project_with_one_room();
+        let floor_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a room material")
+            .id;
+        let room_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .expect("starter has a room")
+            .id;
+        if let Some(room) = project.active_scene_mut().node_mut(room_id) {
+            let NodeKind::Room { grid } = &mut room.kind else {
+                panic!("starter room is a room");
+            };
+            *grid = crate::WorldGrid::stone_room(
+                2,
+                1,
+                crate::DEFAULT_WORLD_SECTOR_SIZE,
+                Some(floor_material),
+                Some(floor_material),
+            );
+        }
+        let portal_id = project.active_scene_mut().add_node(
+            room_id,
+            "Portal",
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name: String::new(),
+            },
+        );
+        if let Some(portal) = project.active_scene_mut().node_mut(portal_id) {
+            portal.transform.translation = [0.0, 0.0, 0.0];
+        }
+        let spawn_id = player_spawn_node_id(&project);
+        if let Some(spawn) = project.active_scene_mut().node_mut(spawn_id) {
+            spawn.transform.translation = [-0.25, 0.0, 0.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("package returned on ok report");
+        assert_eq!(package.rooms.len(), 2);
+        assert_eq!(package.room_portals.len(), 2);
+        assert_eq!(package.rooms[0].portal_first, 0);
+        assert_eq!(package.rooms[0].portal_count, 1);
+        assert_eq!(package.rooms[1].portal_first, 1);
+        assert_eq!(package.rooms[1].portal_count, 1);
+        assert_eq!(package.room_portals[0].source_room, 0);
+        assert_eq!(package.room_portals[0].destination_room, 1);
+        assert_eq!(package.room_portals[0].normal, [-1, 0, 0]);
+        let src = render_manifest_source(&package);
+        assert!(src.contains(
+            "pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[\n    LevelRoomPortalRecord"
+        ));
     }
 
     #[test]
@@ -5539,6 +6215,9 @@ mod tests {
         assert!(src.contains("pub static MATERIALS"));
         assert!(src.contains("pub static ROOMS"));
         assert!(src.contains("pub static ROOM_CHUNKS"));
+        assert!(src.contains("pub static ROOM_PORTALS"));
+        assert!(src.contains("pub static ROOM_NEAR_ROOMS"));
+        assert!(src.contains("pub static ROOM_OVERLAPPED_ROOMS"));
         assert!(src.contains("LevelSkyRecord"));
         assert!(src.contains("sky: LevelSkyRecord"));
         assert!(src.contains("LevelFarVistaRecord"));
@@ -7006,6 +7685,9 @@ mod tests {
         assert!(src.contains("pub static MATERIALS: &[LevelMaterialRecord] = &[\n];"));
         assert!(src.contains("pub static ROOMS: &[LevelRoomRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n];"));
+        assert!(src.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[\n];"));
+        assert!(src.contains("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[\n];"));
+        assert!(src.contains("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[\n];"));
         assert!(src.contains("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[\n];"));
         assert!(src.contains("pub static VISIBILITY_PVS_BITS: &[u8] = &[\n];"));
         assert!(

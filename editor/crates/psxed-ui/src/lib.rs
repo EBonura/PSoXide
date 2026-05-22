@@ -4453,7 +4453,7 @@ impl EditorWorkspace {
         let show_debug_overlays = self.show_play_debug_overlays;
         let debug_rect = Rect::from_min_size(
             rect.left_top() + Vec2::new(8.0, 8.0),
-            Vec2::new(238.0, 177.0),
+            Vec2::new(238.0, 218.0),
         );
         let tape_top = if show_debug_overlays {
             debug_rect.bottom() + 6.0
@@ -4548,8 +4548,10 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "CHNK vis/load {:>2}/{:<2}",
-                        metrics.chunk_visible, metrics.chunk_loaded
+                        "PORT vis/fr/miss {:>2}/{:<2}/{:<2}",
+                        metrics.portal_visible_rooms,
+                        metrics.portal_frontier_rooms,
+                        metrics.portal_missing_resident
                     ),
                     STUDIO_TEXT,
                 );
@@ -4558,8 +4560,62 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "WIN  cand/built/skip {:>2}/{:<2}/{:<2}",
-                        metrics.chunk_candidates, metrics.chunk_built, metrics.chunk_cache_skips
+                        "PORT test/ok {:>2}/{:<2}",
+                        metrics.portal_tests, metrics.portal_accepts
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "PORT rej b/f/t {:>2}/{:<2}/{:<2}",
+                        metrics.portal_rejects[0],
+                        metrics.portal_rejects[1],
+                        metrics.portal_rejects[2]
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "PORT cap r/f/d {:>2}/{:<2}/{:<2}",
+                        metrics.portal_caps[0], metrics.portal_caps[1], metrics.portal_caps[2]
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "ROOM draw/res {:>2}/{:<2}",
+                        metrics.chunk_visible, metrics.chunk_loaded
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "WIN  built/skip {:>2}/{:<2}",
+                        metrics.chunk_built, metrics.chunk_cache_skips
+                    ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "STRM pri c/v/f {:>2}/{:<2}/{:<2}",
+                        metrics.stream_priorities[0],
+                        metrics.stream_priorities[1],
+                        metrics.stream_priorities[2]
                     ),
                     STUDIO_TEXT_WEAK,
                 );
@@ -21173,14 +21229,27 @@ struct PlayChunkDebugMapCell {
     sector_size: f32,
 }
 
+#[derive(Clone)]
+struct PlayChunkDebugMapPortal {
+    source_room_index: usize,
+    destination_room_index: usize,
+    a: [f32; 2],
+    b: [f32; 2],
+}
+
+struct PlayChunkDebugMap {
+    cells: Vec<PlayChunkDebugMapCell>,
+    portals: Vec<PlayChunkDebugMapPortal>,
+}
+
 fn draw_play_chunk_debug_map(
     painter: &egui::Painter,
     viewport_rect: Rect,
     project: &ProjectDocument,
     metrics: EditorPlaytestMetrics,
 ) {
-    let cells = collect_play_chunk_debug_map_cells(project);
-    if cells.is_empty() {
+    let map = collect_play_chunk_debug_map(project);
+    if map.cells.is_empty() {
         return;
     }
 
@@ -21206,7 +21275,7 @@ fn draw_play_chunk_debug_map(
     let mut max_x = f32::NEG_INFINITY;
     let mut min_z = f32::INFINITY;
     let mut max_z = f32::NEG_INFINITY;
-    for cell in &cells {
+    for cell in &map.cells {
         min_x = min_x.min(cell.center[0] - cell.half[0]);
         max_x = max_x.max(cell.center[0] + cell.half[0]);
         min_z = min_z.min(cell.center[1] - cell.half[1]);
@@ -21226,7 +21295,7 @@ fn draw_play_chunk_debug_map(
     painter.text(
         map_rect.left_top() + Vec2::new(8.0, 7.0),
         Align2::LEFT_TOP,
-        "Room map",
+        "Portal map",
         FontId::monospace(11.0),
         STUDIO_TEXT,
     );
@@ -21247,10 +21316,12 @@ fn draw_play_chunk_debug_map(
     let map_x = |x: f32| origin.x + (x - min_x) * scale;
     let map_z = |z: f32| origin.y + (z - min_z) * scale;
 
-    for cell in &cells {
+    for cell in &map.cells {
         let bit = debug_chunk_bit(cell.runtime_room_index);
         let loaded = bit != 0 && metrics.chunk_loaded_mask & bit != 0;
-        let active = bit != 0 && metrics.chunk_active_mask & bit != 0;
+        let visible = bit != 0 && metrics.portal_visible_mask & bit != 0;
+        let frontier = bit != 0 && metrics.portal_frontier_mask & bit != 0;
+        let missing = bit != 0 && metrics.portal_missing_mask & bit != 0;
         let drawn = bit != 0 && metrics.chunk_drawn_mask & bit != 0;
         let rect = Rect::from_min_max(
             Pos2::new(
@@ -21265,8 +21336,12 @@ fn draw_play_chunk_debug_map(
         .shrink(0.75);
         let fill = if drawn {
             Color32::from_rgba_unmultiplied(40, 210, 112, 150)
-        } else if loaded {
+        } else if missing {
             Color32::from_rgba_unmultiplied(220, 56, 64, 104)
+        } else if visible {
+            Color32::from_rgba_unmultiplied(255, 206, 82, 82)
+        } else if loaded {
+            Color32::from_rgba_unmultiplied(80, 132, 190, 62)
         } else {
             Color32::from_rgba_unmultiplied(0, 0, 0, 0)
         };
@@ -21275,18 +21350,46 @@ fn draw_play_chunk_debug_map(
         }
         let stroke = if drawn {
             Stroke::new(1.5, Color32::from_rgb(76, 255, 144))
-        } else if active {
+        } else if missing {
+            Stroke::new(1.7, Color32::from_rgb(255, 84, 92))
+        } else if visible {
             Stroke::new(1.7, Color32::from_rgb(255, 206, 82))
+        } else if frontier {
+            Stroke::new(1.4, Color32::from_rgb(96, 196, 255))
         } else if loaded {
-            Stroke::new(1.2, Color32::from_rgb(255, 84, 92))
+            Stroke::new(1.2, Color32::from_rgb(96, 148, 210))
         } else {
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 120))
         };
         painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
     }
 
+    let clipped = painter.with_clip_rect(plot);
+    for portal in &map.portals {
+        let source_bit = debug_chunk_bit(portal.source_room_index);
+        let dest_bit = debug_chunk_bit(portal.destination_room_index);
+        let source_visible = source_bit != 0 && metrics.portal_visible_mask & source_bit != 0;
+        let dest_visible = dest_bit != 0 && metrics.portal_visible_mask & dest_bit != 0;
+        let dest_frontier = dest_bit != 0 && metrics.portal_frontier_mask & dest_bit != 0;
+        let color = if source_visible && dest_visible {
+            Color32::from_rgb(255, 228, 120)
+        } else if source_visible && dest_frontier {
+            Color32::from_rgb(96, 196, 255)
+        } else {
+            Color32::from_rgba_unmultiplied(210, 220, 235, 112)
+        };
+        clipped.line_segment(
+            [
+                Pos2::new(map_x(portal.a[0]), map_z(portal.a[1])),
+                Pos2::new(map_x(portal.b[0]), map_z(portal.b[1])),
+            ],
+            Stroke::new(2.0, color),
+        );
+    }
+
     if metrics.player_map_valid {
-        if let Some(cell) = cells
+        if let Some(cell) = map
+            .cells
             .iter()
             .find(|cell| cell.runtime_room_index == metrics.player_room_index as usize)
         {
@@ -21324,27 +21427,35 @@ fn draw_play_chunk_debug_map(
         map_rect.left_bottom() + Vec2::new(8.0, -16.0),
         Color32::from_rgba_unmultiplied(40, 210, 112, 150),
         Color32::from_rgb(76, 255, 144),
-        "drawn",
+        "draw",
     );
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(74.0, -16.0),
+        map_rect.left_bottom() + Vec2::new(62.0, -16.0),
+        Color32::from_rgba_unmultiplied(255, 206, 82, 82),
+        Color32::from_rgb(255, 206, 82),
+        "vis",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        map_rect.left_bottom() + Vec2::new(108.0, -16.0),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 0),
+        Color32::from_rgb(96, 196, 255),
+        "front",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        map_rect.left_bottom() + Vec2::new(166.0, -16.0),
         Color32::from_rgba_unmultiplied(220, 56, 64, 104),
         Color32::from_rgb(255, 84, 92),
-        "loaded",
-    );
-    draw_chunk_map_legend_item(
-        painter,
-        map_rect.left_bottom() + Vec2::new(140.0, -16.0),
-        Color32::from_rgba_unmultiplied(0, 0, 0, 0),
-        Color32::from_rgba_unmultiplied(210, 220, 235, 120),
-        "unloaded",
+        "miss",
     );
 }
 
-fn collect_play_chunk_debug_map_cells(project: &ProjectDocument) -> Vec<PlayChunkDebugMapCell> {
+fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap {
     let scene = project.active_scene();
     let mut cells = Vec::new();
+    let mut portals = Vec::new();
     let mut runtime_room_index = 0usize;
     for node in scene.nodes() {
         let NodeKind::Room { grid } = &node.kind else {
@@ -21355,7 +21466,8 @@ fn collect_play_chunk_debug_map_cells(project: &ProjectDocument) -> Vec<PlayChun
         }
         let plan = plan_portal_rooms(scene, node.id, grid, PortalRoomConfig::default());
         let node_center = node_world(node);
-        for roomlet in plan.rooms {
+        let room_base_index = runtime_room_index;
+        for roomlet in &plan.rooms {
             let (local_center, half) =
                 grid_rect_editor_center_half(grid, roomlet.array_origin, roomlet.size);
             cells.push(PlayChunkDebugMapCell {
@@ -21369,8 +21481,40 @@ fn collect_play_chunk_debug_map_cells(project: &ProjectDocument) -> Vec<PlayChun
             });
             runtime_room_index += 1;
         }
+        let sector_size = grid.sector_size.max(1) as f32;
+        for portal in plan.portals {
+            if portal.source_room > portal.destination_room {
+                continue;
+            }
+            let a =
+                portal_debug_map_point(grid, node_center, sector_size, portal.vertices_world[0]);
+            let b =
+                portal_debug_map_point(grid, node_center, sector_size, portal.vertices_world[1]);
+            portals.push(PlayChunkDebugMapPortal {
+                source_room_index: room_base_index + portal.source_room,
+                destination_room_index: room_base_index + portal.destination_room,
+                a,
+                b,
+            });
+        }
     }
-    cells
+    PlayChunkDebugMap { cells, portals }
+}
+
+fn portal_debug_map_point(
+    grid: &WorldGrid,
+    node_center: [f32; 2],
+    sector_size: f32,
+    vertex: [i32; 3],
+) -> [f32; 2] {
+    [
+        node_center[0] + vertex[0] as f32 / sector_size
+            - grid.origin[0] as f32
+            - grid.width as f32 * 0.5,
+        node_center[1] + vertex[2] as f32 / sector_size
+            - grid.origin[1] as f32
+            - grid.depth as f32 * 0.5,
+    ]
 }
 
 fn debug_chunk_bit(index: usize) -> u64 {
