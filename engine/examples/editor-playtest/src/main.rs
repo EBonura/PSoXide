@@ -330,9 +330,7 @@ fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
 
 #[cfg(feature = "cd-stream-bench")]
 fn room_stream_request_chunk_limit(record: &LevelRoomRecord) -> usize {
-    (record.resident_chunk_limit as usize)
-        .clamp(1, STREAMED_ROOM_SLOT_COUNT)
-        .min(room_resident_chunk_limit(record))
+    room_resident_chunk_limit(record).clamp(1, STREAMED_ROOM_SLOT_COUNT)
 }
 
 fn room_visible_chunk_limit(record: &LevelRoomRecord) -> usize {
@@ -368,7 +366,12 @@ fn encode_debug_map_position(value: i32) -> u32 {
     }
 }
 
-fn emit_player_map_debug(room: RoomIndex, position: RoomPoint, view_yaw: Angle) {
+fn emit_player_map_debug(
+    room: RoomIndex,
+    position: RoomPoint,
+    camera_position: RoomPoint,
+    view_yaw_q12: u16,
+) {
     telemetry::counter(
         telemetry::counter::ROOM_PLAYER_ROOM_INDEX,
         room.raw() as u32,
@@ -383,7 +386,15 @@ fn emit_player_map_debug(room: RoomIndex, position: RoomPoint, view_yaw: Angle) 
     );
     telemetry::counter(
         telemetry::counter::ROOM_PLAYER_VIEW_YAW_Q12,
-        view_yaw.as_q12() as u32,
+        view_yaw_q12 as u32,
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_LOCAL_X_BIASED,
+        encode_debug_map_position(camera_position.x),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_LOCAL_Z_BIASED,
+        encode_debug_map_position(camera_position.z),
     );
 }
 
@@ -1086,6 +1097,84 @@ fn clamp_i16(value: i32) -> i16 {
     value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
+fn world_camera_from_position_focus(
+    projection: WorldProjection,
+    position: RoomPoint,
+    focus: RoomPoint,
+) -> WorldCamera {
+    let dx = position.x.saturating_sub(focus.x);
+    let dz = position.z.saturating_sub(focus.z);
+    let radius =
+        isqrt_i32(square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))).max(1);
+    let target_dy = focus.y.saturating_sub(position.y);
+    let pitch_len =
+        isqrt_i32(square_i32_saturating(radius).saturating_add(square_i32_saturating(target_dy)))
+            .max(1);
+    WorldCamera::from_basis(
+        projection,
+        position.to_world_vertex(),
+        Q12::from_ratio(dx, radius),
+        Q12::from_ratio(dz, radius),
+        Q12::from_ratio(target_dy, pitch_len),
+        Q12::from_ratio(radius, pitch_len),
+    )
+}
+
+fn yaw_q12_from_basis(sin_yaw: i32, cos_yaw: i32) -> u16 {
+    if sin_yaw == 0 && cos_yaw == 0 {
+        return 0;
+    }
+    let ax = abs_i32_saturating(sin_yaw);
+    let az = abs_i32_saturating(cos_yaw);
+    let base = if ax <= az {
+        ax.saturating_mul(512) / az.max(1)
+    } else {
+        1024 - (az.saturating_mul(512) / ax.max(1))
+    };
+    let angle = if cos_yaw >= 0 {
+        if sin_yaw >= 0 {
+            base
+        } else {
+            4096 - base
+        }
+    } else if sin_yaw >= 0 {
+        2048 - base
+    } else {
+        2048 + base
+    };
+    (angle & 0x0fff) as u16
+}
+
+fn abs_i32_saturating(value: i32) -> i32 {
+    if value == i32::MIN {
+        i32::MAX
+    } else {
+        value.abs()
+    }
+}
+
+fn isqrt_i32(n: i32) -> i32 {
+    if n <= 0 {
+        return 0;
+    }
+    let mut bit = 1 << 30;
+    let mut rest = n;
+    let mut root = 0;
+    while bit > rest {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if rest >= root + bit {
+            rest -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    root
+}
+
 fn runtime_model_faces<'a>(
     model: RuntimeModelAsset,
     face_pool: &'a [TexturedModelRenderFace],
@@ -1284,6 +1373,10 @@ impl<const N: usize> RoomStreamScheduler<N> {
 
     fn loading_slot_for(&self, room: RoomIndex) -> Option<usize> {
         self.mapped_slot_for(room, RoomStreamSlotState::Loading)
+    }
+
+    fn is_loading(&self, room: RoomIndex) -> bool {
+        self.loading_slot_for(room).is_some()
     }
 
     fn mapped_slot_for(&self, room: RoomIndex, state: RoomStreamSlotState) -> Option<usize> {
@@ -1523,6 +1616,15 @@ impl<const N: usize> RoomStreamScheduler<N> {
             telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
             self.resident_slot_count() as u32,
         );
+        telemetry::counter(
+            telemetry::counter::ROOM_STREAM_SLOT_LIMIT,
+            self.effective_slot_limit() as u32,
+        );
+        emit_room_chunk_mask(
+            telemetry::counter::ROOM_STREAM_LOADING_MASK_LO,
+            telemetry::counter::ROOM_STREAM_LOADING_MASK_HI,
+            self.loading_room_mask(),
+        );
         emit_room_chunk_mask(
             telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO,
             telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI,
@@ -1566,6 +1668,20 @@ impl<const N: usize> RoomStreamScheduler<N> {
         while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Resident {
+                mask |= room_index_debug_mask(meta.room);
+            }
+            slot += 1;
+        }
+        mask
+    }
+
+    fn loading_room_mask(&self) -> u64 {
+        let mut mask = 0u64;
+        let mut slot = 0usize;
+        let limit = self.effective_slot_limit();
+        while slot < limit {
+            let meta = self.slots[slot];
+            if meta.state == RoomStreamSlotState::Loading {
                 mask |= room_index_debug_mask(meta.room);
             }
             slot += 1;
@@ -1697,6 +1813,8 @@ struct Playtest {
     portal_visibility: RuntimePortalVisibility,
     portal_visible_missing_resident: u16,
     portal_visible_missing_mask: u64,
+    portal_visible_build_failed: u16,
+    portal_visible_build_failed_mask: u64,
     portal_stream_priority_current: u16,
     portal_stream_priority_visible: u16,
     portal_stream_priority_frontier: u16,
@@ -1709,8 +1827,11 @@ struct Playtest {
     active_room_candidates: u16,
     active_room_cache_skips: u16,
     active_room_anchor: RoomPoint,
+    active_room_view_anchor: RoomPoint,
     active_room_view_sin_key: i16,
     active_room_view_cos_key: i16,
+    active_room_view_pitch_sin_key: i16,
+    active_room_view_pitch_cos_key: i16,
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
@@ -1801,6 +1922,8 @@ impl Playtest {
             portal_visibility: RuntimePortalVisibility::EMPTY,
             portal_visible_missing_resident: 0,
             portal_visible_missing_mask: 0,
+            portal_visible_build_failed: 0,
+            portal_visible_build_failed_mask: 0,
             portal_stream_priority_current: 0,
             portal_stream_priority_visible: 0,
             portal_stream_priority_frontier: 0,
@@ -1813,8 +1936,11 @@ impl Playtest {
             active_room_candidates: 0,
             active_room_cache_skips: 0,
             active_room_anchor: RoomPoint::ZERO,
+            active_room_view_anchor: RoomPoint::ZERO,
             active_room_view_sin_key: 0,
             active_room_view_cos_key: 0,
+            active_room_view_pitch_sin_key: 0,
+            active_room_view_pitch_cos_key: 0,
             room_index: RoomIndex::ZERO,
             materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
             material_count: 0,
@@ -1930,6 +2056,11 @@ impl Scene for Playtest {
             self.camera_config(),
             CAMERA_START_YAW,
         );
+        self.render_camera = world_camera_from_position_focus(
+            PROJECTION,
+            self.camera.position(),
+            self.camera.focus(),
+        );
         self.load_active_room_window();
         #[cfg(feature = "cd-stream-bench")]
         self.bootstrap_streamed_room_window();
@@ -1994,11 +2125,11 @@ impl Scene for Playtest {
             if ctx.is_held(button::DOWN) {
                 self.orbit_radius = (self.orbit_radius + button_radius_step).min(CAMERA_RADIUS_MAX);
             }
-            self.refresh_active_room_window_if_needed();
             self.player_moved_last_tick = false;
             telemetry::stage_begin(telemetry::stage::CAMERA);
             self.render_camera = self.free_orbit_camera();
             telemetry::stage_end(telemetry::stage::CAMERA);
+            self.refresh_active_room_window_if_needed();
             return;
         }
 
@@ -2100,6 +2231,7 @@ impl Scene for Playtest {
         telemetry::stage_begin(telemetry::stage::CAMERA);
         self.render_camera = self.update_follow_camera(ctx);
         telemetry::stage_end(telemetry::stage::CAMERA);
+        self.refresh_active_room_window_if_needed();
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
@@ -2690,7 +2822,8 @@ impl Scene for Playtest {
             emit_player_map_debug(
                 self.room_index,
                 self.motor.position(),
-                self.active_room_selection_view_yaw(),
+                RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
+                self.active_room_selection_view_yaw_q12(),
             );
             self.emit_portal_visibility_counters();
             #[cfg(feature = "cd-stream-bench")]
@@ -2698,6 +2831,11 @@ impl Scene for Playtest {
                 telemetry::counter(
                     telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
                     ROOM_STREAM_SCHEDULER.resident_slot_count() as u32,
+                );
+                emit_room_chunk_mask(
+                    telemetry::counter::ROOM_STREAM_LOADING_MASK_LO,
+                    telemetry::counter::ROOM_STREAM_LOADING_MASK_HI,
+                    ROOM_STREAM_SCHEDULER.loading_room_mask(),
                 );
                 emit_room_chunk_mask(
                     telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO,
@@ -3289,30 +3427,13 @@ impl Playtest {
         !ROOM_CHUNKS.is_empty()
     }
 
-    fn active_room_selection_view_yaw(&self) -> Angle {
-        if self.free_orbit {
-            self.orbit_yaw
-        } else {
-            self.camera.yaw()
-        }
+    fn active_room_selection_view_yaw_q12(&self) -> u16 {
+        let view = self.active_room_selection_view();
+        yaw_q12_from_basis(view.sin_yaw, view.cos_yaw)
     }
 
     fn active_room_selection_view(&self) -> ActiveRoomView {
-        let yaw = self.active_room_selection_view_yaw();
-        if self.free_orbit {
-            let position = RoomPoint::new(
-                self.spawn
-                    .x
-                    .saturating_add(yaw.sin().mul_i32(self.orbit_radius)),
-                self.spawn.y,
-                self.spawn
-                    .z
-                    .saturating_add(yaw.cos().mul_i32(self.orbit_radius)),
-            );
-            ActiveRoomView::new(position, yaw)
-        } else {
-            ActiveRoomView::new(self.camera.position(), yaw)
-        }
+        ActiveRoomView::from_camera(self.render_camera)
     }
 
     fn rebuild_portal_visibility(
@@ -3322,7 +3443,8 @@ impl Playtest {
         view: ActiveRoomView,
     ) {
         let global = local_to_global_room_point(current_index, view.position);
-        let half_fov_tan_q12 = ((SCREEN_CX as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
+        let half_fov_x_tan_q12 = ((SCREEN_CX as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
+        let half_fov_y_tan_q12 = ((SCREEN_CY as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
         let far_z = current_record.draw_distance.clamp(NEAR_Z, FAR_Z);
         let camera = PortalVisibilityCamera::new(
             global.x,
@@ -3330,9 +3452,12 @@ impl Playtest {
             global.z,
             view.sin_yaw,
             view.cos_yaw,
+            view.sin_pitch,
+            view.cos_pitch,
             PROJECTION.near_z,
             far_z,
-            half_fov_tan_q12,
+            half_fov_x_tan_q12,
+            half_fov_y_tan_q12,
             PORTAL_VISIBILITY_MIN_WIDTH_Q12,
         );
         build_portal_visibility(
@@ -3384,6 +3509,10 @@ impl Playtest {
             stats.reject_tiny as u32,
         );
         telemetry::counter(
+            telemetry::counter::PORTAL_VIS_BOUNDS_FALLBACKS,
+            stats.bounds_fallbacks as u32,
+        );
+        telemetry::counter(
             telemetry::counter::PORTAL_VIS_CAP_ROOM,
             stats.cap_room as u32,
         );
@@ -3398,6 +3527,10 @@ impl Playtest {
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_VISIBLE_MISSING_RESIDENT,
             self.portal_visible_missing_resident as u32,
+        );
+        telemetry::counter(
+            telemetry::counter::PORTAL_VIS_VISIBLE_BUILD_FAILED,
+            self.portal_visible_build_failed as u32,
         );
         telemetry::counter(
             telemetry::counter::ROOM_STREAM_PRIORITY_CURRENT,
@@ -3426,10 +3559,55 @@ impl Playtest {
             telemetry::counter::PORTAL_VIS_MISSING_MASK_HI,
             self.portal_visible_missing_mask,
         );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_BUILD_FAILED_MASK_LO,
+            telemetry::counter::PORTAL_VIS_BUILD_FAILED_MASK_HI,
+            self.portal_visible_build_failed_mask,
+        );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_TESTED_MASK_LO,
+            telemetry::counter::PORTAL_VIS_TESTED_MASK_HI,
+            stats.tested_room_mask,
+        );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_ACCEPTED_MASK_LO,
+            telemetry::counter::PORTAL_VIS_ACCEPTED_MASK_HI,
+            stats.accepted_room_mask,
+        );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO,
+            telemetry::counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
+            stats.reject_frustum_room_mask,
+        );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
+            telemetry::counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
+            stats.bounds_fallback_room_mask,
+        );
     }
 
     fn load_active_room_window(&mut self) {
         self.rebuild_active_room_window(true);
+    }
+
+    fn mark_visible_room_unbuilt(&mut self, index: RoomIndex) {
+        #[cfg(feature = "cd-stream-bench")]
+        {
+            if streamed_room_is_resident(index) {
+                self.portal_visible_build_failed =
+                    self.portal_visible_build_failed.saturating_add(1);
+                self.portal_visible_build_failed_mask |= room_index_debug_mask(index);
+            } else if !streamed_room_is_loading(index) {
+                self.portal_visible_missing_resident =
+                    self.portal_visible_missing_resident.saturating_add(1);
+                self.portal_visible_missing_mask |= room_index_debug_mask(index);
+            }
+        }
+        #[cfg(not(feature = "cd-stream-bench"))]
+        {
+            self.portal_visible_build_failed = self.portal_visible_build_failed.saturating_add(1);
+            self.portal_visible_build_failed_mask |= room_index_debug_mask(index);
+        }
     }
 
     fn rebuild_active_room_window(&mut self, update_streaming: bool) {
@@ -3459,14 +3637,30 @@ impl Playtest {
         };
         let player = self.motor.position();
         let view = self.active_room_selection_view();
+        let view_global = local_to_global_room_point(current_index, view.position);
+        let visibility_index =
+            room_index_containing_global_from(current_index, view_global).unwrap_or(current_index);
+        let visibility_record = ROOMS
+            .get(visibility_index.to_usize())
+            .unwrap_or(current_record);
+        let visibility_view = if visibility_index == current_index {
+            view
+        } else {
+            view.with_position(global_to_local_room_point(visibility_index, view_global))
+        };
         let active_limit = room_active_chunk_limit(current_record);
-        let (view_sin_key, view_cos_key) = portal_visibility_view_keys(view.sin_yaw, view.cos_yaw);
+        let (view_sin_key, view_cos_key, view_pitch_sin_key, view_pitch_cos_key) =
+            portal_visibility_view_keys(view);
         self.active_room_view_sin_key = view_sin_key;
         self.active_room_view_cos_key = view_cos_key;
-        self.rebuild_portal_visibility(current_index, current_record, view);
+        self.active_room_view_pitch_sin_key = view_pitch_sin_key;
+        self.active_room_view_pitch_cos_key = view_pitch_cos_key;
+        self.rebuild_portal_visibility(visibility_index, visibility_record, visibility_view);
         self.active_room_candidates = self.portal_visibility.stats.portals_tested.min(u16::MAX);
         self.portal_visible_missing_resident = 0;
         self.portal_visible_missing_mask = 0;
+        self.portal_visible_build_failed = 0;
+        self.portal_visible_build_failed_mask = 0;
 
         let desired_visible_count = self
             .portal_visibility
@@ -3476,6 +3670,7 @@ impl Playtest {
         let mut next_slot = 0usize;
         let mut visible_slot = 0usize;
         self.active_room_anchor = player;
+        self.active_room_view_anchor = view.position;
 
         while visible_slot < desired_visible_count && next_slot < MAX_ACTIVE_ROOMS {
             let index = self.portal_visibility.rooms[visible_slot].room;
@@ -3509,15 +3704,31 @@ impl Playtest {
                     self.active_room_cache_skips = self.active_room_cache_skips.saturating_add(1);
                 }
                 None => {
-                    self.portal_visible_missing_resident =
-                        self.portal_visible_missing_resident.saturating_add(1);
-                    self.portal_visible_missing_mask |= room_index_debug_mask(index);
+                    self.mark_visible_room_unbuilt(index);
                     if visible_slot == 0 {
                         break;
                     }
                 }
             }
             visible_slot += 1;
+        }
+
+        if self.current_collision_room.is_none() && next_slot < MAX_ACTIVE_ROOMS {
+            if let Some(active) = reuse_or_build_active_room(
+                next_slot,
+                current_index,
+                current_record,
+                current_record,
+                &previous_active_rooms,
+            ) {
+                self.room = active.render_room;
+                self.current_collision_room = Some(active.collision_room);
+                self.current_ambient_rgb = active.ambient_rgb;
+                self.materials = active.materials;
+                self.material_count = active.material_count;
+                self.active_rooms[next_slot] = Some(active);
+                next_slot += 1;
+            }
         }
 
         if next_slot == 0 {
@@ -3547,6 +3758,8 @@ impl Playtest {
         if self.portal_visibility.room_count == 0 {
             self.portal_visible_missing_resident = 0;
             self.portal_visible_missing_mask = 0;
+            self.portal_visible_build_failed = 0;
+            self.portal_visible_build_failed_mask = 0;
         }
         telemetry::counter(
             telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
@@ -3659,6 +3872,8 @@ impl Playtest {
         let mut visible_slot = 0usize;
         self.portal_visible_missing_resident = 0;
         self.portal_visible_missing_mask = 0;
+        self.portal_visible_build_failed = 0;
+        self.portal_visible_build_failed_mask = 0;
         while visible_slot < visible_limit && next_slot < MAX_ACTIVE_ROOMS {
             let index = self.portal_visibility.rooms[visible_slot].room;
             if let Some(record) = ROOMS.get(index.to_usize()) {
@@ -3682,9 +3897,7 @@ impl Playtest {
                             self.active_room_cache_skips.saturating_add(1);
                     }
                     None => {
-                        self.portal_visible_missing_resident =
-                            self.portal_visible_missing_resident.saturating_add(1);
-                        self.portal_visible_missing_mask |= room_index_debug_mask(index);
+                        self.mark_visible_room_unbuilt(index);
                         if visible_slot == 0 {
                             break;
                         }
@@ -3871,6 +4084,11 @@ impl Playtest {
         self.room_index = next_room;
         self.motor.relocate(local);
         self.camera.relocate_room_space(camera_delta);
+        self.render_camera.position = WorldVertex::new(
+            self.render_camera.position.x.saturating_add(camera_delta.x),
+            self.render_camera.position.y.saturating_add(camera_delta.y),
+            self.render_camera.position.z.saturating_add(camera_delta.z),
+        );
         self.lock_target = None;
         self.lock_switch_stick_held = false;
         self.soft_lock_target = None;
@@ -3887,14 +4105,20 @@ impl Playtest {
         };
         let sector_size = record.sector_size.max(1);
         let threshold = sector_size.saturating_mul(ACTIVE_ROOM_REFRESH_SECTORS.max(1));
+        let view_threshold = sector_size;
         let player = self.motor.position();
         let view = self.active_room_selection_view();
-        let (view_sin_key, view_cos_key) = portal_visibility_view_keys(view.sin_yaw, view.cos_yaw);
+        let (view_sin_key, view_cos_key, view_pitch_sin_key, view_pitch_cos_key) =
+            portal_visibility_view_keys(view);
         let moved_far = point_xz_distance_sq(player, self.active_room_anchor)
             >= (threshold as u64).saturating_mul(threshold as u64);
+        let camera_moved_far = point_xyz_distance_sq(view.position, self.active_room_view_anchor)
+            >= (view_threshold as u64).saturating_mul(view_threshold as u64);
         let view_changed = view_sin_key != self.active_room_view_sin_key
-            || view_cos_key != self.active_room_view_cos_key;
-        if !moved_far && !view_changed {
+            || view_cos_key != self.active_room_view_cos_key
+            || view_pitch_sin_key != self.active_room_view_pitch_sin_key
+            || view_pitch_cos_key != self.active_room_view_pitch_cos_key;
+        if !moved_far && !camera_moved_far && !view_changed {
             return;
         }
         self.rebuild_active_room_window(true);
@@ -5227,6 +5451,11 @@ fn streamed_room_is_resident(index: RoomIndex) -> bool {
 }
 
 #[cfg(feature = "cd-stream-bench")]
+fn streamed_room_is_loading(index: RoomIndex) -> bool {
+    unsafe { ROOM_STREAM_SCHEDULER.is_loading(index) }
+}
+
+#[cfg(feature = "cd-stream-bench")]
 fn streamed_room_stream_active() -> bool {
     unsafe { ROOM_STREAM_SCHEDULER.job.is_active() }
 }
@@ -6335,22 +6564,33 @@ struct ActiveRoomView {
     position: RoomPoint,
     sin_yaw: i32,
     cos_yaw: i32,
+    sin_pitch: i32,
+    cos_pitch: i32,
 }
 
 impl ActiveRoomView {
-    fn new(position: RoomPoint, yaw: Angle) -> Self {
-        let sin_yaw = yaw.sin().raw();
-        let cos_yaw = yaw.cos().raw();
+    fn from_camera(camera: WorldCamera) -> Self {
         Self {
-            position,
-            sin_yaw,
-            cos_yaw,
+            position: RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
+            sin_yaw: camera.sin_yaw.raw(),
+            cos_yaw: camera.cos_yaw.raw(),
+            sin_pitch: camera.sin_pitch.raw(),
+            cos_pitch: camera.cos_pitch.raw(),
         }
+    }
+
+    fn with_position(self, position: RoomPoint) -> Self {
+        Self { position, ..self }
     }
 }
 
-fn portal_visibility_view_keys(sin_yaw: i32, cos_yaw: i32) -> (i16, i16) {
-    ((sin_yaw / 1024) as i16, (cos_yaw / 1024) as i16)
+fn portal_visibility_view_keys(view: ActiveRoomView) -> (i16, i16, i16, i16) {
+    (
+        (view.sin_yaw / 256) as i16,
+        (view.cos_yaw / 256) as i16,
+        (view.sin_pitch / 256) as i16,
+        (view.cos_pitch / 256) as i16,
+    )
 }
 
 #[derive(Copy, Clone)]
@@ -6502,6 +6742,15 @@ fn point_xz_distance_sq(a: RoomPoint, b: RoomPoint) -> u64 {
     let dx = (a.x as i64).saturating_sub(b.x as i64).unsigned_abs();
     let dz = (a.z as i64).saturating_sub(b.z as i64).unsigned_abs();
     dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz))
+}
+
+fn point_xyz_distance_sq(a: RoomPoint, b: RoomPoint) -> u64 {
+    let dx = (a.x as i64).saturating_sub(b.x as i64).unsigned_abs();
+    let dy = (a.y as i64).saturating_sub(b.y as i64).unsigned_abs();
+    let dz = (a.z as i64).saturating_sub(b.z as i64).unsigned_abs();
+    dx.saturating_mul(dx)
+        .saturating_add(dy.saturating_mul(dy))
+        .saturating_add(dz.saturating_mul(dz))
 }
 
 fn room_bounds(record: &LevelRoomRecord, room: RuntimeRoom<'_>) -> (i32, i32, i32, i32) {
