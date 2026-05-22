@@ -4548,7 +4548,7 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "PORT vis/fr/miss {:>2}/{:<2}/{:<2}",
+                        "PORT acc/fr/unld {:>2}/{:<2}/{:<2}",
                         metrics.portal_visible_rooms,
                         metrics.portal_frontier_rooms,
                         metrics.portal_missing_resident
@@ -4560,9 +4560,18 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "PORT test/ok {:>2}/{:<2}",
-                        metrics.portal_tests, metrics.portal_accepts
+                        "PORT ok/fb/fail {:>2}/{:<2}/{:<2}",
+                        metrics.portal_accepts,
+                        metrics.portal_bounds_fallbacks,
+                        metrics.portal_build_failed
                     ),
+                    STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!("PORT test {:>2}", metrics.portal_tests),
                     STUDIO_TEXT_WEAK,
                 );
                 draw_play_metric_line(
@@ -4592,8 +4601,8 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "ROOM draw/res {:>2}/{:<2}",
-                        metrics.chunk_visible, metrics.chunk_loaded
+                        "ROOM draw/res/cap {:>2}/{:<2}/{:<2}",
+                        metrics.chunk_visible, metrics.chunk_loaded, metrics.stream_slot_limit
                     ),
                     STUDIO_TEXT_WEAK,
                 );
@@ -21226,6 +21235,7 @@ struct PlayChunkDebugMapCell {
     runtime_room_index: usize,
     center: [f32; 2],
     half: [f32; 2],
+    room_origin: [f32; 2],
     sector_size: f32,
 }
 
@@ -21253,7 +21263,7 @@ fn draw_play_chunk_debug_map(
         return;
     }
 
-    let map_size = Vec2::new(230.0, 180.0);
+    let map_size = Vec2::new(300.0, 224.0);
     let mut map_rect = Rect::from_min_size(
         Pos2::new(
             viewport_rect.right() - map_size.x - 8.0,
@@ -21302,7 +21312,7 @@ fn draw_play_chunk_debug_map(
 
     let plot = Rect::from_min_max(
         map_rect.left_top() + Vec2::new(8.0, 24.0),
-        map_rect.right_bottom() - Vec2::new(8.0, 24.0),
+        map_rect.right_bottom() - Vec2::new(8.0, 60.0),
     );
     let world_w = (max_x - min_x).max(1.0);
     let world_h = (max_z - min_z).max(1.0);
@@ -21319,9 +21329,15 @@ fn draw_play_chunk_debug_map(
     for cell in &map.cells {
         let bit = debug_chunk_bit(cell.runtime_room_index);
         let loaded = bit != 0 && metrics.chunk_loaded_mask & bit != 0;
+        let loading = bit != 0 && metrics.chunk_loading_mask & bit != 0;
         let visible = bit != 0 && metrics.portal_visible_mask & bit != 0;
         let frontier = bit != 0 && metrics.portal_frontier_mask & bit != 0;
         let missing = bit != 0 && metrics.portal_missing_mask & bit != 0;
+        let build_failed = bit != 0 && metrics.portal_build_failed_mask & bit != 0;
+        let fallback = bit != 0 && metrics.portal_bounds_fallback_mask & bit != 0;
+        let rejected = bit != 0
+            && metrics.portal_reject_frustum_mask & bit != 0
+            && metrics.portal_accepted_mask & bit == 0;
         let drawn = bit != 0 && metrics.chunk_drawn_mask & bit != 0;
         let rect = Rect::from_min_max(
             Pos2::new(
@@ -21335,13 +21351,21 @@ fn draw_play_chunk_debug_map(
         )
         .shrink(0.75);
         let fill = if drawn {
-            Color32::from_rgba_unmultiplied(40, 210, 112, 150)
+            Color32::from_rgba_unmultiplied(42, 214, 124, 156)
+        } else if build_failed {
+            Color32::from_rgba_unmultiplied(232, 76, 196, 112)
         } else if missing {
-            Color32::from_rgba_unmultiplied(220, 56, 64, 104)
+            Color32::from_rgba_unmultiplied(226, 54, 74, 112)
+        } else if loading {
+            Color32::from_rgba_unmultiplied(72, 150, 255, 96)
+        } else if rejected {
+            Color32::from_rgba_unmultiplied(255, 124, 36, 84)
+        } else if fallback {
+            Color32::from_rgba_unmultiplied(68, 210, 226, 84)
         } else if visible {
-            Color32::from_rgba_unmultiplied(255, 206, 82, 82)
+            Color32::from_rgba_unmultiplied(244, 170, 48, 96)
         } else if loaded {
-            Color32::from_rgba_unmultiplied(80, 132, 190, 62)
+            Color32::from_rgba_unmultiplied(132, 148, 164, 48)
         } else {
             Color32::from_rgba_unmultiplied(0, 0, 0, 0)
         };
@@ -21349,19 +21373,30 @@ fn draw_play_chunk_debug_map(
             painter.rect_filled(rect, 0.0, fill);
         }
         let stroke = if drawn {
-            Stroke::new(1.5, Color32::from_rgb(76, 255, 144))
+            Stroke::new(1.6, Color32::from_rgb(72, 255, 152))
+        } else if build_failed {
+            Stroke::new(1.8, Color32::from_rgb(255, 92, 214))
         } else if missing {
-            Stroke::new(1.7, Color32::from_rgb(255, 84, 92))
+            Stroke::new(1.8, Color32::from_rgb(255, 82, 104))
+        } else if loading {
+            Stroke::new(1.8, Color32::from_rgb(96, 178, 255))
+        } else if rejected {
+            Stroke::new(1.8, Color32::from_rgb(255, 142, 48))
+        } else if fallback {
+            Stroke::new(1.8, Color32::from_rgb(68, 220, 238))
         } else if visible {
-            Stroke::new(1.7, Color32::from_rgb(255, 206, 82))
+            Stroke::new(1.7, Color32::from_rgb(255, 184, 58))
         } else if frontier {
-            Stroke::new(1.4, Color32::from_rgb(96, 196, 255))
+            Stroke::new(1.6, Color32::from_rgb(172, 128, 255))
         } else if loaded {
-            Stroke::new(1.2, Color32::from_rgb(96, 148, 210))
+            Stroke::new(1.2, Color32::from_rgb(154, 170, 188))
         } else {
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 120))
         };
         painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
+        if rejected {
+            draw_rejected_map_marker(painter, rect);
+        }
     }
 
     let clipped = painter.with_clip_rect(plot);
@@ -21371,10 +21406,24 @@ fn draw_play_chunk_debug_map(
         let source_visible = source_bit != 0 && metrics.portal_visible_mask & source_bit != 0;
         let dest_visible = dest_bit != 0 && metrics.portal_visible_mask & dest_bit != 0;
         let dest_frontier = dest_bit != 0 && metrics.portal_frontier_mask & dest_bit != 0;
+        let dest_loading = dest_bit != 0 && metrics.chunk_loading_mask & dest_bit != 0;
+        let dest_build_failed = dest_bit != 0 && metrics.portal_build_failed_mask & dest_bit != 0;
+        let dest_fallback = dest_bit != 0 && metrics.portal_bounds_fallback_mask & dest_bit != 0;
+        let dest_rejected = dest_bit != 0
+            && metrics.portal_reject_frustum_mask & dest_bit != 0
+            && metrics.portal_accepted_mask & dest_bit == 0;
         let color = if source_visible && dest_visible {
-            Color32::from_rgb(255, 228, 120)
+            Color32::from_rgb(255, 190, 72)
+        } else if source_visible && dest_build_failed {
+            Color32::from_rgb(255, 92, 214)
+        } else if source_visible && dest_loading {
+            Color32::from_rgb(96, 178, 255)
+        } else if source_visible && dest_fallback {
+            Color32::from_rgb(68, 220, 238)
+        } else if source_visible && dest_rejected {
+            Color32::from_rgb(255, 142, 48)
         } else if source_visible && dest_frontier {
-            Color32::from_rgb(96, 196, 255)
+            Color32::from_rgb(172, 128, 255)
         } else {
             Color32::from_rgba_unmultiplied(210, 220, 235, 112)
         };
@@ -21394,61 +21443,123 @@ fn draw_play_chunk_debug_map(
             .find(|cell| cell.runtime_room_index == metrics.player_room_index as usize)
         {
             let sector_size = cell.sector_size.max(1.0);
-            let cell_min_x = cell.center[0] - cell.half[0];
-            let cell_min_z = cell.center[1] - cell.half[1];
-            let player_x = cell_min_x + metrics.player_local_x as f32 / sector_size;
-            let player_z = cell_min_z + metrics.player_local_z as f32 / sector_size;
-            let player_pos = Pos2::new(map_x(player_x), map_z(player_z));
-            if player_pos.x.is_finite() && player_pos.y.is_finite() {
+            let local_to_map_pos = |local_x: i32, local_z: i32| {
+                let x = cell.room_origin[0] + local_x as f32 / sector_size;
+                let z = cell.room_origin[1] + local_z as f32 / sector_size;
+                Pos2::new(map_x(x), map_z(z))
+            };
+            let player_pos = local_to_map_pos(metrics.player_local_x, metrics.player_local_z);
+            let camera_pos = if metrics.camera_map_valid {
+                local_to_map_pos(metrics.camera_local_x, metrics.camera_local_z)
+            } else {
+                player_pos
+            };
+            if player_pos.x.is_finite()
+                && player_pos.y.is_finite()
+                && camera_pos.x.is_finite()
+                && camera_pos.y.is_finite()
+            {
                 let yaw = metrics.player_view_yaw_q12 as f32 * std::f32::consts::TAU / 4096.0;
                 let forward = Vec2::new(-yaw.sin(), -yaw.cos());
-                let cone_len = (scale * 3.0).clamp(20.0, 42.0);
-                let cone_half_angle = 0.48;
+                let cone_len = (content_w * content_w + content_h * content_h)
+                    .sqrt()
+                    .max(42.0);
+                let cone_half_angle = (160.0_f32 / 320.0_f32).atan();
                 let left = rotate_vec2(forward, -cone_half_angle) * cone_len;
                 let right = rotate_vec2(forward, cone_half_angle) * cone_len;
                 let clipped = painter.with_clip_rect(plot);
+                if metrics.camera_map_valid && player_pos.distance(camera_pos) > 2.0 {
+                    clipped.line_segment(
+                        [player_pos, camera_pos],
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(232, 240, 252, 160)),
+                    );
+                }
                 clipped.add(egui::Shape::convex_polygon(
-                    vec![player_pos, player_pos + left, player_pos + right],
-                    Color32::from_rgba_unmultiplied(92, 190, 255, 62),
-                    Stroke::new(1.2, Color32::from_rgb(112, 210, 255)),
+                    vec![camera_pos, camera_pos + left, camera_pos + right],
+                    Color32::from_rgba_unmultiplied(235, 240, 248, 44),
+                    Stroke::new(1.2, Color32::from_rgb(232, 240, 252)),
                 ));
                 clipped.line_segment(
-                    [player_pos, player_pos + forward * (cone_len * 0.82)],
+                    [camera_pos, camera_pos + forward * (cone_len * 0.82)],
                     Stroke::new(1.2, Color32::from_rgb(218, 244, 255)),
                 );
-                clipped.circle_filled(player_pos, 3.5, Color32::from_rgb(245, 250, 255));
-                clipped.circle_stroke(player_pos, 3.5, Stroke::new(1.0, Color32::BLACK));
+                clipped.circle_filled(player_pos, 2.6, Color32::from_rgb(72, 255, 152));
+                clipped.circle_stroke(player_pos, 2.6, Stroke::new(1.0, Color32::BLACK));
+                clipped.circle_filled(camera_pos, 3.5, Color32::from_rgb(245, 250, 255));
+                clipped.circle_stroke(camera_pos, 3.5, Stroke::new(1.0, Color32::BLACK));
             }
         }
     }
 
+    let legend_row0 = map_rect.left_bottom() + Vec2::new(8.0, -51.0);
+    let legend_row1 = map_rect.left_bottom() + Vec2::new(8.0, -34.0);
+    let legend_row2 = map_rect.left_bottom() + Vec2::new(8.0, -17.0);
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(8.0, -16.0),
-        Color32::from_rgba_unmultiplied(40, 210, 112, 150),
-        Color32::from_rgb(76, 255, 144),
-        "draw",
+        legend_row0,
+        Color32::from_rgba_unmultiplied(42, 214, 124, 156),
+        Color32::from_rgb(72, 255, 152),
+        "drawn",
     );
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(62.0, -16.0),
-        Color32::from_rgba_unmultiplied(255, 206, 82, 82),
-        Color32::from_rgb(255, 206, 82),
-        "vis",
+        legend_row0 + Vec2::new(70.0, 0.0),
+        Color32::from_rgba_unmultiplied(244, 170, 48, 96),
+        Color32::from_rgb(255, 184, 58),
+        "accepted",
     );
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(108.0, -16.0),
+        legend_row0 + Vec2::new(158.0, 0.0),
         Color32::from_rgba_unmultiplied(0, 0, 0, 0),
-        Color32::from_rgb(96, 196, 255),
-        "front",
+        Color32::from_rgb(172, 128, 255),
+        "frontier",
     );
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(166.0, -16.0),
-        Color32::from_rgba_unmultiplied(220, 56, 64, 104),
-        Color32::from_rgb(255, 84, 92),
-        "miss",
+        legend_row1,
+        Color32::from_rgba_unmultiplied(132, 148, 164, 48),
+        Color32::from_rgb(154, 170, 188),
+        "resident",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row1 + Vec2::new(94.0, 0.0),
+        Color32::from_rgba_unmultiplied(72, 150, 255, 96),
+        Color32::from_rgb(96, 178, 255),
+        "loading",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row1 + Vec2::new(188.0, 0.0),
+        Color32::from_rgba_unmultiplied(226, 54, 74, 112),
+        Color32::from_rgb(255, 82, 104),
+        "not loaded",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row2,
+        Color32::from_rgba_unmultiplied(232, 76, 196, 112),
+        Color32::from_rgb(255, 92, 214),
+        "build fail",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row2 + Vec2::new(94.0, 0.0),
+        Color32::from_rgba_unmultiplied(255, 124, 36, 84),
+        Color32::from_rgb(255, 142, 48),
+        "clip reject",
+    );
+    draw_rejected_map_marker(
+        painter,
+        Rect::from_min_size(legend_row2 + Vec2::new(94.0, 0.0), Vec2::new(9.0, 9.0)),
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row2 + Vec2::new(188.0, 0.0),
+        Color32::from_rgba_unmultiplied(68, 210, 226, 84),
+        Color32::from_rgb(68, 220, 238),
+        "bounds fb",
     );
 }
 
@@ -21457,7 +21568,13 @@ fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap 
     let mut cells = Vec::new();
     let mut portals = Vec::new();
     let mut runtime_room_index = 0usize;
-    for node in scene.nodes() {
+    let mut room_nodes: Vec<_> = scene
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .collect();
+    room_nodes.sort_by_key(|node| node.id.raw());
+    for node in room_nodes {
         let NodeKind::Room { grid } = &node.kind else {
             continue;
         };
@@ -21468,17 +21585,23 @@ fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap 
         let node_center = node_world(node);
         let room_base_index = runtime_room_index;
         for roomlet in &plan.rooms {
-            let (local_center, half) =
-                grid_rect_editor_center_half(grid, roomlet.array_origin, roomlet.size);
-            cells.push(PlayChunkDebugMapCell {
-                runtime_room_index,
-                center: [
-                    node_center[0] + local_center[0],
-                    node_center[1] + local_center[1],
-                ],
-                half,
-                sector_size: grid.sector_size.max(1) as f32,
-            });
+            let room_origin = [
+                node_center[0] + roomlet.array_origin[0] as f32 - grid.width as f32 * 0.5,
+                node_center[1] + roomlet.array_origin[1] as f32 - grid.depth as f32 * 0.5,
+            ];
+            for [cell_x, cell_z] in &roomlet.cells {
+                let local_center = grid_cell_editor_center(grid, *cell_x, *cell_z);
+                cells.push(PlayChunkDebugMapCell {
+                    runtime_room_index,
+                    center: [
+                        node_center[0] + local_center[0],
+                        node_center[1] + local_center[1],
+                    ],
+                    half: [0.5, 0.5],
+                    room_origin,
+                    sector_size: grid.sector_size.max(1) as f32,
+                });
+            }
             runtime_room_index += 1;
         }
         let sector_size = grid.sector_size.max(1) as f32;
@@ -21528,6 +21651,17 @@ fn debug_chunk_bit(index: usize) -> u64 {
 fn rotate_vec2(v: Vec2, radians: f32) -> Vec2 {
     let (sin, cos) = radians.sin_cos();
     Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos)
+}
+
+fn draw_rejected_map_marker(painter: &egui::Painter, rect: Rect) {
+    let inset = (rect.width().min(rect.height()) * 0.22).clamp(1.0, 4.0);
+    let a = rect.left_top() + Vec2::splat(inset);
+    let b = rect.right_bottom() - Vec2::splat(inset);
+    painter.line_segment(
+        [a, b],
+        Stroke::new(2.4, Color32::from_rgba_unmultiplied(20, 14, 10, 160)),
+    );
+    painter.line_segment([a, b], Stroke::new(1.2, Color32::from_rgb(255, 238, 204)));
 }
 
 fn draw_chunk_map_legend_item(

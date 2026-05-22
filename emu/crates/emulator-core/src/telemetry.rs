@@ -390,7 +390,7 @@ pub mod counter {
     pub const PORTAL_VIS_PORTALS_ACCEPTED: u16 = 144;
     /// Portals rejected by source-facing backface tests.
     pub const PORTAL_VIS_REJECT_BACKFACE: u16 = 145;
-    /// Portals rejected by near/far/cone clipping.
+    /// Portals rejected by camera/window clipping.
     pub const PORTAL_VIS_REJECT_FRUSTUM: u16 = 146;
     /// Portals rejected because the clipped cone was tiny.
     pub const PORTAL_VIS_REJECT_TINY: u16 = 147;
@@ -400,7 +400,7 @@ pub mod counter {
     pub const PORTAL_VIS_CAP_FRUSTUM: u16 = 149;
     /// Portal traversal max-depth hits.
     pub const PORTAL_VIS_CAP_DEPTH: u16 = 150;
-    /// Portal-visible rooms not resident when the active window was built.
+    /// Portal-visible rooms neither resident nor loading when the active window was built.
     pub const PORTAL_VIS_VISIBLE_MISSING_RESIDENT: u16 = 151;
     /// Stream priority requests for the current room.
     pub const ROOM_STREAM_PRIORITY_CURRENT: u16 = 152;
@@ -422,10 +422,44 @@ pub mod counter {
     pub const PORTAL_VIS_MISSING_MASK_LO: u16 = 160;
     /// High 32 bits of the visible-but-missing-residency room bitset.
     pub const PORTAL_VIS_MISSING_MASK_HI: u16 = 161;
+    /// Render camera room-local X, biased for unsigned telemetry transport.
+    pub const ROOM_CAMERA_LOCAL_X_BIASED: u16 = 162;
+    /// Render camera room-local Z, biased for unsigned telemetry transport.
+    pub const ROOM_CAMERA_LOCAL_Z_BIASED: u16 = 163;
+    /// Low 32 bits of destination rooms for portals tested this frame.
+    pub const PORTAL_VIS_TESTED_MASK_LO: u16 = 164;
+    /// High 32 bits of destination rooms for portals tested this frame.
+    pub const PORTAL_VIS_TESTED_MASK_HI: u16 = 165;
+    /// Low 32 bits of destination rooms for accepted portals this frame.
+    pub const PORTAL_VIS_ACCEPTED_MASK_LO: u16 = 166;
+    /// High 32 bits of destination rooms for accepted portals this frame.
+    pub const PORTAL_VIS_ACCEPTED_MASK_HI: u16 = 167;
+    /// Low 32 bits of destination rooms rejected by portal window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_MASK_LO: u16 = 168;
+    /// High 32 bits of destination rooms rejected by portal window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_MASK_HI: u16 = 169;
+    /// Portals recovered by occupied-room-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACKS: u16 = 170;
+    /// Low 32 bits of destination rooms recovered by occupied-room-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO: u16 = 171;
+    /// High 32 bits of destination rooms recovered by occupied-room-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI: u16 = 172;
+    /// Effective resident streamed room slot limit for the current window.
+    pub const ROOM_STREAM_SLOT_LIMIT: u16 = 173;
+    /// Low 32 bits of rooms with in-flight streamed loads.
+    pub const ROOM_STREAM_LOADING_MASK_LO: u16 = 174;
+    /// High 32 bits of rooms with in-flight streamed loads.
+    pub const ROOM_STREAM_LOADING_MASK_HI: u16 = 175;
+    /// Portal-visible rooms resident in the stream cache but not buildable.
+    pub const PORTAL_VIS_VISIBLE_BUILD_FAILED: u16 = 176;
+    /// Low 32 bits of visible resident rooms that failed active-room build.
+    pub const PORTAL_VIS_BUILD_FAILED_MASK_LO: u16 = 177;
+    /// High 32 bits of visible resident rooms that failed active-room build.
+    pub const PORTAL_VIS_BUILD_FAILED_MASK_HI: u16 = 178;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 162;
+pub const COUNTER_COUNT: usize = 179;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -474,6 +508,7 @@ pub struct GuestTelemetry {
     frames_seen: u64,
     counter_totals: [u64; COUNTER_COUNT],
     counter_max_values: [u32; COUNTER_COUNT],
+    counter_latest_values: [u32; COUNTER_COUNT],
 }
 
 impl Default for GuestTelemetry {
@@ -484,6 +519,7 @@ impl Default for GuestTelemetry {
             frames_seen: 0,
             counter_totals: [0; COUNTER_COUNT],
             counter_max_values: [0; COUNTER_COUNT],
+            counter_latest_values: [0; COUNTER_COUNT],
         }
     }
 }
@@ -555,6 +591,14 @@ impl GuestTelemetry {
             .unwrap_or_default()
     }
 
+    /// Most recent single value observed for a known counter since reset.
+    pub fn counter_latest_value(&self, id: u16) -> u32 {
+        self.counter_latest_values
+            .get(id as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Snapshot of all summed counter values observed since reset.
     pub const fn counter_totals(&self) -> [u64; COUNTER_COUNT] {
         self.counter_totals
@@ -563,6 +607,11 @@ impl GuestTelemetry {
     /// Snapshot of all largest counter values observed since reset.
     pub const fn counter_max_values(&self) -> [u32; COUNTER_COUNT] {
         self.counter_max_values
+    }
+
+    /// Snapshot of the most recent counter values observed since reset.
+    pub const fn counter_latest_values(&self) -> [u32; COUNTER_COUNT] {
+        self.counter_latest_values
     }
 
     fn push(&mut self, event: GuestTelemetryEvent) {
@@ -575,6 +624,9 @@ impl GuestTelemetry {
             }
             if let Some(max_value) = self.counter_max_values.get_mut(event.id as usize) {
                 *max_value = (*max_value).max(event.value);
+            }
+            if let Some(latest_value) = self.counter_latest_values.get_mut(event.id as usize) {
+                *latest_value = event.value;
             }
         }
         if self.events.len() >= EVENT_CAP {
@@ -599,6 +651,8 @@ pub struct GuestTelemetrySummary {
     pub counters: [u64; COUNTER_COUNT],
     /// Largest single value observed per known counter id.
     pub counter_max_values: [u32; COUNTER_COUNT],
+    /// Most recent value observed per known counter id.
+    pub counter_latest_values: [u32; COUNTER_COUNT],
 }
 
 impl Default for GuestTelemetrySummary {
@@ -610,6 +664,7 @@ impl Default for GuestTelemetrySummary {
             stage_max_cycles: [0; STAGE_COUNT],
             counters: [0; COUNTER_COUNT],
             counter_max_values: [0; COUNTER_COUNT],
+            counter_latest_values: [0; COUNTER_COUNT],
         }
     }
 }
@@ -655,6 +710,9 @@ impl GuestTelemetrySummary {
                     }
                     if let Some(max_value) = self.counter_max_values.get_mut(idx) {
                         *max_value = (*max_value).max(event.value);
+                    }
+                    if let Some(latest_value) = self.counter_latest_values.get_mut(idx) {
+                        *latest_value = event.value;
                     }
                 }
                 GuestTelemetryKind::Unknown(_) => {}
@@ -852,6 +910,8 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_PLAYER_LOCAL_X_BIASED => "player local x",
         counter::ROOM_PLAYER_LOCAL_Z_BIASED => "player local z",
         counter::ROOM_PLAYER_VIEW_YAW_Q12 => "player view yaw q12",
+        counter::ROOM_CAMERA_LOCAL_X_BIASED => "camera local x",
+        counter::ROOM_CAMERA_LOCAL_Z_BIASED => "camera local z",
         counter::PORTAL_VIS_CURRENT_ROOM => "portal current room",
         counter::PORTAL_VIS_VISIBLE_ROOMS => "portal visible rooms",
         counter::PORTAL_VIS_FRONTIER_ROOMS => "portal frontier rooms",
@@ -875,6 +935,21 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::PORTAL_VIS_FRONTIER_MASK_HI => "portal frontier mask hi",
         counter::PORTAL_VIS_MISSING_MASK_LO => "portal missing mask lo",
         counter::PORTAL_VIS_MISSING_MASK_HI => "portal missing mask hi",
+        counter::PORTAL_VIS_TESTED_MASK_LO => "portal tested mask lo",
+        counter::PORTAL_VIS_TESTED_MASK_HI => "portal tested mask hi",
+        counter::PORTAL_VIS_ACCEPTED_MASK_LO => "portal accepted mask lo",
+        counter::PORTAL_VIS_ACCEPTED_MASK_HI => "portal accepted mask hi",
+        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO => "portal frustum reject mask lo",
+        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI => "portal frustum reject mask hi",
+        counter::PORTAL_VIS_BOUNDS_FALLBACKS => "portal bounds fallback",
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO => "portal bounds fallback mask lo",
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI => "portal bounds fallback mask hi",
+        counter::ROOM_STREAM_SLOT_LIMIT => "room stream slot limit",
+        counter::ROOM_STREAM_LOADING_MASK_LO => "loading chunk mask lo",
+        counter::ROOM_STREAM_LOADING_MASK_HI => "loading chunk mask hi",
+        counter::PORTAL_VIS_VISIBLE_BUILD_FAILED => "portal visible build failed",
+        counter::PORTAL_VIS_BUILD_FAILED_MASK_LO => "portal build failed mask lo",
+        counter::PORTAL_VIS_BUILD_FAILED_MASK_HI => "portal build failed mask hi",
         _ => "unknown",
     }
 }
@@ -902,6 +977,7 @@ mod tests {
         assert_eq!(telemetry.frames_seen(), 0);
         assert_eq!(telemetry.counter_total(counter::WORLD_COMMANDS), 42);
         assert_eq!(telemetry.counter_max_value(counter::WORLD_COMMANDS), 42);
+        assert_eq!(telemetry.counter_latest_value(counter::WORLD_COMMANDS), 42);
         assert_eq!(telemetry.observe_read32(CYCLE_PHYS, 1234), Some(1234));
         assert_eq!(
             events,
@@ -966,6 +1042,10 @@ mod tests {
         assert_eq!(
             summary.counter_max_values[counter::VISUAL_MAX_LATENESS_VBLANKS as usize],
             2
+        );
+        assert_eq!(
+            summary.counter_latest_values[counter::VISUAL_MAX_LATENESS_VBLANKS as usize],
+            1
         );
     }
 
