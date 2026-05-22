@@ -1,9 +1,10 @@
 //! Heap-free portal visibility traversal for cooked runtime rooms.
 //!
-//! The traversal is intentionally conservative: portals are clipped in the
-//! horizontal camera cone and rooms are submitted whole once accepted. This
-//! matches the current renderer, which can overdraw visible room payloads while
-//! streaming keeps the current visible set resident.
+//! The traversal clips each directed portal against the camera's current
+//! screen-space portal window, then recurses with the clipped child window.
+//! That mirrors the Tomb-style door traversal: a room is accepted because a
+//! projected portal rectangle reaches it, not because the room's top-down
+//! footprint intersects the camera cone.
 
 use crate::{LevelRoomPortalRecord, LevelRoomRecord, RoomIndex};
 
@@ -26,14 +27,24 @@ pub struct PortalVisibilityCamera {
     pub sin_yaw_q12: i32,
     /// Camera yaw cosine, Q12.
     pub cos_yaw_q12: i32,
+    /// Camera pitch sine, Q12.
+    pub sin_pitch_q12: i32,
+    /// Camera pitch cosine, Q12.
+    pub cos_pitch_q12: i32,
     /// Near plane in camera-space depth units.
     pub near_z: i32,
     /// Far plane in camera-space depth units.
     pub far_z: i32,
     /// Horizontal half field-of-view as `tan(angle)`, Q12.
-    pub half_fov_tan_q12: i32,
+    pub half_fov_x_tan_q12: i32,
+    /// Vertical half field-of-view as `tan(angle)`, Q12.
+    pub half_fov_y_tan_q12: i32,
     /// Minimum accepted clipped portal cone width, Q12 tangent units.
     pub min_portal_width_q12: i32,
+    /// Recurse from accepted rooms with the full camera viewport instead of
+    /// the clipped entry portal. Enable this for renderers that draw an
+    /// accepted room whole rather than applying per-room viewport/scissor clips.
+    pub whole_room_recursion: bool,
 }
 
 impl PortalVisibilityCamera {
@@ -44,9 +55,12 @@ impl PortalVisibilityCamera {
         z: i32,
         sin_yaw_q12: i32,
         cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
         near_z: i32,
         far_z: i32,
-        half_fov_tan_q12: i32,
+        half_fov_x_tan_q12: i32,
+        half_fov_y_tan_q12: i32,
         min_portal_width_q12: i32,
     ) -> Self {
         Self {
@@ -55,12 +69,55 @@ impl PortalVisibilityCamera {
             z,
             sin_yaw_q12,
             cos_yaw_q12,
+            sin_pitch_q12,
+            cos_pitch_q12,
             near_z,
             far_z,
-            half_fov_tan_q12,
+            half_fov_x_tan_q12,
+            half_fov_y_tan_q12,
             min_portal_width_q12,
+            whole_room_recursion: false,
         }
     }
+
+    /// Return a copy configured for whole-room recursive traversal.
+    pub const fn with_whole_room_recursion(mut self, enabled: bool) -> Self {
+        self.whole_room_recursion = enabled;
+        self
+    }
+}
+
+/// World-space occupied bounds for a runtime room cell used as a conservative
+/// fallback when the renderer draws accepted rooms whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalRoomBounds {
+    /// Runtime room index these bounds belong to.
+    pub room: RoomIndex,
+    /// Minimum world X, inclusive.
+    pub min_x: i32,
+    /// Maximum world X, exclusive.
+    pub max_x: i32,
+    /// Minimum world Y.
+    pub min_y: i32,
+    /// Maximum world Y.
+    pub max_y: i32,
+    /// Minimum world Z, inclusive.
+    pub min_z: i32,
+    /// Maximum world Z, exclusive.
+    pub max_z: i32,
+}
+
+impl PortalRoomBounds {
+    /// Empty bounds slot.
+    pub const EMPTY: Self = Self {
+        room: INVALID_ROOM,
+        min_x: 0,
+        max_x: 0,
+        min_y: 0,
+        max_y: 0,
+        min_z: 0,
+        max_z: 0,
+    };
 }
 
 /// One accepted runtime room in portal traversal order.
@@ -86,7 +143,7 @@ impl PortalVisibleRoom {
     };
 }
 
-/// One clipped horizontal portal cone reaching a runtime room.
+/// One clipped portal viewport reaching a runtime room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortalFrustum {
     /// Room reached by this frustum.
@@ -101,6 +158,10 @@ pub struct PortalFrustum {
     pub left_tan_q12: i32,
     /// Right edge of the horizontal clipped cone, Q12 tangent units.
     pub right_tan_q12: i32,
+    /// Lower edge of the vertical clipped view, Q12 tangent units.
+    pub min_y_tan_q12: i32,
+    /// Upper edge of the vertical clipped view, Q12 tangent units.
+    pub max_y_tan_q12: i32,
 }
 
 impl PortalFrustum {
@@ -112,6 +173,8 @@ impl PortalFrustum {
         depth: 0,
         left_tan_q12: 0,
         right_tan_q12: 0,
+        min_y_tan_q12: 0,
+        max_y_tan_q12: 0,
     };
 }
 
@@ -141,7 +204,7 @@ pub struct PortalVisibilityStats {
     pub portals_accepted: u16,
     /// Portals rejected because the camera was behind the source-facing plane.
     pub reject_backface: u16,
-    /// Portals rejected by near/far/cone clipping.
+    /// Portals rejected by camera-plane/window clipping.
     pub reject_frustum: u16,
     /// Portals rejected because the clipped cone was too narrow.
     pub reject_tiny: u16,
@@ -153,6 +216,16 @@ pub struct PortalVisibilityStats {
     pub cap_depth: u16,
     /// Deepest accepted portal depth.
     pub max_depth: u8,
+    /// Destination-room bitset for portals considered by the traversal.
+    pub tested_room_mask: u64,
+    /// Destination-room bitset for portals accepted by the traversal.
+    pub accepted_room_mask: u64,
+    /// Destination-room bitset for portals rejected by camera/window clipping.
+    pub reject_frustum_room_mask: u64,
+    /// Portals accepted by occupied-room-bounds fallback.
+    pub bounds_fallbacks: u16,
+    /// Destination-room bitset for occupied-room-bounds fallback accepts.
+    pub bounds_fallback_room_mask: u64,
 }
 
 /// Fixed-pool output from a portal visibility traversal.
@@ -199,6 +272,11 @@ impl<const MAX_ROOMS: usize, const MAX_FRUSTUMS: usize, const MAX_FRONTIER: usiz
             cap_frustum: 0,
             cap_depth: 0,
             max_depth: 0,
+            tested_room_mask: 0,
+            accepted_room_mask: 0,
+            reject_frustum_room_mask: 0,
+            bounds_fallbacks: 0,
+            bounds_fallback_room_mask: 0,
         },
     };
 
@@ -297,6 +375,8 @@ impl<const MAX_ROOMS: usize, const MAX_FRUSTUMS: usize, const MAX_FRONTIER: usiz
                 && existing.depth <= frustum.depth
                 && existing.left_tan_q12 <= frustum.left_tan_q12
                 && existing.right_tan_q12 >= frustum.right_tan_q12
+                && existing.min_y_tan_q12 <= frustum.min_y_tan_q12
+                && existing.max_y_tan_q12 >= frustum.max_y_tan_q12
             {
                 return true;
             }
@@ -337,6 +417,31 @@ pub fn build_portal_visibility<
     max_depth: u8,
     out: &mut PortalVisibilityResult<MAX_ROOMS, MAX_FRUSTUMS, MAX_FRONTIER>,
 ) {
+    build_portal_visibility_with_room_bounds(
+        rooms,
+        portals,
+        &[],
+        current_room,
+        camera,
+        max_depth,
+        out,
+    );
+}
+
+/// Build the portal-visible room set with occupied-cell bounds fallback.
+pub fn build_portal_visibility_with_room_bounds<
+    const MAX_ROOMS: usize,
+    const MAX_FRUSTUMS: usize,
+    const MAX_FRONTIER: usize,
+>(
+    rooms: &[LevelRoomRecord],
+    portals: &[LevelRoomPortalRecord],
+    room_bounds: &[PortalRoomBounds],
+    current_room: RoomIndex,
+    camera: PortalVisibilityCamera,
+    max_depth: u8,
+    out: &mut PortalVisibilityResult<MAX_ROOMS, MAX_FRUSTUMS, MAX_FRONTIER>,
+) {
     out.clear();
     if current_room.to_usize() >= rooms.len() {
         return;
@@ -345,14 +450,17 @@ pub fn build_portal_visibility<
     let Some(root_slot) = out.push_visible_room(current_room, 0) else {
         return;
     };
-    let half_fov = camera.half_fov_tan_q12.max(1);
+    let half_fov_x = camera.half_fov_x_tan_q12.max(1);
+    let half_fov_y = camera.half_fov_y_tan_q12.max(1);
     let root = PortalFrustum {
         room: current_room,
         source_room: INVALID_ROOM,
         source_portal: INVALID_PORTAL,
         depth: 0,
-        left_tan_q12: -half_fov,
-        right_tan_q12: half_fov,
+        left_tan_q12: -half_fov_x,
+        right_tan_q12: half_fov_x,
+        min_y_tan_q12: -half_fov_y,
+        max_y_tan_q12: half_fov_y,
     };
     if !out.push_frustum(root_slot, root) {
         return;
@@ -380,6 +488,7 @@ pub fn build_portal_visibility<
                 continue;
             }
             out.stats.portals_tested = out.stats.portals_tested.saturating_add(1);
+            out.stats.tested_room_mask |= room_mask_bit(portal.destination_room);
             if portal.destination_room == current_room
                 || portal.destination_room == frustum.source_room
             {
@@ -389,26 +498,48 @@ pub fn build_portal_visibility<
                 out.stats.reject_backface = out.stats.reject_backface.saturating_add(1);
                 continue;
             }
-            let Some(child_cone) = clipped_portal_cone(portal, camera, frustum) else {
-                out.stats.reject_frustum = out.stats.reject_frustum.saturating_add(1);
-                continue;
+            let child_clip = match clipped_portal_clip(portal, camera, frustum) {
+                Some(child_clip) => child_clip,
+                None => {
+                    if camera.whole_room_recursion
+                        && room_bounds_intersects_camera_window(
+                            portal.destination_room,
+                            room_bounds,
+                            camera,
+                            frustum,
+                        )
+                    {
+                        out.stats.bounds_fallbacks = out.stats.bounds_fallbacks.saturating_add(1);
+                        out.stats.bounds_fallback_room_mask |=
+                            room_mask_bit(portal.destination_room);
+                        PortalClip::full_camera(camera)
+                    } else {
+                        out.stats.reject_frustum = out.stats.reject_frustum.saturating_add(1);
+                        out.stats.reject_frustum_room_mask |=
+                            room_mask_bit(portal.destination_room);
+                        continue;
+                    }
+                }
             };
-            if child_cone
-                .right_tan_q12
-                .saturating_sub(child_cone.left_tan_q12)
-                < camera.min_portal_width_q12.max(0)
-            {
+            if portal_clip_is_tiny(child_clip, camera.min_portal_width_q12.max(0)) {
                 out.stats.reject_tiny = out.stats.reject_tiny.saturating_add(1);
                 continue;
             }
             let child_depth = frustum.depth.saturating_add(1);
+            let traversal_clip = if camera.whole_room_recursion {
+                PortalClip::full_camera(camera)
+            } else {
+                child_clip
+            };
             let child = PortalFrustum {
                 room: portal.destination_room,
                 source_room: portal.source_room,
                 source_portal: portal_index.saturating_sub(1).min(u16::MAX as usize) as u16,
                 depth: child_depth,
-                left_tan_q12: child_cone.left_tan_q12,
-                right_tan_q12: child_cone.right_tan_q12,
+                left_tan_q12: traversal_clip.left_tan_q12,
+                right_tan_q12: traversal_clip.right_tan_q12,
+                min_y_tan_q12: traversal_clip.min_y_tan_q12,
+                max_y_tan_q12: traversal_clip.max_y_tan_q12,
             };
             if out.contains_redundant_frustum(child) {
                 continue;
@@ -419,6 +550,7 @@ pub fn build_portal_visibility<
             };
             if out.push_frustum(room_slot, child) {
                 out.stats.portals_accepted = out.stats.portals_accepted.saturating_add(1);
+                out.stats.accepted_room_mask |= room_mask_bit(portal.destination_room);
                 out.stats.max_depth = out.stats.max_depth.max(child_depth);
             }
         }
@@ -455,9 +587,35 @@ fn build_frontier<const MAX_ROOMS: usize, const MAX_FRUSTUMS: usize, const MAX_F
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PortalCone {
+struct PortalClip {
     left_tan_q12: i32,
     right_tan_q12: i32,
+    min_y_tan_q12: i32,
+    max_y_tan_q12: i32,
+}
+
+impl PortalClip {
+    fn full_camera(camera: PortalVisibilityCamera) -> Self {
+        let half_fov_x = camera.half_fov_x_tan_q12.max(1);
+        let half_fov_y = camera.half_fov_y_tan_q12.max(1);
+        Self {
+            left_tan_q12: -half_fov_x,
+            right_tan_q12: half_fov_x,
+            min_y_tan_q12: -half_fov_y,
+            max_y_tan_q12: half_fov_y,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PortalViewVertex {
+    x: i64,
+    y: i64,
+    z: i64,
+}
+
+impl PortalViewVertex {
+    const ZERO: Self = Self { x: 0, y: 0, z: 0 };
 }
 
 fn portal_front_faces_camera(
@@ -474,99 +632,233 @@ fn portal_front_faces_camera(
     dot >= 0
 }
 
-fn clipped_portal_cone(
+fn clipped_portal_clip(
     portal: LevelRoomPortalRecord,
     camera: PortalVisibilityCamera,
     parent: PortalFrustum,
-) -> Option<PortalCone> {
-    let mut depths = [0i64; 4];
-    let mut laterals = [0i64; 4];
-    let mut min_depth = i64::MAX;
-    let mut max_depth = i64::MIN;
-    let mut interval = PortalSlopeInterval::EMPTY;
-    let near = camera.near_z.max(1) as i64;
-    let far = camera.far_z.max(camera.near_z.max(1)) as i64;
+) -> Option<PortalClip> {
+    let mut vertices = [PortalViewVertex::ZERO; 4];
+    let mut bounds = PortalClipBounds::EMPTY;
+    let camera_plane = 1i64;
+    let mut behind_count = 0u8;
 
     let mut i = 0usize;
     while i < 4 {
-        let dx = (portal.vertex_x[i] as i64).saturating_sub(camera.x as i64);
-        let dz = (portal.vertex_z[i] as i64).saturating_sub(camera.z as i64);
-        let depth = dx
-            .saturating_mul(-(camera.sin_yaw_q12 as i64))
-            .saturating_add(dz.saturating_mul(-(camera.cos_yaw_q12 as i64)))
-            >> Q12_SHIFT;
-        let lateral = dx
-            .saturating_mul(camera.cos_yaw_q12 as i64)
-            .saturating_sub(dz.saturating_mul(camera.sin_yaw_q12 as i64))
-            >> Q12_SHIFT;
-        depths[i] = depth;
-        laterals[i] = lateral;
-        min_depth = min_depth.min(depth);
-        max_depth = max_depth.max(depth);
-        if depth >= near && depth <= far {
-            interval.include_slope(lateral, depth);
+        let vertex = portal_view_vertex(portal, camera, i);
+        vertices[i] = vertex;
+        if vertex.z > 0 {
+            bounds.include_vertex(vertex);
+        } else if vertex.z <= 0 {
+            behind_count = behind_count.saturating_add(1);
         }
         i += 1;
     }
 
-    if max_depth < near || min_depth > far {
+    if behind_count == 4 {
         return None;
     }
 
     let mut edge = 0usize;
     while edge < 4 {
         let next = (edge + 1) & 3;
-        include_depth_crossing(
-            &mut interval,
-            laterals[edge],
-            depths[edge],
-            laterals[next],
-            depths[next],
-            near,
+        include_camera_plane_crossing(
+            &mut bounds,
+            vertices[edge],
+            vertices[next],
+            camera.half_fov_x_tan_q12.max(1),
+            camera.half_fov_y_tan_q12.max(1),
         );
-        include_depth_crossing(
-            &mut interval,
-            laterals[edge],
-            depths[edge],
-            laterals[next],
-            depths[next],
-            far,
-        );
+        include_depth_crossing(&mut bounds, vertices[edge], vertices[next], camera_plane);
         edge += 1;
     }
 
-    if !interval.valid {
+    if !bounds.valid() {
         return None;
     }
-    let left = interval.min_q12.max(parent.left_tan_q12);
-    let right = interval.max_q12.min(parent.right_tan_q12);
-    (left <= right).then_some(PortalCone {
+    let left = bounds.x.min_q12.max(parent.left_tan_q12);
+    let right = bounds.x.max_q12.min(parent.right_tan_q12);
+    let min_y = bounds.y.min_q12.max(parent.min_y_tan_q12);
+    let max_y = bounds.y.max_q12.min(parent.max_y_tan_q12);
+    (left <= right && min_y <= max_y).then_some(PortalClip {
         left_tan_q12: left,
         right_tan_q12: right,
+        min_y_tan_q12: min_y,
+        max_y_tan_q12: max_y,
     })
 }
 
+fn room_bounds_intersects_camera_window(
+    room: RoomIndex,
+    bounds: &[PortalRoomBounds],
+    camera: PortalVisibilityCamera,
+    parent: PortalFrustum,
+) -> bool {
+    let mut i = 0usize;
+    while i < bounds.len() {
+        let cell = bounds[i];
+        if cell.room == room && one_bounds_intersects_camera_window(cell, camera, parent) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn one_bounds_intersects_camera_window(
+    bounds: PortalRoomBounds,
+    camera: PortalVisibilityCamera,
+    parent: PortalFrustum,
+) -> bool {
+    if bounds.max_x <= bounds.min_x || bounds.max_y <= bounds.min_y || bounds.max_z <= bounds.min_z
+    {
+        return false;
+    }
+
+    let mut any_in_front = false;
+    let mut all_right = true;
+    let mut all_left = true;
+    let mut all_above = true;
+    let mut all_below = true;
+    for x in [bounds.min_x, bounds.max_x] {
+        for y in [bounds.min_y, bounds.max_y] {
+            for z in [bounds.min_z, bounds.max_z] {
+                let view = world_view_vertex(x, y, z, camera);
+                if view.z <= 0 {
+                    all_right = false;
+                    all_left = false;
+                    all_above = false;
+                    all_below = false;
+                    continue;
+                }
+                any_in_front = true;
+                let x_slope = clamp_i64_to_i32(
+                    view.x.saturating_mul(Q12_ONE) / view.z,
+                    -SLOPE_LIMIT_Q12,
+                    SLOPE_LIMIT_Q12,
+                );
+                let y_slope = clamp_i64_to_i32(
+                    view.y.saturating_mul(Q12_ONE) / view.z,
+                    -SLOPE_LIMIT_Q12,
+                    SLOPE_LIMIT_Q12,
+                );
+                if x_slope <= parent.right_tan_q12 {
+                    all_right = false;
+                }
+                if x_slope >= parent.left_tan_q12 {
+                    all_left = false;
+                }
+                if y_slope <= parent.max_y_tan_q12 {
+                    all_above = false;
+                }
+                if y_slope >= parent.min_y_tan_q12 {
+                    all_below = false;
+                }
+            }
+        }
+    }
+    any_in_front && !(all_right || all_left || all_above || all_below)
+}
+
+fn portal_view_vertex(
+    portal: LevelRoomPortalRecord,
+    camera: PortalVisibilityCamera,
+    index: usize,
+) -> PortalViewVertex {
+    let dx = (portal.vertex_x[index] as i64).saturating_sub(camera.x as i64);
+    let dy = (portal.vertex_y[index] as i64).saturating_sub(camera.y as i64);
+    let dz = (portal.vertex_z[index] as i64).saturating_sub(camera.z as i64);
+    world_view_delta(dx, dy, dz, camera)
+}
+
+fn world_view_vertex(x: i32, y: i32, z: i32, camera: PortalVisibilityCamera) -> PortalViewVertex {
+    let dx = (x as i64).saturating_sub(camera.x as i64);
+    let dy = (y as i64).saturating_sub(camera.y as i64);
+    let dz = (z as i64).saturating_sub(camera.z as i64);
+    world_view_delta(dx, dy, dz, camera)
+}
+
+fn world_view_delta(dx: i64, dy: i64, dz: i64, camera: PortalVisibilityCamera) -> PortalViewVertex {
+    let sin_yaw = camera.sin_yaw_q12 as i64;
+    let cos_yaw = camera.cos_yaw_q12 as i64;
+    let sin_pitch = camera.sin_pitch_q12 as i64;
+    let cos_pitch = camera.cos_pitch_q12 as i64;
+    let x1 = dx
+        .saturating_mul(cos_yaw)
+        .saturating_sub(dz.saturating_mul(sin_yaw))
+        >> Q12_SHIFT;
+    let z1 = dx
+        .saturating_mul(-sin_yaw)
+        .saturating_sub(dz.saturating_mul(cos_yaw))
+        >> Q12_SHIFT;
+    let y2 = dy
+        .saturating_mul(cos_pitch)
+        .saturating_sub(z1.saturating_mul(sin_pitch))
+        >> Q12_SHIFT;
+    let z2 = dy
+        .saturating_mul(sin_pitch)
+        .saturating_add(z1.saturating_mul(cos_pitch))
+        >> Q12_SHIFT;
+
+    PortalViewVertex {
+        x: x1,
+        y: y2,
+        z: z2,
+    }
+}
+
 fn include_depth_crossing(
-    interval: &mut PortalSlopeInterval,
-    lateral_a: i64,
-    depth_a: i64,
-    lateral_b: i64,
-    depth_b: i64,
+    bounds: &mut PortalClipBounds,
+    a: PortalViewVertex,
+    b: PortalViewVertex,
     clip_depth: i64,
 ) {
-    let crosses = (depth_a < clip_depth && depth_b >= clip_depth)
-        || (depth_b < clip_depth && depth_a >= clip_depth);
+    let crosses =
+        (a.z < clip_depth && b.z >= clip_depth) || (b.z < clip_depth && a.z >= clip_depth);
     if !crosses {
         return;
     }
-    let denom = depth_b.saturating_sub(depth_a);
+    let denom = b.z.saturating_sub(a.z);
     if denom == 0 {
         return;
     }
-    let num = clip_depth.saturating_sub(depth_a);
-    let lateral =
-        lateral_a.saturating_add(lateral_b.saturating_sub(lateral_a).saturating_mul(num) / denom);
-    interval.include_slope(lateral, clip_depth.max(1));
+    let num = clip_depth.saturating_sub(a.z);
+    let x =
+        a.x.saturating_add(b.x.saturating_sub(a.x).saturating_mul(num) / denom);
+    let y =
+        a.y.saturating_add(b.y.saturating_sub(a.y).saturating_mul(num) / denom);
+    bounds.include_vertex(PortalViewVertex {
+        x,
+        y,
+        z: clip_depth.max(1),
+    });
+}
+
+fn include_camera_plane_crossing(
+    bounds: &mut PortalClipBounds,
+    a: PortalViewVertex,
+    b: PortalViewVertex,
+    half_fov_x_tan_q12: i32,
+    half_fov_y_tan_q12: i32,
+) {
+    if !((a.z <= 0 && b.z > 0) || (b.z <= 0 && a.z > 0)) {
+        return;
+    }
+
+    if a.x < 0 && b.x < 0 {
+        bounds.include_x_min(-half_fov_x_tan_q12);
+    } else if a.x > 0 && b.x > 0 {
+        bounds.include_x_max(half_fov_x_tan_q12);
+    } else {
+        bounds.include_x_range(-half_fov_x_tan_q12, half_fov_x_tan_q12);
+    }
+
+    if a.y < 0 && b.y < 0 {
+        bounds.include_y_min(-half_fov_y_tan_q12);
+    } else if a.y > 0 && b.y > 0 {
+        bounds.include_y_max(half_fov_y_tan_q12);
+    } else {
+        bounds.include_y_range(-half_fov_y_tan_q12, half_fov_y_tan_q12);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -589,6 +881,10 @@ impl PortalSlopeInterval {
         }
         let raw = lateral.saturating_mul(Q12_ONE) / depth;
         let slope = clamp_i64_to_i32(raw, -SLOPE_LIMIT_Q12, SLOPE_LIMIT_Q12);
+        self.include_value(slope);
+    }
+
+    fn include_value(&mut self, slope: i32) {
         if !self.valid {
             self.min_q12 = slope;
             self.max_q12 = slope;
@@ -598,6 +894,83 @@ impl PortalSlopeInterval {
             self.max_q12 = self.max_q12.max(slope);
         }
     }
+
+    fn include_min(&mut self, slope: i32) {
+        if !self.valid {
+            self.min_q12 = slope;
+            self.max_q12 = slope;
+            self.valid = true;
+        } else {
+            self.min_q12 = self.min_q12.min(slope);
+        }
+    }
+
+    fn include_max(&mut self, slope: i32) {
+        if !self.valid {
+            self.min_q12 = slope;
+            self.max_q12 = slope;
+            self.valid = true;
+        } else {
+            self.max_q12 = self.max_q12.max(slope);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PortalClipBounds {
+    x: PortalSlopeInterval,
+    y: PortalSlopeInterval,
+}
+
+impl PortalClipBounds {
+    const EMPTY: Self = Self {
+        x: PortalSlopeInterval::EMPTY,
+        y: PortalSlopeInterval::EMPTY,
+    };
+
+    fn include_vertex(&mut self, vertex: PortalViewVertex) {
+        self.x.include_slope(vertex.x, vertex.z);
+        self.y.include_slope(vertex.y, vertex.z);
+    }
+
+    fn include_x_min(&mut self, value: i32) {
+        self.x.include_min(value);
+    }
+
+    fn include_x_max(&mut self, value: i32) {
+        self.x.include_max(value);
+    }
+
+    fn include_x_range(&mut self, min: i32, max: i32) {
+        self.x.include_value(min);
+        self.x.include_value(max);
+    }
+
+    fn include_y_min(&mut self, value: i32) {
+        self.y.include_min(value);
+    }
+
+    fn include_y_max(&mut self, value: i32) {
+        self.y.include_max(value);
+    }
+
+    fn include_y_range(&mut self, min: i32, max: i32) {
+        self.y.include_value(min);
+        self.y.include_value(max);
+    }
+
+    fn valid(self) -> bool {
+        self.x.valid && self.y.valid
+    }
+}
+
+fn portal_clip_is_tiny(clip: PortalClip, min_size_q12: i32) -> bool {
+    if min_size_q12 <= 0 {
+        return false;
+    }
+    let width = clip.right_tan_q12.saturating_sub(clip.left_tan_q12);
+    let height = clip.max_y_tan_q12.saturating_sub(clip.min_y_tan_q12);
+    width < min_size_q12 && height < min_size_q12
 }
 
 fn room_mask_bit(room: RoomIndex) -> u64 {
@@ -675,6 +1048,18 @@ mod tests {
         x1: i32,
         z: i32,
     ) -> LevelRoomPortalRecord {
+        wall_portal_with_y(source, destination, x0, x1, z, 0, 2048)
+    }
+
+    const fn wall_portal_with_y(
+        source: u16,
+        destination: u16,
+        x0: i32,
+        x1: i32,
+        z: i32,
+        y0: i32,
+        y1: i32,
+    ) -> LevelRoomPortalRecord {
         LevelRoomPortalRecord {
             source_room: RoomIndex(source),
             destination_room: RoomIndex(destination),
@@ -683,13 +1068,13 @@ mod tests {
             normal_y: 0,
             normal_z: -1,
             vertex_x: [x0, x1, x1, x0],
-            vertex_y: [0, 0, 2048, 2048],
+            vertex_y: [y0, y0, y1, y1],
             vertex_z: [z, z, z, z],
         }
     }
 
     fn forward_camera(z: i32) -> PortalVisibilityCamera {
-        PortalVisibilityCamera::new(0, 1024, z, 0, -4096, 64, 16_384, 4096, 4)
+        PortalVisibilityCamera::new(0, 1024, z, 0, -4096, 0, 4096, 64, 16_384, 4096, 3072, 4)
     }
 
     #[test]
@@ -713,6 +1098,8 @@ mod tests {
         assert_eq!(out.stats.portals_tested, 2);
         assert_eq!(out.stats.portals_accepted, 1);
         assert_eq!(out.visible_room_mask(), 0b11);
+        assert_eq!(out.stats.tested_room_mask, 0b11);
+        assert_eq!(out.stats.accepted_room_mask, 0b10);
     }
 
     #[test]
@@ -789,5 +1176,127 @@ mod tests {
         assert_eq!(out.rooms[1].frustum_count, 2);
         assert_eq!(out.frustum_count, 5);
         assert_eq!(out.stats.portals_accepted, 4);
+    }
+
+    #[test]
+    fn rejects_portal_outside_vertical_camera_view() {
+        let rooms = [room(0, 0, 1), room(1, 1, 0)];
+        let portals = [wall_portal(0, 1, -1024, 1024, 4096)];
+        let camera =
+            PortalVisibilityCamera::new(0, 8192, 0, 0, -4096, 0, 4096, 64, 16_384, 4096, 1024, 4);
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        build_portal_visibility(&rooms, &portals, RoomIndex(0), camera, 4, &mut out);
+
+        assert_eq!(out.room_count, 1);
+        assert_eq!(out.stats.reject_frustum, 1);
+        assert_eq!(out.stats.reject_frustum_room_mask, 0b10);
+    }
+
+    #[test]
+    fn accepts_portal_closer_than_render_near_plane() {
+        let rooms = [room(0, 0, 1), room(1, 1, 0)];
+        let portals = [wall_portal(0, 1, -1024, 1024, 32)];
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        build_portal_visibility(
+            &rooms,
+            &portals,
+            RoomIndex(0),
+            forward_camera(0),
+            4,
+            &mut out,
+        );
+
+        assert_eq!(out.visible_room_mask(), 0b11);
+        assert_eq!(out.stats.portals_accepted, 1);
+    }
+
+    #[test]
+    fn accepts_projected_portal_beyond_render_far_plane() {
+        let rooms = [room(0, 0, 1), room(1, 1, 0)];
+        let portals = [wall_portal(0, 1, -1024, 1024, 8192)];
+        let camera =
+            PortalVisibilityCamera::new(0, 1024, 0, 0, -4096, 0, 4096, 64, 2048, 4096, 3072, 4);
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        build_portal_visibility(&rooms, &portals, RoomIndex(0), camera, 4, &mut out);
+
+        assert_eq!(out.visible_room_mask(), 0b11);
+        assert_eq!(out.stats.portals_accepted, 1);
+    }
+
+    #[test]
+    fn recursive_portal_visibility_uses_parent_vertical_clip() {
+        let rooms = [room(0, 0, 1), room(1, 1, 1), room(2, 2, 0)];
+        let portals = [
+            wall_portal_with_y(0, 1, -1024, 1024, 4096, 0, 1024),
+            wall_portal_with_y(1, 2, -1024, 1024, 8192, 4096, 5120),
+        ];
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        build_portal_visibility(
+            &rooms,
+            &portals,
+            RoomIndex(0),
+            forward_camera(0),
+            4,
+            &mut out,
+        );
+
+        assert_eq!(out.visible_room_mask(), 0b11);
+        assert_eq!(out.frontier_room_mask(), 0b100);
+        assert_eq!(out.stats.portals_accepted, 1);
+        assert_eq!(out.stats.reject_frustum, 1);
+    }
+
+    #[test]
+    fn whole_room_recursion_keeps_portals_visible_in_whole_room_renderer() {
+        let rooms = [room(0, 0, 1), room(1, 1, 1), room(2, 2, 0)];
+        let portals = [
+            wall_portal(0, 1, -3800, -3000, 4096),
+            wall_portal(1, 2, 3000, 3800, 8192),
+        ];
+        let camera = forward_camera(0).with_whole_room_recursion(true);
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        build_portal_visibility(&rooms, &portals, RoomIndex(0), camera, 4, &mut out);
+
+        assert_eq!(out.visible_room_mask(), 0b111);
+        assert_eq!(out.stats.portals_accepted, 2);
+        assert_eq!(out.stats.reject_frustum, 0);
+    }
+
+    #[test]
+    fn whole_room_renderer_can_fallback_to_occupied_room_bounds() {
+        let rooms = [room(0, 0, 1), room(1, 1, 0)];
+        let portals = [wall_portal(0, 1, 6000, 7000, 4096)];
+        let bounds = [PortalRoomBounds {
+            room: RoomIndex(1),
+            min_x: -512,
+            max_x: 512,
+            min_y: 0,
+            max_y: 2048,
+            min_z: 4096,
+            max_z: 6144,
+        }];
+        let camera = forward_camera(0).with_whole_room_recursion(true);
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        build_portal_visibility_with_room_bounds(
+            &rooms,
+            &portals,
+            &bounds,
+            RoomIndex(0),
+            camera,
+            4,
+            &mut out,
+        );
+
+        assert_eq!(out.visible_room_mask(), 0b11);
+        assert_eq!(out.stats.portals_accepted, 1);
+        assert_eq!(out.stats.reject_frustum, 0);
+        assert_eq!(out.stats.bounds_fallbacks, 1);
+        assert_eq!(out.stats.bounds_fallback_room_mask, 0b10);
     }
 }
