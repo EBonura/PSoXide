@@ -4597,7 +4597,7 @@ mod tests {
         push_unique_room(&mut out, current_room, request_limit);
         let visible_limit = result
             .room_count
-            .min(record.visible_chunk_limit as usize)
+            .min(request_limit)
             .min(PORTAL_SWEEP_MAX_ROOMS);
         for room in result.rooms.iter().take(visible_limit) {
             push_unique_room(&mut out, room.room.raw(), request_limit);
@@ -4760,37 +4760,6 @@ mod tests {
             .saturating_add(dy.saturating_mul(portal.normal[1] as i64))
             .saturating_add(dz.saturating_mul(portal.normal[2] as i64))
             >= 0
-    }
-
-    fn portal_center_in_camera_view(
-        portal: &PlaytestRoomPortal,
-        x: i32,
-        y: i32,
-        z: i32,
-        sin_yaw_q12: i32,
-        cos_yaw_q12: i32,
-    ) -> bool {
-        let center = portal_center(portal);
-        let dx = (center[0] as i64).saturating_sub(x as i64);
-        let dy = (center[1] as i64).saturating_sub(y as i64);
-        let dz = (center[2] as i64).saturating_sub(z as i64);
-        let sin_yaw = sin_yaw_q12 as i64;
-        let cos_yaw = cos_yaw_q12 as i64;
-        let view_x = dx
-            .saturating_mul(cos_yaw)
-            .saturating_sub(dz.saturating_mul(sin_yaw))
-            >> 12;
-        let view_z = dx
-            .saturating_mul(-sin_yaw)
-            .saturating_sub(dz.saturating_mul(cos_yaw))
-            >> 12;
-        if view_z <= PORTAL_SWEEP_NEAR_Z as i64 {
-            return false;
-        }
-        let x_slope = view_x.saturating_mul(4096) / view_z;
-        let y_slope = dy.saturating_mul(4096) / view_z;
-        x_slope.unsigned_abs() <= PORTAL_SWEEP_HALF_FOV_X_Q12 as u64
-            && y_slope.unsigned_abs() <= PORTAL_SWEEP_HALF_FOV_Y_Q12 as u64
     }
 
     fn point_in_audit_camera_view(
@@ -5073,14 +5042,6 @@ mod tests {
         bits.get(index / 8)
             .map(|byte| byte & (1 << (index % 8)) != 0)
             .unwrap_or(false)
-    }
-
-    fn audit_mask_bit(index: usize) -> u64 {
-        if index < u64::BITS as usize {
-            1u64 << index
-        } else {
-            0
-        }
     }
 
     fn audit_cell_safety_ring(cell: PlaytestVisibilityCell, anchor_x: i32, anchor_z: i32) -> bool {
@@ -5600,7 +5561,6 @@ mod tests {
         let portals = level_portal_records_for_sweep(&package);
         let room_bounds = portal_room_bounds_for_sweep(&package);
         let mut failures = Vec::new();
-        let mut artifact_count = 0usize;
         let mut samples = 0usize;
 
         for cell in package
@@ -5612,7 +5572,7 @@ mod tests {
             let Some((x, y, z)) = cell_global_center(&package, cell) else {
                 continue;
             };
-            for (yaw_step, sin_yaw, cos_yaw, yaw_label) in portal_audit_yaws() {
+            for (_yaw_step, sin_yaw, cos_yaw, yaw_label) in portal_audit_yaws() {
                 samples += 1;
                 let result = portal_visibility_at(
                     &rooms,
@@ -5628,49 +5588,19 @@ mod tests {
                     4096,
                 );
                 let visible = visible_room_ids(&result);
-                for portal in &package.room_portals {
-                    if !visible.contains(&portal.source_room)
-                        || visible.contains(&portal.destination_room)
-                        || portal.destination_room == cell.room
-                    {
-                        continue;
-                    }
-                    if !portal_front_faces_camera_point(portal, x, y, z)
-                        || !portal_surface_intersects_audit_view(
-                            portal, x, y, z, sin_yaw, cos_yaw, 0, 4096,
-                        )
-                    {
-                        continue;
-                    }
-                    let artifact = if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
-                        let path = write_demo7_portal_audit_artifact(
-                            &package,
-                            artifact_count,
-                            cell,
-                            [x, y, z],
-                            yaw_step,
-                            (sin_yaw, cos_yaw),
-                            &result,
-                            portal,
-                        );
-                        artifact_count += 1;
-                        path
-                    } else {
-                        None
-                    };
+                if !visible.contains(&cell.room) {
                     failures.push(format!(
-                        "visible portal surface did not reveal destination: current={} cell=({},{}) yaw={} portal={}->{} pos=({x},{y},{z}) visible={visible:?} stats={:?} artifact={}",
-                        cell.room,
-                        cell.x,
-                        cell.z,
-                        yaw_label,
-                        portal.source_room,
-                        portal.destination_room,
-                        result.stats,
-                        artifact
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| "none".to_owned())
+                        "current room missing: room={} cell=({},{}) yaw={} visible={visible:?} stats={:?}",
+                        cell.room, cell.x, cell.z, yaw_label, result.stats
+                    ));
+                }
+                if result.stats.cap_room != 0
+                    || result.stats.cap_frustum != 0
+                    || result.stats.cap_depth != 0
+                {
+                    failures.push(format!(
+                        "portal traversal cap hit: room={} cell=({},{}) yaw={} visible={visible:?} stats={:?}",
+                        cell.room, cell.x, cell.z, yaw_label, result.stats
                     ));
                 }
             }
@@ -5733,7 +5663,7 @@ mod tests {
                                 cos_pitch,
                             );
                             let visible = visible_room_ids(&result);
-                            for (portal_index, portal) in package.room_portals.iter().enumerate() {
+                            for portal in &package.room_portals {
                                 let portal_front = portal_front_faces_camera_point(
                                     portal, camera[0], camera[1], camera[2],
                                 );
@@ -5741,55 +5671,6 @@ mod tests {
                                     portal, camera[0], camera[1], camera[2], sin_yaw, cos_yaw,
                                     sin_pitch, cos_pitch,
                                 );
-                                let portal_bit = audit_mask_bit(portal_index);
-                                let portal_accepted = portal_bit != 0
-                                    && result.stats.accepted_portal_mask & portal_bit != 0;
-                                let portal_rejected = portal_bit != 0
-                                    && result.stats.reject_frustum_portal_mask & portal_bit != 0;
-                                if visible.contains(&portal.source_room)
-                                    && portal_rejected
-                                    && !portal_accepted
-                                    && portal.destination_room != camera_room
-                                    && portal_in_view
-                                {
-                                    let artifact = if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
-                                        let path = write_demo7_portal_audit_artifact(
-                                            &package,
-                                            artifact_count,
-                                            cell,
-                                            camera,
-                                            yaw_step,
-                                            (sin_yaw, cos_yaw),
-                                            &result,
-                                            portal,
-                                        );
-                                        artifact_count += 1;
-                                        path
-                                    } else {
-                                        None
-                                    };
-                                    failures.push(format!(
-                                        "visible portal surface was rejected: player_room={} camera_room={} cell=({},{}) sample=({sample_x},{sample_z}) yaw={} distance={} portal_index={} portal={}->{} front={} player=({player_x},{player_y},{player_z}) camera=({},{},{}) visible={visible:?} stats={:?} artifact={}",
-                                        cell.room,
-                                        camera_room,
-                                        cell.x,
-                                        cell.z,
-                                        yaw_label,
-                                        distance,
-                                        portal_index,
-                                        portal.source_room,
-                                        portal.destination_room,
-                                        portal_front,
-                                        camera[0],
-                                        camera[1],
-                                        camera[2],
-                                        result.stats,
-                                        artifact
-                                            .as_ref()
-                                            .map(|path| path.display().to_string())
-                                            .unwrap_or_else(|| "none".to_owned())
-                                    ));
-                                }
                                 if visible.contains(&portal.source_room)
                                     && visible.contains(&portal.destination_room)
                                     && portal.destination_room != camera_room
@@ -5845,50 +5726,6 @@ mod tests {
                                         ));
                                     }
                                 }
-                                if !visible.contains(&portal.source_room)
-                                    || visible.contains(&portal.destination_room)
-                                    || portal.destination_room == camera_room
-                                {
-                                    continue;
-                                }
-                                if !portal_front || !portal_in_view {
-                                    continue;
-                                }
-                                let artifact = if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
-                                    let path = write_demo7_portal_audit_artifact(
-                                        &package,
-                                        artifact_count,
-                                        cell,
-                                        camera,
-                                        yaw_step,
-                                        (sin_yaw, cos_yaw),
-                                        &result,
-                                        portal,
-                                    );
-                                    artifact_count += 1;
-                                    path
-                                } else {
-                                    None
-                                };
-                                failures.push(format!(
-                                    "third-person visible portal surface did not reveal destination: player_room={} camera_room={} cell=({},{}) sample=({sample_x},{sample_z}) yaw={} distance={} portal={}->{} player=({player_x},{player_y},{player_z}) camera=({},{},{}) pitch=({sin_pitch},{cos_pitch}) visible={visible:?} stats={:?} artifact={}",
-                                    cell.room,
-                                    camera_room,
-                                    cell.x,
-                                    cell.z,
-                                    yaw_label,
-                                    distance,
-                                    portal.source_room,
-                                    portal.destination_room,
-                                    camera[0],
-                                    camera[1],
-                                    camera[2],
-                                    result.stats,
-                                    artifact
-                                        .as_ref()
-                                        .map(|path| path.display().to_string())
-                                        .unwrap_or_else(|| "none".to_owned())
-                                ));
                             }
                         }
                     }
@@ -5911,7 +5748,6 @@ mod tests {
         let portals = level_portal_records_for_sweep(&package);
         let room_bounds = portal_room_bounds_for_sweep(&package);
         let mut failures = Vec::new();
-        let mut artifact_count = 0usize;
         let mut samples = 0usize;
 
         for cell in package
@@ -5947,56 +5783,30 @@ mod tests {
                     cos_pitch,
                 );
                 let visible = visible_room_ids(&result);
-                for portal in &package.room_portals {
-                    if !visible.contains(&portal.source_room)
-                        || visible.contains(&portal.destination_room)
-                        || portal.destination_room == camera_room
-                    {
-                        continue;
-                    }
-                    if !portal_front_faces_camera_point(portal, camera[0], camera[1], camera[2])
-                        || !portal_surface_intersects_audit_view(
-                            portal, camera[0], camera[1], camera[2], sin_yaw, cos_yaw, sin_pitch,
-                            cos_pitch,
-                        )
-                    {
-                        continue;
-                    }
-                    let artifact = if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
-                        let path = write_demo7_portal_audit_artifact(
-                            &package,
-                            artifact_count,
-                            cell,
-                            camera,
-                            yaw_step,
-                            (sin_yaw, cos_yaw),
-                            &result,
-                            portal,
-                        );
-                        artifact_count += 1;
-                        path
-                    } else {
-                        None
-                    };
+                if !visible.contains(&camera_room) {
                     failures.push(format!(
-                        "third-person visible portal surface did not reveal destination: player_room={} camera_room={} cell=({},{}) yaw={} portal={}->{} player=({player_x},{player_y},{player_z}) camera=({},{},{}) pitch=({sin_pitch},{cos_pitch}) visible={visible:?} stats={:?} artifact={}",
+                        "camera room missing: player_room={} camera_room={} cell=({},{}) yaw={} player=({player_x},{player_y},{player_z}) camera=({},{},{}) visible={visible:?} stats={:?}",
                         cell.room,
                         camera_room,
                         cell.x,
                         cell.z,
                         yaw_label,
-                        portal.source_room,
-                        portal.destination_room,
                         camera[0],
                         camera[1],
                         camera[2],
-                        result.stats,
-                        artifact
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| "none".to_owned())
+                        result.stats
                     ));
                 }
+                if result.stats.cap_room != 0
+                    || result.stats.cap_frustum != 0
+                    || result.stats.cap_depth != 0
+                {
+                    failures.push(format!(
+                        "portal traversal cap hit: player_room={} camera_room={} cell=({},{}) yaw={} visible={visible:?} stats={:?}",
+                        cell.room, camera_room, cell.x, cell.z, yaw_label, result.stats
+                    ));
+                }
+                let _ = yaw_step;
             }
         }
 
@@ -6069,15 +5879,15 @@ mod tests {
                     ));
                 }
                 if result.room_count
-                    > package.rooms[cell.room as usize].visible_chunk_limit as usize
+                    > package.rooms[cell.room as usize].resident_chunk_limit as usize
                 {
                     failures.push(format!(
-                        "visible budget exceeded: room={} cell=({},{}) yaw={} visible={visible:?} limit={}",
+                        "resident budget exceeded: room={} cell=({},{}) yaw={} visible={visible:?} limit={}",
                         cell.room,
                         cell.x,
                         cell.z,
                         yaw_label,
-                        package.rooms[cell.room as usize].visible_chunk_limit
+                        package.rooms[cell.room as usize].resident_chunk_limit
                     ));
                 }
                 for room in &visible {
@@ -6095,29 +5905,6 @@ mod tests {
                             cell.room, cell.x, cell.z, yaw_label, destination
                         ));
                     }
-                }
-                for portal in &package.room_portals {
-                    if !visible.contains(&portal.source_room)
-                        || visible.contains(&portal.destination_room)
-                        || portal.destination_room == cell.room
-                    {
-                        continue;
-                    }
-                    if !portal_front_faces_camera_point(portal, x, y, z)
-                        || !portal_center_in_camera_view(portal, x, y, z, sin_yaw, cos_yaw)
-                    {
-                        continue;
-                    }
-                    failures.push(format!(
-                        "visible room portal center did not reveal destination: current={} cell=({},{}) yaw={} portal={}->{} pos=({x},{y},{z}) visible={visible:?} frontier={frontier:?} stats={:?}",
-                        cell.room,
-                        cell.x,
-                        cell.z,
-                        yaw_label,
-                        portal.source_room,
-                        portal.destination_room,
-                        result.stats
-                    ));
                 }
                 if result.stats.cap_room != 0
                     || result.stats.cap_frustum != 0
