@@ -4330,7 +4330,8 @@ mod tests {
     const PORTAL_SWEEP_MAX_FRUSTUMS: usize = 64;
     const PORTAL_SWEEP_MAX_FRONTIER: usize = 32;
     const PORTAL_SWEEP_MAX_DEPTH: u8 = 8;
-    const PORTAL_SWEEP_HALF_FOV_Q12: i32 = 2048;
+    const PORTAL_SWEEP_HALF_FOV_X_Q12: i32 = 2048;
+    const PORTAL_SWEEP_HALF_FOV_Y_Q12: i32 = 1536;
     const PORTAL_SWEEP_MIN_WIDTH_Q12: i32 = 4;
     const PORTAL_SWEEP_NEAR_Z: i32 = 64;
     const PORTAL_SWEEP_YAW_STEPS: usize = 32;
@@ -4487,9 +4488,12 @@ mod tests {
             z,
             sin_yaw_q12,
             cos_yaw_q12,
+            0,
+            4096,
             PORTAL_SWEEP_NEAR_Z,
             record.draw_distance.max(PORTAL_SWEEP_NEAR_Z + 1),
-            PORTAL_SWEEP_HALF_FOV_Q12,
+            PORTAL_SWEEP_HALF_FOV_X_Q12,
+            PORTAL_SWEEP_HALF_FOV_Y_Q12,
             PORTAL_SWEEP_MIN_WIDTH_Q12,
         );
         let mut out = PortalSweepResult::EMPTY;

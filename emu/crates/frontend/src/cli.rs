@@ -666,11 +666,13 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
     if args.dump_guest_profile {
         let counter_totals = bus.telemetry.counter_totals();
         let counter_max_values = bus.telemetry.counter_max_values();
+        let counter_latest_values = bus.telemetry.counter_latest_values();
         let mut summary = profile_summary.unwrap_or_default();
         let events = bus.telemetry.drain_events();
         summary.add_events(&events);
         summary.counters = counter_totals;
         summary.counter_max_values = counter_max_values;
+        summary.counter_latest_values = counter_latest_values;
         print_guest_profile(&summary);
         print_gte_profile(
             &gte_profile_before,
@@ -946,10 +948,11 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
             continue;
         }
         println!(
-            "  {:<18} total={:<10} per_frame={:.0}",
+            "  {:<18} total={:<10} per_frame={:.0} latest={}",
             telemetry::counter_name(id as u16),
             value,
             value as f32 / frames,
+            summary.counter_latest_values[id],
         );
     }
 }
