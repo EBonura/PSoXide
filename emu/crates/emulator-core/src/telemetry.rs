@@ -456,10 +456,30 @@ pub mod counter {
     pub const PORTAL_VIS_BUILD_FAILED_MASK_LO: u16 = 177;
     /// High 32 bits of visible resident rooms that failed active-room build.
     pub const PORTAL_VIS_BUILD_FAILED_MASK_HI: u16 = 178;
+    /// Low 32 bits of directed portal records tested this frame.
+    pub const PORTAL_VIS_TESTED_PORTAL_MASK_LO: u16 = 179;
+    /// High 32 bits of directed portal records tested this frame.
+    pub const PORTAL_VIS_TESTED_PORTAL_MASK_HI: u16 = 180;
+    /// Low 32 bits of directed portal records accepted this frame.
+    pub const PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO: u16 = 181;
+    /// High 32 bits of directed portal records accepted this frame.
+    pub const PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI: u16 = 182;
+    /// Low 32 bits of directed portal records rejected by camera/window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO: u16 = 183;
+    /// High 32 bits of directed portal records rejected by camera/window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI: u16 = 184;
+    /// Low 32 bits of directed portal records accepted by occupied-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO: u16 = 185;
+    /// High 32 bits of directed portal records accepted by occupied-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI: u16 = 186;
+    /// Render camera yaw sine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED: u16 = 187;
+    /// Render camera yaw cosine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED: u16 = 188;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 179;
+pub const COUNTER_COUNT: usize = 189;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -950,6 +970,20 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::PORTAL_VIS_VISIBLE_BUILD_FAILED => "portal visible build failed",
         counter::PORTAL_VIS_BUILD_FAILED_MASK_LO => "portal build failed mask lo",
         counter::PORTAL_VIS_BUILD_FAILED_MASK_HI => "portal build failed mask hi",
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO => "portal tested portal mask lo",
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI => "portal tested portal mask hi",
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO => "portal accepted portal mask lo",
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI => "portal accepted portal mask hi",
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO => "portal frustum reject portal mask lo",
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI => "portal frustum reject portal mask hi",
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO => {
+            "portal bounds fallback portal mask lo"
+        }
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI => {
+            "portal bounds fallback portal mask hi"
+        }
+        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED => "camera view sin yaw q12 biased",
+        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED => "camera view cos yaw q12 biased",
         _ => "unknown",
     }
 }

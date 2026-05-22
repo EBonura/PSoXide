@@ -577,7 +577,7 @@ impl LevelChunkNeighbours {
 /// Runtime room metadata emitted by the playtest cooker.
 ///
 /// Authored editor Rooms may be contiguous worlds; the cooker derives
-/// small wall/portal-delimited runtime rooms from them. This table lets
+/// manual portal-delimited runtime rooms from them. This table lets
 /// the engine stream and render by explicit portal connectivity instead
 /// of deriving active neighbours from broad room bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -38,6 +38,13 @@ use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
+#[cfg(feature = "world-grid-visible")]
+use psx_engine::GridVisibilityStats;
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+use psx_engine::GridVisibleCell;
 use psx_engine::{
     apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
     CachedRoomCell, CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder,
@@ -64,8 +71,6 @@ use psx_engine::{
     draw_indexed_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit_visible_cells,
     GridVisibility,
 };
-#[cfg(feature = "world-grid-visible")]
-use psx_engine::{GridVisibilityStats, GridVisibleCell};
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
     draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
@@ -75,16 +80,18 @@ use psx_gpu::{
     VideoMode,
 };
 use psx_level::portal_visibility::{
-    build_portal_visibility, PortalVisibilityCamera, PortalVisibilityResult,
+    build_portal_visibility_with_room_bounds, PortalRoomBounds, PortalVisibilityCamera,
+    PortalVisibilityResult,
 };
 use psx_level::{
     character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags,
-    model_clip_flags, room_flags, sky_flags, AssetId, AssetKind, CharacterAnimationAction,
-    EntityRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord,
-    LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord,
-    LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex,
-    ModelClipTableIndex, ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager,
-    RoomIndex, WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
+    model_clip_flags, room_flags, sky_flags, visibility_cell_flags, AssetId, AssetKind,
+    CharacterAnimationAction, EntityRecord, LevelCameraRecord, LevelCharacterRecord,
+    LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord,
+    LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord,
+    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
+    ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
+    CHARACTER_ANIMATION_ACTION_COUNT,
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
@@ -116,9 +123,13 @@ use generated::{
     MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
-    ROOM_VISIBILITY, VISIBILITY_CELLS, VISIBILITY_PVS, VISIBILITY_PVS_BITS, WEAPONS,
-    WEAPON_HITBOXES,
+    ROOM_VISIBILITY, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
     WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
@@ -269,25 +280,52 @@ const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_CAMERA_MARGIN: i32 = 96;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_SAFETY_RING: i32 = 1;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_NEAR_RING: i32 = 4;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_REAR_RING: i32 = 6;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS: i32 = 3;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_WEDGE_NUM: u64 = 3;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_WEDGE_DEN: u64 = 4;
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES: bool = true;
 #[cfg(feature = "world-grid-visible")]
-const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 512;
-#[cfg(feature = "world-grid-visible")]
+const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 1024;
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const MAX_ACTIVE_VISIBLE_CELLS: usize = 1024;
 
 fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
@@ -313,6 +351,10 @@ fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
         .unwrap_or_else(fallback_surface_options)
 }
 
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn room_chunk_activation_radius_sectors(record: &LevelRoomRecord) -> i32 {
     record.chunk_activation_radius_sectors.max(1)
 }
@@ -366,11 +408,17 @@ fn encode_debug_map_position(value: i32) -> u32 {
     }
 }
 
+fn encode_debug_q12_basis(value: i32) -> u32 {
+    value.saturating_add(4096).clamp(0, 8192) as u32
+}
+
 fn emit_player_map_debug(
     room: RoomIndex,
     position: RoomPoint,
     camera_position: RoomPoint,
     view_yaw_q12: u16,
+    view_sin_yaw_q12: i32,
+    view_cos_yaw_q12: i32,
 ) {
     telemetry::counter(
         telemetry::counter::ROOM_PLAYER_ROOM_INDEX,
@@ -396,9 +444,20 @@ fn emit_player_map_debug(
         telemetry::counter::ROOM_CAMERA_LOCAL_Z_BIASED,
         encode_debug_map_position(camera_position.z),
     );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        encode_debug_q12_basis(view_sin_yaw_q12),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
+        encode_debug_q12_basis(view_cos_yaw_q12),
+    );
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
     record.visibility_radius.max(1)
 }
@@ -414,24 +473,27 @@ const MAX_TEXTURED_TRIS: usize = 3328;
 /// the runtime fails graceful (skips the over-cap material) and
 /// the cook report should also flag.
 const MAX_ROOM_MATERIALS: usize = 32;
-/// Current generated chunk plus the best cache-budgeted nearby chunks.
+/// Current manual portal room plus the best cache-budgeted nearby rooms.
 ///
-/// Upper bound for chunks that can be active, drawable, and collidable in one
-/// runtime window. The world-level resident chunk limit picks the effective
+/// Upper bound for rooms that can be active, drawable, and collidable in one
+/// runtime window. The world-level resident room limit picks the effective
 /// count per cooked build; this cap only prevents the fixed arrays from
 /// growing past the editor-exposed maximum.
 const MAX_ACTIVE_ROOMS: usize = 32;
 const MAX_PORTAL_FRUSTUMS: usize = 64;
 const MAX_PORTAL_FRONTIER_ROOMS: usize = 32;
+const MAX_PORTAL_ROOM_BOUNDS: usize = 256;
 const PORTAL_VISIBILITY_MAX_DEPTH: u8 = 8;
 const PORTAL_VISIBILITY_MIN_WIDTH_Q12: i32 = 4;
+const PORTAL_ROOM_BOUNDS_MIN_Y: i32 = -4096;
+const PORTAL_ROOM_BOUNDS_MAX_Y: i32 = 8192;
 type RuntimePortalVisibility =
     PortalVisibilityResult<MAX_ACTIVE_ROOMS, MAX_PORTAL_FRUSTUMS, MAX_PORTAL_FRONTIER_ROOMS>;
-/// Streamed room slot budget. A slot stores one generated chunk payload:
+/// Streamed room slot budget. A slot stores one runtime room payload:
 /// the room `.psxw` plus the room-local render cache records carried by
-/// the `.psxc` chunk. Slots are sized to the largest payload in the cooked
+/// the `.psxc` payload. Slots are sized to the largest payload in the cooked
 /// WORLD.PAK, while the slot count is derived from a fixed byte budget so
-/// smaller chunks can stay resident in larger numbers.
+/// smaller rooms can stay resident in larger numbers.
 #[cfg(feature = "cd-stream-bench")]
 const MIN_STREAMED_ROOM_SLOT_BYTES: usize = 2048;
 #[cfg(feature = "cd-stream-bench")]
@@ -1765,7 +1827,10 @@ impl ActiveRuntimeRoom {
     }
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 #[derive(Copy, Clone)]
 struct ActiveVisibleCellCache {
     room: RoomIndex,
@@ -1780,7 +1845,10 @@ struct ActiveVisibleCellCache {
     ready: bool,
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 impl ActiveVisibleCellCache {
     const EMPTY: Self = Self {
         room: RoomIndex::ZERO,
@@ -1811,6 +1879,8 @@ struct Playtest {
     active_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
     /// Portal traversal result for the current player/camera room.
     portal_visibility: RuntimePortalVisibility,
+    /// Global chunk bounds retained for portal diagnostics and streaming.
+    portal_room_bounds: [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
     portal_visible_missing_resident: u16,
     portal_visible_missing_mask: u64,
     portal_visible_build_failed: u16,
@@ -1818,11 +1888,20 @@ struct Playtest {
     portal_stream_priority_current: u16,
     portal_stream_priority_visible: u16,
     portal_stream_priority_frontier: u16,
-    #[cfg(feature = "world-grid-visible")]
+    #[cfg(all(
+        feature = "world-grid-visible",
+        not(feature = "vis-full-active-chunks")
+    ))]
     visible_cell_caches: [ActiveVisibleCellCache; MAX_ACTIVE_ROOMS],
-    #[cfg(feature = "world-grid-visible")]
+    #[cfg(all(
+        feature = "world-grid-visible",
+        not(feature = "vis-full-active-chunks")
+    ))]
     visible_cell_cache_cells: [GridVisibleCell; MAX_ACTIVE_VISIBLE_CELLS],
-    #[cfg(feature = "world-grid-visible")]
+    #[cfg(all(
+        feature = "world-grid-visible",
+        not(feature = "vis-full-active-chunks")
+    ))]
     visible_cell_cache_cursor: usize,
     active_room_candidates: u16,
     active_room_cache_skips: u16,
@@ -1920,6 +1999,7 @@ impl Playtest {
             current_ambient_rgb: [0x80, 0x80, 0x80],
             active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
             portal_visibility: RuntimePortalVisibility::EMPTY,
+            portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
             portal_visible_missing_resident: 0,
             portal_visible_missing_mask: 0,
             portal_visible_build_failed: 0,
@@ -1927,11 +2007,20 @@ impl Playtest {
             portal_stream_priority_current: 0,
             portal_stream_priority_visible: 0,
             portal_stream_priority_frontier: 0,
-            #[cfg(feature = "world-grid-visible")]
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
             visible_cell_caches: [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS],
-            #[cfg(feature = "world-grid-visible")]
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
             visible_cell_cache_cells: [GridVisibleCell::EMPTY; MAX_ACTIVE_VISIBLE_CELLS],
-            #[cfg(feature = "world-grid-visible")]
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
             visible_cell_cache_cursor: 0,
             active_room_candidates: 0,
             active_room_cache_skips: 0,
@@ -2030,7 +2119,7 @@ impl Scene for Playtest {
         // Player init: prefer PLAYER_CONTROLLER (cook output)
         // for spawn + character; fall back to the bare
         // PLAYER_SPAWN for placeholder manifests. The spawn room
-        // may be a generated chunk rather than room zero.
+        // may be a manual portal room rather than room zero.
         let (spawn, character) = match PLAYER_CONTROLLER {
             Some(pc) => {
                 let character = CHARACTERS
@@ -2272,13 +2361,27 @@ impl Scene for Playtest {
             let mut room_cache_vertices = 0u32;
             let mut room_cache_surfaces = 0u32;
             let mut room_cache_fallback_draws = 0u32;
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
             let mut room_visibility_fallback_draws = 0u32;
+            #[cfg(not(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            )))]
+            let room_visibility_fallback_draws = 0u32;
             let mut room_active_chunk_mask = 0u64;
             let mut room_drawn_chunk_mask = 0u64;
             #[cfg(feature = "world-grid-visible")]
             let mut room_visible_cells = 0u32;
-            #[cfg(feature = "world-grid-visible")]
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
             let mut room_range_culled_cells = 0u32;
+            #[cfg(all(feature = "world-grid-visible", feature = "vis-full-active-chunks"))]
+            let room_range_culled_cells = 0u32;
             #[cfg(feature = "world-grid-visible")]
             let mut room_stats_total = GridVisibilityStats::default();
 
@@ -2819,11 +2922,14 @@ impl Scene for Playtest {
                 telemetry::counter::ROOM_DRAWN_CHUNK_MASK_HI,
                 room_drawn_chunk_mask,
             );
+            let debug_view = self.active_room_selection_view();
             emit_player_map_debug(
                 self.room_index,
                 self.motor.position(),
                 RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
-                self.active_room_selection_view_yaw_q12(),
+                yaw_q12_from_basis(debug_view.sin_yaw, debug_view.cos_yaw),
+                debug_view.sin_yaw,
+                debug_view.cos_yaw,
             );
             self.emit_portal_visibility_counters();
             #[cfg(feature = "cd-stream-bench")]
@@ -3427,11 +3533,6 @@ impl Playtest {
         !ROOM_CHUNKS.is_empty()
     }
 
-    fn active_room_selection_view_yaw_q12(&self) -> u16 {
-        let view = self.active_room_selection_view();
-        yaw_q12_from_basis(view.sin_yaw, view.cos_yaw)
-    }
-
     fn active_room_selection_view(&self) -> ActiveRoomView {
         ActiveRoomView::from_camera(self.render_camera)
     }
@@ -3460,9 +3561,11 @@ impl Playtest {
             half_fov_y_tan_q12,
             PORTAL_VISIBILITY_MIN_WIDTH_Q12,
         );
-        build_portal_visibility(
+        let bounds_count = collect_portal_room_bounds(&mut self.portal_room_bounds);
+        build_portal_visibility_with_room_bounds(
             ROOMS,
             ROOM_PORTALS,
+            &self.portal_room_bounds[..bounds_count],
             current_index,
             camera,
             PORTAL_VISIBILITY_MAX_DEPTH,
@@ -3584,6 +3687,26 @@ impl Playtest {
             telemetry::counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
             stats.bounds_fallback_room_mask,
         );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
+            telemetry::counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
+            stats.tested_portal_mask,
+        );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
+            telemetry::counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
+            stats.accepted_portal_mask,
+        );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
+            telemetry::counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
+            stats.reject_frustum_portal_mask,
+        );
+        emit_room_chunk_mask(
+            telemetry::counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
+            telemetry::counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
+            stats.bounds_fallback_portal_mask,
+        );
     }
 
     fn load_active_room_window(&mut self) {
@@ -3625,7 +3748,10 @@ impl Playtest {
         self.active_rooms = [const { None }; MAX_ACTIVE_ROOMS];
         self.active_room_candidates = 0;
         self.active_room_cache_skips = 0;
-        #[cfg(feature = "world-grid-visible")]
+        #[cfg(all(
+            feature = "world-grid-visible",
+            not(feature = "vis-full-active-chunks")
+        ))]
         {
             self.clear_visible_cell_caches();
         }
@@ -5545,7 +5671,10 @@ const fn room_material_fallback() -> WorldRenderMaterial {
     WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 impl Playtest {
     fn clear_visible_cell_caches(&mut self) {
         self.visible_cell_caches = [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS];
@@ -5655,7 +5784,10 @@ impl Playtest {
     }
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn fill_precomputed_visible_cells(
     room_index: RoomIndex,
     anchor_x: i32,
@@ -5721,7 +5853,10 @@ fn fill_precomputed_visible_cells(
     Some((written, rejected_global))
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visible_cell_view_keys(camera: WorldCamera, camera_independent: bool) -> (i16, i16) {
     if camera_independent {
         let _ = camera;
@@ -5757,7 +5892,10 @@ fn visible_cell_view_keys(camera: WorldCamera, camera_independent: bool) -> (i16
     }
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn sort_visible_cells_for_camera(cells: &mut [GridVisibleCell], depths: &mut [i32]) {
     if cells.len() > depths.len() {
         return;
@@ -5782,7 +5920,10 @@ fn sort_visible_cells_for_camera(cells: &mut [GridVisibleCell], depths: &mut [i3
     }
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visible_cell_camera_depth_if_sphere_visible(
     cell: psx_level::LevelVisibilityCellRecord,
     camera: WorldCamera,
@@ -5825,7 +5966,10 @@ fn visible_cell_camera_depth_if_sphere_visible(
     Some(view.z)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visible_cell_camera_depth(
     cell: psx_level::LevelVisibilityCellRecord,
     camera: WorldCamera,
@@ -5845,7 +5989,10 @@ fn visible_cell_camera_depth(
     camera.view_vertex(center).z
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 #[derive(Copy, Clone)]
 struct VisibleCellFilter {
     anchor_x: i32,
@@ -5860,14 +6007,20 @@ struct VisibleCellFilter {
     global_radius_sectors: i32,
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum VisibleCellReject {
     GlobalRange,
     Camera,
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn write_visible_cell_candidate(
     cell: psx_level::LevelVisibilityCellRecord,
     filter: VisibleCellFilter,
@@ -5921,7 +6074,10 @@ fn write_visible_cell_candidate(
     *written += 1;
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visible_cell_reject_reason(
     cell: psx_level::LevelVisibilityCellRecord,
     filter: VisibleCellFilter,
@@ -5960,7 +6116,10 @@ fn visible_cell_reject_reason(
     None
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_safety_ring(
     cell: psx_level::LevelVisibilityCellRecord,
     anchor_x: i32,
@@ -5969,7 +6128,10 @@ fn visibility_cell_safety_ring(
     visibility_cell_anchor_distance(cell, anchor_x, anchor_z) <= ROOM_VISIBLE_CELL_SAFETY_RING
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_anchor_distance(
     cell: psx_level::LevelVisibilityCellRecord,
     anchor_x: i32,
@@ -5980,7 +6142,10 @@ fn visibility_cell_anchor_distance(
     dx.max(dz)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_in_view_wedge(
     cell: psx_level::LevelVisibilityCellRecord,
     filter: VisibleCellFilter,
@@ -6037,7 +6202,10 @@ fn visibility_cell_in_view_wedge(
     lateral <= lateral_limit
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_aabb_intersects_camera(
     cell: psx_level::LevelVisibilityCellRecord,
     sector_size: i32,
@@ -6065,7 +6233,10 @@ fn visibility_cell_aabb_intersects_camera(
     aabb_intersects_camera_frustum(x0, x1, y0, y1, z0, z1, camera, far_z)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn aabb_intersects_camera_frustum(
     x0: i32,
     x1: i32,
@@ -6129,7 +6300,10 @@ fn aabb_intersects_camera_frustum(
     !(all_right || all_left || all_above || all_below)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_in_global_range(
     x: u16,
     z: u16,
@@ -6148,7 +6322,10 @@ fn visibility_cell_in_global_range(
         <= (radius as u64).saturating_mul(radius as u64)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_pvs_bit(bits: &[u8], index: usize) -> bool {
     let byte = index / 8;
     let bit = index % 8;
@@ -6157,7 +6334,10 @@ fn visibility_pvs_bit(bits: &[u8], index: usize) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_index_for_anchor(
     cells: &[psx_level::LevelVisibilityCellRecord],
     x: i32,
@@ -6169,7 +6349,10 @@ fn visibility_cell_index_for_anchor(
     visibility_cell_index_by_coord(cells, x as u16, z as u16)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn visibility_cell_index_by_coord(
     cells: &[psx_level::LevelVisibilityCellRecord],
     x: u16,
@@ -6191,7 +6374,10 @@ fn visibility_cell_index_by_coord(
     (visibility_cell_key(cell.x, cell.z) == key).then_some(low)
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 const fn visibility_cell_key(x: u16, z: u16) -> u32 {
     ((x as u32) << 16) | z as u32
 }
@@ -6237,7 +6423,10 @@ fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32
         .z
 }
 
-#[cfg(feature = "world-grid-visible")]
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn nearest_runtime_visibility_cell(
     cells: &[psx_level::LevelVisibilityCellRecord],
     x: i32,
@@ -6257,6 +6446,10 @@ fn nearest_runtime_visibility_cell(
     best_index
 }
 
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn grid_cell_for_room(value: i32, sector_size: i32) -> i32 {
     if value >= 0 {
         value / sector_size
@@ -6586,10 +6779,10 @@ impl ActiveRoomView {
 
 fn portal_visibility_view_keys(view: ActiveRoomView) -> (i16, i16, i16, i16) {
     (
-        (view.sin_yaw / 256) as i16,
-        (view.cos_yaw / 256) as i16,
-        (view.sin_pitch / 256) as i16,
-        (view.cos_pitch / 256) as i16,
+        (view.sin_yaw / 64) as i16,
+        (view.cos_yaw / 64) as i16,
+        (view.sin_pitch / 64) as i16,
+        (view.cos_pitch / 64) as i16,
     )
 }
 
@@ -6761,6 +6954,90 @@ fn room_bounds(record: &LevelRoomRecord, room: RuntimeRoom<'_>) -> (i32, i32, i3
     (x0, x1, z0, z1)
 }
 
+fn collect_portal_room_bounds(out: &mut [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS]) -> usize {
+    let mut count = 0usize;
+    for visibility in ROOM_VISIBILITY {
+        let Some(record) = ROOMS.get(visibility.room.to_usize()) else {
+            continue;
+        };
+        let first = visibility.cell_first.to_usize();
+        let end = first.saturating_add(visibility.cell_count as usize);
+        let Some(cells) = VISIBILITY_CELLS.get(first..end) else {
+            continue;
+        };
+        let sector_size = record.sector_size.max(1);
+        let room_x0 = room_origin_x(record);
+        let room_z0 = room_origin_z(record);
+        for cell in cells {
+            if cell.flags & visibility_cell_flags::HAS_GEOMETRY == 0 {
+                continue;
+            }
+            let x0 = room_x0.saturating_add((cell.x as i32).saturating_mul(sector_size));
+            let z0 = room_z0.saturating_add((cell.z as i32).saturating_mul(sector_size));
+            count = push_portal_room_bounds(
+                out,
+                count,
+                visibility.room,
+                x0,
+                x0.saturating_add(sector_size),
+                z0,
+                z0.saturating_add(sector_size),
+            );
+        }
+    }
+    if count > 0 {
+        return count;
+    }
+
+    if !ROOM_CHUNKS.is_empty() {
+        for chunk in ROOM_CHUNKS {
+            let Some(record) = ROOMS.get(chunk.room.to_usize()) else {
+                continue;
+            };
+            let (x0, x1, z0, z1) = chunk_global_bounds(*chunk, record);
+            count = push_portal_room_bounds(out, count, chunk.room, x0, x1, z0, z1);
+        }
+        return count;
+    }
+
+    for (raw_index, record) in ROOMS.iter().enumerate() {
+        if raw_index >= u16::MAX as usize {
+            break;
+        }
+        let Some(room) = parse_runtime_room(record) else {
+            continue;
+        };
+        let (x0, x1, z0, z1) = room_bounds(record, room);
+        count =
+            push_portal_room_bounds(out, count, RoomIndex::new(raw_index as u16), x0, x1, z0, z1);
+    }
+    count
+}
+
+fn push_portal_room_bounds(
+    out: &mut [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
+    count: usize,
+    room: RoomIndex,
+    min_x: i32,
+    max_x: i32,
+    min_z: i32,
+    max_z: i32,
+) -> usize {
+    if count >= out.len() || min_x >= max_x || min_z >= max_z {
+        return count;
+    }
+    out[count] = PortalRoomBounds {
+        room,
+        min_x,
+        max_x,
+        min_y: PORTAL_ROOM_BOUNDS_MIN_Y,
+        max_y: PORTAL_ROOM_BOUNDS_MAX_Y,
+        min_z,
+        max_z,
+    };
+    count + 1
+}
+
 fn collision_room_collected(
     collected_rooms: &[RoomIndex; MAX_COLLISION_ROOMS],
     count: usize,
@@ -6782,12 +7059,7 @@ fn room_index_containing_global(point: RoomPoint) -> Option<RoomIndex> {
             let Some(record) = ROOMS.get(chunk.room.to_usize()) else {
                 continue;
             };
-            let sector_size = record.sector_size.max(1);
-            let x0 = room_origin_x(record);
-            let z0 = room_origin_z(record);
-            let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector_size));
-            let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector_size));
-            if point.x >= x0 && point.x < x1 && point.z >= z0 && point.z < z1 {
+            if chunk_contains_global_point(*chunk, record, point) {
                 return Some(chunk.room);
             }
         }
@@ -6807,47 +7079,179 @@ fn room_index_containing_global(point: RoomPoint) -> Option<RoomIndex> {
 
 fn room_index_containing_global_from(current: RoomIndex, point: RoomPoint) -> Option<RoomIndex> {
     if !ROOM_CHUNKS.is_empty() {
+        let current_authored = authored_room_for_chunk(current);
         return room_index_containing_global_by_neighbours(current, point).or_else(|| {
-            let candidate = room_index_containing_global(point)?;
-            match authored_room_for_chunk(current) {
-                Some(authored) if authored_room_for_chunk(candidate) != Some(authored) => None,
-                _ => Some(candidate),
-            }
+            room_index_containing_global_in_authored(point, current_authored).or_else(|| {
+                if current_authored.is_none() {
+                    room_index_containing_global(point)
+                } else {
+                    None
+                }
+            })
         });
     }
     room_index_containing_global(point)
 }
 
 fn room_index_containing_global_by_neighbours(
-    mut current: RoomIndex,
+    current: RoomIndex,
     point: RoomPoint,
 ) -> Option<RoomIndex> {
-    let mut steps = 0usize;
-    while steps < ROOM_CHUNKS.len() {
-        let chunk = chunk_record_for_room(current)?;
-        let record = ROOMS.get(current.to_usize())?;
-        let (x0, x1, z0, z1) = chunk_global_bounds(*chunk, record);
-        if point.x >= x0 && point.x < x1 && point.z >= z0 && point.z < z1 {
-            return Some(current);
+    let current_authored = authored_room_for_chunk(current);
+    // Manual portal rooms can be L-shaped; topology comes from cells, not bboxes.
+    let mut queue = [INVALID_ROOM_INDEX; MAX_PORTAL_ROOM_BOUNDS];
+    let mut visited = [INVALID_ROOM_INDEX; MAX_PORTAL_ROOM_BOUNDS];
+    let mut head = 0usize;
+    let mut tail = 0usize;
+    let mut visited_count = 0usize;
+    push_room_search(
+        current,
+        &mut queue,
+        &mut tail,
+        &mut visited,
+        &mut visited_count,
+    );
+
+    while head < tail {
+        let index = queue[head];
+        head += 1;
+        if current_authored.is_some() && authored_room_for_chunk(index) != current_authored {
+            continue;
         }
-        let next = if point.x < x0 {
-            chunk.neighbours.west
-        } else if point.x >= x1 {
-            chunk.neighbours.east
-        } else if point.z < z0 {
-            chunk.neighbours.south
-        } else if point.z >= z1 {
-            chunk.neighbours.north
-        } else {
-            INVALID_ROOM_INDEX
+        let Some(chunk) = chunk_record_for_room(index) else {
+            continue;
         };
-        if next == INVALID_ROOM_INDEX {
-            return None;
+        let Some(record) = ROOMS.get(index.to_usize()) else {
+            continue;
+        };
+        if chunk_contains_global_point(*chunk, record, point) {
+            return Some(index);
         }
-        current = next;
-        steps += 1;
+        for neighbour in chunk_neighbours(*chunk) {
+            push_room_search(
+                neighbour,
+                &mut queue,
+                &mut tail,
+                &mut visited,
+                &mut visited_count,
+            );
+        }
     }
     None
+}
+
+fn room_index_containing_global_in_authored(
+    point: RoomPoint,
+    authored_room: Option<u32>,
+) -> Option<RoomIndex> {
+    for chunk in ROOM_CHUNKS {
+        if authored_room.is_some() && Some(chunk.authored_room) != authored_room {
+            continue;
+        }
+        let Some(record) = ROOMS.get(chunk.room.to_usize()) else {
+            continue;
+        };
+        if chunk_contains_global_point(*chunk, record, point) {
+            return Some(chunk.room);
+        }
+    }
+    None
+}
+
+fn push_room_search(
+    room: RoomIndex,
+    queue: &mut [RoomIndex; MAX_PORTAL_ROOM_BOUNDS],
+    tail: &mut usize,
+    visited: &mut [RoomIndex; MAX_PORTAL_ROOM_BOUNDS],
+    visited_count: &mut usize,
+) {
+    if room == INVALID_ROOM_INDEX || *tail >= queue.len() || *visited_count >= visited.len() {
+        return;
+    }
+    let mut i = 0usize;
+    while i < *visited_count {
+        if visited[i] == room {
+            return;
+        }
+        i += 1;
+    }
+    visited[*visited_count] = room;
+    *visited_count += 1;
+    queue[*tail] = room;
+    *tail += 1;
+}
+
+fn chunk_neighbours(chunk: LevelChunkRecord) -> [RoomIndex; 4] {
+    [
+        chunk.neighbours.north,
+        chunk.neighbours.east,
+        chunk.neighbours.south,
+        chunk.neighbours.west,
+    ]
+}
+
+fn chunk_contains_global_point(
+    chunk: LevelChunkRecord,
+    record: &LevelRoomRecord,
+    point: RoomPoint,
+) -> bool {
+    if chunk.room.to_usize() >= ROOMS.len() {
+        return false;
+    }
+    match room_visibility_contains_global_point(chunk.room, record, point) {
+        Some(contains) => contains,
+        None => chunk_bounds_contains_global_point(chunk, record, point),
+    }
+}
+
+fn chunk_bounds_contains_global_point(
+    chunk: LevelChunkRecord,
+    record: &LevelRoomRecord,
+    point: RoomPoint,
+) -> bool {
+    let (x0, x1, z0, z1) = chunk_global_bounds(chunk, record);
+    point.x >= x0 && point.x < x1 && point.z >= z0 && point.z < z1
+}
+
+fn room_visibility_contains_global_point(
+    room: RoomIndex,
+    record: &LevelRoomRecord,
+    point: RoomPoint,
+) -> Option<bool> {
+    let sector_size = record.sector_size.max(1);
+    let x0 = room_origin_x(record);
+    let z0 = room_origin_z(record);
+    let local_x = point.x.checked_sub(x0)?;
+    let local_z = point.z.checked_sub(z0)?;
+    if local_x < 0 || local_z < 0 {
+        return Some(false);
+    }
+    let sx_raw = local_x / sector_size;
+    let sz_raw = local_z / sector_size;
+    if sx_raw > u16::MAX as i32 || sz_raw > u16::MAX as i32 {
+        return Some(false);
+    }
+    let sx = sx_raw as u16;
+    let sz = sz_raw as u16;
+    room_visibility_contains_cell(room, sx, sz)
+}
+
+fn room_visibility_contains_cell(room: RoomIndex, sx: u16, sz: u16) -> Option<bool> {
+    let visibility = ROOM_VISIBILITY
+        .iter()
+        .find(|visibility| visibility.room == room)?;
+    let first = visibility.cell_first.to_usize();
+    let count = visibility.cell_count as usize;
+    let cells = VISIBILITY_CELLS.get(first..first.checked_add(count)?)?;
+    let mut i = 0usize;
+    while i < cells.len() {
+        let cell = cells[i];
+        if cell.room == room && cell.x == sx && cell.z == sz {
+            return Some(cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0);
+        }
+        i += 1;
+    }
+    Some(false)
 }
 
 fn chunk_global_bounds(chunk: LevelChunkRecord, record: &LevelRoomRecord) -> (i32, i32, i32, i32) {

@@ -4073,23 +4073,18 @@ pub const MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS: i32 = 256;
 pub const MIN_WORLD_VISIBILITY_RADIUS: u16 = 4;
 /// Maximum precomputed cell-visibility traversal radius.
 pub const MAX_WORLD_VISIBILITY_RADIUS: u16 = 96;
-/// Smallest generated streaming chunk target accepted by the cooker.
-pub const MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = 1;
-/// Default generated streaming chunk target in sectors.
-pub const DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = 6;
-/// Largest generated streaming chunk target accepted by the cooker.
-pub const MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = MAX_ROOM_WIDTH;
-/// Smallest resident generated-chunk budget accepted by the runtime.
-pub const MIN_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 1;
-/// Default generated-chunk residency budget used by the playtest runtime.
+/// Smallest resident portal-room budget accepted by the runtime.
+/// One portal needs at least current + adjacent room residency.
+pub const MIN_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 2;
+/// Default portal-room residency budget used by the playtest runtime.
 pub const DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 10;
-/// Largest generated-chunk residency budget supported by the current runtime.
+/// Largest portal-room residency budget supported by the current runtime.
 pub const MAX_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 32;
-/// Smallest generated-chunk visible-window budget accepted by the runtime.
-pub const MIN_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 1;
-/// Default generated-chunk visible-window budget used by the playtest runtime.
+/// Smallest portal-room visible-window budget accepted by the runtime.
+pub const MIN_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 2;
+/// Default portal-room visible-window budget used by the playtest runtime.
 pub const DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS;
-/// Largest generated-chunk visible-window budget supported by the current runtime.
+/// Largest portal-room visible-window budget supported by the current runtime.
 pub const MAX_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 32;
 
 const fn default_world_draw_distance() -> i32 {
@@ -4102,10 +4097,6 @@ const fn default_world_chunk_activation_radius_sectors() -> i32 {
 
 const fn default_world_visibility_radius() -> u16 {
     32
-}
-
-const fn default_world_streaming_chunk_target_sectors() -> u16 {
-    DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS
 }
 
 const fn default_world_streaming_resident_chunks() -> u8 {
@@ -4160,22 +4151,16 @@ impl Default for WorldCullingSettings {
     }
 }
 
-/// Cook-time streaming chunk controls inherited by descendant Rooms from
-/// their nearest World node.
+/// Portal-room streaming controls inherited by descendant Rooms from their
+/// nearest World node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldStreamingSettings {
-    /// Preferred generated chunk width in grid sectors.
-    #[serde(default = "default_world_streaming_chunk_target_sectors")]
-    pub chunk_target_width: u16,
-    /// Preferred generated chunk depth in grid sectors.
-    #[serde(default = "default_world_streaming_chunk_target_sectors")]
-    pub chunk_target_depth: u16,
-    /// Resident streaming budget, measured in worst-case generated chunk units.
+    /// Resident streaming budget, measured in runtime portal-room units.
     /// The playtest runtime converts this to more resident slots when the cooked
-    /// chunks are smaller than the maximum stream slot size.
+    /// rooms are smaller than the maximum stream slot size.
     #[serde(default = "default_world_streaming_resident_chunks")]
     pub resident_chunk_limit: u8,
-    /// Maximum generated chunks selected for drawing/collision by the runtime.
+    /// Maximum portal rooms selected for drawing/collision by the runtime.
     ///
     /// A serialized zero is treated as a legacy project value and inherits the
     /// resident chunk limit during normalization.
@@ -4201,32 +4186,15 @@ impl WorldStreamingSettings {
         )
         .min(resident_chunk_limit);
         Self {
-            chunk_target_width: self
-                .chunk_target_width
-                .clamp(MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_WIDTH),
-            chunk_target_depth: self
-                .chunk_target_depth
-                .clamp(MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_DEPTH),
             resident_chunk_limit,
             visible_chunk_limit,
         }
-    }
-
-    /// Convert authored world settings into the chunk planner config.
-    pub fn chunk_config(self) -> crate::streaming::StreamingChunkConfig {
-        let mut config = crate::streaming::StreamingChunkConfig::default();
-        let normalized = self.normalized();
-        config.target_width = normalized.chunk_target_width;
-        config.target_depth = normalized.chunk_target_depth;
-        config
     }
 }
 
 impl Default for WorldStreamingSettings {
     fn default() -> Self {
         Self {
-            chunk_target_width: default_world_streaming_chunk_target_sectors(),
-            chunk_target_depth: default_world_streaming_chunk_target_sectors(),
             resident_chunk_limit: default_world_streaming_resident_chunks(),
             visible_chunk_limit: default_world_streaming_visible_chunks(),
         }
@@ -6955,7 +6923,8 @@ pub enum NodeKind {
         streaming: WorldStreamingSettings,
     },
     /// One authored contiguous map: a sector grid plus its child
-    /// entities. The cooker partitions this into runtime room payloads.
+    /// entities. Authored Portal children can manually partition this
+    /// into runtime portal rooms.
     #[serde(rename = "Map", alias = "Room")]
     Room {
         /// Authored grid-world payload.
@@ -7152,8 +7121,8 @@ pub enum NodeKind {
         /// Playback radius.
         radius: f32,
     },
-    /// Streaming-graph edge: the cooker snaps the marker to a grid
-    /// edge and treats that edge as a room-to-room portal.
+    /// Manual streaming/visibility graph edge: the cooker snaps the marker
+    /// to a grid edge and treats that edge as a room-to-room portal.
     Portal {
         /// Legacy target map node by id, or `None` when not wired.
         target_room: Option<NodeId>,
@@ -9061,8 +9030,6 @@ mod tests {
     #[test]
     fn world_streaming_settings_separate_resident_and_visible_limits() {
         let settings = WorldStreamingSettings {
-            chunk_target_width: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
-            chunk_target_depth: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
             resident_chunk_limit: 24,
             visible_chunk_limit: 8,
         }
@@ -9075,8 +9042,6 @@ mod tests {
     #[test]
     fn world_streaming_legacy_visible_limit_inherits_resident_limit() {
         let settings = WorldStreamingSettings {
-            chunk_target_width: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
-            chunk_target_depth: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
             resident_chunk_limit: 18,
             visible_chunk_limit: 0,
         }

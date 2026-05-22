@@ -142,33 +142,33 @@ pub struct PlaytestRoom {
     pub flags: u16,
 }
 
-/// One cooked runtime roomlet emitted from an authored Room.
+/// One cooked runtime room emitted from an authored map or manual portal split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestChunk {
-    /// Owning roomlet index in [`PlaytestPackage::rooms`].
+    /// Owning runtime room index in [`PlaytestPackage::rooms`].
     pub room: u16,
     /// Stable editor Room node id, truncated for compact runtime
     /// diagnostics.
     pub authored_room: u32,
-    /// Stable order inside the authored Room's portal-room plan.
+    /// Stable order inside the authored Room's manual portal-room plan.
     pub chunk_index: u16,
-    /// Roomlet origin X in authored grid sectors.
+    /// Runtime room origin X in authored grid sectors.
     pub origin_x: i32,
-    /// Roomlet origin Z in authored grid sectors.
+    /// Runtime room origin Z in authored grid sectors.
     pub origin_z: i32,
-    /// Roomlet width in sectors.
+    /// Runtime room width in sectors.
     pub width: u16,
-    /// Roomlet depth in sectors.
+    /// Runtime room depth in sectors.
     pub depth: u16,
-    /// Cardinal portal-neighbour roomlets. `None` means no link.
+    /// Cardinal manual portal-neighbour rooms. `None` means no link.
     pub neighbours: [Option<u16>; 4],
-    /// Estimated triangle count from the roomlet budget.
+    /// Estimated triangle count from the runtime room budget.
     pub triangles: usize,
     /// Estimated base `.psxw` byte count.
     pub psxw_bytes: usize,
     /// Estimated static-lit `.psxw` byte count.
     pub static_lit_bytes: usize,
-    /// Number of populated cells in the cooked roomlet.
+    /// Number of populated cells in the cooked runtime room.
     pub populated_cells: u16,
     /// Runtime flags.
     pub flags: u16,
