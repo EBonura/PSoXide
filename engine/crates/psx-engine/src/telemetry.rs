@@ -355,6 +355,52 @@ pub mod counter {
     pub const ROOM_PLAYER_LOCAL_Z_BIASED: u16 = 137;
     /// Camera/view yaw used by player-centred chunk diagnostics, in Q12 angle units.
     pub const ROOM_PLAYER_VIEW_YAW_Q12: u16 = 138;
+    /// Current room used as the root of portal traversal.
+    pub const PORTAL_VIS_CURRENT_ROOM: u16 = 139;
+    /// Portal-visible rooms accepted by the runtime traversal.
+    pub const PORTAL_VIS_VISIBLE_ROOMS: u16 = 140;
+    /// Rooms one portal beyond the visible set.
+    pub const PORTAL_VIS_FRONTIER_ROOMS: u16 = 141;
+    /// Portal frustums accepted by the runtime traversal.
+    pub const PORTAL_VIS_FRUSTUMS: u16 = 142;
+    /// Directed portals tested by the runtime traversal.
+    pub const PORTAL_VIS_PORTALS_TESTED: u16 = 143;
+    /// Directed portals accepted by the runtime traversal.
+    pub const PORTAL_VIS_PORTALS_ACCEPTED: u16 = 144;
+    /// Portals rejected by source-facing backface tests.
+    pub const PORTAL_VIS_REJECT_BACKFACE: u16 = 145;
+    /// Portals rejected by near/far/cone clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM: u16 = 146;
+    /// Portals rejected because the clipped cone was tiny.
+    pub const PORTAL_VIS_REJECT_TINY: u16 = 147;
+    /// Visible-room pool capacity hits.
+    pub const PORTAL_VIS_CAP_ROOM: u16 = 148;
+    /// Frustum pool capacity hits.
+    pub const PORTAL_VIS_CAP_FRUSTUM: u16 = 149;
+    /// Portal traversal max-depth hits.
+    pub const PORTAL_VIS_CAP_DEPTH: u16 = 150;
+    /// Portal-visible rooms not resident when the active window was built.
+    pub const PORTAL_VIS_VISIBLE_MISSING_RESIDENT: u16 = 151;
+    /// Stream priority requests for the current room.
+    pub const ROOM_STREAM_PRIORITY_CURRENT: u16 = 152;
+    /// Stream priority requests for portal-visible rooms.
+    pub const ROOM_STREAM_PRIORITY_VISIBLE: u16 = 153;
+    /// Stream priority requests for portal-frontier rooms.
+    pub const ROOM_STREAM_PRIORITY_FRONTIER: u16 = 154;
+    /// Stream loads blocked because resident/requested rooms filled the pool.
+    pub const ROOM_STREAM_PROTECTED_FULL: u16 = 155;
+    /// Low 32 bits of the portal-visible room bitset.
+    pub const PORTAL_VIS_VISIBLE_MASK_LO: u16 = 156;
+    /// High 32 bits of the portal-visible room bitset.
+    pub const PORTAL_VIS_VISIBLE_MASK_HI: u16 = 157;
+    /// Low 32 bits of the portal-frontier room bitset.
+    pub const PORTAL_VIS_FRONTIER_MASK_LO: u16 = 158;
+    /// High 32 bits of the portal-frontier room bitset.
+    pub const PORTAL_VIS_FRONTIER_MASK_HI: u16 = 159;
+    /// Low 32 bits of the visible-but-missing-residency room bitset.
+    pub const PORTAL_VIS_MISSING_MASK_LO: u16 = 160;
+    /// High 32 bits of the visible-but-missing-residency room bitset.
+    pub const PORTAL_VIS_MISSING_MASK_HI: u16 = 161;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;

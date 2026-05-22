@@ -63,7 +63,7 @@ const COMMAND_ACK_POLL_LIMIT: u32 = 16_384;
 #[cfg(feature = "cd-stream-benchmark")]
 const DATA_READY_POLL_LIMIT: u32 = 1_000_000;
 #[cfg(target_arch = "mips")]
-const DATA_READY_STALL_POLL_LIMIT: u32 = 360;
+const DATA_READY_STALL_POLL_LIMIT: u32 = 4096;
 const DMA_POLL_LIMIT: u32 = 65_536;
 const CLEANUP_POLL_LIMIT: u32 = 16_384;
 

@@ -266,7 +266,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -279,6 +279,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.visible_chunk_limit,
             room.material_first,
             room.material_count,
+            room.portal_first,
+            room.portal_count,
+            room.near_room_first,
+            room.near_room_count,
+            room.overlapped_room_first,
+            room.overlapped_room_count,
             room.fog_rgb[0],
             room.fog_rgb[1],
             room.fog_rgb[2],
@@ -360,6 +366,48 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room_index_or_none(west),
             chunk.flags,
         );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Directed runtime room portal graph.\n");
+    out.push_str("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[\n");
+    for portal in &package.room_portals {
+        let _ = writeln!(
+            out,
+            "    LevelRoomPortalRecord {{ source_room: RoomIndex({}), destination_room: RoomIndex({}), kind: {}, normal_x: {}, normal_y: {}, normal_z: {}, vertex_x: [{}, {}, {}, {}], vertex_y: [{}, {}, {}, {}], vertex_z: [{}, {}, {}, {}] }},",
+            portal.source_room,
+            portal.destination_room,
+            portal.kind,
+            portal.normal[0],
+            portal.normal[1],
+            portal.normal[2],
+            portal.vertices[0][0],
+            portal.vertices[1][0],
+            portal.vertices[2][0],
+            portal.vertices[3][0],
+            portal.vertices[0][1],
+            portal.vertices[1][1],
+            portal.vertices[2][1],
+            portal.vertices[3][1],
+            portal.vertices[0][2],
+            portal.vertices[1][2],
+            portal.vertices[2][2],
+            portal.vertices[3][2],
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Room indices near each runtime room, reserved for portal streaming.\n");
+    out.push_str("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[\n");
+    for room in &package.room_near_rooms {
+        let _ = writeln!(out, "    RoomIndex({room}),");
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Room indices overlapping each runtime room, reserved for stacked rooms.\n");
+    out.push_str("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[\n");
+    for room in &package.room_overlapped_rooms {
+        let _ = writeln!(out, "    RoomIndex({room}),");
     }
     out.push_str("];\n\n");
 
@@ -2567,6 +2615,12 @@ mod tests {
             visible_chunk_limit: 10,
             material_first: 0,
             material_count: 0,
+            portal_first: 0,
+            portal_count: 0,
+            near_room_first: 0,
+            near_room_count: 0,
+            overlapped_room_first: 0,
+            overlapped_room_count: 0,
             fog_rgb: [0, 0, 0],
             fog_near: 0,
             fog_far: 0,
@@ -2726,6 +2780,7 @@ use psx_level::{
     LevelModelInstanceRecord,
     LevelModelRecord,
     LevelModelSocketRecord,
+    LevelRoomPortalRecord,
     LevelRoomRecord,
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,
