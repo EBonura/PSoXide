@@ -106,6 +106,18 @@ pub struct PlaytestRoom {
     /// Number of material records in the slice. Matches the
     /// cooked `.psxw`'s material count exactly.
     pub material_count: u16,
+    /// First directed portal sourced from this room.
+    pub portal_first: u16,
+    /// Number of directed portals sourced from this room.
+    pub portal_count: u8,
+    /// First nearby room index. Reserved for portal streaming coherence.
+    pub near_room_first: u16,
+    /// Number of nearby room indices.
+    pub near_room_count: u8,
+    /// First overlapped room index. Reserved for stacked-room coherence.
+    pub overlapped_room_first: u16,
+    /// Number of overlapped room indices.
+    pub overlapped_room_count: u8,
     /// Fog/depth-cue far colour.
     pub fog_rgb: [u8; 3],
     /// Fog start distance in engine units.
@@ -160,6 +172,21 @@ pub struct PlaytestChunk {
     pub populated_cells: u16,
     /// Runtime flags.
     pub flags: u16,
+}
+
+/// One directed portal between cooked runtime rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestRoomPortal {
+    /// Source room in [`PlaytestPackage::rooms`].
+    pub source_room: u16,
+    /// Destination room in [`PlaytestPackage::rooms`].
+    pub destination_room: u16,
+    /// Wall/floor/ceiling kind. Demo7 emits wall portals (`0`).
+    pub kind: u8,
+    /// Source-facing portal normal.
+    pub normal: [i16; 3],
+    /// World-space portal rectangle vertices `[BL, BR, TR, TL]`.
+    pub vertices: [[i32; 3]; 4],
 }
 
 /// Resolved sky values written into one runtime room record.
@@ -819,6 +846,12 @@ pub struct PlaytestPackage {
     pub rooms: Vec<PlaytestRoom>,
     /// Runtime chunk metadata, one record per cooked room.
     pub chunks: Vec<PlaytestChunk>,
+    /// Directed runtime room portal graph.
+    pub room_portals: Vec<PlaytestRoomPortal>,
+    /// Reserved near-room index table for room coherence / streaming.
+    pub room_near_rooms: Vec<u16>,
+    /// Reserved overlapped-room index table for stacked-room coherence.
+    pub room_overlapped_rooms: Vec<u16>,
     /// Material records ordered as `(room, local_slot)`.
     pub materials: Vec<PlaytestMaterial>,
     /// Per-room visibility slices.
