@@ -73,10 +73,41 @@ pub struct PortalRoom {
     pub cells: Vec<[u16; 2]>,
     /// Cardinal open-seam neighbours `[north, east, south, west]`.
     pub neighbours: [Option<usize>; 4],
+    /// First directed portal record sourced from this room.
+    pub portal_first: usize,
+    /// Number of directed portal records sourced from this room.
+    pub portal_count: usize,
     /// Geometry/byte estimate for the extracted runtime room.
     pub budget: WorldGridBudget,
     /// True if the derived room still violates a hard cap.
     pub over_budget: bool,
+}
+
+/// One directed runtime portal between two derived rooms.
+///
+/// `normal_world` points back toward `source_room`, away from
+/// `destination_room`. Runtime backface tests can therefore accept a
+/// source-side view when `dot(normal, camera - vertex0) > 0`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalRoomPortal {
+    /// Stable index in [`PortalRoomPlan::portals`].
+    pub index: usize,
+    /// Source runtime room.
+    pub source_room: usize,
+    /// Destination runtime room.
+    pub destination_room: usize,
+    /// Canonical seam edge represented by this merged portal.
+    pub source_edge: PortalEdge,
+    /// Direction crossed when travelling from source to destination.
+    pub direction: GridDirection,
+    /// World-space portal rectangle vertices `[BL, BR, TR, TL]`.
+    pub vertices_world: [[i32; 3]; 4],
+    /// Source-facing world-space normal.
+    pub normal_world: [i16; 3],
+    /// True for floor/ceiling portals. Demo7 currently emits wall portals.
+    pub vertical: bool,
+    /// Authored Portal marker that opened this seam, when one exists.
+    pub source_marker: Option<NodeId>,
 }
 
 /// Deterministic portal-room plan for one authored grid.
@@ -90,6 +121,8 @@ pub struct PortalRoomPlan {
     pub source_size: [u16; 2],
     /// Runtime rooms in deterministic array order.
     pub rooms: Vec<PortalRoom>,
+    /// Directed runtime portal graph records.
+    pub portals: Vec<PortalRoomPortal>,
     /// Number of authored portal markers that snapped to a valid grid edge.
     pub portal_count: usize,
 }
@@ -137,8 +170,8 @@ struct EdgeKey {
 }
 
 struct PortalSeams {
-    openings: HashSet<EdgeKey>,
     cuts: HashSet<EdgeKey>,
+    source_marker_for_edge: HashMap<EdgeKey, NodeId>,
     marker_count: usize,
 }
 
@@ -199,14 +232,6 @@ pub fn plan_portal_rooms(
         let (origin, size) = cells_bounds(&cells).unwrap_or(([0, 0], [0, 0]));
         let extracted = extract_portal_room_grid_from_cells(grid, origin, &cells);
         let budget = extracted.budget();
-        let neighbours = room_neighbours(
-            index,
-            &cells,
-            grid,
-            &cell_to_room,
-            &portal_seams.cuts,
-            &portal_seams.openings,
-        );
         rooms.push(PortalRoom {
             index,
             array_origin: origin,
@@ -216,17 +241,22 @@ pub fn plan_portal_rooms(
             ],
             size,
             cells: cells.iter().map(|cell| [cell.x, cell.z]).collect(),
-            neighbours,
+            neighbours: [None; 4],
+            portal_first: 0,
+            portal_count: 0,
             over_budget: config.over_budget(&budget),
             budget,
         });
     }
+    let portals = build_room_portals(grid, &cell_to_room, &portal_seams);
+    apply_portal_slices_and_neighbours(&mut rooms, &portals);
 
     PortalRoomPlan {
         config,
         source_origin: grid.origin,
         source_size: [grid.width, grid.depth],
         rooms,
+        portals,
         portal_count: portal_seams.marker_count,
     }
 }
@@ -312,8 +342,8 @@ fn extract_portal_room_grid_from_cells(
 }
 
 fn collect_portal_seams(scene: &Scene, room_node: NodeId, grid: &WorldGrid) -> PortalSeams {
-    let mut openings = HashSet::new();
     let mut cuts = HashSet::new();
+    let mut source_marker_for_edge = HashMap::new();
     let mut marker_count = 0;
     for node in scene
         .nodes()
@@ -325,12 +355,21 @@ fn collect_portal_seams(scene: &Scene, room_node: NodeId, grid: &WorldGrid) -> P
             continue;
         };
         marker_count += 1;
-        openings.insert(edge);
-        cuts.extend(expand_portal_seam(grid, edge));
+        for seam_edge in expand_portal_seam(grid, edge) {
+            source_marker_for_edge
+                .entry(seam_edge)
+                .and_modify(|existing: &mut NodeId| {
+                    if node.id.raw() < existing.raw() {
+                        *existing = node.id;
+                    }
+                })
+                .or_insert(node.id);
+            cuts.insert(seam_edge);
+        }
     }
     PortalSeams {
-        openings,
         cuts,
+        source_marker_for_edge,
         marker_count,
     }
 }
@@ -449,25 +488,32 @@ fn split_region_to_budget(cells: Vec<Cell>, config: PortalRoomConfig, out: &mut 
     split_region_to_budget(high, config, out);
 }
 
-fn room_neighbours(
-    room_index: usize,
-    cells: &[Cell],
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenPortalEdge {
+    edge: EdgeKey,
+    source_room: usize,
+    destination_room: usize,
+    source_marker: Option<NodeId>,
+}
+
+fn build_room_portals(
     grid: &WorldGrid,
     cell_to_room: &HashMap<Cell, usize>,
-    seam_cuts: &HashSet<EdgeKey>,
-    portal_openings: &HashSet<EdgeKey>,
-) -> [Option<usize>; 4] {
-    let mut neighbours = [None; 4];
-    let mut scores = [0u16; 4];
-    for cell in cells {
-        for direction in GridDirection::CARDINAL {
+    portal_seams: &PortalSeams,
+) -> Vec<PortalRoomPortal> {
+    let mut edges = Vec::new();
+    for cell in cell_to_room.keys() {
+        for direction in [GridDirection::North, GridDirection::East] {
             let Some((nx, nz, _)) = neighbour_across(grid, cell.x, cell.z, direction) else {
                 continue;
             };
-            let Some(&other) = cell_to_room.get(&Cell { x: nx, z: nz }) else {
+            let Some(&source_room) = cell_to_room.get(cell) else {
                 continue;
             };
-            if other == room_index {
+            let Some(&destination_room) = cell_to_room.get(&Cell { x: nx, z: nz }) else {
+                continue;
+            };
+            if source_room == destination_room {
                 continue;
             }
             let Some(edge) = canonical_edge(cell.x, cell.z, direction) else {
@@ -476,18 +522,224 @@ fn room_neighbours(
             if edge_has_wall(grid, edge) {
                 continue;
             }
-            if seam_cuts.contains(&edge) && !portal_openings.contains(&edge) {
-                continue;
-            }
-            let slot = direction_slot(direction);
-            let score = scores[slot].saturating_add(1);
-            if score > scores[slot] {
-                scores[slot] = score;
-                neighbours[slot] = Some(other);
-            }
+            edges.push(OpenPortalEdge {
+                edge,
+                source_room,
+                destination_room,
+                source_marker: portal_seams.source_marker_for_edge.get(&edge).copied(),
+            });
         }
     }
-    neighbours
+
+    edges.sort_by_key(open_portal_edge_sort_key);
+
+    let mut portals = Vec::new();
+    let mut i = 0usize;
+    while i < edges.len() {
+        let first = edges[i];
+        let mut span_edges = vec![first];
+        i += 1;
+        while i < edges.len() && portal_edges_can_merge(span_edges[span_edges.len() - 1], edges[i])
+        {
+            span_edges.push(edges[i]);
+            i += 1;
+        }
+        append_directed_portal_pair(grid, &span_edges, &mut portals);
+    }
+
+    portals.sort_by_key(|portal| {
+        (
+            portal.source_room,
+            direction_slot(portal.direction),
+            portal.destination_room,
+            portal.source_edge.z,
+            portal.source_edge.x,
+        )
+    });
+    for (index, portal) in portals.iter_mut().enumerate() {
+        portal.index = index;
+    }
+    portals
+}
+
+fn portal_edges_can_merge(previous: OpenPortalEdge, next: OpenPortalEdge) -> bool {
+    if previous.source_room != next.source_room
+        || previous.destination_room != next.destination_room
+        || previous.edge.direction != next.edge.direction
+    {
+        return false;
+    }
+    match previous.edge.direction {
+        GridDirection::North => {
+            previous.edge.z == next.edge.z && previous.edge.x.saturating_add(1) == next.edge.x
+        }
+        GridDirection::East => {
+            previous.edge.x == next.edge.x && previous.edge.z.saturating_add(1) == next.edge.z
+        }
+        GridDirection::South
+        | GridDirection::West
+        | GridDirection::NorthWestSouthEast
+        | GridDirection::NorthEastSouthWest => false,
+    }
+}
+
+fn open_portal_edge_sort_key(open: &OpenPortalEdge) -> (usize, usize, usize, u16, u16) {
+    let (line, span) = match open.edge.direction {
+        GridDirection::North => (open.edge.z, open.edge.x),
+        GridDirection::East => (open.edge.x, open.edge.z),
+        GridDirection::South
+        | GridDirection::West
+        | GridDirection::NorthWestSouthEast
+        | GridDirection::NorthEastSouthWest => (open.edge.z, open.edge.x),
+    };
+    (
+        open.source_room,
+        open.destination_room,
+        direction_slot(open.edge.direction),
+        line,
+        span,
+    )
+}
+
+fn append_directed_portal_pair(
+    grid: &WorldGrid,
+    span_edges: &[OpenPortalEdge],
+    portals: &mut Vec<PortalRoomPortal>,
+) {
+    let Some(first) = span_edges.first().copied() else {
+        return;
+    };
+    let Some((vertices, source_edge)) = merged_portal_vertices(grid, span_edges) else {
+        return;
+    };
+    let source_marker = span_edges
+        .iter()
+        .filter_map(|edge| edge.source_marker)
+        .min_by_key(|id| id.raw());
+    portals.push(PortalRoomPortal {
+        index: portals.len(),
+        source_room: first.source_room,
+        destination_room: first.destination_room,
+        source_edge,
+        direction: first.edge.direction,
+        vertices_world: vertices,
+        normal_world: portal_source_facing_normal(first.edge.direction),
+        vertical: false,
+        source_marker,
+    });
+    if let Some(reverse) = first.edge.direction.opposite_cardinal() {
+        portals.push(PortalRoomPortal {
+            index: portals.len(),
+            source_room: first.destination_room,
+            destination_room: first.source_room,
+            source_edge,
+            direction: reverse,
+            vertices_world: vertices,
+            normal_world: portal_source_facing_normal(reverse),
+            vertical: false,
+            source_marker,
+        });
+    }
+}
+
+fn merged_portal_vertices(
+    grid: &WorldGrid,
+    span_edges: &[OpenPortalEdge],
+) -> Option<([[i32; 3]; 4], PortalEdge)> {
+    let first = span_edges.first()?.edge;
+    let last = span_edges.last()?.edge;
+    let (bottom, top) = portal_height_bounds(grid, span_edges)?;
+    let s = grid.sector_size;
+    if s <= 0 || top <= bottom {
+        return None;
+    }
+    let (a, b) = match first.direction {
+        GridDirection::North => {
+            let x0 = grid.origin[0]
+                .saturating_add(i32::from(first.x))
+                .saturating_mul(s);
+            let x1 = grid.origin[0]
+                .saturating_add(i32::from(last.x).saturating_add(1))
+                .saturating_mul(s);
+            let z = grid.origin[1]
+                .saturating_add(i32::from(first.z).saturating_add(1))
+                .saturating_mul(s);
+            ([x0, z], [x1, z])
+        }
+        GridDirection::East => {
+            let x = grid.origin[0]
+                .saturating_add(i32::from(first.x).saturating_add(1))
+                .saturating_mul(s);
+            let z0 = grid.origin[1]
+                .saturating_add(i32::from(first.z))
+                .saturating_mul(s);
+            let z1 = grid.origin[1]
+                .saturating_add(i32::from(last.z).saturating_add(1))
+                .saturating_mul(s);
+            ([x, z1], [x, z0])
+        }
+        GridDirection::South
+        | GridDirection::West
+        | GridDirection::NorthWestSouthEast
+        | GridDirection::NorthEastSouthWest => return None,
+    };
+    Some((
+        [
+            [a[0], bottom, a[1]],
+            [b[0], bottom, b[1]],
+            [b[0], top, b[1]],
+            [a[0], top, a[1]],
+        ],
+        PortalEdge {
+            x: first.x,
+            z: first.z,
+            direction: first.direction,
+        },
+    ))
+}
+
+fn portal_height_bounds(grid: &WorldGrid, span_edges: &[OpenPortalEdge]) -> Option<(i32, i32)> {
+    let mut bottom = i32::MAX;
+    let mut top = i32::MIN;
+    let mut found = false;
+    for open in span_edges {
+        let heights =
+            grid.wall_heights_aligned_to_surfaces(open.edge.x, open.edge.z, open.edge.direction);
+        bottom = bottom.min(heights[0]).min(heights[1]);
+        top = top.max(heights[2]).max(heights[3]);
+        found = true;
+    }
+    found.then_some((bottom, top))
+}
+
+fn portal_source_facing_normal(direction: GridDirection) -> [i16; 3] {
+    match direction {
+        GridDirection::North => [0, 0, -1],
+        GridDirection::East => [-1, 0, 0],
+        GridDirection::South => [0, 0, 1],
+        GridDirection::West => [1, 0, 0],
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => [0, 0, 0],
+    }
+}
+
+fn apply_portal_slices_and_neighbours(rooms: &mut [PortalRoom], portals: &[PortalRoomPortal]) {
+    for room in rooms.iter_mut() {
+        room.neighbours = [None; 4];
+        room.portal_first = 0;
+        room.portal_count = 0;
+    }
+    for (index, portal) in portals.iter().enumerate() {
+        let Some(room) = rooms.get_mut(portal.source_room) else {
+            continue;
+        };
+        if room.portal_count == 0 {
+            room.portal_first = index;
+        }
+        room.portal_count = room.portal_count.saturating_add(1);
+        if portal.direction.is_cardinal() {
+            room.neighbours[direction_slot(portal.direction)] = Some(portal.destination_room);
+        }
+    }
 }
 
 fn mirror_external_seam_walls(
@@ -752,6 +1004,7 @@ mod tests {
             PortalRoomConfig::default(),
         );
         assert_eq!(plan.room_count(), 2);
+        assert!(plan.portals.is_empty());
         assert_eq!(plan.rooms[0].neighbours, [None; 4]);
         assert_eq!(plan.rooms[1].neighbours, [None; 4]);
     }
@@ -792,8 +1045,33 @@ mod tests {
         );
         assert_eq!(plan.room_count(), 2);
         assert_eq!(plan.portal_count, 1);
+        assert_eq!(plan.portals.len(), 2);
+        assert_eq!(plan.rooms[0].portal_first, 0);
+        assert_eq!(plan.rooms[0].portal_count, 1);
+        assert_eq!(plan.rooms[1].portal_first, 1);
+        assert_eq!(plan.rooms[1].portal_count, 1);
         assert_eq!(plan.rooms[0].neighbours[1], Some(1));
         assert_eq!(plan.rooms[1].neighbours[3], Some(0));
+        let east = &plan.portals[plan.rooms[0].portal_first];
+        assert_eq!(east.source_room, 0);
+        assert_eq!(east.destination_room, 1);
+        assert_eq!(east.direction, GridDirection::East);
+        assert_eq!(east.normal_world, [-1, 0, 0]);
+        assert_eq!(east.source_marker, Some(portal));
+        assert_eq!(
+            east.vertices_world,
+            [
+                [1024, 0, 1024],
+                [1024, 0, 0],
+                [1024, 2048, 0],
+                [1024, 2048, 1024],
+            ]
+        );
+        let west = &plan.portals[plan.rooms[1].portal_first];
+        assert_eq!(west.source_room, 1);
+        assert_eq!(west.destination_room, 0);
+        assert_eq!(west.direction, GridDirection::West);
+        assert_eq!(west.normal_world, [1, 0, 0]);
     }
 
     #[test]
@@ -860,6 +1138,7 @@ mod tests {
         );
         assert_eq!(plan.portal_count, 1);
         assert_eq!(plan.room_count(), 2);
+        assert_eq!(plan.portals.len(), 2);
         let south = plan
             .rooms
             .iter()
@@ -874,6 +1153,33 @@ mod tests {
         assert_eq!(north.cells.len(), 3);
         assert_eq!(south.neighbours[0], Some(north.index));
         assert_eq!(north.neighbours[2], Some(south.index));
+        let northbound = plan
+            .portals
+            .iter()
+            .find(|portal| {
+                portal.source_room == south.index && portal.destination_room == north.index
+            })
+            .expect("south-to-north portal");
+        assert_eq!(northbound.direction, GridDirection::North);
+        assert_eq!(northbound.normal_world, [0, 0, -1]);
+        assert_eq!(
+            northbound.vertices_world,
+            [
+                [0, 0, 1024],
+                [3072, 0, 1024],
+                [3072, 2048, 1024],
+                [0, 2048, 1024],
+            ]
+        );
+        let southbound = plan
+            .portals
+            .iter()
+            .find(|portal| {
+                portal.source_room == north.index && portal.destination_room == south.index
+            })
+            .expect("north-to-south portal");
+        assert_eq!(southbound.direction, GridDirection::South);
+        assert_eq!(southbound.normal_world, [0, 0, 1]);
     }
 
     #[test]

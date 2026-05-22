@@ -8,11 +8,10 @@ use psx_level::{
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
     LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord,
-    LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord,
-    LevelVisibilityPvsRecord, LevelWeaponRecord, LevelWorldPackEntryRecord,
-    PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex, RoomResidencyRecord,
-    WeaponHitboxRecord,
+    LevelModelSocketRecord, LevelRoomPortalRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord,
+    LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord, LevelVisibilityPvsRecord,
+    LevelWeaponRecord, LevelWorldPackEntryRecord, PlayerControllerRecord, PlayerSpawnRecord,
+    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
 };
 
 pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
@@ -21,6 +20,9 @@ pub static ASSETS: &[LevelAssetRecord] = &[];
 pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
 pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];
+pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];
+pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[];
+pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[];
 pub const WORLD_PACK_START_LBA: u32 = 54;
 pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[];
 pub static ROOM_VISIBILITY: &[LevelRoomVisibilityRecord] = &[];
