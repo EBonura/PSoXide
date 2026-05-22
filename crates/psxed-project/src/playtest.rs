@@ -42,7 +42,6 @@ use psx_level::{
 use psxed_format::world as psxw;
 
 use crate::portal_rooms::{extract_portal_room_grid, plan_portal_rooms, PortalRoomConfig};
-use crate::streaming::StreamingChunkConfig;
 use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
@@ -119,19 +118,6 @@ struct CookedRoomBakeInput {
     cooked: CookedWorldGrid,
 }
 
-/// Chunking policy used by Embedded Play. Authored Rooms may grow
-/// beyond the runtime room cap, but generated `.psxw` chunks should be
-/// sized for render cost before the hard runtime limits are reached.
-/// `PSXED_PLAYTEST_CHUNK_TARGET=8` or `8x6` overrides the target size
-/// for cook-time benchmark sweeps.
-pub fn playtest_streaming_chunk_config(streaming: WorldStreamingSettings) -> StreamingChunkConfig {
-    let default = streaming.chunk_config();
-    std::env::var("PSXED_PLAYTEST_CHUNK_TARGET")
-        .ok()
-        .and_then(|raw| streaming_chunk_config_with_target(default, &raw))
-        .unwrap_or(default)
-}
-
 fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) -> u8 {
     std::env::var("PSXED_PLAYTEST_RESIDENT_CHUNK_LIMIT")
         .ok()
@@ -143,31 +129,6 @@ fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) ->
             )
         })
         .unwrap_or(streaming.resident_chunk_limit)
-}
-
-fn streaming_chunk_config_with_target(
-    mut config: StreamingChunkConfig,
-    raw: &str,
-) -> Option<StreamingChunkConfig> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut parts = trimmed.split(['x', 'X', ',', ':']);
-    let width = parts.next()?.trim().parse::<u16>().ok()?.max(1);
-    let depth = parts
-        .next()
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .and_then(|part| part.parse::<u16>().ok())
-        .unwrap_or(width)
-        .max(1);
-    if parts.next().is_some() {
-        return None;
-    }
-    config.target_width = width;
-    config.target_depth = depth;
-    Some(config)
 }
 
 /// Build a playtest package from `project`. Validates the scene
@@ -244,12 +205,12 @@ pub fn build_package(
         let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
         if plan.over_budget_count() > 0 {
             report.warn(format!(
-                "Room '{}' produced {} portal room(s) still over budget",
+                "Room '{}' produced {} manual portal room(s) still over budget",
                 room_node.name,
                 plan.over_budget_count()
             ));
         }
-        let roomlet_count = plan.room_count();
+        let portal_room_count = plan.room_count();
         let room_index_base = rooms.len();
         let room_portal_base = room_portals.len();
         for portal in &plan.portals {
@@ -305,7 +266,11 @@ pub fn build_package(
                 kind: PlaytestAssetKind::RoomWorld,
                 bytes: Vec::new(),
                 filename: format!("room_{:03}.psxw", room_index),
-                source_label: runtime_room_name(&room_node.name, roomlet_count, portal_room.index),
+                source_label: runtime_room_name(
+                    &room_node.name,
+                    portal_room_count,
+                    portal_room.index,
+                ),
             });
 
             // Walk material slots in slot order. The cooker emits
@@ -482,7 +447,7 @@ pub fn build_package(
             let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
 
             rooms.push(PlaytestRoom {
-                name: runtime_room_name(&room_node.name, roomlet_count, portal_room.index),
+                name: runtime_room_name(&room_node.name, portal_room_count, portal_room.index),
                 world_asset_index,
                 origin_x: chunk_grid.origin[0],
                 origin_z: chunk_grid.origin[1],
@@ -4178,7 +4143,7 @@ fn runtime_room_name(room_name: &str, room_count: usize, room_index: usize) -> S
     if room_count <= 1 {
         room_name.to_string()
     } else {
-        format!("{room_name} / Roomlet {room_index}")
+        format!("{room_name} / Portal Room {room_index}")
     }
 }
 
@@ -4335,6 +4300,17 @@ mod tests {
     const PORTAL_SWEEP_MIN_WIDTH_Q12: i32 = 4;
     const PORTAL_SWEEP_NEAR_Z: i32 = 64;
     const PORTAL_SWEEP_YAW_STEPS: usize = 32;
+    const PORTAL_AUDIT_YAW_STEPS: usize = 16;
+    const PORTAL_AUDIT_SURFACE_STEPS: usize = 8;
+    const PORTAL_AUDIT_MAX_ARTIFACTS: usize = 12;
+    const PORTAL_AUDIT_CELL_SUBSAMPLES: [i32; 3] = [1, 2, 3];
+    const PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM: i32 = 4;
+    const PORTAL_SWEEP_ROOM_BOUNDS_MIN_Y: i32 = -4096;
+    const PORTAL_SWEEP_ROOM_BOUNDS_MAX_Y: i32 = 8192;
+    const DEMO7_CAMERA_DISTANCE: i32 = 3700;
+    const DEMO7_CAMERA_HEIGHT: i32 = 2950;
+    const DEMO7_CAMERA_TARGET_HEIGHT: i32 = 1050;
+    const DEMO7_CAMERA_DISTANCE_SAMPLES: [i32; 6] = [384, 768, 1200, 1800, 2600, 3700];
 
     type PortalSweepResult = psx_level::portal_visibility::PortalVisibilityResult<
         PORTAL_SWEEP_MAX_ROOMS,
@@ -4346,12 +4322,17 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/demo7/project.ron")
     }
 
-    fn load_demo7_package() -> PlaytestPackage {
+    fn load_demo7_project() -> (ProjectDocument, PathBuf) {
         let path = demo7_project_path();
         let source = std::fs::read_to_string(&path).expect("read demo7 project.ron");
         let project = ProjectDocument::from_ron_str(&source).expect("demo7 project parses");
         let project_root = path.parent().expect("demo7 has parent dir");
-        let (package, report) = build_package(&project, project_root);
+        (project, project_root.to_path_buf())
+    }
+
+    fn load_demo7_package() -> PlaytestPackage {
+        let (project, project_root) = load_demo7_project();
+        let (package, report) = build_package(&project, &project_root);
         assert!(
             report.errors.is_empty(),
             "demo7 playtest validation errors: {:?}",
@@ -4436,6 +4417,34 @@ mod tests {
             .collect()
     }
 
+    fn portal_room_bounds_for_sweep(
+        package: &PlaytestPackage,
+    ) -> Vec<psx_level::portal_visibility::PortalRoomBounds> {
+        package
+            .chunks
+            .iter()
+            .filter_map(|chunk| {
+                let room = package.rooms.get(chunk.room as usize)?;
+                let sector = room.sector_size.max(1);
+                let min_x = room.origin_x.saturating_mul(sector);
+                let min_z = room.origin_z.saturating_mul(sector);
+                let max_x = min_x.saturating_add((chunk.width as i32).saturating_mul(sector));
+                let max_z = min_z.saturating_add((chunk.depth as i32).saturating_mul(sector));
+                (min_x < max_x && min_z < max_z).then_some(
+                    psx_level::portal_visibility::PortalRoomBounds {
+                        room: psx_level::RoomIndex(chunk.room),
+                        min_x,
+                        max_x,
+                        min_y: PORTAL_SWEEP_ROOM_BOUNDS_MIN_Y,
+                        max_y: PORTAL_SWEEP_ROOM_BOUNDS_MAX_Y,
+                        min_z,
+                        max_z,
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn portal_sweep_yaws() -> impl Iterator<Item = (i32, i32, String)> {
         (0..PORTAL_SWEEP_YAW_STEPS).map(|step| {
             let radians = (step as f64) * std::f64::consts::TAU / (PORTAL_SWEEP_YAW_STEPS as f64);
@@ -4446,9 +4455,33 @@ mod tests {
         })
     }
 
+    fn portal_audit_yaws() -> impl Iterator<Item = (usize, i32, i32, String)> {
+        (0..PORTAL_AUDIT_YAW_STEPS).map(|step| {
+            let radians = (step as f64) * std::f64::consts::TAU / (PORTAL_AUDIT_YAW_STEPS as f64);
+            let sin_yaw = (-(radians.sin()) * 4096.0).round() as i32;
+            let cos_yaw = (-(radians.cos()) * 4096.0).round() as i32;
+            let degrees = step * 360 / PORTAL_AUDIT_YAW_STEPS;
+            (step, sin_yaw, cos_yaw, format!("{degrees}deg"))
+        })
+    }
+
     fn cell_global_center(
         package: &PlaytestPackage,
         cell: PlaytestVisibilityCell,
+    ) -> Option<(i32, i32, i32)> {
+        cell_global_sample(
+            package,
+            cell,
+            PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM / 2,
+            PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM / 2,
+        )
+    }
+
+    fn cell_global_sample(
+        package: &PlaytestPackage,
+        cell: PlaytestVisibilityCell,
+        sample_x: i32,
+        sample_z: i32,
     ) -> Option<(i32, i32, i32)> {
         let room = package.rooms.get(cell.room as usize)?;
         let sector = room.sector_size.max(1);
@@ -4456,12 +4489,16 @@ mod tests {
             .origin_x
             .saturating_add(cell.x as i32)
             .saturating_mul(sector)
-            .saturating_add(sector / 2);
+            .saturating_add(
+                sector.saturating_mul(sample_x) / PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM.max(1),
+            );
         let z = room
             .origin_z
             .saturating_add(cell.z as i32)
             .saturating_mul(sector)
-            .saturating_add(sector / 2);
+            .saturating_add(
+                sector.saturating_mul(sample_z) / PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM.max(1),
+            );
         let y = cell
             .min_y
             .saturating_add(cell.max_y.saturating_sub(cell.min_y) / 2)
@@ -4472,12 +4509,15 @@ mod tests {
     fn portal_visibility_at(
         rooms: &[psx_level::LevelRoomRecord],
         portals: &[psx_level::LevelRoomPortalRecord],
+        room_bounds: &[psx_level::portal_visibility::PortalRoomBounds],
         room: u16,
         x: i32,
         y: i32,
         z: i32,
         sin_yaw_q12: i32,
         cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
     ) -> PortalSweepResult {
         let Some(record) = rooms.get(room as usize) else {
             return PortalSweepResult::EMPTY;
@@ -4488,8 +4528,8 @@ mod tests {
             z,
             sin_yaw_q12,
             cos_yaw_q12,
-            0,
-            4096,
+            sin_pitch_q12,
+            cos_pitch_q12,
             PORTAL_SWEEP_NEAR_Z,
             record.draw_distance.max(PORTAL_SWEEP_NEAR_Z + 1),
             PORTAL_SWEEP_HALF_FOV_X_Q12,
@@ -4497,9 +4537,10 @@ mod tests {
             PORTAL_SWEEP_MIN_WIDTH_Q12,
         );
         let mut out = PortalSweepResult::EMPTY;
-        psx_level::portal_visibility::build_portal_visibility(
+        psx_level::portal_visibility::build_portal_visibility_with_room_bounds(
             rooms,
             portals,
+            room_bounds,
             psx_level::RoomIndex(room),
             camera,
             PORTAL_SWEEP_MAX_DEPTH,
@@ -4599,8 +4640,54 @@ mod tests {
         x: i32,
         z: i32,
     ) -> bool {
-        chunk_bounds(package, chunk)
-            .is_some_and(|(x0, x1, z0, z1)| x >= x0 && x < x1 && z >= z0 && z < z1)
+        chunk_cell_for_point(package, chunk, x, z).is_some_and(|(cell_x, cell_z)| {
+            chunk_has_visibility_cell(package, chunk.room, cell_x, cell_z)
+        })
+    }
+
+    fn chunk_cell_for_point(
+        package: &PlaytestPackage,
+        chunk: PlaytestChunk,
+        x: i32,
+        z: i32,
+    ) -> Option<(u16, u16)> {
+        let room = package.rooms.get(chunk.room as usize)?;
+        let sector = room.sector_size.max(1);
+        let (x0, x1, z0, z1) = chunk_bounds(package, chunk)?;
+        if x < x0 || x >= x1 || z < z0 || z >= z1 {
+            return None;
+        }
+        let cell_x = u16::try_from((x - x0) / sector).ok()?;
+        let cell_z = u16::try_from((z - z0) / sector).ok()?;
+        Some((cell_x, cell_z))
+    }
+
+    fn chunk_has_visibility_cell(
+        package: &PlaytestPackage,
+        room: u16,
+        cell_x: u16,
+        cell_z: u16,
+    ) -> bool {
+        let Some(visibility) = package
+            .room_visibility
+            .iter()
+            .find(|visibility| visibility.room == room)
+        else {
+            return true;
+        };
+        let first = visibility.cell_first as usize;
+        let end = first.saturating_add(visibility.cell_count as usize);
+        package
+            .visibility_cells
+            .get(first..end)
+            .is_some_and(|cells| {
+                cells.iter().any(|cell| {
+                    cell.room == room
+                        && cell.x == cell_x
+                        && cell.z == cell_z
+                        && cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0
+                })
+            })
     }
 
     fn chunk_containing_global(package: &PlaytestPackage, x: i32, z: i32) -> Option<u16> {
@@ -4614,28 +4701,26 @@ mod tests {
 
     fn chunk_containing_global_by_neighbours(
         package: &PlaytestPackage,
-        mut current: u16,
+        current: u16,
         x: i32,
         z: i32,
     ) -> Option<u16> {
-        for _ in 0..package.chunks.len() {
+        let mut queue = vec![current];
+        let mut visited = Vec::new();
+        while let Some(current) = queue.pop() {
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.push(current);
             let chunk = *chunk_for_room(package, current)?;
-            let (x0, x1, z0, z1) = chunk_bounds(package, chunk)?;
-            if x >= x0 && x < x1 && z >= z0 && z < z1 {
+            if chunk_contains_point(package, chunk, x, z) {
                 return Some(current);
             }
-            let next = if x < x0 {
-                chunk.neighbours[3]
-            } else if x >= x1 {
-                chunk.neighbours[1]
-            } else if z < z0 {
-                chunk.neighbours[2]
-            } else if z >= z1 {
-                chunk.neighbours[0]
-            } else {
-                None
-            }?;
-            current = next;
+            for neighbour in chunk.neighbours.into_iter().flatten() {
+                if chunks_share_authored_room(package, current, neighbour) {
+                    queue.push(neighbour);
+                }
+            }
         }
         None
     }
@@ -4660,6 +4745,480 @@ mod tests {
             out[2] = out[2].saturating_add(vertex[2] / 4);
         }
         out
+    }
+
+    fn portal_front_faces_camera_point(
+        portal: &PlaytestRoomPortal,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> bool {
+        let dx = (x as i64).saturating_sub(portal.vertices[0][0] as i64);
+        let dy = (y as i64).saturating_sub(portal.vertices[0][1] as i64);
+        let dz = (z as i64).saturating_sub(portal.vertices[0][2] as i64);
+        dx.saturating_mul(portal.normal[0] as i64)
+            .saturating_add(dy.saturating_mul(portal.normal[1] as i64))
+            .saturating_add(dz.saturating_mul(portal.normal[2] as i64))
+            >= 0
+    }
+
+    fn portal_center_in_camera_view(
+        portal: &PlaytestRoomPortal,
+        x: i32,
+        y: i32,
+        z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+    ) -> bool {
+        let center = portal_center(portal);
+        let dx = (center[0] as i64).saturating_sub(x as i64);
+        let dy = (center[1] as i64).saturating_sub(y as i64);
+        let dz = (center[2] as i64).saturating_sub(z as i64);
+        let sin_yaw = sin_yaw_q12 as i64;
+        let cos_yaw = cos_yaw_q12 as i64;
+        let view_x = dx
+            .saturating_mul(cos_yaw)
+            .saturating_sub(dz.saturating_mul(sin_yaw))
+            >> 12;
+        let view_z = dx
+            .saturating_mul(-sin_yaw)
+            .saturating_sub(dz.saturating_mul(cos_yaw))
+            >> 12;
+        if view_z <= PORTAL_SWEEP_NEAR_Z as i64 {
+            return false;
+        }
+        let x_slope = view_x.saturating_mul(4096) / view_z;
+        let y_slope = dy.saturating_mul(4096) / view_z;
+        x_slope.unsigned_abs() <= PORTAL_SWEEP_HALF_FOV_X_Q12 as u64
+            && y_slope.unsigned_abs() <= PORTAL_SWEEP_HALF_FOV_Y_Q12 as u64
+    }
+
+    fn point_in_audit_camera_view(
+        point: [i32; 3],
+        x: i32,
+        y: i32,
+        z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+    ) -> bool {
+        let dx = (point[0] as i64).saturating_sub(x as i64);
+        let dy = (point[1] as i64).saturating_sub(y as i64);
+        let dz = (point[2] as i64).saturating_sub(z as i64);
+        let sin_yaw = sin_yaw_q12 as i64;
+        let cos_yaw = cos_yaw_q12 as i64;
+        let view_x = dx
+            .saturating_mul(cos_yaw)
+            .saturating_sub(dz.saturating_mul(sin_yaw))
+            >> 12;
+        let view_z = dx
+            .saturating_mul(-sin_yaw)
+            .saturating_sub(dz.saturating_mul(cos_yaw))
+            >> 12;
+        let pitch_sin = sin_pitch_q12 as i64;
+        let pitch_cos = cos_pitch_q12 as i64;
+        let view_y = dy
+            .saturating_mul(pitch_cos)
+            .saturating_sub(view_z.saturating_mul(pitch_sin))
+            >> 12;
+        let view_z = dy
+            .saturating_mul(pitch_sin)
+            .saturating_add(view_z.saturating_mul(pitch_cos))
+            >> 12;
+        if view_z <= PORTAL_SWEEP_NEAR_Z as i64 {
+            return false;
+        }
+        let x_slope = view_x.saturating_mul(4096) / view_z;
+        let y_slope = view_y.saturating_mul(4096) / view_z;
+        x_slope.unsigned_abs() <= PORTAL_SWEEP_HALF_FOV_X_Q12 as u64
+            && y_slope.unsigned_abs() <= PORTAL_SWEEP_HALF_FOV_Y_Q12 as u64
+    }
+
+    fn portal_surface_intersects_audit_view(
+        portal: &PlaytestRoomPortal,
+        x: i32,
+        y: i32,
+        z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+    ) -> bool {
+        let steps = PORTAL_AUDIT_SURFACE_STEPS as i64;
+        for u in 0..=PORTAL_AUDIT_SURFACE_STEPS {
+            for v in 0..=PORTAL_AUDIT_SURFACE_STEPS {
+                let u = u as i64;
+                let v = v as i64;
+                let mut point = [0i32; 3];
+                for axis in 0..3 {
+                    let bottom = (portal.vertices[0][axis] as i64)
+                        .saturating_mul(steps - u)
+                        .saturating_add((portal.vertices[1][axis] as i64).saturating_mul(u))
+                        / steps;
+                    let top = (portal.vertices[3][axis] as i64)
+                        .saturating_mul(steps - u)
+                        .saturating_add((portal.vertices[2][axis] as i64).saturating_mul(u))
+                        / steps;
+                    point[axis] =
+                        ((bottom.saturating_mul(steps - v) + top.saturating_mul(v)) / steps) as i32;
+                }
+                if point_in_audit_camera_view(
+                    point,
+                    x,
+                    y,
+                    z,
+                    sin_yaw_q12,
+                    cos_yaw_q12,
+                    sin_pitch_q12,
+                    cos_pitch_q12,
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn demo7_third_person_camera_for_player(
+        package: &PlaytestPackage,
+        player_room: u16,
+        player: [i32; 3],
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+    ) -> (u16, [i32; 3], i32, i32) {
+        demo7_third_person_camera_for_player_distance(
+            package,
+            player_room,
+            player,
+            sin_yaw_q12,
+            cos_yaw_q12,
+            DEMO7_CAMERA_DISTANCE,
+        )
+    }
+
+    fn demo7_third_person_camera_for_player_distance(
+        package: &PlaytestPackage,
+        player_room: u16,
+        player: [i32; 3],
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        distance: i32,
+    ) -> (u16, [i32; 3], i32, i32) {
+        let vertical = DEMO7_CAMERA_HEIGHT.saturating_sub(DEMO7_CAMERA_TARGET_HEIGHT);
+        let distance_sq = DEMO7_CAMERA_DISTANCE.saturating_mul(DEMO7_CAMERA_DISTANCE);
+        let vertical_sq = vertical.saturating_mul(vertical);
+        let horizontal = ((distance_sq.saturating_sub(vertical_sq)) as f64)
+            .sqrt()
+            .round() as i32;
+        let horizontal = horizontal.max(1);
+        let sin_pitch =
+            -((vertical as i64).saturating_mul(4096) / DEMO7_CAMERA_DISTANCE as i64) as i32;
+        let cos_pitch =
+            ((horizontal as i64).saturating_mul(4096) / DEMO7_CAMERA_DISTANCE as i64) as i32;
+        let distance = distance.clamp(384, DEMO7_CAMERA_DISTANCE);
+        let sample_horizontal = ((cos_pitch as i64).saturating_mul(distance as i64) >> 12) as i32;
+        let sample_vertical = ((-sin_pitch as i64).saturating_mul(distance as i64) >> 12) as i32;
+        let focus_y = player[1].saturating_add(DEMO7_CAMERA_TARGET_HEIGHT);
+        let camera = [
+            player[0].saturating_add(
+                ((sin_yaw_q12 as i64).saturating_mul(sample_horizontal as i64) >> 12) as i32,
+            ),
+            focus_y.saturating_add(sample_vertical),
+            player[2].saturating_add(
+                ((cos_yaw_q12 as i64).saturating_mul(sample_horizontal as i64) >> 12) as i32,
+            ),
+        ];
+        let camera_room = chunk_containing_global_from(package, player_room, camera[0], camera[2])
+            .unwrap_or(player_room);
+        (camera_room, camera, sin_pitch, cos_pitch)
+    }
+
+    fn pvs_selected_cell_count_for_audit_camera(
+        package: &PlaytestPackage,
+        room: u16,
+        player_global: [i32; 3],
+        camera: [i32; 3],
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+    ) -> usize {
+        let Some(record) = package.rooms.get(room as usize) else {
+            return 0;
+        };
+        let Some(visibility) = package
+            .room_visibility
+            .iter()
+            .find(|visibility| visibility.room == room)
+        else {
+            return 0;
+        };
+        let first = visibility.cell_first as usize;
+        let count = visibility.cell_count as usize;
+        let Some(cells) = package
+            .visibility_cells
+            .get(first..first.saturating_add(count))
+        else {
+            return 0;
+        };
+        if cells.is_empty() {
+            return 0;
+        }
+        let sector = record.sector_size.max(1);
+        let room_origin_x = record.origin_x.saturating_mul(sector);
+        let room_origin_z = record.origin_z.saturating_mul(sector);
+        let width = chunk_for_room(package, room)
+            .map(|chunk| chunk.width)
+            .unwrap_or(1);
+        let depth = chunk_for_room(package, room)
+            .map(|chunk| chunk.depth)
+            .unwrap_or(1);
+        let anchor_x = grid_cell_for_audit(player_global[0].saturating_sub(room_origin_x), sector)
+            .clamp(0, width as i32 - 1);
+        let anchor_z = grid_cell_for_audit(player_global[2].saturating_sub(room_origin_z), sector)
+            .clamp(0, depth as i32 - 1);
+        let Some(anchor_index) = visibility_cell_index_for_audit_anchor(cells, anchor_x, anchor_z)
+            .or_else(|| nearest_visibility_cell_for_audit(cells, anchor_x, anchor_z))
+        else {
+            return 0;
+        };
+        if anchor_index >= visibility.pvs_count as usize {
+            return 0;
+        }
+        let pvs_index = (visibility.pvs_first as usize).saturating_add(anchor_index);
+        let Some(pvs) = package.visibility_pvs.get(pvs_index) else {
+            return 0;
+        };
+        let bit_first = pvs.byte_first as usize;
+        let bit_end = bit_first.saturating_add(pvs.byte_count as usize);
+        let Some(bits) = package.visibility_pvs_bits.get(bit_first..bit_end) else {
+            return 0;
+        };
+
+        let mut selected = 0usize;
+        for (index, cell) in cells.iter().copied().enumerate() {
+            if !audit_pvs_bit(bits, index) {
+                continue;
+            }
+            if audit_cell_safety_ring(cell, anchor_x, anchor_z)
+                || (audit_cell_in_global_range(
+                    cell,
+                    sector,
+                    room_origin_x,
+                    room_origin_z,
+                    player_global,
+                    record.chunk_activation_radius_sectors,
+                ) && audit_cell_in_view_wedge(
+                    cell,
+                    sector,
+                    anchor_x,
+                    anchor_z,
+                    sin_yaw_q12,
+                    cos_yaw_q12,
+                ) && audit_cell_aabb_intersects_camera(
+                    cell,
+                    sector,
+                    room_origin_x,
+                    room_origin_z,
+                    camera,
+                    sin_yaw_q12,
+                    cos_yaw_q12,
+                    sin_pitch_q12,
+                    cos_pitch_q12,
+                    record.draw_distance,
+                ))
+            {
+                selected += 1;
+            }
+        }
+        selected
+    }
+
+    fn grid_cell_for_audit(value: i32, sector_size: i32) -> i32 {
+        if value >= 0 {
+            value / sector_size
+        } else {
+            (value - sector_size + 1) / sector_size
+        }
+    }
+
+    fn visibility_cell_index_for_audit_anchor(
+        cells: &[PlaytestVisibilityCell],
+        x: i32,
+        z: i32,
+    ) -> Option<usize> {
+        cells
+            .iter()
+            .position(|cell| cell.x as i32 == x && cell.z as i32 == z)
+    }
+
+    fn nearest_visibility_cell_for_audit(
+        cells: &[PlaytestVisibilityCell],
+        x: i32,
+        z: i32,
+    ) -> Option<usize> {
+        cells
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, cell)| {
+                let dx = (cell.x as i64).saturating_sub(x as i64).unsigned_abs();
+                let dz = (cell.z as i64).saturating_sub(z as i64).unsigned_abs();
+                dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz))
+            })
+            .map(|(index, _)| index)
+    }
+
+    fn audit_pvs_bit(bits: &[u8], index: usize) -> bool {
+        bits.get(index / 8)
+            .map(|byte| byte & (1 << (index % 8)) != 0)
+            .unwrap_or(false)
+    }
+
+    fn audit_mask_bit(index: usize) -> u64 {
+        if index < u64::BITS as usize {
+            1u64 << index
+        } else {
+            0
+        }
+    }
+
+    fn audit_cell_safety_ring(cell: PlaytestVisibilityCell, anchor_x: i32, anchor_z: i32) -> bool {
+        (cell.x as i32)
+            .saturating_sub(anchor_x)
+            .abs()
+            .max((cell.z as i32).saturating_sub(anchor_z).abs())
+            <= 1
+    }
+
+    fn audit_cell_in_global_range(
+        cell: PlaytestVisibilityCell,
+        sector: i32,
+        room_origin_x: i32,
+        room_origin_z: i32,
+        player_global: [i32; 3],
+        radius_sectors: i32,
+    ) -> bool {
+        let radius = radius_sectors.max(1).saturating_mul(sector);
+        let x0 = room_origin_x.saturating_add((cell.x as i32).saturating_mul(sector));
+        let x1 = x0.saturating_add(sector);
+        let z0 = room_origin_z.saturating_add((cell.z as i32).saturating_mul(sector));
+        let z1 = z0.saturating_add(sector);
+        rect_distance_sq_i32(player_global[0], player_global[2], x0, x1, z0, z1)
+            <= (radius as u64).saturating_mul(radius as u64)
+    }
+
+    fn rect_distance_sq_i32(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u64 {
+        let dx = if x < x0 {
+            x0 - x
+        } else if x > x1 {
+            x - x1
+        } else {
+            0
+        };
+        let dz = if z < z0 {
+            z0 - z
+        } else if z > z1 {
+            z - z1
+        } else {
+            0
+        };
+        (dx as u64)
+            .saturating_mul(dx as u64)
+            .saturating_add((dz as u64).saturating_mul(dz as u64))
+    }
+
+    fn audit_cell_in_view_wedge(
+        cell: PlaytestVisibilityCell,
+        sector: i32,
+        anchor_x: i32,
+        anchor_z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+    ) -> bool {
+        let anchor_distance = (cell.x as i32)
+            .saturating_sub(anchor_x)
+            .abs()
+            .max((cell.z as i32).saturating_sub(anchor_z).abs());
+        if anchor_distance <= 4 || cell.blocker_mask != 0 || cell.portal_mask != 0x0f {
+            return true;
+        }
+        let half = sector / 2;
+        let center_x = (cell.x as i32).saturating_mul(sector).saturating_add(half);
+        let center_z = (cell.z as i32).saturating_mul(sector).saturating_add(half);
+        let anchor_x = anchor_x.saturating_mul(sector).saturating_add(half);
+        let anchor_z = anchor_z.saturating_mul(sector).saturating_add(half);
+        let dx = center_x.saturating_sub(anchor_x) as i64;
+        let dz = center_z.saturating_sub(anchor_z) as i64;
+        let sin_yaw = sin_yaw_q12 as i64;
+        let cos_yaw = cos_yaw_q12 as i64;
+        let depth = dx
+            .saturating_mul(-sin_yaw)
+            .saturating_add(dz.saturating_mul(-cos_yaw))
+            >> 12;
+        if depth < 0 {
+            return anchor_distance <= 6;
+        }
+        let lateral = (dx
+            .saturating_mul(cos_yaw)
+            .saturating_sub(dz.saturating_mul(sin_yaw))
+            >> 12)
+            .unsigned_abs();
+        let lateral_limit = (depth as u64)
+            .saturating_mul(3)
+            .checked_div(4)
+            .unwrap_or(u64::MAX)
+            .saturating_add((sector as u64).saturating_mul(3));
+        lateral <= lateral_limit
+    }
+
+    fn audit_cell_aabb_intersects_camera(
+        cell: PlaytestVisibilityCell,
+        sector: i32,
+        room_origin_x: i32,
+        room_origin_z: i32,
+        camera: [i32; 3],
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+        far_z: i32,
+    ) -> bool {
+        let margin = 96.max(sector / 4);
+        let x0 = room_origin_x
+            .saturating_add((cell.x as i32).saturating_mul(sector))
+            .saturating_sub(margin);
+        let x1 = room_origin_x
+            .saturating_add((cell.x as i32).saturating_add(1).saturating_mul(sector))
+            .saturating_add(margin);
+        let z0 = room_origin_z
+            .saturating_add((cell.z as i32).saturating_mul(sector))
+            .saturating_sub(margin);
+        let z1 = room_origin_z
+            .saturating_add((cell.z as i32).saturating_add(1).saturating_mul(sector))
+            .saturating_add(margin);
+        let y0 = cell.min_y.saturating_sub(margin);
+        let y1 = cell.max_y.saturating_add(margin);
+        for x in [x0, x1] {
+            for y in [y0, y1] {
+                for z in [z0, z1] {
+                    if point_in_audit_camera_view(
+                        [x, y, z],
+                        camera[0],
+                        camera[1],
+                        camera[2],
+                        sin_yaw_q12,
+                        cos_yaw_q12,
+                        sin_pitch_q12,
+                        cos_pitch_q12,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        let _ = far_z;
+        false
     }
 
     fn nearest_source_cell_for_portal(
@@ -4754,23 +5313,711 @@ mod tests {
         }
     }
 
+    fn write_demo7_portal_audit_artifact(
+        package: &PlaytestPackage,
+        artifact_index: usize,
+        cell: PlaytestVisibilityCell,
+        camera: [i32; 3],
+        yaw_step: usize,
+        yaw: (i32, i32),
+        result: &PortalSweepResult,
+        missed_portal: &PlaytestRoomPortal,
+    ) -> Option<std::path::PathBuf> {
+        const WIDTH: usize = 640;
+        const HEIGHT: usize = 480;
+        let dir = std::env::temp_dir().join("psoxide_demo7_portal_audit");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(format!(
+            "failure_{artifact_index:03}_room{}_cell{}_{}_yaw{yaw_step}.ppm",
+            cell.room, cell.x, cell.z
+        ));
+
+        let mut bounds = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+        for chunk in &package.chunks {
+            let Some((x0, x1, z0, z1)) = chunk_bounds(package, *chunk) else {
+                continue;
+            };
+            bounds.0 = bounds.0.min(x0);
+            bounds.1 = bounds.1.max(x1);
+            bounds.2 = bounds.2.min(z0);
+            bounds.3 = bounds.3.max(z1);
+        }
+        for vertex in missed_portal.vertices {
+            bounds.0 = bounds.0.min(vertex[0]);
+            bounds.1 = bounds.1.max(vertex[0]);
+            bounds.2 = bounds.2.min(vertex[2]);
+            bounds.3 = bounds.3.max(vertex[2]);
+        }
+        bounds.0 = bounds.0.min(camera[0]).saturating_sub(2048);
+        bounds.1 = bounds.1.max(camera[0]).saturating_add(2048);
+        bounds.2 = bounds.2.min(camera[2]).saturating_sub(2048);
+        bounds.3 = bounds.3.max(camera[2]).saturating_add(2048);
+        if bounds.0 >= bounds.1 || bounds.2 >= bounds.3 {
+            return None;
+        }
+
+        let mut pixels = vec![[18u8, 20u8, 24u8]; WIDTH * HEIGHT];
+        for chunk in &package.chunks {
+            let Some((x0, x1, z0, z1)) = chunk_bounds(package, *chunk) else {
+                continue;
+            };
+            let visible = result
+                .rooms
+                .iter()
+                .take(result.room_count)
+                .any(|room| room.room.raw() == chunk.room);
+            let color = if chunk.room == cell.room {
+                [30, 205, 112]
+            } else if chunk.room == missed_portal.source_room {
+                [238, 166, 38]
+            } else if chunk.room == missed_portal.destination_room {
+                [238, 72, 92]
+            } else if visible {
+                [55, 150, 95]
+            } else {
+                [74, 83, 92]
+            };
+            fill_world_rect(&mut pixels, WIDTH, HEIGHT, bounds, x0, x1, z0, z1, color);
+            draw_world_rect(
+                &mut pixels,
+                WIDTH,
+                HEIGHT,
+                bounds,
+                x0,
+                x1,
+                z0,
+                z1,
+                [172, 184, 198],
+            );
+        }
+
+        for portal in &package.room_portals {
+            let color = if portal.source_room == missed_portal.source_room
+                && portal.destination_room == missed_portal.destination_room
+            {
+                [255, 120, 44]
+            } else {
+                [190, 198, 210]
+            };
+            draw_world_line(
+                &mut pixels,
+                WIDTH,
+                HEIGHT,
+                bounds,
+                portal.vertices[0][0],
+                portal.vertices[0][2],
+                portal.vertices[1][0],
+                portal.vertices[1][2],
+                color,
+            );
+        }
+
+        draw_audit_camera_cone(&mut pixels, WIDTH, HEIGHT, bounds, camera, yaw);
+        write_ppm(&path, WIDTH, HEIGHT, &pixels).ok()?;
+        Some(path)
+    }
+
+    fn fill_world_rect(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        bounds: (i32, i32, i32, i32),
+        x0: i32,
+        x1: i32,
+        z0: i32,
+        z1: i32,
+        color: [u8; 3],
+    ) {
+        let (sx0, sy0) = world_to_audit_pixel(bounds, width, height, x0, z0);
+        let (sx1, sy1) = world_to_audit_pixel(bounds, width, height, x1, z1);
+        let min_x = sx0.min(sx1).clamp(0, width.saturating_sub(1) as i32) as usize;
+        let max_x = sx0.max(sx1).clamp(0, width.saturating_sub(1) as i32) as usize;
+        let min_y = sy0.min(sy1).clamp(0, height.saturating_sub(1) as i32) as usize;
+        let max_y = sy0.max(sy1).clamp(0, height.saturating_sub(1) as i32) as usize;
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                pixels[y * width + x] = color;
+            }
+        }
+    }
+
+    fn draw_world_rect(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        bounds: (i32, i32, i32, i32),
+        x0: i32,
+        x1: i32,
+        z0: i32,
+        z1: i32,
+        color: [u8; 3],
+    ) {
+        draw_world_line(pixels, width, height, bounds, x0, z0, x1, z0, color);
+        draw_world_line(pixels, width, height, bounds, x1, z0, x1, z1, color);
+        draw_world_line(pixels, width, height, bounds, x1, z1, x0, z1, color);
+        draw_world_line(pixels, width, height, bounds, x0, z1, x0, z0, color);
+    }
+
+    fn draw_world_line(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        bounds: (i32, i32, i32, i32),
+        x0: i32,
+        z0: i32,
+        x1: i32,
+        z1: i32,
+        color: [u8; 3],
+    ) {
+        let (x0, y0) = world_to_audit_pixel(bounds, width, height, x0, z0);
+        let (x1, y1) = world_to_audit_pixel(bounds, width, height, x1, z1);
+        draw_pixel_line(pixels, width, height, x0, y0, x1, y1, color);
+    }
+
+    fn draw_audit_camera_cone(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        bounds: (i32, i32, i32, i32),
+        camera: [i32; 3],
+        yaw: (i32, i32),
+    ) {
+        let far = 24_000i64;
+        for slope in [-PORTAL_SWEEP_HALF_FOV_X_Q12, PORTAL_SWEEP_HALF_FOV_X_Q12] {
+            let view_x = (slope as i64).saturating_mul(far) / 4096;
+            let dx = view_x
+                .saturating_mul(yaw.1 as i64)
+                .saturating_sub(far.saturating_mul(yaw.0 as i64))
+                >> 12;
+            let dz = (-view_x.saturating_mul(yaw.0 as i64))
+                .saturating_sub(far.saturating_mul(yaw.1 as i64))
+                >> 12;
+            draw_world_line(
+                pixels,
+                width,
+                height,
+                bounds,
+                camera[0],
+                camera[2],
+                camera[0].saturating_add(dx as i32),
+                camera[2].saturating_add(dz as i32),
+                [242, 246, 255],
+            );
+        }
+        let (cx, cy) = world_to_audit_pixel(bounds, width, height, camera[0], camera[2]);
+        for oy in -3..=3 {
+            for ox in -3..=3 {
+                set_audit_pixel(pixels, width, height, cx + ox, cy + oy, [255, 255, 255]);
+            }
+        }
+    }
+
+    fn world_to_audit_pixel(
+        bounds: (i32, i32, i32, i32),
+        width: usize,
+        height: usize,
+        x: i32,
+        z: i32,
+    ) -> (i32, i32) {
+        let span_x = i64::from(bounds.1.saturating_sub(bounds.0)).max(1);
+        let span_z = i64::from(bounds.3.saturating_sub(bounds.2)).max(1);
+        let sx = i64::from(x.saturating_sub(bounds.0))
+            .saturating_mul(width.saturating_sub(1) as i64)
+            / span_x;
+        let sy = i64::from(bounds.3.saturating_sub(z))
+            .saturating_mul(height.saturating_sub(1) as i64)
+            / span_z;
+        (sx as i32, sy as i32)
+    }
+
+    fn draw_pixel_line(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        mut x0: i32,
+        mut y0: i32,
+        x1: i32,
+        y1: i32,
+        color: [u8; 3],
+    ) {
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            set_audit_pixel(pixels, width, height, x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = err.saturating_mul(2);
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    fn set_audit_pixel(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        x: i32,
+        y: i32,
+        color: [u8; 3],
+    ) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        if x < width && y < height {
+            pixels[y * width + x] = color;
+        }
+    }
+
+    fn write_ppm(
+        path: &std::path::Path,
+        width: usize,
+        height: usize,
+        pixels: &[[u8; 3]],
+    ) -> std::io::Result<()> {
+        let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for pixel in pixels {
+            bytes.extend_from_slice(pixel);
+        }
+        std::fs::write(path, bytes)
+    }
+
+    #[test]
+    fn demo7_portal_visibility_audit_every_cell_center_16_dirs() {
+        let package = load_demo7_package();
+        let rooms = level_room_records_for_sweep(&package);
+        let portals = level_portal_records_for_sweep(&package);
+        let room_bounds = portal_room_bounds_for_sweep(&package);
+        let mut failures = Vec::new();
+        let mut artifact_count = 0usize;
+        let mut samples = 0usize;
+
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            let Some((x, y, z)) = cell_global_center(&package, cell) else {
+                continue;
+            };
+            for (yaw_step, sin_yaw, cos_yaw, yaw_label) in portal_audit_yaws() {
+                samples += 1;
+                let result = portal_visibility_at(
+                    &rooms,
+                    &portals,
+                    &room_bounds,
+                    cell.room,
+                    x,
+                    y,
+                    z,
+                    sin_yaw,
+                    cos_yaw,
+                    0,
+                    4096,
+                );
+                let visible = visible_room_ids(&result);
+                for portal in &package.room_portals {
+                    if !visible.contains(&portal.source_room)
+                        || visible.contains(&portal.destination_room)
+                        || portal.destination_room == cell.room
+                    {
+                        continue;
+                    }
+                    if !portal_front_faces_camera_point(portal, x, y, z)
+                        || !portal_surface_intersects_audit_view(
+                            portal, x, y, z, sin_yaw, cos_yaw, 0, 4096,
+                        )
+                    {
+                        continue;
+                    }
+                    let artifact = if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
+                        let path = write_demo7_portal_audit_artifact(
+                            &package,
+                            artifact_count,
+                            cell,
+                            [x, y, z],
+                            yaw_step,
+                            (sin_yaw, cos_yaw),
+                            &result,
+                            portal,
+                        );
+                        artifact_count += 1;
+                        path
+                    } else {
+                        None
+                    };
+                    failures.push(format!(
+                        "visible portal surface did not reveal destination: current={} cell=({},{}) yaw={} portal={}->{} pos=({x},{y},{z}) visible={visible:?} stats={:?} artifact={}",
+                        cell.room,
+                        cell.x,
+                        cell.z,
+                        yaw_label,
+                        portal.source_room,
+                        portal.destination_room,
+                        result.stats,
+                        artifact
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "none".to_owned())
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "demo7 portal visibility audit found {} failures across {samples} cell/yaw samples:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn demo7_portal_visibility_audit_third_person_camera_distance_sweep_16_dirs() {
+        let package = load_demo7_package();
+        let rooms = level_room_records_for_sweep(&package);
+        let portals = level_portal_records_for_sweep(&package);
+        let room_bounds = portal_room_bounds_for_sweep(&package);
+        let mut failures = Vec::new();
+        let mut artifact_count = 0usize;
+        let mut samples = 0usize;
+
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            for sample_x in PORTAL_AUDIT_CELL_SUBSAMPLES {
+                for sample_z in PORTAL_AUDIT_CELL_SUBSAMPLES {
+                    let Some((player_x, player_y, player_z)) =
+                        cell_global_sample(&package, cell, sample_x, sample_z)
+                    else {
+                        continue;
+                    };
+                    for (yaw_step, sin_yaw, cos_yaw, yaw_label) in portal_audit_yaws() {
+                        for distance in DEMO7_CAMERA_DISTANCE_SAMPLES {
+                            samples += 1;
+                            let (camera_room, camera, sin_pitch, cos_pitch) =
+                                demo7_third_person_camera_for_player_distance(
+                                    &package,
+                                    cell.room,
+                                    [player_x, player_y, player_z],
+                                    sin_yaw,
+                                    cos_yaw,
+                                    distance,
+                                );
+                            let result = portal_visibility_at(
+                                &rooms,
+                                &portals,
+                                &room_bounds,
+                                camera_room,
+                                camera[0],
+                                camera[1],
+                                camera[2],
+                                sin_yaw,
+                                cos_yaw,
+                                sin_pitch,
+                                cos_pitch,
+                            );
+                            let visible = visible_room_ids(&result);
+                            for (portal_index, portal) in package.room_portals.iter().enumerate() {
+                                let portal_front = portal_front_faces_camera_point(
+                                    portal, camera[0], camera[1], camera[2],
+                                );
+                                let portal_in_view = portal_surface_intersects_audit_view(
+                                    portal, camera[0], camera[1], camera[2], sin_yaw, cos_yaw,
+                                    sin_pitch, cos_pitch,
+                                );
+                                let portal_bit = audit_mask_bit(portal_index);
+                                let portal_accepted = portal_bit != 0
+                                    && result.stats.accepted_portal_mask & portal_bit != 0;
+                                let portal_rejected = portal_bit != 0
+                                    && result.stats.reject_frustum_portal_mask & portal_bit != 0;
+                                if visible.contains(&portal.source_room)
+                                    && portal_rejected
+                                    && !portal_accepted
+                                    && portal.destination_room != camera_room
+                                    && portal_in_view
+                                {
+                                    let artifact = if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
+                                        let path = write_demo7_portal_audit_artifact(
+                                            &package,
+                                            artifact_count,
+                                            cell,
+                                            camera,
+                                            yaw_step,
+                                            (sin_yaw, cos_yaw),
+                                            &result,
+                                            portal,
+                                        );
+                                        artifact_count += 1;
+                                        path
+                                    } else {
+                                        None
+                                    };
+                                    failures.push(format!(
+                                        "visible portal surface was rejected: player_room={} camera_room={} cell=({},{}) sample=({sample_x},{sample_z}) yaw={} distance={} portal_index={} portal={}->{} front={} player=({player_x},{player_y},{player_z}) camera=({},{},{}) visible={visible:?} stats={:?} artifact={}",
+                                        cell.room,
+                                        camera_room,
+                                        cell.x,
+                                        cell.z,
+                                        yaw_label,
+                                        distance,
+                                        portal_index,
+                                        portal.source_room,
+                                        portal.destination_room,
+                                        portal_front,
+                                        camera[0],
+                                        camera[1],
+                                        camera[2],
+                                        result.stats,
+                                        artifact
+                                            .as_ref()
+                                            .map(|path| path.display().to_string())
+                                            .unwrap_or_else(|| "none".to_owned())
+                                    ));
+                                }
+                                if visible.contains(&portal.source_room)
+                                    && visible.contains(&portal.destination_room)
+                                    && portal.destination_room != camera_room
+                                    && portal_front
+                                    && portal_in_view
+                                {
+                                    let draw_cells = pvs_selected_cell_count_for_audit_camera(
+                                        &package,
+                                        portal.destination_room,
+                                        [player_x, player_y, player_z],
+                                        camera,
+                                        sin_yaw,
+                                        cos_yaw,
+                                        sin_pitch,
+                                        cos_pitch,
+                                    );
+                                    if draw_cells == 0 {
+                                        let artifact =
+                                            if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
+                                                let path = write_demo7_portal_audit_artifact(
+                                                    &package,
+                                                    artifact_count,
+                                                    cell,
+                                                    camera,
+                                                    yaw_step,
+                                                    (sin_yaw, cos_yaw),
+                                                    &result,
+                                                    portal,
+                                                );
+                                                artifact_count += 1;
+                                                path
+                                            } else {
+                                                None
+                                            };
+                                        failures.push(format!(
+                                            "portal-visible destination selected no draw cells: player_room={} camera_room={} cell=({},{}) sample=({sample_x},{sample_z}) yaw={} distance={} portal={}->{} player=({player_x},{player_y},{player_z}) camera=({},{},{}) visible={visible:?} stats={:?} artifact={}",
+                                            cell.room,
+                                            camera_room,
+                                            cell.x,
+                                            cell.z,
+                                            yaw_label,
+                                            distance,
+                                            portal.source_room,
+                                            portal.destination_room,
+                                            camera[0],
+                                            camera[1],
+                                            camera[2],
+                                            result.stats,
+                                            artifact
+                                                .as_ref()
+                                                .map(|path| path.display().to_string())
+                                                .unwrap_or_else(|| "none".to_owned())
+                                        ));
+                                    }
+                                }
+                                if !visible.contains(&portal.source_room)
+                                    || visible.contains(&portal.destination_room)
+                                    || portal.destination_room == camera_room
+                                {
+                                    continue;
+                                }
+                                if !portal_front || !portal_in_view {
+                                    continue;
+                                }
+                                let artifact = if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
+                                    let path = write_demo7_portal_audit_artifact(
+                                        &package,
+                                        artifact_count,
+                                        cell,
+                                        camera,
+                                        yaw_step,
+                                        (sin_yaw, cos_yaw),
+                                        &result,
+                                        portal,
+                                    );
+                                    artifact_count += 1;
+                                    path
+                                } else {
+                                    None
+                                };
+                                failures.push(format!(
+                                    "third-person visible portal surface did not reveal destination: player_room={} camera_room={} cell=({},{}) sample=({sample_x},{sample_z}) yaw={} distance={} portal={}->{} player=({player_x},{player_y},{player_z}) camera=({},{},{}) pitch=({sin_pitch},{cos_pitch}) visible={visible:?} stats={:?} artifact={}",
+                                    cell.room,
+                                    camera_room,
+                                    cell.x,
+                                    cell.z,
+                                    yaw_label,
+                                    distance,
+                                    portal.source_room,
+                                    portal.destination_room,
+                                    camera[0],
+                                    camera[1],
+                                    camera[2],
+                                    result.stats,
+                                    artifact
+                                        .as_ref()
+                                        .map(|path| path.display().to_string())
+                                        .unwrap_or_else(|| "none".to_owned())
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "demo7 third-person portal visibility audit found {} failures across {samples} cell/yaw/distance samples:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn demo7_portal_visibility_audit_third_person_camera_16_dirs() {
+        let package = load_demo7_package();
+        let rooms = level_room_records_for_sweep(&package);
+        let portals = level_portal_records_for_sweep(&package);
+        let room_bounds = portal_room_bounds_for_sweep(&package);
+        let mut failures = Vec::new();
+        let mut artifact_count = 0usize;
+        let mut samples = 0usize;
+
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            let Some((player_x, player_y, player_z)) = cell_global_center(&package, cell) else {
+                continue;
+            };
+            for (yaw_step, sin_yaw, cos_yaw, yaw_label) in portal_audit_yaws() {
+                samples += 1;
+                let (camera_room, camera, sin_pitch, cos_pitch) =
+                    demo7_third_person_camera_for_player(
+                        &package,
+                        cell.room,
+                        [player_x, player_y, player_z],
+                        sin_yaw,
+                        cos_yaw,
+                    );
+                let result = portal_visibility_at(
+                    &rooms,
+                    &portals,
+                    &room_bounds,
+                    camera_room,
+                    camera[0],
+                    camera[1],
+                    camera[2],
+                    sin_yaw,
+                    cos_yaw,
+                    sin_pitch,
+                    cos_pitch,
+                );
+                let visible = visible_room_ids(&result);
+                for portal in &package.room_portals {
+                    if !visible.contains(&portal.source_room)
+                        || visible.contains(&portal.destination_room)
+                        || portal.destination_room == camera_room
+                    {
+                        continue;
+                    }
+                    if !portal_front_faces_camera_point(portal, camera[0], camera[1], camera[2])
+                        || !portal_surface_intersects_audit_view(
+                            portal, camera[0], camera[1], camera[2], sin_yaw, cos_yaw, sin_pitch,
+                            cos_pitch,
+                        )
+                    {
+                        continue;
+                    }
+                    let artifact = if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
+                        let path = write_demo7_portal_audit_artifact(
+                            &package,
+                            artifact_count,
+                            cell,
+                            camera,
+                            yaw_step,
+                            (sin_yaw, cos_yaw),
+                            &result,
+                            portal,
+                        );
+                        artifact_count += 1;
+                        path
+                    } else {
+                        None
+                    };
+                    failures.push(format!(
+                        "third-person visible portal surface did not reveal destination: player_room={} camera_room={} cell=({},{}) yaw={} portal={}->{} player=({player_x},{player_y},{player_z}) camera=({},{},{}) pitch=({sin_pitch},{cos_pitch}) visible={visible:?} stats={:?} artifact={}",
+                        cell.room,
+                        camera_room,
+                        cell.x,
+                        cell.z,
+                        yaw_label,
+                        portal.source_room,
+                        portal.destination_room,
+                        camera[0],
+                        camera[1],
+                        camera[2],
+                        result.stats,
+                        artifact
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "none".to_owned())
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "demo7 third-person portal visibility audit found {} failures across {samples} cell/yaw samples:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
     #[test]
     fn demo7_portal_visibility_sweep_covers_every_cell_center() {
         let package = load_demo7_package();
-        assert!(
-            package.rooms.len() > 1,
-            "demo7 must keep multiple runtime rooms for this regression"
-        );
-        assert!(
-            package.room_portals.len() >= 2,
-            "demo7 must contain directed portal records"
-        );
         assert_portal_slices_match_package(&package);
         assert_chunk_neighbours_have_portals(&package);
         assert_portals_are_reciprocal(&package);
 
         let rooms = level_room_records_for_sweep(&package);
         let portals = level_portal_records_for_sweep(&package);
+        let room_bounds = portal_room_bounds_for_sweep(&package);
         let mut failures = Vec::new();
         let mut swept_samples = 0usize;
 
@@ -4799,8 +6046,19 @@ mod tests {
                 }
             }
             for (sin_yaw, cos_yaw, yaw_label) in portal_sweep_yaws() {
-                let result =
-                    portal_visibility_at(&rooms, &portals, cell.room, x, y, z, sin_yaw, cos_yaw);
+                let result = portal_visibility_at(
+                    &rooms,
+                    &portals,
+                    &room_bounds,
+                    cell.room,
+                    x,
+                    y,
+                    z,
+                    sin_yaw,
+                    cos_yaw,
+                    0,
+                    4096,
+                );
                 let visible = visible_room_ids(&result);
                 let frontier = frontier_room_ids(&result);
                 let stream = sweep_stream_requests(&package, cell.room, &result);
@@ -4838,6 +6096,29 @@ mod tests {
                         ));
                     }
                 }
+                for portal in &package.room_portals {
+                    if !visible.contains(&portal.source_room)
+                        || visible.contains(&portal.destination_room)
+                        || portal.destination_room == cell.room
+                    {
+                        continue;
+                    }
+                    if !portal_front_faces_camera_point(portal, x, y, z)
+                        || !portal_center_in_camera_view(portal, x, y, z, sin_yaw, cos_yaw)
+                    {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "visible room portal center did not reveal destination: current={} cell=({},{}) yaw={} portal={}->{} pos=({x},{y},{z}) visible={visible:?} frontier={frontier:?} stats={:?}",
+                        cell.room,
+                        cell.x,
+                        cell.z,
+                        yaw_label,
+                        portal.source_room,
+                        portal.destination_room,
+                        result.stats
+                    ));
+                }
                 if result.stats.cap_room != 0
                     || result.stats.cap_frustum != 0
                     || result.stats.cap_depth != 0
@@ -4872,12 +6153,15 @@ mod tests {
             let result = portal_visibility_at(
                 &rooms,
                 &portals,
+                &room_bounds,
                 portal.source_room,
                 x,
                 center[1],
                 z,
                 sin_yaw,
                 cos_yaw,
+                0,
+                4096,
             );
             let visible = visible_room_ids(&result);
             if !visible.contains(&portal.destination_room) {
@@ -4911,6 +6195,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn demo7_without_authored_portals_has_no_generated_room_splits() {
+        let (mut project, project_root) = load_demo7_project();
+        let portal_ids: Vec<NodeId> = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
+            .map(|node| node.id)
+            .collect();
+        for id in portal_ids {
+            assert!(project.active_scene_mut().remove_node(id));
+        }
+
+        let (package, report) = build_package(&project, &project_root);
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("demo7 cooks without portals");
+        assert_eq!(package.rooms.len(), 1);
+        assert_eq!(package.chunks.len(), 1);
+        assert!(
+            package.room_portals.is_empty(),
+            "no authored portals should mean no generated runtime portals"
+        );
+    }
+
     fn visibility_test_cell(x: u16, z: u16, blocker_mask: u8) -> PlaytestVisibilityCell {
         PlaytestVisibilityCell {
             room: 0,
@@ -4939,22 +6248,6 @@ mod tests {
             "starter must contain a player spawn entity"
         );
         project
-    }
-
-    #[test]
-    fn streaming_chunk_target_override_accepts_square_and_rect_values() {
-        let default = WorldStreamingSettings::default().chunk_config();
-
-        let square = streaming_chunk_config_with_target(default, "8").expect("square target");
-        assert_eq!(square.target_width, 8);
-        assert_eq!(square.target_depth, 8);
-
-        let rect = streaming_chunk_config_with_target(default, "12x6").expect("rect target");
-        assert_eq!(rect.target_width, 12);
-        assert_eq!(rect.target_depth, 6);
-
-        assert!(streaming_chunk_config_with_target(default, "").is_none());
-        assert!(streaming_chunk_config_with_target(default, "8x8x8").is_none());
     }
 
     fn is_player_spawn_node(scene: &crate::Scene, node: &SceneNode) -> bool {
@@ -5349,7 +6642,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_authored_room_cooks_into_runtime_chunks() {
+    fn oversized_authored_room_fails_without_manual_split() {
         let mut project = project_with_one_room();
         let floor_material = project
             .resources
@@ -5385,13 +6678,16 @@ mod tests {
         }
 
         let (package, report) = build_package(&project, &starter_project_root());
-        assert!(report.is_ok(), "errors: {:?}", report.errors);
-        let package = package.expect("package returned on ok report");
-        assert_eq!(package.rooms.len(), 8);
-        assert_eq!(package.room_asset_count(), 8);
-        assert!(package
-            .spawn
-            .is_some_and(|spawn| (spawn.room as usize) < package.rooms.len()));
+        assert!(package.is_none());
+        assert!(!report.is_ok());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("runtime cap")),
+            "errors: {:?}",
+            report.errors
+        );
     }
 
     #[test]
@@ -5458,7 +6754,7 @@ mod tests {
     }
 
     #[test]
-    fn chunked_rooms_emit_warm_residency_hints() {
+    fn manual_portal_rooms_emit_warm_residency_hints() {
         let mut project = project_with_one_room();
         let floor_material = project
             .resources
@@ -5479,14 +6775,29 @@ mod tests {
             let NodeKind::Room { grid } = &mut room.kind else {
                 panic!("starter room is a room");
             };
-            *grid = crate::WorldGrid::empty(1, 40, crate::DEFAULT_WORLD_SECTOR_SIZE);
-            for z in 0..grid.depth {
-                grid.set_floor(0, z, 0, Some(floor_material));
-            }
+            *grid = crate::WorldGrid::stone_room(
+                2,
+                1,
+                crate::DEFAULT_WORLD_SECTOR_SIZE,
+                Some(floor_material),
+                Some(floor_material),
+            );
+        }
+        let portal_id = project.active_scene_mut().add_node(
+            room_id,
+            "Portal",
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name: String::new(),
+            },
+        );
+        if let Some(portal) = project.active_scene_mut().node_mut(portal_id) {
+            portal.transform.translation = [0.0, 0.0, 0.0];
         }
         let spawn_id = player_spawn_node_id(&project);
         if let Some(spawn) = project.active_scene_mut().node_mut(spawn_id) {
-            spawn.transform.translation = [0.0, 0.0, -19.0];
+            spawn.transform.translation = [-0.25, 0.0, 0.0];
         }
 
         let (package, report) = build_package(&project, &starter_project_root());
@@ -6604,7 +7915,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_boundary_light_is_emitted_for_each_overlapped_chunk() {
+    fn room_light_is_emitted_once_without_generated_splits() {
         let mut project = project_with_one_room();
         let floor_material = project
             .resources
@@ -6625,7 +7936,7 @@ mod tests {
             let NodeKind::Room { grid } = &mut room.kind else {
                 panic!("starter room is a room");
             };
-            *grid = crate::WorldGrid::empty(1, 40, crate::DEFAULT_WORLD_SECTOR_SIZE);
+            *grid = crate::WorldGrid::empty(1, 16, crate::DEFAULT_WORLD_SECTOR_SIZE);
             for z in 0..grid.depth {
                 grid.set_floor(0, z, 0, Some(floor_material));
             }
@@ -6634,7 +7945,7 @@ mod tests {
             let Some(light) = project.active_scene_mut().node_mut(id) else {
                 continue;
             };
-            light.transform.translation = [0.0, 0.0, -10.5];
+            light.transform.translation = [0.0, 0.0, 0.0];
             let NodeKind::PointLight { radius, .. } = &mut light.kind else {
                 continue;
             };
@@ -6651,21 +7962,20 @@ mod tests {
             },
         );
         if let Some(spawn) = project.active_scene_mut().node_mut(spawn_id) {
-            spawn.transform.translation = [0.0, 0.0, -19.0];
+            spawn.transform.translation = [0.0, 0.0, 0.0];
         }
 
         let (package, report) = build_package(&project, &starter_project_root());
 
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
-        assert_eq!(package.rooms.len(), 8);
-        assert_eq!(package.lights.len(), 2);
-        let light_rooms: BTreeSet<u16> = package.lights.iter().map(|light| light.room).collect();
-        assert_eq!(light_rooms.len(), 2);
+        assert_eq!(package.rooms.len(), 1);
+        assert_eq!(package.lights.len(), 1);
+        assert_eq!(package.lights[0].room, 0);
     }
 
     #[test]
-    fn chunk_boundary_floor_transition_wall_stays_with_canonical_chunk() {
+    fn floor_transition_wall_stays_in_single_manual_room() {
         let mut project = project_with_one_room();
         let floor_material = project
             .resources
@@ -6699,7 +8009,7 @@ mod tests {
 
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
-        assert_eq!(package.rooms.len(), 4);
+        assert_eq!(package.rooms.len(), 1);
         let mut transition_walls = 0usize;
         for room in &package.rooms {
             let world = psx_asset::World::from_bytes(&package.assets[room.world_asset_index].bytes)
