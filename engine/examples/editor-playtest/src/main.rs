@@ -365,24 +365,27 @@ fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
         .min(MAX_RUNTIME_RESIDENT_CHUNKS)
 }
 
-#[cfg(not(feature = "cd-stream-bench"))]
-fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
-    (record.resident_chunk_limit as usize).clamp(1, MAX_RUNTIME_RESIDENT_CHUNKS)
-}
-
 #[cfg(feature = "cd-stream-bench")]
 fn room_stream_request_chunk_limit(record: &LevelRoomRecord) -> usize {
     room_resident_chunk_limit(record).clamp(1, STREAMED_ROOM_SLOT_COUNT)
 }
 
-fn room_visible_chunk_limit(record: &LevelRoomRecord) -> usize {
-    (record.visible_chunk_limit as usize)
-        .clamp(1, MAX_ACTIVE_ROOMS)
-        .min(room_resident_chunk_limit(record))
-}
-
 fn room_active_chunk_limit(record: &LevelRoomRecord) -> usize {
-    room_visible_chunk_limit(record)
+    #[cfg(feature = "cd-stream-bench")]
+    {
+        // Portal traversal decides the visible room set. Streaming can only
+        // cap us at the resident slot capacity, not at the old authored
+        // visible-window value.
+        room_resident_chunk_limit(record).min(MAX_ACTIVE_ROOMS)
+    }
+    #[cfg(not(feature = "cd-stream-bench"))]
+    {
+        let _ = record;
+        // Embedded playtest builds have all room payloads available, so the
+        // portal traversal result is the draw budget. The authored chunk limits
+        // only apply when the CD streaming residency cache is active.
+        MAX_ACTIVE_ROOMS
+    }
 }
 
 fn room_index_debug_mask(index: RoomIndex) -> u64 {
@@ -519,8 +522,6 @@ const STREAMED_ROOM_SLOT_COUNT: usize =
     streamed_room_slot_count_for_budget_units(WORLD_RESIDENT_CHUNK_LIMIT);
 #[cfg(feature = "cd-stream-bench")]
 const MAX_RUNTIME_RESIDENT_CHUNKS: usize = STREAMED_ROOM_SLOT_COUNT;
-#[cfg(not(feature = "cd-stream-bench"))]
-const MAX_RUNTIME_RESIDENT_CHUNKS: usize = MAX_ACTIVE_ROOMS;
 #[cfg(feature = "cd-stream-bench")]
 const MAX_COLLISION_ROOMS: usize = STREAMED_ROOM_SLOT_COUNT;
 #[cfg(not(feature = "cd-stream-bench"))]
