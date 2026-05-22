@@ -1071,6 +1071,8 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::ROOM_PLAYER_VIEW_YAW_Q12,
         counter::ROOM_CAMERA_LOCAL_X_BIASED,
         counter::ROOM_CAMERA_LOCAL_Z_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
         counter::PORTAL_VIS_VISIBLE_MASK_LO,
         counter::PORTAL_VIS_VISIBLE_MASK_HI,
         counter::PORTAL_VIS_FRONTIER_MASK_LO,
@@ -1087,6 +1089,14 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
         counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
         counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
     ];
     const RENDER_MAP_COUNTERS: &[u16] = &[
         counter::ROOM_ACTIVE_CHUNK_MASK_LO,
@@ -1101,6 +1111,8 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::ROOM_PLAYER_VIEW_YAW_Q12,
         counter::ROOM_CAMERA_LOCAL_X_BIASED,
         counter::ROOM_CAMERA_LOCAL_Z_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
         counter::PORTAL_VIS_VISIBLE_MASK_LO,
         counter::PORTAL_VIS_VISIBLE_MASK_HI,
         counter::PORTAL_VIS_FRONTIER_MASK_LO,
@@ -1117,6 +1129,14 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
         counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
         counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
     ];
     let chunk_sample = state
         .profiler
@@ -1145,6 +1165,12 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
     let camera_z_biased = chunk_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Z_BIASED as usize);
+    let camera_view_sin_yaw_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED as usize);
+    let camera_view_cos_yaw_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED as usize);
     Some(psxed_ui::EditorPlaytestMetrics {
         host_fps: sample.host_fps(),
         host_ms: sample.host_dt_ms,
@@ -1238,6 +1264,22 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
             counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
         ),
+        portal_tested_portal_mask: chunk_mask(
+            counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
+            counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
+        ),
+        portal_accepted_portal_mask: chunk_mask(
+            counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
+            counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
+        ),
+        portal_reject_frustum_portal_mask: chunk_mask(
+            counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
+            counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
+        ),
+        portal_bounds_fallback_portal_mask: chunk_mask(
+            counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
+            counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
+        ),
         player_map_valid: player_x_biased > 0 || player_z_biased > 0,
         player_room_index: chunk_sample
             .guest
@@ -1248,6 +1290,11 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             .guest
             .counter_latest_value(counter::ROOM_PLAYER_VIEW_YAW_Q12 as usize)
             .min(u16::MAX as u32) as u16,
+        camera_view_basis_valid: camera_view_sin_yaw_biased > 0 || camera_view_cos_yaw_biased > 0,
+        camera_view_sin_yaw_q12: profile_counter_i32_biased(camera_view_sin_yaw_biased, 4096)
+            .clamp(-4096, 4096),
+        camera_view_cos_yaw_q12: profile_counter_i32_biased(camera_view_cos_yaw_biased, 4096)
+            .clamp(-4096, 4096),
         camera_map_valid: camera_x_biased > 0 || camera_z_biased > 0,
         camera_local_x: profile_counter_i32_biased(camera_x_biased, DEBUG_MAP_POSITION_BIAS),
         camera_local_z: profile_counter_i32_biased(camera_z_biased, DEBUG_MAP_POSITION_BIAS),
