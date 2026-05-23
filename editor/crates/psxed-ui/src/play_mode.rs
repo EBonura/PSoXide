@@ -242,6 +242,8 @@ pub struct EditorPlaytestMetrics {
     pub player_map_valid: bool,
     /// Runtime room/chunk index containing the player.
     pub player_room_index: u32,
+    /// Runtime room/chunk index used as the root of portal traversal.
+    pub portal_current_room_index: u32,
     /// Player room-local X in engine units.
     pub player_local_x: i32,
     /// Player room-local Z in engine units.
@@ -254,12 +256,26 @@ pub struct EditorPlaytestMetrics {
     pub camera_view_sin_yaw_q12: i32,
     /// Render camera yaw cosine in Q12 basis units.
     pub camera_view_cos_yaw_q12: i32,
+    /// Render camera pitch sine in Q12 basis units.
+    pub camera_view_sin_pitch_q12: i32,
+    /// Render camera pitch cosine in Q12 basis units.
+    pub camera_view_cos_pitch_q12: i32,
     /// True when the profiler sample contains render-camera map telemetry.
     pub camera_map_valid: bool,
+    /// True when the profiler sample contains exact level-space render-camera telemetry.
+    pub camera_global_valid: bool,
     /// Render camera room-local X in engine units.
     pub camera_local_x: i32,
+    /// Render camera room-local Y in engine units.
+    pub camera_local_y: i32,
     /// Render camera room-local Z in engine units.
     pub camera_local_z: i32,
+    /// Render camera absolute level X in engine units.
+    pub camera_global_x: i32,
+    /// Render camera absolute level Y in engine units.
+    pub camera_global_y: i32,
+    /// Render camera absolute level Z in engine units.
+    pub camera_global_z: i32,
 }
 
 /// One host-drawn editor overlay segment over the 3D preview.

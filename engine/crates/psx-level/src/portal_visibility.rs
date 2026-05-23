@@ -171,6 +171,129 @@ impl PortalFrustum {
     };
 }
 
+/// One portal vertex after transforming it into camera/view space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalClipDebugVertex {
+    /// Horizontal view-space coordinate.
+    pub x: i32,
+    /// Vertical view-space coordinate.
+    pub y: i32,
+    /// Forward view-space depth.
+    pub z: i32,
+}
+
+impl PortalClipDebugVertex {
+    const fn from_view(vertex: PortalViewVertex) -> Self {
+        Self {
+            x: vertex.x,
+            y: vertex.y,
+            z: vertex.z,
+        }
+    }
+}
+
+/// Screen-space tangent window produced by portal clipping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalClipDebugRect {
+    /// Left horizontal tangent, Q12.
+    pub left_tan_q12: i32,
+    /// Right horizontal tangent, Q12.
+    pub right_tan_q12: i32,
+    /// Lower vertical tangent, Q12.
+    pub min_y_tan_q12: i32,
+    /// Upper vertical tangent, Q12.
+    pub max_y_tan_q12: i32,
+}
+
+impl PortalClipDebugRect {
+    const fn from_clip(clip: PortalClip) -> Self {
+        Self {
+            left_tan_q12: clip.left_tan_q12,
+            right_tan_q12: clip.right_tan_q12,
+            min_y_tan_q12: clip.min_y_tan_q12,
+            max_y_tan_q12: clip.max_y_tan_q12,
+        }
+    }
+
+    const fn from_frustum(frustum: PortalFrustum) -> Self {
+        Self {
+            left_tan_q12: frustum.left_tan_q12,
+            right_tan_q12: frustum.right_tan_q12,
+            min_y_tan_q12: frustum.min_y_tan_q12,
+            max_y_tan_q12: frustum.max_y_tan_q12,
+        }
+    }
+}
+
+/// Portal clip plane that emptied the polygon first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortalClipDebugPlane {
+    /// The polygon survived every clip plane.
+    None,
+    /// Near-depth clipping emptied the polygon.
+    Near,
+    /// Left window clipping emptied the polygon.
+    Left,
+    /// Right window clipping emptied the polygon.
+    Right,
+    /// Bottom window clipping emptied the polygon.
+    Bottom,
+    /// Top window clipping emptied the polygon.
+    Top,
+}
+
+/// Final runtime decision for a portal clip diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortalClipDebugDecision {
+    /// The portal produced a non-tiny child clip window.
+    Accepted,
+    /// The portal was rejected by the source-facing backface test.
+    Backface,
+    /// No projectable part of the portal was in front of the near plane.
+    EmptyProjection,
+    /// The projected portal did not overlap the inherited parent window.
+    NoWindowOverlap,
+    /// The portal overlapped but the resulting clip was below the minimum size.
+    Tiny,
+}
+
+/// Exact intermediate values for one directed portal visibility test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalClipDebug {
+    /// Parent portal window inherited by this test.
+    pub parent: PortalClipDebugRect,
+    /// Parent window expanded by the small screen-space pad used before clipping.
+    pub padded_parent: PortalClipDebugRect,
+    /// Whether the directed portal faces the camera.
+    pub front_faces_camera: bool,
+    /// Portal vertices after view transform.
+    pub view_vertices: [PortalClipDebugVertex; 4],
+    /// Polygon vertex count after near clipping.
+    pub near_count: u8,
+    /// Polygon vertex count after left clipping.
+    pub left_count: u8,
+    /// Polygon vertex count after right clipping.
+    pub right_count: u8,
+    /// Polygon vertex count after bottom clipping.
+    pub bottom_count: u8,
+    /// Polygon vertex count after top clipping.
+    pub top_count: u8,
+    /// First clip plane that emptied the polygon, if any.
+    pub first_empty_plane: PortalClipDebugPlane,
+    /// Projected bounds before clamping to the inherited parent window.
+    pub projected_bounds: Option<PortalClipDebugRect>,
+    /// Bounds from the fully clipped polygon, clamped to the parent window.
+    pub clipped_bounds: Option<PortalClipDebugRect>,
+    /// Bounds from the projection fallback, clamped to the parent window.
+    pub fallback_bounds: Option<PortalClipDebugRect>,
+    /// Final child clip window used by traversal, if accepted before tiny rejection.
+    pub result_bounds: Option<PortalClipDebugRect>,
+    /// Whether the final child clip failed the minimum-size test.
+    pub tiny: bool,
+    /// Final visibility decision matching the runtime traversal.
+    pub decision: PortalClipDebugDecision,
+}
+
 /// One portal-clipped room beyond the currently accepted set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortalFrontierRoom {
@@ -612,6 +735,140 @@ fn portal_passes_camera_window(
     !portal_clip_is_tiny(child_clip, camera.min_portal_width_q12.max(0))
 }
 
+/// Return exact intermediate clip values for one directed portal test.
+pub fn debug_portal_clip(
+    portal: LevelRoomPortalRecord,
+    camera: PortalVisibilityCamera,
+    parent: PortalFrustum,
+) -> PortalClipDebug {
+    let mut vertices = [PortalViewVertex::ZERO; PORTAL_CLIP_VERTEX_CAPACITY];
+    let mut scratch = [PortalViewVertex::ZERO; PORTAL_CLIP_VERTEX_CAPACITY];
+    let mut view_vertices = [PortalClipDebugVertex { x: 0, y: 0, z: 0 }; 4];
+    let mut i = 0usize;
+    while i < 4 {
+        let vertex = portal_view_vertex(portal, camera, i);
+        vertices[i] = vertex;
+        view_vertices[i] = PortalClipDebugVertex::from_view(vertex);
+        i += 1;
+    }
+
+    let clip_left = parent.left_tan_q12.saturating_sub(PORTAL_SCREEN_PAD_Q12);
+    let clip_right = parent.right_tan_q12.saturating_add(PORTAL_SCREEN_PAD_Q12);
+    let clip_bottom = parent.min_y_tan_q12.saturating_sub(PORTAL_SCREEN_PAD_Q12);
+    let clip_top = parent.max_y_tan_q12.saturating_add(PORTAL_SCREEN_PAD_Q12);
+    let padded_parent = PortalClipDebugRect {
+        left_tan_q12: clip_left,
+        right_tan_q12: clip_right,
+        min_y_tan_q12: clip_bottom,
+        max_y_tan_q12: clip_top,
+    };
+
+    let mut first_empty_plane = PortalClipDebugPlane::None;
+    let mut count = 4usize;
+    count = clip_portal_polygon_against_plane(
+        &mut vertices,
+        &mut scratch,
+        count,
+        PortalClipPlane::Near(1),
+    );
+    let near_count = count.min(u8::MAX as usize) as u8;
+    if count == 0 {
+        first_empty_plane = PortalClipDebugPlane::Near;
+    }
+    count = clip_portal_polygon_against_plane(
+        &mut vertices,
+        &mut scratch,
+        count,
+        PortalClipPlane::Left(clip_left),
+    );
+    let left_count = count.min(u8::MAX as usize) as u8;
+    if count == 0 && first_empty_plane == PortalClipDebugPlane::None {
+        first_empty_plane = PortalClipDebugPlane::Left;
+    }
+    count = clip_portal_polygon_against_plane(
+        &mut vertices,
+        &mut scratch,
+        count,
+        PortalClipPlane::Right(clip_right),
+    );
+    let right_count = count.min(u8::MAX as usize) as u8;
+    if count == 0 && first_empty_plane == PortalClipDebugPlane::None {
+        first_empty_plane = PortalClipDebugPlane::Right;
+    }
+    count = clip_portal_polygon_against_plane(
+        &mut vertices,
+        &mut scratch,
+        count,
+        PortalClipPlane::Bottom(clip_bottom),
+    );
+    let bottom_count = count.min(u8::MAX as usize) as u8;
+    if count == 0 && first_empty_plane == PortalClipDebugPlane::None {
+        first_empty_plane = PortalClipDebugPlane::Bottom;
+    }
+    count = clip_portal_polygon_against_plane(
+        &mut vertices,
+        &mut scratch,
+        count,
+        PortalClipPlane::Top(clip_top),
+    );
+    let top_count = count.min(u8::MAX as usize) as u8;
+    if count == 0 && first_empty_plane == PortalClipDebugPlane::None {
+        first_empty_plane = PortalClipDebugPlane::Top;
+    }
+
+    let clipped_bounds =
+        clipped_portal_surface_polygon_clip(portal, camera, parent).map(PortalClipDebugRect::from_clip);
+    let projected_bounds = projected_portal_surface_bounds(portal, camera)
+        .map(PortalClipDebugRect::from_clip);
+    let fallback_bounds = projected_portal_surface_bounds_clip(portal, camera, parent)
+        .map(PortalClipDebugRect::from_clip);
+    let result_bounds = fallback_bounds;
+    let tiny = result_bounds
+        .map(|clip| {
+            portal_clip_is_tiny(
+                PortalClip {
+                    left_tan_q12: clip.left_tan_q12,
+                    right_tan_q12: clip.right_tan_q12,
+                    min_y_tan_q12: clip.min_y_tan_q12,
+                    max_y_tan_q12: clip.max_y_tan_q12,
+                },
+                camera.min_portal_width_q12.max(0),
+            )
+        })
+        .unwrap_or(false);
+    let front_faces_camera = portal_front_faces_camera(portal, camera);
+    let decision = if !front_faces_camera {
+        PortalClipDebugDecision::Backface
+    } else if result_bounds.is_none() && projected_bounds.is_none() {
+        PortalClipDebugDecision::EmptyProjection
+    } else if result_bounds.is_none() {
+        PortalClipDebugDecision::NoWindowOverlap
+    } else if tiny {
+        PortalClipDebugDecision::Tiny
+    } else {
+        PortalClipDebugDecision::Accepted
+    };
+
+    PortalClipDebug {
+        parent: PortalClipDebugRect::from_frustum(parent),
+        padded_parent,
+        front_faces_camera,
+        view_vertices,
+        near_count,
+        left_count,
+        right_count,
+        bottom_count,
+        top_count,
+        first_empty_plane,
+        projected_bounds,
+        clipped_bounds,
+        fallback_bounds,
+        result_bounds,
+        tiny,
+        decision,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PortalClip {
     left_tan_q12: i32,
@@ -646,6 +903,14 @@ fn portal_front_faces_camera(
 }
 
 fn clipped_portal_clip(
+    portal: LevelRoomPortalRecord,
+    camera: PortalVisibilityCamera,
+    parent: PortalFrustum,
+) -> Option<PortalClip> {
+    projected_portal_surface_bounds_clip(portal, camera, parent)
+}
+
+fn clipped_portal_surface_polygon_clip(
     portal: LevelRoomPortalRecord,
     camera: PortalVisibilityCamera,
     parent: PortalFrustum,
@@ -693,7 +958,7 @@ fn clipped_portal_clip(
         PortalClipPlane::Top(clip_top),
     );
     if count == 0 {
-        return projected_portal_surface_bounds_clip(portal, camera, parent);
+        return None;
     }
 
     let mut bounds = PortalClipBounds::EMPTY;
@@ -704,7 +969,7 @@ fn clipped_portal_clip(
     }
 
     if !bounds.valid() {
-        return projected_portal_surface_bounds_clip(portal, camera, parent);
+        return None;
     }
     let left = bounds
         .x
@@ -734,13 +999,30 @@ fn clipped_portal_clip(
             max_y_tan_q12: max_y,
         });
     }
-    projected_portal_surface_bounds_clip(portal, camera, parent)
+    None
 }
 
 fn projected_portal_surface_bounds_clip(
     portal: LevelRoomPortalRecord,
     camera: PortalVisibilityCamera,
     parent: PortalFrustum,
+) -> Option<PortalClip> {
+    let bounds = projected_portal_surface_bounds(portal, camera)?;
+    let left = bounds.left_tan_q12.max(parent.left_tan_q12);
+    let right = bounds.right_tan_q12.min(parent.right_tan_q12);
+    let min_y = bounds.min_y_tan_q12.max(parent.min_y_tan_q12);
+    let max_y = bounds.max_y_tan_q12.min(parent.max_y_tan_q12);
+    (left <= right && min_y <= max_y).then_some(PortalClip {
+        left_tan_q12: left,
+        right_tan_q12: right,
+        min_y_tan_q12: min_y,
+        max_y_tan_q12: max_y,
+    })
+}
+
+fn projected_portal_surface_bounds(
+    portal: LevelRoomPortalRecord,
+    camera: PortalVisibilityCamera,
 ) -> Option<PortalClip> {
     let near = 1;
     let mut vertices = [PortalViewVertex::ZERO; 4];
@@ -769,31 +1051,11 @@ fn projected_portal_surface_bounds_clip(
     if !bounds.valid() {
         return None;
     }
-    let left = bounds
-        .x
-        .min_q12
-        .saturating_sub(PORTAL_SCREEN_PAD_Q12)
-        .max(parent.left_tan_q12);
-    let right = bounds
-        .x
-        .max_q12
-        .saturating_add(PORTAL_SCREEN_PAD_Q12)
-        .min(parent.right_tan_q12);
-    let min_y = bounds
-        .y
-        .min_q12
-        .saturating_sub(PORTAL_SCREEN_PAD_Q12)
-        .max(parent.min_y_tan_q12);
-    let max_y = bounds
-        .y
-        .max_q12
-        .saturating_add(PORTAL_SCREEN_PAD_Q12)
-        .min(parent.max_y_tan_q12);
-    (left <= right && min_y <= max_y).then_some(PortalClip {
-        left_tan_q12: left,
-        right_tan_q12: right,
-        min_y_tan_q12: min_y,
-        max_y_tan_q12: max_y,
+    Some(PortalClip {
+        left_tan_q12: bounds.x.min_q12.saturating_sub(PORTAL_SCREEN_PAD_Q12),
+        right_tan_q12: bounds.x.max_q12.saturating_add(PORTAL_SCREEN_PAD_Q12),
+        min_y_tan_q12: bounds.y.min_q12.saturating_sub(PORTAL_SCREEN_PAD_Q12),
+        max_y_tan_q12: bounds.y.max_q12.saturating_add(PORTAL_SCREEN_PAD_Q12),
     })
 }
 
@@ -1416,6 +1678,84 @@ mod tests {
         assert_eq!(out.visible_room_mask(), 0b11);
         assert_eq!(out.stats.portals_accepted, 1);
         assert_eq!(out.stats.reject_frustum, 0);
+    }
+
+    #[test]
+    fn accepts_demo7_second_hop_portal_from_captured_camera() {
+        let rooms = [
+            room(0, 0, 0),
+            room(1, 0, 0),
+            room(2, 0, 0),
+            room(3, 4, 2),
+            room(4, 0, 0),
+            room(5, 9, 2),
+            room(6, 0, 0),
+        ];
+        let dummy = wall_portal(0, 0, 0, 0, 0);
+        let portals = [
+            dummy,
+            dummy,
+            dummy,
+            dummy,
+            LevelRoomPortalRecord {
+                source_room: RoomIndex(3),
+                destination_room: RoomIndex(5),
+                kind: 0,
+                normal_x: -1,
+                normal_y: 0,
+                normal_z: 0,
+                vertex_x: [-2048, -2048, -2048, -2048],
+                vertex_y: [0, 0, 4160, 4160],
+                vertex_z: [-4096, -10240, -10240, -4096],
+            },
+            LevelRoomPortalRecord {
+                source_room: RoomIndex(3),
+                destination_room: RoomIndex(2),
+                kind: 0,
+                normal_x: 0,
+                normal_y: 0,
+                normal_z: 1,
+                vertex_x: [-10240, -6144, -6144, -10240],
+                vertex_y: [0, 0, 2176, 2176],
+                vertex_z: [-12288, -12288, -12288, -12288],
+            },
+            dummy,
+            dummy,
+            dummy,
+            LevelRoomPortalRecord {
+                source_room: RoomIndex(5),
+                destination_room: RoomIndex(6),
+                kind: 0,
+                normal_x: 0,
+                normal_y: 0,
+                normal_z: -1,
+                vertex_x: [0, 2048, 2048, 0],
+                vertex_y: [0, 0, 2176, 2176],
+                vertex_z: [-4096, -4096, -4096, -4096],
+            },
+            LevelRoomPortalRecord {
+                source_room: RoomIndex(5),
+                destination_room: RoomIndex(3),
+                kind: 0,
+                normal_x: 1,
+                normal_y: 0,
+                normal_z: 0,
+                vertex_x: [-2048, -2048, -2048, -2048],
+                vertex_y: [0, 0, 4160, 4160],
+                vertex_z: [-4096, -10240, -10240, -4096],
+            },
+        ];
+        let camera = PortalVisibilityCamera::new(
+            -5615, 1638, -8915, -3573, -2003, -680, 4039, 64, 16_384, 2048, 1536, 4,
+        );
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        build_portal_visibility(&rooms, &portals, RoomIndex(3), camera, 8, &mut out);
+
+        assert!(out.contains_room(RoomIndex(5)));
+        assert!(out.contains_room(RoomIndex(6)));
+        assert_ne!(out.stats.accepted_portal_mask & (1 << 9), 0);
+        assert_eq!(out.stats.reject_frustum_portal_mask & (1 << 9), 0);
     }
 
     #[test]
