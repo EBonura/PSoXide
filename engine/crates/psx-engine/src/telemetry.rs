@@ -69,6 +69,8 @@ pub mod stage {
     pub const FAR_VISTA: u16 = 33;
     /// Editor-authored image/card prop rendering.
     pub const IMAGE_PROPS: u16 = 34;
+    /// Portal traversal and visible-room selection.
+    pub const PORTAL_VISIBILITY: u16 = 35;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
