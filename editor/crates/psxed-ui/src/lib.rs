@@ -34,8 +34,9 @@ use psxed_project::streaming::{collect_scene_resource_use, SceneResourceUse};
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
     default_model_collision_radius_for_height, snap_height, CharacterControllerSettings,
-    ColliderShape, FarVistaSettings, GridCellBounds, GridDirection, GridHorizontalFace, GridSector,
-    GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
+    ColliderShape, EditorCameraMode, EditorCameraState, EditorVisibilityState, FarVistaSettings,
+    GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
+    GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
     PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
     WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
@@ -179,8 +180,7 @@ pub struct EditorWorkspace {
     /// Active 3D viewport screen-space marquee selection.
     viewport_3d_box_select: Option<Viewport3dBoxSelect>,
     /// Selection mode the Select tool picks at: a whole face,
-    /// one of its edges, or one of its corners. Hotkeys 1 / 2 / 3
-    /// toggle.
+    /// one of its edges, or one of its corners.
     selection_mode: SelectionMode,
     /// Transform gizmo mode for selected scene nodes in the 3D
     /// viewport. Move keeps the existing axis handles; Rotate edits
@@ -1308,13 +1308,6 @@ impl TransformGizmoMode {
         }
     }
 
-    const fn hint(self) -> &'static str {
-        match self {
-            Self::Move => "Drag axis handles to move selected nodes.",
-            Self::Rotate => "Drag the ring to rotate selected nodes around Y.",
-            Self::Scale => "Drag handles to resize selected image props.",
-        }
-    }
 }
 
 /// Floor/ceiling edit granularity for Select mode.
@@ -1736,15 +1729,6 @@ pub enum ViewportCameraMode {
     Free,
 }
 
-impl ViewportCameraMode {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Orbit => "Orbit",
-            Self::Free => "Free",
-        }
-    }
-}
-
 /// Snapshot of the editor's 3D viewport camera, handed to the
 /// frontend each frame so it can drive the editor-owned `HwRenderer`
 /// from the same state the editor's viewport input updates.
@@ -2132,6 +2116,8 @@ impl EditorWorkspace {
         workspace.status =
             sync_status.unwrap_or_else(|| format!("Loaded {}", short_path(&workspace.project_dir)));
         workspace.select_first_room();
+        workspace.apply_project_editor_camera();
+        workspace.apply_project_editor_visibility();
         Ok(workspace)
     }
 
@@ -2140,6 +2126,24 @@ impl EditorWorkspace {
     /// of the public API.
     fn with_project(project_dir: PathBuf, project: ProjectDocument) -> Self {
         let saved_project_name = project.name.clone();
+        let editor_camera = project.editor_camera;
+        let editor_visibility = project.editor_visibility;
+        let camera_mode = match editor_camera.mode {
+            EditorCameraMode::Orbit => ViewportCameraMode::Orbit,
+            EditorCameraMode::Free => ViewportCameraMode::Free,
+        };
+        let free_initialized =
+            editor_camera.free_initialized || editor_camera.mode == EditorCameraMode::Free;
+        let free_position = if editor_camera.free_initialized {
+            editor_camera.free_position
+        } else {
+            orbit_camera_position_i32(
+                editor_camera.orbit_yaw_q12,
+                editor_camera.orbit_pitch_q12,
+                editor_camera.orbit_radius,
+                editor_camera.orbit_target,
+            )
+        };
         Self {
             project,
             project_dir,
@@ -2201,13 +2205,13 @@ impl EditorWorkspace {
             brush_material: None,
             snap_to_grid: true,
             snap_units: 16,
-            show_grid: true,
-            show_portals: true,
-            preview_fog: true,
-            preview_backface_wireframe: true,
-            preview_bounds: true,
-            show_play_debug_overlays: true,
-            show_play_debug_map: true,
+            show_grid: editor_visibility.show_grid,
+            show_portals: editor_visibility.show_portals,
+            preview_fog: editor_visibility.preview_fog,
+            preview_backface_wireframe: editor_visibility.preview_backface_wireframe,
+            preview_bounds: editor_visibility.preview_bounds,
+            show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
+            show_play_debug_map: editor_visibility.show_play_debug_map,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
@@ -2219,18 +2223,15 @@ impl EditorWorkspace {
             viewport_pan: Vec2::ZERO,
             viewport_zoom: DEFAULT_VIEWPORT_ZOOM,
             last_viewport_size: Vec2::new(1280.0, 720.0),
-            // Default orbit: ~22° pitch above the target, looking
-            // toward +Z, radius wide enough to frame a 4×4 stone room
-            // at the cooker's standard 1024-unit sector size.
-            viewport_3d_camera_mode: ViewportCameraMode::Orbit,
-            viewport_3d_yaw: 256,
-            viewport_3d_pitch: 256,
-            viewport_3d_radius: 6144,
-            viewport_3d_target: [0, 512, 0],
-            viewport_3d_free_yaw: 256,
-            viewport_3d_free_pitch: 256,
-            viewport_3d_free_position: orbit_camera_position_i32(256, 256, 6144, [0, 512, 0]),
-            viewport_3d_free_initialized: false,
+            viewport_3d_camera_mode: camera_mode,
+            viewport_3d_yaw: editor_camera.orbit_yaw_q12,
+            viewport_3d_pitch: editor_camera.orbit_pitch_q12,
+            viewport_3d_radius: editor_camera.orbit_radius,
+            viewport_3d_target: editor_camera.orbit_target,
+            viewport_3d_free_yaw: editor_camera.free_yaw_q12,
+            viewport_3d_free_pitch: editor_camera.free_pitch_q12,
+            viewport_3d_free_position: free_position,
+            viewport_3d_free_initialized: free_initialized,
             texture_thumbs: HashMap::new(),
             model_resource_preview_texture: None,
             animation_viewer: ModelAnimationViewerState::default(),
@@ -2242,6 +2243,94 @@ impl EditorWorkspace {
             status: "Editor ready".to_string(),
             pending_playtest_request: None,
         }
+    }
+
+    fn current_editor_camera_state(&self) -> EditorCameraState {
+        EditorCameraState {
+            mode: match self.viewport_3d_camera_mode {
+                ViewportCameraMode::Orbit => EditorCameraMode::Orbit,
+                ViewportCameraMode::Free => EditorCameraMode::Free,
+            },
+            orbit_yaw_q12: self.viewport_3d_yaw,
+            orbit_pitch_q12: self.viewport_3d_pitch,
+            orbit_radius: self.viewport_3d_radius,
+            orbit_target: self.viewport_3d_target,
+            free_yaw_q12: self.viewport_3d_free_yaw,
+            free_pitch_q12: self.viewport_3d_free_pitch,
+            free_position: if self.viewport_3d_free_initialized {
+                self.viewport_3d_free_position
+            } else {
+                [0, 0, 0]
+            },
+            free_initialized: self.viewport_3d_free_initialized,
+        }
+    }
+
+    fn persist_editor_camera_state(&mut self) {
+        let mut editor_camera = self.current_editor_camera_state();
+        editor_camera.normalize();
+        if self.project.editor_camera != editor_camera {
+            self.project.editor_camera = editor_camera;
+            self.dirty = true;
+        }
+    }
+
+    fn apply_project_editor_camera(&mut self) {
+        let mut editor_camera = self.project.editor_camera;
+        editor_camera.normalize();
+        self.viewport_3d_camera_mode = match editor_camera.mode {
+            EditorCameraMode::Orbit => ViewportCameraMode::Orbit,
+            EditorCameraMode::Free => ViewportCameraMode::Free,
+        };
+        self.viewport_3d_yaw = editor_camera.orbit_yaw_q12;
+        self.viewport_3d_pitch = editor_camera.orbit_pitch_q12;
+        self.viewport_3d_radius = editor_camera.orbit_radius;
+        self.viewport_3d_target = editor_camera.orbit_target;
+        self.viewport_3d_free_yaw = editor_camera.free_yaw_q12;
+        self.viewport_3d_free_pitch = editor_camera.free_pitch_q12;
+        self.viewport_3d_free_position = if editor_camera.free_initialized {
+            editor_camera.free_position
+        } else {
+            orbit_camera_position_i32(
+                editor_camera.orbit_yaw_q12,
+                editor_camera.orbit_pitch_q12,
+                editor_camera.orbit_radius,
+                editor_camera.orbit_target,
+            )
+        };
+        self.viewport_3d_free_initialized =
+            editor_camera.free_initialized || editor_camera.mode == EditorCameraMode::Free;
+    }
+
+    fn current_editor_visibility_state(&self) -> EditorVisibilityState {
+        EditorVisibilityState {
+            show_grid: self.show_grid,
+            show_portals: self.show_portals,
+            preview_fog: self.preview_fog,
+            preview_backface_wireframe: self.preview_backface_wireframe,
+            preview_bounds: self.preview_bounds,
+            show_play_debug_overlays: self.show_play_debug_overlays,
+            show_play_debug_map: self.show_play_debug_map,
+        }
+    }
+
+    fn persist_editor_visibility_state(&mut self) {
+        let editor_visibility = self.current_editor_visibility_state();
+        if self.project.editor_visibility != editor_visibility {
+            self.project.editor_visibility = editor_visibility;
+            self.dirty = true;
+        }
+    }
+
+    fn apply_project_editor_visibility(&mut self) {
+        let editor_visibility = self.project.editor_visibility;
+        self.show_grid = editor_visibility.show_grid;
+        self.show_portals = editor_visibility.show_portals;
+        self.preview_fog = editor_visibility.preview_fog;
+        self.preview_backface_wireframe = editor_visibility.preview_backface_wireframe;
+        self.preview_bounds = editor_visibility.preview_bounds;
+        self.show_play_debug_overlays = editor_visibility.show_play_debug_overlays;
+        self.show_play_debug_map = editor_visibility.show_play_debug_map;
     }
 
     /// Current project document.
@@ -2269,6 +2358,8 @@ impl EditorWorkspace {
     /// Save to `<project_dir>/project.ron`, retargeting the project
     /// directory when the user-facing project name changes.
     pub fn save(&mut self) -> Result<(), String> {
+        self.persist_editor_camera_state();
+        self.persist_editor_visibility_state();
         if self.floating_geometry.is_some() {
             return Err("Place or cancel the duplicate preview before saving".to_string());
         }
@@ -2319,6 +2410,8 @@ impl EditorWorkspace {
 
     /// Save only when the project contains unsaved edits.
     pub fn save_if_dirty(&mut self) -> Result<bool, String> {
+        self.persist_editor_camera_state();
+        self.persist_editor_visibility_state();
         if !self.dirty {
             return Ok(false);
         }
@@ -2358,6 +2451,8 @@ impl EditorWorkspace {
                 self.status = sync_status
                     .unwrap_or_else(|| format!("Reloaded {}", short_path(&self.project_dir)));
                 self.select_first_room();
+                self.apply_project_editor_camera();
+                self.apply_project_editor_visibility();
             }
             Err(error) => {
                 self.status = format!("Reload failed: {error}");
@@ -4331,6 +4426,7 @@ impl EditorWorkspace {
                 self.viewport_3d_free_initialized = true;
             }
         }
+        self.persist_editor_camera_state();
     }
 
     fn pan_viewport_3d_camera(&mut self, delta: Vec2, panel_size: Vec2) {
@@ -4341,6 +4437,7 @@ impl EditorWorkspace {
                     self.viewport_3d_target[axis] =
                         round_to_i32(self.viewport_3d_target[axis] as f32 + amount);
                 }
+                self.persist_editor_camera_state();
             }
             ViewportCameraMode::Free => {
                 self.move_free_camera_world(world_delta);
@@ -4357,6 +4454,7 @@ impl EditorWorkspace {
                 let factor = if scroll > 0.0 { 0.92 } else { 1.08 };
                 self.viewport_3d_radius =
                     ((self.viewport_3d_radius as f32) * factor).clamp(512.0, 262_144.0) as i32;
+                self.persist_editor_camera_state();
             }
             ViewportCameraMode::Free => {
                 let amount = (scroll * 8.0).clamp(-4096.0, 4096.0);
@@ -4412,6 +4510,7 @@ impl EditorWorkspace {
                 round_to_i32(self.viewport_3d_free_position[axis] as f32 + amount);
         }
         self.viewport_3d_free_initialized = true;
+        self.persist_editor_camera_state();
     }
 
     fn set_viewport_3d_camera_mode(&mut self, mode: ViewportCameraMode) {
@@ -4419,6 +4518,7 @@ impl EditorWorkspace {
             self.sync_free_camera_to_orbit();
         }
         self.viewport_3d_camera_mode = mode;
+        self.persist_editor_camera_state();
     }
 
     fn sync_free_camera_to_orbit(&mut self) {
@@ -4479,20 +4579,16 @@ impl EditorWorkspace {
         let control_size = Vec2::splat(28.0);
         let control_gap = 6.0;
         let controls_origin = rect.left_top() + Vec2::new(8.0, 8.0);
-        let profiler_toggle_rect = Rect::from_min_size(controls_origin, control_size);
-        let map_toggle_rect = Rect::from_min_size(
-            profiler_toggle_rect.left_bottom() + Vec2::new(0.0, control_gap),
-            control_size,
-        );
+        let visibility_rect = Rect::from_min_size(controls_origin, control_size);
         let record_rect = Rect::from_min_size(
-            map_toggle_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            visibility_rect.left_bottom() + Vec2::new(0.0, control_gap),
             control_size,
         );
         let replay_rect = Rect::from_min_size(
             record_rect.left_bottom() + Vec2::new(0.0, control_gap),
             control_size,
         );
-        let controls_rect = Rect::from_min_max(profiler_toggle_rect.min, replay_rect.max);
+        let controls_rect = Rect::from_min_max(visibility_rect.min, replay_rect.max);
         let recording = viewport_3d.play_tape.mode == EditorPlaytestTapeMode::Recording;
         let replaying = viewport_3d.play_tape.mode == EditorPlaytestTapeMode::Replaying;
         let can_record = !replaying;
@@ -4721,38 +4817,7 @@ impl EditorWorkspace {
                 draw_play_chunk_debug_map(&painter, rect, &self.project, metrics);
             }
         }
-        if draw_play_overlay_icon_button(
-            ui,
-            profiler_toggle_rect,
-            "play_profiler_overlay_toggle",
-            icons::TERMINAL,
-            if self.show_play_debug_overlays {
-                "Hide play profiler"
-            } else {
-                "Show play profiler"
-            },
-            self.show_play_debug_overlays,
-            true,
-            None,
-        ) {
-            self.show_play_debug_overlays = !self.show_play_debug_overlays;
-        }
-        if draw_play_overlay_icon_button(
-            ui,
-            map_toggle_rect,
-            "play_portal_map_toggle",
-            icons::GRID,
-            if self.show_play_debug_map {
-                "Hide portal map"
-            } else {
-                "Show portal map"
-            },
-            self.show_play_debug_map,
-            true,
-            None,
-        ) {
-            self.show_play_debug_map = !self.show_play_debug_map;
-        }
+        self.draw_play_overlay_visibility_menu(ui, visibility_rect);
         if draw_play_overlay_icon_button(
             ui,
             record_rect,
@@ -4797,6 +4862,47 @@ impl EditorWorkspace {
                 EditorPlaytestRequest::StartInputReplay
             });
         }
+    }
+
+    fn draw_play_overlay_visibility_menu(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let icon = if !self.show_play_debug_overlays || !self.show_play_debug_map {
+            icons::EYE_OFF
+        } else {
+            icons::EYE
+        };
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.set_min_size(rect.size());
+            let response = egui::menu::menu_custom_button(
+                ui,
+                egui::Button::new(icons::text(icon, 14.0)).min_size(rect.size()),
+                |ui| {
+                    ui.set_min_width(190.0);
+                    let mut changed = false;
+                    egui::Grid::new("play-overlay-visibility-menu-grid")
+                        .num_columns(2)
+                        .spacing(Vec2::new(14.0, 5.0))
+                        .show(ui, |ui| {
+                            changed |= visibility_menu_row(
+                                ui,
+                                "play-overlay-profiler",
+                                "Profiler",
+                                &mut self.show_play_debug_overlays,
+                            );
+                            changed |= visibility_menu_row(
+                                ui,
+                                "play-overlay-map",
+                                "Portal map",
+                                &mut self.show_play_debug_map,
+                            );
+                        });
+                    if changed {
+                        self.persist_editor_visibility_state();
+                    }
+                },
+            )
+            .response;
+            response.on_hover_text("Visibility");
+        });
     }
 
     /// Snapshot of the 3D camera the frontend needs to drive the
@@ -4947,8 +5053,7 @@ impl EditorWorkspace {
         faces
     }
 
-    /// Active selection mode (Face / Edge / Vertex). Hotkeys
-    /// 1 / 2 / 3 cycle.
+    /// Active selection mode (Face / Edge / Vertex).
     pub fn selection_mode(&self) -> SelectionMode {
         self.selection_mode
     }
@@ -8717,6 +8822,7 @@ impl EditorWorkspace {
         if consume_duplicate {
             self.duplicate_current_selection();
         }
+        self.handle_toolbar_group_shortcuts(ctx);
 
         // F2 / Delete only fire when no widget owns focus -- so they
         // don't fight TextEdit content while the user is typing.
@@ -8767,23 +8873,170 @@ impl EditorWorkspace {
                     self.apply_tree_action(TreeAction::Delete(self.selected_node), &[]);
                 }
             }
-            // Selection-mode hotkeys: 1 / 2 / 3 = Face / Edge /
-            // Vertex (Blender convention). The focus guard above
-            // already keeps these from firing while a TextEdit
-            // owns focus.
-            let num1 = ctx.input_mut(|i| i.key_pressed(egui::Key::Num1));
-            if num1 {
-                self.set_selection_mode(SelectionMode::Face);
-            }
-            let num2 = ctx.input_mut(|i| i.key_pressed(egui::Key::Num2));
-            if num2 {
-                self.set_selection_mode(SelectionMode::Edge);
-            }
-            let num3 = ctx.input_mut(|i| i.key_pressed(egui::Key::Num3));
-            if num3 {
-                self.set_selection_mode(SelectionMode::Vertex);
-            }
         }
+    }
+
+    fn handle_toolbar_group_shortcuts(&mut self, ctx: &egui::Context) {
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num1) {
+            self.cycle_workspace_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num2) {
+            self.cycle_tool_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num3) {
+            self.cycle_transform_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num4) {
+            self.cycle_selection_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num5) {
+            self.cycle_horizontal_edit_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num6) {
+            self.cycle_vertex_connectivity_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num7) {
+            self.cycle_visibility_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num8) {
+            self.cycle_camera_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num9) {
+            self.cycle_view_dimension_group(reverse);
+        }
+    }
+
+    fn cycle_workspace_group(&mut self, reverse: bool) {
+        const VALUES: &[WorkspaceView] = &[WorkspaceView::Room, WorkspaceView::Animation];
+        self.active_workspace = cycle_value(VALUES, self.active_workspace, reverse);
+        self.status = format!("Workspace: {}", self.active_workspace.label());
+    }
+
+    fn cycle_tool_group(&mut self, reverse: bool) {
+        const ALL_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
+            (ViewTool::Select, None),
+            (ViewTool::PaintFloor, None),
+            (ViewTool::PaintWall, None),
+            (ViewTool::PaintCeiling, None),
+            (ViewTool::Erase, None),
+            (ViewTool::Place, Some(PlaceKind::PlayerSpawn)),
+            (ViewTool::Place, Some(PlaceKind::Portal)),
+        ];
+        const SELECT_ONLY: &[(ViewTool, Option<PlaceKind>)] = &[(ViewTool::Select, None)];
+        let values = if self.active_room_id().is_some() {
+            ALL_VALUES
+        } else {
+            SELECT_ONLY
+        };
+        let current = self.active_tool_cycle_value();
+        let next = cycle_value(values, current, reverse);
+        self.set_active_tool_cycle_value(next);
+    }
+
+    fn active_tool_cycle_value(&self) -> (ViewTool, Option<PlaceKind>) {
+        if self.active_tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
+            (ViewTool::Place, Some(PlaceKind::Portal))
+        } else if self.active_tool == ViewTool::Place {
+            (ViewTool::Place, Some(PlaceKind::PlayerSpawn))
+        } else {
+            (self.active_tool, None)
+        }
+    }
+
+    fn set_active_tool_cycle_value(&mut self, value: (ViewTool, Option<PlaceKind>)) {
+        self.active_workspace = WorkspaceView::Room;
+        let (tool, place_kind) = value;
+        self.active_tool = tool;
+        if let Some(place_kind) = place_kind {
+            self.place_kind = place_kind;
+        }
+        if self.place_kind == PlaceKind::Portal {
+            self.clear_sector_selection();
+            self.clear_primitive_selection_state();
+            self.hovered_primitive = None;
+        }
+        self.status = if tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
+            "Tool: Portal".to_string()
+        } else {
+            format!("Tool: {}", tool.label())
+        };
+    }
+
+    fn cycle_transform_group(&mut self, reverse: bool) {
+        const VALUES: &[TransformGizmoMode] = &[
+            TransformGizmoMode::Move,
+            TransformGizmoMode::Rotate,
+            TransformGizmoMode::Scale,
+        ];
+        self.set_transform_gizmo_mode(cycle_value(VALUES, self.transform_gizmo_mode, reverse));
+    }
+
+    fn set_transform_gizmo_mode(&mut self, mode: TransformGizmoMode) {
+        self.transform_gizmo_mode = mode;
+        self.primitive_gizmo_drag = None;
+        self.node_gizmo_drag = None;
+        self.node_drag = None;
+        self.status = format!("Transform: {}", mode.label());
+    }
+
+    fn cycle_selection_group(&mut self, reverse: bool) {
+        const VALUES: &[SelectionMode] = &[
+            SelectionMode::Face,
+            SelectionMode::Edge,
+            SelectionMode::Vertex,
+        ];
+        self.set_selection_mode(cycle_value(VALUES, self.selection_mode, reverse));
+    }
+
+    fn cycle_horizontal_edit_group(&mut self, reverse: bool) {
+        const VALUES: &[HorizontalEditMode] =
+            &[HorizontalEditMode::Quad, HorizontalEditMode::Triangle];
+        self.set_horizontal_edit_mode(cycle_value(VALUES, self.horizontal_edit_mode, reverse));
+    }
+
+    fn cycle_vertex_connectivity_group(&mut self, reverse: bool) {
+        const VALUES: &[VertexConnectivity] =
+            &[VertexConnectivity::Welded, VertexConnectivity::Detached];
+        self.vertex_connectivity = cycle_value(VALUES, self.vertex_connectivity, reverse);
+        self.status = format!("Vertex edits: {}", self.vertex_connectivity.label());
+    }
+
+    fn cycle_visibility_group(&mut self, reverse: bool) {
+        let all_visible = !self.editor_visibility_has_hidden_items();
+        let show_all = reverse || !all_visible;
+        self.show_grid = show_all;
+        self.show_portals = show_all;
+        self.preview_fog = show_all;
+        self.preview_backface_wireframe = show_all;
+        self.preview_bounds = show_all;
+        self.show_play_debug_overlays = show_all;
+        self.show_play_debug_map = show_all;
+        self.persist_editor_visibility_state();
+        self.status = if show_all {
+            "Visibility: all shown".to_string()
+        } else {
+            "Visibility: all hidden".to_string()
+        };
+    }
+
+    fn cycle_camera_group(&mut self, reverse: bool) {
+        const VALUES: &[ViewportCameraMode] = &[ViewportCameraMode::Orbit, ViewportCameraMode::Free];
+        let mode = cycle_value(VALUES, self.viewport_3d_camera_mode, reverse);
+        self.set_viewport_3d_camera_mode(mode);
+        self.status = match mode {
+            ViewportCameraMode::Orbit => "Camera: Orbit".to_string(),
+            ViewportCameraMode::Free => "Camera: Free".to_string(),
+        };
+    }
+
+    fn cycle_view_dimension_group(&mut self, reverse: bool) {
+        const VALUES: &[bool] = &[true, false];
+        self.view_2d = cycle_value(VALUES, self.view_2d, reverse);
+        self.status = if self.view_2d {
+            "Viewport: 2D".to_string()
+        } else {
+            "Viewport: 3D".to_string()
+        };
     }
 
     /// Switch the Select tool's primitive mode. Tries to adapt
@@ -8949,6 +9202,7 @@ impl EditorWorkspace {
                 // No-op when `id` isn't a Room -- keeps the camera
                 // put while the user clicks through entity nodes.
                 self.frame_3d_on_room(self.selected_node);
+                self.persist_editor_camera_state();
             }
             TreeAction::BeginRename(id) => {
                 if let Some(node) = self.project.active_scene().node(id) {
@@ -11615,61 +11869,6 @@ impl EditorWorkspace {
         true
     }
 
-    fn viewport_context_chips(&self) -> Vec<String> {
-        if self.active_workspace == WorkspaceView::Animation {
-            return vec!["Animation Viewer".to_string()];
-        }
-
-        let mut chips = vec!["Map Edit".to_string(), self.active_tool.label().to_string()];
-        match self.active_tool {
-            ViewTool::Select => {
-                chips.push(self.selection_mode.label().to_string());
-                chips.push(self.horizontal_edit_mode.label().to_string());
-                chips.push(self.vertex_connectivity.label().to_string());
-            }
-            ViewTool::PaintWall => {
-                chips.push(self.wall_paint_shape.label().to_string());
-            }
-            ViewTool::Place => {
-                chips.push(self.place_kind.label().to_string());
-            }
-            ViewTool::PaintFloor | ViewTool::PaintCeiling | ViewTool::Erase => {}
-        }
-        chips.push(if self.view_2d {
-            "2D".to_string()
-        } else {
-            format!("3D {}", self.viewport_3d_camera_mode.label())
-        });
-        chips
-    }
-
-    fn viewport_header_status(&self) -> String {
-        if self.active_workspace == WorkspaceView::Animation {
-            return "Animation Preview".to_string();
-        }
-        if self.view_2d {
-            let zoom = (self.viewport_zoom / DEFAULT_VIEWPORT_ZOOM * 100.0).round() as u16;
-            return format!("2D Preview · Zoom {zoom}%");
-        }
-        self.viewport_3d_status_text()
-    }
-
-    fn viewport_3d_status_text(&self) -> String {
-        match self.viewport_3d_camera_mode {
-            ViewportCameraMode::Orbit => format!(
-                "3D Preview · Orbit yaw {} pitch {} r {}",
-                self.viewport_3d_yaw, self.viewport_3d_pitch, self.viewport_3d_radius
-            ),
-            ViewportCameraMode::Free => {
-                let [x, y, z] = self.viewport_3d_free_position;
-                format!(
-                    "3D Preview · Free x {x} y {y} z {z} yaw {} pitch {}",
-                    self.viewport_3d_free_yaw, self.viewport_3d_free_pitch
-                )
-            }
-        }
-    }
-
     fn draw_viewport(
         &mut self,
         ctx: &egui::Context,
@@ -11684,7 +11883,7 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 tool_panel_frame().show(ui, |ui| {
                     ui.expand_to_include_rect(ui.max_rect());
-                    self.draw_viewport_tabs(ui);
+                    self.draw_viewport_header_toolbar(ui);
                     tool_panel_body(ui, |ui| {
                         if self.active_workspace == WorkspaceView::Animation {
                             let action = model_animation_viewer::draw_model_animation_viewer(
@@ -11699,9 +11898,6 @@ impl EditorWorkspace {
                             }
                             return;
                         }
-
-                        self.draw_viewport_toolbar(ui);
-                        ui.separator();
 
                         if viewport_3d.mode == EditorViewport3dMode::Play {
                             self.draw_viewport_3d_play_body(ui, viewport_3d, playtest_status);
@@ -11901,243 +12097,359 @@ impl EditorWorkspace {
             });
     }
 
-    fn draw_viewport_tabs(&mut self, ui: &mut egui::Ui) {
-        let room_label = self
-            .active_room_id()
-            .and_then(|id| self.project.active_scene().node(id))
-            .map(|node| node.name.as_str())
-            .unwrap_or("(no map)");
-        let title = format!("{room_label}.map");
-        let context_chips = self.viewport_context_chips();
-        let header_status = self.viewport_header_status();
+    fn draw_viewport_header_toolbar(&mut self, ui: &mut egui::Ui) {
         egui::Frame::new()
             .fill(STUDIO_PANEL_HEADER)
-            .inner_margin(panel_header_margin())
+            .inner_margin(egui::Margin::symmetric(8, 5))
             .show(ui, |ui| {
-                ui.set_min_height(PANEL_HEADER_MIN_HEIGHT);
+                ui.set_min_height(32.0);
+                ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
                 ui.horizontal_wrapped(|ui| {
-                    for (view, label) in [
-                        (WorkspaceView::Room, title.as_str()),
-                        (WorkspaceView::Animation, WorkspaceView::Animation.label()),
-                    ] {
-                        let selected = self.active_workspace == view;
-                        if ui
-                            .selectable_label(selected, icons::label(view.icon(), label))
-                            .clicked()
-                        {
-                            self.active_workspace = view;
-                        }
-                    }
-                    ui.separator();
-                    for (index, chip) in context_chips.iter().enumerate() {
-                        context_chip(ui, chip, index == 1);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("Project: {}", self.project.name))
-                                .color(STUDIO_TEXT_WEAK),
-                        );
-                        ui.label(RichText::new(header_status).small().color(STUDIO_TEXT_WEAK));
-                    });
+                    self.draw_viewport_toolbar(ui);
                 });
             });
-        ui.separator();
     }
 
     fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
-        let room_active = self.active_room_id().is_some();
-        if !room_active && self.active_tool.requires_room_context() {
+        if self.active_room_id().is_none() && self.active_tool.requires_room_context() {
             self.active_tool = ViewTool::Select;
         }
-        egui::ScrollArea::horizontal()
-            .id_salt("viewport-toolbar-scroll")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for (tool, hint) in [
-                        (
-                            ViewTool::Select,
-                            "Click to select; use Move, Rotate, or Scale gizmo handles on selected nodes.",
-                        ),
-                        (
-                            ViewTool::PaintFloor,
-                            "Paint a floor on each cell you click or drag over.",
-                        ),
-                        (
-                            ViewTool::PaintWall,
-                            "Paint a wall on the edge nearest the click.",
-                        ),
-                        (ViewTool::PaintCeiling, "Paint a ceiling on each cell."),
-                        (ViewTool::Erase, "Clear floor/walls/ceiling from the cell."),
-                        (
-                            ViewTool::Place,
-                            "Drop a Spawn Point, entity marker, or portal seam marker at the clicked cell.",
-                        ),
-                    ] {
-                        let enabled = room_active || !tool.requires_room_context();
-                        let active = self.active_tool == tool
-                            && (!matches!(tool, ViewTool::Place)
-                                || !matches!(self.place_kind, PlaceKind::Portal));
-                        let clicked = ui
-                            .add_enabled_ui(enabled, |ui| {
-                                toolbar_icon_button(ui, active, tool.icon(), tool.label(), hint)
-                            })
-                            .inner;
-                        if clicked {
-                            self.active_tool = tool;
-                            if matches!(tool, ViewTool::Place)
-                                && matches!(self.place_kind, PlaceKind::Portal)
-                            {
-                                self.place_kind = PlaceKind::PlayerSpawn;
-                            }
-                        }
-                    }
-                    let portal_enabled = room_active;
-                    let portal_clicked = ui
-                        .add_enabled_ui(portal_enabled, |ui| {
-                            toolbar_icon_button(
-                                ui,
-                                self.active_tool == ViewTool::Place
-                                    && self.place_kind == PlaceKind::Portal,
-                                icons::WAYPOINT,
-                                "Portal",
-                                "Place a portal seam on the highlighted grid edge. Press R to rotate the edge.",
-                            )
-                        })
-                        .inner;
-                    if portal_clicked {
-                        self.active_tool = ViewTool::Place;
-                        self.place_kind = PlaceKind::Portal;
-                        self.clear_sector_selection();
-                        self.clear_primitive_selection_state();
-                        self.hovered_primitive = None;
-                    }
-                    ui.separator();
-                    if matches!(self.active_tool, ViewTool::Select) {
-                        self.draw_transform_gizmo_mode_picker(ui);
-                        ui.separator();
-                        self.draw_selection_mode_picker(ui);
-                        ui.separator();
-                        self.draw_horizontal_edit_mode_picker(ui);
-                        ui.separator();
-                        self.draw_vertex_connectivity_picker(ui);
-                    } else if matches!(self.active_tool, ViewTool::Place)
-                        && !matches!(self.place_kind, PlaceKind::Portal)
-                    {
-                        self.draw_place_kind_picker(ui);
-                    } else if matches!(self.active_tool, ViewTool::PaintWall) {
-                        self.draw_wall_paint_shape_picker(ui);
-                        ui.separator();
-                        self.draw_brush_material_picker(ui);
-                    } else {
-                        self.draw_brush_material_picker(ui);
-                    }
-                    ui.separator();
-                    if toolbar_icon_button(
-                        ui,
-                        self.snap_to_grid,
-                        icons::WAYPOINT,
-                        "Snap",
-                        "Snap movement and placement to the grid.",
-                    ) {
-                        self.snap_to_grid = !self.snap_to_grid;
-                    }
-                    ui.add_sized(
-                        [48.0, 22.0],
-                        egui::DragValue::new(&mut self.snap_units)
-                            .speed(1.0)
-                            .range(1..=256),
-                    )
-                    .on_hover_text("Snap interval.");
-                    if toolbar_icon_button(
-                        ui,
-                        self.show_grid,
-                        icons::GRID,
-                        "Grid",
-                        "Toggle grid overlay.",
-                    ) {
-                        self.show_grid = !self.show_grid;
-                    }
-                    if toolbar_icon_button(
-                        ui,
-                        self.show_portals,
-                        icons::WAYPOINT,
-                        "Portals",
-                        "Toggle portal markers, seam overlays, and portal-room boundaries.",
-                    ) {
-                        self.show_portals = !self.show_portals;
-                    }
-                    ui.add_enabled_ui(!self.view_2d, |ui| {
-                        if toolbar_icon_button(
-                            ui,
-                            self.preview_fog,
-                            icons::EYE,
-                            "Fog",
-                            "Toggle authored room fog in the editor 3D preview.",
-                        ) {
-                            self.preview_fog = !self.preview_fog;
-                        }
-                        if toolbar_icon_button(
-                            ui,
-                            self.preview_backface_wireframe,
-                            icons::SCAN,
-                            "Backfaces",
-                            "Toggle passive outlines for culled backfaces.",
-                        ) {
-                            self.preview_backface_wireframe = !self.preview_backface_wireframe;
-                        }
-                        if toolbar_icon_button(
-                            ui,
-                            self.preview_bounds,
-                            icons::BOX,
-                            "Bounds",
-                            "Toggle entity, prop, and collision bounds in the 3D preview.",
-                        ) {
-                            self.preview_bounds = !self.preview_bounds;
-                        }
-                    });
-                    ui.separator();
-                    ui.add_enabled_ui(!self.view_2d, |ui| {
-                        if toolbar_text_segment(
-                            ui,
-                            self.viewport_3d_camera_mode == ViewportCameraMode::Orbit,
-                            "Orbit",
-                            "Use the target/radius orbit camera.",
-                        ) {
-                            self.set_viewport_3d_camera_mode(ViewportCameraMode::Orbit);
-                        }
-                        if toolbar_text_segment(
-                            ui,
-                            self.viewport_3d_camera_mode == ViewportCameraMode::Free,
-                            "Free",
-                            "Use the free camera. Right/middle drag looks; WASD moves.",
-                        ) {
-                            self.set_viewport_3d_camera_mode(ViewportCameraMode::Free);
-                        }
-                    });
-                    ui.separator();
-                    ui.selectable_value(&mut self.view_2d, true, "2D");
-                    ui.selectable_value(&mut self.view_2d, false, "3D");
-                    ui.separator();
-                    let mut zoom_percent =
-                        (self.viewport_zoom / DEFAULT_VIEWPORT_ZOOM * 100.0) as u16;
-                    if ui
-                        .add_sized(
-                            [58.0, 22.0],
-                            egui::DragValue::new(&mut zoom_percent)
-                                .speed(1.0)
-                                .range(25..=250)
-                                .suffix("%"),
-                        )
-                        .on_hover_text("Viewport zoom.")
-                        .changed()
-                    {
-                        self.viewport_zoom = (zoom_percent as f32 / 100.0 * DEFAULT_VIEWPORT_ZOOM)
-                            .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
-                    }
-                });
+        ui.spacing_mut().item_spacing.x = 4.0;
+
+        toolbar_group_menu(
+            ui,
+            1,
+            self.active_workspace.icon(),
+            "Workspace",
+            self.active_workspace.label(),
+            |ui| self.draw_workspace_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            2,
+            self.active_tool_group_icon(),
+            "Tool",
+            self.active_tool_group_label(),
+            |ui| self.draw_tool_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            3,
+            self.transform_gizmo_mode.icon(),
+            "Transform",
+            self.transform_gizmo_mode.label(),
+            |ui| self.draw_transform_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            4,
+            icons::POINTER,
+            "Selection",
+            self.selection_mode.label(),
+            |ui| self.draw_selection_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            5,
+            icons::SQUARE,
+            "Surface",
+            self.horizontal_edit_mode.label(),
+            |ui| self.draw_horizontal_edit_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            6,
+            icons::BLEND,
+            "Vertex Edits",
+            self.vertex_connectivity.label(),
+            |ui| self.draw_vertex_connectivity_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            7,
+            self.visibility_group_icon(),
+            "Visibility",
+            self.visibility_group_label(),
+            |ui| self.draw_visibility_menu_contents(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            8,
+            icons::ROTATE_3D,
+            "Camera",
+            self.viewport_camera_mode_label(),
+            |ui| self.draw_camera_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            9,
+            self.view_dimension_group_icon(),
+            "Viewport",
+            self.view_dimension_group_label(),
+            |ui| self.draw_view_dimension_group_menu(ui),
+        );
+    }
+
+    fn draw_workspace_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(180.0);
+        for view in [WorkspaceView::Room, WorkspaceView::Animation] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(view.icon(), view.label()),
+                self.active_workspace == view,
+            ) {
+                self.active_workspace = view;
+                self.status = format!("Workspace: {}", view.label());
+            }
+        }
+    }
+
+    fn draw_tool_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(236.0);
+        let room_active = self.active_room_id().is_some();
+        for (tool, place_kind, icon, label) in [
+            (ViewTool::Select, None, ViewTool::Select.icon(), "Select"),
+            (
+                ViewTool::PaintFloor,
+                None,
+                ViewTool::PaintFloor.icon(),
+                "Floor",
+            ),
+            (ViewTool::PaintWall, None, ViewTool::PaintWall.icon(), "Wall"),
+            (
+                ViewTool::PaintCeiling,
+                None,
+                ViewTool::PaintCeiling.icon(),
+                "Ceiling",
+            ),
+            (ViewTool::Erase, None, ViewTool::Erase.icon(), "Erase"),
+            (
+                ViewTool::Place,
+                Some(PlaceKind::PlayerSpawn),
+                ViewTool::Place.icon(),
+                "Place",
+            ),
+            (
+                ViewTool::Place,
+                Some(PlaceKind::Portal),
+                icons::WAYPOINT,
+                "Portal",
+            ),
+        ] {
+            let enabled = room_active || !tool.requires_room_context();
+            let selected = self.active_tool_cycle_value() == (tool, place_kind);
+            ui.add_enabled_ui(enabled, |ui| {
+                if toolbar_menu_choice(ui, icons::label(icon, label), selected) {
+                    self.set_active_tool_cycle_value((tool, place_kind));
+                }
             });
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.snap_to_grid, "Snap");
+            ui.add_sized(
+                [64.0, 22.0],
+                egui::DragValue::new(&mut self.snap_units)
+                    .speed(1.0)
+                    .range(1..=256),
+            )
+            .on_hover_text("Snap interval.");
+        });
+
+        match self.active_tool {
+            ViewTool::Place if self.place_kind != PlaceKind::Portal => {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Kind");
+                    self.draw_place_kind_picker(ui);
+                });
+            }
+            ViewTool::PaintWall => {
+                ui.separator();
+                ui.label("Wall shape");
+                ui.horizontal(|ui| self.draw_wall_paint_shape_picker(ui));
+                ui.separator();
+                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
+            }
+            ViewTool::PaintFloor | ViewTool::PaintCeiling => {
+                ui.separator();
+                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
+            }
+            ViewTool::Select | ViewTool::Erase | ViewTool::Place => {}
+        }
+    }
+
+    fn draw_transform_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(176.0);
+        for mode in [
+            TransformGizmoMode::Move,
+            TransformGizmoMode::Rotate,
+            TransformGizmoMode::Scale,
+        ] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.transform_gizmo_mode == mode,
+            ) {
+                self.set_transform_gizmo_mode(mode);
+            }
+        }
+    }
+
+    fn draw_selection_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(156.0);
+        for mode in [
+            SelectionMode::Face,
+            SelectionMode::Edge,
+            SelectionMode::Vertex,
+        ] {
+            if toolbar_menu_choice(ui, mode.label(), self.selection_mode == mode) {
+                self.set_selection_mode(mode);
+            }
+        }
+    }
+
+    fn draw_horizontal_edit_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(156.0);
+        for mode in [HorizontalEditMode::Quad, HorizontalEditMode::Triangle] {
+            if toolbar_menu_choice(ui, mode.label(), self.horizontal_edit_mode == mode) {
+                self.set_horizontal_edit_mode(mode);
+            }
+        }
+    }
+
+    fn draw_vertex_connectivity_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(168.0);
+        for mode in [VertexConnectivity::Welded, VertexConnectivity::Detached] {
+            if toolbar_menu_choice(ui, mode.label(), self.vertex_connectivity == mode) {
+                self.vertex_connectivity = mode;
+                self.status = format!("Vertex edits: {}", mode.label());
+            }
+        }
+    }
+
+    fn draw_visibility_menu_contents(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(224.0);
+        let mut changed = false;
+        egui::Grid::new("viewport-visibility-menu-grid")
+            .num_columns(2)
+            .spacing(Vec2::new(14.0, 5.0))
+            .show(ui, |ui| {
+                changed |= visibility_menu_row(ui, "grid", "Grid", &mut self.show_grid);
+                changed |= visibility_menu_row(ui, "portals", "Portals", &mut self.show_portals);
+                changed |= visibility_menu_row(ui, "fog", "Fog", &mut self.preview_fog);
+                changed |= visibility_menu_row(
+                    ui,
+                    "backfaces",
+                    "Backfaces",
+                    &mut self.preview_backface_wireframe,
+                );
+                changed |= visibility_menu_row(ui, "bounds", "Bounds", &mut self.preview_bounds);
+                changed |= visibility_menu_row(
+                    ui,
+                    "play-profiler",
+                    "Play profiler",
+                    &mut self.show_play_debug_overlays,
+                );
+                changed |= visibility_menu_row(
+                    ui,
+                    "play-map",
+                    "Play portal map",
+                    &mut self.show_play_debug_map,
+                );
+            });
+        if changed {
+            self.persist_editor_visibility_state();
+        }
+    }
+
+    fn draw_camera_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(148.0);
+        for mode in [ViewportCameraMode::Orbit, ViewportCameraMode::Free] {
+            if toolbar_menu_choice(
+                ui,
+                viewport_camera_mode_label(mode),
+                self.viewport_3d_camera_mode == mode,
+            ) {
+                self.set_viewport_3d_camera_mode(mode);
+                self.status = format!("Camera: {}", viewport_camera_mode_label(mode));
+            }
+        }
+    }
+
+    fn draw_view_dimension_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(120.0);
+        if toolbar_menu_choice(ui, "2D", self.view_2d) {
+            self.view_2d = true;
+            self.status = "Viewport: 2D".to_string();
+        }
+        if toolbar_menu_choice(ui, "3D", !self.view_2d) {
+            self.view_2d = false;
+            self.status = "Viewport: 3D".to_string();
+        }
+    }
+
+    fn active_tool_group_icon(&self) -> char {
+        if self.active_tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
+            icons::WAYPOINT
+        } else {
+            self.active_tool.icon()
+        }
+    }
+
+    fn active_tool_group_label(&self) -> &'static str {
+        if self.active_tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
+            "Portal"
+        } else {
+            self.active_tool.label()
+        }
+    }
+
+    fn visibility_group_icon(&self) -> char {
+        if self.editor_visibility_has_hidden_items() {
+            icons::EYE_OFF
+        } else {
+            icons::EYE
+        }
+    }
+
+    fn visibility_group_label(&self) -> &'static str {
+        if self.editor_visibility_has_hidden_items() {
+            "Some Hidden"
+        } else {
+            "All Shown"
+        }
+    }
+
+    fn viewport_camera_mode_label(&self) -> &'static str {
+        viewport_camera_mode_label(self.viewport_3d_camera_mode)
+    }
+
+    fn view_dimension_group_icon(&self) -> char {
+        if self.view_2d {
+            icons::SQUARE
+        } else {
+            icons::BOX
+        }
+    }
+
+    fn view_dimension_group_label(&self) -> &'static str {
+        if self.view_2d {
+            "2D"
+        } else {
+            "3D"
+        }
+    }
+
+    fn editor_visibility_has_hidden_items(&self) -> bool {
+        !self.show_grid
+            || !self.show_portals
+            || !self.preview_fog
+            || !self.preview_backface_wireframe
+            || !self.preview_bounds
+            || !self.show_play_debug_overlays
+            || !self.show_play_debug_map
     }
 
     /// Toolbar combobox for the active brush material. Selecting
@@ -12149,103 +12461,15 @@ impl EditorWorkspace {
     /// only while `active_tool == Place` -- otherwise the brush
     /// material picker takes the same slot.
     /// Toolbar selector for the Select tool's primitive mode.
-    /// Visible only while `active_tool == Select`. Mirrors the
-    /// `1` / `2` / `3` hotkeys; clicking goes through
-    /// `set_selection_mode` so the existing selection adapts.
-    fn draw_transform_gizmo_mode_picker(&mut self, ui: &mut egui::Ui) {
-        for mode in [
-            TransformGizmoMode::Move,
-            TransformGizmoMode::Rotate,
-            TransformGizmoMode::Scale,
-        ] {
-            if toolbar_icon_button(
-                ui,
-                self.transform_gizmo_mode == mode,
-                mode.icon(),
-                mode.label(),
-                mode.hint(),
-            ) {
-                self.transform_gizmo_mode = mode;
-                self.primitive_gizmo_drag = None;
-                self.node_gizmo_drag = None;
-                self.node_drag = None;
-            }
-        }
-    }
-
-    fn draw_selection_mode_picker(&mut self, ui: &mut egui::Ui) {
-        for mode in [
-            SelectionMode::Face,
-            SelectionMode::Edge,
-            SelectionMode::Vertex,
-        ] {
-            if toolbar_text_segment(
-                ui,
-                self.selection_mode == mode,
-                mode.label(),
-                match mode {
-                    SelectionMode::Face => "Pick a whole face (1).",
-                    SelectionMode::Edge => {
-                        "Pick the closest edge of the face under the cursor (2)."
-                    }
-                    SelectionMode::Vertex => {
-                        "Pick the closest corner of the face under the cursor (3)."
-                    }
-                },
-            ) {
-                self.set_selection_mode(mode);
-            }
-        }
-    }
-
-    fn draw_horizontal_edit_mode_picker(&mut self, ui: &mut egui::Ui) {
-        for mode in [HorizontalEditMode::Quad, HorizontalEditMode::Triangle] {
-            if toolbar_text_segment(
-                ui,
-                self.horizontal_edit_mode == mode,
-                mode.label(),
-                match mode {
-                    HorizontalEditMode::Quad => "Pick floor and ceiling quads.",
-                    HorizontalEditMode::Triangle => "Pick one triangle half of a floor or ceiling.",
-                },
-            ) {
-                self.set_horizontal_edit_mode(mode);
-            }
-        }
-    }
-
-    fn draw_vertex_connectivity_picker(&mut self, ui: &mut egui::Ui) {
-        for mode in [VertexConnectivity::Welded, VertexConnectivity::Detached] {
-            if toolbar_text_segment(
-                ui,
-                self.vertex_connectivity == mode,
-                mode.label(),
-                match mode {
-                    VertexConnectivity::Welded => {
-                        "Move every face-corner sharing the selected physical vertex."
-                    }
-                    VertexConnectivity::Detached => {
-                        "Move only the selected face, edge, or vertex corner records."
-                    }
-                },
-            ) {
-                self.vertex_connectivity = mode;
-            }
-        }
-    }
-
+    /// Visible only while `active_tool == Select`. Clicking goes
+    /// through `set_selection_mode` so the existing selection adapts.
     fn draw_wall_paint_shape_picker(&mut self, ui: &mut egui::Ui) {
         for shape in [
             WallPaintShape::Cardinal,
             WallPaintShape::NorthWestSouthEast,
             WallPaintShape::NorthEastSouthWest,
         ] {
-            if toolbar_text_segment(
-                ui,
-                self.wall_paint_shape == shape,
-                shape.label(),
-                "Choose how wall paint picks cell edges.",
-            ) {
+            if toolbar_menu_choice(ui, shape.label(), self.wall_paint_shape == shape) {
                 self.wall_paint_shape = shape;
             }
         }
@@ -15245,6 +15469,7 @@ impl EditorWorkspace {
         if !self.view_2d {
             if let Some((center, _half)) = self.current_frame_bounds_3d() {
                 self.focus_3d_on_point_preserving_distance(center);
+                self.persist_editor_camera_state();
                 self.status = "Framed selection".to_string();
             } else {
                 self.status = "Nothing to frame".to_string();
@@ -17853,46 +18078,75 @@ fn draw_inline_icon(ui: &mut egui::Ui, icon: char, color: Color32) {
     ui.label(icons::text(icon, 16.0).color(color));
 }
 
-fn context_chip(ui: &mut egui::Ui, text: &str, strong: bool) {
-    let fill = if strong {
-        STUDIO_ACCENT_DIM
-    } else {
-        STUDIO_PANEL_DARK
-    };
-    egui::Frame::new()
-        .fill(fill)
-        .stroke(Stroke::new(1.0, STUDIO_BORDER))
-        .corner_radius(egui::CornerRadius::same(3))
-        .inner_margin(egui::Margin::symmetric(6, 1))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).small().color(STUDIO_TEXT));
-        });
-}
-
-fn toolbar_icon_button(
+fn toolbar_group_menu<R>(
     ui: &mut egui::Ui,
-    selected: bool,
+    number: u8,
     icon: char,
     label: &str,
-    hint: &str,
+    current: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    let number_text = number.to_string();
+    let shortcut = command_shortcut_text(&number_text);
+    let reverse_shortcut = command_shift_shortcut_text(&number_text);
+    let response = egui::menu::menu_custom_button(
+        ui,
+        egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0)),
+        add_contents,
+    )
+    .response;
+    response.on_hover_text(format!(
+        "{label}: {current}\n{shortcut} cycles forward\n{reverse_shortcut} cycles backward"
+    ));
+}
+
+fn toolbar_menu_choice(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    selected: bool,
 ) -> bool {
-    let response = ui.add_sized(
-        [30.0, 23.0],
-        egui::SelectableLabel::new(selected, icons::text(icon, 15.0)),
-    );
-    let clicked = response.clicked();
-    response.on_hover_text(format!("{label}: {hint}"));
+    let clicked = ui.selectable_label(selected, label).clicked();
+    if clicked {
+        ui.close_menu();
+    }
     clicked
 }
 
-fn toolbar_text_segment(ui: &mut egui::Ui, selected: bool, label: &str, hint: &str) -> bool {
-    let response = ui.add_sized(
-        [label.len() as f32 * 7.0 + 18.0, 23.0],
-        egui::SelectableLabel::new(selected, label),
-    );
-    let clicked = response.clicked();
-    response.on_hover_text(hint);
-    clicked
+fn visibility_menu_row(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    label: &str,
+    visible: &mut bool,
+) -> bool {
+    ui.label(label);
+    let icon = if *visible { icons::EYE } else { icons::EYE_OFF };
+    let icon_color = if *visible {
+        STUDIO_TEXT
+    } else {
+        Color32::from_rgb(82, 92, 102)
+    };
+    let response = ui
+        .push_id(id_salt, |ui| {
+            ui.add_sized(
+                [32.0, 22.0],
+                egui::Button::new(icons::text(icon, 14.0).color(icon_color)),
+            )
+            .on_hover_text(if *visible { "Hide" } else { "Show" })
+        })
+        .inner;
+    let changed = response.clicked();
+    if changed {
+        *visible = !*visible;
+    }
+    ui.end_row();
+    changed
+}
+
+fn viewport_camera_mode_label(mode: ViewportCameraMode) -> &'static str {
+    match mode {
+        ViewportCameraMode::Orbit => "Orbit",
+        ViewportCameraMode::Free => "Free",
+    }
 }
 
 fn draw_model_import_preview(
@@ -25075,11 +25329,29 @@ fn consume_command_shift_shortcut(ctx: &egui::Context, key: egui::Key) -> bool {
     ctx.input_mut(|input| input.consume_shortcut(&shortcut))
 }
 
+fn consume_command_cycle_shortcut(ctx: &egui::Context, key: egui::Key) -> Option<bool> {
+    if consume_command_shift_shortcut(ctx, key) {
+        Some(true)
+    } else if consume_command_shortcut(ctx, key) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn command_shortcut_text(key: &str) -> String {
     if cfg!(target_os = "macos") {
         format!("Cmd+{key}")
     } else {
         format!("Ctrl+{key}")
+    }
+}
+
+fn command_shift_shortcut_text(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("Shift+Cmd+{key}")
+    } else {
+        format!("Shift+Ctrl+{key}")
     }
 }
 
@@ -25089,6 +25361,21 @@ fn menu_label(label: &str, shortcut: &str) -> String {
 
 fn bare_shortcuts_available(focus_taken: bool, modifiers: egui::Modifiers) -> bool {
     !focus_taken && !modifiers.command && !modifiers.ctrl
+}
+
+fn cycle_value<T: Copy + PartialEq>(values: &[T], current: T, reverse: bool) -> T {
+    let Some(index) = values.iter().position(|value| *value == current) else {
+        return values.first().copied().unwrap_or(current);
+    };
+    if values.is_empty() {
+        return current;
+    }
+    let next = if reverse {
+        (index + values.len() - 1) % values.len()
+    } else {
+        (index + 1) % values.len()
+    };
+    values[next]
 }
 
 fn frame_radius_for_3d_bounds(half: [f32; 3]) -> i32 {
@@ -29723,6 +30010,69 @@ mod tests {
     }
 
     #[test]
+    fn editor_camera_saves_with_project_and_restores_on_open() {
+        let project_dir = test_temp_dir("editor-camera");
+        let mut project = ProjectDocument::new("editor-camera");
+        project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: populated_grid(2, 2),
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(project_dir.clone(), project);
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
+        workspace.viewport_3d_yaw = 384;
+        workspace.viewport_3d_pitch = signed_to_q12(-128);
+        workspace.viewport_3d_radius = 12_288;
+        workspace.viewport_3d_target = [1024, 512, -2048];
+        workspace.viewport_3d_free_yaw = 1536;
+        workspace.viewport_3d_free_pitch = 128;
+        workspace.viewport_3d_free_position = [-300, 700, 900];
+        workspace.viewport_3d_free_initialized = true;
+
+        workspace.save().unwrap();
+
+        let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+        let camera = reopened.viewport_3d_camera();
+        assert_eq!(camera.mode, ViewportCameraMode::Free);
+        assert_eq!(camera.yaw_q12, 1536);
+        assert_eq!(camera.pitch_q12, 128);
+        assert_eq!(camera.radius, 12_288);
+        assert_eq!(camera.target, [1024, 512, -2048]);
+        assert_eq!(camera.position, [-300, 700, 900]);
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn editor_visibility_saves_with_project_and_restores_on_open() {
+        let project_dir = test_temp_dir("editor-visibility");
+        let mut workspace =
+            EditorWorkspace::with_project(project_dir.clone(), ProjectDocument::new("visibility"));
+        workspace.show_grid = false;
+        workspace.show_portals = false;
+        workspace.preview_fog = false;
+        workspace.preview_backface_wireframe = true;
+        workspace.preview_bounds = false;
+        workspace.show_play_debug_overlays = false;
+        workspace.show_play_debug_map = true;
+
+        workspace.save().unwrap();
+
+        let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+        assert!(!reopened.show_grid_enabled());
+        assert!(!reopened.show_portals_enabled());
+        assert!(!reopened.preview_fog_enabled());
+        assert!(reopened.preview_backface_wireframe_enabled());
+        assert!(!reopened.preview_bounds_enabled());
+        assert!(!reopened.show_play_debug_overlays);
+        assert!(reopened.show_play_debug_map);
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
     fn texture_import_resolution_label_marks_presets_and_custom_sizes() {
         assert_eq!(texture_import_resolution_label(32, 32), "32 x 32");
         assert_eq!(texture_import_resolution_label(40, 24), "Custom 40 x 24");
@@ -29926,6 +30276,39 @@ mod tests {
         assert!(!bare_shortcuts_available(true, egui::Modifiers::NONE));
         assert!(!bare_shortcuts_available(false, egui::Modifiers::COMMAND));
         assert!(!bare_shortcuts_available(false, egui::Modifiers::CTRL));
+    }
+
+    #[test]
+    fn cycle_value_wraps_forward_and_backward() {
+        const VALUES: &[u8] = &[1, 2, 3];
+
+        assert_eq!(cycle_value(VALUES, 1, false), 2);
+        assert_eq!(cycle_value(VALUES, 3, false), 1);
+        assert_eq!(cycle_value(VALUES, 1, true), 3);
+        assert_eq!(cycle_value(VALUES, 9, false), 1);
+    }
+
+    #[test]
+    fn tool_group_cycle_includes_place_and_portal_slots() {
+        let (mut workspace, room) = workspace_with_populated_grid("tool-group-cycle", 1, 1);
+        workspace.replace_node_selection(room);
+        workspace.active_tool = ViewTool::Erase;
+        workspace.place_kind = PlaceKind::Character;
+
+        workspace.cycle_tool_group(false);
+        assert_eq!(workspace.active_tool, ViewTool::Place);
+        assert_eq!(workspace.place_kind, PlaceKind::PlayerSpawn);
+
+        workspace.cycle_tool_group(false);
+        assert_eq!(workspace.active_tool, ViewTool::Place);
+        assert_eq!(workspace.place_kind, PlaceKind::Portal);
+
+        workspace.cycle_tool_group(false);
+        assert_eq!(workspace.active_tool, ViewTool::Select);
+
+        workspace.cycle_tool_group(true);
+        assert_eq!(workspace.active_tool, ViewTool::Place);
+        assert_eq!(workspace.place_kind, PlaceKind::Portal);
     }
 
     #[test]
