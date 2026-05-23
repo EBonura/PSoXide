@@ -21,8 +21,10 @@ use crate::model_animation_viewer::ModelAnimationViewerState;
 use crate::style::*;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
@@ -3019,7 +3021,8 @@ impl EditorWorkspace {
         if !playtest_captured {
             self.handle_global_shortcuts(ctx, playtest_status);
         }
-        self.draw_action_bar(ctx, playtest_status);
+        let play_metrics = viewport_3d.play_metrics;
+        self.draw_action_bar(ctx, playtest_status, play_metrics);
         self.draw_left_dock(ctx);
         self.draw_inspector(ctx);
         self.draw_content_browser(ctx);
@@ -9430,7 +9433,12 @@ impl EditorWorkspace {
         });
     }
 
-    fn draw_action_bar(&mut self, ctx: &egui::Context, playtest_status: EditorPlaytestStatus) {
+    fn draw_action_bar(
+        &mut self,
+        ctx: &egui::Context,
+        playtest_status: EditorPlaytestStatus,
+        play_metrics: Option<EditorPlaytestMetrics>,
+    ) {
         egui::TopBottomPanel::top("psxed_action_bar")
             .exact_height(50.0)
             .frame(top_bar_frame())
@@ -9440,7 +9448,7 @@ impl EditorWorkspace {
                     ui.add_space(8.0);
                     self.draw_main_menus(ctx, ui, playtest_status);
                     ui.add_space(10.0);
-                    self.draw_build_play_controls(ui, playtest_status);
+                    self.draw_build_play_controls(ui, playtest_status, play_metrics);
                     ui.add_space(10.0);
 
                     ui.allocate_ui_with_layout(
@@ -9661,6 +9669,7 @@ impl EditorWorkspace {
         &mut self,
         ui: &mut egui::Ui,
         playtest_status: EditorPlaytestStatus,
+        play_metrics: Option<EditorPlaytestMetrics>,
     ) {
         if ui
             .button(icons::label(icons::BOX, "Build"))
@@ -9698,6 +9707,311 @@ impl EditorWorkspace {
         {
             self.pending_playtest_request = Some(EditorPlaytestRequest::Stop);
         }
+
+        if ui
+            .button(icons::label(icons::FOCUS, "Debug"))
+            .on_hover_text("Append camera, player, room, and portal visibility diagnostics to logs/editor_debug.log.")
+            .clicked()
+        {
+            self.capture_debug_snapshot(play_metrics);
+        }
+    }
+
+    fn capture_debug_snapshot(&mut self, play_metrics: Option<EditorPlaytestMetrics>) {
+        let path = self.debug_log_path();
+        match self.write_debug_snapshot(&path, play_metrics) {
+            Ok(()) => {
+                let label = path
+                    .strip_prefix(&self.project_dir)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| path.display().to_string());
+                self.status = format!("Debug snapshot appended to {label}");
+            }
+            Err(error) => {
+                self.status = format!("Debug snapshot failed: {error}");
+            }
+        }
+    }
+
+    fn debug_log_path(&self) -> PathBuf {
+        self.project_dir.join("logs").join("editor_debug.log")
+    }
+
+    fn write_debug_snapshot(
+        &self,
+        path: &Path,
+        play_metrics: Option<EditorPlaytestMetrics>,
+    ) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+        }
+        let mut text = String::new();
+        self.append_debug_snapshot_text(&mut text, play_metrics);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| format!("open {}: {error}", path.display()))?;
+        std::io::Write::write_all(&mut file, text.as_bytes())
+            .map_err(|error| format!("write {}: {error}", path.display()))?;
+        Ok(())
+    }
+
+    fn append_debug_snapshot_text(
+        &self,
+        out: &mut String,
+        play_metrics: Option<EditorPlaytestMetrics>,
+    ) {
+        let unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let editor_camera = self.viewport_3d_camera();
+        let editor_basis = editor_camera.basis();
+        let editor_position = editor_camera.position_i32();
+        let _ = writeln!(out, "---- PSoXide editor debug snapshot ----");
+        let _ = writeln!(out, "unix_ms: {unix_ms}");
+        let _ = writeln!(out, "project: {}", self.project.name);
+        let _ = writeln!(out, "project_dir: {}", self.project_dir.display());
+        let _ = writeln!(out, "status: {}", self.status);
+        let _ = writeln!(
+            out,
+            "editor_camera: mode={:?} pos={:?} target={:?} yaw_q12={} yaw_deg={:.2} pitch_q12={} pitch_deg={:.2} radius={}",
+            editor_camera.mode,
+            editor_position,
+            editor_camera.target,
+            editor_camera.yaw_q12,
+            q12_degrees(editor_camera.yaw_q12),
+            editor_camera.pitch_q12,
+            q12_degrees(editor_camera.pitch_q12),
+            editor_camera.radius
+        );
+        let _ = writeln!(
+            out,
+            "editor_camera_basis: forward={:?} right={:?} up={:?}",
+            editor_basis.forward, editor_basis.right, editor_basis.up
+        );
+        match play_metrics {
+            Some(metrics) => self.append_play_metrics_debug_snapshot(out, metrics),
+            None => {
+                let _ = writeln!(out, "play_metrics: unavailable");
+            }
+        }
+        let _ = writeln!(out);
+    }
+
+    fn append_play_metrics_debug_snapshot(
+        &self,
+        out: &mut String,
+        metrics: EditorPlaytestMetrics,
+    ) {
+        let _ = writeln!(
+            out,
+            "runtime_player: valid={} room_index={} local=({}, {}) yaw_q12={} yaw_deg={:.2}",
+            metrics.player_map_valid,
+            metrics.player_room_index,
+            metrics.player_local_x,
+            metrics.player_local_z,
+            metrics.player_view_yaw_q12,
+            q12_degrees(metrics.player_view_yaw_q12)
+        );
+        let camera_forward = if metrics.camera_view_basis_valid {
+            let x = -(metrics.camera_view_sin_yaw_q12 as f32) / 4096.0;
+            let z = -(metrics.camera_view_cos_yaw_q12 as f32) / 4096.0;
+            Some([x, z])
+        } else {
+            None
+        };
+        let _ = writeln!(
+            out,
+            "runtime_camera: map_valid={} local=({}, {}) basis_valid={} sin_q12={} cos_q12={} forward_xz={:?}",
+            metrics.camera_map_valid,
+            metrics.camera_local_x,
+            metrics.camera_local_z,
+            metrics.camera_view_basis_valid,
+            metrics.camera_view_sin_yaw_q12,
+            metrics.camera_view_cos_yaw_q12,
+            camera_forward
+        );
+        let _ = writeln!(
+            out,
+            "portal_counts: visible={} frontier={} missing_resident={} build_failed={} tests={} accepts={} bounds_fb={} rejects_b/f/t={:?} caps_r/f/d={:?}",
+            metrics.portal_visible_rooms,
+            metrics.portal_frontier_rooms,
+            metrics.portal_missing_resident,
+            metrics.portal_build_failed,
+            metrics.portal_tests,
+            metrics.portal_accepts,
+            metrics.portal_bounds_fallbacks,
+            metrics.portal_rejects,
+            metrics.portal_caps
+        );
+        let _ = writeln!(
+            out,
+            "stream_counts: visible_chunks={} loaded={} candidates={} built={} cache_skips={} priorities_c/v/f={:?} req={} miss={} prefetch={} evict={} slot_limit={} pending={} failed={}",
+            metrics.chunk_visible,
+            metrics.chunk_loaded,
+            metrics.chunk_candidates,
+            metrics.chunk_built,
+            metrics.chunk_cache_skips,
+            metrics.stream_priorities,
+            metrics.stream_requests,
+            metrics.stream_misses,
+            metrics.stream_prefetches,
+            metrics.stream_evictions,
+            metrics.stream_slot_limit,
+            metrics.stream_pending,
+            metrics.stream_failed
+        );
+        let _ = writeln!(
+            out,
+            "masks: loaded={:#018x} loading={:#018x} active={:#018x} drawn={:#018x} visible={:#018x} frontier={:#018x} missing={:#018x} build_failed={:#018x}",
+            metrics.chunk_loaded_mask,
+            metrics.chunk_loading_mask,
+            metrics.chunk_active_mask,
+            metrics.chunk_drawn_mask,
+            metrics.portal_visible_mask,
+            metrics.portal_frontier_mask,
+            metrics.portal_missing_mask,
+            metrics.portal_build_failed_mask
+        );
+        let _ = writeln!(
+            out,
+            "portal_masks: room_tested={:#018x} room_accepted={:#018x} room_reject_frustum={:#018x} room_bounds_fb={:#018x} portal_tested={:#018x} portal_accepted={:#018x} portal_reject_frustum={:#018x} portal_bounds_fb={:#018x}",
+            metrics.portal_tested_mask,
+            metrics.portal_accepted_mask,
+            metrics.portal_reject_frustum_mask,
+            metrics.portal_bounds_fallback_mask,
+            metrics.portal_tested_portal_mask,
+            metrics.portal_accepted_portal_mask,
+            metrics.portal_reject_frustum_portal_mask,
+            metrics.portal_bounds_fallback_portal_mask
+        );
+        self.append_portal_map_debug_snapshot(out, metrics);
+    }
+
+    fn append_portal_map_debug_snapshot(
+        &self,
+        out: &mut String,
+        metrics: EditorPlaytestMetrics,
+    ) {
+        let map = collect_play_chunk_debug_map(&self.project);
+        let current_room = metrics
+            .player_map_valid
+            .then_some(metrics.player_room_index as usize);
+        let _ = writeln!(
+            out,
+            "portal_map: runtime_rooms={} directed_portals={} current_runtime_room={:?}",
+            map.runtime_room_count(),
+            map.portals.len(),
+            current_room
+        );
+        if let Some(room_index) = current_room {
+            self.append_runtime_room_debug_snapshot(out, &map, metrics, room_index, "current_room");
+        }
+        let connected: Vec<_> = map
+            .portals
+            .iter()
+            .filter(|portal| {
+                current_room.is_none_or(|room| {
+                    portal.source_room_index == room || portal.destination_room_index == room
+                })
+            })
+            .collect();
+        let _ = writeln!(out, "connected_portals: count={}", connected.len());
+        for portal in connected {
+            self.append_portal_debug_snapshot(out, &map, metrics, portal);
+        }
+    }
+
+    fn append_runtime_room_debug_snapshot(
+        &self,
+        out: &mut String,
+        map: &PlayChunkDebugMap,
+        metrics: EditorPlaytestMetrics,
+        room_index: usize,
+        label: &str,
+    ) {
+        let cells: Vec<_> = map
+            .cells
+            .iter()
+            .filter(|cell| cell.runtime_room_index == room_index)
+            .collect();
+        let Some(first) = cells.first() else {
+            let _ = writeln!(out, "{label}: runtime_room={room_index} missing_from_map");
+            return;
+        };
+        let room_name = self
+            .project
+            .active_scene()
+            .node(first.project_room_id)
+            .map(|node| node.name.as_str())
+            .unwrap_or("<missing room node>");
+        let _ = writeln!(
+            out,
+            "{label}: runtime_room={} project_room=#{} '{}' portal_room={} flags=[{}] cell_count={}",
+            room_index,
+            first.project_room_id.raw(),
+            room_name,
+            first.portal_room_index,
+            debug_room_flags(metrics, room_index),
+            cells.len()
+        );
+        for cell in cells {
+            let _ = writeln!(
+                out,
+                "  cell: array={:?} center={:?} half={:?} room_origin={:?} sector_size={}",
+                cell.array_cell, cell.center, cell.half, cell.room_origin, cell.sector_size
+            );
+        }
+    }
+
+    fn append_portal_debug_snapshot(
+        &self,
+        out: &mut String,
+        map: &PlayChunkDebugMap,
+        metrics: EditorPlaytestMetrics,
+        portal: &PlayChunkDebugMapPortal,
+    ) {
+        let portal_bit = debug_chunk_bit(portal.portal_index);
+        let tested = portal_bit != 0 && metrics.portal_tested_portal_mask & portal_bit != 0;
+        let accepted = portal_bit != 0 && metrics.portal_accepted_portal_mask & portal_bit != 0;
+        let rejected =
+            portal_bit != 0 && metrics.portal_reject_frustum_portal_mask & portal_bit != 0;
+        let bounds_fb =
+            portal_bit != 0 && metrics.portal_bounds_fallback_portal_mask & portal_bit != 0;
+        let _ = writeln!(
+            out,
+            "portal #{}: {} -> {} dir={:?} normal={:?} marker={:?} status tested={} accepted={} reject_frustum={} bounds_fb={} map_a={:?} map_b={:?} world={:?}",
+            portal.portal_index,
+            portal.source_room_index,
+            portal.destination_room_index,
+            portal.direction,
+            portal.normal_world,
+            portal.source_marker.map(NodeId::raw),
+            tested,
+            accepted,
+            rejected,
+            bounds_fb,
+            portal.a,
+            portal.b,
+            portal.vertices_world
+        );
+        self.append_runtime_room_debug_snapshot(
+            out,
+            map,
+            metrics,
+            portal.source_room_index,
+            "  source",
+        );
+        self.append_runtime_room_debug_snapshot(
+            out,
+            map,
+            metrics,
+            portal.destination_room_index,
+            "  destination",
+        );
     }
 
     fn draw_build_status_strip(
@@ -22025,6 +22339,9 @@ fn draw_play_overlay_icon_button(
 #[derive(Clone, Copy)]
 struct PlayChunkDebugMapCell {
     runtime_room_index: usize,
+    project_room_id: NodeId,
+    portal_room_index: usize,
+    array_cell: [u16; 2],
     center: [f32; 2],
     half: [f32; 2],
     room_origin: [f32; 2],
@@ -22038,11 +22355,25 @@ struct PlayChunkDebugMapPortal {
     destination_room_index: usize,
     a: [f32; 2],
     b: [f32; 2],
+    vertices_world: [[i32; 3]; 4],
+    direction: GridDirection,
+    normal_world: [i16; 3],
+    source_marker: Option<NodeId>,
 }
 
 struct PlayChunkDebugMap {
     cells: Vec<PlayChunkDebugMapCell>,
     portals: Vec<PlayChunkDebugMapPortal>,
+}
+
+impl PlayChunkDebugMap {
+    fn runtime_room_count(&self) -> usize {
+        self.cells
+            .iter()
+            .map(|cell| cell.runtime_room_index + 1)
+            .max()
+            .unwrap_or_default()
+    }
 }
 
 fn draw_play_chunk_debug_map(
@@ -22378,6 +22709,9 @@ fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap 
                 let local_center = grid_cell_editor_center(grid, *cell_x, *cell_z);
                 cells.push(PlayChunkDebugMapCell {
                     runtime_room_index,
+                    project_room_id: node.id,
+                    portal_room_index: portal_room.index,
+                    array_cell: [*cell_x, *cell_z],
                     center: [
                         node_center[0] + local_center[0],
                         node_center[1] + local_center[1],
@@ -22402,6 +22736,10 @@ fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap 
                 destination_room_index: room_base_index + portal.destination_room,
                 a,
                 b,
+                vertices_world: portal.vertices_world,
+                direction: portal.direction,
+                normal_world: portal.normal_world,
+                source_marker: portal.source_marker,
             });
         }
     }
@@ -22430,6 +22768,30 @@ fn debug_chunk_bit(index: usize) -> u64 {
     } else {
         0
     }
+}
+
+fn debug_room_flags(metrics: EditorPlaytestMetrics, index: usize) -> String {
+    let bit = debug_chunk_bit(index);
+    let flag = |mask: u64| bit != 0 && mask & bit != 0;
+    format!(
+        "loaded={} loading={} active={} drawn={} visible={} frontier={} missing={} build_failed={} tested={} accepted={} reject_frustum={} bounds_fb={}",
+        flag(metrics.chunk_loaded_mask),
+        flag(metrics.chunk_loading_mask),
+        flag(metrics.chunk_active_mask),
+        flag(metrics.chunk_drawn_mask),
+        flag(metrics.portal_visible_mask),
+        flag(metrics.portal_frontier_mask),
+        flag(metrics.portal_missing_mask),
+        flag(metrics.portal_build_failed_mask),
+        flag(metrics.portal_tested_mask),
+        flag(metrics.portal_accepted_mask),
+        flag(metrics.portal_reject_frustum_mask),
+        flag(metrics.portal_bounds_fallback_mask)
+    )
+}
+
+fn q12_degrees(angle: u16) -> f32 {
+    angle as f32 * 360.0 / 4096.0
 }
 
 fn rotate_vec2(v: Vec2, radians: f32) -> Vec2 {
@@ -30494,8 +30856,10 @@ mod tests {
 
     #[test]
     fn visibility_cycle_only_changes_editor_view_items() {
-        let mut workspace =
-            EditorWorkspace::with_project(test_temp_dir("visibility-cycle"), ProjectDocument::new("visibility"));
+        let mut workspace = EditorWorkspace::with_project(
+            test_temp_dir("visibility-cycle"),
+            ProjectDocument::new("visibility"),
+        );
         workspace.show_grid = true;
         workspace.show_portals = true;
         workspace.show_lights = true;
@@ -30515,6 +30879,87 @@ mod tests {
         assert!(!workspace.preview_bounds);
         assert!(!workspace.show_play_debug_overlays);
         assert!(workspace.show_play_debug_map);
+    }
+
+    #[test]
+    fn debug_snapshot_writes_portal_runtime_log() {
+        let (mut workspace, room) = workspace_with_populated_grid("debug-snapshot", 2, 1);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let metrics = EditorPlaytestMetrics {
+            host_fps: 0.0,
+            host_ms: 0.0,
+            emu_hz: 0.0,
+            visual_hz: None,
+            draw_hz: 0.0,
+            total_ms: 0.0,
+            emu_ms: 0.0,
+            hw_ms: 0.0,
+            ui_ms: 0.0,
+            step_budget_percent: 0.0,
+            chunk_visible: 1,
+            chunk_loaded: 1,
+            chunk_candidates: 0,
+            chunk_built: 0,
+            chunk_cache_skips: 0,
+            portal_visible_rooms: 1,
+            portal_frontier_rooms: 0,
+            portal_missing_resident: 0,
+            portal_build_failed: 0,
+            portal_tests: 1,
+            portal_accepts: 1,
+            portal_bounds_fallbacks: 0,
+            portal_rejects: [0, 0, 0],
+            portal_caps: [0, 0, 0],
+            stream_priorities: [0, 0, 0],
+            stream_requests: 0,
+            stream_misses: 0,
+            stream_prefetches: 0,
+            stream_evictions: 0,
+            stream_slot_limit: 0,
+            stream_pending: 0,
+            stream_failed: 0,
+            chunk_loaded_mask: 1,
+            chunk_loading_mask: 0,
+            chunk_active_mask: 1,
+            chunk_drawn_mask: 1,
+            portal_visible_mask: 1,
+            portal_frontier_mask: 0,
+            portal_missing_mask: 0,
+            portal_build_failed_mask: 0,
+            portal_tested_mask: 1,
+            portal_accepted_mask: 1,
+            portal_reject_frustum_mask: 0,
+            portal_bounds_fallback_mask: 0,
+            portal_tested_portal_mask: 1,
+            portal_accepted_portal_mask: 1,
+            portal_reject_frustum_portal_mask: 0,
+            portal_bounds_fallback_portal_mask: 0,
+            player_map_valid: true,
+            player_room_index: 0,
+            player_local_x: 512,
+            player_local_z: 512,
+            player_view_yaw_q12: 1024,
+            camera_view_basis_valid: true,
+            camera_view_sin_yaw_q12: 4096,
+            camera_view_cos_yaw_q12: 0,
+            camera_map_valid: true,
+            camera_local_x: 520,
+            camera_local_z: 500,
+        };
+        let path = workspace.debug_log_path();
+
+        workspace.write_debug_snapshot(&path, Some(metrics)).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("runtime_player: valid=true room_index=0"));
+        assert!(content.contains("connected_portals: count="));
+        assert!(content.contains("portal #0:"));
+
+        let _ = std::fs::remove_dir_all(workspace.project_dir);
     }
 
     #[test]
