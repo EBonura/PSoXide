@@ -8156,7 +8156,13 @@ fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
 }
 
 fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<VramSlot> {
-    ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, VramSlotClutMode::OpaqueZero)
+    let texture = Texture::from_bytes(asset_bytes).ok()?;
+    let clut_mode = if texture.index_zero_transparent() {
+        VramSlotClutMode::TransparentZero
+    } else {
+        VramSlotClutMode::OpaqueZero
+    };
+    ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, clut_mode)
 }
 
 fn ensure_texture_uploaded_with_clut_mode(
