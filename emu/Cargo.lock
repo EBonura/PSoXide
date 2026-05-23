@@ -3045,6 +3045,7 @@ name = "psxed-ui"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "image",
  "psx-asset",
  "psx-engine",
  "psx-gte",
