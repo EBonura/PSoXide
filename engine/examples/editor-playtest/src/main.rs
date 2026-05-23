@@ -579,6 +579,7 @@ const STREAMED_ROOM_PUMP_SECTORS_PER_TICK: usize = 8;
 #[cfg(feature = "cd-stream-bench")]
 const STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT: usize = 4096;
 const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
+const ACTIVE_ROOM_JOB_BUILDS_PER_TICK: usize = 1;
 const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 
 /// Capacity of the residency manager's RAM table. Holds room
@@ -1868,6 +1869,33 @@ impl ActiveVisibleCellCache {
     };
 }
 
+#[derive(Copy, Clone)]
+struct ActiveRoomWindowJob {
+    active: bool,
+    update_streaming: bool,
+    current_room: RoomIndex,
+    requested_rooms: [RoomIndex; MAX_ACTIVE_ROOMS],
+    requested_count: usize,
+    cursor: usize,
+    next_slot: usize,
+    rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    previous_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+}
+
+impl ActiveRoomWindowJob {
+    const EMPTY: Self = Self {
+        active: false,
+        update_streaming: false,
+        current_room: RoomIndex::ZERO,
+        requested_rooms: [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS],
+        requested_count: 0,
+        cursor: 0,
+        next_slot: 0,
+        rooms: [const { None }; MAX_ACTIVE_ROOMS],
+        previous_rooms: [const { None }; MAX_ACTIVE_ROOMS],
+    };
+}
+
 struct Playtest {
     /// Active room. `None` until `init` runs and only `Some`
     /// when the manifest had at least one room and its bytes
@@ -1881,6 +1909,9 @@ struct Playtest {
     /// Cache-budgeted draw chunks, all expressed relative to
     /// `room_index`.
     active_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    /// Incremental active-room cache rebuild in progress. The old
+    /// `active_rooms` remain drawable until the staged replacement is ready.
+    active_room_job: ActiveRoomWindowJob,
     /// Portal traversal result for the current player/camera room.
     portal_visibility: RuntimePortalVisibility,
     /// Global chunk bounds retained for portal diagnostics and streaming.
@@ -2002,6 +2033,7 @@ impl Playtest {
             current_collision_room: None,
             current_ambient_rgb: [0x80, 0x80, 0x80],
             active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
+            active_room_job: ActiveRoomWindowJob::EMPTY,
             portal_visibility: RuntimePortalVisibility::EMPTY,
             portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
             portal_visible_missing_resident: 0,
@@ -2163,9 +2195,8 @@ impl Scene for Playtest {
 
     fn update(&mut self, ctx: &mut Ctx) {
         #[cfg(feature = "cd-stream-bench")]
-        if self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK) {
-            self.load_active_room_window();
-        }
+        let _stream_progress = self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK);
+        self.step_active_room_window_job();
 
         if ctx.just_pressed(button::R3) {
             self.lock_target = match self.lock_target {
@@ -2402,6 +2433,9 @@ impl Scene for Playtest {
                 let Some(active) = self.active_rooms[active_slot] else {
                     continue;
                 };
+                if !self.portal_visibility_draws_room(active.index) {
+                    continue;
+                }
                 room_active_chunks = room_active_chunks.saturating_add(1);
                 let chunk_mask = room_index_debug_mask(active.index);
                 room_active_chunk_mask |= chunk_mask;
@@ -2874,6 +2908,9 @@ impl Scene for Playtest {
                     let Some(active) = self.active_rooms[active_slot as usize] else {
                         continue;
                     };
+                    if !self.portal_visibility_draws_room(active.index) {
+                        continue;
+                    }
                     let room_camera = camera_for_room(camera, active);
                     let Some(player_depth) = player_actor_depth_for_room(
                         active,
@@ -3569,6 +3606,7 @@ impl Playtest {
         let half_fov_x_tan_q12 = ((SCREEN_CX as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
         let half_fov_y_tan_q12 = ((SCREEN_CY as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
         let far_z = current_record.draw_distance.clamp(NEAR_Z, FAR_Z);
+        telemetry::stage_begin(telemetry::stage::PORTAL_VISIBILITY);
         let camera = PortalVisibilityCamera::new(
             global.x,
             global.y,
@@ -3593,6 +3631,129 @@ impl Playtest {
             PORTAL_VISIBILITY_MAX_DEPTH,
             &mut self.portal_visibility,
         );
+        telemetry::stage_end(telemetry::stage::PORTAL_VISIBILITY);
+    }
+
+    fn refresh_portal_visibility_for_view(
+        &mut self,
+        current_index: RoomIndex,
+        current_record: &LevelRoomRecord,
+        view: ActiveRoomView,
+    ) {
+        let view_global = local_to_global_room_point(current_index, view.position);
+        let visibility_index =
+            room_index_containing_global_from(current_index, view_global).unwrap_or(current_index);
+        let visibility_record = ROOMS
+            .get(visibility_index.to_usize())
+            .unwrap_or(current_record);
+        let visibility_view = if visibility_index == current_index {
+            view
+        } else {
+            view.with_position(global_to_local_room_point(visibility_index, view_global))
+        };
+        let (view_sin_key, view_cos_key, view_pitch_sin_key, view_pitch_cos_key) =
+            portal_visibility_view_keys(view);
+        self.active_room_view_sin_key = view_sin_key;
+        self.active_room_view_cos_key = view_cos_key;
+        self.active_room_view_pitch_sin_key = view_pitch_sin_key;
+        self.active_room_view_pitch_cos_key = view_pitch_cos_key;
+        self.active_room_view_anchor = view.position;
+        self.rebuild_portal_visibility(visibility_index, visibility_record, visibility_view);
+        self.active_room_candidates = self.portal_visibility.stats.portals_tested.min(u16::MAX);
+        self.portal_visible_missing_resident = 0;
+        self.portal_visible_missing_mask = 0;
+        self.portal_visible_build_failed = 0;
+        self.portal_visible_build_failed_mask = 0;
+    }
+
+    fn portal_visible_room_limit(&self, current_record: &LevelRoomRecord) -> usize {
+        self.portal_visibility
+            .room_count
+            .min(room_active_chunk_limit(current_record))
+            .min(MAX_ACTIVE_ROOMS)
+    }
+
+    fn portal_visible_rooms_are_active(&self, current_record: &LevelRoomRecord) -> bool {
+        let visible_limit = self.portal_visible_room_limit(current_record);
+        let mut i = 0usize;
+        while i < visible_limit {
+            if !self.active_room_contains_drawable(self.portal_visibility.rooms[i].room) {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    fn active_room_contains_drawable(&self, index: RoomIndex) -> bool {
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            if let Some(active) = self.active_rooms[slot] {
+                if active.index == index
+                    && (index == self.room_index
+                        || active.render_room.is_some()
+                        || active.surface_cache.ready)
+                {
+                    return true;
+                }
+            }
+            slot += 1;
+        }
+        false
+    }
+
+    fn retain_previous_active_rooms(
+        &mut self,
+        previous_active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+        current_record: &LevelRoomRecord,
+        active_limit: usize,
+        next_slot: &mut usize,
+    ) {
+        let retained_limit = active_limit.min(MAX_ACTIVE_ROOMS);
+        let mut previous_slot = 0usize;
+        while *next_slot < retained_limit && previous_slot < MAX_ACTIVE_ROOMS {
+            let Some(previous) = previous_active_rooms[previous_slot] else {
+                previous_slot += 1;
+                continue;
+            };
+            previous_slot += 1;
+            if previous.stream_slot != active_room_stream_slot(previous.index)
+                || self.active_room_contains(previous.index)
+            {
+                continue;
+            }
+            let Some(record) = ROOMS.get(previous.index.to_usize()) else {
+                continue;
+            };
+            self.active_rooms[*next_slot] =
+                Some(previous.with_current_room_offsets(record, current_record));
+            *next_slot += 1;
+        }
+    }
+
+    fn active_room_contains(&self, index: RoomIndex) -> bool {
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            if self.active_rooms[slot].is_some_and(|active| active.index == index) {
+                return true;
+            }
+            slot += 1;
+        }
+        false
+    }
+
+    fn portal_visibility_draws_room(&self, index: RoomIndex) -> bool {
+        if index == self.room_index {
+            return true;
+        }
+        let mut i = 0usize;
+        while i < self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS) {
+            if self.portal_visibility.rooms[i].room == index {
+                return true;
+            }
+            i += 1;
+        }
+        false
     }
 
     fn emit_portal_visibility_counters(&self) {
@@ -3732,7 +3893,181 @@ impl Playtest {
     }
 
     fn load_active_room_window(&mut self) {
+        self.active_room_job = ActiveRoomWindowJob::EMPTY;
         self.rebuild_active_room_window(true);
+    }
+
+    fn begin_active_room_window_job(&mut self, update_streaming: bool) {
+        if !self.chunked_level() {
+            return;
+        }
+        let current_index = self.room_index;
+        let Some(current_record) = ROOMS.get(current_index.to_usize()) else {
+            return;
+        };
+        let view = self.active_room_selection_view();
+        self.refresh_portal_visibility_for_view(current_index, current_record, view);
+
+        let mut requested_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+        let mut requested_count = self.portal_visible_room_limit(current_record);
+        if requested_count == 0 {
+            requested_rooms[0] = current_index;
+            requested_count = 1;
+        } else {
+            let mut i = 0usize;
+            while i < requested_count {
+                requested_rooms[i] = self.portal_visibility.rooms[i].room;
+                i += 1;
+            }
+        }
+
+        self.active_room_anchor = self.motor.position();
+        self.active_room_job = ActiveRoomWindowJob {
+            active: true,
+            update_streaming,
+            current_room: current_index,
+            requested_rooms,
+            requested_count,
+            cursor: 0,
+            next_slot: 0,
+            rooms: [const { None }; MAX_ACTIVE_ROOMS],
+            previous_rooms: self.active_rooms,
+        };
+        telemetry::counter(telemetry::counter::ROOM_WINDOW_REBUILDS, 1);
+        self.step_active_room_window_job();
+    }
+
+    fn step_active_room_window_job(&mut self) {
+        if !self.active_room_job.active {
+            return;
+        }
+        let current_room = self.active_room_job.current_room;
+        if current_room != self.room_index {
+            self.active_room_job = ActiveRoomWindowJob::EMPTY;
+            return;
+        }
+        let Some(current_record) = ROOMS.get(current_room.to_usize()) else {
+            self.active_room_job = ActiveRoomWindowJob::EMPTY;
+            return;
+        };
+
+        #[cfg(feature = "cd-stream-bench")]
+        if self.active_room_job.update_streaming {
+            let requested_rooms = self.active_room_job.requested_rooms;
+            let requested_count = self.active_room_job.requested_count;
+            self.request_streamed_active_room_job(
+                &requested_rooms,
+                requested_count,
+                current_record,
+            );
+        }
+
+        telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
+        let mut built_this_tick = 0usize;
+        let mut skipped = 0u16;
+        let mut unbuilt_room = INVALID_ROOM_INDEX;
+        {
+            let job = &mut self.active_room_job;
+            while job.cursor < job.requested_count
+                && job.next_slot < MAX_ACTIVE_ROOMS
+                && built_this_tick < ACTIVE_ROOM_JOB_BUILDS_PER_TICK
+            {
+                let index = job.requested_rooms[job.cursor];
+                if index == INVALID_ROOM_INDEX {
+                    job.cursor += 1;
+                    continue;
+                }
+                let Some(record) = ROOMS.get(index.to_usize()) else {
+                    job.cursor += 1;
+                    continue;
+                };
+                match reuse_or_build_active_room(
+                    job.next_slot,
+                    index,
+                    record,
+                    current_record,
+                    &job.previous_rooms,
+                ) {
+                    Some(active)
+                        if job.cursor == 0
+                            || active.render_room.is_some()
+                            || active.surface_cache.ready =>
+                    {
+                        job.rooms[job.next_slot] = Some(active);
+                        job.next_slot += 1;
+                        job.cursor += 1;
+                        built_this_tick += 1;
+                    }
+                    Some(_) => {
+                        skipped = skipped.saturating_add(1);
+                        job.cursor += 1;
+                    }
+                    None => {
+                        unbuilt_room = index;
+                        #[cfg(feature = "cd-stream-bench")]
+                        {
+                            if streamed_room_is_loading(index) || !streamed_room_is_resident(index)
+                            {
+                                break;
+                            }
+                            job.cursor += 1;
+                        }
+                        #[cfg(not(feature = "cd-stream-bench"))]
+                        {
+                            job.cursor += 1;
+                        }
+                    }
+                }
+            }
+        }
+        self.active_room_cache_skips = self.active_room_cache_skips.saturating_add(skipped);
+        if unbuilt_room != INVALID_ROOM_INDEX {
+            self.mark_visible_room_unbuilt(unbuilt_room);
+        }
+
+        telemetry::counter(
+            telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
+            built_this_tick as u32,
+        );
+        telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
+
+        if self.active_room_job.cursor >= self.active_room_job.requested_count
+            || self.active_room_job.next_slot >= MAX_ACTIVE_ROOMS
+        {
+            self.active_rooms = self.active_room_job.rooms;
+            let previous_rooms = self.active_room_job.previous_rooms;
+            let mut next_slot = self.active_room_job.next_slot;
+            self.retain_previous_active_rooms(
+                &previous_rooms,
+                current_record,
+                room_active_chunk_limit(current_record),
+                &mut next_slot,
+            );
+            self.apply_current_active_room_fields();
+            self.active_room_job = ActiveRoomWindowJob::EMPTY;
+        }
+    }
+
+    fn apply_current_active_room_fields(&mut self) {
+        self.room = None;
+        self.current_collision_room = None;
+        self.current_ambient_rgb = [0x80, 0x80, 0x80];
+        self.materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
+        self.material_count = 0;
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            if let Some(active) = self.active_rooms[slot] {
+                if active.index == self.room_index {
+                    self.room = active.render_room;
+                    self.current_collision_room = Some(active.collision_room);
+                    self.current_ambient_rgb = active.ambient_rgb;
+                    self.materials = active.materials;
+                    self.material_count = active.material_count;
+                    return;
+                }
+            }
+            slot += 1;
+        }
     }
 
     fn mark_visible_room_unbuilt(&mut self, index: RoomIndex) {
@@ -3785,40 +4120,13 @@ impl Playtest {
         };
         let player = self.motor.position();
         let view = self.active_room_selection_view();
-        let view_global = local_to_global_room_point(current_index, view.position);
-        let visibility_index =
-            room_index_containing_global_from(current_index, view_global).unwrap_or(current_index);
-        let visibility_record = ROOMS
-            .get(visibility_index.to_usize())
-            .unwrap_or(current_record);
-        let visibility_view = if visibility_index == current_index {
-            view
-        } else {
-            view.with_position(global_to_local_room_point(visibility_index, view_global))
-        };
         let active_limit = room_active_chunk_limit(current_record);
-        let (view_sin_key, view_cos_key, view_pitch_sin_key, view_pitch_cos_key) =
-            portal_visibility_view_keys(view);
-        self.active_room_view_sin_key = view_sin_key;
-        self.active_room_view_cos_key = view_cos_key;
-        self.active_room_view_pitch_sin_key = view_pitch_sin_key;
-        self.active_room_view_pitch_cos_key = view_pitch_cos_key;
-        self.rebuild_portal_visibility(visibility_index, visibility_record, visibility_view);
-        self.active_room_candidates = self.portal_visibility.stats.portals_tested.min(u16::MAX);
-        self.portal_visible_missing_resident = 0;
-        self.portal_visible_missing_mask = 0;
-        self.portal_visible_build_failed = 0;
-        self.portal_visible_build_failed_mask = 0;
+        self.refresh_portal_visibility_for_view(current_index, current_record, view);
 
-        let desired_visible_count = self
-            .portal_visibility
-            .room_count
-            .min(active_limit)
-            .min(MAX_ACTIVE_ROOMS);
+        let desired_visible_count = self.portal_visible_room_limit(current_record);
         let mut next_slot = 0usize;
         let mut visible_slot = 0usize;
         self.active_room_anchor = player;
-        self.active_room_view_anchor = view.position;
 
         while visible_slot < desired_visible_count && next_slot < MAX_ACTIVE_ROOMS {
             let index = self.portal_visibility.rooms[visible_slot].room;
@@ -3900,6 +4208,13 @@ impl Playtest {
             }
         }
 
+        self.retain_previous_active_rooms(
+            &previous_active_rooms,
+            current_record,
+            active_limit,
+            &mut next_slot,
+        );
+
         if self.portal_visibility.room_count == 0 {
             self.rebuild_portal_visibility(current_index, current_record, view);
         }
@@ -3926,6 +4241,71 @@ impl Playtest {
         desired_visible_count: usize,
         current_record: &LevelRoomRecord,
     ) {
+        let visible_limit =
+            self.request_streamed_active_room_window(desired_visible_count, current_record);
+
+        let previous_active_rooms = self.active_rooms;
+        let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
+        let mut next_slot = 0usize;
+        let mut visible_slot = 0usize;
+        self.portal_visible_missing_resident = 0;
+        self.portal_visible_missing_mask = 0;
+        self.portal_visible_build_failed = 0;
+        self.portal_visible_build_failed_mask = 0;
+        while visible_slot < visible_limit && next_slot < MAX_ACTIVE_ROOMS {
+            let index = self.portal_visibility.rooms[visible_slot].room;
+            if let Some(record) = ROOMS.get(index.to_usize()) {
+                match reuse_or_build_active_room(
+                    next_slot,
+                    index,
+                    record,
+                    current_record,
+                    &previous_active_rooms,
+                ) {
+                    Some(active)
+                        if visible_slot == 0
+                            || active.render_room.is_some()
+                            || active.surface_cache.ready =>
+                    {
+                        rebuilt[next_slot] = Some(active);
+                        next_slot += 1;
+                    }
+                    Some(_) => {
+                        self.active_room_cache_skips =
+                            self.active_room_cache_skips.saturating_add(1);
+                    }
+                    None => {
+                        self.mark_visible_room_unbuilt(index);
+                        if visible_slot == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+            visible_slot += 1;
+        }
+        self.active_rooms = rebuilt;
+        self.retain_previous_active_rooms(
+            &previous_active_rooms,
+            current_record,
+            room_active_chunk_limit(current_record),
+            &mut next_slot,
+        );
+        if let Some(active) = self.active_rooms[0] {
+            self.room = active.render_room;
+            self.current_collision_room = Some(active.collision_room);
+            self.current_ambient_rgb = active.ambient_rgb;
+            self.materials = active.materials;
+            self.material_count = active.material_count;
+        }
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn request_streamed_active_room_window(
+        &mut self,
+        desired_visible_count: usize,
+        current_record: &LevelRoomRecord,
+    ) -> usize {
         let resident_capacity = room_resident_chunk_limit(current_record);
         let request_limit = room_stream_request_chunk_limit(current_record);
         let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
@@ -4014,54 +4394,102 @@ impl Playtest {
             resident_capacity,
         );
 
-        let previous_active_rooms = self.active_rooms;
-        let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
-        let mut next_slot = 0usize;
-        let mut visible_slot = 0usize;
-        self.portal_visible_missing_resident = 0;
-        self.portal_visible_missing_mask = 0;
-        self.portal_visible_build_failed = 0;
-        self.portal_visible_build_failed_mask = 0;
-        while visible_slot < visible_limit && next_slot < MAX_ACTIVE_ROOMS {
-            let index = self.portal_visibility.rooms[visible_slot].room;
-            if let Some(record) = ROOMS.get(index.to_usize()) {
-                match reuse_or_build_active_room(
-                    next_slot,
-                    index,
-                    record,
-                    current_record,
-                    &previous_active_rooms,
-                ) {
-                    Some(active)
-                        if visible_slot == 0
-                            || active.render_room.is_some()
-                            || active.surface_cache.ready =>
-                    {
-                        rebuilt[next_slot] = Some(active);
-                        next_slot += 1;
-                    }
-                    Some(_) => {
-                        self.active_room_cache_skips =
-                            self.active_room_cache_skips.saturating_add(1);
-                    }
-                    None => {
-                        self.mark_visible_room_unbuilt(index);
-                        if visible_slot == 0 {
-                            break;
-                        }
-                    }
-                }
+        visible_limit
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn request_streamed_active_room_job(
+        &mut self,
+        job_rooms: &[RoomIndex; MAX_ACTIVE_ROOMS],
+        job_room_count: usize,
+        current_record: &LevelRoomRecord,
+    ) {
+        let resident_capacity = room_resident_chunk_limit(current_record);
+        let request_limit = room_stream_request_chunk_limit(current_record);
+        let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
+        let mut requested_count = 0usize;
+        self.portal_stream_priority_current = 0;
+        self.portal_stream_priority_visible = 0;
+        self.portal_stream_priority_frontier = 0;
+
+        if push_stream_room_request(
+            &mut requested_rooms,
+            &mut requested_count,
+            request_limit,
+            self.room_index,
+        ) {
+            self.portal_stream_priority_current = 1;
+        }
+
+        let mut i = 0usize;
+        while i < job_room_count
+            && requested_count < request_limit
+            && requested_count < STREAMED_ROOM_SLOT_COUNT
+        {
+            if push_stream_room_request(
+                &mut requested_rooms,
+                &mut requested_count,
+                request_limit,
+                job_rooms[i],
+            ) {
+                self.portal_stream_priority_visible =
+                    self.portal_stream_priority_visible.saturating_add(1);
             }
-            visible_slot += 1;
+            i += 1;
         }
-        self.active_rooms = rebuilt;
-        if let Some(active) = self.active_rooms[0] {
-            self.room = active.render_room;
-            self.current_collision_room = Some(active.collision_room);
-            self.current_ambient_rgb = active.ambient_rgb;
-            self.materials = active.materials;
-            self.material_count = active.material_count;
+
+        let portal_first = current_record.portal_first as usize;
+        let portal_end = portal_first.saturating_add(current_record.portal_count as usize);
+        let mut portal_index = portal_first;
+        while portal_index < portal_end.min(ROOM_PORTALS.len())
+            && requested_count < request_limit
+            && requested_count < STREAMED_ROOM_SLOT_COUNT
+        {
+            let portal = ROOM_PORTALS[portal_index];
+            if portal.source_room == self.room_index
+                && push_stream_room_request(
+                    &mut requested_rooms,
+                    &mut requested_count,
+                    request_limit,
+                    portal.destination_room,
+                )
+            {
+                self.portal_stream_priority_frontier =
+                    self.portal_stream_priority_frontier.saturating_add(1);
+            }
+            portal_index += 1;
         }
+
+        let mut frontier = 0usize;
+        while frontier < self.portal_visibility.frontier_count
+            && requested_count < request_limit
+            && requested_count < STREAMED_ROOM_SLOT_COUNT
+        {
+            let room = self.portal_visibility.frontier_rooms[frontier].room;
+            if push_stream_room_request(
+                &mut requested_rooms,
+                &mut requested_count,
+                request_limit,
+                room,
+            ) {
+                self.portal_stream_priority_frontier =
+                    self.portal_stream_priority_frontier.saturating_add(1);
+            }
+            frontier += 1;
+        }
+
+        let protected_count = requested_count;
+        let requested_count = self.append_pack_aware_streamed_prefetches(
+            &mut requested_rooms,
+            requested_count,
+            request_limit,
+        );
+        self.ensure_streamed_room_residency(
+            &requested_rooms,
+            requested_count,
+            protected_count,
+            resident_capacity,
+        );
     }
 
     #[cfg(feature = "cd-stream-bench")]
@@ -4258,18 +4686,27 @@ impl Playtest {
         let view = self.active_room_selection_view();
         let (view_sin_key, view_cos_key, view_pitch_sin_key, view_pitch_cos_key) =
             portal_visibility_view_keys(view);
-        let moved_far = point_xz_distance_sq(player, self.active_room_anchor)
-            >= (threshold as u64).saturating_mul(threshold as u64);
-        let camera_moved_far = point_xyz_distance_sq(view.position, self.active_room_view_anchor)
-            >= (view_threshold as u64).saturating_mul(view_threshold as u64);
+        let moved_far = point_xz_axis_moved_at_least(player, self.active_room_anchor, threshold);
+        let camera_moved_far = point_xyz_axis_moved_at_least(
+            view.position,
+            self.active_room_view_anchor,
+            view_threshold,
+        );
         let view_changed = view_sin_key != self.active_room_view_sin_key
             || view_cos_key != self.active_room_view_cos_key
             || view_pitch_sin_key != self.active_room_view_pitch_sin_key
             || view_pitch_cos_key != self.active_room_view_pitch_cos_key;
-        if !moved_far && !camera_moved_far && !view_changed {
+        if moved_far {
+            self.begin_active_room_window_job(true);
             return;
         }
-        self.rebuild_active_room_window(true);
+        if !camera_moved_far && !view_changed {
+            return;
+        }
+        self.refresh_portal_visibility_for_view(self.room_index, record, view);
+        if !self.active_room_job.active && !self.portal_visible_rooms_are_active(record) {
+            self.begin_active_room_window_job(true);
+        }
     }
 
     fn lock_target_position(&self) -> Option<RoomPoint> {
@@ -6953,19 +7390,23 @@ fn rect_distance_sq(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u64 {
         .saturating_add((dz as u64).saturating_mul(dz as u64))
 }
 
-fn point_xz_distance_sq(a: RoomPoint, b: RoomPoint) -> u64 {
-    let dx = (a.x as i64).saturating_sub(b.x as i64).unsigned_abs();
-    let dz = (a.z as i64).saturating_sub(b.z as i64).unsigned_abs();
-    dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz))
+fn axis_moved_at_least(a: i32, b: i32, threshold: i32) -> bool {
+    let threshold = threshold.max(0);
+    if a >= b {
+        a.saturating_sub(b) >= threshold
+    } else {
+        b.saturating_sub(a) >= threshold
+    }
 }
 
-fn point_xyz_distance_sq(a: RoomPoint, b: RoomPoint) -> u64 {
-    let dx = (a.x as i64).saturating_sub(b.x as i64).unsigned_abs();
-    let dy = (a.y as i64).saturating_sub(b.y as i64).unsigned_abs();
-    let dz = (a.z as i64).saturating_sub(b.z as i64).unsigned_abs();
-    dx.saturating_mul(dx)
-        .saturating_add(dy.saturating_mul(dy))
-        .saturating_add(dz.saturating_mul(dz))
+fn point_xz_axis_moved_at_least(a: RoomPoint, b: RoomPoint, threshold: i32) -> bool {
+    axis_moved_at_least(a.x, b.x, threshold) || axis_moved_at_least(a.z, b.z, threshold)
+}
+
+fn point_xyz_axis_moved_at_least(a: RoomPoint, b: RoomPoint, threshold: i32) -> bool {
+    axis_moved_at_least(a.x, b.x, threshold)
+        || axis_moved_at_least(a.y, b.y, threshold)
+        || axis_moved_at_least(a.z, b.z, threshold)
 }
 
 fn room_bounds(record: &LevelRoomRecord, room: RuntimeRoom<'_>) -> (i32, i32, i32, i32) {

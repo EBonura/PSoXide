@@ -87,6 +87,8 @@ pub mod stage {
     pub const FAR_VISTA: u16 = 33;
     /// Editor-authored image/card prop rendering.
     pub const IMAGE_PROPS: u16 = 34;
+    /// Portal traversal and visible-room selection.
+    pub const PORTAL_VISIBILITY: u16 = 35;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -96,7 +98,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 35;
+pub const STAGE_COUNT: usize = 36;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -782,6 +784,7 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::SKY => "sky",
         stage::FAR_VISTA => "far vista",
         stage::IMAGE_PROPS => "image props",
+        stage::PORTAL_VISIBILITY => "portal visibility",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
@@ -1101,6 +1104,7 @@ mod tests {
         assert_eq!(stage_name(stage::SKY), "sky");
         assert_eq!(stage_name(stage::FAR_VISTA), "far vista");
         assert_eq!(stage_name(stage::IMAGE_PROPS), "image props");
+        assert_eq!(stage_name(stage::PORTAL_VISIBILITY), "portal visibility");
         assert_eq!(
             counter_name(counter::CD_STREAM_BENCH_STATUS),
             "cd stream status"
