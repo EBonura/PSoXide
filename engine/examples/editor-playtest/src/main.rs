@@ -240,6 +240,9 @@ const CAMERA_RADIUS_MAX: i32 = 5200;
 const CAMERA_RADIUS_STEP: i32 = 64;
 const CAMERA_START_YAW: Angle = Angle::from_q12(220);
 const CAMERA_YAW_STEP: Angle = Angle::from_q12(12);
+const CAMERA_SWEEP_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP").is_some();
+const CAMERA_SWEEP_YAW_STEP_Q12: i16 = 4;
+const CAMERA_SWEEP_RADIUS: i32 = CAMERA_START_RADIUS;
 const MOVE_STICK_DEADZONE: i16 = 18;
 const STICK_MAX: i16 = 127;
 const CAMERA_STICK_DEADZONE: i16 = 18;
@@ -2185,6 +2188,10 @@ impl Scene for Playtest {
             self.free_orbit = !self.free_orbit;
         }
         let delta_vblanks = ctx.time.delta_vblanks();
+        if CAMERA_SWEEP_ENABLED {
+            self.update_camera_sweep(delta_vblanks);
+            return;
+        }
         if self.free_orbit {
             let (right_x, right_y) = ctx.pad.sticks.right_centered();
             self.camera_turning_last_tick = abs_i16(right_x) >= CAMERA_STICK_DEADZONE;
@@ -3473,6 +3480,20 @@ impl Playtest {
             self.orbit_radius,
             self.orbit_yaw,
         )
+    }
+
+    fn update_camera_sweep(&mut self, delta_vblanks: u16) {
+        self.orbit_radius = CAMERA_SWEEP_RADIUS.clamp(CAMERA_RADIUS_MIN, CAMERA_RADIUS_MAX);
+        self.orbit_yaw = self.orbit_yaw.add_signed_q12(scale_i16_by_vblanks(
+            CAMERA_SWEEP_YAW_STEP_Q12,
+            delta_vblanks,
+        ));
+        self.player_moved_last_tick = false;
+        self.camera_turning_last_tick = true;
+        telemetry::stage_begin(telemetry::stage::CAMERA);
+        self.render_camera = self.free_orbit_camera();
+        telemetry::stage_end(telemetry::stage::CAMERA);
+        self.refresh_active_room_window_if_needed();
     }
 
     fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
@@ -9043,10 +9064,9 @@ fn atmosphere_seed(index: u32) -> u32 {
 
 fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
     match video_mode {
-        VideoMode::Ntsc => VisualPacing::EveryNVBlanks(3),
-        // PAL is 50Hz, so exact 20Hz pacing does not divide cleanly.
-        // Use a deterministic 25Hz fallback instead of a jittery 2/3
-        // cadence; PAL-specific 20Hz interpolation can be added later.
+        VideoMode::Ntsc => VisualPacing::EveryNVBlanks(2),
+        // PAL is 50Hz, so exact 30Hz pacing does not divide cleanly.
+        // Use a deterministic 25Hz fallback instead of a jittery cadence.
         VideoMode::Pal => VisualPacing::EveryNVBlanks(2),
     }
 }
