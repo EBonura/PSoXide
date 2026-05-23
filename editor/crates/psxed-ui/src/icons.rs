@@ -28,6 +28,7 @@ pub const LAYERS: char = '\u{e529}';
 pub const MAP_PIN: char = '\u{e111}';
 pub const MOVE: char = '\u{e121}';
 pub const PALETTE: char = '\u{e12f}';
+pub const PEN_LINE: char = '\u{e130}';
 pub const PLAY: char = '\u{e13c}';
 pub const PLUS: char = '\u{e13d}';
 pub const POINTER: char = '\u{e1e8}';

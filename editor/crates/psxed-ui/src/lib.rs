@@ -135,11 +135,21 @@ enum TreeAction {
     },
 }
 
+struct ActionBarStatus<'a> {
+    icon: char,
+    badge: &'static str,
+    message: &'a str,
+    accent: Color32,
+    border: Color32,
+}
+
 /// Embedded editor workspace state.
 pub struct EditorWorkspace {
     project: ProjectDocument,
     project_dir: PathBuf,
     saved_project_name: String,
+    project_name_editing: bool,
+    project_name_focus_pending: bool,
     new_project_dialog_open: bool,
     new_project_name: String,
     new_project_error: Option<String>,
@@ -2124,6 +2134,8 @@ impl EditorWorkspace {
             project,
             project_dir,
             saved_project_name,
+            project_name_editing: false,
+            project_name_focus_pending: false,
             new_project_dialog_open: false,
             new_project_name: String::new(),
             new_project_error: None,
@@ -9066,293 +9078,350 @@ impl EditorWorkspace {
             .frame(top_bar_frame())
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    egui::Frame::new()
-                        .fill(STUDIO_PANEL_DARK)
-                        .stroke(Stroke::new(1.0, STUDIO_BORDER))
-                        .corner_radius(egui::CornerRadius::same(4))
-                        .inner_margin(egui::Margin::symmetric(7, 5))
-                        .show(ui, |ui| {
-                            ui.label(icons::text(icons::BOX, 18.0).color(STUDIO_ACCENT));
-                        })
-                        .response
-                        .on_hover_text("PSoXide");
-
-                    ui.add_space(4.0);
-
-                    ui.menu_button("File", |ui| {
-                        if ui
-                            .button(menu_label("New Project...", &command_shortcut_text("N")))
-                            .clicked()
-                        {
-                            self.open_new_project_dialog();
-                            ui.close_menu();
-                        }
-                        ui.menu_button(icons::label(icons::FOLDER, "Project"), |ui| {
-                            self.draw_project_switch_menu(ui);
-                        });
-                        let can_delete_project = !self.current_project_is_default();
-                        let delete_response = ui.add_enabled(
-                            can_delete_project,
-                            egui::Button::new("Delete Project..."),
-                        );
-                        let delete_clicked = delete_response.clicked();
-                        if !can_delete_project {
-                            delete_response.on_hover_text("The default project cannot be deleted");
-                        }
-                        if delete_clicked {
-                            self.delete_project_dialog_open = true;
-                            self.delete_project_error = None;
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui
-                            .button(menu_label("Save", &command_shortcut_text("S")))
-                            .clicked()
-                        {
-                            self.save_project_from_ui();
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button(menu_label("Reload", &command_shortcut_text("R")))
-                            .clicked()
-                        {
-                            self.reload();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Quit").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.menu_button("Edit", |ui| {
-                        let can_node_delete = self.selected_node != NodeId::ROOT;
-                        let has_geometry_selection = self.has_geometry_selection();
-                        if ui
-                            .button(menu_label(
-                                "Duplicate Selection",
-                                &command_shortcut_text("D"),
-                            ))
-                            .clicked()
-                        {
-                            self.duplicate_current_selection();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui
-                            .add_enabled(
-                                has_geometry_selection,
-                                egui::Button::new("Rotate World Geometry 90°"),
-                            )
-                            .clicked()
-                        {
-                            self.rotate_current_selection_90();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui
-                            .add_enabled(can_node_delete, egui::Button::new("Delete Selection"))
-                            .clicked()
-                        {
-                            self.delete_selected();
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("View", |ui| {
-                        if ui
-                            .checkbox(&mut self.left_dock_open, "Scene and files")
-                            .clicked()
-                        {
-                            ui.close_menu();
-                        }
-                        if ui
-                            .checkbox(&mut self.resources_open, "Resources")
-                            .clicked()
-                        {
-                            ui.close_menu();
-                        }
-                        if ui.checkbox(&mut self.inspector_open, "Inspector").clicked() {
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Frame Selection").clicked() {
-                            self.frame_viewport();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Room Workspace").clicked() {
-                            self.active_workspace = WorkspaceView::Room;
-                            ui.close_menu();
-                        }
-                        if ui.button("Animation Viewer").clicked() {
-                            self.open_animation_viewer_for_current_selection();
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Tools", |ui| {
-                        if ui.button("Build Project").clicked() {
-                            self.pending_playtest_request =
-                                Some(EditorPlaytestRequest::BuildProject);
-                            ui.close_menu();
-                        }
-                        let play_label = if playtest_status.is_active() {
-                            "Rebuild and Play"
-                        } else {
-                            "Play"
-                        };
-                        if ui.button(play_label).clicked() {
-                            self.request_play_or_rebuild(playtest_status);
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Help", |ui| {
-                        ui.label(RichText::new("PSoXide Editor").strong());
-                        ui.weak("Build cooks assets and compiles the PS1 runtime.");
-                        ui.weak("Play builds and runs inside the viewport.");
-                    });
-
+                    self.draw_project_identity(ui);
+                    ui.add_space(8.0);
+                    self.draw_main_menus(ctx, ui, playtest_status);
                     ui.add_space(10.0);
-
-                    if ui
-                        .selectable_label(self.left_dock_open, icons::text(icons::LAYERS, 14.0))
-                        .on_hover_text("Toggle scene/files panel")
-                        .clicked()
-                    {
-                        self.left_dock_open = !self.left_dock_open;
-                    }
-                    if ui
-                        .selectable_label(self.resources_open, icons::text(icons::FOLDER, 14.0))
-                        .on_hover_text("Toggle resources panel")
-                        .clicked()
-                    {
-                        self.resources_open = !self.resources_open;
-                    }
-                    if ui
-                        .selectable_label(self.inspector_open, icons::text(icons::SCAN, 14.0))
-                        .on_hover_text("Toggle inspector panel")
-                        .clicked()
-                    {
-                        self.inspector_open = !self.inspector_open;
-                    }
-
+                    self.draw_build_play_controls(ui, playtest_status);
                     ui.add_space(10.0);
-
-                    if ui
-                        .button(icons::label(icons::FILE_PLUS, "New"))
-                        .on_hover_text(
-                            format!(
-                                "Create a new project from the default template. Shortcut: {}.",
-                                command_shortcut_text("N")
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.open_new_project_dialog();
-                    }
-                    if ui
-                        .button(icons::label(icons::SAVE, "Save"))
-                        .on_hover_text(format!(
-                            "Save the project. Shortcut: {}.",
-                            command_shortcut_text("S")
-                        ))
-                        .clicked()
-                    {
-                        self.save_project_from_ui();
-                    }
-                    if ui
-                        .button(icons::label(icons::ROTATE_CCW, "Reload"))
-                        .on_hover_text(format!(
-                            "Reload project.ron from disk. Shortcut: {}.",
-                            command_shortcut_text("R")
-                        ))
-                        .clicked()
-                    {
-                        self.reload();
-                    }
-                    if ui
-                        .button(icons::label(icons::FOCUS, "Frame"))
-                        .on_hover_text("Frame the current node or tile selection. Shortcut: .")
-                        .clicked()
-                    {
-                        self.frame_viewport();
-                    }
-
-                    ui.add_space(10.0);
-
-                    if ui
-                        .button(icons::label(icons::BOX, "Build"))
-                        .on_hover_text(
-                            format!(
-                                "Cook assets, build the runtime EXE, and export it into the launcher Projects list. Shortcut: {}.",
-                                command_shortcut_text("B")
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
-                    }
-                    let playtest_active = playtest_status.is_active();
-                    let play_label = if playtest_active {
-                        "Rebuild & Play"
-                    } else {
-                        "Play"
-                    };
-                    if ui
-                        .button(icons::label(icons::PLAY, play_label))
-                        .on_hover_text(
-                            format!(
-                                "Cook assets, build the runtime, and run it inside the 3D viewport. Shortcut: {}.",
-                                command_shortcut_text("Enter")
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.request_play_or_rebuild(playtest_status);
-                    }
-                    if playtest_active
-                        && ui
-                            .button(icons::label(icons::TRASH, "Stop"))
-                            .on_hover_text("Stop embedded play mode and return the viewport to editing.")
-                            .clicked()
-                    {
-                        self.pending_playtest_request = Some(EditorPlaytestRequest::Stop);
-                    }
-
-                    ui.add_space(12.0);
 
                     ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width().max(160.0), 38.0),
-                        egui::Layout::top_down(egui::Align::LEFT),
+                        Vec2::new(ui.available_width().max(180.0), 38.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            self.draw_project_title_status(ui);
+                            self.draw_build_status_strip(ui, playtest_status);
                         },
                     );
                 });
             });
     }
 
-    fn draw_project_title_status(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing.y = 1.0;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let dirty_width = if self.dirty { 12.0 } else { 0.0 };
-            let title_width = (ui.available_width() - dirty_width).max(96.0);
+    fn draw_project_identity(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_DARK)
+            .stroke(Stroke::new(1.0, STUDIO_BORDER))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(7, 5))
+            .show(ui, |ui| {
+                ui.label(icons::text(icons::BOX, 18.0).color(STUDIO_ACCENT));
+            })
+            .response
+            .on_hover_text("PSoXide");
+
+        ui.add_space(2.0);
+
+        if self.project_name_editing {
+            let edit_id = ui.id().with("project_name_inline_edit");
             let response = ui.add_sized(
-                Vec2::new(title_width, 21.0),
+                Vec2::new(154.0, 23.0),
                 egui::TextEdit::singleline(&mut self.project.name)
                     .hint_text("Project name")
-                    .font(egui::TextStyle::Button),
+                    .font(egui::TextStyle::Button)
+                    .id(edit_id),
             );
+            if self.project_name_focus_pending {
+                response.request_focus();
+                self.project_name_focus_pending = false;
+            }
             if response.changed() {
                 self.mark_dirty();
+            }
+            let finish_edit = response.lost_focus()
+                || (response.has_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+            if finish_edit {
+                self.project_name_editing = false;
             }
             if self.dirty {
                 ui.label(RichText::new("*").strong().color(STUDIO_ACCENT));
             }
+            return;
+        }
+
+        let display_name = if self.project.name.trim().is_empty() {
+            "Untitled"
+        } else {
+            self.project.name.trim()
+        };
+        ui.label(RichText::new(display_name).strong().size(15.0));
+        if self.dirty {
+            ui.label(RichText::new("*").strong().color(STUDIO_ACCENT));
+        }
+        if ui
+            .add_sized(
+                Vec2::new(24.0, 23.0),
+                egui::Button::new(icons::text(icons::PEN_LINE, 13.0)),
+            )
+            .on_hover_text("Edit project name")
+            .clicked()
+        {
+            self.project_name_editing = true;
+            self.project_name_focus_pending = true;
+        }
+    }
+
+    fn draw_main_menus(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        playtest_status: EditorPlaytestStatus,
+    ) {
+        ui.menu_button("File", |ui| {
+            if ui
+                .button(menu_label("New Project...", &command_shortcut_text("N")))
+                .clicked()
+            {
+                self.open_new_project_dialog();
+                ui.close_menu();
+            }
+            ui.menu_button(icons::label(icons::FOLDER, "Project"), |ui| {
+                self.draw_project_switch_menu(ui);
+            });
+            let can_delete_project = !self.current_project_is_default();
+            let delete_response =
+                ui.add_enabled(can_delete_project, egui::Button::new("Delete Project..."));
+            let delete_clicked = delete_response.clicked();
+            if !can_delete_project {
+                delete_response.on_hover_text("The default project cannot be deleted");
+            }
+            if delete_clicked {
+                self.delete_project_dialog_open = true;
+                self.delete_project_error = None;
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .button(menu_label("Save", &command_shortcut_text("S")))
+                .clicked()
+            {
+                self.save_project_from_ui();
+                ui.close_menu();
+            }
+            if ui
+                .button(menu_label("Reload", &command_shortcut_text("R")))
+                .clicked()
+            {
+                self.reload();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Quit").clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         });
-        ui.add_sized(
-            Vec2::new(ui.available_width(), 16.0),
-            egui::Label::new(RichText::new(&self.status).small().color(STUDIO_TEXT_WEAK)),
-        );
+        ui.menu_button("Edit", |ui| {
+            let can_node_delete = self.selected_node != NodeId::ROOT;
+            let has_geometry_selection = self.has_geometry_selection();
+            if ui
+                .button(menu_label(
+                    "Duplicate Selection",
+                    &command_shortcut_text("D"),
+                ))
+                .clicked()
+            {
+                self.duplicate_current_selection();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    has_geometry_selection,
+                    egui::Button::new("Rotate World Geometry 90°"),
+                )
+                .clicked()
+            {
+                self.rotate_current_selection_90();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(can_node_delete, egui::Button::new("Delete Selection"))
+                .clicked()
+            {
+                self.delete_selected();
+                ui.close_menu();
+            }
+        });
+        ui.menu_button("View", |ui| {
+            if ui
+                .checkbox(&mut self.left_dock_open, "Scene and files")
+                .clicked()
+            {
+                ui.close_menu();
+            }
+            if ui.checkbox(&mut self.resources_open, "Resources").clicked() {
+                ui.close_menu();
+            }
+            if ui.checkbox(&mut self.inspector_open, "Inspector").clicked() {
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Frame Selection").clicked() {
+                self.frame_viewport();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Room Workspace").clicked() {
+                self.active_workspace = WorkspaceView::Room;
+                ui.close_menu();
+            }
+            if ui.button("Animation Viewer").clicked() {
+                self.open_animation_viewer_for_current_selection();
+                ui.close_menu();
+            }
+        });
+        ui.menu_button("Tools", |ui| {
+            if ui.button("Build Project").clicked() {
+                self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
+                ui.close_menu();
+            }
+            let play_label = if playtest_status.is_active() {
+                "Rebuild and Play"
+            } else {
+                "Play"
+            };
+            if ui.button(play_label).clicked() {
+                self.request_play_or_rebuild(playtest_status);
+                ui.close_menu();
+            }
+            if playtest_status.is_active() {
+                ui.separator();
+                if ui.button("Stop Embedded Play").clicked() {
+                    self.pending_playtest_request = Some(EditorPlaytestRequest::Stop);
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Help", |ui| {
+            ui.label(RichText::new("PSoXide Editor").strong());
+            ui.weak("Build cooks assets and compiles the PS1 runtime.");
+            ui.weak("Play builds and runs inside the viewport.");
+        });
+    }
+
+    fn draw_build_play_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        playtest_status: EditorPlaytestStatus,
+    ) {
+        if ui
+            .button(icons::label(icons::BOX, "Build"))
+            .on_hover_text(format!(
+                "Cook assets, build the runtime EXE, and export it into the launcher Projects list. Shortcut: {}.",
+                command_shortcut_text("B")
+            ))
+            .clicked()
+        {
+            self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
+        }
+
+        let playtest_active = playtest_status.is_active();
+        let play_label = if playtest_active {
+            "Rebuild & Play"
+        } else {
+            "Play"
+        };
+        if ui
+            .button(icons::label(icons::PLAY, play_label))
+            .on_hover_text(format!(
+                "Cook assets, build the runtime, and run it inside the 3D viewport. Shortcut: {}.",
+                command_shortcut_text("Enter")
+            ))
+            .clicked()
+        {
+            self.request_play_or_rebuild(playtest_status);
+        }
+
+        if playtest_active
+            && ui
+                .button(icons::label(icons::TRASH, "Stop"))
+                .on_hover_text("Stop embedded play mode and return the viewport to editing.")
+                .clicked()
+        {
+            self.pending_playtest_request = Some(EditorPlaytestRequest::Stop);
+        }
+    }
+
+    fn draw_build_status_strip(
+        &self,
+        ui: &mut egui::Ui,
+        playtest_status: EditorPlaytestStatus,
+    ) {
+        let status = self.action_bar_status(playtest_status);
+        let strip_width = ui.available_width().max(180.0);
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_DARK)
+            .stroke(Stroke::new(1.0, status.border))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(9, 5))
+            .show(ui, |ui| {
+                ui.set_min_width((strip_width - 18.0).max(80.0));
+                ui.set_min_height(26.0);
+                ui.horizontal_centered(|ui| {
+                    ui.label(icons::text(status.icon, 14.0).color(status.accent));
+                    ui.label(
+                        RichText::new(status.badge)
+                            .small()
+                            .strong()
+                            .color(status.accent),
+                    );
+                    ui.separator();
+                    ui.add_sized(
+                        Vec2::new(ui.available_width(), 18.0),
+                        egui::Label::new(
+                            RichText::new(status.message).small().color(STUDIO_TEXT_WEAK),
+                        )
+                        .truncate(),
+                    );
+                });
+            });
+    }
+
+    fn action_bar_status(&self, playtest_status: EditorPlaytestStatus) -> ActionBarStatus<'_> {
+        match playtest_status {
+            EditorPlaytestStatus::Cooking => ActionBarStatus {
+                icon: icons::BOX,
+                badge: "COOKING",
+                message: &self.status,
+                accent: STUDIO_ACCENT,
+                border: STUDIO_ACCENT_DIM,
+            },
+            EditorPlaytestStatus::Building => ActionBarStatus {
+                icon: icons::TERMINAL,
+                badge: "BUILDING",
+                message: &self.status,
+                accent: STUDIO_ACCENT,
+                border: STUDIO_ACCENT_DIM,
+            },
+            EditorPlaytestStatus::Running { input_captured } => ActionBarStatus {
+                icon: icons::PLAY,
+                badge: if input_captured { "PLAY INPUT" } else { "PLAY" },
+                message: &self.status,
+                accent: Color32::from_rgb(114, 207, 138),
+                border: Color32::from_rgb(40, 93, 55),
+            },
+            EditorPlaytestStatus::Failed => ActionBarStatus {
+                icon: icons::TERMINAL,
+                badge: "FAILED",
+                message: &self.status,
+                accent: Color32::from_rgb(239, 106, 106),
+                border: Color32::from_rgb(104, 42, 42),
+            },
+            EditorPlaytestStatus::Idle if self.dirty => ActionBarStatus {
+                icon: icons::SAVE,
+                badge: "UNSAVED",
+                message: &self.status,
+                accent: STUDIO_ACCENT,
+                border: STUDIO_ACCENT_DIM,
+            },
+            EditorPlaytestStatus::Idle => ActionBarStatus {
+                icon: icons::CIRCLE_DOT,
+                badge: "READY",
+                message: &self.status,
+                accent: STUDIO_TEXT_WEAK,
+                border: STUDIO_BORDER,
+            },
+        }
     }
 
     fn draw_left_dock(&mut self, ctx: &egui::Context) {
@@ -9457,33 +9526,6 @@ impl EditorWorkspace {
             }
         });
 
-        ui.separator();
-        draw_scene_group(
-            ui,
-            icons::GRID,
-            "Rooms",
-            count_nodes(&self.project, |kind| matches!(kind, NodeKind::Room { .. })),
-        );
-        draw_scene_group(
-            ui,
-            icons::BOX,
-            "Entities",
-            count_nodes(&self.project, |kind| matches!(kind, NodeKind::Entity)),
-        );
-        draw_scene_group(
-            ui,
-            icons::LAYERS,
-            "Components",
-            count_nodes(&self.project, NodeKind::is_component),
-        );
-        draw_scene_group(
-            ui,
-            icons::SUN,
-            "Lights",
-            count_nodes(&self.project, |kind| {
-                matches!(kind, NodeKind::PointLight { .. })
-            }),
-        );
     }
 
     fn draw_filesystem_panel(&mut self, ui: &mut egui::Ui) {
@@ -22757,23 +22799,6 @@ fn node_draw_mode(kind: &NodeKind) -> &'static str {
         NodeKind::Portal { .. } => "Portal Seam",
         NodeKind::Node | NodeKind::Node3D => "None",
     }
-}
-
-fn count_nodes(project: &ProjectDocument, predicate: impl Fn(&NodeKind) -> bool) -> usize {
-    project
-        .active_scene()
-        .nodes()
-        .iter()
-        .filter(|node| predicate(&node.kind))
-        .count()
-}
-
-fn draw_scene_group(ui: &mut egui::Ui, icon: char, label: &str, count: usize) {
-    egui::CollapsingHeader::new(format!("{} ({count})", icons::label(icon, label)))
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.weak("Filtered collection");
-        });
 }
 
 #[derive(Debug, Clone)]
