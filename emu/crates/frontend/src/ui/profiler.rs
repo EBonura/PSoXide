@@ -372,6 +372,8 @@ impl EguiRenderProfile {
 /// One frontend redraw sample.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameProfileSample {
+    /// Monotonic frontend redraw sample id, assigned by [`FrameProfiler::record`].
+    pub sample_serial: u32,
     /// Host delta between redraw callbacks.
     pub host_dt_ms: f32,
     /// Full RedrawRequested handler wall time.
@@ -569,6 +571,11 @@ impl FrameProfileSample {
         Some(visual_frames * 1000.0 / self.host_dt_ms)
     }
 
+    pub fn guest_visual_frame_count(self) -> f32 {
+        self.guest
+            .counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize)
+    }
+
     fn bus_cycles_per_guest_frame(self) -> f32 {
         per_guest_frame(self.bus_cycles, self.frames_run)
     }
@@ -616,6 +623,7 @@ enum LogMode {
 /// Rolling profiler state.
 pub struct FrameProfiler {
     samples: VecDeque<FrameProfileSample>,
+    next_sample_serial: u32,
     log_mode: LogMode,
     log_accum_ms: f32,
     guest_stage_starts: [Option<u64>; STAGE_COUNT],
@@ -630,6 +638,7 @@ impl Default for FrameProfiler {
         };
         Self {
             samples: VecDeque::with_capacity(HISTORY_CAP),
+            next_sample_serial: 0,
             log_mode,
             log_accum_ms: 0.0,
             guest_stage_starts: [None; STAGE_COUNT],
@@ -639,7 +648,9 @@ impl Default for FrameProfiler {
 
 impl FrameProfiler {
     /// Add one sample. Returns a log line when `PSOXIDE_PROFILE` asks for stderr output.
-    pub fn record(&mut self, sample: FrameProfileSample) -> Option<String> {
+    pub fn record(&mut self, mut sample: FrameProfileSample) -> Option<String> {
+        self.next_sample_serial = self.next_sample_serial.wrapping_add(1);
+        sample.sample_serial = self.next_sample_serial;
         if self.samples.len() >= HISTORY_CAP {
             self.samples.pop_front();
         }
@@ -1332,6 +1343,7 @@ mod tests {
     fn averages_samples() {
         let mut profiler = FrameProfiler {
             samples: VecDeque::with_capacity(HISTORY_CAP),
+            next_sample_serial: 0,
             log_mode: LogMode::Off,
             log_accum_ms: 0.0,
             guest_stage_starts: [None; STAGE_COUNT],
