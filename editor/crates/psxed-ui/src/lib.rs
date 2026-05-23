@@ -55,6 +55,9 @@ const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
 const CONTENT_BROWSER_MIN_HEIGHT: f32 = 48.0;
 const CENTRAL_WORKSPACE_MIN_WIDTH: f32 = 360.0;
 const CENTRAL_WORKSPACE_MIN_HEIGHT: f32 = 220.0;
+const LEFT_DOCK_MIN_SPLIT_PANEL_HEIGHT: f32 = 116.0;
+const LEFT_DOCK_SPLITTER_HEIGHT: f32 = 8.0;
+const LEFT_DOCK_DEFAULT_SCENE_FRACTION: f32 = 0.58;
 const LEFT_DOCK_LABEL_CHARS: usize = 34;
 const EDITOR_OUTLINE_STROKE_WIDTH: f32 = 1.25;
 const EDITOR_SELECTED_OUTLINE_STROKE_WIDTH: f32 = 3.0;
@@ -269,10 +272,12 @@ pub struct EditorWorkspace {
     /// requests focus + selects the text inside the rename TextEdit.
     pending_rename_focus: bool,
     collapsed_scene_nodes: HashSet<NodeId>,
+    collapsed_file_folders: HashSet<String>,
     hidden_scene_nodes: HashSet<NodeId>,
     history: UndoStack,
     scene_filter: String,
     file_filter: String,
+    left_dock_scene_fraction: f32,
     resource_search: String,
     resource_filter: ResourceFilter,
     /// `Some((id, buffer))` while the resource inspector's name
@@ -478,6 +483,11 @@ struct TextureImportPreviewKey {
 struct ResourceClick {
     id: ResourceId,
     modifiers: egui::Modifiers,
+}
+
+enum ProjectFileRowAction {
+    Select(ResourceClick),
+    ToggleFolder(String),
 }
 
 struct ModelImportDialog {
@@ -2174,10 +2184,12 @@ impl EditorWorkspace {
             renaming: None,
             pending_rename_focus: false,
             collapsed_scene_nodes: HashSet::new(),
+            collapsed_file_folders: HashSet::new(),
             hidden_scene_nodes: HashSet::new(),
             history: UndoStack::default(),
             scene_filter: String::new(),
             file_filter: String::new(),
+            left_dock_scene_fraction: LEFT_DOCK_DEFAULT_SCENE_FRACTION,
             resource_search: String::new(),
             resource_filter: ResourceFilter::All,
             resource_renaming: None,
@@ -9439,15 +9451,83 @@ impl EditorWorkspace {
                 fixed_panel_content(ui, "psxed_left_dock_fixed_content", |ui| {
                     let content_width = ui.available_width().max(1.0);
                     constrain_resizable_dock_content(ui, content_width);
-                    self.draw_scene_tree_panel(ui);
-                    ui.add_space(6.0);
-                    self.draw_filesystem_panel(ui);
+                    self.draw_scene_filesystem_split(ui);
                 });
             });
     }
 
+    fn draw_scene_filesystem_split(&mut self, ui: &mut egui::Ui) {
+        let content_width = ui.available_width().max(1.0);
+        let total_height = ui.available_height().max(1.0);
+        let splitter_height = LEFT_DOCK_SPLITTER_HEIGHT.min(total_height);
+        let panel_height = (total_height - splitter_height).max(1.0);
+        let min_panel = LEFT_DOCK_MIN_SPLIT_PANEL_HEIGHT.min(panel_height * 0.5);
+        let min_fraction = (min_panel / panel_height).clamp(0.0, 0.5);
+        self.left_dock_scene_fraction = self
+            .left_dock_scene_fraction
+            .clamp(min_fraction, 1.0 - min_fraction);
+
+        let scene_height = (panel_height * self.left_dock_scene_fraction)
+            .clamp(min_panel, panel_height - min_panel);
+        let filesystem_height = (panel_height - scene_height).max(0.0);
+
+        ui.allocate_ui_with_layout(
+            Vec2::new(content_width, scene_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(Vec2::new(content_width, scene_height));
+                ui.set_max_width(content_width);
+                self.draw_scene_tree_panel(ui);
+            },
+        );
+        self.draw_scene_filesystem_splitter(ui, content_width, panel_height);
+        ui.allocate_ui_with_layout(
+            Vec2::new(content_width, filesystem_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(Vec2::new(content_width, filesystem_height));
+                ui.set_max_width(content_width);
+                self.draw_filesystem_panel(ui);
+            },
+        );
+    }
+
+    fn draw_scene_filesystem_splitter(
+        &mut self,
+        ui: &mut egui::Ui,
+        width: f32,
+        panel_height: f32,
+    ) {
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, LEFT_DOCK_SPLITTER_HEIGHT), Sense::drag());
+        let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        if response.dragged() && panel_height > 1.0 {
+            let delta = ui.input(|input| input.pointer.delta().y);
+            let min_fraction =
+                (LEFT_DOCK_MIN_SPLIT_PANEL_HEIGHT.min(panel_height * 0.5) / panel_height)
+                    .clamp(0.0, 0.5);
+            self.left_dock_scene_fraction = (self.left_dock_scene_fraction + delta / panel_height)
+                .clamp(min_fraction, 1.0 - min_fraction);
+        }
+
+        let color = if response.dragged() || response.hovered() {
+            STUDIO_ACCENT
+        } else {
+            STUDIO_BORDER
+        };
+        let y = rect.center().y;
+        ui.painter().line_segment(
+            [
+                Pos2::new(rect.left() + 10.0, y),
+                Pos2::new(rect.right() - 10.0, y),
+            ],
+            Stroke::new(1.0, color),
+        );
+    }
+
     fn draw_scene_tree_panel(&mut self, ui: &mut egui::Ui) {
         tool_panel_frame().show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
             tool_panel_header(ui, icons::LAYERS, "Scene", |ui| {
                 ui.menu_button(icons::text(icons::PLUS, 14.0), |ui| {
                     for (label, kind) in default_addable_kinds() {
@@ -9484,7 +9564,7 @@ impl EditorWorkspace {
         let scene = self.project.active_scene();
         let renaming = &mut self.renaming;
         let pending_focus = &mut self.pending_rename_focus;
-        let tree_scroll_height = ui.available_height().clamp(180.0, 420.0);
+        let tree_scroll_height = (ui.available_height() - 30.0).max(24.0);
         egui::ScrollArea::vertical()
             .id_salt("psxed_scene_tree")
             .auto_shrink([false, false])
@@ -9525,11 +9605,11 @@ impl EditorWorkspace {
                 self.delete_selected();
             }
         });
-
     }
 
     fn draw_filesystem_panel(&mut self, ui: &mut egui::Ui) {
         tool_panel_frame().show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
             tool_panel_header(ui, icons::FOLDER, "FileSystem", |_| {});
             tool_panel_body(ui, |ui| self.draw_filesystem_panel_body(ui));
         });
@@ -9538,33 +9618,47 @@ impl EditorWorkspace {
     fn draw_filesystem_panel_body(&mut self, ui: &mut egui::Ui) {
         let rows = project_filesystem_rows(&self.project);
         let filter = self.file_filter.to_ascii_lowercase();
-        let visible_resource_order: Vec<ResourceId> = rows
+        let visible_rows =
+            project_filesystem_display_rows(&rows, &filter, &self.collapsed_file_folders);
+        let visible_resource_order: Vec<ResourceId> = visible_rows
             .iter()
-            .filter(|row| {
-                row.resource.is_some()
-                    && (filter.is_empty() || row.name.to_ascii_lowercase().contains(&filter))
-            })
             .filter_map(|row| row.resource)
             .collect();
         let mut clicked_resource = None;
+        let mut toggled_folder = None;
         let selected_resource = self.selected_resource;
         let selected_resources = self.selected_resources.clone();
+        let collapsed_folders = self.collapsed_file_folders.clone();
+        let file_scroll_height = (ui.available_height() - 28.0).max(24.0);
         egui::ScrollArea::vertical()
             .id_salt("psxed_filesystem")
-            .max_height(190.0)
+            .auto_shrink([false, false])
+            .max_height(file_scroll_height)
             .show(ui, |ui| {
-                for row in &rows {
-                    if let Some(click) = draw_project_file_row(
+                for row in visible_rows {
+                    match draw_project_file_row(
                         ui,
                         row,
                         selected_resource,
                         &selected_resources,
                         &filter,
+                        &collapsed_folders,
                     ) {
-                        clicked_resource = Some(click);
+                        Some(ProjectFileRowAction::Select(click)) => {
+                            clicked_resource = Some(click);
+                        }
+                        Some(ProjectFileRowAction::ToggleFolder(key)) => {
+                            toggled_folder = Some(key);
+                        }
+                        None => {}
                     }
                 }
             });
+        if let Some(key) = toggled_folder {
+            if !self.collapsed_file_folders.insert(key.clone()) {
+                self.collapsed_file_folders.remove(&key);
+            }
+        }
         if let Some(click) = clicked_resource {
             self.apply_resource_selection_modifiers(
                 click.id,
@@ -22806,6 +22900,8 @@ struct ProjectFileRow {
     depth: usize,
     name: String,
     folder: bool,
+    key: String,
+    ancestors: Vec<String>,
     icon: char,
     resource: Option<ResourceId>,
 }
@@ -22816,6 +22912,8 @@ fn project_filesystem_rows(project: &ProjectDocument) -> Vec<ProjectFileRow> {
         depth: 0,
         name: "res://".to_string(),
         folder: true,
+        key: "res://".to_string(),
+        ancestors: Vec::new(),
         icon: icons::FOLDER,
         resource: None,
     });
@@ -22823,6 +22921,8 @@ fn project_filesystem_rows(project: &ProjectDocument) -> Vec<ProjectFileRow> {
         depth: 1,
         name: "maps".to_string(),
         folder: true,
+        key: "res://maps".to_string(),
+        ancestors: vec!["res://".to_string()],
         icon: icons::FOLDER,
         resource: None,
     });
@@ -22830,6 +22930,8 @@ fn project_filesystem_rows(project: &ProjectDocument) -> Vec<ProjectFileRow> {
         depth: 2,
         name: format!("{}.map", snake_name(&project.active_scene().name)),
         folder: false,
+        key: "res://maps/main.map".to_string(),
+        ancestors: vec!["res://".to_string(), "res://maps".to_string()],
         icon: icons::GRID,
         resource: None,
     });
@@ -22851,10 +22953,13 @@ fn push_resource_folder(
     folder: &str,
     filter: ResourceFilter,
 ) {
+    let key = format!("res://{folder}");
     rows.push(ProjectFileRow {
         depth: 1,
         name: folder.to_string(),
         folder: true,
+        key: key.clone(),
+        ancestors: vec!["res://".to_string()],
         icon: icons::FOLDER,
         resource: None,
     });
@@ -22867,10 +22972,31 @@ fn push_resource_folder(
             depth: 2,
             name: resource_file_name(resource),
             folder: false,
+            key: format!("{key}/{}", resource.id.raw()),
+            ancestors: vec!["res://".to_string(), key.clone()],
             icon: resource_lucide_icon(&resource.data),
             resource: Some(resource.id),
         });
     }
+}
+
+fn project_filesystem_display_rows<'a>(
+    rows: &'a [ProjectFileRow],
+    filter: &str,
+    collapsed_folders: &HashSet<String>,
+) -> Vec<&'a ProjectFileRow> {
+    rows.iter()
+        .filter(|row| {
+            if row
+                .ancestors
+                .iter()
+                .any(|ancestor| collapsed_folders.contains(ancestor))
+            {
+                return false;
+            }
+            row.folder || filter.is_empty() || row.name.to_ascii_lowercase().contains(filter)
+        })
+        .collect()
 }
 
 fn draw_project_file_row(
@@ -22879,23 +23005,37 @@ fn draw_project_file_row(
     selected_resource: Option<ResourceId>,
     selected_resources: &HashSet<ResourceId>,
     filter: &str,
-) -> Option<ResourceClick> {
+    collapsed_folders: &HashSet<String>,
+) -> Option<ProjectFileRowAction> {
     if !row.folder && !filter.is_empty() && !row.name.to_ascii_lowercase().contains(filter) {
         return None;
     }
 
-    let mut clicked = None;
+    let mut action = None;
     ui.horizontal(|ui| {
         ui.add_space(row.depth as f32 * 14.0);
         let display_name = compact_middle(&row.name, dock_label_limit(row.depth));
-        let label = icons::label(row.icon, &display_name);
         let label_was_compacted = display_name != row.name;
         if row.folder {
-            let response = ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK));
+            let chevron = if collapsed_folders.contains(&row.key) {
+                icons::CHEVRON_RIGHT
+            } else {
+                icons::CHEVRON_DOWN
+            };
+            let label = format!("{chevron}  {}", icons::label(row.icon, &display_name));
+            let response = ui.add(egui::SelectableLabel::new(
+                false,
+                RichText::new(label).color(STUDIO_TEXT_WEAK),
+            ));
+            if response.clicked() {
+                action = Some(ProjectFileRowAction::ToggleFolder(row.key.clone()));
+            }
             if label_was_compacted {
                 response.on_hover_text(row.name.clone());
             }
         } else {
+            ui.add_space(18.0);
+            let label = icons::label(row.icon, &display_name);
             let selected = row
                 .resource
                 .is_some_and(|id| selected_resources.contains(&id))
@@ -22903,10 +23043,10 @@ fn draw_project_file_row(
             let response = ui.selectable_label(selected, label);
             if response.clicked() {
                 if let Some(id) = row.resource {
-                    clicked = Some(ResourceClick {
+                    action = Some(ProjectFileRowAction::Select(ResourceClick {
                         id,
                         modifiers: ui.input(|input| input.modifiers),
-                    });
+                    }));
                 }
             }
             if label_was_compacted {
@@ -22914,7 +23054,7 @@ fn draw_project_file_row(
             }
         }
     });
-    clicked
+    action
 }
 
 fn resource_file_name(resource: &Resource) -> String {
@@ -33851,6 +33991,22 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| row.name == "delven_slateflr1a_q2.mat" && row.resource.is_some()));
+    }
+
+    #[test]
+    fn collapsed_project_filesystem_folder_hides_children() {
+        let project = ProjectDocument::starter();
+        let rows = project_filesystem_rows(&project);
+        let mut collapsed = HashSet::new();
+        collapsed.insert("res://textures".to_string());
+
+        let display_rows = project_filesystem_display_rows(&rows, "", &collapsed);
+
+        assert!(display_rows.iter().any(|row| row.name == "textures"));
+        assert!(!display_rows.iter().any(|row| row.name.ends_with(".psxt")));
+        assert!(display_rows
+            .iter()
+            .any(|row| row.name == "delven_slateflr1a_q2.mat"));
     }
 
     #[test]
