@@ -7512,11 +7512,143 @@ impl Scene {
     }
 }
 
+/// Saved editor 3D camera mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EditorCameraMode {
+    /// Target/radius orbit camera.
+    #[default]
+    Orbit,
+    /// Explicit-position fly camera.
+    Free,
+}
+
+fn default_editor_camera_orbit_yaw_q12() -> u16 {
+    256
+}
+
+fn default_editor_camera_orbit_pitch_q12() -> u16 {
+    256
+}
+
+fn default_editor_camera_orbit_radius() -> i32 {
+    6144
+}
+
+fn default_editor_camera_orbit_target() -> [i32; 3] {
+    [0, 512, 0]
+}
+
+fn default_editor_camera_free_yaw_q12() -> u16 {
+    default_editor_camera_orbit_yaw_q12()
+}
+
+fn default_editor_camera_free_pitch_q12() -> u16 {
+    default_editor_camera_orbit_pitch_q12()
+}
+
+/// Editor-only 3D viewport camera state persisted with a project.
+///
+/// This is intentionally authoring metadata: cook/playtest paths
+/// should not use it for runtime camera behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorCameraState {
+    #[serde(default)]
+    pub mode: EditorCameraMode,
+    #[serde(default = "default_editor_camera_orbit_yaw_q12")]
+    pub orbit_yaw_q12: u16,
+    #[serde(default = "default_editor_camera_orbit_pitch_q12")]
+    pub orbit_pitch_q12: u16,
+    #[serde(default = "default_editor_camera_orbit_radius")]
+    pub orbit_radius: i32,
+    #[serde(default = "default_editor_camera_orbit_target")]
+    pub orbit_target: [i32; 3],
+    #[serde(default = "default_editor_camera_free_yaw_q12")]
+    pub free_yaw_q12: u16,
+    #[serde(default = "default_editor_camera_free_pitch_q12")]
+    pub free_pitch_q12: u16,
+    #[serde(default)]
+    pub free_position: [i32; 3],
+    #[serde(default)]
+    pub free_initialized: bool,
+}
+
+impl Default for EditorCameraState {
+    fn default() -> Self {
+        Self {
+            mode: EditorCameraMode::Orbit,
+            orbit_yaw_q12: default_editor_camera_orbit_yaw_q12(),
+            orbit_pitch_q12: default_editor_camera_orbit_pitch_q12(),
+            orbit_radius: default_editor_camera_orbit_radius(),
+            orbit_target: default_editor_camera_orbit_target(),
+            free_yaw_q12: default_editor_camera_free_yaw_q12(),
+            free_pitch_q12: default_editor_camera_free_pitch_q12(),
+            free_position: [0, 0, 0],
+            free_initialized: false,
+        }
+    }
+}
+
+impl EditorCameraState {
+    pub fn normalize(&mut self) {
+        self.orbit_pitch_q12 = clamp_q12_pitch(self.orbit_pitch_q12);
+        self.free_pitch_q12 = clamp_q12_pitch(self.free_pitch_q12);
+        self.orbit_radius = self.orbit_radius.clamp(512, 262_144);
+    }
+}
+
+fn clamp_q12_pitch(value: u16) -> u16 {
+    let raw = (value & 0x0fff) as i32;
+    let signed = if raw >= 2048 { raw - 4096 } else { raw };
+    signed.clamp(-960, 960).rem_euclid(4096) as u16
+}
+
+/// Editor-only visibility preferences persisted with a project.
+///
+/// These fields affect authoring and debug overlays only; cooked
+/// runtime output must not depend on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorVisibilityState {
+    #[serde(default = "default_true")]
+    pub show_grid: bool,
+    #[serde(default = "default_true")]
+    pub show_portals: bool,
+    #[serde(default = "default_true")]
+    pub preview_fog: bool,
+    #[serde(default = "default_true")]
+    pub preview_backface_wireframe: bool,
+    #[serde(default = "default_true")]
+    pub preview_bounds: bool,
+    #[serde(default = "default_true")]
+    pub show_play_debug_overlays: bool,
+    #[serde(default = "default_true")]
+    pub show_play_debug_map: bool,
+}
+
+impl Default for EditorVisibilityState {
+    fn default() -> Self {
+        Self {
+            show_grid: true,
+            show_portals: true,
+            preview_fog: true,
+            preview_backface_wireframe: true,
+            preview_bounds: true,
+            show_play_debug_overlays: true,
+            show_play_debug_map: true,
+        }
+    }
+}
+
 /// One editor project document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDocument {
     /// Display name.
     pub name: String,
+    /// Editor-only viewport camera state.
+    #[serde(default)]
+    pub editor_camera: EditorCameraState,
+    /// Editor-only overlay visibility preferences.
+    #[serde(default)]
+    pub editor_visibility: EditorVisibilityState,
     /// Open scenes. The first scene is the active scene for now.
     pub scenes: Vec<Scene>,
     /// Project resources.
@@ -7529,6 +7661,8 @@ impl ProjectDocument {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            editor_camera: EditorCameraState::default(),
+            editor_visibility: EditorVisibilityState::default(),
             scenes: vec![Scene::new("Main")],
             resources: Vec::new(),
             next_resource_id: 1,
@@ -7902,6 +8036,7 @@ impl ProjectDocument {
 
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
+        self.editor_camera.normalize();
         for scene in &mut self.scenes {
             for node in &mut scene.nodes {
                 match &mut node.kind {
@@ -10025,6 +10160,44 @@ mod tests {
         let ron = project.to_ron_string().unwrap();
 
         assert!(ron.contains("Room"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn editor_camera_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("camera");
+        project.editor_camera = EditorCameraState {
+            mode: EditorCameraMode::Free,
+            orbit_yaw_q12: 384,
+            orbit_pitch_q12: 4096 - 128,
+            orbit_radius: 8192,
+            orbit_target: [1024, 512, -2048],
+            free_yaw_q12: 1536,
+            free_pitch_q12: 128,
+            free_position: [-300, 700, 900],
+            free_initialized: true,
+        };
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("editor_camera"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn editor_visibility_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("visibility");
+        project.editor_visibility = EditorVisibilityState {
+            show_grid: false,
+            show_portals: true,
+            preview_fog: false,
+            preview_backface_wireframe: true,
+            preview_bounds: false,
+            show_play_debug_overlays: false,
+            show_play_debug_map: true,
+        };
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("editor_visibility"));
         assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
     }
 
