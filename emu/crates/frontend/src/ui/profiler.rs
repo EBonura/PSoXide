@@ -58,6 +58,7 @@ const PROFILE_LOG_STAGE_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
 const PROFILE_LOG_STAGE_PER_HIT_FIELDS: &[(u16, &str)] = &[
     (stage::UPDATE, "guest_update_hit"),
     (stage::CAMERA, "guest_camera_hit"),
+    (stage::PORTAL_VISIBILITY, "guest_portal_vis_hit"),
     (stage::ACTIVE_ROOM_WINDOW, "guest_room_window_hit"),
     (stage::ROOM_SURFACE_CACHE, "guest_room_cache_hit"),
     (stage::VRAM_UPLOAD, "guest_vram_hit"),
