@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use psx_asset::Texture;
 use psx_gpu::material::TextureWindow;
@@ -100,7 +101,7 @@ pub struct EditorTextures {
     /// populate the limited room-material VRAM band. Scene-used
     /// materials and active far-vista panels are prioritized ahead
     /// of unused library resources.
-    room_signature: Vec<(ResourceId, String, String, bool, bool)>,
+    room_signature: Vec<PreviewTextureSignature>,
     /// 8-texel-grid allocator for room textures inside tpages 5..15.
     room_allocator: TextureWindowAtlas<ROOM_TPAGE_COUNT>,
     /// Halfword X-coord of the next free 4bpp CLUT slot. Each
@@ -125,6 +126,16 @@ struct ModelAtlasCacheEntry {
     /// has no atlas (no slot is uploaded in that case -- entry
     /// just records the empty signature so we don't re-walk).
     signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewTextureSignature {
+    id: ResourceId,
+    path: String,
+    cache_signature: String,
+    name: String,
+    force_zero_opaque: bool,
+    allow_procedural_fallback: bool,
 }
 
 impl EditorTextures {
@@ -197,17 +208,18 @@ impl EditorTextures {
     /// so authored scene materials and far-vista panels must get slots
     /// before unused resource-library entries.
     pub fn refresh(&mut self, project: &ProjectDocument, project_root: &Path) {
-        let plan = preview_texture_upload_plan(project);
-        let room_signature: Vec<(ResourceId, String, String, bool, bool)> = plan
+        let plan = preview_texture_upload_plan(project, project_root);
+        let room_signature: Vec<PreviewTextureSignature> = plan
             .iter()
             .map(|item| {
-                (
-                    item.id,
-                    item.signature.clone(),
-                    item.name.clone(),
-                    item.force_zero_opaque,
-                    item.allow_procedural_fallback,
-                )
+                PreviewTextureSignature {
+                    id: item.id,
+                    path: item.signature.clone(),
+                    cache_signature: item.cache_signature.clone(),
+                    name: item.name.clone(),
+                    force_zero_opaque: item.force_zero_opaque,
+                    allow_procedural_fallback: item.allow_procedural_fallback,
+                }
             })
             .collect();
         if self.room_signature == room_signature {
@@ -333,6 +345,7 @@ impl EditorTextures {
         // declared CLUT entry count rather than the depth enum so
         // the only psx-asset surface this file touches is `Texture`.
         let clut_bytes = texture.clut_bytes();
+        let transparent_index_zero = texture.index_zero_transparent();
         if !clut_bytes.is_empty() {
             for i in 0..16 {
                 let off = i * 2;
@@ -340,10 +353,13 @@ impl EditorTextures {
                     break;
                 }
                 let raw = u16::from_le_bytes([clut_bytes[off], clut_bytes[off + 1]]);
-                // Room materials are opaque until materials carry
-                // explicit alpha, so index 0 must not become a
-                // preview-only hole in imported textures.
-                let marked = if force_zero_opaque {
+                // Legacy room textures keep index 0 opaque. Cooked
+                // PSXT files that explicitly opt into transparent
+                // zero must keep raw CLUT 0 so the preview matches
+                // the runtime cutout path.
+                let marked = if transparent_index_zero && i == 0 && raw == 0 {
+                    0
+                } else if force_zero_opaque {
                     opaque_room_clut_entry(raw)
                 } else {
                     raw
@@ -650,23 +666,27 @@ struct PreviewTextureUploadPlan {
     id: ResourceId,
     name: String,
     signature: String,
+    cache_signature: String,
     force_zero_opaque: bool,
     allow_procedural_fallback: bool,
 }
 
-fn preview_texture_upload_plan(project: &ProjectDocument) -> Vec<PreviewTextureUploadPlan> {
+fn preview_texture_upload_plan(
+    project: &ProjectDocument,
+    project_root: &Path,
+) -> Vec<PreviewTextureUploadPlan> {
     let scene_material_ids = collect_scene_resource_use(project).materials;
     let mut plan = Vec::new();
     for id in scene_material_ids {
-        push_material_resource_upload(project, id, true, &mut plan);
+        push_material_resource_upload(project, id, true, project_root, &mut plan);
     }
 
-    push_image_prop_material_uploads(project, &mut plan);
-    push_far_vista_texture_uploads(project, &mut plan);
+    push_image_prop_material_uploads(project, project_root, &mut plan);
+    push_far_vista_texture_uploads(project, project_root, &mut plan);
 
     for resource in &project.resources {
         if matches!(&resource.data, ResourceData::Material(_)) {
-            push_material_resource_upload(project, resource.id, true, &mut plan);
+            push_material_resource_upload(project, resource.id, true, project_root, &mut plan);
         }
     }
 
@@ -677,6 +697,7 @@ fn push_material_resource_upload(
     project: &ProjectDocument,
     id: ResourceId,
     force_zero_opaque: bool,
+    project_root: &Path,
     plan: &mut Vec<PreviewTextureUploadPlan>,
 ) {
     if let Some(item) = plan.iter_mut().find(|item| item.id == id) {
@@ -689,10 +710,13 @@ fn push_material_resource_upload(
     let ResourceData::Material(material) = &resource.data else {
         return;
     };
+    let signature = texture_path(project, material).unwrap_or_default();
+    let cache_signature = texture_cache_signature(project_root, &signature);
     plan.push(PreviewTextureUploadPlan {
         id,
         name: resource.name.clone(),
-        signature: texture_path(project, material).unwrap_or_default(),
+        signature,
+        cache_signature,
         force_zero_opaque,
         allow_procedural_fallback: true,
     });
@@ -700,6 +724,7 @@ fn push_material_resource_upload(
 
 fn push_image_prop_material_uploads(
     project: &ProjectDocument,
+    project_root: &Path,
     plan: &mut Vec<PreviewTextureUploadPlan>,
 ) {
     for node in project.active_scene().nodes() {
@@ -710,12 +735,13 @@ fn push_image_prop_material_uploads(
         else {
             continue;
         };
-        push_material_resource_upload(project, *material_id, false, plan);
+        push_material_resource_upload(project, *material_id, false, project_root, plan);
     }
 }
 
 fn push_far_vista_texture_uploads(
     project: &ProjectDocument,
+    project_root: &Path,
     plan: &mut Vec<PreviewTextureUploadPlan>,
 ) {
     for node in project.active_scene().nodes() {
@@ -728,10 +754,10 @@ fn push_far_vista_texture_uploads(
         let assigned_panels = far_vista.texture_panels.iter().any(Option::is_some);
         if assigned_panels {
             for texture_id in far_vista.texture_panels.iter().flatten() {
-                push_texture_resource_upload(project, *texture_id, plan);
+                push_texture_resource_upload(project, *texture_id, project_root, plan);
             }
         } else if let Some(texture_id) = far_vista.texture {
-            push_texture_resource_upload(project, texture_id, plan);
+            push_texture_resource_upload(project, texture_id, project_root, plan);
         }
     }
 }
@@ -739,6 +765,7 @@ fn push_far_vista_texture_uploads(
 fn push_texture_resource_upload(
     project: &ProjectDocument,
     id: ResourceId,
+    project_root: &Path,
     plan: &mut Vec<PreviewTextureUploadPlan>,
 ) {
     if plan.iter().any(|item| item.id == id) {
@@ -750,13 +777,42 @@ fn push_texture_resource_upload(
     let ResourceData::Texture { psxt_path } = &resource.data else {
         return;
     };
+    let cache_signature = texture_cache_signature(project_root, psxt_path);
     plan.push(PreviewTextureUploadPlan {
         id,
         name: resource.name.clone(),
         signature: psxt_path.clone(),
+        cache_signature,
         force_zero_opaque: false,
         allow_procedural_fallback: false,
     });
+}
+
+fn texture_cache_signature(project_root: &Path, stored: &str) -> String {
+    if stored.is_empty() {
+        return "empty".to_string();
+    }
+    let abs = if Path::new(stored).is_absolute() {
+        PathBuf::from(stored)
+    } else {
+        project_root.join(stored)
+    };
+    let Ok(metadata) = std::fs::metadata(&abs) else {
+        return format!("{stored}|missing");
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+    match modified {
+        Some(modified) => format!(
+            "{stored}|{}|{}|{}",
+            metadata.len(),
+            modified.as_secs(),
+            modified.subsec_nanos()
+        ),
+        None => format!("{stored}|{}|unknown-mtime", metadata.len()),
+    }
 }
 
 /// Resolve a Material's texture link to the underlying `.psxt`
@@ -1308,7 +1364,7 @@ mod tests {
         let scene = project.active_scene_mut();
         scene.add_node(scene.root, "Room", NodeKind::Room { grid });
 
-        let plan = preview_texture_upload_plan(&project);
+        let plan = preview_texture_upload_plan(&project, Path::new("."));
         assert_eq!(plan.first().map(|item| item.id), Some(used));
 
         let mut textures = EditorTextures::new();
@@ -1347,7 +1403,7 @@ mod tests {
             },
         );
 
-        let plan = preview_texture_upload_plan(&project);
+        let plan = preview_texture_upload_plan(&project, Path::new("."));
         let item = plan
             .iter()
             .find(|item| item.id == panel)
@@ -1392,7 +1448,7 @@ mod tests {
             },
         );
 
-        let plan = preview_texture_upload_plan(&project);
+        let plan = preview_texture_upload_plan(&project, Path::new("."));
         let panel_index = plan
             .iter()
             .position(|item| item.id == panel)

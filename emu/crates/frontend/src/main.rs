@@ -865,6 +865,7 @@ impl ApplicationHandler for Shell {
                         state.editor.preview_backface_wireframe_enabled();
                     let editor_preview_bounds = state.editor.preview_bounds_enabled();
                     let editor_show_grid = state.editor.show_grid_enabled();
+                    let editor_show_portals = state.editor.show_portals_enabled();
                     let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
                     let editor_selected = state.editor.selected_node_id();
                     let editor_root = state.editor.project_root();
@@ -887,6 +888,7 @@ impl ApplicationHandler for Shell {
                         editor_preview_backface_wireframe,
                         editor_preview_bounds,
                         editor_show_grid,
+                        editor_show_portals,
                         editor_hidden_scene_nodes,
                         editor_selected,
                         editor_hover,

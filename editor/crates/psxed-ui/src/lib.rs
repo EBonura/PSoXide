@@ -296,6 +296,7 @@ pub struct EditorWorkspace {
     snap_to_grid: bool,
     snap_units: u16,
     show_grid: bool,
+    show_portals: bool,
     preview_fog: bool,
     preview_backface_wireframe: bool,
     preview_bounds: bool,
@@ -352,7 +353,22 @@ pub struct EditorWorkspace {
 struct ThumbnailEntry {
     signature: String,
     handle: egui::TextureHandle,
+    image: ColorImage,
     stats: PsxtStats,
+}
+
+#[derive(Clone)]
+struct TexturePreviewSnapshot {
+    texture_id: egui::TextureId,
+    image: ColorImage,
+    stats: PsxtStats,
+}
+
+#[derive(Clone, Copy)]
+struct PickedPsxtTexel {
+    x: u16,
+    y: u16,
+    color: Color32,
 }
 
 struct TextureImportDialog {
@@ -546,6 +562,7 @@ struct PsxtStats {
     depth_bits: u8,
     /// 16 for 4bpp, 256 for 8bpp, 0 for 15bpp.
     clut_entries: u16,
+    index_zero_transparent: bool,
     pixel_bytes: u32,
     clut_bytes: u32,
     file_bytes: u32,
@@ -2161,6 +2178,7 @@ impl EditorWorkspace {
             snap_to_grid: true,
             snap_units: 16,
             show_grid: true,
+            show_portals: true,
             preview_fog: true,
             preview_backface_wireframe: true,
             preview_bounds: true,
@@ -4805,6 +4823,10 @@ impl EditorWorkspace {
     /// same button hides both grid-style affordances at once.
     pub fn show_grid_enabled(&self) -> bool {
         self.show_grid
+    }
+
+    pub fn show_portals_enabled(&self) -> bool {
+        self.show_portals
     }
 
     /// Currently-selected scene node. The frontend reads this so the
@@ -10545,11 +10567,18 @@ impl EditorWorkspace {
         // mutably below. `texture_thumb_entry` takes `&self` and
         // walks Texture / Material → cached `.psxt` decode, so this
         // copy is the only way to keep both alive in one inspector.
-        let preview_thumb = self
+        let preview_snapshot = self
             .project
             .resource(id)
             .and_then(|resource| self.texture_thumb_entry(resource))
-            .map(|entry| (entry.handle.id(), entry.stats));
+            .map(|entry| TexturePreviewSnapshot {
+                texture_id: entry.handle.id(),
+                image: entry.image.clone(),
+                stats: entry.stats,
+            });
+        let preview_thumb = preview_snapshot
+            .as_ref()
+            .map(|entry| (entry.texture_id, entry.stats));
         // Snapshot project_dir for path resolution inside the
         // model inspector (parses .psxmdl / .psxanim for live
         // stats display). Cloned so the mutable resource borrow
@@ -10603,6 +10632,7 @@ impl EditorWorkspace {
 
         let mut rename_commit: Option<String> = None;
         let mut rename_cancelled = false;
+        let mut transparency_key_action: Option<(ResourceId, PickedPsxtTexel)> = None;
         let mut changed = false;
         ui.horizontal(|ui| {
             draw_inline_icon(
@@ -10656,7 +10686,11 @@ impl EditorWorkspace {
 
         match &mut resource.data {
             ResourceData::Texture { psxt_path } => {
-                draw_psxt_preview_block(ui, preview_thumb);
+                if let Some(pick) =
+                    draw_psxt_preview_block_pickable(ui, preview_snapshot.as_ref())
+                {
+                    transparency_key_action = Some((id, pick));
+                }
                 egui::CollapsingHeader::new(icons::label(icons::FILE, "PSXT"))
                     .default_open(true)
                     .show(ui, |ui| {
@@ -10677,7 +10711,13 @@ impl EditorWorkspace {
                 }
             }
             ResourceData::Material(material) => {
-                draw_psxt_preview_block(ui, preview_thumb);
+                if let Some(pick) =
+                    draw_psxt_preview_block_pickable(ui, preview_snapshot.as_ref())
+                {
+                    if let Some(texture_id) = material.texture {
+                        transparency_key_action = Some((texture_id, pick));
+                    }
+                }
                 egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
                     .default_open(true)
                     .show(ui, |ui| {
@@ -10794,6 +10834,10 @@ impl EditorWorkspace {
 
         if changed {
             self.mark_dirty();
+        }
+
+        if let Some((texture_id, pick)) = transparency_key_action {
+            self.apply_texture_transparency_key(ui.ctx(), texture_id, pick);
         }
 
         // Apply deferred nav so the user can drill straight
@@ -11139,13 +11183,14 @@ impl EditorWorkspace {
         stats: PsxtStats,
     ) {
         if let Some(entry) = self.texture_thumbs.get_mut(&id) {
-            entry.handle.set(image, egui::TextureOptions::NEAREST);
+            entry.handle.set(image.clone(), egui::TextureOptions::NEAREST);
             entry.signature = signature;
+            entry.image = image;
             entry.stats = stats;
         } else {
             let handle = ctx.load_texture(
                 format!("psxt-thumb-{}", id.raw()),
-                image,
+                image.clone(),
                 egui::TextureOptions::NEAREST,
             );
             self.texture_thumbs.insert(
@@ -11153,10 +11198,71 @@ impl EditorWorkspace {
                 ThumbnailEntry {
                     signature,
                     handle,
+                    image,
                     stats,
                 },
             );
         }
+    }
+
+    fn apply_texture_transparency_key(
+        &mut self,
+        ctx: &egui::Context,
+        texture_id: ResourceId,
+        pick: PickedPsxtTexel,
+    ) {
+        let Some(resource) = self.project.resource(texture_id) else {
+            self.status = "Texture resource missing".to_string();
+            return;
+        };
+        let psxt_path = match &resource.data {
+            ResourceData::Texture { psxt_path } => psxt_path.clone(),
+            _ => {
+                self.status = "Selected resource is not a Texture".to_string();
+                return;
+            }
+        };
+        if psxt_path.is_empty() {
+            self.status = "Texture path is empty".to_string();
+            return;
+        }
+        let abs = psxed_project::model_import::resolve_path(&psxt_path, Some(&self.project_dir));
+        let mut bytes = match std::fs::read(&abs) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = format!("Could not read {}: {err}", abs.display());
+                return;
+            }
+        };
+        let report = match psxed_project::texture_import::apply_texel_color_key_transparency(
+            &mut bytes, pick.x, pick.y,
+        ) {
+            Ok(report) => report,
+            Err(err) => {
+                self.status = format!("Transparency key failed: {err}");
+                return;
+            }
+        };
+        if let Err(err) = std::fs::write(&abs, &bytes) {
+            self.status = format!("Could not write {}: {err}", abs.display());
+            return;
+        }
+        if let Some((image, stats)) = decode_psxt_thumbnail(&bytes) {
+            self.set_texture_thumb(ctx, texture_id, psxt_path, image, stats);
+        } else {
+            self.remove_texture_thumb(texture_id);
+        }
+        self.status = format!(
+            "Transparent key #{:02X} RGB({},{},{}) rewrote {} texel(s) from click RGB({},{},{})",
+            report.picked_index,
+            report.picked_rgb[0],
+            report.picked_rgb[1],
+            report.picked_rgb[2],
+            report.rewritten_texels,
+            pick.color.r(),
+            pick.color.g(),
+            pick.color.b()
+        );
     }
 
     fn remove_texture_thumb(&mut self, id: ResourceId) {
@@ -11543,6 +11649,7 @@ impl EditorWorkspace {
                             &self.selected_sectors,
                             &self.validation_issue_primitives,
                             &self.validation_issue_rooms,
+                            self.show_portals,
                         );
 
                         let pointer_world = response
@@ -11815,6 +11922,15 @@ impl EditorWorkspace {
                         "Toggle grid overlay.",
                     ) {
                         self.show_grid = !self.show_grid;
+                    }
+                    if toolbar_icon_button(
+                        ui,
+                        self.show_portals,
+                        icons::WAYPOINT,
+                        "Portals",
+                        "Toggle portal markers, seam overlays, and portal-room boundaries.",
+                    ) {
+                        self.show_portals = !self.show_portals;
                     }
                     ui.add_enabled_ui(!self.view_2d, |ui| {
                         if toolbar_icon_button(
@@ -18037,6 +18153,9 @@ fn draw_psxt_preview_block_sized(
             let (rect, _) = ui.allocate_exact_size(preview_size, Sense::hover());
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 4.0, STUDIO_PANEL);
+            if stats.index_zero_transparent {
+                draw_checker_preview(&painter, rect, Color32::from_rgb(20, 26, 32));
+            }
             painter.image(
                 id,
                 rect,
@@ -18084,6 +18203,90 @@ fn draw_psxt_preview_block_sized(
     ui.add_space(6.0);
 }
 
+fn draw_psxt_preview_block_pickable(
+    ui: &mut egui::Ui,
+    thumb: Option<&TexturePreviewSnapshot>,
+) -> Option<PickedPsxtTexel> {
+    draw_psxt_preview_block_sized_pickable(ui, thumb, Vec2::splat(128.0))
+}
+
+fn draw_psxt_preview_block_sized_pickable(
+    ui: &mut egui::Ui,
+    thumb: Option<&TexturePreviewSnapshot>,
+    preview_size: Vec2,
+) -> Option<PickedPsxtTexel> {
+    let mut picked = None;
+    ui.vertical_centered(|ui| match thumb {
+        Some(snapshot) => {
+            let (rect, response) = ui.allocate_exact_size(preview_size, Sense::click());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 4.0, STUDIO_PANEL);
+            if snapshot.stats.index_zero_transparent {
+                draw_checker_preview(&painter, rect, Color32::from_rgb(20, 26, 32));
+            }
+            painter.image(
+                snapshot.texture_id,
+                rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            painter.rect_stroke(
+                rect,
+                4.0,
+                Stroke::new(1.0, STUDIO_BORDER),
+                StrokeKind::Inside,
+            );
+            if response.hovered() {
+                ui.output_mut(|out| out.cursor_icon = egui::CursorIcon::Crosshair);
+            }
+            let response =
+                response.on_hover_text("Click a texel to make that indexed colour transparent.");
+            if response.clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    picked = sample_psxt_preview(snapshot, rect, pos);
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "{}×{}  {}bpp  {}",
+                    snapshot.stats.width,
+                    snapshot.stats.height,
+                    snapshot.stats.depth_bits,
+                    human_bytes(snapshot.stats.file_bytes)
+                ))
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
+        }
+        None => draw_psxt_preview_block(ui, None),
+    });
+    ui.add_space(6.0);
+    picked
+}
+
+fn sample_psxt_preview(
+    snapshot: &TexturePreviewSnapshot,
+    rect: Rect,
+    pos: Pos2,
+) -> Option<PickedPsxtTexel> {
+    let width = snapshot.image.size[0];
+    let height = snapshot.image.size[1];
+    if width == 0 || height == 0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return None;
+    }
+    let rel_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 0.999_999);
+    let rel_y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 0.999_999);
+    let x = (rel_x * width as f32).floor() as usize;
+    let y = (rel_y * height as f32).floor() as usize;
+    let color = *snapshot.image.pixels.get(y * width + x)?;
+    Some(PickedPsxtTexel {
+        x: x as u16,
+        y: y as u16,
+        color,
+    })
+}
+
 /// Tabular `key -- value` rows summarizing a `.psxt`. Mirrors the
 /// fields the cooker writes so authors can sanity-check that their
 /// material's texture lines up with the dimensions they expect.
@@ -18106,6 +18309,15 @@ fn draw_psxt_stats(ui: &mut egui::Ui, stats: PsxtStats) {
         },
     );
     row(ui, "CLUT entries", format!("{}", stats.clut_entries));
+    row(
+        ui,
+        "Transparent 0",
+        if stats.index_zero_transparent {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        },
+    );
     row(ui, "Pixel data", human_bytes(stats.pixel_bytes));
     if stats.clut_bytes > 0 {
         row(ui, "CLUT data", human_bytes(stats.clut_bytes));
@@ -23105,13 +23317,18 @@ fn decode_psxt_thumbnail(bytes: &[u8]) -> Option<(ColorImage, PsxtStats)> {
         height: texture.height(),
         depth_bits,
         clut_entries: clut_entries as u16,
+        index_zero_transparent: texture.index_zero_transparent(),
         pixel_bytes: texture.pixel_bytes().len() as u32,
         clut_bytes: clut_bytes.len() as u32,
         file_bytes: bytes.len() as u32,
     };
     let palette: Vec<Color32> = (0..clut_entries)
         .map(|i| {
-            let raw = u16::from_le_bytes([clut_bytes[i * 2], clut_bytes[i * 2 + 1]]) & 0x7FFF;
+            let raw_full = u16::from_le_bytes([clut_bytes[i * 2], clut_bytes[i * 2 + 1]]);
+            if i == 0 && texture.index_zero_transparent() && raw_full == 0 {
+                return Color32::TRANSPARENT;
+            }
+            let raw = raw_full & 0x7FFF;
             let r5 = (raw & 0x1F) as u8;
             let g5 = ((raw >> 5) & 0x1F) as u8;
             let b5 = ((raw >> 10) & 0x1F) as u8;
@@ -23490,6 +23707,7 @@ fn draw_scene_viewport(
     selected_sectors: &HashSet<SectorSelection>,
     validation_issue_primitives: &[Selection],
     validation_issue_rooms: &HashSet<NodeId>,
+    show_portals: bool,
 ) -> Vec<ViewportHit> {
     let scene = project.active_scene();
     let mut hits = Vec::new();
@@ -23509,6 +23727,7 @@ fn draw_scene_viewport(
                 selected_sectors,
                 validation_issue_primitives,
                 validation_issue_rooms,
+                show_portals,
                 &mut hits,
             );
         }
@@ -23593,7 +23812,7 @@ fn draw_scene_viewport(
                     &mut hits,
                 );
             }
-            NodeKind::Portal { .. } => {
+            NodeKind::Portal { .. } if show_portals => {
                 draw_portal_seam_2d(
                     painter,
                     transform,
@@ -23640,6 +23859,7 @@ fn draw_room(
     selected_sectors: &HashSet<SectorSelection>,
     validation_issue_primitives: &[Selection],
     validation_issue_rooms: &HashSet<NodeId>,
+    show_portals: bool,
     hits: &mut Vec<ViewportHit>,
 ) {
     let NodeKind::Room { grid } = &node.kind else {
@@ -23710,7 +23930,9 @@ fn draw_room(
         }
     }
 
-    draw_portal_room_boundaries_2d(painter, transform, project, node.id, grid, node_center);
+    if show_portals {
+        draw_portal_room_boundaries_2d(painter, transform, project, node.id, grid, node_center);
+    }
     draw_validation_issue_primitives_2d(
         painter,
         transform,
@@ -30080,11 +30302,16 @@ mod tests {
             ThumbnailEntry {
                 signature: "test.psxt".to_string(),
                 handle,
+                image: ColorImage {
+                    size: [1, 1],
+                    pixels: vec![Color32::WHITE],
+                },
                 stats: PsxtStats {
                     width: 1,
                     height: 1,
                     depth_bits: 4,
                     clut_entries: 16,
+                    index_zero_transparent: false,
                     pixel_bytes: 1,
                     clut_bytes: 32,
                     file_bytes: 45,
@@ -30148,11 +30375,16 @@ mod tests {
             ThumbnailEntry {
                 signature: "test.psxt".to_string(),
                 handle,
+                image: ColorImage {
+                    size: [1, 1],
+                    pixels: vec![Color32::WHITE],
+                },
                 stats: PsxtStats {
                     width: 1,
                     height: 1,
                     depth_bits: 4,
                     clut_entries: 16,
+                    index_zero_transparent: false,
                     pixel_bytes: 1,
                     clut_bytes: 32,
                     file_bytes: 45,
