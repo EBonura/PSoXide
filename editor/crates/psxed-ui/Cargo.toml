@@ -14,6 +14,7 @@ egui = "0.31"
 psx-asset = { path = "../../../sdk/crates/psx-asset" }
 psx-engine = { path = "../../../engine/crates/psx-engine" }
 psx-gte = { path = "../../../sdk/crates/psx-gte" }
+psx-level = { path = "../../../engine/crates/psx-level" }
 psxed-project = { path = "../psxed-project" }
 rfd = { version = "0.15", default-features = false }
 zip = { version = "2", default-features = false, features = ["deflate"] }
