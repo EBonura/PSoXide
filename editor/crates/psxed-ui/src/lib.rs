@@ -76,6 +76,13 @@ const RESOURCE_CARD_WIDTH: f32 = 120.0;
 const RESOURCE_CARD_HEIGHT: f32 = 128.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
+const PLAY_PORTAL_DEBUG_SCREEN_CX: i32 = 160;
+const PLAY_PORTAL_DEBUG_SCREEN_CY: i32 = 120;
+const PLAY_PORTAL_DEBUG_FOCAL: i32 = 320;
+const PLAY_PORTAL_DEBUG_NEAR_Z: i32 = 64;
+const PLAY_PORTAL_DEBUG_FAR_Z: i32 = 16_384;
+const PLAY_PORTAL_DEBUG_MAX_DEPTH: u8 = 8;
+const PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12: i32 = 4;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/obsidian_wraith",
     "assets/models/crimson_cross_knight",
@@ -9825,13 +9832,21 @@ impl EditorWorkspace {
         };
         let _ = writeln!(
             out,
-            "runtime_camera: map_valid={} local=({}, {}) basis_valid={} sin_q12={} cos_q12={} forward_xz={:?}",
+            "runtime_camera: map_valid={} local=({}, {}, {}) global_valid={} global=({}, {}, {}) visibility_room={} basis_valid={} yaw_sin_q12={} yaw_cos_q12={} pitch_sin_q12={} pitch_cos_q12={} forward_xz={:?}",
             metrics.camera_map_valid,
             metrics.camera_local_x,
+            metrics.camera_local_y,
             metrics.camera_local_z,
+            metrics.camera_global_valid,
+            metrics.camera_global_x,
+            metrics.camera_global_y,
+            metrics.camera_global_z,
+            metrics.portal_current_room_index,
             metrics.camera_view_basis_valid,
             metrics.camera_view_sin_yaw_q12,
             metrics.camera_view_cos_yaw_q12,
+            metrics.camera_view_sin_pitch_q12,
+            metrics.camera_view_cos_pitch_q12,
             camera_forward
         );
         let _ = writeln!(
@@ -9897,18 +9912,50 @@ impl EditorWorkspace {
         metrics: EditorPlaytestMetrics,
     ) {
         let map = collect_play_chunk_debug_map(&self.project);
-        let current_room = metrics
+        let player_room = metrics
             .player_map_valid
             .then_some(metrics.player_room_index as usize);
+        let current_room = if metrics.camera_global_valid {
+            Some(metrics.portal_current_room_index as usize)
+        } else {
+            player_room
+        };
+        let trace = collect_portal_clip_trace(&map, metrics, current_room);
         let _ = writeln!(
             out,
-            "portal_map: runtime_rooms={} directed_portals={} current_runtime_room={:?}",
+            "portal_map: runtime_rooms={} directed_portals={} player_runtime_room={:?} visibility_runtime_room={:?}",
             map.runtime_room_count(),
             map.portals.len(),
+            player_room,
             current_room
         );
+        if let Some(trace) = &trace {
+            let _ = writeln!(
+                out,
+                "portal_clip_trace: camera_global={:?} entries={} half_fov_q12=({}, {}) near={} far={} max_depth={} min_width={}",
+                trace.camera_global,
+                trace.entries.len(),
+                trace.camera.half_fov_x_tan_q12,
+                trace.camera.half_fov_y_tan_q12,
+                trace.camera.near_z,
+                trace.camera.far_z,
+                PLAY_PORTAL_DEBUG_MAX_DEPTH,
+                trace.camera.min_portal_width_q12
+            );
+        } else {
+            let _ = writeln!(out, "portal_clip_trace: unavailable");
+        }
         if let Some(room_index) = current_room {
             self.append_runtime_room_debug_snapshot(out, &map, metrics, room_index, "current_room");
+        }
+        if player_room.is_some() && player_room != current_room {
+            self.append_runtime_room_debug_snapshot(
+                out,
+                &map,
+                metrics,
+                player_room.unwrap(),
+                "player_room",
+            );
         }
         let connected: Vec<_> = map
             .portals
@@ -9920,8 +9967,35 @@ impl EditorWorkspace {
             })
             .collect();
         let _ = writeln!(out, "connected_portals: count={}", connected.len());
+        let connected_indices: HashSet<usize> = connected
+            .iter()
+            .map(|portal| portal.portal_index)
+            .collect();
         for portal in connected {
-            self.append_portal_debug_snapshot(out, &map, metrics, portal);
+            self.append_portal_debug_snapshot(out, &map, metrics, portal, trace.as_ref());
+        }
+        let traversal_portals: Vec<_> = map
+            .portals
+            .iter()
+            .filter(|portal| {
+                if connected_indices.contains(&portal.portal_index) {
+                    return false;
+                }
+                let source_bit = debug_chunk_bit(portal.source_room_index);
+                let portal_bit = debug_chunk_bit(portal.portal_index);
+                source_bit != 0
+                    && portal_bit != 0
+                    && metrics.portal_visible_mask & source_bit != 0
+                    && metrics.portal_tested_portal_mask & portal_bit != 0
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "visible_source_traversal_portals: count={}",
+            traversal_portals.len()
+        );
+        for portal in traversal_portals {
+            self.append_portal_debug_snapshot(out, &map, metrics, portal, trace.as_ref());
         }
     }
 
@@ -9961,8 +10035,13 @@ impl EditorWorkspace {
         for cell in cells {
             let _ = writeln!(
                 out,
-                "  cell: array={:?} center={:?} half={:?} room_origin={:?} sector_size={}",
-                cell.array_cell, cell.center, cell.half, cell.room_origin, cell.sector_size
+                "  cell: array={:?} center={:?} half={:?} map_origin={:?} runtime_origin={:?} sector_size={}",
+                cell.array_cell,
+                cell.center,
+                cell.half,
+                cell.room_origin,
+                cell.runtime_origin,
+                cell.sector_size
             );
         }
     }
@@ -9973,6 +10052,7 @@ impl EditorWorkspace {
         map: &PlayChunkDebugMap,
         metrics: EditorPlaytestMetrics,
         portal: &PlayChunkDebugMapPortal,
+        trace: Option<&PortalClipTrace>,
     ) {
         let portal_bit = debug_chunk_bit(portal.portal_index);
         let tested = portal_bit != 0 && metrics.portal_tested_portal_mask & portal_bit != 0;
@@ -9998,6 +10078,7 @@ impl EditorWorkspace {
             portal.b,
             portal.vertices_world
         );
+        self.append_portal_clip_debug_snapshot(out, portal, trace);
         self.append_runtime_room_debug_snapshot(
             out,
             map,
@@ -10012,6 +10093,59 @@ impl EditorWorkspace {
             portal.destination_room_index,
             "  destination",
         );
+    }
+
+    fn append_portal_clip_debug_snapshot(
+        &self,
+        out: &mut String,
+        portal: &PlayChunkDebugMapPortal,
+        trace: Option<&PortalClipTrace>,
+    ) {
+        let Some(trace) = trace else {
+            let _ = writeln!(out, "  clip: unavailable");
+            return;
+        };
+        let mut matches = 0usize;
+        for entry in trace
+            .entries
+            .iter()
+            .filter(|entry| entry.portal_index == portal.portal_index)
+        {
+            matches += 1;
+            let debug = entry.debug;
+            let _ = writeln!(
+                out,
+                "  clip[{}]: parent_room={} parent_portal={} depth={} skipped_return={} decision={:?} front={} first_empty={:?} counts_n/l/r/b/t={}/{}/{}/{}/{} tiny={} parent={} padded={} projected={} clipped={} fallback={} result={}",
+                matches - 1,
+                entry.parent.room.raw(),
+                debug_parent_portal_label(entry.parent.source_portal),
+                entry.parent.depth,
+                entry.skipped_return,
+                debug.decision,
+                debug.front_faces_camera,
+                debug.first_empty_plane,
+                debug.near_count,
+                debug.left_count,
+                debug.right_count,
+                debug.bottom_count,
+                debug.top_count,
+                debug.tiny,
+                portal_clip_debug_rect_text(Some(debug.parent)),
+                portal_clip_debug_rect_text(Some(debug.padded_parent)),
+                portal_clip_debug_rect_text(debug.projected_bounds),
+                portal_clip_debug_rect_text(debug.clipped_bounds),
+                portal_clip_debug_rect_text(debug.fallback_bounds),
+                portal_clip_debug_rect_text(debug.result_bounds),
+            );
+            let _ = writeln!(
+                out,
+                "    view_vertices: {}",
+                portal_clip_debug_vertices_text(debug.view_vertices)
+            );
+        }
+        if matches == 0 {
+            let _ = writeln!(out, "  clip: no traversal entry for this portal");
+        }
     }
 
     fn draw_build_status_strip(
@@ -22345,6 +22479,7 @@ struct PlayChunkDebugMapCell {
     center: [f32; 2],
     half: [f32; 2],
     room_origin: [f32; 2],
+    runtime_origin: [i32; 2],
     sector_size: f32,
 }
 
@@ -22366,6 +22501,20 @@ struct PlayChunkDebugMap {
     portals: Vec<PlayChunkDebugMapPortal>,
 }
 
+#[derive(Clone, Copy)]
+struct PortalClipTraceEntry {
+    portal_index: usize,
+    parent: psx_level::portal_visibility::PortalFrustum,
+    debug: psx_level::portal_visibility::PortalClipDebug,
+    skipped_return: bool,
+}
+
+struct PortalClipTrace {
+    camera: psx_level::portal_visibility::PortalVisibilityCamera,
+    camera_global: [i32; 3],
+    entries: Vec<PortalClipTraceEntry>,
+}
+
 impl PlayChunkDebugMap {
     fn runtime_room_count(&self) -> usize {
         self.cells
@@ -22373,6 +22522,224 @@ impl PlayChunkDebugMap {
             .map(|cell| cell.runtime_room_index + 1)
             .max()
             .unwrap_or_default()
+    }
+}
+
+fn collect_portal_clip_trace(
+    map: &PlayChunkDebugMap,
+    metrics: EditorPlaytestMetrics,
+    current_room: Option<usize>,
+) -> Option<PortalClipTrace> {
+    let current_room = current_room?;
+    let (camera, camera_global) = portal_clip_debug_camera(map, metrics, current_room)?;
+    let root = psx_level::portal_visibility::PortalFrustum {
+        room: psx_level::RoomIndex(current_room.min(u16::MAX as usize) as u16),
+        source_room: psx_level::RoomIndex(u16::MAX),
+        source_portal: u16::MAX,
+        depth: 0,
+        left_tan_q12: -camera.half_fov_x_tan_q12,
+        right_tan_q12: camera.half_fov_x_tan_q12,
+        min_y_tan_q12: -camera.half_fov_y_tan_q12,
+        max_y_tan_q12: camera.half_fov_y_tan_q12,
+    };
+    let mut frustums = vec![root];
+    let mut entries = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < frustums.len() {
+        let parent = frustums[cursor];
+        cursor += 1;
+        if parent.depth >= PLAY_PORTAL_DEBUG_MAX_DEPTH {
+            continue;
+        }
+        for portal in map
+            .portals
+            .iter()
+            .filter(|portal| portal.source_room_index == parent.room.to_usize())
+        {
+            let record = portal_level_record(portal);
+            let debug = psx_level::portal_visibility::debug_portal_clip(record, camera, parent);
+            let destination = psx_level::RoomIndex(
+                portal.destination_room_index.min(u16::MAX as usize) as u16,
+            );
+            let skipped_return = portal.destination_room_index == current_room
+                || destination == parent.source_room;
+            entries.push(PortalClipTraceEntry {
+                portal_index: portal.portal_index,
+                parent,
+                debug,
+                skipped_return,
+            });
+            if skipped_return
+                || debug.decision != psx_level::portal_visibility::PortalClipDebugDecision::Accepted
+            {
+                continue;
+            }
+            let Some(bounds) = debug.result_bounds else {
+                continue;
+            };
+            let child = psx_level::portal_visibility::PortalFrustum {
+                room: destination,
+                source_room: parent.room,
+                source_portal: portal.portal_index.min(u16::MAX as usize) as u16,
+                depth: parent.depth.saturating_add(1),
+                left_tan_q12: bounds.left_tan_q12,
+                right_tan_q12: bounds.right_tan_q12,
+                min_y_tan_q12: bounds.min_y_tan_q12,
+                max_y_tan_q12: bounds.max_y_tan_q12,
+            };
+            if !portal_debug_trace_contains_redundant_frustum(&frustums, child) {
+                frustums.push(child);
+            }
+        }
+    }
+    Some(PortalClipTrace {
+        camera,
+        camera_global,
+        entries,
+    })
+}
+
+fn portal_clip_debug_camera(
+    map: &PlayChunkDebugMap,
+    metrics: EditorPlaytestMetrics,
+    current_room: usize,
+) -> Option<(
+    psx_level::portal_visibility::PortalVisibilityCamera,
+    [i32; 3],
+)> {
+    if !metrics.camera_view_basis_valid || (!metrics.camera_map_valid && !metrics.camera_global_valid) {
+        return None;
+    }
+    if !metrics.camera_global_valid
+        && (metrics.camera_local_y < -900_000 || metrics.camera_view_cos_pitch_q12 <= 0)
+    {
+        return None;
+    }
+    let (global_x, global_y, global_z) = if metrics.camera_global_valid {
+        (
+            metrics.camera_global_x,
+            metrics.camera_global_y,
+            metrics.camera_global_z,
+        )
+    } else {
+        let room_cell = map
+            .cells
+            .iter()
+            .find(|cell| cell.runtime_room_index == current_room)?;
+        let sector_size = room_cell.sector_size.max(1.0);
+        (
+            room_cell.runtime_origin[0]
+                .saturating_mul(sector_size.round().max(1.0) as i32)
+                .saturating_add(metrics.camera_local_x),
+            metrics.camera_local_y,
+            room_cell.runtime_origin[1]
+                .saturating_mul(sector_size.round().max(1.0) as i32)
+                .saturating_add(metrics.camera_local_z),
+        )
+    };
+    let half_fov_x = (PLAY_PORTAL_DEBUG_SCREEN_CX * 4096 / PLAY_PORTAL_DEBUG_FOCAL.max(1)).max(1);
+    let half_fov_y = (PLAY_PORTAL_DEBUG_SCREEN_CY * 4096 / PLAY_PORTAL_DEBUG_FOCAL.max(1)).max(1);
+    let camera = psx_level::portal_visibility::PortalVisibilityCamera::new(
+        global_x,
+        global_y,
+        global_z,
+        metrics.camera_view_sin_yaw_q12,
+        metrics.camera_view_cos_yaw_q12,
+        metrics.camera_view_sin_pitch_q12,
+        metrics.camera_view_cos_pitch_q12,
+        PLAY_PORTAL_DEBUG_NEAR_Z,
+        PLAY_PORTAL_DEBUG_FAR_Z,
+        half_fov_x,
+        half_fov_y,
+        PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12,
+    );
+    Some((camera, [global_x, global_y, global_z]))
+}
+
+fn portal_level_record(portal: &PlayChunkDebugMapPortal) -> psx_level::LevelRoomPortalRecord {
+    psx_level::LevelRoomPortalRecord {
+        source_room: psx_level::RoomIndex(portal.source_room_index.min(u16::MAX as usize) as u16),
+        destination_room: psx_level::RoomIndex(
+            portal.destination_room_index.min(u16::MAX as usize) as u16,
+        ),
+        kind: 0,
+        normal_x: portal.normal_world[0],
+        normal_y: portal.normal_world[1],
+        normal_z: portal.normal_world[2],
+        vertex_x: [
+            portal.vertices_world[0][0],
+            portal.vertices_world[1][0],
+            portal.vertices_world[2][0],
+            portal.vertices_world[3][0],
+        ],
+        vertex_y: [
+            portal.vertices_world[0][1],
+            portal.vertices_world[1][1],
+            portal.vertices_world[2][1],
+            portal.vertices_world[3][1],
+        ],
+        vertex_z: [
+            portal.vertices_world[0][2],
+            portal.vertices_world[1][2],
+            portal.vertices_world[2][2],
+            portal.vertices_world[3][2],
+        ],
+    }
+}
+
+fn portal_debug_trace_contains_redundant_frustum(
+    frustums: &[psx_level::portal_visibility::PortalFrustum],
+    frustum: psx_level::portal_visibility::PortalFrustum,
+) -> bool {
+    frustums.iter().any(|existing| {
+        existing.room == frustum.room
+            && existing.source_room == frustum.source_room
+            && existing.source_portal == frustum.source_portal
+            && existing.depth <= frustum.depth
+            && existing.left_tan_q12 <= frustum.left_tan_q12
+            && existing.right_tan_q12 >= frustum.right_tan_q12
+            && existing.min_y_tan_q12 <= frustum.min_y_tan_q12
+            && existing.max_y_tan_q12 >= frustum.max_y_tan_q12
+    })
+}
+
+fn portal_clip_debug_rect_text(
+    rect: Option<psx_level::portal_visibility::PortalClipDebugRect>,
+) -> String {
+    rect.map(|rect| {
+        format!(
+            "x=[{},{}] y=[{},{}]",
+            rect.left_tan_q12, rect.right_tan_q12, rect.min_y_tan_q12, rect.max_y_tan_q12
+        )
+    })
+    .unwrap_or_else(|| "none".to_owned())
+}
+
+fn portal_clip_debug_vertices_text(
+    vertices: [psx_level::portal_visibility::PortalClipDebugVertex; 4],
+) -> String {
+    format!(
+        "[({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})]",
+        vertices[0].x,
+        vertices[0].y,
+        vertices[0].z,
+        vertices[1].x,
+        vertices[1].y,
+        vertices[1].z,
+        vertices[2].x,
+        vertices[2].y,
+        vertices[2].z,
+        vertices[3].x,
+        vertices[3].y,
+        vertices[3].z
+    )
+}
+
+fn debug_parent_portal_label(portal: u16) -> String {
+    if portal == u16::MAX {
+        "root".to_owned()
+    } else {
+        format!("#{portal}")
     }
 }
 
@@ -22544,6 +22911,20 @@ fn draw_play_chunk_debug_map(
         if source_visible && portal_rejected && !portal_accepted {
             draw_rejected_portal_marker(&clipped, a, b);
         }
+        if source_visible && (portal_accepted || portal_rejected) {
+            let label = if portal_rejected && !portal_accepted {
+                format!("#{} R", portal.portal_index)
+            } else {
+                format!("#{}", portal.portal_index)
+            };
+            clipped.text(
+                a.lerp(b, 0.5) + Vec2::new(0.0, -7.0),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::monospace(8.5),
+                color,
+            );
+        }
     }
 
     if metrics.player_map_valid {
@@ -22558,8 +22939,26 @@ fn draw_play_chunk_debug_map(
                 let z = cell.room_origin[1] + local_z as f32 / sector_size;
                 Pos2::new(map_x(x), map_z(z))
             };
+            let global_to_map_pos =
+                |cell: &PlayChunkDebugMapCell, global_x: i32, global_z: i32| {
+                    let sector_size = cell.sector_size.max(1.0);
+                    let x = cell.room_origin[0] + global_x as f32 / sector_size
+                        - cell.runtime_origin[0] as f32;
+                    let z = cell.room_origin[1] + global_z as f32 / sector_size
+                        - cell.runtime_origin[1] as f32;
+                    Pos2::new(map_x(x), map_z(z))
+                };
             let player_pos = local_to_map_pos(metrics.player_local_x, metrics.player_local_z);
-            let camera_pos = if metrics.camera_map_valid {
+            let camera_pos = if metrics.camera_global_valid {
+                let camera_cell = map
+                    .cells
+                    .iter()
+                    .find(|cell| {
+                        cell.runtime_room_index == metrics.portal_current_room_index as usize
+                    })
+                    .unwrap_or(cell);
+                global_to_map_pos(camera_cell, metrics.camera_global_x, metrics.camera_global_z)
+            } else if metrics.camera_map_valid {
                 local_to_map_pos(metrics.camera_local_x, metrics.camera_local_z)
             } else {
                 player_pos
@@ -22718,6 +23117,7 @@ fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap 
                     ],
                     half: [0.5, 0.5],
                     room_origin,
+                    runtime_origin: portal_room.world_origin,
                     sector_size: grid.sector_size.max(1) as f32,
                 });
             }
@@ -30940,15 +31340,23 @@ mod tests {
             portal_bounds_fallback_portal_mask: 0,
             player_map_valid: true,
             player_room_index: 0,
+            portal_current_room_index: 0,
             player_local_x: 512,
             player_local_z: 512,
             player_view_yaw_q12: 1024,
             camera_view_basis_valid: true,
             camera_view_sin_yaw_q12: 4096,
             camera_view_cos_yaw_q12: 0,
+            camera_view_sin_pitch_q12: 0,
+            camera_view_cos_pitch_q12: 4096,
             camera_map_valid: true,
+            camera_global_valid: true,
             camera_local_x: 520,
+            camera_local_y: 1024,
             camera_local_z: 500,
+            camera_global_x: 520,
+            camera_global_y: 1024,
+            camera_global_z: 500,
         };
         let path = workspace.debug_log_path();
 

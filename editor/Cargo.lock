@@ -726,6 +726,7 @@ dependencies = [
  "psx-asset",
  "psx-engine",
  "psx-gte",
+ "psx-level",
  "psxed-project",
  "rfd",
  "zip",
