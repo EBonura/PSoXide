@@ -142,6 +142,8 @@ pub struct EditorPlaytestTapeStatus {
 /// Rolling emulator metrics shown over the live editor Play viewport.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EditorPlaytestMetrics {
+    /// Frontend profiler redraw sample id.
+    pub sample_serial: u32,
     /// Host redraw rate from the frontend profiler.
     pub host_fps: f32,
     /// Average host frame time.
@@ -152,8 +154,12 @@ pub struct EditorPlaytestMetrics {
     pub visual_hz: Option<f32>,
     /// VBlanks that produced draw traffic per guest refresh.
     pub draw_hz: f32,
+    /// Visual frames emitted by the most recent frontend redraw.
+    pub visual_frames: u32,
     /// Full frontend frame cost.
     pub total_ms: f32,
+    /// Estimated visual-frame interval, derived from the current visual cadence.
+    pub frame_ms: f32,
     /// Guest execution cost.
     pub emu_ms: f32,
     /// Hardware renderer cost.
