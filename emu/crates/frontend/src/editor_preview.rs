@@ -211,6 +211,7 @@ pub fn build_phase1_frame(
     preview_backface_wireframe: bool,
     preview_bounds: bool,
     show_grid: bool,
+    show_portals: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
     hovered_primitive: Option<psxed_ui::Selection>,
@@ -296,15 +297,17 @@ pub fn build_phase1_frame(
         hovered_entity_node,
         &mut scratch,
     );
-    walk_portal_seams(
-        project,
-        room_id,
-        grid,
-        hidden_scene_nodes,
-        selected,
-        hovered_entity_node,
-        &mut scratch,
-    );
+    if show_portals {
+        walk_portal_seams(
+            project,
+            room_id,
+            grid,
+            hidden_scene_nodes,
+            selected,
+            hovered_entity_node,
+            &mut scratch,
+        );
+    }
 
     // Selection / hover / paint overlays drawn before models --
     // they project through the camera GTE matrix that
@@ -684,6 +687,7 @@ enum FaceShade {
     Textured {
         slot: MaterialSlot,
         tint: (u8, u8, u8),
+        blend_mode: BlendMode,
         sidedness: psxed_project::MaterialFaceSidedness,
     },
 }
@@ -698,9 +702,15 @@ impl FaceShade {
     fn with_sidedness(self, sidedness: psxed_project::MaterialFaceSidedness) -> Self {
         match self {
             Self::Flat { rgb, .. } => Self::Flat { rgb, sidedness },
-            Self::Textured { slot, tint, .. } => Self::Textured {
+            Self::Textured {
                 slot,
                 tint,
+                blend_mode,
+                ..
+            } => Self::Textured {
+                slot,
+                tint,
+                blend_mode,
                 sidedness,
             },
         }
@@ -720,6 +730,7 @@ fn face_shade(
             return FaceShade::Textured {
                 slot,
                 tint: material_texture_tint(project, id),
+                blend_mode: material_blend_mode(project, Some(id)),
                 sidedness,
             };
         }
@@ -761,6 +772,26 @@ fn material_texture_tint(project: &ProjectDocument, material: ResourceId) -> (u8
         .unwrap_or((0x80, 0x80, 0x80))
 }
 
+fn material_blend_mode(project: &ProjectDocument, material: Option<ResourceId>) -> BlendMode {
+    material
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Material(material) => Some(psx_blend_mode(material.blend_mode)),
+            _ => None,
+        })
+        .unwrap_or(BlendMode::Opaque)
+}
+
+fn psx_blend_mode(mode: psxed_project::PsxBlendMode) -> BlendMode {
+    match mode {
+        psxed_project::PsxBlendMode::Opaque => BlendMode::Opaque,
+        psxed_project::PsxBlendMode::Average => BlendMode::Average,
+        psxed_project::PsxBlendMode::Add => BlendMode::Add,
+        psxed_project::PsxBlendMode::Subtract => BlendMode::Subtract,
+        psxed_project::PsxBlendMode::AddQuarter => BlendMode::AddQuarter,
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct PreviewFog {
     enabled: bool,
@@ -788,10 +819,12 @@ impl PreviewFog {
             FaceShade::Textured {
                 slot,
                 tint,
+                blend_mode,
                 sidedness,
             } => FaceShade::Textured {
                 slot,
                 tint: self.apply_rgb(tint, depth),
+                blend_mode,
                 sidedness,
             },
         }
@@ -1259,10 +1292,14 @@ fn light_face(
             sidedness,
         },
         FaceShade::Textured {
-            slot, sidedness, ..
+            slot,
+            blend_mode,
+            sidedness,
+            ..
         } => FaceShade::Textured {
             slot,
             tint: (r, g, b),
+            blend_mode,
             sidedness,
         },
     }
@@ -1766,8 +1803,8 @@ fn walk_image_props(
         let v_max = slot.texture_height.saturating_sub(1);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
         let lit_tint = preview_lit_image_prop_tint(tint, verts, &lights, grid.ambient_color);
-        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, lit_tint)
-            .with_texture_window(slot.texture_window);
+        let material =
+            preview_texture_material(slot, lit_tint, material_blend_mode(project, Some(material_id)));
         let _ = push_textured_material_tri(
             scratch,
             [p[0], p[1], p[2]],
@@ -4562,9 +4599,11 @@ fn push_far_vista_textured_quad(
     texture_height: u8,
     tint: [u8; 3],
 ) {
-    let material =
-        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (tint[0], tint[1], tint[2]))
-            .with_texture_window(slot.texture_window);
+    let material = preview_texture_material(
+        slot,
+        (tint[0], tint[1], tint[2]),
+        BlendMode::Opaque,
+    );
     let uvs = [
         (0, 0),
         (texture_width.saturating_sub(1), 0),
@@ -4618,7 +4657,12 @@ fn emit_face_tri(
     }
     match shade {
         FaceShade::Flat { rgb, .. } => push_tri(scratch, p, rgb),
-        FaceShade::Textured { slot, tint, .. } => push_tex_tri(scratch, p, uvs, slot, tint),
+        FaceShade::Textured {
+            slot,
+            tint,
+            blend_mode,
+            ..
+        } => push_tex_tri(scratch, p, uvs, slot, tint, blend_mode),
     }
 }
 
@@ -4774,16 +4818,29 @@ fn push_tex_tri(
     uvs: [(u8, u8); 3],
     slot: MaterialSlot,
     tint: (u8, u8, u8),
+    blend_mode: BlendMode,
 ) -> bool {
     let avg_sz = projected_avg_sz(p);
     push_textured_material_tri(
         scratch,
         p,
         uvs,
-        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
-            .with_texture_window(slot.texture_window),
+        preview_texture_material(slot, tint, blend_mode),
         room_depth_slot(avg_sz),
     )
+}
+
+fn preview_texture_material(
+    slot: MaterialSlot,
+    tint: (u8, u8, u8),
+    blend_mode: BlendMode,
+) -> TextureMaterial {
+    let material = if blend_mode.is_translucent() {
+        TextureMaterial::blended(slot.clut_word, slot.tpage_word, tint, blend_mode)
+    } else {
+        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+    };
+    material.with_texture_window(slot.texture_window)
 }
 
 fn push_shadow_tex_tri(
@@ -4940,6 +4997,7 @@ mod tests {
         PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
         PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
+    use psx_gpu::material::BlendMode;
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gte::scene::Projected;
     use psxed_project::portal_rooms::PortalEdge;
@@ -5559,6 +5617,7 @@ mod tests {
                     texture_height: 64,
                 },
                 tint: (128, 64, 32),
+                blend_mode: BlendMode::Opaque,
                 sidedness: psxed_project::MaterialFaceSidedness::Front,
             },
             128,
@@ -5579,6 +5638,7 @@ mod tests {
                 texture_height: 32,
             },
             tint: (128, 128, 128),
+            blend_mode: BlendMode::Opaque,
             sidedness: psxed_project::MaterialFaceSidedness::Both,
         };
         assert_eq!(
@@ -5598,6 +5658,7 @@ mod tests {
                 texture_height: 64,
             },
             tint: (128, 128, 128),
+            blend_mode: BlendMode::Opaque,
             sidedness: psxed_project::MaterialFaceSidedness::Both,
         };
         assert_eq!(
