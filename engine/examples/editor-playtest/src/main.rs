@@ -699,6 +699,7 @@ static mut RESIDENCY: ResidencyManager<MAX_RESIDENT_RAM_ASSETS, MAX_RESIDENT_VRA
 struct VramSlot {
     asset: AssetId,
     clut_mode: VramSlotClutMode,
+    ready: bool,
     clut_word: u16,
     tpage_word: u16,
     texture_window: TextureWindow,
@@ -736,6 +737,235 @@ static mut MODEL_TPAGE_X_CURSOR: u16 = 0;
 /// CLUT row offset: each 8bpp atlas needs a fresh 256-entry
 /// CLUT row.
 static mut MODEL_ATLAS_COUNT: usize = 0;
+
+const VRAM_UPLOAD_QUEUE_CAP: usize = 8;
+const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 8;
+const ROOM_WINDOW_BACKGROUND_TICK_MASK: u32 = 1;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum VramUploadKind {
+    TextureAndClut,
+    ClutOnly,
+}
+
+#[derive(Copy, Clone)]
+struct VramUploadJob {
+    active: bool,
+    slot_index: u16,
+    asset: AssetId,
+    clut_mode: VramSlotClutMode,
+    kind: VramUploadKind,
+    bytes: Option<&'static [u8]>,
+    texture_x: u16,
+    texture_y: u16,
+    texture_width_halfwords: u16,
+    texture_height_rows: u16,
+    next_texture_row: u16,
+    clut_x: u16,
+    clut_y: u16,
+    clut_entries: u16,
+    clut_uploaded: bool,
+}
+
+impl VramUploadJob {
+    const EMPTY: Self = Self {
+        active: false,
+        slot_index: 0,
+        asset: AssetId(0),
+        clut_mode: VramSlotClutMode::OpaqueZero,
+        kind: VramUploadKind::TextureAndClut,
+        bytes: None,
+        texture_x: 0,
+        texture_y: 0,
+        texture_width_halfwords: 0,
+        texture_height_rows: 0,
+        next_texture_row: 0,
+        clut_x: 0,
+        clut_y: 0,
+        clut_entries: 0,
+        clut_uploaded: false,
+    };
+
+    fn texture_complete(self) -> bool {
+        self.kind == VramUploadKind::ClutOnly
+            || self.next_texture_row >= self.texture_height_rows
+    }
+
+    fn complete(self) -> bool {
+        self.texture_complete() && self.clut_uploaded
+    }
+}
+
+struct VramUploadQueue {
+    jobs: [VramUploadJob; VRAM_UPLOAD_QUEUE_CAP],
+}
+
+impl VramUploadQueue {
+    const fn new() -> Self {
+        Self {
+            jobs: [VramUploadJob::EMPTY; VRAM_UPLOAD_QUEUE_CAP],
+        }
+    }
+
+    fn contains(&self, asset: AssetId, clut_mode: VramSlotClutMode) -> bool {
+        let mut i = 0usize;
+        while i < self.jobs.len() {
+            let job = self.jobs[i];
+            if job.active && job.asset == asset && job.clut_mode == clut_mode {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn has_free_slot(&self) -> bool {
+        let mut i = 0usize;
+        while i < self.jobs.len() {
+            if !self.jobs[i].active {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn push(&mut self, job: VramUploadJob) -> bool {
+        let mut i = 0usize;
+        while i < self.jobs.len() {
+            if !self.jobs[i].active {
+                self.jobs[i] = job;
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn step(&mut self, row_budget: u16) -> bool {
+        let mut remaining_rows = row_budget;
+        let mut completed_any = false;
+        let mut i = 0usize;
+        while i < self.jobs.len() && remaining_rows > 0 {
+            if !self.jobs[i].active {
+                i += 1;
+                continue;
+            }
+
+            telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
+            if !self.jobs[i].texture_complete() {
+                let rows = self.upload_texture_rows(i, remaining_rows);
+                remaining_rows = remaining_rows.saturating_sub(rows.max(1));
+            } else if !self.jobs[i].clut_uploaded {
+                self.upload_clut(i);
+                remaining_rows = remaining_rows.saturating_sub(1);
+            }
+            telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
+
+            if self.jobs[i].complete() {
+                unsafe {
+                    mark_vram_slot_ready(self.jobs[i].slot_index as usize);
+                }
+                telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
+                self.jobs[i] = VramUploadJob::EMPTY;
+                completed_any = true;
+            }
+            i += 1;
+        }
+        completed_any
+    }
+
+    fn upload_texture_rows(&mut self, index: usize, row_budget: u16) -> u16 {
+        let Some(bytes) = self.jobs[index].bytes else {
+            self.jobs[index] = VramUploadJob::EMPTY;
+            return 0;
+        };
+        let Some(texture) = Texture::from_bytes(bytes).ok() else {
+            self.jobs[index] = VramUploadJob::EMPTY;
+            return 0;
+        };
+        let row_bytes = usize::from(self.jobs[index].texture_width_halfwords).saturating_mul(2);
+        if row_bytes == 0
+            || texture.pixel_bytes().len()
+                < row_bytes.saturating_mul(usize::from(self.jobs[index].texture_height_rows))
+        {
+            self.jobs[index] = VramUploadJob::EMPTY;
+            return 0;
+        }
+
+        let mut uploaded = 0u16;
+        while uploaded < row_budget
+            && self.jobs[index].next_texture_row < self.jobs[index].texture_height_rows
+        {
+            let row = self.jobs[index].next_texture_row;
+            let offset = usize::from(row).saturating_mul(row_bytes);
+            upload_bytes(
+                VramRect::new(
+                    self.jobs[index].texture_x,
+                    self.jobs[index].texture_y.saturating_add(row),
+                    self.jobs[index].texture_width_halfwords,
+                    1,
+                ),
+                &texture.pixel_bytes()[offset..offset + row_bytes],
+            );
+            self.jobs[index].next_texture_row = self.jobs[index].next_texture_row.saturating_add(1);
+            uploaded = uploaded.saturating_add(1);
+        }
+        uploaded
+    }
+
+    fn upload_clut(&mut self, index: usize) {
+        let Some(bytes) = self.jobs[index].bytes else {
+            self.jobs[index] = VramUploadJob::EMPTY;
+            return;
+        };
+        let Some(texture) = Texture::from_bytes(bytes).ok() else {
+            self.jobs[index] = VramUploadJob::EMPTY;
+            return;
+        };
+        let clut_bytes = texture.clut_bytes();
+        let expected_len = usize::from(self.jobs[index].clut_entries).saturating_mul(2);
+        if clut_bytes.len() < expected_len {
+            self.jobs[index] = VramUploadJob::EMPTY;
+            return;
+        }
+        let rect = VramRect::new(
+            self.jobs[index].clut_x,
+            self.jobs[index].clut_y,
+            self.jobs[index].clut_entries,
+            1,
+        );
+        if self.jobs[index].clut_mode == VramSlotClutMode::OpaqueZero {
+            upload_opaque_clut(rect, &clut_bytes[..expected_len]);
+        } else {
+            upload_clut(rect, &clut_bytes[..expected_len]);
+        }
+        self.jobs[index].clut_uploaded = true;
+    }
+}
+
+static mut VRAM_UPLOAD_QUEUE: VramUploadQueue = VramUploadQueue::new();
+
+#[derive(Copy, Clone)]
+struct RuntimeStreamingJobs {
+    vram_rows_per_tick: u16,
+}
+
+impl RuntimeStreamingJobs {
+    const fn new() -> Self {
+        Self {
+            vram_rows_per_tick: VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK,
+        }
+    }
+
+    fn background_tick(self, ctx: &Ctx) -> bool {
+        (ctx.simulation_tick & ROOM_WINDOW_BACKGROUND_TICK_MASK) != 0
+    }
+
+    fn step_vram_uploads(self) -> bool {
+        unsafe { VRAM_UPLOAD_QUEUE.step(self.vram_rows_per_tick) }
+    }
+}
 
 /// Animation state machine for the player: idle with no movement,
 /// walking for normal movement, running while Circle is held.
@@ -2055,6 +2285,8 @@ struct Playtest {
     shadow_material: Option<TextureMaterial>,
     /// Immediate-mode cylinder overlay for tuning actor blockers.
     show_collision_debug: bool,
+    /// Cooperative background policy for room-window and VRAM upload work.
+    streaming_jobs: RuntimeStreamingJobs,
 }
 
 impl Playtest {
@@ -2139,6 +2371,7 @@ impl Playtest {
             clips: [const { None }; MAX_RUNTIME_MODEL_CLIPS],
             shadow_material: None,
             show_collision_debug: false,
+            streaming_jobs: RuntimeStreamingJobs::new(),
         }
     }
 
@@ -2228,8 +2461,15 @@ impl Scene for Playtest {
 
     fn update(&mut self, ctx: &mut Ctx) {
         #[cfg(feature = "cd-stream-bench")]
-        let _stream_progress = self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK);
-        self.step_active_room_window_job();
+        if self.streaming_jobs.background_tick(ctx) {
+            let _stream_progress = self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK);
+        }
+        if self.streaming_jobs.background_tick(ctx) {
+            if self.streaming_jobs.step_vram_uploads() {
+                self.refresh_active_room_materials();
+            }
+            self.step_active_room_window_job();
+        }
 
         if ctx.just_pressed(button::R3) {
             self.lock_target = match self.lock_target {
@@ -3971,7 +4211,6 @@ impl Playtest {
             previous_rooms: self.active_rooms,
         };
         telemetry::counter(telemetry::counter::ROOM_WINDOW_REBUILDS, 1);
-        self.step_active_room_window_job();
     }
 
     fn step_active_room_window_job(&mut self) {
@@ -4105,6 +4344,22 @@ impl Playtest {
             }
             slot += 1;
         }
+    }
+
+    fn refresh_active_room_materials(&mut self) {
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            if let Some(mut active) = self.active_rooms[slot] {
+                if let Some(record) = ROOMS.get(active.index.to_usize()) {
+                    let (materials, material_count) = build_runtime_room_material_table(record);
+                    active.materials = materials;
+                    active.material_count = material_count;
+                    self.active_rooms[slot] = Some(active);
+                }
+            }
+            slot += 1;
+        }
+        self.apply_current_active_room_fields();
     }
 
     fn mark_visible_room_unbuilt(&mut self, index: RoomIndex) {
@@ -8210,14 +8465,15 @@ fn find_vram_slot(asset_id: AssetId, clut_mode: VramSlotClutMode) -> Option<Vram
         VRAM_SLOTS
             .iter()
             .filter_map(|s| *s)
-            .find(|s| s.asset == asset_id && s.clut_mode == clut_mode)
+            .find(|s| s.ready && s.asset == asset_id && s.clut_mode == clut_mode)
     }
 }
 
 fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
     unsafe {
         VRAM_SLOTS.iter().filter_map(|s| *s).find(|s| {
-            s.asset == asset_id
+            s.ready
+                && s.asset == asset_id
                 && matches!(
                     s.clut_mode,
                     VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
@@ -8226,7 +8482,39 @@ fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
     }
 }
 
-fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<VramSlot> {
+fn pending_vram_upload(asset_id: AssetId, clut_mode: VramSlotClutMode) -> bool {
+    unsafe {
+        VRAM_SLOTS
+            .iter()
+            .filter_map(|s| *s)
+            .any(|s| !s.ready && s.asset == asset_id && s.clut_mode == clut_mode)
+            || VRAM_UPLOAD_QUEUE.contains(asset_id, clut_mode)
+    }
+}
+
+fn pending_room_texture_upload(asset_id: AssetId) -> bool {
+    unsafe {
+        VRAM_SLOTS.iter().filter_map(|s| *s).any(|s| {
+            !s.ready
+                && s.asset == asset_id
+                && matches!(
+                    s.clut_mode,
+                    VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
+                )
+        })
+    }
+}
+
+unsafe fn mark_vram_slot_ready(index: usize) {
+    let Some(mut slot) = VRAM_SLOTS.get(index).copied().flatten() else {
+        return;
+    };
+    slot.ready = true;
+    VRAM_SLOTS[index] = Some(slot);
+    let _ = RESIDENCY.mark_vram_resident(slot.asset);
+}
+
+fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &'static [u8]) -> Option<VramSlot> {
     let texture = Texture::from_bytes(asset_bytes).ok()?;
     let clut_mode = if texture.index_zero_transparent() {
         VramSlotClutMode::TransparentZero
@@ -8238,7 +8526,7 @@ fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<Vram
 
 fn ensure_texture_uploaded_with_clut_mode(
     asset_id: AssetId,
-    asset_bytes: &[u8],
+    asset_bytes: &'static [u8],
     clut_mode: VramSlotClutMode,
 ) -> Option<VramSlot> {
     // VRAM_SLOTS is the source of truth for "have we actually
@@ -8248,6 +8536,17 @@ fn ensure_texture_uploaded_with_clut_mode(
     // and skip the upload entirely.
     if let Some(slot) = find_vram_slot(asset_id, clut_mode) {
         return Some(slot);
+    }
+    if pending_vram_upload(asset_id, clut_mode) {
+        return None;
+    }
+    if pending_room_texture_upload(asset_id) {
+        return None;
+    }
+    unsafe {
+        if !VRAM_UPLOAD_QUEUE.has_free_slot() {
+            return None;
+        }
     }
 
     let texture = Texture::from_bytes(asset_bytes).ok()?;
@@ -8290,19 +8589,10 @@ fn ensure_texture_uploaded_with_clut_mode(
     }
 
     if let Some(shared_texture) = find_room_texture_vram_slot(asset_id) {
-        telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
-        telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
-        let clut_rect = VramRect::new(clut_x, ROOM_CLUT_Y, texture.clut_entries(), 1);
-        if clut_mode == VramSlotClutMode::OpaqueZero {
-            upload_opaque_clut(clut_rect, texture.clut_bytes());
-        } else {
-            upload_clut(clut_rect, texture.clut_bytes());
-        }
-        telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
-
         let slot = VramSlot {
             asset: asset_id,
             clut_mode,
+            ready: false,
             clut_word: Clut::new(clut_x, ROOM_CLUT_Y).uv_clut_word(),
             tpage_word: shared_texture.tpage_word,
             texture_window: shared_texture.texture_window,
@@ -8313,9 +8603,30 @@ fn ensure_texture_uploaded_with_clut_mode(
             VRAM_SLOTS[count] = Some(slot);
             VRAM_SLOT_COUNT = count + 1;
             ROOM_TEXTURE_COUNT = room_count + 1;
-            let _ = RESIDENCY.mark_vram_resident(asset_id);
+            if !VRAM_UPLOAD_QUEUE.push(VramUploadJob {
+                active: true,
+                slot_index: count as u16,
+                asset: asset_id,
+                clut_mode,
+                kind: VramUploadKind::ClutOnly,
+                bytes: Some(asset_bytes),
+                texture_x: 0,
+                texture_y: 0,
+                texture_width_halfwords: 0,
+                texture_height_rows: 0,
+                next_texture_row: 0,
+                clut_x,
+                clut_y: ROOM_CLUT_Y,
+                clut_entries: texture.clut_entries(),
+                clut_uploaded: false,
+            }) {
+                VRAM_SLOTS[count] = None;
+                VRAM_SLOT_COUNT = count;
+                ROOM_TEXTURE_COUNT = room_count;
+                return None;
+            }
         }
-        return Some(slot);
+        return None;
     }
 
     // Pack room materials on the GP0(E2) 8-texel grid inside 4bpp
@@ -8336,31 +8647,11 @@ fn ensure_texture_uploaded_with_clut_mode(
         .y()
         .checked_add(u16::from(placement.origin_v()))?;
 
-    telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
-    telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
-    if !upload_4bpp_tile(
-        texture_x,
-        texture_y,
-        texture_width_halfwords,
-        texture_height_rows,
-        &texture,
-    ) {
-        telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
-        return None;
-    }
-
-    let clut_rect = VramRect::new(clut_x, ROOM_CLUT_Y, texture.clut_entries(), 1);
-    if clut_mode == VramSlotClutMode::OpaqueZero {
-        upload_opaque_clut(clut_rect, texture.clut_bytes());
-    } else {
-        upload_clut(clut_rect, texture.clut_bytes());
-    }
-    telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
-
     let clut = Clut::new(clut_x, ROOM_CLUT_Y);
     let slot = VramSlot {
         asset: asset_id,
         clut_mode,
+        ready: false,
         clut_word: clut.uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::power_of_two_tile(
@@ -8377,13 +8668,31 @@ fn ensure_texture_uploaded_with_clut_mode(
         VRAM_SLOTS[count] = Some(slot);
         VRAM_SLOT_COUNT = count + 1;
         ROOM_TEXTURE_COUNT = room_count + 1;
-        // Mirror VRAM into the residency tracker. mark_vram_resident
-        // returns false if it overflows; we already reserved a
-        // slot so this should always succeed.
-        let _ = RESIDENCY.mark_vram_resident(asset_id);
+        if !VRAM_UPLOAD_QUEUE.push(VramUploadJob {
+            active: true,
+            slot_index: count as u16,
+            asset: asset_id,
+            clut_mode,
+            kind: VramUploadKind::TextureAndClut,
+            bytes: Some(asset_bytes),
+            texture_x,
+            texture_y,
+            texture_width_halfwords,
+            texture_height_rows,
+            next_texture_row: 0,
+            clut_x,
+            clut_y: ROOM_CLUT_Y,
+            clut_entries: texture.clut_entries(),
+            clut_uploaded: false,
+        }) {
+            VRAM_SLOTS[count] = None;
+            VRAM_SLOT_COUNT = count;
+            ROOM_TEXTURE_COUNT = room_count;
+            return None;
+        }
     }
 
-    Some(slot)
+    None
 }
 
 fn room_texture_window_size(size: u16) -> Option<u8> {
@@ -8450,6 +8759,7 @@ fn ensure_sky_panorama_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option
     let slot = VramSlot {
         asset: asset_id,
         clut_mode: VramSlotClutMode::SkyPanorama,
+        ready: true,
         clut_word: sky_panorama_clut_word(0),
         tpage_word: SKY_PANORAMA_LEFT_TPAGE.uv_tpage_word(0),
         texture_window: TextureWindow::NONE,
@@ -8541,6 +8851,7 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
     let slot = VramSlot {
         asset: asset_id,
         clut_mode: VramSlotClutMode::ModelAtlas,
+        ready: true,
         clut_word: Clut::new(0, clut_y).uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::NONE,
