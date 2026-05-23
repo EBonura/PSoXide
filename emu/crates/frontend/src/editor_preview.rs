@@ -212,6 +212,7 @@ pub fn build_phase1_frame(
     preview_bounds: bool,
     show_grid: bool,
     show_portals: bool,
+    show_lights: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
     hovered_primitive: Option<psxed_ui::Selection>,
@@ -270,6 +271,7 @@ pub fn build_phase1_frame(
         world_camera,
         fog,
         preview_backface_wireframe,
+        show_lights,
         hidden_scene_nodes,
         &mut scratch,
     );
@@ -283,20 +285,23 @@ pub fn build_phase1_frame(
         selected,
         hovered_entity_node,
         preview_bounds,
+        show_lights,
         &mut scratch,
     );
     if show_grid {
         push_streaming_chunk_boundaries(project, room_id, grid, &mut scratch);
     }
     walk_entities(project, grid, hidden_scene_nodes, selected, &mut scratch);
-    walk_light_gizmos(
-        project,
-        grid,
-        hidden_scene_nodes,
-        selected,
-        hovered_entity_node,
-        &mut scratch,
-    );
+    if show_lights {
+        walk_light_gizmos(
+            project,
+            grid,
+            hidden_scene_nodes,
+            selected,
+            hovered_entity_node,
+            &mut scratch,
+        );
+    }
     if show_portals {
         walk_portal_seams(
             project,
@@ -347,6 +352,7 @@ pub fn build_phase1_frame(
         &world_camera,
         fog,
         hidden_scene_nodes,
+        show_lights,
         &mut scratch,
     );
 
@@ -505,11 +511,16 @@ fn walk_room(
     camera: psx_engine::WorldCamera,
     fog: PreviewFog,
     preview_backface_wireframe: bool,
+    show_lights: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
     scratch: &mut PreviewScratch,
 ) {
     let s = grid.sector_size;
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
+    let lights = if show_lights {
+        collect_preview_lights(project, room_id, grid, hidden_scene_nodes)
+    } else {
+        Vec::new()
+    };
     let ambient = grid.ambient_color;
     for x in 0..grid.width {
         for z in 0..grid.depth {
@@ -1752,10 +1763,15 @@ fn walk_image_props(
     selected: NodeId,
     hovered: Option<NodeId>,
     preview_bounds: bool,
+    show_lights: bool,
     scratch: &mut PreviewScratch,
 ) {
     let scene = project.active_scene();
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
+    let lights = if show_lights {
+        collect_preview_lights(project, room_id, grid, hidden_scene_nodes)
+    } else {
+        Vec::new()
+    };
     for node in scene.nodes() {
         if scene_node_hidden(scene, hidden_scene_nodes, node.id)
             || !is_descendant_of_room(scene, node.id, room_id)
@@ -2105,6 +2121,7 @@ fn walk_model_instances(
     camera: &psx_engine::WorldCamera,
     fog: PreviewFog,
     hidden_scene_nodes: &HashSet<NodeId>,
+    show_lights: bool,
     scratch: &mut PreviewScratch,
 ) {
     // Bump the global preview tick once per frame so the
@@ -2118,7 +2135,11 @@ fn walk_model_instances(
     // active, where it lives in the world) lives in
     // `instances_meta`.
     let scene = project.active_scene();
-    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
+    let lights = if show_lights {
+        collect_preview_lights(project, room_id, grid, hidden_scene_nodes)
+    } else {
+        Vec::new()
+    };
     let ambient = grid.ambient_color;
     let mut instances_meta: Vec<InstanceMeta> = Vec::new();
 
