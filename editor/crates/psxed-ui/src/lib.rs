@@ -47,12 +47,13 @@ use psxed_project::{
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
     MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
     MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE,
-    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+    MAX_WORLD_SECTOR_SIZE, MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
     MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
     MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
     MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
-    MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
-    SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
+    MIN_WORLD_SECTOR_SIZE, MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX,
+    SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX,
+    WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -76,6 +77,10 @@ const RESOURCE_CARD_WIDTH: f32 = 120.0;
 const RESOURCE_CARD_HEIGHT: f32 = 128.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
+const PLAY_FRAME_HISTORY_CAP: usize = 150;
+const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
+const PSOXIDE_LOGO_ICON_PNG: &[u8] =
+    include_bytes!("../../../../assets/branding/logo-icon-player.png");
 const PLAY_PORTAL_DEBUG_SCREEN_CX: i32 = 160;
 const PLAY_PORTAL_DEBUG_SCREEN_CY: i32 = 120;
 const PLAY_PORTAL_DEBUG_FOCAL: i32 = 320;
@@ -342,6 +347,9 @@ pub struct EditorWorkspace {
     preview_bounds: bool,
     show_play_debug_overlays: bool,
     show_play_debug_map: bool,
+    play_frame_times_ms: VecDeque<f32>,
+    play_frame_chart_last_visual: Option<Instant>,
+    play_frame_last_sample_serial: Option<u32>,
     shortcut_group_flash: Option<(ShortcutGroup, Instant)>,
     view_2d: bool,
     active_workspace: WorkspaceView,
@@ -370,6 +378,7 @@ pub struct EditorWorkspace {
     /// re-decoding. Keyed on the *Texture* resource id; Materials
     /// follow `material.texture` to the same key.
     texture_thumbs: HashMap<ResourceId, ThumbnailEntry>,
+    psoxide_logo_texture: Option<egui::TextureHandle>,
     /// Persistent texture used by the Model resource inspector's
     /// animated preview. Keeping the handle alive across frames
     /// avoids submitting a texture id that egui has already freed.
@@ -2170,6 +2179,12 @@ fn centered_aspect_rect(container: Rect, target_aspect: f32) -> Rect {
     Rect::from_center_size(container.center(), Vec2::new(w, h))
 }
 
+fn decode_embedded_png(bytes: &[u8]) -> Option<ColorImage> {
+    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    Some(ColorImage::from_rgba_unmultiplied(size, image.as_raw()))
+}
+
 impl EditorWorkspace {
     /// Open the project at `dir`. Errors when `dir/project.ron` is
     /// missing or malformed -- the frontend wraps the error and falls
@@ -2281,6 +2296,9 @@ impl EditorWorkspace {
             preview_bounds: editor_visibility.preview_bounds,
             show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
             show_play_debug_map: editor_visibility.show_play_debug_map,
+            play_frame_times_ms: VecDeque::with_capacity(PLAY_FRAME_HISTORY_CAP),
+            play_frame_chart_last_visual: None,
+            play_frame_last_sample_serial: None,
             shortcut_group_flash: None,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
@@ -2303,6 +2321,7 @@ impl EditorWorkspace {
             viewport_3d_free_position: free_position,
             viewport_3d_free_initialized: free_initialized,
             texture_thumbs: HashMap::new(),
+            psoxide_logo_texture: None,
             model_resource_preview_texture: None,
             animation_viewer: ModelAnimationViewerState::default(),
             animation_viewer_preview_texture: None,
@@ -4635,6 +4654,34 @@ impl EditorWorkspace {
 
     /// Play-mode 3D body -- paints the live emulator framebuffer into
     /// the viewport and suppresses all authoring hit-testing.
+    fn record_play_frame_time(&mut self, metrics: EditorPlaytestMetrics) {
+        if self.play_frame_last_sample_serial == Some(metrics.sample_serial) {
+            return;
+        }
+        self.play_frame_last_sample_serial = Some(metrics.sample_serial);
+        if metrics.visual_frames == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let frame_ms = if let Some(previous) = self.play_frame_chart_last_visual {
+            let elapsed_ms = now.duration_since(previous).as_secs_f32() * 1000.0;
+            elapsed_ms / metrics.visual_frames.max(1) as f32
+        } else {
+            metrics.frame_ms
+        };
+        self.play_frame_chart_last_visual = Some(now);
+        if !frame_ms.is_finite() || frame_ms <= 0.0 {
+            return;
+        }
+        let frames = metrics.visual_frames.min(4);
+        for _ in 0..frames {
+            if self.play_frame_times_ms.len() >= PLAY_FRAME_HISTORY_CAP {
+                self.play_frame_times_ms.pop_front();
+            }
+            self.play_frame_times_ms.push_back(frame_ms.clamp(0.0, 120.0));
+        }
+    }
+
     fn draw_viewport_3d_play_body(
         &mut self,
         ui: &mut egui::Ui,
@@ -4675,7 +4722,7 @@ impl EditorWorkspace {
         let show_debug_map = self.show_play_debug_map;
         let debug_rect = Rect::from_min_size(
             rect.left_top() + Vec2::new(44.0, 8.0),
-            Vec2::new(238.0, 218.0),
+            Vec2::new(272.0, 145.0),
         );
         let clicked_overlay = response.interact_pointer_pos().is_some_and(|pos| {
             controls_rect.contains(pos) || (show_debug_overlays && debug_rect.contains(pos))
@@ -4696,6 +4743,9 @@ impl EditorWorkspace {
             );
         }
         if show_debug_overlays {
+            if let Some(metrics) = viewport_3d.play_metrics {
+                self.record_play_frame_time(metrics);
+            }
             painter.rect_filled(debug_rect, 4.0, Color32::from_black_alpha(164));
             let mut y = debug_rect.top() + 7.0;
             draw_play_metric_line(
@@ -4706,23 +4756,12 @@ impl EditorWorkspace {
                 STUDIO_TEXT,
             );
             if let Some(metrics) = viewport_3d.play_metrics {
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!("EMU  {:>5.1} Hz", metrics.emu_hz),
-                    STUDIO_TEXT,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &match metrics.visual_hz {
-                        Some(visual_hz) => format!("VIS  {:>5.1} Hz", visual_hz),
-                        None => format!("DRAW {:>5.1} Hz", metrics.draw_hz),
-                    },
-                    STUDIO_TEXT,
-                );
+                let visual_hz = metrics.visual_hz.unwrap_or(metrics.draw_hz);
+                let frame_ms = self
+                    .play_frame_times_ms
+                    .back()
+                    .copied()
+                    .unwrap_or(metrics.frame_ms);
                 draw_play_metric_line(
                     &painter,
                     debug_rect.left() + 8.0,
@@ -4734,16 +4773,16 @@ impl EditorWorkspace {
                     &painter,
                     debug_rect.left() + 8.0,
                     &mut y,
-                    &format!("FRAME {:>5.2} ms", metrics.total_ms),
-                    STUDIO_TEXT_WEAK,
+                    &format!("VIS  {:>5.1} Hz  FRAME {:>5.1} ms", visual_hz, frame_ms),
+                    STUDIO_TEXT,
                 );
                 draw_play_metric_line(
                     &painter,
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "EMU/HW/UI {:>4.1}/{:>4.1}/{:>4.1}",
-                        metrics.emu_ms, metrics.hw_ms, metrics.ui_ms
+                        "AVG {:>5.1} ms  EMU/HW/UI {:>4.1}/{:>4.1}/{:>4.1}",
+                        metrics.total_ms, metrics.emu_ms, metrics.hw_ms, metrics.ui_ms
                     ),
                     STUDIO_TEXT_WEAK,
                 );
@@ -4751,18 +4790,12 @@ impl EditorWorkspace {
                     &painter,
                     debug_rect.left() + 8.0,
                     &mut y,
-                    &format!("STEP {:>5.1}%", metrics.step_budget_percent),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
                     &format!(
-                        "PORT acc/edge/unld {:>2}/{:<2}/{:<2}",
+                        "PORT rooms {:>2}/{:<2}  tests {:>2}  rej {:>2}",
                         metrics.portal_visible_rooms,
-                        metrics.portal_frontier_rooms,
-                        metrics.portal_missing_resident
+                        metrics.chunk_loaded,
+                        metrics.portal_tests,
+                        metrics.portal_rejects.iter().copied().sum::<u32>()
                     ),
                     STUDIO_TEXT,
                 );
@@ -4771,92 +4804,20 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "PORT ok/build {:>2}/{:<2}",
-                        metrics.portal_accepts, metrics.portal_build_failed
+                        "STRM slots {:>2}/{:<2}  req {:>2}  miss/fail {:>2}/{:<2}",
+                        metrics.chunk_loaded,
+                        metrics.stream_slot_limit,
+                        metrics.stream_requests,
+                        metrics.stream_misses,
+                        metrics.stream_failed
                     ),
                     STUDIO_TEXT_WEAK,
                 );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!("PORT test {:>2}", metrics.portal_tests),
-                    STUDIO_TEXT_WEAK,
+                let chart_rect = Rect::from_min_size(
+                    Pos2::new(debug_rect.left() + 8.0, y + 2.0),
+                    Vec2::new(debug_rect.width() - 16.0, 42.0),
                 );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!(
-                        "PORT rej b/f/t {:>2}/{:<2}/{:<2}",
-                        metrics.portal_rejects[0],
-                        metrics.portal_rejects[1],
-                        metrics.portal_rejects[2]
-                    ),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!(
-                        "PORT cap r/f/d {:>2}/{:<2}/{:<2}",
-                        metrics.portal_caps[0], metrics.portal_caps[1], metrics.portal_caps[2]
-                    ),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!(
-                        "ROOM draw/res/cap {:>2}/{:<2}/{:<2}",
-                        metrics.chunk_visible, metrics.chunk_loaded, metrics.stream_slot_limit
-                    ),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!(
-                        "WIN  built/skip {:>2}/{:<2}",
-                        metrics.chunk_built, metrics.chunk_cache_skips
-                    ),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!(
-                        "STRM pri c/v/f {:>2}/{:<2}/{:<2}",
-                        metrics.stream_priorities[0],
-                        metrics.stream_priorities[1],
-                        metrics.stream_priorities[2]
-                    ),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!(
-                        "STRM req/miss/pf {:>2}/{:<2}/{:<2}",
-                        metrics.stream_requests, metrics.stream_misses, metrics.stream_prefetches
-                    ),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!(
-                        "STRM ev/pnd/fail {:>2}/{:<2}/{:<2}",
-                        metrics.stream_evictions, metrics.stream_pending, metrics.stream_failed
-                    ),
-                    STUDIO_TEXT_WEAK,
-                );
+                draw_play_frame_rate_chart(&painter, chart_rect, &self.play_frame_times_ms);
             } else {
                 draw_play_metric_line(
                     &painter,
@@ -4866,18 +4827,19 @@ impl EditorWorkspace {
                     STUDIO_TEXT_WEAK,
                 );
             }
+            y = (debug_rect.bottom() - 18.0).max(y);
             let tape_line = match viewport_3d.play_tape.mode {
                 EditorPlaytestTapeMode::Idle if viewport_3d.play_tape.frames == 0 => {
-                    "TAPE empty".to_string()
+                    "Tape empty".to_string()
                 }
                 EditorPlaytestTapeMode::Idle => {
-                    format!("TAPE {:>5} fr", viewport_3d.play_tape.frames)
+                    format!("Tape {:>5} fr", viewport_3d.play_tape.frames)
                 }
                 EditorPlaytestTapeMode::Recording => {
-                    format!("REC  {:>5} fr", viewport_3d.play_tape.frames)
+                    format!("Rec  {:>5} fr", viewport_3d.play_tape.frames)
                 }
                 EditorPlaytestTapeMode::Replaying => format!(
-                    "PLAY {:>5}/{:<5}",
+                    "Replay {:>5}/{:<5}",
                     viewport_3d.play_tape.cursor, viewport_3d.play_tape.frames
                 ),
             };
@@ -9470,13 +9432,18 @@ impl EditorWorkspace {
     }
 
     fn draw_project_identity(&mut self, ui: &mut egui::Ui) {
+        let logo_texture = self.psoxide_logo_texture_id(ui.ctx());
         egui::Frame::new()
             .fill(STUDIO_PANEL_DARK)
             .stroke(Stroke::new(1.0, STUDIO_BORDER))
             .corner_radius(egui::CornerRadius::same(4))
-            .inner_margin(egui::Margin::symmetric(7, 5))
+            .inner_margin(egui::Margin::symmetric(4, 4))
             .show(ui, |ui| {
-                ui.label(icons::text(icons::BOX, 18.0).color(STUDIO_ACCENT));
+                if let Some(texture_id) = logo_texture {
+                    ui.add(egui::Image::new((texture_id, Vec2::splat(28.0))));
+                } else {
+                    ui.label(icons::text(icons::BOX, 18.0).color(STUDIO_ACCENT));
+                }
             })
             .response
             .on_hover_text("PSoXide");
@@ -9531,6 +9498,18 @@ impl EditorWorkspace {
             self.project_name_editing = true;
             self.project_name_focus_pending = true;
         }
+    }
+
+    fn psoxide_logo_texture_id(&mut self, ctx: &egui::Context) -> Option<egui::TextureId> {
+        if self.psoxide_logo_texture.is_none() {
+            let logo = decode_embedded_png(PSOXIDE_LOGO_ICON_PNG)?;
+            self.psoxide_logo_texture = Some(ctx.load_texture(
+                "psoxide-logo-icon",
+                logo,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        self.psoxide_logo_texture.as_ref().map(|handle| handle.id())
     }
 
     fn draw_main_menus(
@@ -16788,17 +16767,20 @@ fn draw_world_grid_settings(
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Sector Size").color(STUDIO_TEXT_WEAK));
                 let mut next = sector_size;
-                egui::ComboBox::from_id_salt("world-sector-size")
-                    .selected_text(sector_size.to_string())
-                    .show_ui(ui, |ui| {
-                        for &preset in WORLD_SECTOR_SIZE_PRESETS {
-                            ui.selectable_value(&mut next, preset, preset.to_string());
-                        }
-                    });
+                let response = ui.add(
+                    egui::DragValue::new(&mut next)
+                        .speed(WORLD_SECTOR_SIZE_QUANTUM as f64)
+                        .range(MIN_WORLD_SECTOR_SIZE..=MAX_WORLD_SECTOR_SIZE)
+                        .update_while_editing(false),
+                );
                 if next != sector_size {
                     *world_sector_size_change = Some(psxed_project::snap_world_sector_size(next));
                     changed = true;
                 }
+                response.on_hover_text(format!(
+                    "Snaps to {}-unit steps",
+                    WORLD_SECTOR_SIZE_QUANTUM
+                ));
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
             });
         });
@@ -23278,6 +23260,80 @@ fn draw_chunk_map_legend_item(
         FontId::monospace(10.0),
         STUDIO_TEXT_WEAK,
     );
+}
+
+fn play_frame_rate_from_ms(frame_ms: f32) -> f32 {
+    if frame_ms > 0.0 && frame_ms.is_finite() {
+        (1000.0 / frame_ms).clamp(0.0, PLAY_FRAME_TARGET_FPS)
+    } else {
+        0.0
+    }
+}
+
+fn draw_play_frame_rate_chart(
+    painter: &egui::Painter,
+    rect: Rect,
+    samples: &VecDeque<f32>,
+) {
+    painter.rect_filled(rect, 3.0, Color32::from_black_alpha(88));
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(180, 200, 220, 64)),
+        StrokeKind::Inside,
+    );
+    let plot = rect.shrink2(Vec2::new(2.0, 3.0));
+    let target_y = plot.top();
+    painter.line_segment(
+        [
+            Pos2::new(plot.left(), target_y),
+            Pos2::new(plot.right(), target_y),
+        ],
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(235, 240, 248, 126)),
+    );
+
+    if samples.len() < 2 {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "VIS fps",
+            FontId::monospace(9.0),
+            STUDIO_TEXT_WEAK,
+        );
+        return;
+    }
+
+    let step = plot.width() / (samples.len().saturating_sub(1) as f32).max(1.0);
+    let mut fps_points = Vec::with_capacity(samples.len());
+    let fill = Color32::from_rgba_unmultiplied(42, 214, 124, 38);
+    for (index, frame_ms) in samples.iter().copied().enumerate() {
+        let rate = play_frame_rate_from_ms(frame_ms);
+        let t = (rate / PLAY_FRAME_TARGET_FPS).clamp(0.0, 1.0);
+        let point = Pos2::new(
+            plot.left() + step * index as f32,
+            plot.bottom() - plot.height() * t,
+        );
+        let x0 = if index == 0 {
+            plot.left()
+        } else {
+            point.x - step * 0.5
+        };
+        let x1 = if index + 1 == samples.len() {
+            plot.right()
+        } else {
+            point.x + step * 0.5
+        };
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(x0, point.y), Pos2::new(x1, plot.bottom())),
+            0.0,
+            fill,
+        );
+        fps_points.push(point);
+    }
+    painter.add(egui::Shape::line(
+        fps_points,
+        Stroke::new(1.2, Color32::from_rgba_unmultiplied(150, 238, 172, 184)),
+    ));
 }
 
 fn draw_play_metric_line(painter: &egui::Painter, x: f32, y: &mut f32, text: &str, color: Color32) {
@@ -31290,12 +31346,15 @@ mod tests {
         workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
 
         let metrics = EditorPlaytestMetrics {
+            sample_serial: 0,
             host_fps: 0.0,
             host_ms: 0.0,
             emu_hz: 0.0,
             visual_hz: None,
             draw_hz: 0.0,
+            visual_frames: 0,
             total_ms: 0.0,
+            frame_ms: 0.0,
             emu_ms: 0.0,
             hw_ms: 0.0,
             ui_ms: 0.0,
