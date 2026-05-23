@@ -254,6 +254,7 @@ make profile-demo3          # cook/build/boot streamed demo3, dump screenshot/pr
 make profile-demo3-forward  # same, while holding forward
 make profile-demo3-paced20  # paced visual telemetry alias for streamed demo3
 make profile-demo3-disc-stream # explicit CD-stream benchmark path
+make profile-demo7-camera-sweep # deterministic demo7 camera sweep with guest profile
 ```
 
 `make cook-playtest` is destructive for
@@ -262,6 +263,10 @@ normally owns that directory. The profile targets additionally build a
 raw `.bin` disc image through `tools/mkisopsx` and boot that image in
 the emulator frontend. Editor Play uses PSoXide's HLE BIOS path, so it
 does not require a configured user BIOS.
+The camera-sweep profile builds the playtest with `PSXO_CAMERA_SWEEP=1`
+and room/model micro-profiling enabled, then dumps the guest stage
+breakdown, a final hardware-render PPM, and visual-frame hashes under
+`/tmp`.
 
 ## Examples
 
