@@ -1694,14 +1694,6 @@ pub const MIN_WORLD_SECTOR_SIZE: i32 = WORLD_SECTOR_SIZE_QUANTUM;
 /// Maximum authored sector size. This is an authoring sanity cap,
 /// not a PSX wire-format limit.
 pub const MAX_WORLD_SECTOR_SIZE: i32 = 8192;
-/// Curated dropdown choices for the World inspector's Sector Size
-/// editor. Covers every value used by shipped demo projects
-/// (`512, 640, 768, 896, 1024`) plus smaller and larger options.
-/// Trades the full `WORLD_SECTOR_SIZE_QUANTUM` granularity for a
-/// shorter pick list. Loading a project whose sector_size isn't in
-/// this list still works -- the existing value displays, and the
-/// dropdown only replaces it when the user picks an entry.
-pub const WORLD_SECTOR_SIZE_PRESETS: &[i32] = &[256, 512, 640, 768, 896, 1024, 1536, 2048, 4096];
 /// Fixed-point one for authored model resource scale.
 pub const MODEL_SCALE_ONE_Q8: u16 = 256;
 

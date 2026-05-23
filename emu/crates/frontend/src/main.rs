@@ -1055,10 +1055,15 @@ fn hw_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
 }
 
 fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytestMetrics> {
-    let sample = state
-        .profiler
-        .average()
-        .or_else(|| state.profiler.latest())?;
+    let latest = state.profiler.latest()?;
+    let sample = state.profiler.average().unwrap_or(latest);
+    let visual_hz = sample.guest_visual_frame_hz();
+    let display_hz = visual_hz.unwrap_or_else(|| sample.psx_draw_hz());
+    let frame_ms = if display_hz > 0.0 {
+        1000.0 / display_hz
+    } else {
+        latest.total_ms
+    };
     const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
     const CHUNK_MAP_COUNTERS: &[u16] = &[
         counter::ROOM_STREAM_RESIDENT_MASK_LO,
@@ -1208,12 +1213,18 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED as usize);
     Some(psxed_ui::EditorPlaytestMetrics {
+        sample_serial: latest.sample_serial,
         host_fps: sample.host_fps(),
         host_ms: sample.host_dt_ms,
         emu_hz: sample.emulated_vblank_hz(),
-        visual_hz: sample.guest_visual_frame_hz(),
+        visual_hz,
         draw_hz: sample.psx_draw_hz(),
+        visual_frames: latest
+            .guest_visual_frame_count()
+            .round()
+            .clamp(0.0, u32::MAX as f32) as u32,
         total_ms: sample.total_ms,
+        frame_ms,
         emu_ms: sample.emu_ms,
         hw_ms: sample.hw_render_ms,
         ui_ms: sample.egui.total_ms,
