@@ -7613,6 +7613,8 @@ pub struct EditorVisibilityState {
     #[serde(default = "default_true")]
     pub show_portals: bool,
     #[serde(default = "default_true")]
+    pub show_lights: bool,
+    #[serde(default = "default_true")]
     pub preview_fog: bool,
     #[serde(default = "default_true")]
     pub preview_backface_wireframe: bool,
@@ -7629,6 +7631,7 @@ impl Default for EditorVisibilityState {
         Self {
             show_grid: true,
             show_portals: true,
+            show_lights: true,
             preview_fog: true,
             preview_backface_wireframe: true,
             preview_bounds: true,
@@ -10189,6 +10192,7 @@ mod tests {
         project.editor_visibility = EditorVisibilityState {
             show_grid: false,
             show_portals: true,
+            show_lights: false,
             preview_fog: false,
             preview_backface_wireframe: true,
             preview_bounds: false,

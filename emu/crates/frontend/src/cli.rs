@@ -818,6 +818,7 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         true,
         !args.no_grid,
         true,
+        true,
         &empty_hidden,
         NodeId::ROOT,
         None,
