@@ -36,6 +36,7 @@ pub const ROTATE_CCW: char = '\u{e144}';
 pub const SAVE: char = '\u{e14d}';
 pub const SCALE_3D: char = '\u{e2eb}';
 pub const SCAN: char = '\u{e257}';
+pub const SQUARE: char = '\u{e167}';
 pub const SUN: char = '\u{e178}';
 pub const TERMINAL: char = '\u{e183}';
 pub const TRASH: char = '\u{e18d}';
