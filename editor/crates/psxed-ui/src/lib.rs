@@ -22,6 +22,7 @@ use crate::style::*;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
@@ -72,6 +73,7 @@ const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
 const RESOURCE_CARD_WIDTH: f32 = 120.0;
 const RESOURCE_CARD_HEIGHT: f32 = 128.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
+const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/obsidian_wraith",
     "assets/models/crimson_cross_knight",
@@ -145,6 +147,19 @@ struct ActionBarStatus<'a> {
     message: &'a str,
     accent: Color32,
     border: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutGroup {
+    Workspace,
+    Tool,
+    Transform,
+    Selection,
+    Surface,
+    Vertex,
+    Visibility,
+    Camera,
+    Viewport,
 }
 
 /// Embedded editor workspace state.
@@ -312,11 +327,13 @@ pub struct EditorWorkspace {
     snap_units: u16,
     show_grid: bool,
     show_portals: bool,
+    show_lights: bool,
     preview_fog: bool,
     preview_backface_wireframe: bool,
     preview_bounds: bool,
     show_play_debug_overlays: bool,
     show_play_debug_map: bool,
+    shortcut_group_flash: Option<(ShortcutGroup, Instant)>,
     view_2d: bool,
     active_workspace: WorkspaceView,
     left_dock_open: bool,
@@ -1282,6 +1299,14 @@ impl SelectionMode {
             Self::Vertex => "Vertex",
         }
     }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Face => icons::SQUARE,
+            Self::Edge => icons::SCAN,
+            Self::Vertex => icons::CIRCLE_DOT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1325,6 +1350,13 @@ impl HorizontalEditMode {
             Self::Triangle => "Tri",
         }
     }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Quad => icons::SQUARE,
+            Self::Triangle => icons::PLAY,
+        }
+    }
 }
 
 /// Vertex propagation behavior for primitive height edits.
@@ -1343,6 +1375,13 @@ impl VertexConnectivity {
         match self {
             Self::Welded => "Welded",
             Self::Detached => "Detached",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Welded => icons::BLEND,
+            Self::Detached => icons::COPY,
         }
     }
 }
@@ -1729,6 +1768,15 @@ pub enum ViewportCameraMode {
     Free,
 }
 
+impl ViewportCameraMode {
+    const fn icon(self) -> char {
+        match self {
+            Self::Orbit => icons::ROTATE_3D,
+            Self::Free => icons::MOVE,
+        }
+    }
+}
+
 /// Snapshot of the editor's 3D viewport camera, handed to the
 /// frontend each frame so it can drive the editor-owned `HwRenderer`
 /// from the same state the editor's viewport input updates.
@@ -1937,6 +1985,17 @@ impl PlaceKind {
             Self::ImageProp => "Image Prop",
             Self::PointLightMarker => "Point Light",
             Self::Portal => "Portal",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::PlayerSpawn | Self::SpawnMarker => icons::MAP_PIN,
+            Self::ModelInstance => icons::BOX,
+            Self::Character => icons::CIRCLE_DOT,
+            Self::ImageProp => icons::PALETTE,
+            Self::PointLightMarker => icons::SUN,
+            Self::Portal => icons::WAYPOINT,
         }
     }
 }
@@ -2207,11 +2266,13 @@ impl EditorWorkspace {
             snap_units: 16,
             show_grid: editor_visibility.show_grid,
             show_portals: editor_visibility.show_portals,
+            show_lights: editor_visibility.show_lights,
             preview_fog: editor_visibility.preview_fog,
             preview_backface_wireframe: editor_visibility.preview_backface_wireframe,
             preview_bounds: editor_visibility.preview_bounds,
             show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
             show_play_debug_map: editor_visibility.show_play_debug_map,
+            shortcut_group_flash: None,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
@@ -2306,6 +2367,7 @@ impl EditorWorkspace {
         EditorVisibilityState {
             show_grid: self.show_grid,
             show_portals: self.show_portals,
+            show_lights: self.show_lights,
             preview_fog: self.preview_fog,
             preview_backface_wireframe: self.preview_backface_wireframe,
             preview_bounds: self.preview_bounds,
@@ -2326,6 +2388,7 @@ impl EditorWorkspace {
         let editor_visibility = self.project.editor_visibility;
         self.show_grid = editor_visibility.show_grid;
         self.show_portals = editor_visibility.show_portals;
+        self.show_lights = editor_visibility.show_lights;
         self.preview_fog = editor_visibility.preview_fog;
         self.preview_backface_wireframe = editor_visibility.preview_backface_wireframe;
         self.preview_bounds = editor_visibility.preview_bounds;
@@ -4514,11 +4577,15 @@ impl EditorWorkspace {
     }
 
     fn set_viewport_3d_camera_mode(&mut self, mode: ViewportCameraMode) {
+        if self.viewport_3d_camera_mode == mode {
+            return;
+        }
         if mode == ViewportCameraMode::Free && !self.viewport_3d_free_initialized {
             self.sync_free_camera_to_orbit();
         }
         self.viewport_3d_camera_mode = mode;
         self.persist_editor_camera_state();
+        self.mark_shortcut_group_changed(ShortcutGroup::Camera);
     }
 
     fn sync_free_camera_to_orbit(&mut self) {
@@ -4957,6 +5024,10 @@ impl EditorWorkspace {
 
     pub fn show_portals_enabled(&self) -> bool {
         self.show_portals
+    }
+
+    pub fn show_lights_enabled(&self) -> bool {
+        self.show_lights
     }
 
     /// Currently-selected scene node. The frontend reads this so the
@@ -8910,6 +8981,7 @@ impl EditorWorkspace {
         const VALUES: &[WorkspaceView] = &[WorkspaceView::Room, WorkspaceView::Animation];
         self.active_workspace = cycle_value(VALUES, self.active_workspace, reverse);
         self.status = format!("Workspace: {}", self.active_workspace.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
     }
 
     fn cycle_tool_group(&mut self, reverse: bool) {
@@ -8944,6 +9016,8 @@ impl EditorWorkspace {
     }
 
     fn set_active_tool_cycle_value(&mut self, value: (ViewTool, Option<PlaceKind>)) {
+        let changed =
+            self.active_tool_cycle_value() != value || self.active_workspace != WorkspaceView::Room;
         self.active_workspace = WorkspaceView::Room;
         let (tool, place_kind) = value;
         self.active_tool = tool;
@@ -8960,6 +9034,9 @@ impl EditorWorkspace {
         } else {
             format!("Tool: {}", tool.label())
         };
+        if changed {
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
     }
 
     fn cycle_transform_group(&mut self, reverse: bool) {
@@ -8972,11 +9049,15 @@ impl EditorWorkspace {
     }
 
     fn set_transform_gizmo_mode(&mut self, mode: TransformGizmoMode) {
+        if self.transform_gizmo_mode == mode {
+            return;
+        }
         self.transform_gizmo_mode = mode;
         self.primitive_gizmo_drag = None;
         self.node_gizmo_drag = None;
         self.node_drag = None;
         self.status = format!("Transform: {}", mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Transform);
     }
 
     fn cycle_selection_group(&mut self, reverse: bool) {
@@ -8997,8 +9078,7 @@ impl EditorWorkspace {
     fn cycle_vertex_connectivity_group(&mut self, reverse: bool) {
         const VALUES: &[VertexConnectivity] =
             &[VertexConnectivity::Welded, VertexConnectivity::Detached];
-        self.vertex_connectivity = cycle_value(VALUES, self.vertex_connectivity, reverse);
-        self.status = format!("Vertex edits: {}", self.vertex_connectivity.label());
+        self.set_vertex_connectivity(cycle_value(VALUES, self.vertex_connectivity, reverse));
     }
 
     fn cycle_visibility_group(&mut self, reverse: bool) {
@@ -9006,17 +9086,17 @@ impl EditorWorkspace {
         let show_all = reverse || !all_visible;
         self.show_grid = show_all;
         self.show_portals = show_all;
+        self.show_lights = show_all;
         self.preview_fog = show_all;
         self.preview_backface_wireframe = show_all;
         self.preview_bounds = show_all;
-        self.show_play_debug_overlays = show_all;
-        self.show_play_debug_map = show_all;
         self.persist_editor_visibility_state();
         self.status = if show_all {
             "Visibility: all shown".to_string()
         } else {
             "Visibility: all hidden".to_string()
         };
+        self.mark_shortcut_group_changed(ShortcutGroup::Visibility);
     }
 
     fn cycle_camera_group(&mut self, reverse: bool) {
@@ -9037,6 +9117,7 @@ impl EditorWorkspace {
         } else {
             "Viewport: 3D".to_string()
         };
+        self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
     }
 
     /// Switch the Select tool's primitive mode. Tries to adapt
@@ -9068,6 +9149,7 @@ impl EditorWorkspace {
         // new mode anyway.
         self.hovered_primitive = None;
         self.status = format!("Selection mode: {}", mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Selection);
     }
 
     fn set_horizontal_edit_mode(&mut self, mode: HorizontalEditMode) {
@@ -9091,6 +9173,16 @@ impl EditorWorkspace {
         self.selected_primitive = active.or_else(|| self.selected_primitives.first().copied());
         self.hovered_primitive = None;
         self.status = format!("Surface edit: {}", mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Surface);
+    }
+
+    fn set_vertex_connectivity(&mut self, mode: VertexConnectivity) {
+        if self.vertex_connectivity == mode {
+            return;
+        }
+        self.vertex_connectivity = mode;
+        self.status = format!("Vertex edits: {}", mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Vertex);
     }
 
     fn selection_as_horizontal_mode(
@@ -11982,6 +12074,7 @@ impl EditorWorkspace {
                             &self.validation_issue_primitives,
                             &self.validation_issue_rooms,
                             self.show_portals,
+                            self.show_lights,
                         );
 
                         let pointer_world = response
@@ -12110,15 +12203,44 @@ impl EditorWorkspace {
             });
     }
 
+    fn mark_shortcut_group_changed(&mut self, group: ShortcutGroup) {
+        self.shortcut_group_flash = Some((group, Instant::now()));
+    }
+
+    fn retain_shortcut_group_flash(&mut self) {
+        if self
+            .shortcut_group_flash
+            .is_some_and(|(_, started)| started.elapsed().as_secs_f32() >= SHORTCUT_GROUP_FLASH_SECONDS)
+        {
+            self.shortcut_group_flash = None;
+        }
+    }
+
+    fn shortcut_group_glow(&self, group: ShortcutGroup) -> f32 {
+        let Some((active, started)) = self.shortcut_group_flash else {
+            return 0.0;
+        };
+        if active != group {
+            return 0.0;
+        }
+        let elapsed = started.elapsed().as_secs_f32();
+        (1.0 - elapsed / SHORTCUT_GROUP_FLASH_SECONDS).clamp(0.0, 1.0)
+    }
+
     fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
         if self.active_room_id().is_none() && self.active_tool.requires_room_context() {
             self.active_tool = ViewTool::Select;
+        }
+        self.retain_shortcut_group_flash();
+        if self.shortcut_group_flash.is_some() {
+            ui.ctx().request_repaint();
         }
         ui.spacing_mut().item_spacing.x = 4.0;
 
         toolbar_group_menu(
             ui,
             1,
+            self.shortcut_group_glow(ShortcutGroup::Workspace),
             self.active_workspace.icon(),
             "Workspace",
             self.active_workspace.label(),
@@ -12127,6 +12249,7 @@ impl EditorWorkspace {
         toolbar_group_menu(
             ui,
             2,
+            self.shortcut_group_glow(ShortcutGroup::Tool),
             self.active_tool_group_icon(),
             "Tool",
             self.active_tool_group_label(),
@@ -12135,6 +12258,7 @@ impl EditorWorkspace {
         toolbar_group_menu(
             ui,
             3,
+            self.shortcut_group_glow(ShortcutGroup::Transform),
             self.transform_gizmo_mode.icon(),
             "Transform",
             self.transform_gizmo_mode.label(),
@@ -12143,7 +12267,8 @@ impl EditorWorkspace {
         toolbar_group_menu(
             ui,
             4,
-            icons::POINTER,
+            self.shortcut_group_glow(ShortcutGroup::Selection),
+            self.selection_mode.icon(),
             "Selection",
             self.selection_mode.label(),
             |ui| self.draw_selection_group_menu(ui),
@@ -12151,7 +12276,8 @@ impl EditorWorkspace {
         toolbar_group_menu(
             ui,
             5,
-            icons::SQUARE,
+            self.shortcut_group_glow(ShortcutGroup::Surface),
+            self.horizontal_edit_mode.icon(),
             "Surface",
             self.horizontal_edit_mode.label(),
             |ui| self.draw_horizontal_edit_group_menu(ui),
@@ -12159,7 +12285,8 @@ impl EditorWorkspace {
         toolbar_group_menu(
             ui,
             6,
-            icons::BLEND,
+            self.shortcut_group_glow(ShortcutGroup::Vertex),
+            self.vertex_connectivity.icon(),
             "Vertex Edits",
             self.vertex_connectivity.label(),
             |ui| self.draw_vertex_connectivity_group_menu(ui),
@@ -12167,6 +12294,7 @@ impl EditorWorkspace {
         toolbar_group_menu(
             ui,
             7,
+            self.shortcut_group_glow(ShortcutGroup::Visibility),
             self.visibility_group_icon(),
             "Visibility",
             self.visibility_group_label(),
@@ -12175,7 +12303,8 @@ impl EditorWorkspace {
         toolbar_group_menu(
             ui,
             8,
-            icons::ROTATE_3D,
+            self.shortcut_group_glow(ShortcutGroup::Camera),
+            self.viewport_3d_camera_mode.icon(),
             "Camera",
             self.viewport_camera_mode_label(),
             |ui| self.draw_camera_group_menu(ui),
@@ -12183,6 +12312,7 @@ impl EditorWorkspace {
         toolbar_group_menu(
             ui,
             9,
+            self.shortcut_group_glow(ShortcutGroup::Viewport),
             self.view_dimension_group_icon(),
             "Viewport",
             self.view_dimension_group_label(),
@@ -12198,8 +12328,11 @@ impl EditorWorkspace {
                 icons::label(view.icon(), view.label()),
                 self.active_workspace == view,
             ) {
-                self.active_workspace = view;
-                self.status = format!("Workspace: {}", view.label());
+                if self.active_workspace != view {
+                    self.active_workspace = view;
+                    self.status = format!("Workspace: {}", view.label());
+                    self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
+                }
             }
         }
     }
@@ -12232,7 +12365,7 @@ impl EditorWorkspace {
             (
                 ViewTool::Place,
                 Some(PlaceKind::Portal),
-                icons::WAYPOINT,
+                PlaceKind::Portal.icon(),
                 "Portal",
             ),
         ] {
@@ -12247,14 +12380,19 @@ impl EditorWorkspace {
 
         ui.separator();
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.snap_to_grid, "Snap");
-            ui.add_sized(
+            if ui.checkbox(&mut self.snap_to_grid, "Snap").changed() {
+                self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+            }
+            let snap_response = ui.add_sized(
                 [64.0, 22.0],
                 egui::DragValue::new(&mut self.snap_units)
                     .speed(1.0)
                     .range(1..=256),
-            )
-            .on_hover_text("Snap interval.");
+            );
+            if snap_response.changed() {
+                self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+            }
+            snap_response.on_hover_text("Snap interval.");
         });
 
         match self.active_tool {
@@ -12304,7 +12442,11 @@ impl EditorWorkspace {
             SelectionMode::Edge,
             SelectionMode::Vertex,
         ] {
-            if toolbar_menu_choice(ui, mode.label(), self.selection_mode == mode) {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.selection_mode == mode,
+            ) {
                 self.set_selection_mode(mode);
             }
         }
@@ -12313,7 +12455,11 @@ impl EditorWorkspace {
     fn draw_horizontal_edit_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(156.0);
         for mode in [HorizontalEditMode::Quad, HorizontalEditMode::Triangle] {
-            if toolbar_menu_choice(ui, mode.label(), self.horizontal_edit_mode == mode) {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.horizontal_edit_mode == mode,
+            ) {
                 self.set_horizontal_edit_mode(mode);
             }
         }
@@ -12322,9 +12468,12 @@ impl EditorWorkspace {
     fn draw_vertex_connectivity_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(168.0);
         for mode in [VertexConnectivity::Welded, VertexConnectivity::Detached] {
-            if toolbar_menu_choice(ui, mode.label(), self.vertex_connectivity == mode) {
-                self.vertex_connectivity = mode;
-                self.status = format!("Vertex edits: {}", mode.label());
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.vertex_connectivity == mode,
+            ) {
+                self.set_vertex_connectivity(mode);
             }
         }
     }
@@ -12338,6 +12487,7 @@ impl EditorWorkspace {
             .show(ui, |ui| {
                 changed |= visibility_menu_row(ui, "grid", "Grid", &mut self.show_grid);
                 changed |= visibility_menu_row(ui, "portals", "Portals", &mut self.show_portals);
+                changed |= visibility_menu_row(ui, "lights", "Lights", &mut self.show_lights);
                 changed |= visibility_menu_row(ui, "fog", "Fog", &mut self.preview_fog);
                 changed |= visibility_menu_row(
                     ui,
@@ -12346,21 +12496,10 @@ impl EditorWorkspace {
                     &mut self.preview_backface_wireframe,
                 );
                 changed |= visibility_menu_row(ui, "bounds", "Bounds", &mut self.preview_bounds);
-                changed |= visibility_menu_row(
-                    ui,
-                    "play-profiler",
-                    "Play profiler",
-                    &mut self.show_play_debug_overlays,
-                );
-                changed |= visibility_menu_row(
-                    ui,
-                    "play-map",
-                    "Play portal map",
-                    &mut self.show_play_debug_map,
-                );
             });
         if changed {
             self.persist_editor_visibility_state();
+            self.mark_shortcut_group_changed(ShortcutGroup::Visibility);
         }
     }
 
@@ -12369,7 +12508,7 @@ impl EditorWorkspace {
         for mode in [ViewportCameraMode::Orbit, ViewportCameraMode::Free] {
             if toolbar_menu_choice(
                 ui,
-                viewport_camera_mode_label(mode),
+                icons::label(mode.icon(), viewport_camera_mode_label(mode)),
                 self.viewport_3d_camera_mode == mode,
             ) {
                 self.set_viewport_3d_camera_mode(mode);
@@ -12380,27 +12519,32 @@ impl EditorWorkspace {
 
     fn draw_view_dimension_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(120.0);
-        if toolbar_menu_choice(ui, "2D", self.view_2d) {
-            self.view_2d = true;
-            self.status = "Viewport: 2D".to_string();
+        if toolbar_menu_choice(ui, icons::label(icons::SQUARE, "2D"), self.view_2d) {
+            if !self.view_2d {
+                self.view_2d = true;
+                self.status = "Viewport: 2D".to_string();
+                self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
+            }
         }
-        if toolbar_menu_choice(ui, "3D", !self.view_2d) {
-            self.view_2d = false;
-            self.status = "Viewport: 3D".to_string();
+        if toolbar_menu_choice(ui, icons::label(icons::BOX, "3D"), !self.view_2d) {
+            if self.view_2d {
+                self.view_2d = false;
+                self.status = "Viewport: 3D".to_string();
+                self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
+            }
         }
     }
 
     fn active_tool_group_icon(&self) -> char {
-        if self.active_tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
-            icons::WAYPOINT
-        } else {
-            self.active_tool.icon()
+        match self.active_tool {
+            ViewTool::Place => self.place_kind.icon(),
+            tool => tool.icon(),
         }
     }
 
     fn active_tool_group_label(&self) -> &'static str {
-        if self.active_tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
-            "Portal"
+        if self.active_tool == ViewTool::Place {
+            self.place_kind.label()
         } else {
             self.active_tool.label()
         }
@@ -12445,11 +12589,10 @@ impl EditorWorkspace {
     fn editor_visibility_has_hidden_items(&self) -> bool {
         !self.show_grid
             || !self.show_portals
+            || !self.show_lights
             || !self.preview_fog
             || !self.preview_backface_wireframe
             || !self.preview_bounds
-            || !self.show_play_debug_overlays
-            || !self.show_play_debug_map
     }
 
     /// Toolbar combobox for the active brush material. Selecting
@@ -12470,13 +12613,17 @@ impl EditorWorkspace {
             WallPaintShape::NorthEastSouthWest,
         ] {
             if toolbar_menu_choice(ui, shape.label(), self.wall_paint_shape == shape) {
-                self.wall_paint_shape = shape;
+                if self.wall_paint_shape != shape {
+                    self.wall_paint_shape = shape;
+                    self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+                }
             }
         }
     }
 
     fn draw_place_kind_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(icons::text(icons::PLUS, 14.0).color(STUDIO_TEXT_WEAK));
+        ui.label(icons::text(self.place_kind.icon(), 14.0).color(STUDIO_TEXT_WEAK));
+        let before = self.place_kind;
         egui::ComboBox::from_id_salt("place-kind-toolbar")
             .selected_text(self.place_kind.label())
             .show_ui(ui, |ui| {
@@ -12491,6 +12638,10 @@ impl EditorWorkspace {
                     ui.selectable_value(&mut self.place_kind, kind, kind.label());
                 }
             });
+        if self.place_kind != before {
+            self.status = format!("Place kind: {}", self.place_kind.label());
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
         match self.place_kind {
             PlaceKind::ModelInstance => {
                 self.draw_place_resource_picker(ui, ResourceFilter::Model, "Model")
@@ -12542,6 +12693,7 @@ impl EditorWorkspace {
 
         ui.label(icons::text(filter.icon(), 14.0).color(STUDIO_TEXT_WEAK))
             .on_hover_text(label);
+        let before = self.place_resource;
         egui::ComboBox::from_id_salt(("place-resource-picker", filter.label()))
             .selected_text(selected)
             .show_ui(ui, |ui| {
@@ -12552,6 +12704,9 @@ impl EditorWorkspace {
                     }
                 }
             });
+        if self.place_resource != before {
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
     }
 
     fn place_resource_candidates(&self) -> impl Iterator<Item = ResourceId> {
@@ -12699,6 +12854,7 @@ impl EditorWorkspace {
         };
         ui.label(icons::text(icons::PALETTE, 14.0).color(STUDIO_TEXT_WEAK))
             .on_hover_text("Brush material");
+        let before = self.brush_material;
         egui::ComboBox::from_id_salt("brush-material-picker")
             .selected_text(label)
             .show_ui(ui, |ui| {
@@ -12708,6 +12864,9 @@ impl EditorWorkspace {
                     ui.selectable_value(&mut self.brush_material, Some(*id), name);
                 }
             });
+        if self.brush_material != before {
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
     }
 
     /// Resolve the Room node that owns the current selection, if any.
@@ -12729,6 +12888,9 @@ impl EditorWorkspace {
                 continue;
             }
             if self.scene_node_effectively_hidden(node.id) {
+                continue;
+            }
+            if matches!(node.kind, NodeKind::PointLight { .. }) && !self.show_lights {
                 continue;
             }
             // Find this node's enclosing Room.
@@ -18081,6 +18243,7 @@ fn draw_inline_icon(ui: &mut egui::Ui, icon: char, color: Color32) {
 fn toolbar_group_menu<R>(
     ui: &mut egui::Ui,
     number: u8,
+    glow: f32,
     icon: char,
     label: &str,
     current: &str,
@@ -18089,11 +18252,26 @@ fn toolbar_group_menu<R>(
     let number_text = number.to_string();
     let shortcut = command_shortcut_text(&number_text);
     let reverse_shortcut = command_shift_shortcut_text(&number_text);
-    let response = egui::menu::menu_custom_button(
-        ui,
-        egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0)),
-        add_contents,
-    )
+    let shortcut_summary = format!("Shortcut: {shortcut} / Reverse: {reverse_shortcut}");
+    let glow = glow.clamp(0.0, 1.0);
+    let mut button = egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0));
+    if glow > 0.0 {
+        let fill_alpha = (34.0 + 58.0 * glow).round() as u8;
+        let stroke_alpha = (120.0 + 120.0 * glow).round() as u8;
+        button = button
+            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, fill_alpha))
+            .stroke(Stroke::new(
+                1.0 + glow * 0.75,
+                Color32::from_rgba_unmultiplied(165, 238, 255, stroke_alpha),
+            ));
+    }
+    let footer = shortcut_summary.clone();
+    let response = egui::menu::menu_custom_button(ui, button, |ui| {
+        let result = add_contents(ui);
+        ui.separator();
+        ui.label(RichText::new(footer).small().color(STUDIO_TEXT_WEAK));
+        result
+    })
     .response;
     response.on_hover_text(format!(
         "{label}: {current}\n{shortcut} cycles forward\n{reverse_shortcut} cycles backward"
@@ -24127,6 +24305,7 @@ fn draw_scene_viewport(
     validation_issue_primitives: &[Selection],
     validation_issue_rooms: &HashSet<NodeId>,
     show_portals: bool,
+    show_lights: bool,
 ) -> Vec<ViewportHit> {
     let scene = project.active_scene();
     let mut hits = Vec::new();
@@ -24194,7 +24373,7 @@ fn draw_scene_viewport(
                 color,
                 intensity,
                 radius,
-            } => {
+            } if show_lights => {
                 draw_light_marker(
                     painter,
                     transform,
@@ -30052,6 +30231,7 @@ mod tests {
             EditorWorkspace::with_project(project_dir.clone(), ProjectDocument::new("visibility"));
         workspace.show_grid = false;
         workspace.show_portals = false;
+        workspace.show_lights = false;
         workspace.preview_fog = false;
         workspace.preview_backface_wireframe = true;
         workspace.preview_bounds = false;
@@ -30063,6 +30243,7 @@ mod tests {
         let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
         assert!(!reopened.show_grid_enabled());
         assert!(!reopened.show_portals_enabled());
+        assert!(!reopened.show_lights_enabled());
         assert!(!reopened.preview_fog_enabled());
         assert!(reopened.preview_backface_wireframe_enabled());
         assert!(!reopened.preview_bounds_enabled());
@@ -30309,6 +30490,31 @@ mod tests {
         workspace.cycle_tool_group(true);
         assert_eq!(workspace.active_tool, ViewTool::Place);
         assert_eq!(workspace.place_kind, PlaceKind::Portal);
+    }
+
+    #[test]
+    fn visibility_cycle_only_changes_editor_view_items() {
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("visibility-cycle"), ProjectDocument::new("visibility"));
+        workspace.show_grid = true;
+        workspace.show_portals = true;
+        workspace.show_lights = true;
+        workspace.preview_fog = true;
+        workspace.preview_backface_wireframe = true;
+        workspace.preview_bounds = true;
+        workspace.show_play_debug_overlays = false;
+        workspace.show_play_debug_map = true;
+
+        workspace.cycle_visibility_group(false);
+
+        assert!(!workspace.show_grid);
+        assert!(!workspace.show_portals);
+        assert!(!workspace.show_lights);
+        assert!(!workspace.preview_fog);
+        assert!(!workspace.preview_backface_wireframe);
+        assert!(!workspace.preview_bounds);
+        assert!(!workspace.show_play_debug_overlays);
+        assert!(workspace.show_play_debug_map);
     }
 
     #[test]
