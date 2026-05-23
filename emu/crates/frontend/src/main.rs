@@ -1070,13 +1070,20 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::ROOM_DRAWN_CHUNK_MASK_LO,
         counter::ROOM_DRAWN_CHUNK_MASK_HI,
         counter::ROOM_PLAYER_ROOM_INDEX,
+        counter::PORTAL_VIS_CURRENT_ROOM,
         counter::ROOM_PLAYER_LOCAL_X_BIASED,
         counter::ROOM_PLAYER_LOCAL_Z_BIASED,
         counter::ROOM_PLAYER_VIEW_YAW_Q12,
         counter::ROOM_CAMERA_LOCAL_X_BIASED,
+        counter::ROOM_CAMERA_LOCAL_Y_BIASED,
         counter::ROOM_CAMERA_LOCAL_Z_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
         counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
         counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
         counter::PORTAL_VIS_VISIBLE_MASK_LO,
         counter::PORTAL_VIS_VISIBLE_MASK_HI,
         counter::PORTAL_VIS_FRONTIER_MASK_LO,
@@ -1110,13 +1117,20 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::ROOM_STREAM_LOADING_MASK_LO,
         counter::ROOM_STREAM_LOADING_MASK_HI,
         counter::ROOM_PLAYER_ROOM_INDEX,
+        counter::PORTAL_VIS_CURRENT_ROOM,
         counter::ROOM_PLAYER_LOCAL_X_BIASED,
         counter::ROOM_PLAYER_LOCAL_Z_BIASED,
         counter::ROOM_PLAYER_VIEW_YAW_Q12,
         counter::ROOM_CAMERA_LOCAL_X_BIASED,
+        counter::ROOM_CAMERA_LOCAL_Y_BIASED,
         counter::ROOM_CAMERA_LOCAL_Z_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
         counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
         counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
         counter::PORTAL_VIS_VISIBLE_MASK_LO,
         counter::PORTAL_VIS_VISIBLE_MASK_HI,
         counter::PORTAL_VIS_FRONTIER_MASK_LO,
@@ -1166,15 +1180,33 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
     let camera_x_biased = chunk_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_LOCAL_X_BIASED as usize);
+    let camera_y_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Y_BIASED as usize);
     let camera_z_biased = chunk_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Z_BIASED as usize);
+    let camera_global_x_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_X_BIASED as usize);
+    let camera_global_y_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_Y_BIASED as usize);
+    let camera_global_z_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_Z_BIASED as usize);
     let camera_view_sin_yaw_biased = chunk_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED as usize);
     let camera_view_cos_yaw_biased = chunk_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED as usize);
+    let camera_view_sin_pitch_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED as usize);
+    let camera_view_cos_pitch_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED as usize);
     Some(psxed_ui::EditorPlaytestMetrics {
         host_fps: sample.host_fps(),
         host_ms: sample.host_dt_ms,
@@ -1288,20 +1320,46 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         player_room_index: chunk_sample
             .guest
             .counter_latest_value(counter::ROOM_PLAYER_ROOM_INDEX as usize),
+        portal_current_room_index: chunk_sample
+            .guest
+            .counter_latest_value(counter::PORTAL_VIS_CURRENT_ROOM as usize),
         player_local_x: profile_counter_i32_biased(player_x_biased, DEBUG_MAP_POSITION_BIAS),
         player_local_z: profile_counter_i32_biased(player_z_biased, DEBUG_MAP_POSITION_BIAS),
         player_view_yaw_q12: chunk_sample
             .guest
             .counter_latest_value(counter::ROOM_PLAYER_VIEW_YAW_Q12 as usize)
             .min(u16::MAX as u32) as u16,
-        camera_view_basis_valid: camera_view_sin_yaw_biased > 0 || camera_view_cos_yaw_biased > 0,
+        camera_view_basis_valid: camera_view_sin_yaw_biased > 0
+            || camera_view_cos_yaw_biased > 0
+            || camera_view_sin_pitch_biased > 0
+            || camera_view_cos_pitch_biased > 0,
         camera_view_sin_yaw_q12: profile_counter_i32_biased(camera_view_sin_yaw_biased, 4096)
             .clamp(-4096, 4096),
         camera_view_cos_yaw_q12: profile_counter_i32_biased(camera_view_cos_yaw_biased, 4096)
             .clamp(-4096, 4096),
-        camera_map_valid: camera_x_biased > 0 || camera_z_biased > 0,
+        camera_view_sin_pitch_q12: profile_counter_i32_biased(camera_view_sin_pitch_biased, 4096)
+            .clamp(-4096, 4096),
+        camera_view_cos_pitch_q12: profile_counter_i32_biased(camera_view_cos_pitch_biased, 4096)
+            .clamp(-4096, 4096),
+        camera_map_valid: camera_x_biased > 0 || camera_y_biased > 0 || camera_z_biased > 0,
+        camera_global_valid: camera_global_x_biased > 0
+            || camera_global_y_biased > 0
+            || camera_global_z_biased > 0,
         camera_local_x: profile_counter_i32_biased(camera_x_biased, DEBUG_MAP_POSITION_BIAS),
+        camera_local_y: profile_counter_i32_biased(camera_y_biased, DEBUG_MAP_POSITION_BIAS),
         camera_local_z: profile_counter_i32_biased(camera_z_biased, DEBUG_MAP_POSITION_BIAS),
+        camera_global_x: profile_counter_i32_biased(
+            camera_global_x_biased,
+            DEBUG_MAP_POSITION_BIAS,
+        ),
+        camera_global_y: profile_counter_i32_biased(
+            camera_global_y_biased,
+            DEBUG_MAP_POSITION_BIAS,
+        ),
+        camera_global_z: profile_counter_i32_biased(
+            camera_global_z_biased,
+            DEBUG_MAP_POSITION_BIAS,
+        ),
     })
 }
 
