@@ -7,11 +7,11 @@
 //! budget metrics are tracked separately so PS1 workload does not get hidden
 //! behind fast host wall-clock timings.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fmt::Write as _};
 
 use egui::{Color32, RichText};
 use emulator_core::telemetry::{
-    counter_name, stage, stage_name, GuestTelemetryEvent, COUNTER_COUNT, STAGE_COUNT,
+    counter, counter_name, stage, stage_name, GuestTelemetryEvent, COUNTER_COUNT, STAGE_COUNT,
 };
 
 use crate::theme;
@@ -23,8 +23,6 @@ const BUDGET_30_MS: f32 = 1000.0 / 30.0;
 const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
 const PSX_CYCLES_PER_MS: f32 = PSX_MASTER_CLOCK_HZ / 1000.0;
 const NTSC_CPU_CYCLES_PER_VBLANK: f32 = PSX_MASTER_CLOCK_HZ / 60.0;
-const PACED20_INTERVAL_VBLANKS: f32 = 3.0;
-const PACED20_VISUAL_BUDGET_CYCLES: f32 = NTSC_CPU_CYCLES_PER_VBLANK * PACED20_INTERVAL_VBLANKS;
 const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (stage::SKY, "sky"),
     (stage::FAR_VISTA, "far vista"),
@@ -36,6 +34,116 @@ const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (stage::EQUIPMENT, "equipment"),
     (stage::WORLD_FLUSH, "flush/sort"),
     (stage::OT_SUBMIT, "ot submit"),
+];
+const PROFILE_LOG_STAGE_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
+    (stage::FRAME_CLEAR, "guest_clear_v"),
+    (stage::RENDER, "guest_render_v"),
+    (stage::SKY, "guest_sky_v"),
+    (stage::FAR_VISTA, "guest_vista_v"),
+    (stage::ROOM, "guest_room_v"),
+    (stage::ROOM_VISIBLE_LIST, "guest_room_list_v"),
+    (stage::ROOM_CELL_SELECT, "guest_room_select_v"),
+    (stage::ROOM_PROJECT, "guest_room_project_v"),
+    (stage::ROOM_DEPTH_PREP, "guest_room_depth_v"),
+    (stage::ROOM_SURFACE_DRAW, "guest_room_surface_v"),
+    (stage::ENTITY_MARKERS, "guest_markers_v"),
+    (stage::IMAGE_PROPS, "guest_props_v"),
+    (stage::MODEL_INSTANCES, "guest_models_v"),
+    (stage::PLAYER, "guest_player_v"),
+    (stage::EQUIPMENT, "guest_equipment_v"),
+    (stage::WORLD_FLUSH, "guest_flush_v"),
+    (stage::OT_SUBMIT, "guest_ot_v"),
+    (stage::PRESENT, "guest_present_v"),
+];
+const PROFILE_LOG_STAGE_PER_HIT_FIELDS: &[(u16, &str)] = &[
+    (stage::UPDATE, "guest_update_hit"),
+    (stage::CAMERA, "guest_camera_hit"),
+    (stage::ACTIVE_ROOM_WINDOW, "guest_room_window_hit"),
+    (stage::ROOM_SURFACE_CACHE, "guest_room_cache_hit"),
+    (stage::VRAM_UPLOAD, "guest_vram_hit"),
+    (stage::MODEL_BOUNDS, "guest_model_bounds_hit"),
+    (stage::MODEL_DRAW, "guest_model_draw_hit"),
+    (stage::PLAYER_BOUNDS, "guest_player_bounds_hit"),
+    (stage::PLAYER_DRAW, "guest_player_draw_hit"),
+    (stage::TEXTURED_MODEL_JOINTS, "guest_mdl_joints_hit"),
+    (stage::TEXTURED_MODEL_PROJECT, "guest_mdl_project_hit"),
+    (stage::TEXTURED_MODEL_FACES, "guest_mdl_faces_hit"),
+];
+const PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
+    (counter::ROOM_ACTIVE_CHUNKS, "room_chunks_v"),
+    (counter::ROOM_CACHED_DRAWS, "room_cached_v"),
+    (counter::ROOM_UNCACHED_DRAWS, "room_uncached_v"),
+    (counter::ROOM_CACHE_FALLBACK_DRAWS, "room_cache_fb_v"),
+    (
+        counter::ROOM_VISIBILITY_FALLBACK_DRAWS,
+        "room_visibility_fb_v",
+    ),
+    (counter::ROOM_CACHE_CELLS, "room_cache_cells_v"),
+    (counter::ROOM_CACHE_VERTICES, "room_cache_verts_v"),
+    (counter::ROOM_CACHE_SURFACES, "room_cache_surfaces_v"),
+    (counter::ROOM_VISIBLE_CELLS, "room_visible_cells_v"),
+    (counter::ROOM_CELLS_CONSIDERED, "room_cells_v"),
+    (counter::ROOM_CELLS_DRAWN, "room_cells_drawn_v"),
+    (counter::ROOM_CELLS_CULLED, "room_cells_culled_v"),
+    (counter::ROOM_CELLS_RANGE_CULLED, "room_range_culled_v"),
+    (counter::ROOM_SURFACES_CONSIDERED, "room_surfaces_v"),
+    (counter::ROOM_PROJECTED_VERTICES, "room_projected_verts_v"),
+    (counter::TRI_PRIMITIVES, "tri_prims_v"),
+    (counter::TRI_PRIMITIVE_REMAINING, "tri_free_v"),
+    (counter::WORLD_COMMANDS, "world_cmds_v"),
+    (counter::MODEL_INSTANCE_DRAWS, "model_draws_v"),
+    (counter::MODEL_INSTANCE_BOUNDS_TESTS, "model_bounds_v"),
+    (
+        counter::MODEL_INSTANCE_BOUNDS_CULLED,
+        "model_bounds_culled_v",
+    ),
+    (counter::MODEL_INSTANCE_PROJECTED_VERTICES, "model_verts_v"),
+    (counter::MODEL_INSTANCE_SUBMITTED_TRIS, "model_tris_v"),
+    (counter::PLAYER_BOUNDS_TESTS, "player_bounds_v"),
+    (counter::PLAYER_BOUNDS_CULLED, "player_bounds_culled_v"),
+    (counter::PLAYER_PROJECTED_VERTICES, "player_verts_v"),
+    (counter::PLAYER_SUBMITTED_TRIS, "player_tris_v"),
+    (counter::EQUIPMENT_DRAWS, "equipment_draws_v"),
+    (counter::EQUIPMENT_PROJECTED_VERTICES, "equipment_verts_v"),
+    (counter::EQUIPMENT_SUBMITTED_TRIS, "equipment_tris_v"),
+    (counter::ROOM_SURF_MATERIAL_CYCLES, "surf_material_cyc_v"),
+    (counter::ROOM_SURF_PROJECTED_CYCLES, "surf_projected_cyc_v"),
+    (counter::ROOM_SURF_SCREEN_CYCLES, "surf_screen_cyc_v"),
+    (counter::ROOM_SURF_KIND_CYCLES, "surf_kind_cyc_v"),
+    (counter::ROOM_SURF_BACKFACE_CYCLES, "surf_backface_cyc_v"),
+    (counter::ROOM_SURF_LIGHTING_CYCLES, "surf_lighting_cyc_v"),
+    (counter::ROOM_SURF_SUBMIT_CYCLES, "surf_submit_cyc_v"),
+    (counter::ROOM_SURF_PROFILED, "surf_profiled_v"),
+    (counter::ROOM_SURF_SCREEN_CULLED, "surf_screen_culled_v"),
+    (counter::ROOM_SURF_BACKFACE_CULLED, "surf_backface_culled_v"),
+    (
+        counter::ROOM_SUBMIT_HW_SAFE_TEST_CYCLES,
+        "submit_hw_test_cyc_v",
+    ),
+    (
+        counter::ROOM_SUBMIT_PACKET_FILL_CYCLES,
+        "submit_packet_cyc_v",
+    ),
+    (
+        counter::ROOM_SUBMIT_PRIMITIVE_PUSH_CYCLES,
+        "submit_prim_push_cyc_v",
+    ),
+    (counter::ROOM_SUBMIT_DEPTH_CYCLES, "submit_depth_cyc_v"),
+    (counter::ROOM_SUBMIT_COMMAND_CYCLES, "submit_command_cyc_v"),
+    (
+        counter::ROOM_SUBMIT_FALLBACK_CYCLES,
+        "submit_fallback_cyc_v",
+    ),
+    (counter::ROOM_SUBMIT_HW_SAFE_CALLS, "submit_hw_calls_v"),
+    (
+        counter::ROOM_SUBMIT_FALLBACK_CALLS,
+        "submit_fallback_calls_v",
+    ),
+    (counter::ROOM_STREAM_REQUESTS, "stream_req_v"),
+    (counter::ROOM_STREAM_MISSES, "stream_miss_v"),
+    (counter::ROOM_STREAM_PREFETCH_REQUESTS, "stream_prefetch_v"),
+    (counter::ROOM_STREAM_RESIDENT_SLOTS, "stream_resident_v"),
+    (counter::ROOM_STREAM_PENDING_LOADS, "stream_pending_v"),
 ];
 
 /// Timing breakdown returned by [`crate::gfx::Graphics::render`].
@@ -162,6 +270,15 @@ impl GuestRuntimeProfile {
         per_guest_frame(self.counters[counter_id], self.frames)
     }
 
+    fn counter_per_visual_frame(self, counter_id: usize) -> f32 {
+        let visual_frames = self.counter_total(counter::VISUAL_FRAMES as usize);
+        if visual_frames > 0.0 {
+            self.counters[counter_id] / visual_frames
+        } else {
+            self.counter_per_guest_frame(counter_id)
+        }
+    }
+
     fn counter_total(self, counter_id: usize) -> f32 {
         self.counters[counter_id]
     }
@@ -201,11 +318,21 @@ impl GuestRuntimeProfile {
         }
     }
 
-    fn paced20_budget_status(self) -> &'static str {
+    fn stage_cycles_per_visual_frame(self, stage_id: usize) -> f32 {
+        let visual_frames = self.counter_total(counter::VISUAL_FRAMES as usize);
+        if visual_frames > 0.0 {
+            self.stage_cycles[stage_id] / visual_frames
+        } else {
+            self.stage_cycles_per_guest_frame(stage_id)
+        }
+    }
+
+    fn paced_visual_budget_status(self) -> &'static str {
         let render_cycles = self.render_cycles_per_visual_frame();
-        if render_cycles <= 0.0 {
+        let interval = self.visual_interval_vblanks();
+        if render_cycles <= 0.0 || interval <= 0.0 {
             "?"
-        } else if render_cycles <= PACED20_VISUAL_BUDGET_CYCLES {
+        } else if render_cycles <= NTSC_CPU_CYCLES_PER_VBLANK * interval {
             "pass"
         } else {
             "fail"
@@ -789,7 +916,11 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                     "REN/V",
                     format!("{:.0}", avg.guest.render_cycles_per_visual_frame()),
                 );
-                metric(ui, "3VB", avg.guest.paced20_budget_status().to_string());
+                metric(
+                    ui,
+                    "VBUD",
+                    avg.guest.paced_visual_budget_status().to_string(),
+                );
             });
         }
         draw_guest_render_breakdown(ui, avg.guest);
@@ -1099,7 +1230,7 @@ fn per_guest_frame(total: f32, frames_run: f32) -> f32 {
 }
 
 fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
-    format!(
+    let mut line = format!(
         "[profile {kind}] total={:.2}ms host_dt={:.2}ms fps={:.1} run={:.1} \
          emu={:.2}ms audio={:.2}ms vram={:.2}ms hw={:.2}ms ui={:.2}ms \
          host_fps={:.1} emu_hz={:.1} vis_hz={:.1} draw_hz={:.1} step={:.1}% \
@@ -1108,7 +1239,7 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
          guest_frames={:.1} guest_render_hit={:.0} guest_models_hit={:.0} guest_player_hit={:.0} \
          guest_flush_hit={:.0} guest_prims_f={:.0} guest_cmds_f={:.0} \
          guest_sim={:.0} guest_visual={:.0} guest_int={:.2} guest_miss={:.0} \
-         guest_late={:.0} guest_render_visual={:.0} guest_20hz={} \
+         guest_late={:.0} guest_render_visual={:.0} guest_vbud={} \
          scale={:.0}x ticks={:.0} cycles={:.0}",
         sample.total_ms,
         sample.host_dt_ms,
@@ -1168,11 +1299,28 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
             emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS as usize,
         ),
         sample.guest.render_cycles_per_visual_frame(),
-        sample.guest.paced20_budget_status(),
+        sample.guest.paced_visual_budget_status(),
         sample.hw_scale.max(1.0),
         sample.cpu_ticks,
         sample.bus_cycles,
-    )
+    );
+    append_guest_profile_log_fields(&mut line, sample.guest);
+    line
+}
+
+fn append_guest_profile_log_fields(line: &mut String, guest: GuestRuntimeProfile) {
+    for &(stage_id, label) in PROFILE_LOG_STAGE_PER_VISUAL_FIELDS {
+        let cycles = guest.stage_cycles_per_visual_frame(stage_id as usize);
+        let _ = write!(line, " {label}={cycles:.0}");
+    }
+    for &(stage_id, label) in PROFILE_LOG_STAGE_PER_HIT_FIELDS {
+        let cycles = guest.stage_cycles_per_hit(stage_id as usize);
+        let _ = write!(line, " {label}={cycles:.0}");
+    }
+    for &(counter_id, label) in PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS {
+        let value = guest.counter_per_visual_frame(counter_id as usize);
+        let _ = write!(line, " {label}={value:.0}");
+    }
 }
 
 #[cfg(test)]
@@ -1323,7 +1471,7 @@ mod tests {
         );
         assert_eq!(guest.visual_interval_vblanks(), 3.0);
         assert_eq!(guest.render_cycles_per_visual_frame(), 100.0);
-        assert_eq!(guest.paced20_budget_status(), "pass");
+        assert_eq!(guest.paced_visual_budget_status(), "pass");
     }
 
     #[test]
@@ -1370,6 +1518,6 @@ mod tests {
         assert!(line.contains("cyc_f=564398"));
         assert!(line.contains("gte_f=96"));
         assert!(line.contains("draw_f=32"));
-        assert!(line.contains("guest_20hz=?"));
+        assert!(line.contains("guest_vbud=?"));
     }
 }
