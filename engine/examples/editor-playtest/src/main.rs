@@ -422,9 +422,12 @@ fn emit_player_map_debug(
     room: RoomIndex,
     position: RoomPoint,
     camera_position: RoomPoint,
+    camera_global: RoomPoint,
     view_yaw_q12: u16,
     view_sin_yaw_q12: i32,
     view_cos_yaw_q12: i32,
+    view_sin_pitch_q12: i32,
+    view_cos_pitch_q12: i32,
 ) {
     telemetry::counter(
         telemetry::counter::ROOM_PLAYER_ROOM_INDEX,
@@ -447,8 +450,24 @@ fn emit_player_map_debug(
         encode_debug_map_position(camera_position.x),
     );
     telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_LOCAL_Y_BIASED,
+        encode_debug_map_position(camera_position.y),
+    );
+    telemetry::counter(
         telemetry::counter::ROOM_CAMERA_LOCAL_Z_BIASED,
         encode_debug_map_position(camera_position.z),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+        encode_debug_map_position(camera_global.x),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+        encode_debug_map_position(camera_global.y),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
+        encode_debug_map_position(camera_global.z),
     );
     telemetry::counter(
         telemetry::counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
@@ -457,6 +476,14 @@ fn emit_player_map_debug(
     telemetry::counter(
         telemetry::counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
         encode_debug_q12_basis(view_cos_yaw_q12),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
+        encode_debug_q12_basis(view_sin_pitch_q12),
+    );
+    telemetry::counter(
+        telemetry::counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
+        encode_debug_q12_basis(view_cos_pitch_q12),
     );
 }
 
@@ -1914,6 +1941,10 @@ struct Playtest {
     active_room_job: ActiveRoomWindowJob,
     /// Portal traversal result for the current player/camera room.
     portal_visibility: RuntimePortalVisibility,
+    /// Runtime room used as the root for the latest portal traversal.
+    portal_visibility_root: RoomIndex,
+    /// Absolute level-space render camera used by the latest portal traversal.
+    portal_visibility_camera_global: RoomPoint,
     /// Global chunk bounds retained for portal diagnostics and streaming.
     portal_room_bounds: [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
     portal_visible_missing_resident: u16,
@@ -2035,6 +2066,8 @@ impl Playtest {
             active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
             active_room_job: ActiveRoomWindowJob::EMPTY,
             portal_visibility: RuntimePortalVisibility::EMPTY,
+            portal_visibility_root: RoomIndex::ZERO,
+            portal_visibility_camera_global: RoomPoint::ZERO,
             portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
             portal_visible_missing_resident: 0,
             portal_visible_missing_mask: 0,
@@ -2972,9 +3005,12 @@ impl Scene for Playtest {
                 self.room_index,
                 self.motor.position(),
                 RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
+                self.portal_visibility_camera_global,
                 yaw_q12_from_basis(debug_view.sin_yaw, debug_view.cos_yaw),
                 debug_view.sin_yaw,
                 debug_view.cos_yaw,
+                debug_view.sin_pitch,
+                debug_view.cos_pitch,
             );
             self.emit_portal_visibility_counters();
             #[cfg(feature = "cd-stream-bench")]
@@ -3601,16 +3637,18 @@ impl Playtest {
         current_index: RoomIndex,
         current_record: &LevelRoomRecord,
         view: ActiveRoomView,
+        camera_global: RoomPoint,
     ) {
-        let global = local_to_global_room_point(current_index, view.position);
         let half_fov_x_tan_q12 = ((SCREEN_CX as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
         let half_fov_y_tan_q12 = ((SCREEN_CY as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
         let far_z = current_record.draw_distance.clamp(NEAR_Z, FAR_Z);
+        self.portal_visibility_root = current_index;
+        self.portal_visibility_camera_global = camera_global;
         telemetry::stage_begin(telemetry::stage::PORTAL_VISIBILITY);
         let camera = PortalVisibilityCamera::new(
-            global.x,
-            global.y,
-            global.z,
+            camera_global.x,
+            camera_global.y,
+            camera_global.z,
             view.sin_yaw,
             view.cos_yaw,
             view.sin_pitch,
@@ -3640,17 +3678,11 @@ impl Playtest {
         current_record: &LevelRoomRecord,
         view: ActiveRoomView,
     ) {
-        let view_global = local_to_global_room_point(current_index, view.position);
-        let visibility_index =
-            room_index_containing_global_from(current_index, view_global).unwrap_or(current_index);
+        let visibility_space = portal_visibility_space_for_view(current_index, view);
+        let visibility_index = visibility_space.room;
         let visibility_record = ROOMS
             .get(visibility_index.to_usize())
             .unwrap_or(current_record);
-        let visibility_view = if visibility_index == current_index {
-            view
-        } else {
-            view.with_position(global_to_local_room_point(visibility_index, view_global))
-        };
         let (view_sin_key, view_cos_key, view_pitch_sin_key, view_pitch_cos_key) =
             portal_visibility_view_keys(view);
         self.active_room_view_sin_key = view_sin_key;
@@ -3658,7 +3690,12 @@ impl Playtest {
         self.active_room_view_pitch_sin_key = view_pitch_sin_key;
         self.active_room_view_pitch_cos_key = view_pitch_cos_key;
         self.active_room_view_anchor = view.position;
-        self.rebuild_portal_visibility(visibility_index, visibility_record, visibility_view);
+        self.rebuild_portal_visibility(
+            visibility_index,
+            visibility_record,
+            visibility_space.view,
+            visibility_space.camera_global,
+        );
         self.active_room_candidates = self.portal_visibility.stats.portals_tested.min(u16::MAX);
         self.portal_visible_missing_resident = 0;
         self.portal_visible_missing_mask = 0;
@@ -3760,7 +3797,7 @@ impl Playtest {
         let stats = self.portal_visibility.stats;
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_CURRENT_ROOM,
-            self.room_index.raw() as u32,
+            self.portal_visibility_root.raw() as u32,
         );
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_VISIBLE_ROOMS,
@@ -4216,7 +4253,16 @@ impl Playtest {
         );
 
         if self.portal_visibility.room_count == 0 {
-            self.rebuild_portal_visibility(current_index, current_record, view);
+            let visibility_space = portal_visibility_space_for_view(current_index, view);
+            let visibility_record = ROOMS
+                .get(visibility_space.room.to_usize())
+                .unwrap_or(current_record);
+            self.rebuild_portal_visibility(
+                visibility_space.room,
+                visibility_record,
+                visibility_space.view,
+                visibility_space.camera_global,
+            );
         }
         if self.portal_visibility.room_count == 0 {
             self.portal_visible_missing_resident = 0;
@@ -7233,6 +7279,31 @@ impl ActiveRoomView {
 
     fn with_position(self, position: RoomPoint) -> Self {
         Self { position, ..self }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct PortalVisibilitySpace {
+    room: RoomIndex,
+    view: ActiveRoomView,
+    camera_global: RoomPoint,
+}
+
+fn portal_visibility_space_for_view(
+    current_index: RoomIndex,
+    view: ActiveRoomView,
+) -> PortalVisibilitySpace {
+    let camera_global = local_to_global_room_point(current_index, view.position);
+    let room = room_index_containing_global_from(current_index, camera_global).unwrap_or(current_index);
+    let view = if room == current_index {
+        view
+    } else {
+        view.with_position(global_to_local_room_point(room, camera_global))
+    };
+    PortalVisibilitySpace {
+        room,
+        view,
+        camera_global,
     }
 }
 

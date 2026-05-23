@@ -478,10 +478,22 @@ pub mod counter {
     pub const ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED: u16 = 187;
     /// Render camera yaw cosine in Q12, biased by 4096 for unsigned transport.
     pub const ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED: u16 = 188;
+    /// Render camera room-local Y, biased for unsigned telemetry transport.
+    pub const ROOM_CAMERA_LOCAL_Y_BIASED: u16 = 189;
+    /// Render camera pitch sine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED: u16 = 190;
+    /// Render camera pitch cosine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED: u16 = 191;
+    /// Render camera absolute level X used by portal traversal, biased for unsigned transport.
+    pub const ROOM_CAMERA_GLOBAL_X_BIASED: u16 = 192;
+    /// Render camera absolute level Y used by portal traversal, biased for unsigned transport.
+    pub const ROOM_CAMERA_GLOBAL_Y_BIASED: u16 = 193;
+    /// Render camera absolute level Z used by portal traversal, biased for unsigned transport.
+    pub const ROOM_CAMERA_GLOBAL_Z_BIASED: u16 = 194;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 189;
+pub const COUNTER_COUNT: usize = 195;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -987,6 +999,12 @@ pub fn counter_name(id: u16) -> &'static str {
         }
         counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED => "camera view sin yaw q12 biased",
         counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED => "camera view cos yaw q12 biased",
+        counter::ROOM_CAMERA_LOCAL_Y_BIASED => "camera local y",
+        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED => "camera view sin pitch q12 biased",
+        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED => "camera view cos pitch q12 biased",
+        counter::ROOM_CAMERA_GLOBAL_X_BIASED => "camera global x",
+        counter::ROOM_CAMERA_GLOBAL_Y_BIASED => "camera global y",
+        counter::ROOM_CAMERA_GLOBAL_Z_BIASED => "camera global z",
         _ => "unknown",
     }
 }
