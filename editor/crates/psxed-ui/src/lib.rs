@@ -300,6 +300,7 @@ pub struct EditorWorkspace {
     preview_backface_wireframe: bool,
     preview_bounds: bool,
     show_play_debug_overlays: bool,
+    show_play_debug_map: bool,
     view_2d: bool,
     active_workspace: WorkspaceView,
     left_dock_open: bool,
@@ -2164,6 +2165,7 @@ impl EditorWorkspace {
             preview_backface_wireframe: true,
             preview_bounds: true,
             show_play_debug_overlays: true,
+            show_play_debug_map: true,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
@@ -4432,42 +4434,36 @@ impl EditorWorkspace {
             .uv(viewport_3d.uv)
             .paint_at(ui, rect);
 
-        let toggle_rect = Rect::from_min_size(
-            Pos2::new(rect.right() - 36.0, rect.top() + 8.0),
-            Vec2::splat(28.0),
+        let control_size = Vec2::splat(28.0);
+        let control_gap = 6.0;
+        let controls_origin = rect.left_top() + Vec2::new(8.0, 8.0);
+        let profiler_toggle_rect = Rect::from_min_size(controls_origin, control_size);
+        let map_toggle_rect = Rect::from_min_size(
+            profiler_toggle_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            control_size,
         );
-        let toggle_response = ui
-            .interact(
-                toggle_rect,
-                ui.id().with("play_debug_overlay_toggle"),
-                Sense::click(),
-            )
-            .on_hover_text(if self.show_play_debug_overlays {
-                "Hide play debug overlays"
-            } else {
-                "Show play debug overlays"
-            });
-        if toggle_response.clicked() {
-            self.show_play_debug_overlays = !self.show_play_debug_overlays;
-        }
+        let record_rect = Rect::from_min_size(
+            map_toggle_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            control_size,
+        );
+        let replay_rect = Rect::from_min_size(
+            record_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            control_size,
+        );
+        let controls_rect = Rect::from_min_max(profiler_toggle_rect.min, replay_rect.max);
+        let recording = viewport_3d.play_tape.mode == EditorPlaytestTapeMode::Recording;
+        let replaying = viewport_3d.play_tape.mode == EditorPlaytestTapeMode::Replaying;
+        let can_record = !replaying;
+        let can_replay = !recording;
+
         let show_debug_overlays = self.show_play_debug_overlays;
+        let show_debug_map = self.show_play_debug_map;
         let debug_rect = Rect::from_min_size(
-            rect.left_top() + Vec2::new(8.0, 8.0),
+            rect.left_top() + Vec2::new(44.0, 8.0),
             Vec2::new(238.0, 218.0),
         );
-        let tape_top = if show_debug_overlays {
-            debug_rect.bottom() + 6.0
-        } else {
-            rect.top() + 8.0
-        };
-        let tape_controls_rect = Rect::from_min_size(
-            Pos2::new(debug_rect.left(), tape_top),
-            Vec2::new(238.0, 28.0),
-        );
         let clicked_overlay = response.interact_pointer_pos().is_some_and(|pos| {
-            toggle_rect.contains(pos)
-                || tape_controls_rect.contains(pos)
-                || (show_debug_overlays && debug_rect.contains(pos))
+            controls_rect.contains(pos) || (show_debug_overlays && debug_rect.contains(pos))
         });
         if response.clicked() && !clicked_overlay {
             self.pending_playtest_request = Some(EditorPlaytestRequest::CaptureInput);
@@ -4678,98 +4674,81 @@ impl EditorWorkspace {
                 STUDIO_TEXT,
             );
         }
-        self.draw_play_input_tape_controls(ui, tape_controls_rect, viewport_3d.play_tape);
-        if show_debug_overlays {
+        if show_debug_map {
             if let Some(metrics) = viewport_3d.play_metrics {
                 draw_play_chunk_debug_map(&painter, rect, &self.project, metrics);
             }
         }
-        draw_play_debug_overlay_toggle(
-            &painter,
-            toggle_rect,
-            show_debug_overlays,
-            toggle_response.hovered(),
-        );
-    }
-
-    fn draw_play_input_tape_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        rect: Rect,
-        tape: EditorPlaytestTapeStatus,
-    ) {
-        ui.painter()
-            .rect_filled(rect, 4.0, Color32::from_black_alpha(164));
-        let gap = 6.0;
-        let button_width = (rect.width() - gap) * 0.5;
-        let record_rect =
-            Rect::from_min_size(rect.left_top(), Vec2::new(button_width, rect.height()));
-        let replay_rect = Rect::from_min_size(
-            Pos2::new(record_rect.right() + gap, rect.top()),
-            Vec2::new(button_width, rect.height()),
-        );
-        let recording = tape.mode == EditorPlaytestTapeMode::Recording;
-        let replaying = tape.mode == EditorPlaytestTapeMode::Replaying;
-        let can_record = !replaying;
-        let can_replay = !recording;
-
-        let record_label = if recording {
-            "Stop Rec".to_string()
-        } else {
-            icons::label(icons::CIRCLE_DOT, "Rec")
-        };
-        let record_response = ui.put(
+        if draw_play_overlay_icon_button(
+            ui,
+            profiler_toggle_rect,
+            "play_profiler_overlay_toggle",
+            icons::TERMINAL,
+            if self.show_play_debug_overlays {
+                "Hide play profiler"
+            } else {
+                "Show play profiler"
+            },
+            self.show_play_debug_overlays,
+            true,
+            None,
+        ) {
+            self.show_play_debug_overlays = !self.show_play_debug_overlays;
+        }
+        if draw_play_overlay_icon_button(
+            ui,
+            map_toggle_rect,
+            "play_portal_map_toggle",
+            icons::GRID,
+            if self.show_play_debug_map {
+                "Hide portal map"
+            } else {
+                "Show portal map"
+            },
+            self.show_play_debug_map,
+            true,
+            None,
+        ) {
+            self.show_play_debug_map = !self.show_play_debug_map;
+        }
+        if draw_play_overlay_icon_button(
+            ui,
             record_rect,
-            egui::Button::new(RichText::new(record_label).color(if can_record {
-                STUDIO_TEXT
+            "play_input_record_toggle",
+            icons::CIRCLE_DOT,
+            if recording {
+                "Stop recording input"
             } else {
-                STUDIO_TEXT_WEAK
-            }))
-            .fill(if recording {
-                Color32::from_rgb(92, 34, 34)
-            } else {
-                STUDIO_PANEL_DARK
-            }),
-        );
-        let record_clicked = record_response.clicked();
-        record_response.on_hover_text(if recording {
-            "Stop recording input"
-        } else {
-            "Record embedded play input"
-        });
-        if can_record && record_clicked {
+                "Record embedded play input"
+            },
+            recording,
+            can_record,
+            Some(Color32::from_rgb(92, 34, 34)),
+        ) {
             self.pending_playtest_request = Some(if recording {
                 EditorPlaytestRequest::StopInputRecording
             } else {
                 EditorPlaytestRequest::StartInputRecording
             });
         }
-
-        let replay_label = if replaying {
-            "Stop".to_string()
-        } else {
-            icons::label(icons::PLAY, "Replay")
-        };
-        let replay_response = ui.put(
+        if draw_play_overlay_icon_button(
+            ui,
             replay_rect,
-            egui::Button::new(RichText::new(replay_label).color(if can_replay {
-                STUDIO_TEXT
+            "play_input_replay_toggle",
+            if replaying {
+                icons::SQUARE
             } else {
-                STUDIO_TEXT_WEAK
-            }))
-            .fill(if replaying {
-                STUDIO_ACCENT_DIM
+                icons::PLAY
+            },
+            if replaying {
+                "Stop replaying input"
             } else {
-                STUDIO_PANEL_DARK
-            }),
-        );
-        let replay_clicked = replay_response.clicked();
-        replay_response.on_hover_text(if replaying {
-            "Stop replaying input"
-        } else {
-            "Replay saved input"
-        });
-        if can_replay && replay_clicked {
+                "Replay saved input"
+            },
+            replaying,
+            can_replay,
+            Some(STUDIO_ACCENT_DIM),
+        ) {
             self.pending_playtest_request = Some(if replaying {
                 EditorPlaytestRequest::StopInputReplay
             } else {
@@ -21205,31 +21184,62 @@ fn human_bytes_u64(n: u64) -> String {
     }
 }
 
-fn draw_play_debug_overlay_toggle(
-    painter: &egui::Painter,
+fn draw_play_overlay_icon_button(
+    ui: &mut egui::Ui,
     rect: Rect,
-    visible: bool,
-    hovered: bool,
-) {
-    let fill = if hovered {
+    id_source: &'static str,
+    icon: char,
+    tooltip: &'static str,
+    active: bool,
+    enabled: bool,
+    active_fill: Option<Color32>,
+) -> bool {
+    let response = ui
+        .interact(
+            rect,
+            ui.id().with(("play_overlay_icon_button", id_source)),
+            if enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        )
+        .on_hover_text(tooltip);
+    let hovered = response.hovered();
+    let fill = if active {
+        active_fill.unwrap_or(STUDIO_ACCENT_DIM)
+    } else if hovered && enabled {
         Color32::from_rgba_unmultiplied(34, 48, 58, 232)
-    } else {
+    } else if enabled {
         Color32::from_black_alpha(176)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 112)
     };
+    let stroke = if active {
+        Stroke::new(1.0, STUDIO_ACCENT)
+    } else if hovered && enabled {
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 128))
+    } else {
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 84))
+    };
+    let icon_color = if !enabled {
+        Color32::from_rgba_unmultiplied(142, 154, 168, 108)
+    } else if hovered || active {
+        Color32::WHITE
+    } else {
+        STUDIO_TEXT
+    };
+    let painter = ui.painter();
     painter.rect_filled(rect, 4.0, fill);
-    painter.rect_stroke(
-        rect,
-        4.0,
-        Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 84)),
-        StrokeKind::Inside,
-    );
+    painter.rect_stroke(rect, 4.0, stroke, StrokeKind::Inside);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
-        if visible { icons::EYE_OFF } else { icons::EYE }.to_string(),
+        icon.to_string(),
         icons::font(14.0),
-        if hovered { Color32::WHITE } else { STUDIO_TEXT },
+        icon_color,
     );
+    enabled && response.clicked()
 }
 
 #[derive(Clone, Copy)]
