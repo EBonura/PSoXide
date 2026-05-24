@@ -79,6 +79,7 @@ const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
 const PLAY_FRAME_HISTORY_CAP: usize = 150;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
+const PLAY_NTSC_VBLANK_MS: f32 = 1000.0 / 60.0;
 const PSOXIDE_LOGO_ICON_PNG: &[u8] =
     include_bytes!("../../../../assets/branding/logo-icon-player.png");
 const PLAY_PORTAL_DEBUG_SCREEN_CX: i32 = 160;
@@ -348,7 +349,6 @@ pub struct EditorWorkspace {
     show_play_debug_overlays: bool,
     show_play_debug_map: bool,
     play_frame_times_ms: VecDeque<f32>,
-    play_frame_chart_last_visual: Option<Instant>,
     play_frame_last_sample_serial: Option<u32>,
     shortcut_group_flash: Option<(ShortcutGroup, Instant)>,
     view_2d: bool,
@@ -2297,7 +2297,6 @@ impl EditorWorkspace {
             show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
             show_play_debug_map: editor_visibility.show_play_debug_map,
             play_frame_times_ms: VecDeque::with_capacity(PLAY_FRAME_HISTORY_CAP),
-            play_frame_chart_last_visual: None,
             play_frame_last_sample_serial: None,
             shortcut_group_flash: None,
             // Default to the 3D preview so the bit-faithful HwRenderer
@@ -4662,14 +4661,16 @@ impl EditorWorkspace {
         if metrics.visual_frames == 0 {
             return;
         }
-        let now = Instant::now();
-        let frame_ms = if let Some(previous) = self.play_frame_chart_last_visual {
-            let elapsed_ms = now.duration_since(previous).as_secs_f32() * 1000.0;
-            elapsed_ms / metrics.visual_frames.max(1) as f32
+        let frame_ms = if metrics.visual_interval_vblanks > 0.0 {
+            let base_ms = metrics.visual_interval_vblanks * PLAY_NTSC_VBLANK_MS;
+            if metrics.visual_deadline_misses > 0 && metrics.visual_lateness_vblanks > 0 {
+                base_ms * (metrics.visual_lateness_vblanks.saturating_add(1) as f32)
+            } else {
+                base_ms
+            }
         } else {
             metrics.frame_ms
         };
-        self.play_frame_chart_last_visual = Some(now);
         if !frame_ms.is_finite() || frame_ms <= 0.0 {
             return;
         }
@@ -4773,7 +4774,13 @@ impl EditorWorkspace {
                     &painter,
                     debug_rect.left() + 8.0,
                     &mut y,
-                    &format!("VIS  {:>5.1} Hz  FRAME {:>5.1} ms", visual_hz, frame_ms),
+                    &format!(
+                        "VIS {:>5.1}Hz {:>5.1}ms M/L {}/{}",
+                        visual_hz,
+                        frame_ms,
+                        metrics.visual_deadline_misses,
+                        metrics.visual_lateness_vblanks
+                    ),
                     STUDIO_TEXT,
                 );
                 draw_play_metric_line(
@@ -31353,6 +31360,9 @@ mod tests {
             visual_hz: None,
             draw_hz: 0.0,
             visual_frames: 0,
+            visual_interval_vblanks: 0.0,
+            visual_deadline_misses: 0,
+            visual_lateness_vblanks: 0,
             total_ms: 0.0,
             frame_ms: 0.0,
             emu_ms: 0.0,
