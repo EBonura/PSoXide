@@ -16,7 +16,7 @@ use emulator_core::telemetry::{
 
 use crate::theme;
 
-const HISTORY_CAP: usize = 240;
+const HISTORY_CAP: usize = 500;
 const LOG_INTERVAL_MS: f32 = 1000.0;
 const BUDGET_60_MS: f32 = 1000.0 / 60.0;
 const BUDGET_30_MS: f32 = 1000.0 / 30.0;
@@ -731,6 +731,21 @@ impl FrameProfiler {
         self.guest_stage_starts = [None; STAGE_COUNT];
     }
 
+    /// Number of samples currently retained in the rolling history.
+    pub fn history_len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Export the rolling history as a wide CSV for offline diagnosis.
+    pub fn history_csv(&self) -> String {
+        let mut out = String::new();
+        push_history_csv_header(&mut out);
+        for (index, sample) in self.samples.iter().copied().enumerate() {
+            push_history_csv_sample(&mut out, index, sample);
+        }
+        out
+    }
+
     /// Fold raw guest events into one frontend-frame sample, preserving
     /// open stage spans across samples when the guest misses a VBlank budget.
     pub fn consume_guest_events(&mut self, events: &[GuestTelemetryEvent]) -> GuestRuntimeProfile {
@@ -1236,6 +1251,145 @@ fn draw_budget_line(ui: &egui::Ui, rect: egui::Rect, max_ms: f32, budget: f32, l
         egui::FontId::monospace(theme::FONT_SIZE_SMALL),
         theme::TEXT_DIM,
     );
+}
+
+fn push_history_csv_header(out: &mut String) {
+    out.push_str(
+        "index,sample_serial,host_dt_ms,total_ms,input_ms,emu_ms,audio_ms,cmd_log_ms,\
+         compute_ms,vram_upload_ms,display_upload_ms,hw_scale_ms,hw_vram_clone_ms,\
+         hw_render_ms,egui_input_ms,egui_ui_ms,egui_platform_output_ms,\
+         egui_tessellate_ms,egui_texture_update_ms,egui_buffer_update_ms,\
+         egui_paint_ms,egui_submit_present_ms,egui_total_ms,frames_run,cpu_ticks,\
+         bus_cycles,psx_budget_cycles,psx_vblanks,psx_draw_vblanks,\
+         psx_step_cap_misses,gte_ops,gte_estimated_cycles,gpu_cmds,gpu_words,\
+         gpu_draw_cmds,gpu_image_cmds,hw_scale,host_fps,emulated_vblank_hz,\
+         psx_draw_hz,guest_visual_hz,guest_visual_frames,\
+         guest_visual_interval_vblanks,guest_visual_deadline_misses,\
+         guest_visual_max_lateness_vblanks,guest_render_cycles_per_visual,\
+         guest_visual_budget_status",
+    );
+    for id in 0..STAGE_COUNT {
+        push_csv_metric_header(out, "stage", id, stage_name(id as u16), "cycles");
+        push_csv_metric_header(out, "stage", id, stage_name(id as u16), "hits");
+    }
+    for id in 0..COUNTER_COUNT {
+        push_csv_metric_header(out, "counter", id, counter_name(id as u16), "total");
+        push_csv_metric_header(out, "counter", id, counter_name(id as u16), "max");
+        push_csv_metric_header(out, "counter", id, counter_name(id as u16), "latest");
+    }
+    out.push('\n');
+}
+
+fn push_csv_metric_header(out: &mut String, prefix: &str, id: usize, name: &str, suffix: &str) {
+    let _ = write!(
+        out,
+        ",{prefix}_{id}_{name}_{suffix}",
+        name = csv_identifier(name)
+    );
+}
+
+fn csv_identifier(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().max(1));
+    let mut last_was_underscore = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_underscore = false;
+        } else if !last_was_underscore {
+            out.push('_');
+            last_was_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push('x');
+    }
+    out
+}
+
+fn push_history_csv_sample(out: &mut String, index: usize, sample: FrameProfileSample) {
+    let _ = write!(out, "{index}");
+    push_csv_display(out, sample.sample_serial);
+    push_csv_f32_3(out, sample.host_dt_ms);
+    push_csv_f32_3(out, sample.total_ms);
+    push_csv_f32_3(out, sample.input_ms);
+    push_csv_f32_3(out, sample.emu_ms);
+    push_csv_f32_3(out, sample.audio_ms);
+    push_csv_f32_3(out, sample.cmd_log_ms);
+    push_csv_f32_3(out, sample.compute_ms);
+    push_csv_f32_3(out, sample.vram_upload_ms);
+    push_csv_f32_3(out, sample.display_upload_ms);
+    push_csv_f32_3(out, sample.hw_scale_ms);
+    push_csv_f32_3(out, sample.hw_vram_clone_ms);
+    push_csv_f32_3(out, sample.hw_render_ms);
+    push_csv_f32_3(out, sample.egui.input_ms);
+    push_csv_f32_3(out, sample.egui.ui_ms);
+    push_csv_f32_3(out, sample.egui.platform_output_ms);
+    push_csv_f32_3(out, sample.egui.tessellate_ms);
+    push_csv_f32_3(out, sample.egui.texture_update_ms);
+    push_csv_f32_3(out, sample.egui.buffer_update_ms);
+    push_csv_f32_3(out, sample.egui.paint_ms);
+    push_csv_f32_3(out, sample.egui.submit_present_ms);
+    push_csv_f32_3(out, sample.egui.total_ms);
+    push_csv_f32_1(out, sample.frames_run);
+    push_csv_f32_0(out, sample.cpu_ticks);
+    push_csv_f32_0(out, sample.bus_cycles);
+    push_csv_f32_0(out, sample.psx_budget_cycles);
+    push_csv_f32_1(out, sample.psx_vblanks);
+    push_csv_f32_1(out, sample.psx_draw_vblanks);
+    push_csv_f32_0(out, sample.psx_step_cap_misses);
+    push_csv_f32_0(out, sample.gte_ops);
+    push_csv_f32_0(out, sample.gte_estimated_cycles);
+    push_csv_f32_0(out, sample.gpu_cmds);
+    push_csv_f32_0(out, sample.gpu_words);
+    push_csv_f32_0(out, sample.gpu_draw_cmds);
+    push_csv_f32_0(out, sample.gpu_image_cmds);
+    push_csv_f32_1(out, sample.hw_scale);
+    push_csv_f32_3(out, sample.host_fps());
+    push_csv_f32_3(out, sample.emulated_vblank_hz());
+    push_csv_f32_3(out, sample.psx_draw_hz());
+    push_csv_f32_3(out, sample.guest_visual_frame_hz().unwrap_or(0.0));
+    push_csv_f32_0(out, sample.guest_visual_frame_count());
+    push_csv_f32_3(out, sample.guest_visual_interval_vblanks().unwrap_or(0.0));
+    push_csv_f32_0(out, sample.guest_visual_deadline_misses());
+    push_csv_f32_0(out, sample.guest_visual_max_lateness_vblanks());
+    push_csv_f32_0(out, sample.guest.render_cycles_per_visual_frame());
+    push_csv_display(out, sample.guest.paced_visual_budget_status());
+    for id in 0..STAGE_COUNT {
+        let _ = write!(
+            out,
+            ",{:.0},{:.0}",
+            sample.guest.stage_cycles[id], sample.guest.stage_hits[id]
+        );
+    }
+    for id in 0..COUNTER_COUNT {
+        let _ = write!(
+            out,
+            ",{:.0},{:.0},{}",
+            sample.guest.counters[id],
+            sample.guest.counter_max_values[id],
+            sample.guest.counter_latest_values[id]
+        );
+    }
+    out.push('\n');
+}
+
+fn push_csv_display(out: &mut String, value: impl std::fmt::Display) {
+    let _ = write!(out, ",{value}");
+}
+
+fn push_csv_f32_3(out: &mut String, value: f32) {
+    let _ = write!(out, ",{value:.3}");
+}
+
+fn push_csv_f32_1(out: &mut String, value: f32) {
+    let _ = write!(out, ",{value:.1}");
+}
+
+fn push_csv_f32_0(out: &mut String, value: f32) {
+    let _ = write!(out, ",{value:.0}");
 }
 
 fn color_for_ms(ms: f32) -> Color32 {
