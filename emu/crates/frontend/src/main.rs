@@ -1059,6 +1059,18 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
     let sample = state.profiler.average().unwrap_or(latest);
     let visual_hz = sample.guest_visual_frame_hz();
     let display_hz = visual_hz.unwrap_or_else(|| sample.psx_draw_hz());
+    let visual_interval_vblanks = latest
+        .guest_visual_interval_vblanks()
+        .or_else(|| sample.guest_visual_interval_vblanks())
+        .unwrap_or(0.0);
+    let visual_deadline_misses = latest
+        .guest_visual_deadline_misses()
+        .round()
+        .clamp(0.0, u32::MAX as f32) as u32;
+    let visual_lateness_vblanks = latest
+        .guest_visual_max_lateness_vblanks()
+        .round()
+        .clamp(0.0, u32::MAX as f32) as u32;
     let frame_ms = if display_hz > 0.0 {
         1000.0 / display_hz
     } else {
@@ -1223,6 +1235,9 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             .guest_visual_frame_count()
             .round()
             .clamp(0.0, u32::MAX as f32) as u32,
+        visual_interval_vblanks,
+        visual_deadline_misses,
+        visual_lateness_vblanks,
         total_ms: sample.total_ms,
         frame_ms,
         emu_ms: sample.emu_ms,

@@ -156,6 +156,12 @@ pub struct EditorPlaytestMetrics {
     pub draw_hz: f32,
     /// Visual frames emitted by the most recent frontend redraw.
     pub visual_frames: u32,
+    /// Guest VBlank interval per paced visual frame.
+    pub visual_interval_vblanks: f32,
+    /// Guest visual deadline misses emitted by the most recent frontend redraw.
+    pub visual_deadline_misses: u32,
+    /// Maximum guest visual lateness emitted by the most recent frontend redraw.
+    pub visual_lateness_vblanks: u32,
     /// Full frontend frame cost.
     pub total_ms: f32,
     /// Estimated visual-frame interval, derived from the current visual cadence.

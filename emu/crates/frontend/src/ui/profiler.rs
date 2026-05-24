@@ -576,6 +576,29 @@ impl FrameProfileSample {
             .counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize)
     }
 
+    pub fn guest_visual_interval_vblanks(self) -> Option<f32> {
+        if !self.guest.has_pacing_data() {
+            return None;
+        }
+        let interval = self.guest.visual_interval_vblanks();
+        if interval > 0.0 {
+            Some(interval)
+        } else {
+            None
+        }
+    }
+
+    pub fn guest_visual_deadline_misses(self) -> f32 {
+        self.guest
+            .counter_total(emulator_core::telemetry::counter::VISUAL_DEADLINE_MISSES as usize)
+    }
+
+    pub fn guest_visual_max_lateness_vblanks(self) -> f32 {
+        self.guest.counter_max_value(
+            emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS as usize,
+        )
+    }
+
     fn bus_cycles_per_guest_frame(self) -> f32 {
         per_guest_frame(self.bus_cycles, self.frames_run)
     }
