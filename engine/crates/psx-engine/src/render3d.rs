@@ -3606,18 +3606,16 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             while command_index != 0 {
                 command_index -= 1;
                 let command = self.commands[command_index];
-                if !command.packet_ptr.is_null() {
-                    // SAFETY: Commands are created only from primitive
-                    // arenas borrowed by submit methods. Those packets live
-                    // until after this pass flushes and the frame submits.
-                    unsafe {
-                        self.ot.add_raw_slot(
-                            DepthSlot::new(command.slot as usize),
-                            command.packet_ptr,
-                            command.words,
-                        )
-                    };
-                }
+                // SAFETY: Bucketed commands are appended only after a packet
+                // arena push succeeds, and depth slots are produced by this
+                // pass' OT-depth-aware depth-band mapping.
+                unsafe {
+                    self.ot.add_raw_unchecked(
+                        command.slot as usize,
+                        command.packet_ptr,
+                        command.words,
+                    )
+                };
             }
             return;
         }
