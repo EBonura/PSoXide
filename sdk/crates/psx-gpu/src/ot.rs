@@ -45,6 +45,21 @@ impl<const N: usize> OrderingTable<N> {
     /// to the slot below. Submission starts at `[N-1]` so the
     /// DMA walker visits `[N-1] → [N-2] → … → [0] → end`.
     pub fn clear(&mut self) {
+        #[cfg(target_arch = "mips")]
+        {
+            if N <= u16::MAX as usize {
+                psx_io::dma::clear_ordering_table(self.entries.as_mut_ptr(), N as u16);
+            } else {
+                self.clear_software();
+            }
+        }
+        #[cfg(not(target_arch = "mips"))]
+        {
+            self.clear_software();
+        }
+    }
+
+    fn clear_software(&mut self) {
         // Slot 0 is the sentinel; chain walks stop here.
         self.entries[0] = 0x00FF_FFFF;
         for i in 1..N {
