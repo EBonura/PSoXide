@@ -2077,9 +2077,14 @@ impl<const N: usize> RoomStreamScheduler<N> {
                 i += 1;
                 continue;
             }
-            let Some(target) =
-                self.choose_slot(requested_rooms, protected_count, &plan.slots, plan.count)
-            else {
+            let allow_eviction = i < protected_count;
+            let Some(target) = self.choose_slot(
+                requested_rooms,
+                protected_count,
+                &plan.slots,
+                plan.count,
+                allow_eviction,
+            ) else {
                 self.window_protected_full = self.window_protected_full.saturating_add(1);
                 i += 1;
                 continue;
@@ -2361,6 +2366,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
         requested_count: usize,
         reserved_slots: &[usize; N],
         reserved_count: usize,
+        allow_eviction: bool,
     ) -> Option<usize> {
         let mut slot = 0usize;
         let slot_limit = self.effective_slot_limit();
@@ -2372,6 +2378,9 @@ impl<const N: usize> RoomStreamScheduler<N> {
                 return Some(slot);
             }
             slot += 1;
+        }
+        if !allow_eviction {
+            return None;
         }
 
         let mut best_slot = None;
