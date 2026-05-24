@@ -243,7 +243,9 @@ pub fn apply_texel_color_key_transparency(
         .and_then(|halfwords| halfwords.checked_mul(2))
         .ok_or_else(|| invalid_texture("indexed pixel block length overflow"))?;
     if pixel_len < expected_pixel_len {
-        return Err(invalid_texture("indexed pixel block shorter than texture dimensions"));
+        return Err(invalid_texture(
+            "indexed pixel block shorter than texture dimensions",
+        ));
     }
 
     let picked_index = indexed_texel_at(
@@ -466,10 +468,7 @@ fn indexed_texel_at(
 
 fn palette_rgb555(bytes: &[u8], clut_start: usize, index: u8) -> Option<u16> {
     let off = clut_start + usize::from(index) * 2;
-    Some(u16::from_le_bytes([
-        *bytes.get(off)?,
-        *bytes.get(off + 1)?,
-    ]) & 0x7FFF)
+    Some(u16::from_le_bytes([*bytes.get(off)?, *bytes.get(off + 1)?]) & 0x7FFF)
 }
 
 fn rgb555_to_rgb888(raw: u16) -> [u8; 3] {
@@ -708,12 +707,7 @@ mod tests {
             1, 2, 3, 1, //
             2, 3, 1, 2, //
         ];
-        let palette = [
-            [0, 0, 0],
-            [16, 24, 32],
-            [255, 0, 0],
-            [255, 0, 0],
-        ];
+        let palette = [[0, 0, 0], [16, 24, 32], [255, 0, 0], [255, 0, 0]];
         let mut bytes =
             psxed_tex::encode_indexed_psxt(4, 2, TextureDepth::Bit4, &indices, &palette, false)
                 .expect("encode indexed psxt");

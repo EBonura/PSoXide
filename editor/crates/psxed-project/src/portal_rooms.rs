@@ -1004,6 +1004,7 @@ mod tests {
                 target_room: None,
                 target_entry: String::new(),
                 entry_name: String::new(),
+                geometry: None,
             },
         );
         project
@@ -1069,6 +1070,7 @@ mod tests {
                 target_room: None,
                 target_entry: String::new(),
                 entry_name: String::new(),
+                geometry: None,
             },
         );
         let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
@@ -1205,6 +1207,7 @@ mod tests {
                 target_room: None,
                 target_entry: String::new(),
                 entry_name: String::new(),
+                geometry: None,
             },
         );
         let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {

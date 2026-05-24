@@ -889,13 +889,7 @@ mod tests {
                 ResourceData::Material(_) => Some(resource.id),
                 _ => None,
             });
-        let mut grid = WorldGrid::stone_room(
-            2,
-            3,
-            template.sector_size,
-            material,
-            material,
-        );
+        let mut grid = WorldGrid::stone_room(2, 3, template.sector_size, material, material);
         grid.ambient_color = template.ambient_color;
         grid.fog_enabled = template.fog_enabled;
         grid.fog_color = template.fog_color;
