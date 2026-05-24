@@ -105,10 +105,12 @@ use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect
 mod cd_stream;
 mod input;
 mod overlay;
+mod runtime_schedule;
 mod vram_upload;
 
 use input::*;
 use overlay::*;
+use runtime_schedule::RUNTIME_SCHEDULE;
 use vram_upload::*;
 
 // Placeholder manifests reference unused statics; populated
@@ -373,21 +375,18 @@ fn room_stream_request_chunk_limit(record: &LevelRoomRecord) -> usize {
     room_resident_chunk_limit(record).clamp(1, STREAMED_ROOM_SLOT_COUNT)
 }
 
+fn room_visible_chunk_limit(record: &LevelRoomRecord) -> usize {
+    usize::from(record.visible_chunk_limit.max(1)).min(MAX_ACTIVE_ROOMS)
+}
+
 fn room_active_chunk_limit(record: &LevelRoomRecord) -> usize {
     #[cfg(feature = "cd-stream-bench")]
     {
-        // Portal traversal decides the visible room set. Streaming can only
-        // cap us at the resident slot capacity, not at the old authored
-        // visible-window value.
-        room_resident_chunk_limit(record).min(MAX_ACTIVE_ROOMS)
+        room_visible_chunk_limit(record).min(room_resident_chunk_limit(record))
     }
     #[cfg(not(feature = "cd-stream-bench"))]
     {
-        let _ = record;
-        // Embedded playtest builds have all room payloads available, so the
-        // portal traversal result is the draw budget. The authored chunk limits
-        // only apply when the CD streaming residency cache is active.
-        MAX_ACTIVE_ROOMS
+        room_visible_chunk_limit(record)
     }
 }
 
@@ -406,7 +405,6 @@ fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: u64) {
 }
 
 const DEBUG_LOG_LINE_CAP: usize = 256;
-const POST_CROSS_DEBUG_FRAMES: u8 = 4;
 
 struct DebugLogLine {
     bytes: [u8; DEBUG_LOG_LINE_CAP],
@@ -808,8 +806,6 @@ const MAX_ACTIVE_ROOMS: usize = 32;
 const MAX_PORTAL_FRUSTUMS: usize = 64;
 const MAX_PORTAL_FRONTIER_ROOMS: usize = 32;
 const MAX_PORTAL_ROOM_BOUNDS: usize = 256;
-const PORTAL_VISIBILITY_MAX_DEPTH: u8 = 8;
-const PORTAL_VISIBILITY_MIN_WIDTH_Q12: i32 = 4;
 const PORTAL_ROOM_BOUNDS_MIN_Y: i32 = -4096;
 const PORTAL_ROOM_BOUNDS_MAX_Y: i32 = 8192;
 type RuntimePortalVisibility =
@@ -882,23 +878,6 @@ const fn clamp_streamed_room_slot_bytes(raw: usize) -> usize {
     };
     (clamped + 3) & !3
 }
-/// Opportunistic lookahead for CD-backed rooms. Prefetch is only allowed when
-/// WORLD.PAK metadata proves the extra read span is tiny, so it cannot turn a
-/// local active-window read into a broad sector sweep.
-#[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_PREFETCH_COUNT: usize = 1;
-#[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_PREFETCH_MAX_EXTRA_SECTORS: u32 = 8;
-#[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_PREFETCH_MAX_TOTAL_SECTORS: u32 = 48;
-#[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_LOAD_BATCH_COUNT: usize = 4;
-#[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_PUMP_SECTORS_PER_TICK: usize = 8;
-#[cfg(feature = "cd-stream-bench")]
-const STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT: usize = 4096;
-const ACTIVE_ROOM_REFRESH_SECTORS: i32 = 4;
-const ACTIVE_ROOM_JOB_BUILDS_PER_TICK: usize = 1;
 const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 
 /// Capacity of the residency manager's RAM table. Holds room
@@ -2073,7 +2052,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
                 i += 1;
                 continue;
             }
-            if plan.count >= STREAMED_ROOM_LOAD_BATCH_COUNT {
+            if plan.count >= RUNTIME_SCHEDULE.stream_load_batch_count {
                 i += 1;
                 continue;
             }
@@ -2818,7 +2797,7 @@ impl Scene for Playtest {
         let background_tick = self.streaming_jobs.background_tick(ctx);
         #[cfg(feature = "cd-stream-bench")]
         let stream_progress = if background_tick {
-            self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK)
+            self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick)
         } else {
             false
         };
@@ -3007,7 +2986,8 @@ impl Scene for Playtest {
 
         let camera = self.render_camera;
         let post_cross_debug = self.post_cross_debug_frames != 0;
-        let post_cross_detail = self.post_cross_debug_frames == POST_CROSS_DEBUG_FRAMES;
+        let post_cross_detail = self.post_cross_debug_frames
+            == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
         let mut post_cross_logged_end = false;
         if post_cross_debug {
             debug_log_post_cross_render_start(
@@ -4300,7 +4280,7 @@ impl Playtest {
             far_z,
             half_fov_x_tan_q12,
             half_fov_y_tan_q12,
-            PORTAL_VISIBILITY_MIN_WIDTH_Q12,
+            RUNTIME_SCHEDULE.portal_min_width_q12,
         );
         let bounds_count = collect_portal_room_bounds(&mut self.portal_room_bounds);
         build_portal_visibility_with_room_bounds(
@@ -4309,7 +4289,7 @@ impl Playtest {
             &self.portal_room_bounds[..bounds_count],
             current_index,
             camera,
-            PORTAL_VISIBILITY_MAX_DEPTH,
+            RUNTIME_SCHEDULE.portal_max_depth,
             &mut self.portal_visibility,
         );
         telemetry::stage_end(telemetry::stage::PORTAL_VISIBILITY);
@@ -4389,7 +4369,10 @@ impl Playtest {
         active_limit: usize,
         next_slot: &mut usize,
     ) {
-        let retained_limit = active_limit.min(MAX_ACTIVE_ROOMS);
+        let retained_limit = next_slot
+            .saturating_add(RUNTIME_SCHEDULE.retained_inactive_rooms)
+            .min(active_limit)
+            .min(MAX_ACTIVE_ROOMS);
         let mut previous_slot = 0usize;
         while *next_slot < retained_limit && previous_slot < MAX_ACTIVE_ROOMS {
             let Some(previous) = previous_active_rooms[previous_slot] else {
@@ -4678,7 +4661,7 @@ impl Playtest {
             let job = &mut self.active_room_job;
             while job.cursor < job.requested_count
                 && job.next_slot < MAX_ACTIVE_ROOMS
-                && built_this_tick < ACTIVE_ROOM_JOB_BUILDS_PER_TICK
+                && built_this_tick < RUNTIME_SCHEDULE.active_job_builds_per_tick
             {
                 let index = job.requested_rooms[job.cursor];
                 if index == INVALID_ROOM_INDEX {
@@ -5252,7 +5235,7 @@ impl Playtest {
         if requested_count == 0
             || requested_count >= request_limit
             || requested_count >= STREAMED_ROOM_SLOT_COUNT
-            || STREAMED_ROOM_PREFETCH_COUNT == 0
+            || RUNTIME_SCHEDULE.stream_prefetch_count == 0
             || ROOM_CHUNKS.is_empty()
         {
             return requested_count;
@@ -5264,7 +5247,7 @@ impl Playtest {
         let player = self.motor.position();
 
         let mut added = 0usize;
-        while added < STREAMED_ROOM_PREFETCH_COUNT
+        while added < RUNTIME_SCHEDULE.stream_prefetch_count
             && requested_count < request_limit
             && requested_count < STREAMED_ROOM_SLOT_COUNT
         {
@@ -5306,9 +5289,9 @@ impl Playtest {
                     .max(candidate_end)
                     .saturating_sub(span_start.min(info.sector_offset));
                 let extra_sectors = total_sectors.saturating_sub(base_span);
-                if extra_sectors > STREAMED_ROOM_PREFETCH_MAX_EXTRA_SECTORS
+                if extra_sectors > RUNTIME_SCHEDULE.stream_prefetch_max_extra_sectors
                     || (extra_sectors > 0
-                        && total_sectors > STREAMED_ROOM_PREFETCH_MAX_TOTAL_SECTORS)
+                        && total_sectors > RUNTIME_SCHEDULE.stream_prefetch_max_total_sectors)
                 {
                     continue;
                 }
@@ -5375,8 +5358,8 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     fn bootstrap_streamed_room_window(&mut self) {
         let mut pumps = 0usize;
-        while pumps < STREAMED_ROOM_BOOTSTRAP_PUMP_LIMIT && streamed_room_stream_active() {
-            if self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK) {
+        while pumps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit && streamed_room_stream_active() {
+            if self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick) {
                 self.load_active_room_window();
             }
             pumps += 1;
@@ -5456,7 +5439,7 @@ impl Playtest {
             stats.portals_tested,
             stats.portals_accepted,
         );
-        self.post_cross_debug_frames = POST_CROSS_DEBUG_FRAMES;
+        self.post_cross_debug_frames = RUNTIME_SCHEDULE.post_cross_render_debug_frames;
         true
     }
 
@@ -5468,7 +5451,8 @@ impl Playtest {
             return;
         };
         let sector_size = record.sector_size.max(1);
-        let threshold = sector_size.saturating_mul(ACTIVE_ROOM_REFRESH_SECTORS.max(1));
+        let threshold =
+            sector_size.saturating_mul(RUNTIME_SCHEDULE.active_refresh_sectors.max(1));
         let view_threshold = sector_size;
         let player = self.motor.position();
         let view = self.active_room_selection_view();
