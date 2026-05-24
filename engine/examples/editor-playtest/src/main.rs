@@ -3051,7 +3051,12 @@ impl Scene for Playtest {
             #[cfg(feature = "world-grid-visible")]
             let mut room_stats_total = GridVisibilityStats::default();
 
-            let active_draw_order = active_room_draw_order(&self.active_rooms, camera);
+            let active_draw_order = active_room_draw_order(
+                &self.active_rooms,
+                camera,
+                &self.portal_visibility,
+                self.room_index,
+            );
             for &active_slot in &active_draw_order {
                 if active_slot == INVALID_ACTIVE_ROOM_SLOT {
                     continue;
@@ -4435,17 +4440,7 @@ impl Playtest {
     }
 
     fn portal_visibility_draws_room(&self, index: RoomIndex) -> bool {
-        if index == self.room_index {
-            return true;
-        }
-        let mut i = 0usize;
-        while i < self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS) {
-            if self.portal_visibility.rooms[i].room == index {
-                return true;
-            }
-            i += 1;
-        }
-        false
+        portal_visibility_result_draws_room(&self.portal_visibility, self.room_index, index)
     }
 
     fn emit_portal_visibility_counters(&self) {
@@ -7618,6 +7613,8 @@ const INVALID_ACTIVE_ROOM_SLOT: u8 = u8::MAX;
 fn active_room_draw_order(
     active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
     camera: WorldCamera,
+    visibility: &RuntimePortalVisibility,
+    current_room: RoomIndex,
 ) -> [u8; MAX_ACTIVE_ROOMS] {
     let mut order = [INVALID_ACTIVE_ROOM_SLOT; MAX_ACTIVE_ROOMS];
     let mut depths = [i32::MIN; MAX_ACTIVE_ROOMS];
@@ -7625,6 +7622,10 @@ fn active_room_draw_order(
     let mut slot = 0usize;
     while slot < MAX_ACTIVE_ROOMS {
         if let Some(active) = active_rooms[slot] {
+            if !portal_visibility_result_draws_room(visibility, current_room, active.index) {
+                slot += 1;
+                continue;
+            }
             let depth = active_room_sort_depth(active, camera);
             let mut insert = count;
             while insert > 0 && depth > depths[insert - 1] {
@@ -7639,6 +7640,24 @@ fn active_room_draw_order(
         slot += 1;
     }
     order
+}
+
+fn portal_visibility_result_draws_room(
+    visibility: &RuntimePortalVisibility,
+    current_room: RoomIndex,
+    index: RoomIndex,
+) -> bool {
+    if index == current_room {
+        return true;
+    }
+    let mut i = 0usize;
+    while i < visibility.room_count.min(MAX_ACTIVE_ROOMS) {
+        if visibility.rooms[i].room == index {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32 {
