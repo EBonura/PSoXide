@@ -873,7 +873,7 @@ mod tests {
     };
 
     fn starter_grid(project: &ProjectDocument) -> WorldGrid {
-        project
+        let template = project
             .active_scene()
             .nodes()
             .iter()
@@ -881,7 +881,32 @@ mod tests {
                 NodeKind::Room { grid } => Some(grid.clone()),
                 _ => None,
             })
-            .expect("starter project should contain a room")
+            .expect("starter project should contain a room");
+        let material = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::Material(_) => Some(resource.id),
+                _ => None,
+            });
+        let mut grid = WorldGrid::stone_room(
+            2,
+            3,
+            template.sector_size,
+            material,
+            material,
+        );
+        grid.ambient_color = template.ambient_color;
+        grid.fog_enabled = template.fog_enabled;
+        grid.fog_color = template.fog_color;
+        grid.fog_near = template.fog_near;
+        grid.fog_far = template.fog_far;
+        grid.atmosphere_enabled = template.atmosphere_enabled;
+        grid.atmosphere_color = template.atmosphere_color;
+        grid.atmosphere_density = template.atmosphere_density;
+        grid.atmosphere_fall_speed_q4 = template.atmosphere_fall_speed_q4;
+        grid.atmosphere_wind_speed_q4 = template.atmosphere_wind_speed_q4;
+        grid
     }
 
     fn first_floor_material(grid: &WorldGrid) -> ResourceId {
@@ -1268,8 +1293,8 @@ mod tests {
         // cooker reported. Regresses the v1 byte layout against
         // both producer and consumer in one assertion.
         let mut project = ProjectDocument::starter();
-        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
-        let wall_texture = texture_named(&project, "delven_06_stonebrk1b_q3.psxt");
+        let floor_texture = texture_named(&project, "block_1a.psxt");
+        let wall_texture = texture_named(&project, "brick_1a.psxt");
         let floor = material_for_texture(&mut project, "Floor Slot", floor_texture);
         let wall = material_for_texture(&mut project, "Wall Slot", wall_texture);
         let grid = WorldGrid::stone_room(2, 2, 1024, Some(floor), Some(wall));
@@ -1310,8 +1335,8 @@ mod tests {
         // sectors `[x * depth + z]`. If a future reshape flips that
         // order, the runtime package contract changes.
         let mut project = ProjectDocument::starter();
-        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
-        let wall_texture = texture_named(&project, "delven_06_stonebrk1b_q3.psxt");
+        let floor_texture = texture_named(&project, "block_1a.psxt");
+        let wall_texture = texture_named(&project, "brick_1a.psxt");
         let floor = material_for_texture(&mut project, "Floor Slot", floor_texture);
         let wall = material_for_texture(&mut project, "Wall Slot", wall_texture);
         let grid = WorldGrid::stone_room(2, 2, 1024, Some(floor), Some(wall));
@@ -1330,8 +1355,8 @@ mod tests {
             }
         };
 
-        assert!(psxt_path_for_slot(0).ends_with("delven_01_slateflr1a_q2.psxt"));
-        assert!(psxt_path_for_slot(1).ends_with("delven_06_stonebrk1b_q3.psxt"));
+        assert!(psxt_path_for_slot(0).ends_with("block_1a.psxt"));
+        assert!(psxt_path_for_slot(1).ends_with("brick_1a.psxt"));
     }
 
     #[test]
@@ -1499,7 +1524,7 @@ mod tests {
     fn cooks_horizontal_triangle_material_uv_and_walkable_overrides() {
         let mut project = ProjectDocument::starter();
         let base = first_floor_material(&starter_grid(&project));
-        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
+        let floor_texture = texture_named(&project, "block_1a.psxt");
         let override_material = material_for_texture(&mut project, "Triangle Slot", floor_texture);
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.set_floor(0, 0, 0, Some(base));
