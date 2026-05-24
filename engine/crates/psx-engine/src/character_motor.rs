@@ -6,7 +6,9 @@
 //! Inputs are intent-shaped rather than pad-shaped so callers can feed
 //! either player controls or future behaviour-tree output.
 
-use crate::{Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12};
+use crate::{
+    fixed::div_q12_i32, Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12,
+};
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
 const DEFAULT_BODY_HEIGHT: i32 = 768;
@@ -1297,14 +1299,8 @@ fn circle_overlaps_segment(
             .saturating_add(square_i32_saturating(cz.saturating_sub(az)))
             <= square_i32_saturating(radius);
     }
-    let dot = (wx as i64)
-        .saturating_mul(vx as i64)
-        .saturating_add((wz as i64).saturating_mul(vz as i64));
-    let t_q12 = (dot
-        .saturating_mul(Q12::SCALE as i64)
-        .checked_div(len_sq as i64)
-        .unwrap_or(0))
-    .clamp(0, Q12::SCALE as i64) as i32;
+    let dot = wx.saturating_mul(vx).saturating_add(wz.saturating_mul(vz));
+    let t_q12 = div_q12_i32(dot, len_sq).clamp(0, Q12::SCALE);
     let t = Q12::from_raw(t_q12);
     let closest_x = ax.saturating_add(t.mul_i32(vx));
     let closest_z = az.saturating_add(t.mul_i32(vz));
