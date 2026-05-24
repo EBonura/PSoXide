@@ -482,6 +482,8 @@ const EVENT_ADDR: *mut u32 = 0xBF80_2F00 as *mut u32;
 const VALUE_ADDR: *mut u32 = 0xBF80_2F04 as *mut u32;
 #[cfg(target_arch = "mips")]
 const CYCLE_ADDR: *const u32 = 0xBF80_2F08 as *const u32;
+#[cfg(target_arch = "mips")]
+const LOG_ADDR: *mut u32 = 0xBF80_2F0C as *mut u32;
 
 /// Mark the start of a guest frame.
 #[inline(always)]
@@ -519,6 +521,32 @@ pub fn cycle_counter() -> u32 {
     read_cycle_counter()
 }
 
+/// Emit one complete debug line to the PSoXide host terminal.
+///
+/// This is an emulator-only diagnostic path. On host builds it compiles to a
+/// no-op; on PS1/MIPS it writes ASCII bytes through the same Expansion 2
+/// telemetry page as stage/counter profiling.
+#[inline(always)]
+pub fn debug_log(message: &str) {
+    debug_bytes(message.as_bytes());
+    debug_byte(b'\n');
+}
+
+/// Emit one complete debug line from an ASCII byte slice.
+#[inline(always)]
+pub fn debug_line(bytes: &[u8]) {
+    debug_bytes(bytes);
+    debug_byte(b'\n');
+}
+
+/// Emit raw debug bytes without appending a newline.
+#[inline(always)]
+pub fn debug_bytes(bytes: &[u8]) {
+    for &byte in bytes {
+        debug_byte(byte);
+    }
+}
+
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 fn encode_event(kind: u8, id: u16) -> u32 {
@@ -548,6 +576,18 @@ fn read_cycle_counter() -> u32 {
 fn read_cycle_counter() -> u32 {
     0
 }
+
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn debug_byte(byte: u8) {
+    unsafe {
+        core::ptr::write_volatile(LOG_ADDR, byte as u32);
+    }
+}
+
+#[cfg(not(target_arch = "mips"))]
+#[inline(always)]
+fn debug_byte(_byte: u8) {}
 
 #[cfg(target_arch = "mips")]
 #[inline(always)]

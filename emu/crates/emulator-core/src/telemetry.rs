@@ -17,8 +17,12 @@ pub const EVENT_PHYS: u32 = BASE_PHYS;
 pub const VALUE_PHYS: u32 = BASE_PHYS + 4;
 /// Read-only low 32 bits of the emulator-observed guest cycle counter.
 pub const CYCLE_PHYS: u32 = BASE_PHYS + 8;
+/// Write-only byte sink for guest debug text. Newline commits one log line.
+pub const LOG_PHYS: u32 = BASE_PHYS + 12;
 
 const EVENT_CAP: usize = 65_536;
+const LOG_CAP: usize = 2_048;
+const LOG_LINE_CAP: usize = 384;
 const KIND_SHIFT: u32 = 24;
 const KIND_MASK: u32 = 0xFF;
 const ID_MASK: u32 = 0xFFFF;
@@ -535,10 +539,26 @@ pub struct GuestTelemetryEvent {
     pub value: u32,
 }
 
+/// One guest debug line emitted through the telemetry log byte sink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestDebugLogLine {
+    /// Bus cycles elapsed when the line began.
+    pub cycles: u64,
+    /// Guest frame count observed when the line began.
+    pub frame: u64,
+    /// Sanitised ASCII text emitted by the guest.
+    pub text: String,
+}
+
 /// Rolling capture buffer for guest telemetry events.
 pub struct GuestTelemetry {
     pending_value: u32,
     events: VecDeque<GuestTelemetryEvent>,
+    debug_logs: VecDeque<GuestDebugLogLine>,
+    pending_debug_log: String,
+    pending_debug_log_cycles: u64,
+    pending_debug_log_frame: u64,
+    pending_debug_log_truncated: bool,
     frames_seen: u64,
     counter_totals: [u64; COUNTER_COUNT],
     counter_max_values: [u32; COUNTER_COUNT],
@@ -550,6 +570,11 @@ impl Default for GuestTelemetry {
         Self {
             pending_value: 0,
             events: VecDeque::with_capacity(EVENT_CAP),
+            debug_logs: VecDeque::with_capacity(LOG_CAP),
+            pending_debug_log: String::with_capacity(LOG_LINE_CAP),
+            pending_debug_log_cycles: 0,
+            pending_debug_log_frame: 0,
+            pending_debug_log_truncated: false,
             frames_seen: 0,
             counter_totals: [0; COUNTER_COUNT],
             counter_max_values: [0; COUNTER_COUNT],
@@ -566,7 +591,7 @@ impl GuestTelemetry {
 
     /// True if `phys` lands inside the telemetry port.
     pub const fn contains(phys: u32) -> bool {
-        phys == EVENT_PHYS || phys == VALUE_PHYS || phys == CYCLE_PHYS
+        phys == EVENT_PHYS || phys == VALUE_PHYS || phys == CYCLE_PHYS || phys == LOG_PHYS
     }
 
     /// Observe a 32-bit read. Returns a value if the telemetry port consumed it.
@@ -595,6 +620,10 @@ impl GuestTelemetry {
                 });
                 true
             }
+            LOG_PHYS => {
+                self.push_debug_log_byte((value & 0xFF) as u8, cycles);
+                true
+            }
             _ => false,
         }
     }
@@ -602,6 +631,11 @@ impl GuestTelemetry {
     /// Drain all captured events in chronological order.
     pub fn drain_events(&mut self) -> Vec<GuestTelemetryEvent> {
         self.events.drain(..).collect()
+    }
+
+    /// Drain all complete guest debug log lines in chronological order.
+    pub fn drain_debug_logs(&mut self) -> Vec<GuestDebugLogLine> {
+        self.debug_logs.drain(..).collect()
     }
 
     /// Number of guest frame-begin markers observed since reset.
@@ -667,6 +701,58 @@ impl GuestTelemetry {
             self.events.pop_front();
         }
         self.events.push_back(event);
+    }
+
+    fn push_debug_log_byte(&mut self, byte: u8, cycles: u64) {
+        match byte {
+            b'\n' | 0 => {
+                self.flush_debug_log(cycles);
+            }
+            b'\r' => {}
+            byte => {
+                if self.pending_debug_log.is_empty() && !self.pending_debug_log_truncated {
+                    self.pending_debug_log_cycles = cycles;
+                    self.pending_debug_log_frame = self.frames_seen;
+                }
+                if self.pending_debug_log.len() < LOG_LINE_CAP {
+                    self.pending_debug_log.push(sanitise_debug_log_byte(byte));
+                } else {
+                    self.pending_debug_log_truncated = true;
+                }
+            }
+        }
+    }
+
+    fn flush_debug_log(&mut self, cycles: u64) {
+        if self.pending_debug_log.is_empty() && !self.pending_debug_log_truncated {
+            return;
+        }
+        if self.pending_debug_log_cycles == 0 {
+            self.pending_debug_log_cycles = cycles;
+            self.pending_debug_log_frame = self.frames_seen;
+        }
+        if self.pending_debug_log_truncated {
+            self.pending_debug_log.push_str("...");
+        }
+        if self.debug_logs.len() >= LOG_CAP {
+            self.debug_logs.pop_front();
+        }
+        self.debug_logs.push_back(GuestDebugLogLine {
+            cycles: self.pending_debug_log_cycles,
+            frame: self.pending_debug_log_frame,
+            text: core::mem::take(&mut self.pending_debug_log),
+        });
+        self.pending_debug_log_cycles = 0;
+        self.pending_debug_log_frame = 0;
+        self.pending_debug_log_truncated = false;
+    }
+}
+
+fn sanitise_debug_log_byte(byte: u8) -> char {
+    if byte == b'\t' || byte == b' ' || byte.is_ascii_graphic() {
+        byte as char
+    } else {
+        '.'
     }
 }
 
@@ -1043,6 +1129,31 @@ mod tests {
                 value: 42,
             }]
         );
+    }
+
+    #[test]
+    fn telemetry_port_collects_debug_log_lines() {
+        let mut telemetry = GuestTelemetry::new();
+        assert!(GuestTelemetry::contains(LOG_PHYS));
+        assert!(telemetry.observe_write32(
+            EVENT_PHYS,
+            encode_event(1, 0),
+            90
+        ));
+        for (i, byte) in b"room cross 1->2\n".iter().copied().enumerate() {
+            assert!(telemetry.observe_write32(LOG_PHYS, byte as u32, 100 + i as u64));
+        }
+
+        let logs = telemetry.drain_debug_logs();
+        assert_eq!(
+            logs,
+            [GuestDebugLogLine {
+                cycles: 100,
+                frame: 1,
+                text: "room cross 1->2".to_string(),
+            }]
+        );
+        assert!(telemetry.drain_debug_logs().is_empty());
     }
 
     #[test]
