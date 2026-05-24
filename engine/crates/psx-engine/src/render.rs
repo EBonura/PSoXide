@@ -334,6 +334,17 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         unsafe { self.add_raw(slot.index(), packet_ptr, words) };
     }
 
+    /// Insert a raw primitive packet pointer at an already-clamped raw OT slot.
+    ///
+    /// # Safety
+    /// Same requirements as [`add_raw`](Self::add_raw). In addition, `slot`
+    /// must be less than `DEPTH`.
+    #[inline(always)]
+    pub unsafe fn add_raw_unchecked(&mut self, slot: usize, packet_ptr: *mut u32, words: u8) {
+        debug_assert!(words <= 15);
+        unsafe { self.ot.insert_unchecked(slot, packet_ptr, words) };
+    }
+
     /// Insert a known SDK GPU packet at a raw OT slot.
     pub fn add_packet<T: GpuPacket>(&mut self, slot: usize, prim: &mut T) {
         self.add(slot, prim, T::WORDS);
