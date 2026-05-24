@@ -278,14 +278,10 @@ impl App {
             }
 
             let mut due_visual_intervals = 0u16;
-            // Once a paced visual frame is due, render it immediately. Catching
-            // up extra simulation ticks here lowers the render cadence under
-            // backlog (for example 30Hz visuals collapse toward 20Hz).
-            let max_simulation_ticks = visual_interval.max(1);
-            let mut simulation_ticks = 0u16;
-            while next_simulation_tick <= elapsed_vblanks
-                && simulation_ticks < max_simulation_ticks
-            {
+            // Simulation owns real time: drain every elapsed VBlank before
+            // drawing. If rendering is too expensive, VIS drops, but controls
+            // and movement still advance at the display clock.
+            while next_simulation_tick <= elapsed_vblanks {
                 telemetry::frame_begin(next_simulation_tick);
                 ctx.simulation_tick = next_simulation_tick;
                 ctx.time = EngineTime::fixed_simulation_tick(
@@ -310,10 +306,6 @@ impl App {
                         due_visual_intervals.saturating_add(tick_visual_intervals);
                 }
                 next_simulation_tick = next_simulation_tick.wrapping_add(1);
-                simulation_ticks = simulation_ticks.saturating_add(1);
-                if tick_visual_intervals != 0 {
-                    break;
-                }
             }
 
             if due_visual_intervals == 0 {
