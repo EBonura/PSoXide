@@ -244,7 +244,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
                 i += 1;
             }
 
-            if self.valid_count == 0 || self.result.status != STATUS_OK {
+            if self.valid_count == 0 {
                 self.state = WorldRoomSlotsReadState::Done;
                 telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_STATUS, self.result.status);
             } else {
