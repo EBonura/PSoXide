@@ -4713,7 +4713,11 @@ impl EditorWorkspace {
             record_rect.left_bottom() + Vec2::new(0.0, control_gap),
             control_size,
         );
-        let controls_rect = Rect::from_min_max(visibility_rect.min, replay_rect.max);
+        let dump_rect = Rect::from_min_size(
+            replay_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            control_size,
+        );
+        let controls_rect = Rect::from_min_max(visibility_rect.min, dump_rect.max);
         let recording = viewport_3d.play_tape.mode == EditorPlaytestTapeMode::Recording;
         let replaying = viewport_3d.play_tape.mode == EditorPlaytestTapeMode::Replaying;
         let can_record = !replaying;
@@ -4907,6 +4911,18 @@ impl EditorWorkspace {
             } else {
                 EditorPlaytestRequest::StartInputReplay
             });
+        }
+        if draw_play_overlay_icon_button(
+            ui,
+            dump_rect,
+            "play_profiler_history_dump",
+            icons::FILE,
+            "Dump last profiler frames",
+            false,
+            true,
+            Some(STUDIO_ACCENT_DIM),
+        ) {
+            self.pending_playtest_request = Some(EditorPlaytestRequest::DumpProfilerHistory);
         }
     }
 

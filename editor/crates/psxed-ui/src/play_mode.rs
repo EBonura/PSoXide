@@ -26,6 +26,8 @@ pub enum EditorPlaytestRequest {
     StartInputReplay,
     /// Stop input replay and return to live input.
     StopInputReplay,
+    /// Write the rolling embedded Play profiler history to the project logs.
+    DumpProfilerHistory,
 }
 
 /// Frontend-owned embedded playtest state, mirrored into the editor
