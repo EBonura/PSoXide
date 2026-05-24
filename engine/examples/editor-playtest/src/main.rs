@@ -405,6 +405,298 @@ fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: u64) {
     telemetry::counter(counter_hi, (mask >> 32) as u32);
 }
 
+const DEBUG_LOG_LINE_CAP: usize = 256;
+const POST_CROSS_DEBUG_FRAMES: u8 = 4;
+
+struct DebugLogLine {
+    bytes: [u8; DEBUG_LOG_LINE_CAP],
+    len: usize,
+}
+
+impl DebugLogLine {
+    fn new(prefix: &str) -> Self {
+        let mut line = Self {
+            bytes: [0; DEBUG_LOG_LINE_CAP],
+            len: 0,
+        };
+        line.push_str(prefix);
+        line
+    }
+
+    fn push_str(&mut self, text: &str) {
+        for &byte in text.as_bytes() {
+            self.push_byte(byte);
+        }
+    }
+
+    fn push_byte(&mut self, byte: u8) {
+        if self.len < self.bytes.len() {
+            self.bytes[self.len] = byte;
+            self.len += 1;
+        }
+    }
+
+    fn push_u32(&mut self, value: u32) {
+        let mut scratch = [0u8; 10];
+        let mut remaining = value;
+        let mut len = 0usize;
+        loop {
+            scratch[len] = b'0' + (remaining % 10) as u8;
+            len += 1;
+            remaining /= 10;
+            if remaining == 0 {
+                break;
+            }
+        }
+        while len > 0 {
+            len -= 1;
+            self.push_byte(scratch[len]);
+        }
+    }
+
+    fn push_i32(&mut self, value: i32) {
+        if value < 0 {
+            self.push_byte(b'-');
+            self.push_u32(value.wrapping_neg() as u32);
+        } else {
+            self.push_u32(value as u32);
+        }
+    }
+
+    fn push_room(&mut self, room: RoomIndex) {
+        self.push_u32(room.raw() as u32);
+    }
+
+    fn push_bool(&mut self, value: bool) {
+        self.push_byte(if value { b'1' } else { b'0' });
+    }
+
+    fn push_point(&mut self, point: RoomPoint) {
+        self.push_byte(b'(');
+        self.push_i32(point.x);
+        self.push_byte(b',');
+        self.push_i32(point.y);
+        self.push_byte(b',');
+        self.push_i32(point.z);
+        self.push_byte(b')');
+    }
+
+    fn push_hex_u64(&mut self, value: u64) {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        self.push_str("0x");
+        if value == 0 {
+            self.push_byte(b'0');
+            return;
+        }
+        let mut started = false;
+        let mut shift = 60i32;
+        while shift >= 0 {
+            let nibble = ((value >> shift) & 0xF) as usize;
+            if nibble != 0 || started {
+                started = true;
+                self.push_byte(DIGITS[nibble]);
+            }
+            shift -= 4;
+        }
+    }
+
+    fn emit(&self) {
+        telemetry::debug_line(&self.bytes[..self.len]);
+    }
+}
+
+fn debug_log_room_transition(
+    previous_room: RoomIndex,
+    next_room: RoomIndex,
+    previous_local: RoomPoint,
+    next_local: RoomPoint,
+    global: RoomPoint,
+    camera_before: RoomPoint,
+    camera_after: RoomPoint,
+) {
+    let mut line = DebugLogLine::new("room cross prev=");
+    line.push_room(previous_room);
+    line.push_str(" next=");
+    line.push_room(next_room);
+    line.push_str(" player_local=");
+    line.push_point(previous_local);
+    line.push_str(" -> ");
+    line.push_point(next_local);
+    line.push_str(" global=");
+    line.push_point(global);
+    line.push_str(" camera=");
+    line.push_point(camera_before);
+    line.push_str(" -> ");
+    line.push_point(camera_after);
+    line.emit();
+}
+
+fn debug_log_room_window_after_cross(
+    room: RoomIndex,
+    visible_count: usize,
+    frontier_count: usize,
+    visible_mask: u64,
+    active_mask: u64,
+    drawable_mask: u64,
+    loading_mask: u64,
+    missing_mask: u64,
+    build_failed_mask: u64,
+    current_render_ready: bool,
+    current_collision_ready: bool,
+    portals_tested: u16,
+    portals_accepted: u16,
+) {
+    let mut line = DebugLogLine::new("room window room=");
+    line.push_room(room);
+    line.push_str(" visible=");
+    line.push_u32(visible_count.min(u32::MAX as usize) as u32);
+    line.push_str(" frontier=");
+    line.push_u32(frontier_count.min(u32::MAX as usize) as u32);
+    line.push_str(" tested=");
+    line.push_u32(portals_tested as u32);
+    line.push_str(" accepted=");
+    line.push_u32(portals_accepted as u32);
+    line.push_str(" vis=");
+    line.push_hex_u64(visible_mask);
+    line.push_str(" active=");
+    line.push_hex_u64(active_mask);
+    line.push_str(" draw=");
+    line.push_hex_u64(drawable_mask);
+    line.push_str(" loading=");
+    line.push_hex_u64(loading_mask);
+    line.push_str(" missing=");
+    line.push_hex_u64(missing_mask);
+    line.push_str(" build_fail=");
+    line.push_hex_u64(build_failed_mask);
+    line.push_str(" render=");
+    line.push_bool(current_render_ready);
+    line.push_str(" coll=");
+    line.push_bool(current_collision_ready);
+    line.emit();
+}
+
+fn active_room_cache_status_debug_code(status: ActiveRoomCacheStatus) -> u32 {
+    match status {
+        ActiveRoomCacheStatus::Ready => 0,
+        ActiveRoomCacheStatus::NotBuilt => 1,
+        ActiveRoomCacheStatus::Overflow => 2,
+        ActiveRoomCacheStatus::Empty => 3,
+    }
+}
+
+fn debug_log_post_cross_render_start(
+    room: RoomIndex,
+    camera: WorldCamera,
+    visible_mask: u64,
+    active_mask: u64,
+    current_collision_ready: bool,
+) {
+    let mut line = DebugLogLine::new("render start room=");
+    line.push_room(room);
+    line.push_str(" cam=");
+    line.push_point(RoomPoint::new(
+        camera.position.x,
+        camera.position.y,
+        camera.position.z,
+    ));
+    line.push_str(" vis=");
+    line.push_hex_u64(visible_mask);
+    line.push_str(" active=");
+    line.push_hex_u64(active_mask);
+    line.push_str(" coll=");
+    line.push_bool(current_collision_ready);
+    line.emit();
+}
+
+fn debug_log_post_cross_render_room(slot: usize, active: ActiveRuntimeRoom, draws: bool) {
+    let cache = active.surface_cache;
+    let mut line = DebugLogLine::new("render room slot=");
+    line.push_u32(slot.min(u32::MAX as usize) as u32);
+    line.push_str(" room=");
+    line.push_room(active.index);
+    line.push_str(" stream=");
+    line.push_u32(active.stream_slot as u32);
+    line.push_str(" off=(");
+    line.push_i32(active.offset_x);
+    line.push_byte(b',');
+    line.push_i32(active.offset_z);
+    line.push_byte(b')');
+    line.push_str(" draw=");
+    line.push_bool(draws);
+    line.push_str(" cache=");
+    line.push_bool(cache.ready);
+    line.push_str(" st=");
+    line.push_u32(active_room_cache_status_debug_code(cache.status));
+    line.push_str(" cells=");
+    line.push_u32(cache.cell_count.min(u32::MAX as usize) as u32);
+    line.push_str(" verts=");
+    line.push_u32(cache.vertex_count.min(u32::MAX as usize) as u32);
+    line.push_str(" surf=");
+    line.push_u32(cache.surface_count.min(u32::MAX as usize) as u32);
+    line.push_str(" rr=");
+    line.push_bool(active.render_room.is_some());
+    line.push_str(" slices=");
+    line.push_bool(room_surface_cache_slices(active.index, cache).is_some());
+    line.emit();
+}
+
+fn debug_log_post_cross_render_end(
+    room: RoomIndex,
+    active_mask: u64,
+    drawn_mask: u64,
+    primitive_count: usize,
+    primitive_remaining: usize,
+    world_commands: usize,
+) {
+    let mut line = DebugLogLine::new("render end room=");
+    line.push_room(room);
+    line.push_str(" active=");
+    line.push_hex_u64(active_mask);
+    line.push_str(" drawn=");
+    line.push_hex_u64(drawn_mask);
+    line.push_str(" prim=");
+    line.push_u32(primitive_count.min(u32::MAX as usize) as u32);
+    line.push_str(" rem=");
+    line.push_u32(primitive_remaining.min(u32::MAX as usize) as u32);
+    line.push_str(" cmd=");
+    line.push_u32(world_commands.min(u32::MAX as usize) as u32);
+    line.emit();
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn debug_log_stream_plan<const N: usize>(label: &str, plan: &RoomStreamLoadPlan<N>) {
+    let mut line = DebugLogLine::new(label);
+    line.push_str(" count=");
+    line.push_u32(plan.count.min(u32::MAX as usize) as u32);
+    line.push_str(" rooms=");
+    let limit = plan.count.min(N).min(STREAMED_ROOM_SLOT_COUNT);
+    let mut i = 0usize;
+    while i < limit {
+        if i > 0 {
+            line.push_byte(b',');
+        }
+        line.push_room(plan.rooms[i]);
+        line.push_byte(b'@');
+        line.push_u32(plan.slots[i].min(u32::MAX as usize) as u32);
+        i += 1;
+    }
+    line.emit();
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn debug_log_stream_entry(label: &str, room: RoomIndex, slot: usize, byte_count: usize, status: u32) {
+    let mut line = DebugLogLine::new(label);
+    line.push_str(" room=");
+    line.push_room(room);
+    line.push_str(" slot=");
+    line.push_u32(slot.min(u32::MAX as usize) as u32);
+    line.push_str(" bytes=");
+    line.push_u32(byte_count.min(u32::MAX as usize) as u32);
+    line.push_str(" status=");
+    line.push_u32(status);
+    line.emit();
+}
+
 fn encode_debug_map_position(value: i32) -> u32 {
     let encoded = value.saturating_add(DEBUG_MAP_POSITION_BIAS);
     if encoded < 0 {
@@ -1741,7 +2033,15 @@ impl<const N: usize> RoomStreamScheduler<N> {
         active_count: usize,
     ) -> RoomStreamLoadPlan<N> {
         let mut plan = RoomStreamLoadPlan::EMPTY;
+        if requested_count > 0 && !self.current_room_request_can_wait(requested_rooms[0]) {
+            self.abort_active_load();
+        }
         let can_schedule_new_loads = !self.job.is_active();
+        let protected_count = active_count
+            .min(requested_count)
+            .min(self.effective_slot_limit())
+            .min(N)
+            .min(STREAMED_ROOM_SLOT_COUNT);
         let limit = requested_count
             .min(self.effective_slot_limit())
             .min(N)
@@ -1778,7 +2078,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
                 continue;
             }
             let Some(target) =
-                self.choose_slot(requested_rooms, requested_count, &plan.slots, plan.count)
+                self.choose_slot(requested_rooms, protected_count, &plan.slots, plan.count)
             else {
                 self.window_protected_full = self.window_protected_full.saturating_add(1);
                 i += 1;
@@ -1805,10 +2105,39 @@ impl<const N: usize> RoomStreamScheduler<N> {
         plan
     }
 
+    fn current_room_request_can_wait(&self, room: RoomIndex) -> bool {
+        room == INVALID_ROOM_INDEX
+            || self.is_resident(room)
+            || self.is_loading(room)
+            || !self.job.is_active()
+    }
+
+    fn abort_active_load(&mut self) {
+        if !self.job.is_active() {
+            return;
+        }
+        debug_log_stream_plan("stream abort", &self.job_plan);
+        self.job.abort();
+        let plan = self.job_plan;
+        let mut i = 0usize;
+        while i < plan.count.min(N).min(STREAMED_ROOM_SLOT_COUNT) {
+            let slot = plan.slots[i];
+            if slot < N
+                && self.slots[slot].state == RoomStreamSlotState::Loading
+                && self.slots[slot].room == plan.rooms[i]
+            {
+                self.set_slot(slot, StreamedRoomSlot::EMPTY);
+            }
+            i += 1;
+        }
+        self.job_plan = RoomStreamLoadPlan::EMPTY;
+    }
+
     fn start_load_plan(&mut self, plan: RoomStreamLoadPlan<N>) {
         if plan.count == 0 || self.job.is_active() {
             return;
         }
+        debug_log_stream_plan("stream start", &plan);
         let mut room_ids = [u16::MAX; N];
         let mut i = 0usize;
         while i < plan.count.min(N) {
@@ -1906,6 +2235,13 @@ impl<const N: usize> RoomStreamScheduler<N> {
                         state: RoomStreamSlotState::Resident,
                     },
                 );
+                debug_log_stream_entry(
+                    "stream loaded",
+                    plan.rooms[loaded],
+                    target,
+                    byte_counts[loaded],
+                    statuses[loaded],
+                );
             } else {
                 self.set_slot(
                     target,
@@ -1917,6 +2253,13 @@ impl<const N: usize> RoomStreamScheduler<N> {
                     },
                 );
                 self.window_failed_loads = self.window_failed_loads.saturating_add(1);
+                debug_log_stream_entry(
+                    "stream failed",
+                    plan.rooms[loaded],
+                    target,
+                    byte_counts[loaded],
+                    statuses[loaded],
+                );
             }
             loaded += 1;
         }
@@ -2286,6 +2629,9 @@ struct Playtest {
     show_collision_debug: bool,
     /// Cooperative background policy for room-window and VRAM upload work.
     streaming_jobs: RuntimeStreamingJobs,
+    /// Host-visible render breadcrumbs emitted for a few frames after
+    /// crossing into another room.
+    post_cross_debug_frames: u8,
 }
 
 impl Playtest {
@@ -2371,6 +2717,7 @@ impl Playtest {
             shadow_material: None,
             show_collision_debug: false,
             streaming_jobs: RuntimeStreamingJobs::new(),
+            post_cross_debug_frames: 0,
         }
     }
 
@@ -2459,11 +2806,18 @@ impl Scene for Playtest {
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        let background_tick = self.streaming_jobs.background_tick(ctx);
         #[cfg(feature = "cd-stream-bench")]
-        if self.streaming_jobs.background_tick(ctx) {
-            let _stream_progress = self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK);
-        }
-        if self.streaming_jobs.background_tick(ctx) {
+        let stream_progress = if background_tick {
+            self.pump_room_stream(STREAMED_ROOM_PUMP_SECTORS_PER_TICK)
+        } else {
+            false
+        };
+        if background_tick {
+            #[cfg(feature = "cd-stream-bench")]
+            if stream_progress {
+                self.begin_active_room_window_job(true);
+            }
             if self.streaming_jobs.step_vram_uploads() {
                 self.refresh_active_room_materials();
             }
@@ -2643,6 +2997,18 @@ impl Scene for Playtest {
         }
 
         let camera = self.render_camera;
+        let post_cross_debug = self.post_cross_debug_frames != 0;
+        let post_cross_detail = self.post_cross_debug_frames == POST_CROSS_DEBUG_FRAMES;
+        let mut post_cross_logged_end = false;
+        if post_cross_debug {
+            debug_log_post_cross_render_start(
+                self.room_index,
+                camera,
+                self.portal_visibility.visible_room_mask(),
+                self.active_room_mask(),
+                self.current_collision_room.is_some(),
+            );
+        }
 
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut primitive_packets = unsafe { PrimitivePacketArena::new(&mut PRIMITIVE_PACKETS) };
@@ -2705,7 +3071,11 @@ impl Scene for Playtest {
                 let Some(active) = self.active_rooms[active_slot] else {
                     continue;
                 };
-                if !self.portal_visibility_draws_room(active.index) {
+                let draws_room = self.portal_visibility_draws_room(active.index);
+                if post_cross_detail {
+                    debug_log_post_cross_render_room(active_slot, active, draws_room);
+                }
+                if !draws_room {
                     continue;
                 }
                 room_active_chunks = room_active_chunks.saturating_add(1);
@@ -3337,6 +3707,31 @@ impl Scene for Playtest {
                 telemetry::counter::MODEL_INSTANCE_CULLED_TRIS,
                 telemetry::counter::MODEL_INSTANCE_DROPPED_TRIS,
             );
+            if post_cross_debug {
+                debug_log_post_cross_render_end(
+                    self.room_index,
+                    room_active_chunk_mask,
+                    room_drawn_chunk_mask,
+                    primitive_packets.len(),
+                    primitive_packets.remaining(),
+                    world.command_len(),
+                );
+                post_cross_logged_end = true;
+            }
+        }
+
+        if post_cross_debug && !post_cross_logged_end {
+            debug_log_post_cross_render_end(
+                self.room_index,
+                0,
+                0,
+                primitive_packets.len(),
+                primitive_packets.remaining(),
+                world.command_len(),
+            );
+        }
+        if post_cross_debug {
+            self.post_cross_debug_frames = self.post_cross_debug_frames.saturating_sub(1);
         }
 
         telemetry::counter(
@@ -4018,6 +4413,35 @@ impl Playtest {
         false
     }
 
+    fn active_room_mask(&self) -> u64 {
+        let mut mask = 0u64;
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            if let Some(active) = self.active_rooms[slot] {
+                mask |= room_index_debug_mask(active.index);
+            }
+            slot += 1;
+        }
+        mask
+    }
+
+    fn active_room_drawable_mask(&self) -> u64 {
+        let mut mask = 0u64;
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            if let Some(active) = self.active_rooms[slot] {
+                if active.index == self.room_index
+                    || active.render_room.is_some()
+                    || active.surface_cache.ready
+                {
+                    mask |= room_index_debug_mask(active.index);
+                }
+            }
+            slot += 1;
+        }
+        mask
+    }
+
     fn portal_visibility_draws_room(&self, index: RoomIndex) -> bool {
         if index == self.room_index {
             return true;
@@ -4547,13 +4971,33 @@ impl Playtest {
         let previous_active_rooms = self.active_rooms;
         let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
         let mut next_slot = 0usize;
+        let active_limit = room_active_chunk_limit(current_record).min(MAX_ACTIVE_ROOMS);
         let mut visible_slot = 0usize;
         self.portal_visible_missing_resident = 0;
         self.portal_visible_missing_mask = 0;
         self.portal_visible_build_failed = 0;
         self.portal_visible_build_failed_mask = 0;
-        while visible_slot < visible_limit && next_slot < MAX_ACTIVE_ROOMS {
+        if next_slot < active_limit {
+            match reuse_or_build_active_room(
+                next_slot,
+                self.room_index,
+                current_record,
+                current_record,
+                &previous_active_rooms,
+            ) {
+                Some(active) => {
+                    rebuilt[next_slot] = Some(active);
+                    next_slot += 1;
+                }
+                None => self.mark_visible_room_unbuilt(self.room_index),
+            }
+        }
+        while visible_slot < visible_limit && next_slot < active_limit {
             let index = self.portal_visibility.rooms[visible_slot].room;
+            if index == self.room_index {
+                visible_slot += 1;
+                continue;
+            }
             if let Some(record) = ROOMS.get(index.to_usize()) {
                 match reuse_or_build_active_room(
                     next_slot,
@@ -4588,16 +5032,10 @@ impl Playtest {
         self.retain_previous_active_rooms(
             &previous_active_rooms,
             current_record,
-            room_active_chunk_limit(current_record),
+            active_limit,
             &mut next_slot,
         );
-        if let Some(active) = self.active_rooms[0] {
-            self.room = active.render_room;
-            self.current_collision_room = Some(active.collision_room);
-            self.current_ambient_rgb = active.ambient_rgb;
-            self.materials = active.materials;
-            self.material_count = active.material_count;
-        }
+        self.apply_current_active_room_fields();
     }
 
     #[cfg(feature = "cd-stream-bench")]
@@ -4950,12 +5388,18 @@ impl Playtest {
         if next_room == self.room_index {
             return false;
         }
+        let previous_room = self.room_index;
         let previous_local = self.motor.position();
         let local = global_to_local_room_point(next_room, global);
         let camera_delta = RoomPoint::new(
             local.x.saturating_sub(previous_local.x),
             local.y.saturating_sub(previous_local.y),
             local.z.saturating_sub(previous_local.z),
+        );
+        let camera_before = RoomPoint::new(
+            self.render_camera.position.x,
+            self.render_camera.position.y,
+            self.render_camera.position.z,
         );
         self.room_index = next_room;
         self.motor.relocate(local);
@@ -4968,7 +5412,42 @@ impl Playtest {
         self.lock_target = None;
         self.lock_switch_stick_held = false;
         self.soft_lock_target = None;
+        let camera_after = RoomPoint::new(
+            self.render_camera.position.x,
+            self.render_camera.position.y,
+            self.render_camera.position.z,
+        );
+        debug_log_room_transition(
+            previous_room,
+            next_room,
+            previous_local,
+            local,
+            global,
+            camera_before,
+            camera_after,
+        );
         self.load_active_room_window();
+        #[cfg(feature = "cd-stream-bench")]
+        let loading_mask = unsafe { ROOM_STREAM_SCHEDULER.loading_room_mask() };
+        #[cfg(not(feature = "cd-stream-bench"))]
+        let loading_mask = 0;
+        let stats = self.portal_visibility.stats;
+        debug_log_room_window_after_cross(
+            next_room,
+            self.portal_visibility.room_count,
+            self.portal_visibility.frontier_count,
+            self.portal_visibility.visible_room_mask(),
+            self.active_room_mask(),
+            self.active_room_drawable_mask(),
+            loading_mask,
+            self.portal_visible_missing_mask,
+            self.portal_visible_build_failed_mask,
+            self.room.is_some(),
+            self.current_collision_room.is_some(),
+            stats.portals_tested,
+            stats.portals_accepted,
+        );
+        self.post_cross_debug_frames = POST_CROSS_DEBUG_FRAMES;
         true
     }
 
@@ -7078,7 +7557,7 @@ fn visibility_cell_in_global_range(
     let x1 = x0.saturating_add(sector_size);
     let z1 = z0.saturating_add(sector_size);
     rect_distance_sq(global_anchor.x, global_anchor.z, x0, x1, z0, z1)
-        <= (radius as u64).saturating_mul(radius as u64)
+        <= square_i32_to_u32_saturating(radius)
 }
 
 #[cfg(all(
