@@ -130,12 +130,18 @@ pub fn enable_channel(ch: Channel) {
 }
 
 /// OTC-channel helper: clears a RAM block as a reverse-linked chain
-/// the GPU-DMA walker consumes. The last word is the terminator
-/// `0x00FF_FFFF`; previous words are "previous address & 0x1FFFFFFF".
+/// the GPU-DMA walker consumes. `buf` points at the first word; the
+/// hardware starts from the last word and steps backward, writing a
+/// terminator at the first transfer and then predecessor pointers.
 ///
 /// Convenience wrapper: sets up MADR/BCR/CHCR and blocks until done.
 pub fn clear_ordering_table(buf: *mut u32, words: u16) {
-    set_madr(Channel::Otc, buf as u32);
+    if words == 0 {
+        return;
+    }
+    enable_channel(Channel::Otc);
+    let last = unsafe { buf.add(words as usize - 1) };
+    set_madr(Channel::Otc, last as u32);
     set_bcr_manual(Channel::Otc, words);
     // OTC clear: direction backward (step -4), manual sync, trigger bit.
     set_chcr(
