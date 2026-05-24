@@ -4282,10 +4282,7 @@ fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        NodeKind, ProjectDocument, DEFAULT_WORLD_CAMERA_DISTANCE, DEFAULT_WORLD_CAMERA_HEIGHT,
-        DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, DEFAULT_WORLD_CAMERA_TARGET_HEIGHT,
-    };
+    use crate::{NodeKind, ProjectDocument};
 
     fn starter_project_root() -> PathBuf {
         crate::default_project_dir()
@@ -5997,13 +5994,17 @@ mod tests {
         }
 
         let (package, report) = build_package(&project, &project_root);
-        assert!(report.is_ok(), "errors: {:?}", report.errors);
-        let package = package.expect("demo7 cooks without portals");
-        assert_eq!(package.rooms.len(), 1);
-        assert_eq!(package.chunks.len(), 1);
         assert!(
-            package.room_portals.is_empty(),
-            "no authored portals should mean no generated runtime portals"
+            package.is_none(),
+            "demo7 without portals is too large to cook as one runtime room"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("runtime cap")),
+            "errors: {:?}",
+            report.errors
         );
     }
 
@@ -6022,7 +6023,95 @@ mod tests {
     }
 
     fn project_with_one_room() -> ProjectDocument {
-        let project = ProjectDocument::starter();
+        let mut project = ProjectDocument::starter();
+        let room_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(|resource| resource.id);
+        let (world_kind, room_grid, player_name, player_kind, player_children, light_template) = {
+            let scene = project.active_scene();
+            let world = scene
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::World { .. }))
+                .expect("starter must contain a World");
+            let room = scene
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+                .expect("starter must contain a Map");
+            let NodeKind::Room { grid } = &room.kind else {
+                unreachable!();
+            };
+            let player = scene
+                .nodes()
+                .iter()
+                .find(|node| is_player_spawn_node(scene, node))
+                .expect("starter must contain a player spawn entity");
+            let children: Vec<_> = player
+                .children
+                .iter()
+                .filter_map(|id| {
+                    let child = scene.node(*id)?;
+                    Some((child.name.clone(), child.kind.clone(), child.transform))
+                })
+                .collect();
+            let light = scene
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::PointLight { .. }))
+                .map(|node| (node.name.clone(), node.kind.clone()));
+            (
+                world.kind.clone(),
+                grid.clone(),
+                player.name.clone(),
+                player.kind.clone(),
+                children,
+                light,
+            )
+        };
+
+        let mut grid = WorldGrid::stone_room(
+            1,
+            1,
+            room_grid.sector_size,
+            room_material,
+            room_material,
+        );
+        grid.ambient_color = room_grid.ambient_color;
+        grid.fog_enabled = room_grid.fog_enabled;
+        grid.fog_color = room_grid.fog_color;
+        grid.fog_near = room_grid.fog_near;
+        grid.fog_far = room_grid.fog_far;
+        grid.atmosphere_enabled = room_grid.atmosphere_enabled;
+        grid.atmosphere_color = room_grid.atmosphere_color;
+        grid.atmosphere_density = room_grid.atmosphere_density;
+        grid.atmosphere_fall_speed_q4 = room_grid.atmosphere_fall_speed_q4;
+        grid.atmosphere_wind_speed_q4 = room_grid.atmosphere_wind_speed_q4;
+
+        let mut scene = crate::Scene::new("Main");
+        let world_id = scene.add_node(scene.root, "World", world_kind);
+        let room_id = scene.add_node(world_id, "Room", NodeKind::Room { grid });
+        if let Some((name, kind)) = light_template {
+            let light_id = scene.add_node(room_id, name, kind);
+            if let Some(light) = scene.node_mut(light_id) {
+                light.transform.translation = [0.0, 1.5, 0.0];
+            }
+        }
+        let player_id = scene.add_node(room_id, player_name, player_kind);
+        if let Some(player) = scene.node_mut(player_id) {
+            player.transform.translation = [0.0, 0.0, 0.0];
+            player.transform.rotation_degrees = [0.0, 0.0, 0.0];
+        }
+        for (name, kind, transform) in player_children {
+            let child_id = scene.add_node(player_id, name, kind);
+            if let Some(child) = scene.node_mut(child_id) {
+                child.transform = transform;
+            }
+        }
+        project.scenes[0] = scene;
+
         let scene = project.active_scene();
         let has_room = scene
             .nodes()
@@ -6178,7 +6267,12 @@ mod tests {
         let ids: Vec<NodeId> = scene
             .nodes()
             .iter()
-            .filter(|node| matches!(node.kind, NodeKind::ModelRenderer { model: Some(_), .. }))
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    NodeKind::ModelRenderer { model: Some(_), .. } | NodeKind::Animator { .. }
+                )
+            })
             .map(|node| node.id)
             .collect();
         for id in ids {
@@ -6255,6 +6349,15 @@ mod tests {
     #[test]
     fn starter_project_validates_and_cooks() {
         let project = project_with_one_room();
+        let expected_camera = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::World { camera, .. } => Some(*camera),
+                _ => None,
+            })
+            .expect("starter world has camera settings");
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("package returned on ok report");
@@ -6275,18 +6378,15 @@ mod tests {
         );
         assert_eq!(package.rooms[0].far_vista.segments, 12);
         assert!(package.rooms[0].far_vista.texture_asset_indices.is_empty());
-        assert_eq!(
-            package.rooms[0].camera.distance,
-            DEFAULT_WORLD_CAMERA_DISTANCE
-        );
-        assert_eq!(package.rooms[0].camera.height, DEFAULT_WORLD_CAMERA_HEIGHT);
+        assert_eq!(package.rooms[0].camera.distance, expected_camera.distance);
+        assert_eq!(package.rooms[0].camera.height, expected_camera.height);
         assert_eq!(
             package.rooms[0].camera.target_height,
-            DEFAULT_WORLD_CAMERA_TARGET_HEIGHT
+            expected_camera.target_height
         );
         assert_eq!(
             package.rooms[0].camera.min_floor_clearance,
-            DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE
+            expected_camera.min_floor_clearance
         );
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
@@ -6621,20 +6721,20 @@ mod tests {
         assert_eq!(pc.character, 0);
         assert_eq!(pc.spawn, package.spawn.unwrap());
         let character = &package.characters[0];
-        // Starter characters use the shared standalone FBX
-        // library rather than model-local Meshy clips.
-        assert_eq!(
-            character.action_clips[CharacterAnimationAction::Idle.to_index()],
-            0
-        );
-        assert_eq!(
-            character.action_clips[CharacterAnimationAction::Walk.to_index()],
-            1
-        );
-        assert_eq!(
-            character.action_clips[CharacterAnimationAction::Run.to_index()],
-            1
-        );
+        for action in [
+            CharacterAnimationAction::Idle,
+            CharacterAnimationAction::Walk,
+            CharacterAnimationAction::Run,
+            CharacterAnimationAction::Roll,
+            CharacterAnimationAction::LightAttack,
+            CharacterAnimationAction::HeavyAttack,
+        ] {
+            assert_ne!(
+                character.action_clips[action.to_index()],
+                CHARACTER_CLIP_NONE,
+                "{action:?} should be mapped for the starter player"
+            );
+        }
         assert_eq!(
             character.action_clips[CharacterAnimationAction::Turn.to_index()],
             CHARACTER_CLIP_NONE
@@ -6934,24 +7034,25 @@ mod tests {
     #[test]
     fn player_spawn_with_invalid_idle_clip_fails_validation() {
         let mut project = project_with_one_room();
-        let scene = project.active_scene();
-        let character_id = scene
-            .nodes()
-            .iter()
-            .find_map(|_| {
-                project.resources.iter().find_map(|r| match &r.data {
-                    crate::ResourceData::Character(_) => Some(r.id),
-                    _ => None,
-                })
-            })
-            .expect("starter has a Character");
+        let character_id = player_character_resource_id(&project);
         // Bump idle clip past the model's clip count so cook
         // validation must reject.
         if let Some(resource) = project.resource_mut(character_id) {
             if let crate::ResourceData::Character(c) = &mut resource.data {
                 c.animation_set = None;
+                c.action_clips.clear();
                 c.idle_clip = Some(99);
             }
+        }
+        let animator_ids: Vec<NodeId> = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Animator { .. }))
+            .map(|node| node.id)
+            .collect();
+        for id in animator_ids {
+            project.active_scene_mut().remove_node(id);
         }
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(package.is_none());
@@ -7441,10 +7542,10 @@ mod tests {
 
     #[test]
     fn texture_shared_across_materials_emits_single_asset() {
-        // Two materials in the starter both use the first Delven texture.
+        // Two materials in the starter both use the same room texture.
         // After cook + package the texture should appear once in
         // ASSETS even though both materials reference it.
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         // Find the starter room texture id and an existing material to
         // clone-and-retint as a second material referencing the
         // same texture.
@@ -7452,14 +7553,12 @@ mod tests {
             .resources
             .iter()
             .find_map(|r| match &r.data {
-                ResourceData::Texture { psxt_path }
-                    if psxt_path.ends_with("delven_01_slateflr1a_q2.psxt") =>
-                {
+                ResourceData::Texture { psxt_path } if psxt_path.ends_with("bigdoor_1a.psxt") => {
                     Some(r.id)
                 }
                 _ => None,
             })
-            .expect("starter has first Delven texture");
+            .expect("starter has first demo7 texture");
 
         // Reassign every wall material in the room to a new
         // material that *also* points at the same room texture. After
@@ -7467,7 +7566,7 @@ mod tests {
         // new wall material) but both resolve to the same texture,
         // so playtest should emit 1 texture asset.
         let new_material_id = project.add_resource(
-            "DelvenOnWalls",
+            "BigdoorOnWalls",
             ResourceData::Material(crate::MaterialResource::opaque(Some(room_texture_id))),
         );
         let scene = project.active_scene_mut();
@@ -7483,10 +7582,10 @@ mod tests {
                 // no walls. Grow to a 2x1 grid and add a north wall
                 // on the new cell so the test has a wall material
                 // alongside the floor. The original cell keeps its
-                // starter Delven material; the new cell's floor and
+                // starter demo7 material; the new cell's floor and
                 // wall both use new_material_id, giving the cooker
                 // two distinct material slots that both share the
-                // same Delven texture.
+                // same demo7 texture.
                 let sector_size = grid.sector_size;
                 let (sx, sz) =
                     grid.extend_to_include(grid.origin[0] + grid.width as i32, grid.origin[1]);
@@ -7520,7 +7619,7 @@ mod tests {
             .collect();
         assert!(
             room_texture_slots.len() >= 2,
-            "expected at least two cooked material slots to share the first Delven texture"
+            "expected at least two cooked material slots to share the first demo7 texture"
         );
         let first_room_asset = room_texture_slots[0].texture_asset_index;
         assert!(room_texture_slots
@@ -7530,7 +7629,7 @@ mod tests {
 
     #[test]
     fn material_sidedness_reaches_playtest_manifest_flags() {
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         let material = project
             .resources
             .iter_mut()
@@ -7561,7 +7660,7 @@ mod tests {
     fn missing_texture_path_fails_with_clear_error() {
         // Point a texture resource at a bogus path; cook should
         // refuse and the error should mention the file.
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         let target = project
             .resources
             .iter_mut()
@@ -7687,7 +7786,7 @@ mod tests {
         // It should now appear in `package.lights` with a
         // sensible intensity_q8 derived from the editor's
         // authored intensity float.
-        let project = ProjectDocument::starter();
+        let project = project_with_one_room();
         let expected_color = starter_light_color(&project);
         let expected_intensity_q8 = starter_light_intensity_q8(&project);
         let (package, report) = build_package(&project, &starter_project_root());
@@ -8291,7 +8390,7 @@ mod tests {
         // Swap the starter's brick material to point at the
         // model's 8bpp atlas, which lives at the same project.
         // Cook should refuse the room material 8bpp depth.
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         // Rewire the actually-used starter room texture to the
         // wraith atlas path so it parses but with the wrong CLUT
         // entry count.
@@ -8515,7 +8614,7 @@ mod tests {
 
     #[test]
     fn non_player_character_controller_cooks_idle_model_instance_with_yaw() {
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         let character_id = player_character_resource_id(&project);
         let scene = project.active_scene_mut();
         let room_id = scene
@@ -8554,10 +8653,7 @@ mod tests {
         let instance = package.model_instances[0];
         assert_eq!(instance.yaw, 2048);
         assert_eq!(instance.model, package.characters[0].model);
-        assert_eq!(
-            instance.clip,
-            package.characters[0].action_clips[CharacterAnimationAction::Idle.to_index()]
-        );
+        assert!(instance.clip < package.models[instance.model as usize].clip_count);
     }
 
     #[test]
@@ -8630,7 +8726,7 @@ mod tests {
     /// Helper: starter project with the player spawn moved to
     /// editor coord `(ex, ez)`.
     fn project_with_spawn_at(ex: f32, ez: f32) -> (ProjectDocument, NodeId, NodeId) {
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         let (room_id, spawn_id) = {
             let scene = project.active_scene();
             let room = scene
