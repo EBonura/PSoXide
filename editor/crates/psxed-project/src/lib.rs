@@ -18,6 +18,7 @@ pub mod resolve;
 pub mod spatial;
 pub mod streaming;
 pub mod texture_import;
+pub mod tr_level;
 pub mod world_cook;
 
 /// Embedded copy of the default project's RON, baked at compile
@@ -6684,9 +6685,9 @@ pub enum ResourceData {
         /// Project-relative source path.
         source_path: String,
     },
-    /// Nested scene/prefab reference.
+    /// Nested room/prefab reference.
     Scene {
-        /// Project-relative scene path.
+        /// Project-relative room/prefab path.
         source_path: String,
     },
     /// Script resource.
@@ -6721,7 +6722,7 @@ impl ResourceData {
             Self::AnimationClip(_) => "Animation Clip",
             Self::AnimationSet(_) => "Clip Role Map",
             Self::Mesh { .. } => "Mesh",
-            Self::Scene { .. } => "Scene",
+            Self::Scene { .. } => "Room",
             Self::Script { .. } => "Script",
             Self::Audio { .. } => "Audio",
             Self::Character(_) => "Character Profile",
@@ -6877,7 +6878,7 @@ impl std::error::Error for ResourceDeleteError {}
 /// Node type used by the editor scene tree.
 ///
 /// Hierarchy convention for level authoring:
-/// `Scene root -> World (macro) -> Map (sector grid) -> entity nodes`.
+/// `World (scene root) -> Room (sector grid) -> portal/entity nodes`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     /// Plain organisational node.
@@ -6890,34 +6891,32 @@ pub enum NodeKind {
     /// [`Animator`](Self::Animator), and
     /// [`Collider`](Self::Collider).
     Entity,
-    /// Macro-node grouping every authored map that belongs to one streamed
-    /// region. Owns the global sector size inherited by descendant
-    /// map grids.
+    /// World-root node for one authored world. Owns global settings
+    /// inherited by descendant room grids.
     World {
         /// Shared sector size in engine units, snapped to
         /// [`WORLD_SECTOR_SIZE_QUANTUM`].
         #[serde(default = "default_world_sector_size")]
         sector_size: i32,
-        /// Background sky drawn before map geometry.
+        /// Background sky drawn before room geometry.
         #[serde(default)]
         sky: SkySettings,
-        /// Distant scenery ring drawn between sky and map geometry.
+        /// Distant scenery ring drawn between sky and room geometry.
         #[serde(default)]
         far_vista: FarVistaSettings,
-        /// Third-person camera defaults inherited by descendant maps.
+        /// Third-person camera defaults inherited by descendant rooms.
         #[serde(default)]
         camera: WorldCameraSettings,
-        /// Runtime culling controls inherited by descendant maps.
+        /// Runtime culling controls inherited by descendant rooms.
         #[serde(default)]
         culling: WorldCullingSettings,
-        /// Cook-time streaming controls inherited by descendant maps.
+        /// Cook-time streaming controls inherited by descendant rooms.
         #[serde(default)]
         streaming: WorldStreamingSettings,
     },
-    /// One authored contiguous map: a sector grid plus its child
-    /// entities. Authored Portal children can manually partition this
-    /// into runtime portal rooms.
-    #[serde(rename = "Map", alias = "Room")]
+    /// One authored Tomb Raider-style room: a sector grid plus its
+    /// child entities and portal links.
+    #[serde(rename = "Room", alias = "Map")]
     Room {
         /// Authored grid-world payload.
         grid: WorldGrid,
@@ -7116,16 +7115,32 @@ pub enum NodeKind {
     /// Manual streaming/visibility graph edge: the cooker snaps the marker
     /// to a grid edge and treats that edge as a room-to-room portal.
     Portal {
-        /// Legacy target map node by id, or `None` when not wired.
+        /// Target room node by id, or `None` when not wired.
         target_room: Option<NodeId>,
-        /// Legacy entry-portal label on the target map.
+        /// Entry-portal label on the target room.
         target_entry: String,
-        /// Identifier this portal marker is known by in its own map.
+        /// Identifier this portal marker is known by in its source room.
         entry_name: String,
+        /// Optional exact 3D portal plane imported from a Tomb
+        /// Raider-style level file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        geometry: Option<PortalGeometry>,
     },
 }
 
 impl NodeKind {
+    /// Default scene-root World node.
+    pub fn default_world() -> Self {
+        Self::World {
+            sector_size: DEFAULT_WORLD_SECTOR_SIZE,
+            sky: SkySettings::default(),
+            far_vista: FarVistaSettings::default(),
+            camera: WorldCameraSettings::default(),
+            culling: WorldCullingSettings::default(),
+            streaming: WorldStreamingSettings::default(),
+        }
+    }
+
     /// User-facing label.
     pub const fn label(&self) -> &'static str {
         match self {
@@ -7133,7 +7148,7 @@ impl NodeKind {
             Self::Node3D => "Node3D",
             Self::Entity => "Entity",
             Self::World { .. } => "World",
-            Self::Room { .. } => "Map",
+            Self::Room { .. } => "Room",
             Self::MeshInstance { .. } => "Mesh Instance",
             Self::ImageProp { .. } => "Image Prop",
             Self::ModelRenderer { .. } => "Model Renderer",
@@ -7208,6 +7223,20 @@ const fn default_combat_health() -> u16 {
     1
 }
 
+/// Explicit Tomb Raider-style portal rectangle.
+///
+/// Authored seam portals still use the marker transform and snap to
+/// sector edges. Imported TR levels already carry the exact 3D
+/// rectangle that connects two rooms, so keep that information on
+/// the portal node instead of trying to rediscover it from a 2D grid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortalGeometry {
+    /// Portal normal in editor/world coordinates.
+    pub normal: [i32; 3],
+    /// Portal corners in editor/world coordinates.
+    pub vertices: [[i32; 3]; 4],
+}
+
 /// A scene-tree node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneNode {
@@ -7264,21 +7293,92 @@ pub struct NodeRow {
 pub struct Scene {
     /// Display name.
     pub name: String,
-    /// Root node id.
+    /// World root node id.
     pub root: NodeId,
     next_node_id: u64,
     nodes: Vec<SceneNode>,
 }
 
 impl Scene {
-    /// Create a scene with one root `Node3D`.
+    /// Create a scene with one root `World`.
     pub fn new(name: impl Into<String>) -> Self {
-        let root = SceneNode::new(NodeId::ROOT, None, "Root", NodeKind::Node3D);
+        let root = SceneNode::new(NodeId::ROOT, None, "World", NodeKind::default_world());
         Self {
             name: name.into(),
             root: NodeId::ROOT,
             next_node_id: NodeId::ROOT.raw() + 1,
             nodes: vec![root],
+        }
+    }
+
+    /// Normalize legacy `Root -> World -> Room` scenes into the
+    /// Tomb Raider-style `World(root) -> Room` hierarchy.
+    pub fn normalize_world_root(&mut self) {
+        let root_id = self.root;
+        if self.node(root_id).is_none() {
+            self.nodes.insert(
+                0,
+                SceneNode::new(root_id, None, "World", NodeKind::default_world()),
+            );
+        }
+
+        let child_world = self.node(root_id).and_then(|root| {
+            root.children.iter().copied().find(|id| {
+                self.node(*id)
+                    .is_some_and(|node| matches!(&node.kind, NodeKind::World { .. }))
+            })
+        });
+
+        if self
+            .node(root_id)
+            .is_some_and(|root| matches!(&root.kind, NodeKind::World { .. }))
+        {
+            if let Some(root) = self.node_mut(root_id) {
+                root.parent = None;
+                if root.name == "Root" || root.name.is_empty() {
+                    root.name = "World".to_string();
+                }
+            }
+            return;
+        }
+
+        if let Some(world_id) = child_world {
+            let Some(world_node) = self.node(world_id).cloned() else {
+                return;
+            };
+            let mut merged_children = self
+                .node(root_id)
+                .map(|root| root.children.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| *id != world_id)
+                .collect::<Vec<_>>();
+            for child in world_node.children {
+                if child != root_id && !merged_children.contains(&child) {
+                    merged_children.push(child);
+                }
+            }
+            for node in &mut self.nodes {
+                if node.parent == Some(world_id) {
+                    node.parent = Some(root_id);
+                }
+                node.children.retain(|child| *child != world_id);
+            }
+            if let Some(root) = self.node_mut(root_id) {
+                root.name = if world_node.name.is_empty() || world_node.name == "Root" {
+                    "World".to_string()
+                } else {
+                    world_node.name
+                };
+                root.kind = world_node.kind;
+                root.parent = None;
+                root.children = merged_children;
+            }
+            self.nodes.retain(|node| node.id != world_id);
+        } else if let Some(root) = self.node_mut(root_id) {
+            root.name = "World".to_string();
+            root.kind = NodeKind::default_world();
+            root.parent = None;
         }
     }
 
@@ -7351,7 +7451,7 @@ impl Scene {
     /// Move `id` under `new_parent` at `position` in its child list.
     ///
     /// Refuses (returns `false`) when:
-    /// * `id` is the scene root,
+    /// * `id` is the world root,
     /// * `id` or `new_parent` is missing,
     /// * `new_parent` is `id` or any of its descendants -- that would
     ///   form a cycle.
@@ -8033,6 +8133,7 @@ impl ProjectDocument {
     pub fn normalize_loaded(&mut self) {
         self.editor_camera.normalize();
         for scene in &mut self.scenes {
+            scene.normalize_world_root();
             for node in &mut scene.nodes {
                 match &mut node.kind {
                     NodeKind::World {
@@ -8787,7 +8888,7 @@ const fn resource_default_stem(data: &ResourceData) -> &'static str {
         ResourceData::AnimationSet(_) => "animation_set",
         ResourceData::Weapon(_) => "weapon",
         ResourceData::Mesh { .. } => "mesh",
-        ResourceData::Scene { .. } => "scene",
+        ResourceData::Scene { .. } => "room",
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "audio",
         ResourceData::Character(_) => "character",
@@ -9924,11 +10025,7 @@ mod tests {
                         depth -= 1;
                         if depth == 0 {
                             let end = payload_start + offset + ch.len_utf8();
-                            return format!(
-                                "{}kind: World{}",
-                                &source[..start],
-                                &source[end..]
-                            );
+                            return format!("{}kind: World{}", &source[..start], &source[end..]);
                         }
                     }
                     _ => {}
@@ -9943,11 +10040,18 @@ mod tests {
             .nodes()
             .iter()
             .any(|node| matches!(node.kind, NodeKind::World { .. })));
-        let legacy =
-            replace_first_world_payload(DEFAULT_PROJECT_RON).replacen("kind: Entity,", "kind: Actor,", 1);
+        let legacy = replace_first_world_payload(DEFAULT_PROJECT_RON).replacen(
+            "kind: Entity,",
+            "kind: Actor,",
+            1,
+        );
 
         let project = ProjectDocument::from_ron_str(&legacy).unwrap();
         let scene = project.active_scene();
+        let root = scene.node(scene.root).expect("world root exists");
+        assert!(matches!(root.kind, NodeKind::World { .. }));
+        assert_eq!(root.name, "World");
+        assert!(scene.nodes().iter().all(|node| node.name != "Root"));
         let world = scene
             .nodes()
             .iter()
@@ -10022,7 +10126,7 @@ mod tests {
             .active_scene()
             .hierarchy_rows()
             .iter()
-            .any(|row| row.kind == "Map" && row.name == "Demo7 Map"));
+            .any(|row| row.kind == "Room" && row.name == "Demo7 Map"));
         let grid = project
             .active_scene()
             .nodes()

@@ -6040,7 +6040,7 @@ mod tests {
                 .nodes()
                 .iter()
                 .find(|node| matches!(node.kind, NodeKind::Room { .. }))
-                .expect("starter must contain a Map");
+                .expect("starter must contain a Room");
             let NodeKind::Room { grid } = &room.kind else {
                 unreachable!();
             };
@@ -6072,13 +6072,8 @@ mod tests {
             )
         };
 
-        let mut grid = WorldGrid::stone_room(
-            1,
-            1,
-            room_grid.sector_size,
-            room_material,
-            room_material,
-        );
+        let mut grid =
+            WorldGrid::stone_room(1, 1, room_grid.sector_size, room_material, room_material);
         grid.ambient_color = room_grid.ambient_color;
         grid.fog_enabled = room_grid.fog_enabled;
         grid.fog_color = room_grid.fog_color;
@@ -6091,7 +6086,11 @@ mod tests {
         grid.atmosphere_wind_speed_q4 = room_grid.atmosphere_wind_speed_q4;
 
         let mut scene = crate::Scene::new("Main");
-        let world_id = scene.add_node(scene.root, "World", world_kind);
+        let world_id = scene.root;
+        if let Some(world) = scene.node_mut(world_id) {
+            world.name = "World".to_string();
+            world.kind = world_kind;
+        }
         let room_id = scene.add_node(world_id, "Room", NodeKind::Room { grid });
         if let Some((name, kind)) = light_template {
             let light_id = scene.add_node(room_id, name, kind);
@@ -6612,6 +6611,7 @@ mod tests {
                 target_room: None,
                 target_entry: String::new(),
                 entry_name: String::new(),
+                geometry: None,
             },
         );
         if let Some(portal) = project.active_scene_mut().node_mut(portal_id) {
@@ -6677,6 +6677,7 @@ mod tests {
                 target_room: None,
                 target_entry: String::new(),
                 entry_name: String::new(),
+                geometry: None,
             },
         );
         if let Some(portal) = project.active_scene_mut().node_mut(portal_id) {
