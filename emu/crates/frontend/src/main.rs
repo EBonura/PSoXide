@@ -1173,9 +1173,21 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
         counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
     ];
+    const RENDER_MAP_REQUIRED_COUNTERS: &[u16] = &[
+        counter::ROOM_PLAYER_LOCAL_X_BIASED,
+        counter::ROOM_PLAYER_LOCAL_Z_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
+    ];
     let chunk_sample = state
         .profiler
-        .latest_with_guest_counters(RENDER_MAP_COUNTERS)
+        .latest_with_all_guest_counters(RENDER_MAP_REQUIRED_COUNTERS)
+        .or_else(|| state.profiler.latest_with_guest_counters(RENDER_MAP_COUNTERS))
         .or_else(|| {
             state
                 .profiler

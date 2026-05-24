@@ -292,6 +292,12 @@ impl GuestRuntimeProfile {
         self.counter_latest_values[counter_id]
     }
 
+    fn has_counter_observation(self, counter_id: usize) -> bool {
+        self.counter_latest_value(counter_id) > 0
+            || self.counter_max_value(counter_id) > 0.0
+            || self.counter_total(counter_id) > 0.0
+    }
+
     fn has_pacing_data(self) -> bool {
         self.counter_total(emulator_core::telemetry::counter::SIM_TICKS as usize) > 0.0
             || self.counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize) > 0.0
@@ -703,10 +709,17 @@ impl FrameProfiler {
     pub fn latest_with_guest_counters(&self, counter_ids: &[u16]) -> Option<FrameProfileSample> {
         self.samples.iter().rev().copied().find(|sample| {
             counter_ids.iter().any(|&id| {
-                sample.guest.counter_max_value(id as usize) > 0.0
-                    || sample.guest.counter_latest_value(id as usize) > 0
-                    || sample.guest.counter_total(id as usize) > 0.0
+                sample.guest.has_counter_observation(id as usize)
             })
+        })
+    }
+
+    /// Most recent sample that contains every requested guest counter.
+    pub fn latest_with_all_guest_counters(&self, counter_ids: &[u16]) -> Option<FrameProfileSample> {
+        self.samples.iter().rev().copied().find(|sample| {
+            counter_ids
+                .iter()
+                .all(|&id| sample.guest.has_counter_observation(id as usize))
         })
     }
 
@@ -1662,6 +1675,46 @@ mod tests {
         assert_eq!(guest.visual_interval_vblanks(), 3.0);
         assert_eq!(guest.render_cycles_per_visual_frame(), 100.0);
         assert_eq!(guest.paced_visual_budget_status(), "pass");
+    }
+
+    #[test]
+    fn latest_with_all_guest_counters_ignores_partial_scheduler_samples() {
+        let mut profiler = FrameProfiler::default();
+        let required = [
+            emulator_core::telemetry::counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+            emulator_core::telemetry::counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+            emulator_core::telemetry::counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
+            emulator_core::telemetry::counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        ];
+        let loading_counter = emulator_core::telemetry::counter::ROOM_STREAM_LOADING_MASK_LO;
+
+        let mut render_sample = FrameProfileSample::default();
+        for &counter_id in &required {
+            render_sample.guest.counter_latest_values[counter_id as usize] = 1;
+        }
+        render_sample.guest.counter_latest_values[loading_counter as usize] = 2;
+        profiler.record(render_sample);
+
+        let mut scheduler_sample = FrameProfileSample::default();
+        scheduler_sample.guest.counter_latest_values[loading_counter as usize] = 4;
+        profiler.record(scheduler_sample);
+
+        assert_eq!(
+            profiler
+                .latest_with_guest_counters(&[loading_counter])
+                .unwrap()
+                .guest
+                .counter_latest_value(loading_counter as usize),
+            4
+        );
+        assert_eq!(
+            profiler
+                .latest_with_all_guest_counters(&required)
+                .unwrap()
+                .guest
+                .counter_latest_value(loading_counter as usize),
+            2
+        );
     }
 
     #[test]
