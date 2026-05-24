@@ -699,6 +699,7 @@ dependencies = [
 name = "psxed-project"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "psx-asset",
  "psx-engine",
  "psx-iso",
