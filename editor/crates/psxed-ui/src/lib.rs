@@ -78,6 +78,7 @@ const RESOURCE_CARD_HEIGHT: f32 = 128.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
 const PLAY_FRAME_HISTORY_CAP: usize = 150;
+const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
 const PLAY_NTSC_VBLANK_MS: f32 = 1000.0 / 60.0;
 const PSOXIDE_LOGO_ICON_PNG: &[u8] =
@@ -175,6 +176,12 @@ enum ShortcutGroup {
     Visibility,
     Camera,
     Viewport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentBrowserView {
+    Resources,
+    Debug,
 }
 
 /// Embedded editor workspace state.
@@ -350,12 +357,14 @@ pub struct EditorWorkspace {
     show_play_debug_map: bool,
     play_frame_times_ms: VecDeque<f32>,
     play_frame_last_sample_serial: Option<u32>,
+    play_debug_terminal_lines: VecDeque<String>,
     shortcut_group_flash: Option<(ShortcutGroup, Instant)>,
     view_2d: bool,
     active_workspace: WorkspaceView,
     left_dock_open: bool,
     inspector_open: bool,
     resources_open: bool,
+    content_browser_view: ContentBrowserView,
     viewport_pan: Vec2,
     viewport_zoom: f32,
     last_viewport_size: Vec2,
@@ -2298,6 +2307,7 @@ impl EditorWorkspace {
             show_play_debug_map: editor_visibility.show_play_debug_map,
             play_frame_times_ms: VecDeque::with_capacity(PLAY_FRAME_HISTORY_CAP),
             play_frame_last_sample_serial: None,
+            play_debug_terminal_lines: VecDeque::with_capacity(PLAY_DEBUG_TERMINAL_LINE_CAP),
             shortcut_group_flash: None,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
@@ -2307,6 +2317,7 @@ impl EditorWorkspace {
             left_dock_open: true,
             inspector_open: true,
             resources_open: true,
+            content_browser_view: ContentBrowserView::Resources,
             viewport_pan: Vec2::ZERO,
             viewport_zoom: DEFAULT_VIEWPORT_ZOOM,
             last_viewport_size: Vec2::new(1280.0, 720.0),
@@ -3015,6 +3026,20 @@ impl EditorWorkspace {
     /// existing status strip.
     pub fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
+    }
+
+    /// Append guest-runtime debug lines to the bottom debug terminal.
+    pub fn append_play_debug_terminal_lines<I, S>(&mut self, lines: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for line in lines {
+            if self.play_debug_terminal_lines.len() >= PLAY_DEBUG_TERMINAL_LINE_CAP {
+                self.play_debug_terminal_lines.pop_front();
+            }
+            self.play_debug_terminal_lines.push_back(line.into());
+        }
     }
 
     /// Draw the full editor workspace.
@@ -9443,6 +9468,8 @@ impl EditorWorkspace {
     }
 
     fn request_play_or_rebuild(&mut self, playtest_status: EditorPlaytestStatus) {
+        self.resources_open = true;
+        self.content_browser_view = ContentBrowserView::Debug;
         self.pending_playtest_request = Some(if playtest_status.is_active() {
             EditorPlaytestRequest::Rebuild
         } else {
@@ -11815,7 +11842,9 @@ impl EditorWorkspace {
         // cards rendered below have something to blit instead of the
         // name-keyword procedural fallback. Cheap when nothing's
         // changed -- the signature cache short-circuits per-resource.
-        self.refresh_texture_thumbs(ctx);
+        if self.content_browser_view == ContentBrowserView::Resources {
+            self.refresh_texture_thumbs(ctx);
+        }
         let max_height = max_resizable_bottom_dock_height(ctx);
         egui::TopBottomPanel::bottom("psxed_content_browser")
             .resizable(true)
@@ -11832,7 +11861,10 @@ impl EditorWorkspace {
                         tool_panel_body(ui, |ui| {
                             let content_width = ui.available_width().max(1.0);
                             ui.set_width(content_width);
-                            self.draw_resources_tab(ui);
+                            match self.content_browser_view {
+                                ContentBrowserView::Resources => self.draw_resources_tab(ui),
+                                ContentBrowserView::Debug => self.draw_debug_terminal_tab(ui),
+                            }
                         });
                     });
                 });
@@ -11846,14 +11878,57 @@ impl EditorWorkspace {
             .show(ui, |ui| {
                 ui.set_min_height(PANEL_HEADER_MIN_HEIGHT);
                 ui.horizontal(|ui| {
-                    ui.label(icons::text(icons::LAYERS, 15.0).color(STUDIO_ACCENT));
-                    ui.label(RichText::new("Resources").strong().color(STUDIO_TEXT));
+                    ui.label(
+                        icons::text(
+                            match self.content_browser_view {
+                                ContentBrowserView::Resources => icons::LAYERS,
+                                ContentBrowserView::Debug => icons::TERMINAL,
+                            },
+                            15.0,
+                        )
+                        .color(STUDIO_ACCENT),
+                    );
+                    ui.selectable_value(
+                        &mut self.content_browser_view,
+                        ContentBrowserView::Resources,
+                        "Resources",
+                    );
+                    ui.selectable_value(
+                        &mut self.content_browser_view,
+                        ContentBrowserView::Debug,
+                        "Debug Viz",
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.draw_resource_panel_actions(ui);
+                        match self.content_browser_view {
+                            ContentBrowserView::Resources => self.draw_resource_panel_actions(ui),
+                            ContentBrowserView::Debug => self.draw_debug_terminal_actions(ui),
+                        }
                     });
                 });
             });
         ui.separator();
+    }
+
+    fn draw_debug_terminal_actions(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add(egui::Button::new(icons::text(icons::COPY, 14.0)).min_size(Vec2::new(28.0, 24.0)))
+            .on_hover_text("Copy all guest debug terminal lines")
+            .clicked()
+        {
+            ui.ctx().copy_text(self.play_debug_terminal_text());
+            self.status = "Copied guest debug terminal".to_string();
+        }
+        if ui
+            .add(
+                egui::Button::new(icons::text(icons::TRASH, 14.0))
+                    .min_size(Vec2::new(28.0, 24.0)),
+            )
+            .on_hover_text("Clear the guest debug terminal")
+            .clicked()
+        {
+            self.play_debug_terminal_lines.clear();
+            self.status = "Cleared guest debug terminal".to_string();
+        }
     }
 
     fn draw_resource_panel_actions(&mut self, ui: &mut egui::Ui) {
@@ -12065,6 +12140,50 @@ impl EditorWorkspace {
         })
         .response
         .on_hover_text("Add, import, or sync resources");
+    }
+
+    fn play_debug_terminal_text(&self) -> String {
+        let mut out = String::new();
+        for line in &self.play_debug_terminal_lines {
+            let _ = writeln!(out, "{line}");
+        }
+        out
+    }
+
+    fn draw_debug_terminal_tab(&mut self, ui: &mut egui::Ui) {
+        let terminal_height = ui.available_height().max(1.0);
+        egui::Frame::new()
+            .fill(Color32::from_black_alpha(170))
+            .stroke(Stroke::new(1.0, STUDIO_BORDER))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(8, 7))
+            .show(ui, |ui| {
+                ui.set_min_height((terminal_height - 14.0).max(1.0));
+                if self.play_debug_terminal_lines.is_empty() {
+                    ui.weak("Guest debug terminal is waiting for PSX log output.");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt("psxed_play_debug_terminal")
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .max_height(ui.available_height().max(1.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width().max(1.0));
+                        let mut terminal_text = self.play_debug_terminal_text();
+                        let rows = self.play_debug_terminal_lines.len().max(1);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut terminal_text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(rows)
+                                .frame(false)
+                                .margin(egui::Margin::same(0))
+                                .interactive(true),
+                        )
+                        .on_hover_text("Select log text and press Ctrl+C or Cmd+C to copy it.");
+                    });
+            });
     }
 
     /// Walk every Texture resource and ensure its `.psxt` blob has

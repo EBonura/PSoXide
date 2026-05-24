@@ -115,6 +115,18 @@ impl VisualPacing {
     }
 }
 
+const PACED_VISUAL_EXTRA_CATCHUP_TICKS: u16 = 2;
+
+#[inline]
+const fn paced_visual_update_batch_limit(visual_interval: u16) -> u16 {
+    let interval = if visual_interval == 0 {
+        1
+    } else {
+        visual_interval
+    };
+    interval.saturating_add(PACED_VISUAL_EXTRA_CATCHUP_TICKS)
+}
+
 #[derive(Copy, Clone, Debug)]
 struct VisualPacer {
     interval: u16,
@@ -278,7 +290,11 @@ impl App {
             }
 
             let mut due_visual_intervals = 0u16;
-            while next_simulation_tick <= elapsed_vblanks {
+            let max_simulation_ticks = paced_visual_update_batch_limit(visual_interval);
+            let mut simulation_ticks = 0u16;
+            while next_simulation_tick <= elapsed_vblanks
+                && simulation_ticks < max_simulation_ticks
+            {
                 telemetry::frame_begin(next_simulation_tick);
                 ctx.simulation_tick = next_simulation_tick;
                 ctx.time = EngineTime::fixed_simulation_tick(
@@ -303,13 +319,25 @@ impl App {
                         due_visual_intervals.saturating_add(tick_visual_intervals);
                 }
                 next_simulation_tick = next_simulation_tick.wrapping_add(1);
+                simulation_ticks = simulation_ticks.saturating_add(1);
             }
 
             if due_visual_intervals == 0 {
                 continue;
             }
 
-            ctx.missed_visual_intervals = due_visual_intervals.saturating_sub(1);
+            let pending_vblanks = if next_simulation_tick <= elapsed_vblanks {
+                elapsed_vblanks
+                    .wrapping_sub(next_simulation_tick)
+                    .saturating_add(1)
+            } else {
+                0
+            };
+            let pending_visual_intervals =
+                pending_vblanks / visual_interval.max(1) as u32;
+            ctx.missed_visual_intervals = due_visual_intervals
+                .saturating_sub(1)
+                .saturating_add(pending_visual_intervals.min(u16::MAX as u32) as u16);
 
             telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
             ctx.fb.clear(
@@ -354,5 +382,12 @@ mod tests {
         assert_eq!(pacer.mark_due_intervals(2), 0);
         assert_eq!(pacer.mark_due_intervals(3), 1);
         assert_eq!(pacer.mark_due_intervals(10), 2);
+    }
+
+    #[test]
+    fn paced_visual_update_batch_leaves_room_to_render() {
+        assert_eq!(paced_visual_update_batch_limit(1), 3);
+        assert_eq!(paced_visual_update_batch_limit(2), 4);
+        assert_eq!(paced_visual_update_batch_limit(3), 5);
     }
 }

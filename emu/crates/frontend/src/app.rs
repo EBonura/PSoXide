@@ -333,6 +333,17 @@ impl AppState {
 }
 
 impl AppState {
+    /// Append guest-runtime debug output captured from the telemetry port.
+    pub fn append_guest_debug_logs(
+        &mut self,
+        logs: Vec<emulator_core::telemetry::GuestDebugLogLine>,
+    ) {
+        self.editor
+            .append_play_debug_terminal_lines(logs.into_iter().map(|line| {
+                format!("[f{} c{}] {}", line.frame, line.cycles, line.text)
+            }));
+    }
+
     /// Rebuild the emulator state around `entry`. Same flow the
     /// headless `launch` CLI runs: mount the disc or side-load the
     /// EXE, plug a pad into port 1, and use a real BIOS only for

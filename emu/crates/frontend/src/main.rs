@@ -688,7 +688,7 @@ impl ApplicationHandler for Shell {
                         // timing model.
                         let audio_start = Instant::now();
                         let effective_audio_volume = self.state.effective_audio_volume();
-                        let guest_events = if let Some(bus) = self.state.bus.as_mut() {
+                        let (guest_events, guest_debug_logs) = if let Some(bus) = self.state.bus.as_mut() {
                             let cycles_after = bus.cycles();
                             self.audio_cycle_accum = self
                                 .audio_cycle_accum
@@ -711,11 +711,16 @@ impl ApplicationHandler for Shell {
                                 // SPU's internal queue doesn't grow unbounded.
                                 let _ = bus.spu.drain_audio();
                             }
-                            bus.telemetry.drain_events()
+                            let events = bus.telemetry.drain_events();
+                            let logs = bus.telemetry.drain_debug_logs();
+                            (events, logs)
                         } else {
-                            Vec::new()
+                            (Vec::new(), Vec::new())
                         };
                         let guest_profile = self.state.profiler.consume_guest_events(&guest_events);
+                        if !guest_debug_logs.is_empty() {
+                            self.state.append_guest_debug_logs(guest_debug_logs);
+                        }
                         profile.add_guest_profile(guest_profile);
                         profile.audio_ms += elapsed_ms(audio_start);
                     }
