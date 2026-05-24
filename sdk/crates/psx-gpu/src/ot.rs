@@ -79,6 +79,17 @@ impl<const N: usize> OrderingTable<N> {
     /// [`crate::prim`] satisfy this.
     pub unsafe fn insert(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
         let z = z.min(N - 1);
+        unsafe { self.insert_unchecked(z, packet_ptr, words) };
+    }
+
+    /// Prepend a primitive packet into an already-clamped depth slot.
+    ///
+    /// # Safety
+    /// Same packet lifetime/alignment requirements as [`insert`](Self::insert).
+    /// In addition, `z` must be less than `N`.
+    #[inline(always)]
+    pub unsafe fn insert_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
+        debug_assert!(z < N);
         let old_head = self.entries[z] & 0x00FF_FFFF;
         let tag = ((words as u32) << 24) | old_head;
         unsafe { ptr::write_volatile(packet_ptr, tag) };
