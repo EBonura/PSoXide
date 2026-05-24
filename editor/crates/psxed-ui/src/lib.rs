@@ -6220,12 +6220,12 @@ impl EditorWorkspace {
         let pointer_delta = pointer - drag.start_pointer;
         let steps = match drag.axis {
             PrimitiveGizmoAxis::Y => {
-                const PIXELS_PER_QUANTUM: f32 = 8.0;
+                const PIXELS_PER_QUANTUM: f32 = 4.0;
                 let unit = drag.screen_axis / axis_len_sq.sqrt();
                 (pointer_delta.dot(unit) / PIXELS_PER_QUANTUM).round() as i32
             }
             PrimitiveGizmoAxis::X | PrimitiveGizmoAxis::Z => {
-                (pointer_delta.dot(drag.screen_axis) / axis_len_sq).round() as i32
+                (pointer_delta.dot(drag.screen_axis) * 2.0 / axis_len_sq).round() as i32
             }
         };
         if steps == drag.current_steps {
@@ -6549,7 +6549,8 @@ impl EditorWorkspace {
             return;
         }
         let pixels_per_step = match drag.mode {
-            TransformGizmoMode::Move | TransformGizmoMode::Scale => 8.0,
+            TransformGizmoMode::Move => 4.0,
+            TransformGizmoMode::Scale => 8.0,
             // Rotation steps are 1° each, so a low pixels-per-step
             // makes the ring feel hair-trigger. 12 px / ° (a full
             // 360° revolution costs roughly screen-width of drag)
@@ -8347,13 +8348,37 @@ impl EditorWorkspace {
         let mapped = world_cook_error_primitives(room, error, array_origin);
         if mapped.is_empty() {
             self.validation_issue_rooms.insert(room);
+            self.replace_node_selection(room);
+            self.clear_sector_selection();
+            self.clear_primitive_selection_state();
+            self.frame_viewport();
         } else {
-            for selection in mapped {
-                if !self.validation_issue_primitives.contains(&selection) {
-                    self.validation_issue_primitives.push(selection);
+            for selection in &mapped {
+                if !self.validation_issue_primitives.contains(selection) {
+                    self.validation_issue_primitives.push(*selection);
                 }
             }
+            self.select_and_frame_validation_issue_primitives(&mapped);
         }
+    }
+
+    fn select_and_frame_validation_issue_primitives(&mut self, selections: &[Selection]) {
+        let mut selected = Vec::new();
+        for &selection in selections {
+            if !selected.contains(&selection) {
+                selected.push(selection);
+            }
+        }
+        let Some(first) = selected.first().copied() else {
+            return;
+        };
+
+        self.replace_node_selection(first.room());
+        self.clear_sector_selection();
+        self.selected_primitives = selected;
+        self.selected_primitive = Some(first);
+        self.update_primitive_resource_selection();
+        self.frame_viewport();
     }
 
     /// Map a `(face, world-hit)` pair from `pick_face_with_hit`
@@ -13343,6 +13368,9 @@ impl EditorWorkspace {
             if matches!(node.kind, NodeKind::PointLight { .. }) && !self.show_lights {
                 continue;
             }
+            if matches!(node.kind, NodeKind::Portal { .. }) && !self.show_portals {
+                continue;
+            }
             // Find this node's enclosing Room.
             let enclosing_room = enclosing_room_id(scene, node.id);
             if let (Some(want), Some(actual)) = (room_filter, enclosing_room) {
@@ -13350,7 +13378,7 @@ impl EditorWorkspace {
                     continue;
                 }
             }
-            let Some((kind, half_extents)) = entity_bound_kind_and_size(self, node) else {
+            let Some((kind, mut half_extents)) = entity_bound_kind_and_size(self, node) else {
                 continue;
             };
             // World position. Entities under a Room use the
@@ -13359,7 +13387,13 @@ impl EditorWorkspace {
             let center_world = match enclosing_room.and_then(|id| scene.node(id)) {
                 Some(room_node) => match &room_node.kind {
                     NodeKind::Room { grid } => {
-                        if node_is_floor_anchored(&node.kind) {
+                        if kind == EntityBoundKind::Portal {
+                            let Some((center, half)) = portal_seam_bounds_3d(grid, node) else {
+                                continue;
+                            };
+                            half_extents = half;
+                            center
+                        } else if node_is_floor_anchored(&node.kind) {
                             psxed_project::spatial::floor_anchored_node_preview_bounds_center(
                                 grid,
                                 &node.transform,
@@ -25072,6 +25106,19 @@ impl ViewportHit {
         }
     }
 
+    fn segment(
+        id: NodeId,
+        _name: impl Into<String>,
+        a: [f32; 2],
+        b: [f32; 2],
+        radius: f32,
+    ) -> Self {
+        Self {
+            id,
+            shape: HitShape::Segment { a, b, radius },
+        }
+    }
+
     fn contains(&self, world: [f32; 2]) -> bool {
         match self.shape {
             HitShape::Rect { center, half } => {
@@ -25085,6 +25132,9 @@ impl ViewportHit {
                 let dz = world[1] - center[1];
                 dx * dx + dz * dz <= radius * radius
             }
+            HitShape::Segment { a, b, radius } => {
+                point_segment_dist2_2d(world, a, b) <= radius * radius
+            }
         }
     }
 }
@@ -25093,6 +25143,11 @@ impl ViewportHit {
 enum HitShape {
     Rect { center: [f32; 2], half: [f32; 2] },
     Circle { center: [f32; 2], radius: f32 },
+    Segment {
+        a: [f32; 2],
+        b: [f32; 2],
+        radius: f32,
+    },
 }
 
 fn draw_world_grid(painter: &egui::Painter, transform: ViewportTransform) {
@@ -25259,6 +25314,7 @@ fn draw_scene_viewport(
                     node,
                     selected_nodes.contains(&node.id)
                         || (selected_nodes.is_empty() && selected == node.id),
+                    &mut hits,
                 );
                 draw_portal_marker(
                     painter,
@@ -25866,6 +25922,7 @@ fn draw_portal_seam_2d(
     scene: &psxed_project::Scene,
     node: &psxed_project::SceneNode,
     selected: bool,
+    hits: &mut Vec<ViewportHit>,
 ) {
     let Some(room_id) = enclosing_room_id(scene, node.id) else {
         return;
@@ -25887,6 +25944,17 @@ fn draw_portal_seam_2d(
     );
     let stroke = Stroke::new(if selected { 4.0 } else { 3.0 }, PORTAL_PINK);
     for edge in seam {
+        if let Some((local_a, local_b)) = portal_edge_editor_segment(grid, edge) {
+            let a = [room_center[0] + local_a[0], room_center[1] + local_a[1]];
+            let b = [room_center[0] + local_b[0], room_center[1] + local_b[1]];
+            hits.push(ViewportHit::segment(
+                node.id,
+                node.name.clone(),
+                a,
+                b,
+                0.12_f32.max(7.0 / transform.zoom),
+            ));
+        }
         draw_portal_edge_segment_2d(painter, transform, grid, room_center, edge, halo, stroke);
     }
     if let Some(edge) = portal_edge_for_node(grid, node) {
@@ -26532,6 +26600,21 @@ fn distance_to_segment_2d(point: Pos2, a: Pos2, b: Pos2) -> f32 {
     let t = ((point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
     let closest = a + ab * t;
     (point - closest).length()
+}
+
+fn point_segment_dist2_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let ap = [point[0] - a[0], point[1] - a[1]];
+    let len_sq = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if len_sq > f32::EPSILON {
+        ((ap[0] * ab[0] + ap[1] * ab[1]) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let closest = [a[0] + ab[0] * t, a[1] + ab[1] * t];
+    let dx = point[0] - closest[0];
+    let dz = point[1] - closest[1];
+    dx * dx + dz * dz
 }
 
 fn polygon_area_2d(points: &[Pos2]) -> f32 {
@@ -28871,6 +28954,108 @@ fn node_enclosing_sector_size(scene: &psxed_project::Scene, node_id: NodeId) -> 
             _ => None,
         })
         .unwrap_or(DEFAULT_WORLD_SECTOR_SIZE)
+}
+
+fn portal_seam_bounds_3d(
+    grid: &WorldGrid,
+    node: &psxed_project::SceneNode,
+) -> Option<([f32; 3], [f32; 3])> {
+    if !matches!(node.kind, NodeKind::Portal { .. }) {
+        return None;
+    }
+
+    let mut bounds = None;
+    for edge in portal_seam_edges_for_node(grid, node) {
+        let Some((a, b)) = portal_edge_room_local_segment(grid, edge) else {
+            continue;
+        };
+        let (min_y, max_y) = portal_edge_pick_height_bounds(grid, edge);
+        for point in [
+            [a[0], min_y, a[2]],
+            [a[0], max_y, a[2]],
+            [b[0], min_y, b[2]],
+            [b[0], max_y, b[2]],
+        ] {
+            merge_bounds_3d(&mut bounds, point, [0.0, 0.0, 0.0]);
+        }
+    }
+
+    let (center, mut half) = bounds.map(bounds_3d_to_center_half)?;
+    let pick_pad = (grid.sector_size as f32 * 0.08).clamp(48.0, 128.0);
+    half[0] = half[0].max(pick_pad);
+    half[1] = half[1].max(pick_pad);
+    half[2] = half[2].max(pick_pad);
+    Some((center, half))
+}
+
+fn portal_edge_room_local_segment(
+    grid: &WorldGrid,
+    edge: PortalEdge,
+) -> Option<([f32; 3], [f32; 3])> {
+    let (a, b) = portal_edge_editor_segment(grid, edge)?;
+    Some((grid.editor_to_room_local(a), grid.editor_to_room_local(b)))
+}
+
+fn portal_edge_pick_height_bounds(grid: &WorldGrid, edge: PortalEdge) -> (f32, f32) {
+    let mut min_y: Option<i32> = None;
+    let mut max_y: Option<i32> = None;
+    include_portal_pick_sector_heights(grid.sector(edge.x, edge.z), &mut min_y, &mut max_y);
+    if let Some((nx, nz)) = portal_edge_neighbour(edge.x, edge.z, edge.direction)
+        .filter(|(nx, nz)| *nx < grid.width && *nz < grid.depth)
+    {
+        include_portal_pick_sector_heights(grid.sector(nx, nz), &mut min_y, &mut max_y);
+    }
+    if let Some(wall) = grid.floor_transition_wall_for_edge(edge.x, edge.z, edge.direction) {
+        for height in wall.heights {
+            include_min_i32(&mut min_y, height);
+            include_max_i32(&mut max_y, height);
+        }
+    }
+
+    let fallback_min = min_y.unwrap_or(0);
+    let mut fallback_max = max_y.unwrap_or(fallback_min + grid.sector_size.max(128));
+    if fallback_max <= fallback_min {
+        fallback_max = fallback_min + grid.sector_size.max(128);
+    }
+    (fallback_min as f32, fallback_max as f32)
+}
+
+fn include_portal_pick_sector_heights(
+    sector: Option<&GridSector>,
+    min_y: &mut Option<i32>,
+    max_y: &mut Option<i32>,
+) {
+    let Some(sector) = sector else {
+        return;
+    };
+    for heights in [
+        sector.floor.as_ref().map(|face| face.heights),
+        sector.ceiling.as_ref().map(|face| face.heights),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for height in heights {
+            include_min_i32(min_y, height);
+            include_max_i32(max_y, height);
+        }
+    }
+    for dir in GridDirection::CARDINAL {
+        for wall in sector.walls.get(dir) {
+            for height in wall.heights {
+                include_min_i32(min_y, height);
+                include_max_i32(max_y, height);
+            }
+        }
+    }
+}
+
+fn include_min_i32(target: &mut Option<i32>, value: i32) {
+    *target = Some(target.map_or(value, |current| current.min(value)));
+}
+
+fn include_max_i32(target: &mut Option<i32>, value: i32) {
+    *target = Some(target.map_or(value, |current| current.max(value)));
 }
 
 /// Per-kind half-extents in world units. Picked so:
@@ -32121,6 +32306,11 @@ mod tests {
         let circle = ViewportHit::circle(NodeId::ROOT, "Circle", [2.0, 2.0], 0.5);
         assert!(circle.contains([2.25, 2.25]));
         assert!(!circle.contains([2.6, 2.0]));
+
+        let segment =
+            ViewportHit::segment(NodeId::ROOT, "Segment", [0.0, 0.0], [2.0, 0.0], 0.25);
+        assert!(segment.contains([1.0, 0.2]));
+        assert!(!segment.contains([1.0, 0.3]));
     }
 
     fn starter_player_entity(scene: &psxed_project::Scene) -> &psxed_project::SceneNode {
@@ -33613,7 +33803,7 @@ mod tests {
             viewport,
             y_axis.start
         ));
-        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 8.0);
+        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 4.0);
         workspace.end_primitive_gizmo_drag();
 
         let grid = workspace.room_grid_view(room).unwrap();
@@ -33661,7 +33851,7 @@ mod tests {
             viewport,
             y_axis.start
         ));
-        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 8.0);
+        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 4.0);
         workspace.end_primitive_gizmo_drag();
 
         let grid = workspace.room_grid_view(room).unwrap();
@@ -33711,7 +33901,7 @@ mod tests {
             viewport,
             x_axis.start
         ));
-        workspace.update_primitive_gizmo_drag(x_axis.end);
+        workspace.update_primitive_gizmo_drag(x_axis.start + (x_axis.end - x_axis.start) * 0.5);
 
         let grid = workspace.room_grid_view(room).unwrap();
         assert!(grid.sector(0, 0).unwrap().floor.is_none());
@@ -33911,7 +34101,7 @@ mod tests {
         let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
         let unit = (x_axis.end - x_axis.start).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
-        workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+        workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 4.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(entity).unwrap();
@@ -33959,7 +34149,7 @@ mod tests {
         let y_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
         let unit = (y_axis.end - y_axis.start).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, y_axis.start));
-        workspace.update_node_gizmo_drag(viewport, y_axis.start + unit * 8.0);
+        workspace.update_node_gizmo_drag(viewport, y_axis.start + unit * 4.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(light).unwrap();
@@ -34083,14 +34273,16 @@ mod tests {
     #[test]
     fn duplicate_wall_cook_error_marks_both_authored_faces() {
         let mut project = ProjectDocument::new("duplicate-wall");
-        let room = project.active_scene_mut().add_node(
-            NodeId::ROOT,
-            "Room",
-            NodeKind::Room {
-                grid: WorldGrid::empty(4, 2, 1024),
-            },
-        );
+        let mut grid = WorldGrid::empty(4, 2, 1024);
+        grid.add_wall(3, 1, GridDirection::South, 0, 1024, None);
+        grid.add_wall(3, 0, GridDirection::North, 0, 1024, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.view_2d = false;
+        workspace.viewport_3d_target = [99_000, 99_000, 99_000];
 
         workspace.record_world_cook_error(
             room,
@@ -34126,6 +34318,19 @@ mod tests {
         assert!(workspace.validation_issue_primitives.contains(&south));
         assert!(workspace.validation_issue_primitives.contains(&north));
         assert!(workspace.validation_issue_rooms.is_empty());
+        assert_eq!(workspace.selected_primitive, Some(south));
+        assert_eq!(workspace.selected_primitives, vec![south, north]);
+        let (center, _) = workspace
+            .selected_frame_bounds_3d()
+            .expect("duplicate wall faces frame in 3D");
+        assert_eq!(
+            workspace.viewport_3d_target,
+            [
+                round_to_i32(center[0]),
+                round_to_i32(center[1]),
+                round_to_i32(center[2])
+            ]
+        );
     }
 
     #[test]
@@ -34456,6 +34661,48 @@ mod tests {
         assert_eq!(edge.direction, GridDirection::East);
         assert_eq!(workspace.status, "Placed Portal on East edge at 0,0");
         assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn visible_portal_bounds_follow_the_authored_seam() {
+        let mut project = ProjectDocument::new("portal-seam-bounds");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Map", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let portal = workspace.selected_node_id();
+        let bounds = workspace
+            .collect_entity_bounds(Some(room))
+            .into_iter()
+            .find(|bounds| bounds.node == portal)
+            .expect("visible portal has seam bounds");
+        assert_eq!(bounds.kind, EntityBoundKind::Portal);
+        assert!((bounds.center[0] - 1024.0).abs() < 0.001);
+        assert!((bounds.center[2] - 512.0).abs() < 0.001);
+        assert!(bounds.half_extents[0] >= 48.0);
+        assert!(bounds.half_extents[2] >= 512.0);
+        let t = ray_intersects_aabb(
+            [bounds.center[0] - 4096.0, bounds.center[1], bounds.center[2]],
+            [1.0, 0.0, 0.0],
+            bounds.center,
+            bounds.half_extents,
+        );
+        assert!(t.is_some(), "portal seam bound is pickable");
+
+        workspace.show_portals = false;
+        assert!(workspace
+            .collect_entity_bounds(Some(room))
+            .into_iter()
+            .all(|bounds| bounds.node != portal));
     }
 
     #[test]
