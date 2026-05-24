@@ -787,8 +787,7 @@ impl VramUploadJob {
     };
 
     fn texture_complete(self) -> bool {
-        self.kind == VramUploadKind::ClutOnly
-            || self.next_texture_row >= self.texture_height_rows
+        self.kind == VramUploadKind::ClutOnly || self.next_texture_row >= self.texture_height_rows
     }
 
     fn complete(self) -> bool {
@@ -7549,7 +7548,8 @@ fn portal_visibility_space_for_view(
     view: ActiveRoomView,
 ) -> PortalVisibilitySpace {
     let camera_global = local_to_global_room_point(current_index, view.position);
-    let room = room_index_containing_global_from(current_index, camera_global).unwrap_or(current_index);
+    let room =
+        room_index_containing_global_from(current_index, camera_global).unwrap_or(current_index);
     let view = if room == current_index {
         view
     } else {
@@ -7574,13 +7574,13 @@ fn portal_visibility_view_keys(view: ActiveRoomView) -> (i16, i16, i16, i16) {
 #[derive(Copy, Clone)]
 struct ChunkResidencyScore {
     tier: u8,
-    distance: u64,
+    distance: u32,
 }
 
 impl ChunkResidencyScore {
     const WORST: Self = Self {
         tier: u8::MAX,
-        distance: u64::MAX,
+        distance: u32::MAX,
     };
 
     fn better_than(self, other: Self) -> bool {
@@ -7654,7 +7654,7 @@ fn chunk_distance_sq_current_space(
     chunk: LevelChunkRecord,
     current_record: &LevelRoomRecord,
     player: RoomPoint,
-) -> u64 {
+) -> u32 {
     let (x0, x1, z0, z1) = chunk_bounds_current_space(chunk, current_record);
     rect_distance_sq(player.x, player.z, x0, x1, z0, z1)
 }
@@ -7696,24 +7696,31 @@ fn chunk_overlaps_collision_window(
         && anchor.z.saturating_sub(margin) < z1
 }
 
-fn rect_distance_sq(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u64 {
+fn rect_distance_sq(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u32 {
     let dx = if x < x0 {
-        x0 - x
+        x0.saturating_sub(x)
     } else if x > x1 {
-        x - x1
+        x.saturating_sub(x1)
     } else {
         0
     };
     let dz = if z < z0 {
-        z0 - z
+        z0.saturating_sub(z)
     } else if z > z1 {
-        z - z1
+        z.saturating_sub(z1)
     } else {
         0
     };
-    (dx as u64)
-        .saturating_mul(dx as u64)
-        .saturating_add((dz as u64).saturating_mul(dz as u64))
+    square_i32_to_u32_saturating(dx).saturating_add(square_i32_to_u32_saturating(dz))
+}
+
+fn square_i32_to_u32_saturating(value: i32) -> u32 {
+    let value = value.unsigned_abs();
+    if value > 65_535 {
+        u32::MAX
+    } else {
+        value.saturating_mul(value)
+    }
 }
 
 fn axis_moved_at_least(a: i32, b: i32, threshold: i32) -> bool {
@@ -9569,27 +9576,30 @@ fn image_prop_depth_bias(width: u16, height: u16) -> i32 {
 
 fn image_prop_cull_bounds(verts: [WorldVertex; 4]) -> (WorldVertex, i32) {
     let center = WorldVertex::new(
-        ((verts[0].x as i64 + verts[1].x as i64 + verts[2].x as i64 + verts[3].x as i64) / 4)
-            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-        ((verts[0].y as i64 + verts[1].y as i64 + verts[2].y as i64 + verts[3].y as i64) / 4)
-            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-        ((verts[0].z as i64 + verts[1].z as i64 + verts[2].z as i64 + verts[3].z as i64) / 4)
-            .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        average4_i32(verts[0].x, verts[1].x, verts[2].x, verts[3].x),
+        average4_i32(verts[0].y, verts[1].y, verts[2].y, verts[3].y),
+        average4_i32(verts[0].z, verts[1].z, verts[2].z, verts[3].z),
     );
     let mut radius = 32;
     for vertex in verts {
-        let dx = (vertex.x as i64 - center.x as i64)
-            .abs()
-            .min(i32::MAX as i64) as i32;
-        let dy = (vertex.y as i64 - center.y as i64)
-            .abs()
-            .min(i32::MAX as i64) as i32;
-        let dz = (vertex.z as i64 - center.z as i64)
-            .abs()
-            .min(i32::MAX as i64) as i32;
+        let dx = abs_delta_i32(vertex.x, center.x);
+        let dy = abs_delta_i32(vertex.y, center.y);
+        let dz = abs_delta_i32(vertex.z, center.z);
         radius = radius.max(dx.saturating_add(dy).saturating_add(dz));
     }
     (center, radius)
+}
+
+fn average4_i32(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    a.saturating_add(b).saturating_add(c).saturating_add(d) / 4
+}
+
+fn abs_delta_i32(a: i32, b: i32) -> i32 {
+    if a >= b {
+        a.saturating_sub(b)
+    } else {
+        b.saturating_sub(a)
+    }
 }
 
 fn image_prop_sort_depth(camera: &WorldCamera, verts: [WorldVertex; 4]) -> i32 {
@@ -9682,7 +9692,11 @@ fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
 }
 
 fn mul_q12_i32(value: i32, q12: i32) -> i32 {
-    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    let whole = value >> Q12::FRACTIONAL_BITS;
+    let fraction = value & (Q12::SCALE - 1);
+    whole
+        .saturating_mul(q12)
+        .saturating_add(fraction.saturating_mul(q12) >> Q12::FRACTIONAL_BITS)
 }
 
 /// Draw one tinted cube per generated entity record. Cubes

@@ -8,6 +8,10 @@ target-dir = "../../../build/examples"
 
 [target.mipsel-sony-psx]
 rustflags = [
+    # PSX builds cannot recover from panics; immediate abort removes
+    # panic formatting and bounds-check reporting code from the binary.
+    "-Zunstable-options",
+    "-Cpanic=immediate-abort",
     "-Clink-arg=-T../../../sdk/psoxide.ld",
     "-Clink-arg=--oformat=binary",
 ]
