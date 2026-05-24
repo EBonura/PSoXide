@@ -9126,10 +9126,15 @@ mod tests {
             .map(|node| node.id)
             .expect("starter has room");
 
-        assert_eq!(
-            scene.world_camera_for_node(room_id),
-            Some(WorldCameraSettings::default())
-        );
+        let inherited_camera = scene
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::World { camera, .. } => Some(*camera),
+                _ => None,
+            })
+            .expect("starter world has camera settings");
+        assert_eq!(scene.world_camera_for_node(room_id), Some(inherited_camera));
 
         {
             let world = project.active_scene_mut().node_mut(world_id).unwrap();
@@ -9841,11 +9846,11 @@ mod tests {
         let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
         assert!(project.resources.iter().any(|r| matches!(
             &r.data,
-            ResourceData::Texture { psxt_path } if psxt_path.ends_with("delven_01_slateflr1a_q2.psxt")
+            ResourceData::Texture { psxt_path } if psxt_path.ends_with("block_1a.psxt")
         )));
         assert!(project.resources.iter().any(|r| matches!(
             &r.data,
-            ResourceData::Texture { psxt_path } if psxt_path.ends_with("delven_38_ground4b_q0.psxt")
+            ResourceData::Texture { psxt_path } if psxt_path.ends_with("fence_1a.psxt")
         )));
         assert!(!project.resources.iter().any(|r| matches!(
             &r.data,
@@ -9853,51 +9858,93 @@ mod tests {
                 if psxt_path.ends_with("floor.psxt")
                     || psxt_path.ends_with("brick-wall.psxt")
         )));
-        // Starter ships the obsidian wraith model plus a shared
-        // standalone FBX animation library, so characters are
-        // animated without relying on model-local Meshy clips.
-        let (wraith_id, wraith) = project
+        // Starter now mirrors demo7: the active player is the
+        // Crimson Cross Knight profile with its Meshy Gold animation
+        // library and material atlas.
+        let (character_id, character) = project
             .resources
             .iter()
             .find_map(|r| match &r.data {
-                ResourceData::Model(m) if r.name == "Obsidian Wraith" => Some((r.id, m)),
+                ResourceData::Character(c) if r.name == "Crimson Cross Knight Player" => {
+                    Some((r.id, c))
+                }
                 _ => None,
             })
-            .expect("starter model resource missing");
-        assert!(wraith.model_path.ends_with("obsidian_wraith.psxmdl"));
-        assert!(wraith.texture_path.is_some());
-        assert!(wraith.clips.is_empty());
-        assert_eq!(wraith.default_clip, Some(0));
+            .expect("starter player character resource missing");
+        let model_id = character.model.expect("starter character has a model");
+        let model = project
+            .resource(model_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Model(model) => Some(model),
+                _ => None,
+            })
+            .expect("starter player model resource missing");
+        assert!(model
+            .model_path
+            .ends_with("crimson_cross_knight/crimson_cross_knight.psxmdl"));
+        assert!(model
+            .texture_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("crimson_cross_knight.psxt")));
+        assert!(model.skeleton.is_some());
+        assert!(model.clips.len() >= 50);
+        assert_eq!(model.default_clip, Some(22));
         assert_eq!(
-            wraith.collision_radius,
-            default_model_collision_radius_for_height(wraith.world_height)
+            model.collision_radius,
+            default_model_collision_radius_for_height(model.world_height)
         );
-        let resolved_clips = project.resolved_model_animation_clips(wraith_id);
-        assert_eq!(resolved_clips.len(), 8);
-        assert_eq!(resolved_clips[0].name, "Standalone FBX / neutral idle");
-        assert_eq!(wraith.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
+        let resolved_clips = project.resolved_model_animation_clips(model_id);
+        assert!(resolved_clips.len() >= 50);
+        assert!(resolved_clips
+            .iter()
+            .any(|clip| clip.name == "Meshy Gold / idle 03"));
+        assert_eq!(model.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
+        assert!(project.active_scene().nodes().iter().any(|node| matches!(
+            &node.kind,
+            NodeKind::CharacterController {
+                player: true,
+                character: Some(id),
+                ..
+            } if *id == character_id
+        )));
     }
 
     #[test]
     fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
+        fn replace_first_world_payload(source: &str) -> String {
+            let start = source
+                .find("kind: World(")
+                .expect("default fixture has a parameterised World kind");
+            let payload_start = start + "kind: World".len();
+            let mut depth = 0i32;
+            for (offset, ch) in source[payload_start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let end = payload_start + offset + ch.len_utf8();
+                            return format!(
+                                "{}kind: World{}",
+                                &source[..start],
+                                &source[end..]
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unterminated World payload");
+        }
+
         let starter = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
-        let starter_world_sector_size = starter
+        assert!(starter
             .active_scene()
             .nodes()
             .iter()
-            .find_map(|node| match &node.kind {
-                NodeKind::World { sector_size, .. } => Some(*sector_size),
-                _ => None,
-            })
-            .expect("starter world exists");
-        let legacy = DEFAULT_PROJECT_RON
-            .replace(
-                &format!(
-                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640, min_floor_clearance: 64)),"
-                ),
-                "kind: World,",
-            )
-            .replacen("kind: Entity,", "kind: Actor,", 1);
+            .any(|node| matches!(node.kind, NodeKind::World { .. })));
+        let legacy =
+            replace_first_world_payload(DEFAULT_PROJECT_RON).replacen("kind: Entity,", "kind: Actor,", 1);
 
         let project = ProjectDocument::from_ron_str(&legacy).unwrap();
         let scene = project.active_scene();
@@ -9922,13 +9969,13 @@ mod tests {
     fn starter_model_files_present_on_disk() {
         let root = default_project_dir();
         assert!(root
-            .join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl")
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
             .is_file());
         assert!(root
-            .join("assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt")
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxt")
             .is_file());
         assert!(root
-            .join("assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim")
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_03_baselayer.psxanim")
             .is_file());
     }
 
@@ -9937,10 +9984,13 @@ mod tests {
         assert!(projects_dir().is_dir(), "{}", projects_dir().display());
         assert!(default_project_dir().join("project.ron").is_file());
         assert!(default_project_dir()
-            .join("assets/textures/delven_01_slateflr1a_q2.psxt")
+            .join("assets/textures/block_1a.psxt")
             .is_file());
         assert!(default_project_dir()
-            .join("assets/textures/delven_38_ground4b_q0.psxt")
+            .join("assets/textures/fence_1a.psxt")
+            .is_file());
+        assert!(default_project_dir()
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
             .is_file());
         assert!(!default_project_dir()
             .join("assets/textures/floor.psxt")
@@ -9965,14 +10015,14 @@ mod tests {
         let project = ProjectDocument::starter();
 
         assert_eq!(project.scenes.len(), 1);
-        // Starter includes the Delven room texture/material set plus gameplay
+        // Starter includes the demo7 room texture/material set plus gameplay
         // resources for the animated character and weapon path.
         assert!(project.resources.len() >= 10);
         assert!(project
             .active_scene()
             .hierarchy_rows()
             .iter()
-            .any(|row| row.name == "Room"));
+            .any(|row| row.kind == "Map" && row.name == "Demo7 Map"));
         let grid = project
             .active_scene()
             .nodes()
@@ -10154,7 +10204,7 @@ mod tests {
         let project = ProjectDocument::starter();
         let ron = project.to_ron_string().unwrap();
 
-        assert!(ron.contains("Room"));
+        assert!(ron.contains("Demo7 Map"));
         assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
     }
 
