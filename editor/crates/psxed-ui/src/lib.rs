@@ -4686,13 +4686,10 @@ impl EditorWorkspace {
         if metrics.visual_frames == 0 {
             return;
         }
-        let frame_ms = if metrics.visual_interval_vblanks > 0.0 {
-            let base_ms = metrics.visual_interval_vblanks * PLAY_NTSC_VBLANK_MS;
-            if metrics.visual_deadline_misses > 0 && metrics.visual_lateness_vblanks > 0 {
-                base_ms * (metrics.visual_lateness_vblanks.saturating_add(1) as f32)
-            } else {
-                base_ms
-            }
+        let frame_ms = if metrics.frame_ms.is_finite() && metrics.frame_ms > 0.0 {
+            metrics.frame_ms
+        } else if metrics.visual_interval_vblanks > 0.0 {
+            metrics.visual_interval_vblanks * PLAY_NTSC_VBLANK_MS
         } else {
             metrics.frame_ms
         };
