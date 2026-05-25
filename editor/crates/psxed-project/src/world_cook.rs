@@ -831,13 +831,8 @@ fn cook_walls(
                 material_slots,
             )?;
             let runtime_direction = runtime_wall_direction(direction);
-            for mut segment in wall.split_into_autotile_segments(sector_size) {
+            for segment in wall.split_into_autotile_segments(sector_size) {
                 validate_wall_heights(&segment, x, z, direction)?;
-                if segment.uv.span[1] == 0 {
-                    segment.autotile_uv(sector_size);
-                    segment.uv.offset[1] =
-                        crate::wrap_tiled_uv_offset_i16(i64::from(segment.uv.offset[1]));
-                }
                 cooked
                     .get_mut(runtime_direction)
                     .push(CookedGridVerticalFace {
@@ -1128,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn cook_autotiles_implicit_tall_wall_without_splitting_when_uv_fits_packet() {
+    fn cook_keeps_default_tall_wall_uvs_matching_editor_preview() {
         let project = ProjectDocument::starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
@@ -1152,16 +1147,16 @@ mod tests {
         assert_eq!(parsed_sector.wall_count(), 1);
         assert_eq!(
             max_uv_v_span(cooked_sector.walls.south[0].uvs),
-            world::TILE_UV * 2
+            world::TILE_UV
         );
         assert_eq!(
             max_uv_v_span(parsed_wall.uvs().corners()),
-            world::TILE_UV * 2
+            world::TILE_UV
         );
     }
 
     #[test]
-    fn cook_splits_autotiled_wall_only_when_uv_exceeds_packet_range() {
+    fn cook_splits_explicit_autotiled_wall_only_when_uv_exceeds_packet_range() {
         let project = ProjectDocument::starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
@@ -1173,6 +1168,10 @@ mod tests {
             world::SECTOR_SIZE * 5,
             Some(material),
         );
+        grid.sector_mut(0, 0)
+            .and_then(|sector| sector.walls.get_mut(GridDirection::North).first_mut())
+            .expect("north wall exists")
+            .autotile_uv(world::SECTOR_SIZE);
 
         let cooked = cook_world_grid(&project, &grid).unwrap();
         let cooked_sector = cooked.sectors[0].as_ref().unwrap();
