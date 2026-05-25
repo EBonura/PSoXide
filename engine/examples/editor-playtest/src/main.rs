@@ -1388,6 +1388,15 @@ const JOINT_CAP: usize = 32;
 const MAX_MODEL_INSTANCES: usize = 16;
 /// Cap on static boxed prop collision blockers per frame.
 const MAX_BOX_PROP_BLOCKERS: usize = 32;
+/// Fixed authored box-prop state budget. Props beyond this still render
+/// as static props, but cannot be toggled broken in this no-heap runtime.
+const MAX_BOX_PROP_STATE: usize = 128;
+const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
+/// Active baked break bursts retained after a prop is marked broken.
+const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
+const BOX_PROP_BREAK_FRAMES: u8 = 18;
+const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
+const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
 /// Cap on attached weapon/equipment visuals rendered per frame.
 const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// Runtime model cache capacity. The current playtest package only
@@ -1747,6 +1756,27 @@ impl PlayerAnim {
 
     const fn is_motor_fixed_action(self) -> bool {
         matches!(self, Self::Roll | Self::Backstep)
+    }
+}
+
+const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
+    matches!(anim, PlayerAnim::LightAttack | PlayerAnim::HeavyAttack)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BoxPropBreakEvent {
+    prop_index: u16,
+    age: u8,
+}
+
+impl BoxPropBreakEvent {
+    const EMPTY: Self = Self {
+        prop_index: u16::MAX,
+        age: 0,
+    };
+
+    const fn is_active(self) -> bool {
+        self.prop_index != u16::MAX
     }
 }
 
@@ -3054,6 +3084,10 @@ struct Playtest {
     /// locomotion input is ignored and the current action clip
     /// plays from start to finish.
     anim_lock_until_tick: u32,
+    /// Persistent runtime state for authored breakable box props.
+    box_prop_broken: [u32; BOX_PROP_BROKEN_WORDS],
+    /// Short-lived baked face-burst events for newly broken box props.
+    box_prop_break_events: [BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.
@@ -3165,6 +3199,8 @@ impl Playtest {
             anim_state: PlayerAnim::Idle,
             anim_start_tick: 0,
             anim_lock_until_tick: 0,
+            box_prop_broken: [0; BOX_PROP_BROKEN_WORDS],
+            box_prop_break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
             evade_run_hold_ticks: 0,
             evade_run_hold_consumed: false,
             free_orbit: false,
@@ -3270,6 +3306,9 @@ impl Scene for Playtest {
         self.room_index = spawn.room;
         self.anim_state = PlayerAnim::Idle;
         self.anim_start_tick = 0;
+        self.anim_lock_until_tick = 0;
+        self.box_prop_broken = [0; BOX_PROP_BROKEN_WORDS];
+        self.box_prop_break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
@@ -3328,6 +3367,7 @@ impl Scene for Playtest {
             self.free_orbit = !self.free_orbit;
         }
         let delta_vblanks = ctx.time.delta_vblanks();
+        self.advance_box_prop_break_events(delta_vblanks);
         if CAMERA_SWEEP_ENABLED {
             self.update_camera_sweep(delta_vblanks);
             return;
@@ -3391,6 +3431,13 @@ impl Scene for Playtest {
             }
         }
         let config = self.motor_config();
+        if self.anim_lock_until_tick > now && player_anim_is_attack(self.anim_state) {
+            self.break_box_props_for_attack(config);
+        } else if let Some(trigger) =
+            box_prop_movement_break_trigger(input, config, self.motor.stamina_q12())
+        {
+            self.break_box_props_for_movement(trigger, input, config, delta_vblanks);
+        }
         let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
         let collision_room_count = if self.chunked_level() {
             let catchup = delta_vblanks.min(4) as i32;
@@ -3875,6 +3922,17 @@ impl Scene for Playtest {
                 telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
                 telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
                 draw_box_props(
+                    BOX_PROPS,
+                    &self.box_prop_broken,
+                    active.index,
+                    &room_camera,
+                    actor_options,
+                    &lighting,
+                    &mut primitive_packets,
+                    &mut world,
+                );
+                draw_box_prop_break_events(
+                    &self.box_prop_break_events,
                     BOX_PROPS,
                     active.index,
                     &room_camera,
@@ -4438,6 +4496,104 @@ impl Playtest {
         }
     }
 
+    fn is_box_prop_broken(&self, index: usize) -> bool {
+        let Some((word, mask)) = box_prop_state_bit(index) else {
+            return false;
+        };
+        self.box_prop_broken[word] & mask != 0
+    }
+
+    fn mark_box_prop_broken(&mut self, index: usize) -> bool {
+        let Some((word, mask)) = box_prop_state_bit(index) else {
+            return false;
+        };
+        if self.box_prop_broken[word] & mask != 0 {
+            return false;
+        }
+        self.box_prop_broken[word] |= mask;
+        self.spawn_box_prop_break_event(index);
+        true
+    }
+
+    fn spawn_box_prop_break_event(&mut self, index: usize) {
+        let prop_index = index.min(u16::MAX as usize) as u16;
+        let mut target = 0usize;
+        let mut oldest_age = 0u8;
+        for (slot, event) in self.box_prop_break_events.iter().enumerate() {
+            if !event.is_active() {
+                self.box_prop_break_events[slot] = BoxPropBreakEvent { prop_index, age: 0 };
+                return;
+            }
+            if event.age >= oldest_age {
+                oldest_age = event.age;
+                target = slot;
+            }
+        }
+        self.box_prop_break_events[target] = BoxPropBreakEvent { prop_index, age: 0 };
+    }
+
+    fn advance_box_prop_break_events(&mut self, delta_vblanks: u16) {
+        let step = delta_vblanks.max(1).min(u8::MAX as u16) as u8;
+        for event in &mut self.box_prop_break_events {
+            if !event.is_active() {
+                continue;
+            }
+            event.age = event.age.saturating_add(step);
+            if event.age >= BOX_PROP_BREAK_FRAMES {
+                *event = BoxPropBreakEvent::EMPTY;
+            }
+        }
+    }
+
+    fn break_box_props_for_movement(
+        &mut self,
+        trigger: u16,
+        input: CharacterMotorInput,
+        config: CharacterMotorConfig,
+        delta_vblanks: u16,
+    ) {
+        let current = self.motor.position();
+        let target = box_prop_movement_probe_target(
+            current,
+            self.motor.yaw(),
+            input,
+            config,
+            trigger,
+            delta_vblanks,
+        );
+        for (index, prop) in BOX_PROPS.iter().enumerate() {
+            if prop.room != self.room_index
+                || prop.flags & trigger == 0
+                || self.is_box_prop_broken(index)
+            {
+                continue;
+            }
+            let (min, max) = box_prop_aabb(prop);
+            if character_body_overlaps_aabb(current, config.radius, config.height, min, max)
+                || character_body_overlaps_aabb(target, config.radius, config.height, min, max)
+            {
+                self.mark_box_prop_broken(index);
+            }
+        }
+    }
+
+    fn break_box_props_for_attack(&mut self, config: CharacterMotorConfig) {
+        let origin = self.motor.position();
+        let yaw = self.motor.yaw();
+        for (index, prop) in BOX_PROPS.iter().enumerate() {
+            if prop.room != self.room_index
+                || prop.flags & box_prop_flags::BREAK_ON_ATTACK == 0
+                || self.is_box_prop_broken(index)
+            {
+                continue;
+            }
+            let (min, max) = box_prop_aabb(prop);
+            if box_prop_intersects_attack_volume(origin, yaw, config, min, max) {
+                self.mark_box_prop_broken(index);
+            }
+        }
+    }
+
     fn collect_collision_blockers(
         &self,
         out: &mut [CharacterCollisionCylinder; MAX_MODEL_INSTANCES],
@@ -4470,32 +4626,16 @@ impl Playtest {
         out: &mut [CharacterCollisionAabb; MAX_BOX_PROP_BLOCKERS],
     ) -> usize {
         let mut count = 0usize;
-        for prop in BOX_PROPS {
+        for (index, prop) in BOX_PROPS.iter().enumerate() {
             if prop.room != self.room_index
                 || prop.flags & box_prop_flags::COLLISION_ENABLED == 0
+                || self.is_box_prop_broken(index)
                 || count >= out.len()
             {
                 continue;
             }
-            let vertices = box_prop_vertices(prop);
-            let mut min_x = vertices[0].x;
-            let mut max_x = vertices[0].x;
-            let mut min_y = vertices[0].y;
-            let mut max_y = vertices[0].y;
-            let mut min_z = vertices[0].z;
-            let mut max_z = vertices[0].z;
-            for vertex in vertices {
-                min_x = min_x.min(vertex.x);
-                max_x = max_x.max(vertex.x);
-                min_y = min_y.min(vertex.y);
-                max_y = max_y.max(vertex.y);
-                min_z = min_z.min(vertex.z);
-                max_z = max_z.max(vertex.z);
-            }
-            out[count] = CharacterCollisionAabb::new(
-                RoomPoint::new(min_x, min_y, min_z),
-                RoomPoint::new(max_x, max_y, max_z),
-            );
+            let (min, max) = box_prop_aabb(prop);
+            out[count] = CharacterCollisionAabb::new(min, max);
             count += 1;
         }
         count
@@ -10745,7 +10885,55 @@ const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT]
     [0, 1, 2, 3],
 ];
 
+fn box_prop_state_bit(index: usize) -> Option<(usize, u32)> {
+    if index >= MAX_BOX_PROP_STATE {
+        return None;
+    }
+    Some((index / 32, 1u32 << (index % 32)))
+}
+
+fn box_prop_broken_in_words(broken: &[u32; BOX_PROP_BROKEN_WORDS], index: usize) -> bool {
+    let Some((word, mask)) = box_prop_state_bit(index) else {
+        return false;
+    };
+    broken[word] & mask != 0
+}
+
 fn draw_box_props<T>(
+    props: &[LevelBoxPropRecord],
+    broken: &[u32; BOX_PROP_BROKEN_WORDS],
+    current_room: RoomIndex,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
+    for (index, prop) in props.iter().enumerate() {
+        if prop.room != current_room || box_prop_broken_in_words(broken, index) {
+            continue;
+        }
+        let vertices = box_prop_vertices(prop);
+        let (center, radius) = box_prop_cull_bounds(vertices);
+        if !sphere_visible_to_camera(camera, options, center, radius, 96) {
+            continue;
+        }
+        draw_box_prop_faces(
+            prop,
+            box_prop_faces(vertices),
+            camera,
+            options,
+            lighting,
+            triangles,
+            world,
+        );
+    }
+}
+
+fn draw_box_prop_break_events<T>(
+    events: &[BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
     props: &[LevelBoxPropRecord],
     current_room: RoomIndex,
     camera: &WorldCamera,
@@ -10756,80 +10944,100 @@ fn draw_box_props<T>(
 ) where
     T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
 {
-    for prop in props {
+    for event in events {
+        if !event.is_active() || event.age >= BOX_PROP_BREAK_FRAMES {
+            continue;
+        }
+        let Some(prop) = props.get(event.prop_index as usize) else {
+            continue;
+        };
         if prop.room != current_room {
             continue;
         }
         let vertices = box_prop_vertices(prop);
         let (center, radius) = box_prop_cull_bounds(vertices);
-        if !sphere_visible_to_camera(camera, options, center, radius, 96) {
+        if !sphere_visible_to_camera(camera, options, center, radius.saturating_mul(3), 128) {
             continue;
         }
-        let faces = box_prop_faces(vertices);
-        for face in 0..psx_level::BOX_PROP_FACE_COUNT {
-            let Some(texture_asset) = prop.texture_assets[face] else {
-                continue;
-            };
-            let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
-                continue;
-            };
-            let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-                asset.id,
-                asset.bytes,
-                VramSlotClutMode::TransparentZero,
-            ) else {
-                continue;
-            };
-            let material =
-                TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
-                    .with_texture_window(slot.texture_window);
-            let u_max = model_render_uv_max(slot.texture_width);
-            let v_max = model_render_uv_max(slot.texture_height);
-            let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-            let face_vertices = faces[face];
-            let colors = [
-                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][0], face_vertices[0]),
-                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][1], face_vertices[1]),
-                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][2], face_vertices[2]),
-                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][3], face_vertices[3]),
-            ];
-            let opts = options
-                .with_depth_policy(DepthPolicy::Average)
-                .with_cull_mode(CullMode::None)
-                .with_material_layer(material)
-                .with_textured_triangle_splitting(true)
-                .with_textured_triangle_max_edge(0);
-            if let Some(projected) = camera.project_world_quad(face_vertices) {
-                let _ = world.submit_textured_gouraud_triangle(
-                    triangles,
-                    [projected[0], projected[1], projected[2]],
-                    [uvs[0], uvs[1], uvs[2]],
-                    [colors[0], colors[1], colors[2]],
-                    material,
-                    opts,
-                );
-                let _ = world.submit_textured_gouraud_triangle(
-                    triangles,
-                    [projected[0], projected[2], projected[3]],
-                    [uvs[0], uvs[2], uvs[3]],
-                    [colors[0], colors[2], colors[3]],
-                    material,
-                    opts,
-                );
-            } else {
-                let tint = average_vertex_rgb(colors);
-                let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
-                    .with_texture_window(slot.texture_window);
-                let opts = opts.with_material_layer(material);
-                let _ = world.submit_textured_world_quad(
-                    triangles,
-                    *camera,
-                    face_vertices,
-                    uvs,
-                    material,
-                    opts,
-                );
-            }
+        let faces = box_prop_break_faces(vertices, event.age);
+        draw_box_prop_faces(prop, faces, camera, options, lighting, triangles, world);
+    }
+}
+
+fn draw_box_prop_faces<T>(
+    prop: &LevelBoxPropRecord,
+    faces: [[WorldVertex; 4]; psx_level::BOX_PROP_FACE_COUNT],
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
+    for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        let Some(texture_asset) = prop.texture_assets[face] else {
+            continue;
+        };
+        let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
+            continue;
+        };
+        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
+            asset.id,
+            asset.bytes,
+            VramSlotClutMode::TransparentZero,
+        ) else {
+            continue;
+        };
+        let material =
+            TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
+                .with_texture_window(slot.texture_window);
+        let u_max = model_render_uv_max(slot.texture_width);
+        let v_max = model_render_uv_max(slot.texture_height);
+        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+        let face_vertices = faces[face];
+        let colors = [
+            lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][0], face_vertices[0]),
+            lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][1], face_vertices[1]),
+            lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][2], face_vertices[2]),
+            lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][3], face_vertices[3]),
+        ];
+        let opts = options
+            .with_depth_policy(DepthPolicy::Average)
+            .with_cull_mode(CullMode::None)
+            .with_material_layer(material)
+            .with_textured_triangle_splitting(true)
+            .with_textured_triangle_max_edge(0);
+        if let Some(projected) = camera.project_world_quad(face_vertices) {
+            let _ = world.submit_textured_gouraud_triangle(
+                triangles,
+                [projected[0], projected[1], projected[2]],
+                [uvs[0], uvs[1], uvs[2]],
+                [colors[0], colors[1], colors[2]],
+                material,
+                opts,
+            );
+            let _ = world.submit_textured_gouraud_triangle(
+                triangles,
+                [projected[0], projected[2], projected[3]],
+                [uvs[0], uvs[2], uvs[3]],
+                [colors[0], colors[2], colors[3]],
+                material,
+                opts,
+            );
+        } else {
+            let tint = average_vertex_rgb(colors);
+            let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+                .with_texture_window(slot.texture_window);
+            let opts = opts.with_material_layer(material);
+            let _ = world.submit_textured_world_quad(
+                triangles,
+                *camera,
+                face_vertices,
+                uvs,
+                material,
+                opts,
+            );
         }
     }
 }
@@ -11002,6 +11210,182 @@ fn box_prop_cull_bounds(
         .saturating_add(abs_delta_i32(max_z, min_z))
         / 2;
     (center, radius.max(32))
+}
+
+fn box_prop_aabb(prop: &LevelBoxPropRecord) -> (RoomPoint, RoomPoint) {
+    let vertices = box_prop_vertices(prop);
+    let mut min_x = vertices[0].x;
+    let mut max_x = vertices[0].x;
+    let mut min_y = vertices[0].y;
+    let mut max_y = vertices[0].y;
+    let mut min_z = vertices[0].z;
+    let mut max_z = vertices[0].z;
+    for vertex in vertices {
+        min_x = min_x.min(vertex.x);
+        max_x = max_x.max(vertex.x);
+        min_y = min_y.min(vertex.y);
+        max_y = max_y.max(vertex.y);
+        min_z = min_z.min(vertex.z);
+        max_z = max_z.max(vertex.z);
+    }
+    (
+        RoomPoint::new(min_x, min_y, min_z),
+        RoomPoint::new(max_x, max_y, max_z),
+    )
+}
+
+fn box_prop_movement_break_trigger(
+    input: CharacterMotorInput,
+    config: CharacterMotorConfig,
+    stamina_q12: i32,
+) -> Option<u16> {
+    let moving = input.move_x.raw() != 0 || input.move_z.raw() != 0 || input.walk != 0;
+    if !moving {
+        return None;
+    }
+    if input.sprint && stamina_q12 > 0 && config.run_speed > config.walk_speed {
+        Some(box_prop_flags::BREAK_ON_RUN)
+    } else {
+        Some(box_prop_flags::BREAK_ON_WALK)
+    }
+}
+
+fn box_prop_movement_probe_target(
+    origin: RoomPoint,
+    yaw: Angle,
+    input: CharacterMotorInput,
+    config: CharacterMotorConfig,
+    trigger: u16,
+    delta_vblanks: u16,
+) -> RoomPoint {
+    let base_speed = if trigger == box_prop_flags::BREAK_ON_RUN {
+        config.run_speed
+    } else {
+        config.walk_speed
+    };
+    let speed = base_speed.saturating_mul(delta_vblanks.max(1).min(4) as i32);
+    let dx = input.move_x.mul_i32(speed);
+    let dz = input.move_z.mul_i32(speed);
+    if dx != 0 || dz != 0 {
+        return RoomPoint::new(
+            origin.x.saturating_add(dx),
+            origin.y,
+            origin.z.saturating_add(dz),
+        );
+    }
+    if input.walk == 0 || speed == 0 {
+        return origin;
+    }
+    let signed_speed = if input.walk < 0 { -speed } else { speed };
+    RoomPoint::new(
+        origin
+            .x
+            .saturating_add(yaw.sin().mul_i32(signed_speed)),
+        origin.y,
+        origin
+            .z
+            .saturating_add(yaw.cos().mul_i32(signed_speed)),
+    )
+}
+
+fn character_body_overlaps_aabb(
+    position: RoomPoint,
+    radius: i32,
+    height: i32,
+    min: RoomPoint,
+    max: RoomPoint,
+) -> bool {
+    if max.y < position.y || min.y > position.y.saturating_add(height.max(1)) {
+        return false;
+    }
+    let closest_x = position.x.clamp(min.x, max.x);
+    let closest_z = position.z.clamp(min.z, max.z);
+    let dx = position.x.saturating_sub(closest_x);
+    let dz = position.z.saturating_sub(closest_z);
+    square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
+        <= square_i32_saturating(radius.max(0))
+}
+
+fn box_prop_intersects_attack_volume(
+    origin: RoomPoint,
+    yaw: Angle,
+    config: CharacterMotorConfig,
+    min: RoomPoint,
+    max: RoomPoint,
+) -> bool {
+    let body_top = origin.y.saturating_add(config.height.max(1));
+    if max.y < origin.y.saturating_sub(128) || min.y > body_top.saturating_add(128) {
+        return false;
+    }
+    let center_x = min.x.saturating_add(max.x) / 2;
+    let center_z = min.z.saturating_add(max.z) / 2;
+    let dx = center_x.saturating_sub(origin.x);
+    let dz = center_z.saturating_sub(origin.z);
+    let sin_yaw = yaw.sin();
+    let cos_yaw = yaw.cos();
+    let forward = sin_yaw
+        .mul_i32(dx)
+        .saturating_add(cos_yaw.mul_i32(dz));
+    let lateral = cos_yaw
+        .mul_i32(dx)
+        .saturating_sub(sin_yaw.mul_i32(dz));
+    let prop_extent = abs_delta_i32(max.x, min.x)
+        .saturating_add(abs_delta_i32(max.z, min.z))
+        / 2;
+    let reach = BOX_PROP_BREAK_ATTACK_REACH
+        .saturating_add(config.radius.max(0))
+        .saturating_add(prop_extent);
+    let half_width = BOX_PROP_BREAK_ATTACK_WIDTH
+        .saturating_add(config.radius.max(0))
+        .saturating_add(prop_extent);
+    forward >= -prop_extent && forward <= reach && abs_i32(lateral) <= half_width
+}
+
+fn box_prop_break_faces(
+    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
+    age: u8,
+) -> [[WorldVertex; 4]; psx_level::BOX_PROP_FACE_COUNT] {
+    let base = box_prop_faces(vertices);
+    let (center, _) = box_prop_cull_bounds(vertices);
+    let t = age.min(BOX_PROP_BREAK_FRAMES) as i32;
+    let spread_q8 = t.saturating_mul(t).saturating_mul(2);
+    let drop = t.saturating_mul(t).saturating_mul(3);
+    let mut out = base;
+    for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        let face_center = WorldVertex::new(
+            average4_i32(
+                base[face][0].x,
+                base[face][1].x,
+                base[face][2].x,
+                base[face][3].x,
+            ),
+            average4_i32(
+                base[face][0].y,
+                base[face][1].y,
+                base[face][2].y,
+                base[face][3].y,
+            ),
+            average4_i32(
+                base[face][0].z,
+                base[face][1].z,
+                base[face][2].z,
+                base[face][3].z,
+            ),
+        );
+        let spread_q8 = spread_q8.min(u16::MAX as i32) as u16;
+        let offset_x = scale_q8_i32(face_center.x.saturating_sub(center.x), spread_q8);
+        let offset_y = scale_q8_i32(face_center.y.saturating_sub(center.y), spread_q8)
+            .saturating_sub(drop);
+        let offset_z = scale_q8_i32(face_center.z.saturating_sub(center.z), spread_q8);
+        for corner in 0..4 {
+            out[face][corner] = WorldVertex::new(
+                base[face][corner].x.saturating_add(offset_x),
+                base[face][corner].y.saturating_add(offset_y),
+                base[face][corner].z.saturating_add(offset_z),
+            );
+        }
+    }
+    out
 }
 
 fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {

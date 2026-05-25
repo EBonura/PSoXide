@@ -8125,6 +8125,7 @@ impl EditorWorkspace {
                                 materials: [Some(material_id); psxed_project::BOX_PROP_FACE_COUNT],
                                 vertices: psxed_project::box_prop_vertices_for_size(size),
                                 collision_enabled: true,
+                                break_flags: 0,
                             },
                         )
                     }
@@ -18489,6 +18490,24 @@ fn draw_box_prop_nudge_buttons(
     changed
 }
 
+fn draw_box_prop_break_flag_checkbox(
+    ui: &mut egui::Ui,
+    flags: &mut u16,
+    flag: u16,
+    label: &str,
+) -> bool {
+    let mut checked = *flags & flag != 0;
+    if !ui.checkbox(&mut checked, label).changed() {
+        return false;
+    }
+    if checked {
+        *flags |= flag;
+    } else {
+        *flags &= !flag;
+    }
+    true
+}
+
 fn nudge_box_prop_vertices(
     vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
     indices: &[usize],
@@ -18927,6 +18946,7 @@ fn draw_node_kind_editor(
             materials,
             vertices,
             collision_enabled,
+            break_flags,
         } => {
             ui.weak(
                 "Editable material-backed box. Transform position is the bottom-center anchor.",
@@ -18953,6 +18973,28 @@ fn draw_node_kind_editor(
             }
             ui.separator();
             changed |= ui.checkbox(collision_enabled, "Collision").changed();
+            ui.separator();
+            ui.label(RichText::new("Break On").color(STUDIO_TEXT_WEAK));
+            ui.horizontal(|ui| {
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_WALK,
+                    "Walk",
+                );
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_RUN,
+                    "Run",
+                );
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_ATTACK,
+                    "Attack",
+                );
+            });
             ui.separator();
             egui::CollapsingHeader::new("Move Faces")
                 .default_open(false)
@@ -25527,6 +25569,7 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 16] {
                     psxed_project::DEFAULT_BOX_PROP_SIZE,
                 ),
                 collision_enabled: true,
+                break_flags: 0,
             },
         ),
         (
