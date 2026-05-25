@@ -919,6 +919,7 @@ pub fn build_package(
                 materials,
                 vertices,
                 collision_enabled,
+                break_flags,
             } => {
                 if !push_box_prop(
                     project,
@@ -932,6 +933,7 @@ pub fn build_package(
                     materials,
                     *vertices,
                     *collision_enabled,
+                    *break_flags,
                     &mut texture_asset_for_resource,
                     &mut assets,
                     &mut box_props,
@@ -3071,6 +3073,7 @@ fn push_box_prop(
     materials: &[Option<ResourceId>; crate::BOX_PROP_FACE_COUNT],
     vertices: [[i16; 3]; crate::BOX_PROP_VERTEX_COUNT],
     collision_enabled: bool,
+    break_flags: u16,
     texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
     assets: &mut Vec<PlaytestAsset>,
     box_props: &mut Vec<PlaytestBoxProp>,
@@ -3115,6 +3118,11 @@ fn push_box_prop(
         baked_vertex_rgb[face] = [rgb_tuple(tint_rgb[face]); 4];
     }
 
+    let mut flags = break_flags & box_prop_flags::BREAK_ON_MASK;
+    if collision_enabled {
+        flags |= box_prop_flags::COLLISION_ENABLED;
+    }
+
     box_props.push(PlaytestBoxProp {
         room: room_index,
         texture_asset_indices,
@@ -3127,11 +3135,7 @@ fn push_box_prop(
         vertices,
         tint_rgb,
         baked_vertex_rgb,
-        flags: if collision_enabled {
-            box_prop_flags::COLLISION_ENABLED
-        } else {
-            0
-        },
+        flags,
     });
     true
 }
@@ -9025,6 +9029,8 @@ mod tests {
                 materials: [Some(material_id); crate::BOX_PROP_FACE_COUNT],
                 vertices,
                 collision_enabled: true,
+                break_flags: psx_level::box_prop_flags::BREAK_ON_WALK
+                    | psx_level::box_prop_flags::BREAK_ON_ATTACK,
             },
         );
         if let Some(node) = scene.node_mut(prop_id) {
@@ -9044,6 +9050,8 @@ mod tests {
         assert_eq!(prop.yaw, 1024);
         assert_eq!(prop.roll, 3072);
         assert_eq!(prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED, 1);
+        assert_ne!(prop.flags & psx_level::box_prop_flags::BREAK_ON_WALK, 0);
+        assert_ne!(prop.flags & psx_level::box_prop_flags::BREAK_ON_ATTACK, 0);
     }
 
     #[test]
