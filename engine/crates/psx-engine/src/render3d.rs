@@ -1412,7 +1412,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 colors[2],
             ),
         ];
-        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+        if projected_triangle_can_skip_split(verts, options) {
             merge_world_stats(
                 &mut stats,
                 self.submit_textured_gouraud_triangle_leaf(triangles, textured, material, options),
@@ -1457,7 +1457,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 colors[2],
             ),
         ];
-        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+        if projected_triangle_can_skip_split(verts, options) {
             return self
                 .submit_textured_gouraud_triangle_leaf(triangles, textured, material, options);
         }
@@ -1480,7 +1480,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         material: TextureMaterial,
         options: WorldSurfaceOptions,
     ) -> WorldRenderStats {
-        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+        if projected_triangle_can_skip_split(verts, options) {
             return self.submit_textured_gouraud_triangle_leaf_u8(
                 triangles, verts, uvs, colors, material, options,
             );
@@ -1510,7 +1510,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         prepared_depth: PreparedTriangleDepth,
     ) -> WorldRenderStats {
-        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+        if projected_triangle_can_skip_split(verts, options) {
             return self.submit_textured_gouraud_triangle_leaf_u8_prepared_depth(
                 triangles,
                 verts,
@@ -1539,7 +1539,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         material: TextureMaterial,
         options: WorldSurfaceOptions,
     ) -> WorldRenderStats {
-        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+        if projected_triangle_can_skip_split(verts, options) {
             return self.submit_textured_gouraud_triangle_leaf_uv_words(
                 triangles, verts, uv_words, colors, material, options,
             );
@@ -1569,7 +1569,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         prepared_depth: PreparedTriangleDepth,
     ) -> WorldRenderStats {
-        if options.split_textured_triangles && projected_triangle_hw_safe(verts) {
+        if projected_triangle_can_skip_split(verts, options) {
             return self.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
                 triangles,
                 verts,
@@ -1605,7 +1605,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         profile: &mut TexturedGouraudSubmitMicroProfile,
     ) -> WorldRenderStats {
         let hw_safe_start = TexturedGouraudSubmitMicroProfile::cycle();
-        let hardware_safe = options.split_textured_triangles && projected_triangle_hw_safe(verts);
+        let hardware_safe = projected_triangle_can_skip_split(verts, options);
         profile.add_hw_safe_test(TexturedGouraudSubmitMicroProfile::elapsed(hw_safe_start));
         if hardware_safe {
             profile.count_hw_safe();
@@ -1640,7 +1640,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         profile: &mut TexturedGouraudSubmitMicroProfile,
     ) -> WorldRenderStats {
         let hw_safe_start = TexturedGouraudSubmitMicroProfile::cycle();
-        let hardware_safe = options.split_textured_triangles && projected_triangle_hw_safe(verts);
+        let hardware_safe = projected_triangle_can_skip_split(verts, options);
         profile.add_hw_safe_test(TexturedGouraudSubmitMicroProfile::elapsed(hw_safe_start));
         if hardware_safe {
             profile.count_hw_safe();
@@ -1680,7 +1680,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         profile: &mut TexturedGouraudSubmitMicroProfile,
     ) -> WorldRenderStats {
         let hw_safe_start = TexturedGouraudSubmitMicroProfile::cycle();
-        let hardware_safe = options.split_textured_triangles && projected_triangle_hw_safe(verts);
+        let hardware_safe = projected_triangle_can_skip_split(verts, options);
         profile.add_hw_safe_test(TexturedGouraudSubmitMicroProfile::elapsed(hw_safe_start));
         if hardware_safe {
             profile.count_hw_safe();
@@ -1720,7 +1720,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         profile: &mut TexturedGouraudSubmitMicroProfile,
     ) -> WorldRenderStats {
         let hw_safe_start = TexturedGouraudSubmitMicroProfile::cycle();
-        let hardware_safe = options.split_textured_triangles && projected_triangle_hw_safe(verts);
+        let hardware_safe = projected_triangle_can_skip_split(verts, options);
         profile.add_hw_safe_test(TexturedGouraudSubmitMicroProfile::elapsed(hw_safe_start));
         if hardware_safe {
             profile.count_hw_safe();
@@ -1768,9 +1768,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             clamp_projected_textured_gouraud_vertex(verts[2]),
         ];
 
-        if projected_textured_gouraud_exceeds_hw_extent(verts)
-            && split_depth < MAX_TEXTURED_HW_SPLIT_DEPTH
-        {
+        let needs_split = projected_textured_gouraud_needs_split(verts, options);
+        if needs_split && split_depth < MAX_TEXTURED_HW_SPLIT_DEPTH {
             return self.submit_split_textured_gouraud_triangle(
                 triangles,
                 verts,
@@ -4512,6 +4511,21 @@ fn projected_textured_gouraud_exceeds_hw_extent(
         || projected_edge_exceeds_hw_extent(verts[2].textured(), verts[0].textured())
 }
 
+fn projected_textured_gouraud_needs_split(
+    verts: [ProjectedTexturedGouraudVertex; 3],
+    options: WorldSurfaceOptions,
+) -> bool {
+    projected_textured_gouraud_exceeds_hw_extent(verts)
+        || projected_textured_exceeds_quality_extent(
+            [
+                verts[0].textured(),
+                verts[1].textured(),
+                verts[2].textured(),
+            ],
+            options.textured_split_max_edge,
+        )
+}
+
 fn projected_triangle_hw_safe(verts: [ProjectedVertex; 3]) -> bool {
     let min_x = verts[0].sx.min(verts[1].sx).min(verts[2].sx);
     let max_x = verts[0].sx.max(verts[1].sx).max(verts[2].sx);
@@ -4523,6 +4537,30 @@ fn projected_triangle_hw_safe(verts: [ProjectedVertex; 3]) -> bool {
         && max_y <= PSX_VERTEX_MAX
         && ((max_x as i32) - (min_x as i32)) <= PSX_TRI_MAX_DX
         && ((max_y as i32) - (min_y as i32)) <= PSX_TRI_MAX_DY
+}
+
+fn projected_triangle_can_skip_split(
+    verts: [ProjectedVertex; 3],
+    options: WorldSurfaceOptions,
+) -> bool {
+    options.split_textured_triangles
+        && projected_triangle_hw_safe(verts)
+        && !projected_vertices_exceed_quality_extent(verts, options.textured_split_max_edge)
+}
+
+fn projected_vertices_exceed_quality_extent(verts: [ProjectedVertex; 3], max_edge: u16) -> bool {
+    if max_edge == 0 {
+        return false;
+    }
+    projected_vertex_edge_split_score(verts[0], verts[1]) > max_edge as i32
+        || projected_vertex_edge_split_score(verts[1], verts[2]) > max_edge as i32
+        || projected_vertex_edge_split_score(verts[2], verts[0]) > max_edge as i32
+}
+
+fn projected_vertex_edge_split_score(a: ProjectedVertex, b: ProjectedVertex) -> i32 {
+    let dx = ((a.sx as i32) - (b.sx as i32)).abs();
+    let dy = ((a.sy as i32) - (b.sy as i32)).abs();
+    dx.max(dy.saturating_mul(2))
 }
 
 #[inline(always)]
@@ -5666,6 +5704,49 @@ mod tests {
         assert_eq!(regular.submitted_triangles, 1);
         assert_eq!(prescreened.submitted_triangles, 1);
         assert_eq!(commands[0].depth_raw(), commands[1].depth_raw());
+    }
+
+    #[test]
+    fn prescreened_gouraud_honors_quality_split_max_edge() {
+        const ZERO: TriTexturedGouraud = TriTexturedGouraud::new(
+            [(0, 0), (0, 0), (0, 0)],
+            [(0, 0), (0, 0), (0, 0)],
+            [(0, 0, 0), (0, 0, 0), (0, 0, 0)],
+            0,
+            0,
+        );
+        let material = TextureMaterial::opaque(0, 0, (128, 128, 128));
+        let verts = [
+            ProjectedVertex::new(0, 0, 100),
+            ProjectedVertex::new(64, 0, 120),
+            ProjectedVertex::new(0, 16, 140),
+        ];
+        let uvs = [(0, 0), (63, 0), (0, 15)];
+        let colors = [(128, 128, 128), (96, 96, 96), (64, 64, 64)];
+        let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000))
+            .with_cull_mode(CullMode::None)
+            .with_textured_triangle_splitting(true)
+            .with_textured_triangle_max_edge(16);
+
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut triangle_storage = [const { ZERO }; 16];
+        let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 16];
+        let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+
+        let stats = pass.submit_textured_gouraud_triangle_prescreened_u8(
+            &mut triangles,
+            verts,
+            uvs,
+            colors,
+            material,
+            options,
+        );
+
+        assert!(stats.split_triangles > 0);
+        assert!(stats.submitted_triangles > 1);
+        assert_eq!(triangles.len(), stats.submitted_triangles as usize);
     }
 
     #[test]

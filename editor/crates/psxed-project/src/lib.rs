@@ -323,6 +323,41 @@ const fn default_image_prop_collision_size() -> [u16; 3] {
     ]
 }
 
+/// Face slots on an authored boxed prop.
+pub const BOX_PROP_FACE_COUNT: usize = 6;
+/// Editable vertex count on an authored boxed prop.
+pub const BOX_PROP_VERTEX_COUNT: usize = 8;
+/// Default authored cube size for boxed props, in engine/editor units.
+pub const DEFAULT_BOX_PROP_SIZE: u16 = DEFAULT_WORLD_SECTOR_SIZE as u16;
+
+/// User-facing face order for boxed prop material slots.
+pub const BOX_PROP_FACE_NAMES: [&str; BOX_PROP_FACE_COUNT] =
+    ["Front", "Right", "Back", "Left", "Top", "Bottom"];
+
+const fn default_box_prop_materials() -> [Option<ResourceId>; BOX_PROP_FACE_COUNT] {
+    [None; BOX_PROP_FACE_COUNT]
+}
+
+const fn default_box_prop_vertices() -> [[i16; 3]; BOX_PROP_VERTEX_COUNT] {
+    box_prop_vertices_for_size(DEFAULT_BOX_PROP_SIZE)
+}
+
+/// Build the default bottom-anchored cube vertices for a boxed prop.
+pub const fn box_prop_vertices_for_size(size: u16) -> [[i16; 3]; BOX_PROP_VERTEX_COUNT] {
+    let half = (size / 2) as i16;
+    let height = size as i16;
+    [
+        [-half, 0, -half],
+        [half, 0, -half],
+        [half, 0, half],
+        [-half, 0, half],
+        [-half, height, -half],
+        [half, height, -half],
+        [half, height, half],
+        [-half, height, half],
+    ]
+}
+
 impl MaterialResource {
     /// Build an opaque neutral material.
     pub const fn opaque(texture: Option<ResourceId>) -> Self {
@@ -7096,6 +7131,20 @@ pub enum NodeKind {
         #[serde(default = "default_image_prop_collision_size")]
         collision_size: [u16; 3],
     },
+    /// Material-backed editable hexahedron. The transform is a
+    /// bottom-center anchor, `vertices` are local engine units from
+    /// that anchor, and each face can bind its own material.
+    BoxProp {
+        /// Per-face material slots in [`BOX_PROP_FACE_NAMES`] order.
+        #[serde(default = "default_box_prop_materials")]
+        materials: [Option<ResourceId>; BOX_PROP_FACE_COUNT],
+        /// Editable local vertices, bottom ring then top ring.
+        #[serde(default = "default_box_prop_vertices")]
+        vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
+        /// Whether this prop blocks the character motor.
+        #[serde(default = "default_true")]
+        collision_enabled: bool,
+    },
     /// Render a cooked [`ResourceData::Model`] from the transform
     /// on the nearest entity ancestor. This is the component form of
     /// the legacy [`MeshInstance`](Self::MeshInstance) node.
@@ -7277,6 +7326,7 @@ impl NodeKind {
             Self::Room { .. } => "Room",
             Self::MeshInstance { .. } => "Mesh Instance",
             Self::ImageProp { .. } => "Image Prop",
+            Self::BoxProp { .. } => "Box Prop",
             Self::ModelRenderer { .. } => "Model Renderer",
             Self::Animator { .. } => "Animator",
             Self::Collider { .. } => "Collider",
@@ -7859,6 +7909,65 @@ impl Default for EditorVisibilityState {
     }
 }
 
+/// Runtime depth sorting policy for cooked cached room geometry.
+///
+/// This affects embedded play and generated runtime manifests. The editor
+/// preview remains the reference view, but the PS1 path needs explicit
+/// tradeoffs between stable ordering and per-triangle work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeDepthSortMode {
+    /// Use the legacy fixed cell depth key for every cached surface.
+    FixedCell,
+    /// Use per-triangle depth for sloped/high-span horizontal surfaces.
+    Hybrid,
+    /// Use per-triangle projected depth for every cached surface.
+    PerTriangle,
+}
+
+impl RuntimeDepthSortMode {
+    pub const ALL: [Self; 3] = [Self::Hybrid, Self::PerTriangle, Self::FixedCell];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FixedCell => "Fixed cell",
+            Self::Hybrid => "Hybrid",
+            Self::PerTriangle => "Per triangle",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::FixedCell => "Fast legacy ordering. Can show overlap errors on ramps.",
+            Self::Hybrid => "Uses per-triangle depth only where sloped floors need it.",
+            Self::PerTriangle => "Most precise cached-room ordering. Costs more sort work.",
+        }
+    }
+
+    pub const fn manifest_value(self) -> u8 {
+        match self {
+            Self::FixedCell => 0,
+            Self::Hybrid => 1,
+            Self::PerTriangle => 2,
+        }
+    }
+}
+
+impl Default for RuntimeDepthSortMode {
+    fn default() -> Self {
+        Self::Hybrid
+    }
+}
+
+/// Default projected edge threshold for runtime room subdivision.
+///
+/// `0` disables visual subdivision and keeps splitting limited to PS1
+/// hardware packet bounds. Lower positive values split more aggressively.
+pub const DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE: u16 = 128;
+
+const fn default_runtime_texture_split_max_edge() -> u16 {
+    DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE
+}
+
 /// One editor project document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDocument {
@@ -7870,6 +7979,12 @@ pub struct ProjectDocument {
     /// Editor-only overlay visibility preferences.
     #[serde(default)]
     pub editor_visibility: EditorVisibilityState,
+    /// Cooked playtest cached-room depth sorting mode.
+    #[serde(default)]
+    pub runtime_depth_sort_mode: RuntimeDepthSortMode,
+    /// Projected edge threshold used to subdivide textured runtime room surfaces.
+    #[serde(default = "default_runtime_texture_split_max_edge")]
+    pub runtime_texture_split_max_edge: u16,
     /// Open scenes. The first scene is the active scene for now.
     pub scenes: Vec<Scene>,
     /// Project resources.
@@ -7884,6 +7999,8 @@ impl ProjectDocument {
             name: name.into(),
             editor_camera: EditorCameraState::default(),
             editor_visibility: EditorVisibilityState::default(),
+            runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
+            runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
             resources: Vec::new(),
             next_resource_id: 1,
@@ -8473,6 +8590,10 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
                 + option_resource_reference_count(*material, id)
         }
         NodeKind::ImageProp { material, .. } => option_resource_reference_count(*material, id),
+        NodeKind::BoxProp { materials, .. } => materials
+            .iter()
+            .filter(|material| **material == Some(id))
+            .count(),
         NodeKind::ModelRenderer {
             model, material, ..
         } => {
@@ -8524,6 +8645,13 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
             clear_option_resource(mesh, id) + clear_option_resource(material, id)
         }
         NodeKind::ImageProp { material, .. } => clear_option_resource(material, id),
+        NodeKind::BoxProp { materials, .. } => {
+            let mut cleared = 0;
+            for material in materials {
+                cleared += clear_option_resource(material, id);
+            }
+            cleared
+        }
         NodeKind::ModelRenderer {
             model, material, ..
         } => clear_option_resource(model, id) + clear_option_resource(material, id),
@@ -10474,6 +10602,18 @@ mod tests {
         let ron = project.to_ron_string().unwrap();
 
         assert!(ron.contains("editor_visibility"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn runtime_depth_sort_mode_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("depth-sort");
+        project.runtime_depth_sort_mode = RuntimeDepthSortMode::PerTriangle;
+        project.runtime_texture_split_max_edge = 96;
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("runtime_depth_sort_mode"));
+        assert!(ron.contains("runtime_texture_split_max_edge"));
         assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
     }
 
