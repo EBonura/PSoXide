@@ -114,6 +114,28 @@ const PREVIEW_WALL_UVS: [(u8, u8); 4] = [
     (GRID_TILE_UV, 0),
     (0, 0),
 ];
+const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psxed_project::BOX_PROP_FACE_COUNT] = [
+    [4, 5, 1, 0],
+    [5, 6, 2, 1],
+    [6, 7, 3, 2],
+    [7, 4, 0, 3],
+    [7, 6, 5, 4],
+    [0, 1, 2, 3],
+];
+const BOX_PROP_EDGE_VERTEX_INDICES: [(usize, usize); 12] = [
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+];
 const EDITOR_PREVIEW_HOVER_STROKE_WIDTH: f32 = 1.5;
 const EDITOR_PREVIEW_SELECTED_STROKE_WIDTH: f32 = 3.0;
 const EDITOR_PREVIEW_PAINT_STROKE_WIDTH: f32 = 2.0;
@@ -303,6 +325,19 @@ pub fn build_phase1_frame(
             grid,
             textures,
             world_camera,
+            hidden_scene_nodes,
+            selected,
+            hovered_entity_node,
+            preview_bounds,
+            &mut scratch,
+        );
+        walk_box_props(
+            project,
+            room_id,
+            grid,
+            textures,
+            world_camera,
+            fog,
             hidden_scene_nodes,
             selected,
             hovered_entity_node,
@@ -2072,6 +2107,168 @@ fn walk_image_props(
     }
 }
 
+fn walk_box_props(
+    project: &ProjectDocument,
+    room_id: psxed_project::NodeId,
+    grid: &WorldGrid,
+    textures: &EditorTextures,
+    camera: psx_engine::WorldCamera,
+    fog: PreviewFog,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+    hovered: Option<NodeId>,
+    preview_bounds: bool,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
+    for node in scene.nodes() {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
+            || !is_descendant_of_room(scene, node.id, room_id)
+        {
+            continue;
+        }
+        let NodeKind::BoxProp {
+            materials,
+            vertices,
+            collision_enabled: _,
+        } = &node.kind
+        else {
+            continue;
+        };
+        let origin = node_room_local_origin(grid, &node.transform);
+        let world_vertices = box_prop_vertices(origin, *vertices, node.transform.rotation_degrees);
+        for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+            let Some(material_id) = materials[face] else {
+                continue;
+            };
+            let face_vertices = box_prop_face_vertices(world_vertices, face);
+            let Some(projected) = camera.project_world_quad(face_vertices) else {
+                continue;
+            };
+            let p = projected.map(preview_projected_from_engine);
+            let shade = face_shade(
+                project,
+                Some(material_id),
+                box_prop_fallback_color(face),
+                textures,
+            )
+            // Box props are standalone closed primitives. The
+            // runtime renders them uncullled, and the editor
+            // preview should match that rather than inheriting
+            // one-sided room-face material semantics.
+            .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
+            let face_center = average_world_quad(face_vertices);
+            let depth = face_depth(camera, face_center);
+            let shade = fog.apply_shade(
+                light_face(shade, face_center, &lights, grid.ambient_color),
+                depth,
+            );
+            let uvs = match shade {
+                FaceShade::Textured { slot, .. } => {
+                    let u_max = slot.texture_width.saturating_sub(1);
+                    let v_max = slot.texture_height.saturating_sub(1);
+                    [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]
+                }
+                FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
+            };
+            emit_box_prop_face(scratch, p, uvs, shade);
+        }
+
+        if preview_bounds {
+            let is_selected = node.id == selected;
+            let is_hovered = hovered == Some(node.id);
+            push_box_prop_wireframe(
+                scratch,
+                world_vertices,
+                entity_bound_style(psxed_ui::EntityBoundKind::BoxProp, is_selected, is_hovered),
+            );
+        }
+    }
+}
+
+fn emit_box_prop_face(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 4],
+    uvs: [(u8, u8); 4],
+    shade: FaceShade,
+) {
+    let _ = emit_face_tri(scratch, [p[0], p[1], p[2]], [uvs[0], uvs[1], uvs[2]], shade);
+    let _ = emit_face_tri(scratch, [p[0], p[2], p[3]], [uvs[0], uvs[2], uvs[3]], shade);
+}
+
+fn box_prop_vertices(
+    origin: psx_engine::WorldVertex,
+    vertices: [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    rotation_degrees: [f32; 3],
+) -> [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT] {
+    let rotation = [
+        yaw_to_q12(rotation_degrees[0]),
+        yaw_to_q12(rotation_degrees[1]),
+        yaw_to_q12(rotation_degrees[2]),
+    ];
+    let mut out = [psx_engine::WorldVertex::new(0, 0, 0); psxed_project::BOX_PROP_VERTEX_COUNT];
+    for (i, local) in vertices.iter().enumerate() {
+        let rotated = rotate_image_prop_local(
+            [local[0] as i32, local[1] as i32, local[2] as i32],
+            rotation,
+        );
+        out[i] = psx_engine::WorldVertex::new(
+            origin.x.saturating_add(rotated[0]),
+            origin.y.saturating_add(rotated[1]),
+            origin.z.saturating_add(rotated[2]),
+        );
+    }
+    out
+}
+
+fn box_prop_face_vertices(
+    vertices: [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT],
+    face: usize,
+) -> [psx_engine::WorldVertex; 4] {
+    let indices = BOX_PROP_FACE_VERTEX_INDICES[face];
+    [
+        vertices[indices[0]],
+        vertices[indices[1]],
+        vertices[indices[2]],
+        vertices[indices[3]],
+    ]
+}
+
+fn average_world_quad(verts: [psx_engine::WorldVertex; 4]) -> [i32; 3] {
+    [
+        average_i32_4(verts[0].x, verts[1].x, verts[2].x, verts[3].x),
+        average_i32_4(verts[0].y, verts[1].y, verts[2].y, verts[3].y),
+        average_i32_4(verts[0].z, verts[1].z, verts[2].z, verts[3].z),
+    ]
+}
+
+fn box_prop_fallback_color(face: usize) -> (u8, u8, u8) {
+    const COLORS: [(u8, u8, u8); psxed_project::BOX_PROP_FACE_COUNT] = [
+        (0x87, 0xB4, 0xDC),
+        (0x78, 0xC0, 0xA0),
+        (0xD0, 0xAA, 0x78),
+        (0xB0, 0x98, 0xD0),
+        (0xC0, 0xC8, 0xD0),
+        (0x90, 0x98, 0xA0),
+    ];
+    COLORS[face]
+}
+
+fn push_box_prop_wireframe(
+    scratch: &mut PreviewScratch,
+    vertices: [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT],
+    style: FaceOutlineStyle,
+) {
+    let projected = vertices.map(|v| gte_scene::project_vertex(world_to_view([v.x, v.y, v.z])));
+    for (a, b) in BOX_PROP_EDGE_VERTEX_INDICES {
+        if projected[a].sz == 0 || projected[b].sz == 0 {
+            continue;
+        }
+        push_screen_line(scratch, projected[a], projected[b], style);
+    }
+}
+
 fn preview_lit_image_prop_tint(
     tint: [u8; 3],
     verts: [psx_engine::WorldVertex; 4],
@@ -3163,6 +3360,7 @@ fn walk_entity_bounds(
             b.kind,
             psxed_ui::EntityBoundKind::PointLight
                 | psxed_ui::EntityBoundKind::ImageProp
+                | psxed_ui::EntityBoundKind::BoxProp
                 | psxed_ui::EntityBoundKind::Portal
         ) {
             continue;
@@ -3206,6 +3404,7 @@ fn entity_bound_style(
         psxed_ui::EntityBoundKind::Model => (0xC0, 0xC8, 0xD0),
         psxed_ui::EntityBoundKind::MeshFallback => (0x90, 0x98, 0xA0),
         psxed_ui::EntityBoundKind::ImageProp => (0xD0, 0xAA, 0x78),
+        psxed_ui::EntityBoundKind::BoxProp => (0x87, 0xB4, 0xDC),
         psxed_ui::EntityBoundKind::SpawnPoint => (0x60, 0xE0, 0x80),
         psxed_ui::EntityBoundKind::PointLight => (0xFF, 0xD8, 0x70),
         psxed_ui::EntityBoundKind::Trigger => (0xC8, 0x80, 0xE0),
@@ -3282,10 +3481,12 @@ fn push_world_box_wireframe(
 }
 
 fn selected_node_is_image_prop(project: &ProjectDocument, selected: NodeId) -> bool {
-    project
-        .active_scene()
-        .node(selected)
-        .is_some_and(|node| matches!(node.kind, NodeKind::ImageProp { .. }))
+    project.active_scene().node(selected).is_some_and(|node| {
+        matches!(
+            node.kind,
+            NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. }
+        )
+    })
 }
 
 /// Draw a forward-pointing arrow from the bound centre out
@@ -3468,6 +3669,9 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         NodeKind::SpawnPoint { player: false, .. } => Some((0x60, 0xB8, 0xF0)),
         NodeKind::MeshInstance { .. } => Some((0xC0, 0xC8, 0xD0)),
         NodeKind::ImageProp { .. } => Some((0xD0, 0xAA, 0x78)),
+        // Box props render as real textured geometry in
+        // `walk_box_props`; don't cover them with a 2D marker.
+        NodeKind::BoxProp { .. } => None,
         NodeKind::Entity => Some((0xA0, 0xB0, 0xC0)),
         // Lights draw their own bulb icon + radius ring in
         // `walk_light_gizmos`; using the generic billboard square

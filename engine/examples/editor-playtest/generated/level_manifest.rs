@@ -3,7 +3,7 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelCachedRoomCellRecord,
+    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelBoxPropRecord, LevelCachedRoomCellRecord,
     LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
     LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
@@ -16,6 +16,8 @@ use psx_level::{
 
 pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
 pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = 0;
+pub const CACHED_ROOM_DEPTH_MODE: u8 = 1;
+pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 128;
 pub static ASSETS: &[LevelAssetRecord] = &[];
 pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
@@ -52,6 +54,7 @@ pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];
 pub static MODELS: &[LevelModelRecord] = &[];
 pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
 pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
+pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
 pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[];
 pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
