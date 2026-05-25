@@ -82,6 +82,7 @@ const MATERIAL_TEXTURE_PICKER_POPUP_WIDTH: f32 = 320.0;
 const MATERIAL_TEXTURE_PICKER_POPUP_HEIGHT: f32 = 320.0;
 const MATERIAL_TEXTURE_PICKER_ROW_HEIGHT: f32 = 44.0;
 const MATERIAL_TEXTURE_PICKER_THUMB_SIZE: f32 = 34.0;
+const MATERIAL_TEXTURE_PICKER_BUTTON_WIDTH: f32 = 190.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
 const ACTION_BAR_COMPACT_HEIGHT: f32 = 50.0;
@@ -9158,7 +9159,6 @@ impl EditorWorkspace {
     ) {
         let consume_save = consume_command_shortcut(ctx, egui::Key::S);
         let consume_new = consume_command_shortcut(ctx, egui::Key::N);
-        let consume_reload = consume_command_shortcut(ctx, egui::Key::R);
         let consume_build = consume_command_shortcut(ctx, egui::Key::B);
         let consume_play = consume_command_shortcut(ctx, egui::Key::Enter);
         let consume_redo = consume_command_shift_shortcut(ctx, egui::Key::Z);
@@ -9174,9 +9174,6 @@ impl EditorWorkspace {
         }
         if consume_new {
             self.open_new_project_dialog();
-        }
-        if consume_reload {
-            self.reload();
         }
         if consume_build {
             self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
@@ -9891,10 +9888,7 @@ impl EditorWorkspace {
                 self.save_project_from_ui();
                 ui.close_menu();
             }
-            if ui
-                .button(menu_label("Reload", &command_shortcut_text("R")))
-                .clicked()
-            {
+            if ui.button("Reload").clicked() {
                 self.reload();
                 ui.close_menu();
             }
@@ -21407,9 +21401,28 @@ fn material_texture_picker(
                     .map(|option| option.name.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt("material-texture-picker")
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
+        let popup_id = ui.make_persistent_id("material-texture-picker-popup");
+        let open = ui.memory(|mem| mem.is_popup_open(popup_id));
+        let button = egui::Button::new(format!("{preview}  v"))
+            .selected(open)
+            .truncate();
+        let response = ui.add_sized(
+            [
+                MATERIAL_TEXTURE_PICKER_BUTTON_WIDTH,
+                ui.spacing().interact_size.y,
+            ],
+            button,
+        );
+        if response.clicked() {
+            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+        }
+
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &response,
+            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
                 ui.set_min_width(MATERIAL_TEXTURE_PICKER_POPUP_WIDTH);
                 ui.horizontal(|ui| {
                     let search_width = (ui.available_width() - 58.0).max(96.0);
@@ -21436,7 +21449,7 @@ fn material_texture_picker(
                 if material_texture_picker_row(ui, "(none)", None, current.is_none()).clicked() {
                     *current = None;
                     changed = true;
-                    ui.close_menu();
+                    ui.memory_mut(|mem| mem.close_popup());
                 }
 
                 ui.separator();
@@ -21463,7 +21476,7 @@ fn material_texture_picker(
                                 {
                                     *current = Some(option.id);
                                     changed = true;
-                                    ui.close_menu();
+                                    ui.memory_mut(|mem| mem.close_popup());
                                 }
                             }
                         });
@@ -21477,7 +21490,8 @@ fn material_texture_picker(
                             .small(),
                     );
                 }
-            });
+            },
+        );
         if let Some(id) = *current {
             if ui
                 .small_button("->")
@@ -29435,14 +29449,10 @@ fn rotate_horizontal_face_cw(mut face: GridHorizontalFace) -> GridHorizontalFace
     ];
     face.split = rotate_split_cw(old_split);
     face.dropped_corner = face.dropped_corner.map(rotate_corner_cw);
-    face.uv = rotate_uv_transform_cw(face.uv);
 
     for new_index in 0..2 {
         let old_index = rotated_horizontal_triangle_source_index(old_split, face.split, new_index);
         let mut triangle_override = *old_overrides.get(old_index);
-        if let Some(uv) = triangle_override.uv.as_mut() {
-            *uv = rotate_uv_transform_cw(*uv);
-        }
         if let Some(heights) = triangle_override.heights {
             triangle_override.heights = Some(rotate_triangle_heights_cw(
                 old_split, old_index, face.split, new_index, heights,
@@ -29600,7 +29610,6 @@ fn rotate_vertical_face_cw(
     wall.dropped_corner = wall
         .dropped_corner
         .map(|corner| rotate_wall_corner_cw(direction, corner));
-    wall.uv = rotate_uv_transform_cw(wall.uv);
     wall
 }
 
@@ -29767,11 +29776,6 @@ fn wall_corner_from_horizontal_endpoint(
     }
 }
 
-fn rotate_uv_transform_cw(mut uv: GridUvTransform) -> GridUvTransform {
-    uv.rotation = rotate_uv_rotation_cw(uv.rotation);
-    uv
-}
-
 fn flip_uv_transform_u(mut uv: GridUvTransform) -> GridUvTransform {
     uv.flip_u = !uv.flip_u;
     uv
@@ -29780,19 +29784,6 @@ fn flip_uv_transform_u(mut uv: GridUvTransform) -> GridUvTransform {
 fn flip_uv_transform_v(mut uv: GridUvTransform) -> GridUvTransform {
     uv.flip_v = !uv.flip_v;
     uv
-}
-
-const fn rotate_uv_rotation_cw(rotation: GridUvRotation) -> GridUvRotation {
-    match rotation {
-        GridUvRotation::Deg0 => GridUvRotation::Deg90,
-        GridUvRotation::Deg45 => GridUvRotation::Deg135,
-        GridUvRotation::Deg90 => GridUvRotation::Deg180,
-        GridUvRotation::Deg135 => GridUvRotation::Deg225,
-        GridUvRotation::Deg180 => GridUvRotation::Deg270,
-        GridUvRotation::Deg225 => GridUvRotation::Deg315,
-        GridUvRotation::Deg270 => GridUvRotation::Deg0,
-        GridUvRotation::Deg315 => GridUvRotation::Deg45,
-    }
 }
 
 fn horizontal_triangle_index_at_local(
@@ -34766,6 +34757,47 @@ mod tests {
         assert!(workspace.selected_sectors.contains(&(room, 0, 1)));
         assert_eq!(workspace.selected_sectors.len(), 2);
         assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn rotate_sector_preserves_authored_uv_rotation() {
+        let mut sector = GridSector::empty();
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.uv.rotation = GridUvRotation::Deg45;
+        let mut floor_tri_a = GridUvTransform::IDENTITY;
+        floor_tri_a.rotation = GridUvRotation::Deg135;
+        floor.triangle_override_mut(0).uv = Some(floor_tri_a);
+        let mut floor_tri_b = GridUvTransform::IDENTITY;
+        floor_tri_b.rotation = GridUvRotation::Deg225;
+        floor.triangle_override_mut(1).uv = Some(floor_tri_b);
+        sector.floor = Some(floor);
+
+        let mut ceiling = GridHorizontalFace::flat(1024, None);
+        ceiling.uv.rotation = GridUvRotation::Deg315;
+        sector.ceiling = Some(ceiling);
+
+        let mut wall = GridVerticalFace::with_heights([0, 10, 110, 100], None);
+        wall.uv.rotation = GridUvRotation::Deg90;
+        sector.walls.get_mut(GridDirection::North).push(wall);
+
+        let rotated = rotate_sector_cw(&sector);
+        let floor = rotated.floor.as_ref().unwrap();
+        let floor_override_rotations = [
+            floor.triangle_override(0).uv.unwrap().rotation,
+            floor.triangle_override(1).uv.unwrap().rotation,
+        ];
+
+        assert_eq!(floor.uv.rotation, GridUvRotation::Deg45);
+        assert!(floor_override_rotations.contains(&GridUvRotation::Deg135));
+        assert!(floor_override_rotations.contains(&GridUvRotation::Deg225));
+        assert_eq!(
+            rotated.ceiling.as_ref().unwrap().uv.rotation,
+            GridUvRotation::Deg315
+        );
+        assert_eq!(
+            rotated.walls.get(GridDirection::East)[0].uv.rotation,
+            GridUvRotation::Deg90
+        );
     }
 
     #[test]
