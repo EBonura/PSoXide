@@ -497,9 +497,6 @@ fn build_room_portals(
             let Some(&source_marker) = portal_seams.source_marker_for_edge.get(&edge) else {
                 continue;
             };
-            if edge_has_wall(grid, edge) {
-                continue;
-            }
             edges.push(OpenPortalEdge {
                 edge,
                 source_room,
@@ -681,13 +678,28 @@ fn portal_height_bounds(grid: &WorldGrid, span_edges: &[OpenPortalEdge]) -> Opti
     let mut top = i32::MIN;
     let mut found = false;
     for open in span_edges {
-        let heights =
-            grid.wall_heights_aligned_to_surfaces(open.edge.x, open.edge.z, open.edge.direction);
-        bottom = bottom.min(heights[0]).min(heights[1]);
-        top = top.max(heights[2]).max(heights[3]);
-        found = true;
+        if let Some((edge_bottom, edge_top)) = portal_edge_height_bounds(grid, open.edge) {
+            bottom = bottom.min(edge_bottom);
+            top = top.max(edge_top);
+            found = true;
+        }
     }
     found.then_some((bottom, top))
+}
+
+fn portal_edge_height_bounds(grid: &WorldGrid, edge: EdgeKey) -> Option<(i32, i32)> {
+    let (nx, nz, opposite) = neighbour_across(grid, edge.x, edge.z, edge.direction)?;
+    let source = grid.wall_heights_aligned_to_surfaces(edge.x, edge.z, edge.direction);
+    let destination = grid.wall_heights_aligned_to_surfaces(nx, nz, opposite);
+    let bottom = source[0]
+        .min(source[1])
+        .min(destination[0])
+        .min(destination[1]);
+    let top = source[2]
+        .max(source[3])
+        .max(destination[2])
+        .max(destination[3]);
+    (top > bottom).then_some((bottom, top))
 }
 
 fn portal_source_facing_normal(direction: GridDirection) -> [i16; 3] {
@@ -841,17 +853,6 @@ fn sorted_portal_edges(edges: HashSet<EdgeKey>) -> Vec<PortalEdge> {
     let mut out: Vec<PortalEdge> = edges.into_iter().map(Into::into).collect();
     out.sort_by_key(|edge| (edge.z, edge.x, direction_slot(edge.direction)));
     out
-}
-
-fn edge_has_wall(grid: &WorldGrid, edge: EdgeKey) -> bool {
-    let Some((nx, nz, opposite)) = neighbour_across(grid, edge.x, edge.z, edge.direction) else {
-        return true;
-    };
-    grid.sector(edge.x, edge.z)
-        .is_some_and(|sector| !sector.walls.get(edge.direction).is_empty())
-        || grid
-            .sector(nx, nz)
-            .is_some_and(|sector| !sector.walls.get(opposite).is_empty())
 }
 
 fn canonical_edge(x: u16, z: u16, direction: GridDirection) -> Option<EdgeKey> {
@@ -1051,6 +1052,116 @@ mod tests {
         assert_eq!(west.destination_room, 0);
         assert_eq!(west.direction, GridDirection::West);
         assert_eq!(west.normal_world, [1, 0, 0]);
+    }
+
+    #[test]
+    fn portal_marker_on_walled_edge_still_links_rooms() {
+        let mut project = ProjectDocument::new("test");
+        let mat = material(&mut project);
+        let mut grid = WorldGrid::stone_room(2, 1, 1024, Some(mat), None);
+        grid.ensure_sector(0, 0)
+            .unwrap()
+            .walls
+            .east
+            .push(GridVerticalFace::flat(0, 1024, Some(mat)));
+        let room = project.active_scene_mut().add_node(
+            crate::NodeId::ROOT,
+            "Room",
+            NodeKind::Room { grid },
+        );
+        let portal = project.active_scene_mut().add_node(
+            room,
+            "Portal",
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name: String::new(),
+                geometry: None,
+            },
+        );
+        project
+            .active_scene_mut()
+            .node_mut(portal)
+            .unwrap()
+            .transform
+            .translation = [0.0, 0.0, 0.0];
+        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+            panic!("expected room");
+        };
+        let plan = plan_portal_rooms(
+            project.active_scene(),
+            room,
+            grid,
+            PortalRoomConfig::default(),
+        );
+        assert_eq!(plan.room_count(), 2);
+        assert_eq!(plan.portal_count, 1);
+        assert_eq!(plan.portals.len(), 2);
+        assert_eq!(plan.rooms[0].neighbours[1], Some(1));
+        assert_eq!(plan.rooms[1].neighbours[3], Some(0));
+        assert!(plan.portals.iter().any(|portal| {
+            portal.source_room == 0
+                && portal.destination_room == 1
+                && portal.direction == GridDirection::East
+        }));
+        assert!(plan.portals.iter().any(|portal| {
+            portal.source_room == 1
+                && portal.destination_room == 0
+                && portal.direction == GridDirection::West
+        }));
+    }
+
+    #[test]
+    fn portal_height_spans_both_sides_of_stepped_seam() {
+        let mut project = ProjectDocument::new("test");
+        let mat = material(&mut project);
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 1024, Some(mat));
+        grid.set_floor(1, 0, 0, Some(mat));
+        let room = project.active_scene_mut().add_node(
+            crate::NodeId::ROOT,
+            "Room",
+            NodeKind::Room { grid },
+        );
+        let portal = project.active_scene_mut().add_node(
+            room,
+            "Portal",
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name: String::new(),
+                geometry: None,
+            },
+        );
+        project
+            .active_scene_mut()
+            .node_mut(portal)
+            .unwrap()
+            .transform
+            .translation = [0.0, 0.0, 0.0];
+        let NodeKind::Room { grid } = &project.active_scene().node(room).unwrap().kind else {
+            panic!("expected room");
+        };
+        let plan = plan_portal_rooms(
+            project.active_scene(),
+            room,
+            grid,
+            PortalRoomConfig::default(),
+        );
+        let east = plan
+            .portals
+            .iter()
+            .find(|portal| portal.direction == GridDirection::East)
+            .expect("east portal");
+        assert_eq!(
+            east.vertices_world,
+            [
+                [1024, 0, 1024],
+                [1024, 0, 0],
+                [1024, 3072, 0],
+                [1024, 3072, 1024],
+            ]
+        );
     }
 
     #[test]
