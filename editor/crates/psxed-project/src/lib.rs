@@ -7923,17 +7923,25 @@ pub enum RuntimeDepthSortMode {
     FixedCell,
     /// Use per-triangle depth for sloped/high-span horizontal surfaces.
     Hybrid,
+    /// Like hybrid, but also sorts high-depth-span walls per triangle.
+    HybridWalls,
     /// Use per-triangle projected depth for every cached surface.
     PerTriangle,
 }
 
 impl RuntimeDepthSortMode {
-    pub const ALL: [Self; 3] = [Self::Hybrid, Self::PerTriangle, Self::FixedCell];
+    pub const ALL: [Self; 4] = [
+        Self::Hybrid,
+        Self::HybridWalls,
+        Self::PerTriangle,
+        Self::FixedCell,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::FixedCell => "Fixed cell",
             Self::Hybrid => "Hybrid",
+            Self::HybridWalls => "Hybrid + walls",
             Self::PerTriangle => "Per triangle",
         }
     }
@@ -7942,6 +7950,9 @@ impl RuntimeDepthSortMode {
         match self {
             Self::FixedCell => "Fast legacy ordering. Can show overlap errors on ramps.",
             Self::Hybrid => "Uses per-triangle depth only where sloped floors need it.",
+            Self::HybridWalls => {
+                "Also sorts high-depth-span walls per triangle for ramp/wall conflicts."
+            }
             Self::PerTriangle => "Most precise cached-room ordering. Costs more sort work.",
         }
     }
@@ -7950,7 +7961,8 @@ impl RuntimeDepthSortMode {
         match self {
             Self::FixedCell => 0,
             Self::Hybrid => 1,
-            Self::PerTriangle => 2,
+            Self::HybridWalls => 2,
+            Self::PerTriangle => 3,
         }
     }
 }
@@ -7971,6 +7983,98 @@ const fn default_runtime_texture_split_max_edge() -> u16 {
     DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE
 }
 
+/// Scope for runtime room triangle subdivision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeTextureSplitMode {
+    /// Apply the edge threshold to every cached room surface.
+    All,
+    /// Apply the edge threshold only to surfaces using per-triangle depth.
+    DepthSorted,
+    /// Apply the edge threshold only to sloped/high-depth-span surfaces.
+    Risky,
+}
+
+impl RuntimeTextureSplitMode {
+    pub const ALL: [Self; 3] = [Self::All, Self::DepthSorted, Self::Risky];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All surfaces",
+            Self::DepthSorted => "Depth sorted",
+            Self::Risky => "Risky only",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::All => "Current behavior. Every cached room surface may subdivide.",
+            Self::DepthSorted => "Only per-triangle depth surfaces subdivide.",
+            Self::Risky => "Only sloped or high-depth-span surfaces subdivide.",
+        }
+    }
+
+    pub const fn manifest_value(self) -> u8 {
+        match self {
+            Self::All => 0,
+            Self::DepthSorted => 1,
+            Self::Risky => 2,
+        }
+    }
+}
+
+impl Default for RuntimeTextureSplitMode {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+/// Runtime draw ordering for active room chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeRoomDrawOrderMode {
+    /// Sort active visible rooms by their camera-space center depth.
+    Distance,
+    /// Draw rooms in portal traversal order.
+    Portal,
+    /// Draw active slots in runtime slot order.
+    Slot,
+}
+
+impl RuntimeRoomDrawOrderMode {
+    pub const ALL: [Self; 3] = [Self::Distance, Self::Portal, Self::Slot];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Distance => "Distance",
+            Self::Portal => "Portal order",
+            Self::Slot => "Slot order",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Distance => "Current behavior. Sort active rooms by camera-space center depth.",
+            Self::Portal => {
+                "Draw rooms in portal traversal order, closer to Tomb Raider-style visibility."
+            }
+            Self::Slot => "Stable runtime slot order for debugging streaming/order interactions.",
+        }
+    }
+
+    pub const fn manifest_value(self) -> u8 {
+        match self {
+            Self::Distance => 0,
+            Self::Portal => 1,
+            Self::Slot => 2,
+        }
+    }
+}
+
+impl Default for RuntimeRoomDrawOrderMode {
+    fn default() -> Self {
+        Self::Distance
+    }
+}
+
 /// One editor project document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDocument {
@@ -7985,6 +8089,12 @@ pub struct ProjectDocument {
     /// Cooked playtest cached-room depth sorting mode.
     #[serde(default)]
     pub runtime_depth_sort_mode: RuntimeDepthSortMode,
+    /// Runtime room triangle subdivision scope.
+    #[serde(default)]
+    pub runtime_texture_split_mode: RuntimeTextureSplitMode,
+    /// Runtime active-room draw ordering policy.
+    #[serde(default)]
+    pub runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode,
     /// Projected edge threshold used to subdivide textured runtime room surfaces.
     #[serde(default = "default_runtime_texture_split_max_edge")]
     pub runtime_texture_split_max_edge: u16,
@@ -8003,6 +8113,8 @@ impl ProjectDocument {
             editor_camera: EditorCameraState::default(),
             editor_visibility: EditorVisibilityState::default(),
             runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
+            runtime_texture_split_mode: RuntimeTextureSplitMode::default(),
+            runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),
             runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
             resources: Vec::new(),
@@ -10611,11 +10723,15 @@ mod tests {
     #[test]
     fn runtime_depth_sort_mode_roundtrips_through_ron_string() {
         let mut project = ProjectDocument::new("depth-sort");
-        project.runtime_depth_sort_mode = RuntimeDepthSortMode::PerTriangle;
+        project.runtime_depth_sort_mode = RuntimeDepthSortMode::HybridWalls;
+        project.runtime_texture_split_mode = RuntimeTextureSplitMode::DepthSorted;
+        project.runtime_room_draw_order_mode = RuntimeRoomDrawOrderMode::Portal;
         project.runtime_texture_split_max_edge = 96;
         let ron = project.to_ron_string().unwrap();
 
         assert!(ron.contains("runtime_depth_sort_mode"));
+        assert!(ron.contains("runtime_texture_split_mode"));
+        assert!(ron.contains("runtime_room_draw_order_mode"));
         assert!(ron.contains("runtime_texture_split_max_edge"));
         assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
     }
