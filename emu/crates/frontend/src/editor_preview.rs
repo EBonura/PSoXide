@@ -2132,6 +2132,7 @@ fn walk_box_props(
             materials,
             vertices,
             collision_enabled: _,
+            break_flags: _,
         } = &node.kind
         else {
             continue;
