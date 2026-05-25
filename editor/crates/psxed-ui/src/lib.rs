@@ -44,10 +44,10 @@ use psxed_project::{
     GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
-    PsxBlendMode, Resource, ResourceData, ResourceId, Scene, SceneNode, SkyMode, SkySettings,
-    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
-    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
-    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
+    PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode, Scene, SceneNode,
+    SkyMode, SkySettings, WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget,
+    WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM,
+    MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
     MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
     MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE,
     MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -74,6 +74,28 @@ const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
 const MAX_IMAGE_PROP_SIZE: u16 = 4096;
+const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psxed_project::BOX_PROP_FACE_COUNT] = [
+    [4, 5, 1, 0],
+    [5, 6, 2, 1],
+    [6, 7, 3, 2],
+    [7, 4, 0, 3],
+    [7, 6, 5, 4],
+    [0, 1, 2, 3],
+];
+const BOX_PROP_EDGE_VERTEX_INDICES: [[usize; 2]; 12] = [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+];
 const PLACEMENT_DUPLICATE_EPSILON: f32 = 0.001;
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
 const RESOURCE_CARD_WIDTH: f32 = 120.0;
@@ -1073,6 +1095,8 @@ pub enum EntityBoundKind {
     MeshFallback,
     /// Flat `ImageProp`.
     ImageProp,
+    /// Editable boxed prop.
+    BoxProp,
     /// `SpawnPoint` (player or non-player).
     SpawnPoint,
     /// `PointLight`. Marker box only -- radius ring is drawn
@@ -2022,6 +2046,8 @@ enum PlaceKind {
     Character,
     /// Flat material-backed image prop.
     ImageProp,
+    /// Editable material-backed box prop.
+    BoxProp,
     /// `PointLight` with default color / intensity / radius.
     PointLightMarker,
     /// `Portal` marker. Runtime cooking snaps it to the nearest
@@ -2037,6 +2063,7 @@ impl PlaceKind {
             Self::ModelInstance => "Prop",
             Self::Character => "Character",
             Self::ImageProp => "Image Prop",
+            Self::BoxProp => "Box Prop",
             Self::PointLightMarker => "Point Light",
             Self::Portal => "Portal",
         }
@@ -2048,6 +2075,7 @@ impl PlaceKind {
             Self::ModelInstance => icons::BOX,
             Self::Character => icons::CIRCLE_DOT,
             Self::ImageProp => icons::PALETTE,
+            Self::BoxProp => icons::BOX,
             Self::PointLightMarker => icons::SUN,
             Self::Portal => icons::WAYPOINT,
         }
@@ -7688,6 +7716,21 @@ impl EditorWorkspace {
         })
     }
 
+    fn find_duplicate_box_prop(
+        &self,
+        room_id: NodeId,
+        material_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(
+                node.kind,
+                NodeKind::BoxProp { materials, .. }
+                    if materials.iter().any(|material| *material == Some(material_id))
+            )
+        })
+    }
+
     fn find_duplicate_spawn_marker(
         &self,
         room_id: NodeId,
@@ -8058,6 +8101,30 @@ impl EditorWorkspace {
                                 cylindrical_billboard: false,
                                 collision_enabled: false,
                                 collision_size: [size, size, size],
+                            },
+                        )
+                    }
+                    Err(message) => {
+                        self.status = message;
+                        return;
+                    }
+                },
+                PlaceKind::BoxProp => match self.resolve_place_image_prop_material() {
+                    Ok((material_id, name)) => {
+                        let size = image_prop_default_size_for_sector(sector_size_i);
+                        translation[1] = hit_world[1] as f32 / sector_size;
+                        if let Some(existing) =
+                            self.find_duplicate_box_prop(room_id, material_id, translation)
+                        {
+                            self.reject_duplicate_placement(existing, "Box Prop");
+                            return;
+                        }
+                        (
+                            format!("{name} Box"),
+                            NodeKind::BoxProp {
+                                materials: [Some(material_id); psxed_project::BOX_PROP_FACE_COUNT],
+                                vertices: psxed_project::box_prop_vertices_for_size(size),
+                                collision_enabled: true,
                             },
                         )
                     }
@@ -9579,6 +9646,7 @@ impl EditorWorkspace {
             NodeKind::Entity
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Trigger { .. }
                 | NodeKind::AudioSource { .. }
@@ -10964,6 +11032,18 @@ impl EditorWorkspace {
                                 }
                                 if changed && self.selected_node_is_player_source() {
                                     self.demote_player_sources_except(Some(selected));
+                                }
+                                let selected_is_world = self
+                                    .project
+                                    .active_scene()
+                                    .node(selected)
+                                    .is_some_and(|node| matches!(node.kind, NodeKind::World { .. }));
+                                if selected_is_world {
+                                    changed |= draw_playtest_render_settings(
+                                        ui,
+                                        &mut self.project.runtime_depth_sort_mode,
+                                        &mut self.project.runtime_texture_split_max_edge,
+                                    );
                                 }
 
                                 // Phase 2: component host/member authoring. This uses
@@ -13533,6 +13613,7 @@ impl EditorWorkspace {
             PlaceKind::ModelInstance,
             PlaceKind::Character,
             PlaceKind::ImageProp,
+            PlaceKind::BoxProp,
             PlaceKind::PointLightMarker,
         ] {
             if ui
@@ -13554,6 +13635,9 @@ impl EditorWorkspace {
             }
             PlaceKind::ImageProp => {
                 self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Image")
+            }
+            PlaceKind::BoxProp => {
+                self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Material")
             }
             _ => {}
         }
@@ -16815,7 +16899,10 @@ impl EditorWorkspace {
                 node.transform.translation[2] += world_delta[1];
                 if matches!(
                     node.kind,
-                    NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. }
+                    NodeKind::Entity
+                        | NodeKind::PointLight { .. }
+                        | NodeKind::ImageProp { .. }
+                        | NodeKind::BoxProp { .. }
                 ) {
                     node.transform.translation[0] = snap_node_transform_component_to_world_step(
                         node.transform.translation[0],
@@ -17283,9 +17370,12 @@ fn draw_transform_policy_editor(
             changed
         }
         kind if kind.is_component() => false,
-        NodeKind::Entity | NodeKind::ImageProp { .. } => {
+        NodeKind::Entity | NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
             let mut changed = false;
-            let allow_full_rotation = matches!(node.kind, NodeKind::ImageProp { .. });
+            let allow_full_rotation = matches!(
+                node.kind,
+                NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. }
+            );
             egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -17312,6 +17402,54 @@ fn draw_transform_policy_editor(
             changed
         }
     }
+}
+
+fn draw_playtest_render_settings(
+    ui: &mut egui::Ui,
+    mode: &mut RuntimeDepthSortMode,
+    texture_split_max_edge: &mut u16,
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::BOX, "Playtest Render"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Depth Sorting").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-depth-sort-mode")
+                    .selected_text(mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeDepthSortMode::ALL {
+                            changed |= ui
+                                .selectable_value(mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Subdivision Edge").color(STUDIO_TEXT_WEAK));
+                let mut next = i32::from(*texture_split_max_edge);
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut next)
+                            .speed(8.0)
+                            .range(0..=512)
+                            .update_while_editing(false),
+                    )
+                    .on_hover_text(
+                        "Maximum projected edge length before cached room triangles are split. \
+                         Lower values reduce PS1 ordering artifacts at higher CPU cost; 0 disables visual subdivision.",
+                    )
+                    .changed()
+                {
+                    *texture_split_max_edge = next.clamp(0, 512) as u16;
+                    changed = true;
+                }
+            });
+            ui.weak("0 disables visual subdivision. Lower values split room triangles more aggressively.");
+        });
+    changed
 }
 
 fn draw_world_grid_settings(
@@ -18062,15 +18200,22 @@ fn node_gizmo_translation(
         PrimitiveGizmoAxis::Z => 2,
     };
     let step = match (&node.kind, axis) {
-        (NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. }, _) => {
-            node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
-        }
+        (
+            NodeKind::Entity
+            | NodeKind::PointLight { .. }
+            | NodeKind::ImageProp { .. }
+            | NodeKind::BoxProp { .. },
+            _,
+        ) => node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size),
         _ => 1.0,
     };
     translation[index] = start[index] + steps as f32 * step;
 
     match &node.kind {
-        NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. } => {
+        NodeKind::Entity
+        | NodeKind::PointLight { .. }
+        | NodeKind::ImageProp { .. }
+        | NodeKind::BoxProp { .. } => {
             if steps != 0 {
                 translation[index] =
                     snap_node_transform_component_to_world_step(translation[index], sector_size);
@@ -18096,7 +18241,10 @@ fn node_gizmo_plane_translation(
     }
 
     match &node.kind {
-        NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. } => {
+        NodeKind::Entity
+        | NodeKind::PointLight { .. }
+        | NodeKind::ImageProp { .. }
+        | NodeKind::BoxProp { .. } => {
             for axis in plane.axes() {
                 let index = axis.index();
                 if delta_world[index].abs() > f32::EPSILON {
@@ -18165,7 +18313,7 @@ fn node_gizmo_rotation(
 /// trigger transforms stay flat without stray pitch / roll.
 fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
     match kind {
-        NodeKind::ImageProp { .. } => &[
+        NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => &[
             PrimitiveGizmoAxis::X,
             PrimitiveGizmoAxis::Y,
             PrimitiveGizmoAxis::Z,
@@ -18207,6 +18355,7 @@ fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode)
             NodeKind::Entity
                 | NodeKind::PointLight { .. }
                 | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Trigger { .. }
@@ -18217,6 +18366,7 @@ fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode)
             kind,
             NodeKind::Entity
                 | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Trigger { .. }
@@ -18317,6 +18467,41 @@ struct AnimatorClipContext {
     clip_in_place_defaults: Vec<bool>,
     profile_name: Option<String>,
     profile_action_clips: [Option<u16>; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT],
+}
+
+fn draw_box_prop_nudge_buttons(
+    ui: &mut egui::Ui,
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    indices: &[usize],
+) -> bool {
+    let mut changed = false;
+    let step = HEIGHT_QUANTUM as i16;
+    for (axis, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+        if ui.small_button(format!("{label}-")).clicked() {
+            nudge_box_prop_vertices(vertices, indices, axis, -step);
+            changed = true;
+        }
+        if ui.small_button(format!("{label}+")).clicked() {
+            nudge_box_prop_vertices(vertices, indices, axis, step);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn nudge_box_prop_vertices(
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    indices: &[usize],
+    axis: usize,
+    delta: i16,
+) {
+    for index in indices {
+        let value = i32::from(vertices[*index][axis]) + i32::from(delta);
+        vertices[*index][axis] = value.clamp(
+            -i32::from(MAX_IMAGE_PROP_SIZE),
+            i32::from(MAX_IMAGE_PROP_SIZE),
+        ) as i16;
+    }
 }
 
 fn selected_animator_clip_context(
@@ -18737,6 +18922,132 @@ fn draw_node_kind_editor(
                     }
                 });
             });
+        }
+        NodeKind::BoxProp {
+            materials,
+            vertices,
+            collision_enabled,
+        } => {
+            ui.weak(
+                "Editable material-backed box. Transform position is the bottom-center anchor.",
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Faces").color(STUDIO_TEXT_WEAK));
+                if ui.small_button("Fill from Front").clicked() {
+                    if let Some(material) = materials[0] {
+                        for slot in materials.iter_mut() {
+                            *slot = Some(material);
+                        }
+                        changed = true;
+                    }
+                }
+            });
+            for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+                changed |= material_picker(
+                    ui,
+                    psxed_project::BOX_PROP_FACE_NAMES[face],
+                    &mut materials[face],
+                    material_options,
+                    nav_target,
+                );
+            }
+            ui.separator();
+            changed |= ui.checkbox(collision_enabled, "Collision").changed();
+            ui.separator();
+            egui::CollapsingHeader::new("Move Faces")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+                        ui.horizontal(|ui| {
+                            ui.label(psxed_project::BOX_PROP_FACE_NAMES[face]);
+                            changed |= draw_box_prop_nudge_buttons(
+                                ui,
+                                vertices,
+                                &BOX_PROP_FACE_VERTEX_INDICES[face],
+                            );
+                        });
+                    }
+                });
+            egui::CollapsingHeader::new("Move Edges")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for (edge, indices) in BOX_PROP_EDGE_VERTEX_INDICES.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("E{edge}"));
+                            changed |= draw_box_prop_nudge_buttons(ui, vertices, indices);
+                        });
+                    }
+                });
+            ui.separator();
+            egui::CollapsingHeader::new("Vertices")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Preset").color(STUDIO_TEXT_WEAK));
+                        if ui.small_button("Reset Cube").clicked() {
+                            *vertices = psxed_project::box_prop_vertices_for_size(
+                                psxed_project::DEFAULT_BOX_PROP_SIZE,
+                            );
+                            changed = true;
+                        }
+                    });
+                    for (index, vertex) in vertices.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("V{index}"));
+                            let mut x = i32::from(vertex[0]);
+                            let mut y = i32::from(vertex[1]);
+                            let mut z = i32::from(vertex[2]);
+                            let vertex_changed = ui
+                                .add(
+                                    egui::DragValue::new(&mut x)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("X "),
+                                )
+                                .changed()
+                                | ui.add(
+                                    egui::DragValue::new(&mut y)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("Y "),
+                                )
+                                .changed()
+                                | ui.add(
+                                    egui::DragValue::new(&mut z)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("Z "),
+                                )
+                                .changed();
+                            if vertex_changed {
+                                *vertex = [
+                                    x.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                    y.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                    z.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                ];
+                                changed = true;
+                            }
+                        });
+                    }
+                });
         }
         NodeKind::ModelRenderer {
             model,
@@ -19231,6 +19542,7 @@ fn node_lucide_icon(kind: &str, root: bool) -> char {
         "Room" | "Map" => icons::GRID,
         "Mesh Instance" | "MeshInstance" => icons::BOX,
         "Image Prop" | "ImageProp" => icons::PALETTE,
+        "Box Prop" | "BoxProp" => icons::BOX,
         "Model Renderer" | "ModelRenderer" => icons::BOX,
         "Animator" => icons::PLAY,
         "Collider" => icons::SCALE_3D,
@@ -19263,6 +19575,7 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
         "Room" | "Map" => Color32::from_rgb(209, 118, 71),
         "Mesh Instance" | "MeshInstance" => Color32::from_rgb(156, 174, 190),
         "Image Prop" | "ImageProp" => Color32::from_rgb(210, 170, 120),
+        "Box Prop" | "BoxProp" => Color32::from_rgb(135, 180, 220),
         "Model Renderer" | "ModelRenderer" => Color32::from_rgb(134, 168, 196),
         "Animator" => Color32::from_rgb(126, 164, 220),
         "Collider" => Color32::from_rgb(180, 170, 112),
@@ -25113,7 +25426,7 @@ fn scene_tree_kind_label(kind: &'static str) -> &'static str {
 
 /// Default `(menu label, kind template)` pairs for "Add Child" menus.
 /// Each menu entry uses the label as the new node's display name.
-fn default_addable_kinds() -> [(&'static str, NodeKind); 15] {
+fn default_addable_kinds() -> [(&'static str, NodeKind); 16] {
     [
         (
             "Room",
@@ -25204,6 +25517,16 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 15] {
             NodeKind::SpawnPoint {
                 player: false,
                 character: None,
+            },
+        ),
+        (
+            "Box Prop",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(
+                    psxed_project::DEFAULT_BOX_PROP_SIZE,
+                ),
+                collision_enabled: true,
             },
         ),
         (
@@ -25368,6 +25691,7 @@ fn node_draw_mode(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::MeshInstance { .. } => "Textured Triangles",
         NodeKind::ImageProp { .. } => "Flat Image",
+        NodeKind::BoxProp { .. } => "Box Prop",
         NodeKind::ModelRenderer { .. } => "Render Component",
         NodeKind::Animator { .. } => "Animation Component",
         NodeKind::Collider { .. } => "Collision Component",
@@ -26447,6 +26771,18 @@ fn draw_scene_viewport(
                     &mut hits,
                 );
             }
+            NodeKind::BoxProp { .. } => {
+                draw_simple_marker(
+                    painter,
+                    transform,
+                    node,
+                    selected_nodes.contains(&node.id)
+                        || (selected_nodes.is_empty() && selected == node.id),
+                    "B",
+                    Color32::from_rgb(135, 180, 220),
+                    &mut hits,
+                );
+            }
             NodeKind::SpawnPoint { .. } => {
                 draw_spawn_marker(
                     painter,
@@ -27410,6 +27746,7 @@ fn node_kind_uses_room_editor_position(kind: &NodeKind) -> bool {
         NodeKind::Entity
             | NodeKind::MeshInstance { .. }
             | NodeKind::ImageProp { .. }
+            | NodeKind::BoxProp { .. }
             | NodeKind::SpawnPoint { .. }
             | NodeKind::PointLight { .. }
             | NodeKind::Trigger { .. }
@@ -30298,6 +30635,25 @@ fn entity_bound_kind_and_size(
                 32.0,
             ],
         )),
+        NodeKind::BoxProp { vertices, .. } => {
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for vertex in vertices {
+                for axis in 0..3 {
+                    let value = vertex[axis] as f32;
+                    min[axis] = min[axis].min(value);
+                    max[axis] = max[axis].max(value);
+                }
+            }
+            Some((
+                EntityBoundKind::BoxProp,
+                [
+                    ((max[0] - min[0]).abs() * 0.5).max(32.0),
+                    ((max[1] - min[1]).abs() * 0.5).max(32.0),
+                    ((max[2] - min[2]).abs() * 0.5).max(32.0),
+                ],
+            ))
+        }
         NodeKind::SpawnPoint { .. } => Some((EntityBoundKind::SpawnPoint, [128.0, 256.0, 128.0])),
         NodeKind::PointLight { .. } => Some((EntityBoundKind::PointLight, [128.0, 128.0, 128.0])),
         NodeKind::Trigger { .. } => Some((EntityBoundKind::Trigger, [256.0, 256.0, 256.0])),
@@ -30309,7 +30665,10 @@ fn entity_bound_kind_and_size(
 fn node_is_floor_anchored(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Entity | NodeKind::MeshInstance { .. } | NodeKind::SpawnPoint { .. }
+        NodeKind::Entity
+            | NodeKind::MeshInstance { .. }
+            | NodeKind::BoxProp { .. }
+            | NodeKind::SpawnPoint { .. }
     )
 }
 

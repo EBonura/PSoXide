@@ -73,9 +73,9 @@ pub mod world_render;
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
-    CharacterCollision, CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAction,
-    CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput,
-    CharacterMotorState,
+    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
+    CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
+    CharacterMotorInput, CharacterMotorState,
 };
 pub use fixed::{Q12, Q8};
 pub use frames::{Frames, Ticks};
@@ -124,7 +124,7 @@ pub use world_render::{
     draw_indexed_cached_room_vertex_lit_all_cells,
     draw_indexed_cached_room_vertex_lit_visible_cells, draw_room, draw_room_lit,
     draw_room_lit_grid_visible, draw_room_vertex_lit, draw_room_vertex_lit_grid_visible,
-    draw_room_vertex_lit_visible_cells, CachedRoomCell, CachedRoomSurface,
+    draw_room_vertex_lit_visible_cells, CachedRoomCell, CachedRoomDepthMode, CachedRoomSurface,
     CachedRoomSurfaceCacheStats, GridVisibility, GridVisibilityStats, GridVisibleCell,
     NoWorldSurfaceLighting, SurfaceSidedness, WorldRenderMaterial, WorldSurfaceKind,
     WorldSurfaceLighting, WorldSurfaceSample,

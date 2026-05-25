@@ -148,6 +148,17 @@ pub mod image_prop_flags {
     pub const CYLINDRICAL_BILLBOARD: u16 = 1 << 0;
 }
 
+/// Face slots on an authored boxed prop.
+pub const BOX_PROP_FACE_COUNT: usize = 6;
+/// Editable vertex count on an authored boxed prop.
+pub const BOX_PROP_VERTEX_COUNT: usize = 8;
+
+/// Box prop record flags.
+pub mod box_prop_flags {
+    /// Prop emits a static collision blocker for the character motor.
+    pub const COLLISION_ENABLED: u16 = 1 << 0;
+}
+
 /// Model clip bounds/calibration flags.
 pub mod model_clip_flags {
     /// Runtime should cancel root translation for this clip.
@@ -1251,6 +1262,37 @@ pub struct LevelImagePropRecord {
     pub tint_rgb: [u8; 3],
     /// Baked static light base per quad vertex, in perimeter order.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Runtime flags.
+    pub flags: u16,
+}
+
+/// One placed editable box prop. Coordinates are room-local engine
+/// units and `x/y/z` names the bottom-center anchor. Vertices are
+/// local to that anchor, in bottom-ring then top-ring order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelBoxPropRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Per-face texture asset. `None` means the face is not drawn.
+    pub texture_assets: [Option<AssetId>; BOX_PROP_FACE_COUNT],
+    /// Bottom-center room-local X.
+    pub x: i32,
+    /// Bottom Y.
+    pub y: i32,
+    /// Bottom-center room-local Z.
+    pub z: i32,
+    /// Static pitch in PSX angle units.
+    pub pitch: i16,
+    /// Static yaw in PSX angle units.
+    pub yaw: i16,
+    /// Static roll in PSX angle units.
+    pub roll: i16,
+    /// Editable local vertices, bottom ring then top ring.
+    pub vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
+    /// Per-face modulation tint.
+    pub tint_rgb: [[u8; 3]; BOX_PROP_FACE_COUNT],
+    /// Baked static light base per face vertex.
+    pub baked_vertex_rgb: [[(u8, u8, u8); 4]; BOX_PROP_FACE_COUNT],
     /// Runtime flags.
     pub flags: u16,
 }

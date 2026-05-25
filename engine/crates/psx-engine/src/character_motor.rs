@@ -53,6 +53,28 @@ impl CharacterCollisionCylinder {
     }
 }
 
+/// Axis-aligned box used by static prop collision.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CharacterCollisionAabb {
+    /// Minimum room-local corner.
+    pub min: RoomPoint,
+    /// Maximum room-local corner.
+    pub max: RoomPoint,
+}
+
+impl CharacterCollisionAabb {
+    /// Empty non-blocking box for fixed stack buffers.
+    pub const EMPTY: Self = Self {
+        min: RoomPoint::ZERO,
+        max: RoomPoint::ZERO,
+    };
+
+    /// Build a blocking AABB from room-local corners.
+    pub const fn new(min: RoomPoint, max: RoomPoint) -> Self {
+        Self { min, max }
+    }
+}
+
 /// One room collision view placed in the motor's current local
 /// coordinate space.
 ///
@@ -113,6 +135,8 @@ pub struct CharacterCollision<'room, 'room_ref, 'blockers> {
     pub rooms: &'blockers [CharacterCollisionRoom<'room>],
     /// Other coarse actor bodies that block this motor.
     pub blockers: &'blockers [CharacterCollisionCylinder],
+    /// Static axis-aligned prop bodies that block this motor.
+    pub aabb_blockers: &'blockers [CharacterCollisionAabb],
 }
 
 impl<'room, 'room_ref, 'blockers> CharacterCollision<'room, 'room_ref, 'blockers> {
@@ -125,6 +149,22 @@ impl<'room, 'room_ref, 'blockers> CharacterCollision<'room, 'room_ref, 'blockers
             room,
             rooms: &[],
             blockers,
+            aabb_blockers: &[],
+        }
+    }
+
+    /// Build a collision context from an optional room, actor
+    /// cylinders, and static AABB blockers.
+    pub const fn new_with_aabbs(
+        room: Option<RoomCollision<'room, 'room_ref>>,
+        blockers: &'blockers [CharacterCollisionCylinder],
+        aabb_blockers: &'blockers [CharacterCollisionAabb],
+    ) -> Self {
+        Self {
+            room,
+            rooms: &[],
+            blockers,
+            aabb_blockers,
         }
     }
 
@@ -137,6 +177,21 @@ impl<'room, 'room_ref, 'blockers> CharacterCollision<'room, 'room_ref, 'blockers
             room: None,
             rooms,
             blockers,
+            aabb_blockers: &[],
+        }
+    }
+
+    /// Build a multi-room collision context with static AABB blockers.
+    pub const fn rooms_with_aabbs(
+        rooms: &'blockers [CharacterCollisionRoom<'room>],
+        blockers: &'blockers [CharacterCollisionCylinder],
+        aabb_blockers: &'blockers [CharacterCollisionAabb],
+    ) -> Self {
+        Self {
+            room: None,
+            rooms,
+            blockers,
+            aabb_blockers,
         }
     }
 
@@ -146,6 +201,7 @@ impl<'room, 'room_ref, 'blockers> CharacterCollision<'room, 'room_ref, 'blockers
             room,
             rooms: &[],
             blockers: &[],
+            aabb_blockers: &[],
         }
     }
 }
@@ -729,7 +785,10 @@ impl CharacterMotorState {
             return (false, true);
         }
 
-        if collision.room.is_none() && collision.blockers.is_empty() {
+        if collision.room.is_none()
+            && collision.blockers.is_empty()
+            && collision.aabb_blockers.is_empty()
+        {
             self.position = target;
             return (true, false);
         }
@@ -922,7 +981,9 @@ fn body_stand_position(
             None => target,
         }
     };
-    if body_hits_blocker(position, radius, height, collision.blockers) {
+    if body_hits_blocker(position, radius, height, collision.blockers)
+        || body_hits_aabb_blocker(position, radius, height, collision.aabb_blockers)
+    {
         return None;
     }
     Some(position)
@@ -1326,6 +1387,23 @@ fn body_hits_blocker(
     false
 }
 
+fn body_hits_aabb_blocker(
+    position: RoomPoint,
+    radius: i32,
+    height: i32,
+    blockers: &[CharacterCollisionAabb],
+) -> bool {
+    if radius <= 0 || height <= 0 {
+        return false;
+    }
+    for blocker in blockers {
+        if cylinder_overlaps_aabb(position, radius, height, *blocker) {
+            return true;
+        }
+    }
+    false
+}
+
 fn cylinder_overlaps(
     position: RoomPoint,
     radius: i32,
@@ -1350,6 +1428,33 @@ fn cylinder_overlaps(
     let dz = position.z.saturating_sub(blocker.position.z);
     square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
         <= square_i32_saturating(radius_sum)
+}
+
+fn cylinder_overlaps_aabb(
+    position: RoomPoint,
+    radius: i32,
+    height: i32,
+    blocker: CharacterCollisionAabb,
+) -> bool {
+    let min_x = blocker.min.x.min(blocker.max.x);
+    let max_x = blocker.min.x.max(blocker.max.x);
+    let min_y = blocker.min.y.min(blocker.max.y);
+    let max_y = blocker.min.y.max(blocker.max.y);
+    let min_z = blocker.min.z.min(blocker.max.z);
+    let max_z = blocker.min.z.max(blocker.max.z);
+    if min_x == max_x || min_y == max_y || min_z == max_z {
+        return false;
+    }
+    let top = position.y.saturating_add(height.max(1));
+    if top <= min_y || max_y <= position.y {
+        return false;
+    }
+    let closest_x = position.x.clamp(min_x, max_x);
+    let closest_z = position.z.clamp(min_z, max_z);
+    let dx = position.x.saturating_sub(closest_x);
+    let dz = position.z.saturating_sub(closest_z);
+    square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
+        <= square_i32_saturating(radius.max(0))
 }
 
 fn height_at_local(heights: [i32; 4], split: u8, local_x: i32, local_z: i32, sector: i32) -> i32 {
@@ -1581,6 +1686,30 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(0, 0, 160));
         assert!(frame.moved);
         assert!(!frame.blocked);
+    }
+
+    #[test]
+    fn actor_aabb_blocks_horizontal_overlap() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut cfg = config();
+        cfg.walk_speed = 160;
+        cfg.height = 768;
+        let blockers = [CharacterCollisionAabb::new(
+            RoomPoint::new(-64, 0, 96),
+            RoomPoint::new(64, 768, 224),
+        )];
+        let frame = motor.update_vblanks_with_collision(
+            CharacterCollision::new_with_aabbs(None, &[], &blockers),
+            CharacterMotorInput {
+                walk: 1,
+                ..CharacterMotorInput::default()
+            },
+            cfg,
+            1,
+        );
+        assert_eq!(frame.position, RoomPoint::ZERO);
+        assert!(!frame.moved);
+        assert!(frame.blocked);
     }
 
     #[test]
