@@ -1,6 +1,6 @@
 //! Host-side package schema for embedded editor play mode.
 
-use crate::{MaterialFaceSidedness, ResourceId, SkyCycloramaQuad};
+use crate::{MaterialFaceSidedness, ResourceId, RuntimeDepthSortMode, SkyCycloramaQuad};
 
 /// Number of cooked character animation action slots.
 pub const PLAYTEST_CHARACTER_ACTION_COUNT: usize = psx_level::CHARACTER_ANIMATION_ACTION_COUNT;
@@ -612,6 +612,35 @@ pub struct PlaytestImageProp {
     pub flags: u16,
 }
 
+/// One material-backed editable box prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestBoxProp {
+    /// Owning room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Per-face texture asset indices. `None` skips that face.
+    pub texture_asset_indices: [Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
+    /// Bottom-center room-local X.
+    pub x: i32,
+    /// Bottom Y.
+    pub y: i32,
+    /// Bottom-center room-local Z.
+    pub z: i32,
+    /// Static pitch, PSX angle units.
+    pub pitch: i16,
+    /// Static yaw, PSX angle units.
+    pub yaw: i16,
+    /// Static roll, PSX angle units.
+    pub roll: i16,
+    /// Editable local vertices, bottom ring then top ring.
+    pub vertices: [[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT],
+    /// Material modulation tint per face.
+    pub tint_rgb: [[u8; 3]; psx_level::BOX_PROP_FACE_COUNT],
+    /// Baked static light base per face vertex.
+    pub baked_vertex_rgb: [[(u8, u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
+    /// Runtime flags.
+    pub flags: u16,
+}
+
 /// Weapon-local hit shape, ready for manifest emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestWeaponHitShape {
@@ -853,6 +882,10 @@ pub struct PlaytestEntity {
 /// instances, and residency.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestPackage {
+    /// Cached-room depth sorting mode selected by the project.
+    pub runtime_depth_sort_mode: RuntimeDepthSortMode,
+    /// Projected edge threshold for runtime room surface subdivision.
+    pub runtime_texture_split_max_edge: u16,
     /// Master asset table -- rooms first, then room textures,
     /// then per-model assets (mesh + atlas + clips), in
     /// deterministic order.
@@ -903,6 +936,8 @@ pub struct PlaytestPackage {
     pub model_instances: Vec<PlaytestModelInstance>,
     /// Placed flat image props, room-local coordinates.
     pub image_props: Vec<PlaytestImageProp>,
+    /// Placed editable box props, room-local coordinates.
+    pub box_props: Vec<PlaytestBoxProp>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.
