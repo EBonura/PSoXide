@@ -47,17 +47,17 @@ use psx_engine::GridVisibilityStats;
 use psx_engine::GridVisibleCell;
 use psx_engine::{
     apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
-    CachedRoomCell, CachedRoomSurface, CharacterCollision, CharacterCollisionCylinder,
-    CharacterCollisionRoom, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput,
-    CharacterMotorState, Config, Ctx, CullMode, DepthBand, DepthPolicy, DepthRange,
-    JointViewTransform, JointWorldTransform, LocalToWorldScale, Mat3I16, MaterialTint,
-    ModelPoseTranslation, OtFrame, PointLightSample, PrimitivePacketArena, PrimitivePacketScratch,
-    PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom,
-    Scene, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
-    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, VisualPacing, WorldCamera, WorldProjection, WorldRenderMaterial,
-    WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions, WorldSurfaceSample,
-    WorldTriCommand, WorldVertex, Q12, Q8,
+    CachedRoomCell, CachedRoomDepthMode, CachedRoomSurface, CharacterCollision,
+    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAnim,
+    CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, CullMode,
+    DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform, LocalToWorldScale,
+    Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame, PointLightSample, PrimitivePacketArena,
+    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender,
+    RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelGeometry, TexturedModelRenderFace,
+    TexturedModelRenderStats, ThirdPersonCameraConfig, ThirdPersonCameraInput,
+    ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing, WorldCamera, WorldProjection,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
+    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -85,14 +85,14 @@ use psx_level::portal_visibility::{
     PortalRoomBounds, PortalVisibilityCamera, PortalVisibilityResult,
 };
 use psx_level::{
-    character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags,
-    model_clip_flags, room_flags, sky_flags, visibility_cell_flags, AssetId, AssetKind,
-    CharacterAnimationAction, EntityRecord, LevelCameraRecord, LevelCharacterRecord,
-    LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord,
-    LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord,
-    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
-    ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex, WeaponHitShapeRecord,
-    CHARACTER_ANIMATION_ACTION_COUNT,
+    box_prop_flags, character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind,
+    image_prop_flags, model_clip_flags, room_flags, sky_flags, visibility_cell_flags, AssetId,
+    AssetKind, CharacterAnimationAction, EntityRecord, LevelBoxPropRecord, LevelCameraRecord,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
+    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
+    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
+    WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
@@ -122,11 +122,12 @@ mod generated {
 }
 
 use generated::{
-    ASSETS, CHARACTERS, ENTITIES, EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS,
-    MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER,
-    PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
-    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
-    ROOM_VISIBILITY, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CHARACTERS,
+    ENTITIES, EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
+    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS,
+    ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
+    ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY,
+    VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -137,6 +138,14 @@ use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 use generated::{
     WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
 };
+
+const fn cached_room_depth_mode() -> CachedRoomDepthMode {
+    match CACHED_ROOM_DEPTH_MODE {
+        0 => CachedRoomDepthMode::FixedCell,
+        2 => CachedRoomDepthMode::PerTriangle,
+        _ => CachedRoomDepthMode::Hybrid,
+    }
+}
 
 // VRAM layout. Room materials and model atlases live in
 // disjoint regions so a model atlas upload never overwrites a
@@ -345,10 +354,12 @@ fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
 
 fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
     WorldSurfaceOptions::new(WORLD_BAND, room_depth_range(record))
+        .with_textured_triangle_max_edge(CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE)
 }
 
 fn fallback_surface_options() -> WorldSurfaceOptions {
     WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
+        .with_textured_triangle_max_edge(CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE)
 }
 
 fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfaceOptions {
@@ -1375,6 +1386,8 @@ const MODEL_VISUAL_SCALE_ONE_Q8: u16 = 256;
 const JOINT_CAP: usize = 32;
 /// Cap on placed model instances rendered per frame.
 const MAX_MODEL_INSTANCES: usize = 16;
+/// Cap on static boxed prop collision blockers per frame.
+const MAX_BOX_PROP_BLOCKERS: usize = 32;
 /// Cap on attached weapon/equipment visuals rendered per frame.
 const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// Runtime model cache capacity. The current playtest package only
@@ -3403,12 +3416,19 @@ impl Scene for Playtest {
         };
         let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_MODEL_INSTANCES];
         let blocker_count = self.collect_collision_blockers(&mut blockers);
+        let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_BOX_PROP_BLOCKERS];
+        let aabb_blocker_count = self.collect_box_prop_collision_blockers(&mut aabb_blockers);
         let collision = if collision_room_count <= 1 {
-            CharacterCollision::new(room_collision, &blockers[..blocker_count])
+            CharacterCollision::new_with_aabbs(
+                room_collision,
+                &blockers[..blocker_count],
+                &aabb_blockers[..aabb_blocker_count],
+            )
         } else {
-            CharacterCollision::rooms(
+            CharacterCollision::rooms_with_aabbs(
                 &collision_rooms[..collision_room_count],
                 &blockers[..blocker_count],
+                &aabb_blockers[..aabb_blocker_count],
             )
         };
         let motor_frame =
@@ -3623,6 +3643,7 @@ impl Scene for Playtest {
                                     &lighting,
                                     &room_camera,
                                     room_options,
+                                    cached_room_depth_mode(),
                                     ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                     &mut primitive_packets,
                                     &mut world,
@@ -3752,6 +3773,7 @@ impl Scene for Playtest {
                                         &lighting,
                                         &room_camera,
                                         room_options,
+                                        cached_room_depth_mode(),
                                         cells,
                                         visibility.screen_margin,
                                         &mut primitive_packets,
@@ -3852,6 +3874,15 @@ impl Scene for Playtest {
                 );
                 telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
                 telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
+                draw_box_props(
+                    BOX_PROPS,
+                    active.index,
+                    &room_camera,
+                    actor_options,
+                    &lighting,
+                    &mut primitive_packets,
+                    &mut world,
+                );
                 draw_image_props(
                     IMAGE_PROPS,
                     active.index,
@@ -4428,6 +4459,42 @@ impl Playtest {
                 RoomPoint::new(inst.x, inst.y, inst.z),
                 radius,
                 height,
+            );
+            count += 1;
+        }
+        count
+    }
+
+    fn collect_box_prop_collision_blockers(
+        &self,
+        out: &mut [CharacterCollisionAabb; MAX_BOX_PROP_BLOCKERS],
+    ) -> usize {
+        let mut count = 0usize;
+        for prop in BOX_PROPS {
+            if prop.room != self.room_index
+                || prop.flags & box_prop_flags::COLLISION_ENABLED == 0
+                || count >= out.len()
+            {
+                continue;
+            }
+            let vertices = box_prop_vertices(prop);
+            let mut min_x = vertices[0].x;
+            let mut max_x = vertices[0].x;
+            let mut min_y = vertices[0].y;
+            let mut max_y = vertices[0].y;
+            let mut min_z = vertices[0].z;
+            let mut max_z = vertices[0].z;
+            for vertex in vertices {
+                min_x = min_x.min(vertex.x);
+                max_x = max_x.max(vertex.x);
+                min_y = min_y.min(vertex.y);
+                max_y = max_y.max(vertex.y);
+                min_z = min_z.min(vertex.z);
+                max_z = max_z.max(vertex.z);
+            }
+            out[count] = CharacterCollisionAabb::new(
+                RoomPoint::new(min_x, min_y, min_z),
+                RoomPoint::new(max_x, max_y, max_z),
             );
             count += 1;
         }
@@ -10669,6 +10736,104 @@ fn draw_image_props<T>(
     }
 }
 
+const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT] = [
+    [4, 5, 1, 0],
+    [5, 6, 2, 1],
+    [6, 7, 3, 2],
+    [7, 4, 0, 3],
+    [7, 6, 5, 4],
+    [0, 1, 2, 3],
+];
+
+fn draw_box_props<T>(
+    props: &[LevelBoxPropRecord],
+    current_room: RoomIndex,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
+    for prop in props {
+        if prop.room != current_room {
+            continue;
+        }
+        let vertices = box_prop_vertices(prop);
+        let (center, radius) = box_prop_cull_bounds(vertices);
+        if !sphere_visible_to_camera(camera, options, center, radius, 96) {
+            continue;
+        }
+        let faces = box_prop_faces(vertices);
+        for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+            let Some(texture_asset) = prop.texture_assets[face] else {
+                continue;
+            };
+            let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
+                continue;
+            };
+            let Some(slot) = ensure_texture_uploaded_with_clut_mode(
+                asset.id,
+                asset.bytes,
+                VramSlotClutMode::TransparentZero,
+            ) else {
+                continue;
+            };
+            let material =
+                TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
+                    .with_texture_window(slot.texture_window);
+            let u_max = model_render_uv_max(slot.texture_width);
+            let v_max = model_render_uv_max(slot.texture_height);
+            let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+            let face_vertices = faces[face];
+            let colors = [
+                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][0], face_vertices[0]),
+                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][1], face_vertices[1]),
+                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][2], face_vertices[2]),
+                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][3], face_vertices[3]),
+            ];
+            let opts = options
+                .with_depth_policy(DepthPolicy::Average)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(material)
+                .with_textured_triangle_splitting(true)
+                .with_textured_triangle_max_edge(0);
+            if let Some(projected) = camera.project_world_quad(face_vertices) {
+                let _ = world.submit_textured_gouraud_triangle(
+                    triangles,
+                    [projected[0], projected[1], projected[2]],
+                    [uvs[0], uvs[1], uvs[2]],
+                    [colors[0], colors[1], colors[2]],
+                    material,
+                    opts,
+                );
+                let _ = world.submit_textured_gouraud_triangle(
+                    triangles,
+                    [projected[0], projected[2], projected[3]],
+                    [uvs[0], uvs[2], uvs[3]],
+                    [colors[0], colors[2], colors[3]],
+                    material,
+                    opts,
+                );
+            } else {
+                let tint = average_vertex_rgb(colors);
+                let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+                    .with_texture_window(slot.texture_window);
+                let opts = opts.with_material_layer(material);
+                let _ = world.submit_textured_world_quad(
+                    triangles,
+                    *camera,
+                    face_vertices,
+                    uvs,
+                    material,
+                    opts,
+                );
+            }
+        }
+    }
+}
+
 fn average_vertex_rgb(colors: [(u8, u8, u8); 4]) -> (u8, u8, u8) {
     let mut r = 0u16;
     let mut g = 0u16;
@@ -10767,6 +10932,76 @@ fn image_prop_vertices(
         i += 1;
     }
     out
+}
+
+fn box_prop_vertices(prop: &LevelBoxPropRecord) -> [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT] {
+    let mut out = [WorldVertex::new(0, 0, 0); psx_level::BOX_PROP_VERTEX_COUNT];
+    let mut i = 0usize;
+    while i < prop.vertices.len() {
+        let local = prop.vertices[i];
+        let rotated = rotate_z_q12(
+            rotate_y_q12(
+                rotate_x_q12(
+                    [local[0] as i32, local[1] as i32, local[2] as i32],
+                    prop.pitch as u16,
+                ),
+                prop.yaw as u16,
+            ),
+            prop.roll as u16,
+        );
+        out[i] = WorldVertex::new(
+            prop.x.saturating_add(rotated[0]),
+            prop.y.saturating_add(rotated[1]),
+            prop.z.saturating_add(rotated[2]),
+        );
+        i += 1;
+    }
+    out
+}
+
+fn box_prop_faces(
+    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
+) -> [[WorldVertex; 4]; psx_level::BOX_PROP_FACE_COUNT] {
+    let mut out = [[WorldVertex::new(0, 0, 0); 4]; psx_level::BOX_PROP_FACE_COUNT];
+    let mut face = 0usize;
+    while face < psx_level::BOX_PROP_FACE_COUNT {
+        let mut corner = 0usize;
+        while corner < 4 {
+            out[face][corner] = vertices[BOX_PROP_FACE_VERTEX_INDICES[face][corner]];
+            corner += 1;
+        }
+        face += 1;
+    }
+    out
+}
+
+fn box_prop_cull_bounds(
+    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
+) -> (WorldVertex, i32) {
+    let mut min_x = vertices[0].x;
+    let mut max_x = vertices[0].x;
+    let mut min_y = vertices[0].y;
+    let mut max_y = vertices[0].y;
+    let mut min_z = vertices[0].z;
+    let mut max_z = vertices[0].z;
+    for vertex in vertices {
+        min_x = min_x.min(vertex.x);
+        max_x = max_x.max(vertex.x);
+        min_y = min_y.min(vertex.y);
+        max_y = max_y.max(vertex.y);
+        min_z = min_z.min(vertex.z);
+        max_z = max_z.max(vertex.z);
+    }
+    let center = WorldVertex::new(
+        min_x.saturating_add(max_x) / 2,
+        min_y.saturating_add(max_y) / 2,
+        min_z.saturating_add(max_z) / 2,
+    );
+    let radius = abs_delta_i32(max_x, min_x)
+        .saturating_add(abs_delta_i32(max_y, min_y))
+        .saturating_add(abs_delta_i32(max_z, min_z))
+        / 2;
+    (center, radius.max(32))
 }
 
 fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
