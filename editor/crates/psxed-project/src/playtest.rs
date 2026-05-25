@@ -36,8 +36,8 @@ use psx_engine::{
     WorldRenderMaterial, WorldVertex,
 };
 use psx_level::{
-    character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags, model_clip_flags,
-    room_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
+    box_prop_flags, character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags,
+    model_clip_flags, room_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
@@ -581,6 +581,7 @@ pub fn build_package(
     let mut model_sockets: Vec<PlaytestModelSocket> = Vec::new();
     let mut model_instances: Vec<PlaytestModelInstance> = Vec::new();
     let mut image_props: Vec<PlaytestImageProp> = Vec::new();
+    let mut box_props: Vec<PlaytestBoxProp> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
@@ -914,6 +915,31 @@ pub fn build_package(
                     return (None, report);
                 }
             }
+            NodeKind::BoxProp {
+                materials,
+                vertices,
+                collision_enabled,
+            } => {
+                if !push_box_prop(
+                    project,
+                    project_root,
+                    node.name.as_str(),
+                    room_index,
+                    floor_pos,
+                    pitch,
+                    yaw,
+                    roll,
+                    materials,
+                    *vertices,
+                    *collision_enabled,
+                    &mut texture_asset_for_resource,
+                    &mut assets,
+                    &mut box_props,
+                    &mut report,
+                ) {
+                    return (None, report);
+                }
+            }
             NodeKind::Trigger { .. } => {
                 if warned_unsupported.insert("Trigger") {
                     report.warn("Trigger volumes are skipped in this pass");
@@ -1089,6 +1115,7 @@ pub fn build_package(
     let lights = expand_lights_across_chunks(&room_bake_inputs, &lights);
     bake_static_surface_lights(&mut room_bake_inputs, &lights);
     bake_static_image_prop_lights(&mut image_props, &room_bake_inputs, &lights);
+    bake_static_box_prop_lights(&mut box_props, &room_bake_inputs, &lights);
     for room in &room_bake_inputs {
         let bytes = match room.cooked.to_psxw_bytes() {
             Ok(b) => b,
@@ -1151,6 +1178,8 @@ pub fn build_package(
 
     (
         Some(PlaytestPackage {
+            runtime_depth_sort_mode: project.runtime_depth_sort_mode,
+            runtime_texture_split_max_edge: project.runtime_texture_split_max_edge,
             assets,
             rooms,
             chunks,
@@ -1175,6 +1204,7 @@ pub fn build_package(
             model_sockets,
             model_instances,
             image_props,
+            box_props,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -2894,6 +2924,73 @@ fn component_children<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn resolve_material_texture_asset(
+    project: &ProjectDocument,
+    project_root: &Path,
+    label: &str,
+    material_id: ResourceId,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<(usize, [u8; 3])> {
+    let Some(material_resource) = project.resource(material_id) else {
+        report.warn(format!(
+            "{label} references missing Material #{} — skipped",
+            material_id.raw()
+        ));
+        return None;
+    };
+    let ResourceData::Material(material) = &material_resource.data else {
+        report.warn(format!(
+            "{label} references '{}' but it is not a Material — skipped",
+            material_resource.name
+        ));
+        return None;
+    };
+    let Some(texture_id) = material.texture else {
+        report.warn(format!(
+            "{label} material '{}' has no Texture — skipped",
+            material_resource.name
+        ));
+        return None;
+    };
+    let Some(texture_resource) = find_resource(project, texture_id) else {
+        report.warn(format!(
+            "{label} material '{}' references missing Texture #{} — skipped",
+            material_resource.name,
+            texture_id.raw()
+        ));
+        return None;
+    };
+    let texture_asset_index = if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
+        existing
+    } else {
+        let bytes = match load_texture_bytes(texture_resource, project_root) {
+            Ok(bytes) => bytes,
+            Err(msg) => {
+                report.warn(format!("{label}: {msg} — skipped"));
+                return None;
+            }
+        };
+        if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
+            report.warn(format!("{label}: {msg} — skipped"));
+            return None;
+        }
+        let texture_index = texture_asset_for_resource.len();
+        let new_index = assets.len();
+        assets.push(PlaytestAsset {
+            kind: PlaytestAssetKind::Texture,
+            bytes,
+            filename: format!("texture_{texture_index:03}.psxt"),
+            source_label: texture_resource.name.clone(),
+        });
+        texture_asset_for_resource.insert(texture_id, new_index);
+        new_index
+    };
+    Some((texture_asset_index, material.tint))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn push_image_prop(
     project: &ProjectDocument,
     project_root: &Path,
@@ -2918,59 +3015,17 @@ fn push_image_prop(
         ));
         return true;
     };
-    let Some(material_resource) = project.resource(material_id) else {
-        report.warn(format!(
-            "Image Prop '{node_name}' references missing Material #{} — skipped",
-            material_id.raw()
-        ));
+    let label = format!("Image Prop '{node_name}'");
+    let Some((texture_asset_index, tint_rgb)) = resolve_material_texture_asset(
+        project,
+        project_root,
+        &label,
+        material_id,
+        texture_asset_for_resource,
+        assets,
+        report,
+    ) else {
         return true;
-    };
-    let ResourceData::Material(material) = &material_resource.data else {
-        report.warn(format!(
-            "Image Prop '{node_name}' references '{}' but it is not a Material — skipped",
-            material_resource.name
-        ));
-        return true;
-    };
-    let Some(texture_id) = material.texture else {
-        report.warn(format!(
-            "Image Prop '{node_name}' material '{}' has no Texture — skipped",
-            material_resource.name
-        ));
-        return true;
-    };
-    let Some(texture_resource) = find_resource(project, texture_id) else {
-        report.warn(format!(
-            "Image Prop '{node_name}' material '{}' references missing Texture #{} — skipped",
-            material_resource.name,
-            texture_id.raw()
-        ));
-        return true;
-    };
-    let texture_asset_index = if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
-        existing
-    } else {
-        let bytes = match load_texture_bytes(texture_resource, project_root) {
-            Ok(bytes) => bytes,
-            Err(msg) => {
-                report.warn(format!("Image Prop '{node_name}': {msg} — skipped"));
-                return true;
-            }
-        };
-        if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
-            report.warn(format!("Image Prop '{node_name}': {msg} — skipped"));
-            return true;
-        }
-        let texture_index = texture_asset_for_resource.len();
-        let new_index = assets.len();
-        assets.push(PlaytestAsset {
-            kind: PlaytestAssetKind::Texture,
-            bytes,
-            filename: format!("texture_{texture_index:03}.psxt"),
-            source_label: texture_resource.name.clone(),
-        });
-        texture_asset_for_resource.insert(texture_id, new_index);
-        new_index
     };
     image_props.push(PlaytestImageProp {
         room: room_index,
@@ -2983,10 +3038,97 @@ fn push_image_prop(
         roll,
         width: width.max(1),
         height: height.max(1),
-        tint_rgb: material.tint,
-        baked_vertex_rgb: [rgb_tuple(material.tint); 4],
+        tint_rgb,
+        baked_vertex_rgb: [rgb_tuple(tint_rgb); 4],
         flags: if cylindrical_billboard {
             image_prop_flags::CYLINDRICAL_BILLBOARD
+        } else {
+            0
+        },
+    });
+    true
+}
+
+const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT] = [
+    [4, 5, 1, 0],
+    [5, 6, 2, 1],
+    [6, 7, 3, 2],
+    [7, 4, 0, 3],
+    [7, 6, 5, 4],
+    [0, 1, 2, 3],
+];
+
+#[allow(clippy::too_many_arguments)]
+fn push_box_prop(
+    project: &ProjectDocument,
+    project_root: &Path,
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    pitch: i16,
+    yaw: i16,
+    roll: i16,
+    materials: &[Option<ResourceId>; crate::BOX_PROP_FACE_COUNT],
+    vertices: [[i16; 3]; crate::BOX_PROP_VERTEX_COUNT],
+    collision_enabled: bool,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    box_props: &mut Vec<PlaytestBoxProp>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut texture_asset_indices = [None; psx_level::BOX_PROP_FACE_COUNT];
+    let mut tint_rgb = [[128, 128, 128]; psx_level::BOX_PROP_FACE_COUNT];
+    let mut valid_faces = 0usize;
+    for (face, material) in materials.iter().enumerate() {
+        let Some(material_id) = *material else {
+            continue;
+        };
+        let label = format!(
+            "Box Prop '{node_name}' {} face",
+            crate::BOX_PROP_FACE_NAMES[face]
+        );
+        let Some((texture_asset_index, tint)) = resolve_material_texture_asset(
+            project,
+            project_root,
+            &label,
+            material_id,
+            texture_asset_for_resource,
+            assets,
+            report,
+        ) else {
+            continue;
+        };
+        texture_asset_indices[face] = Some(texture_asset_index);
+        tint_rgb[face] = tint;
+        valid_faces += 1;
+    }
+
+    if valid_faces == 0 {
+        report.warn(format!(
+            "Box Prop '{node_name}' has no drawable Material faces — skipped"
+        ));
+        return true;
+    }
+
+    let mut baked_vertex_rgb = [[rgb_tuple([128, 128, 128]); 4]; psx_level::BOX_PROP_FACE_COUNT];
+    for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        baked_vertex_rgb[face] = [rgb_tuple(tint_rgb[face]); 4];
+    }
+
+    box_props.push(PlaytestBoxProp {
+        room: room_index,
+        texture_asset_indices,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        pitch,
+        yaw,
+        roll,
+        vertices,
+        tint_rgb,
+        baked_vertex_rgb,
+        flags: if collision_enabled {
+            box_prop_flags::COLLISION_ENABLED
         } else {
             0
         },
@@ -3227,6 +3369,53 @@ fn bake_static_image_prop_lights(
     }
 }
 
+fn bake_static_box_prop_lights(
+    box_props: &mut [PlaytestBoxProp],
+    rooms: &[CookedRoomBakeInput],
+    lights: &[PlaytestLight],
+) {
+    for prop in box_props {
+        let Some(room) = rooms.iter().find(|room| room.room_index == prop.room) else {
+            continue;
+        };
+        let room_lights: Vec<&PlaytestLight> = lights
+            .iter()
+            .filter(|light| light.room == prop.room)
+            .collect();
+        let ambient = room.cooked.ambient_color;
+        let face_vertices = box_prop_static_face_vertices(prop);
+        for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+            let base = prop.tint_rgb[face];
+            prop.baked_vertex_rgb[face] = [
+                rgb_tuple(bake_static_vertex_rgb(
+                    face_vertices[face][0],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    face_vertices[face][1],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    face_vertices[face][2],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    face_vertices[face][3],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+            ];
+        }
+    }
+}
+
 fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
     let half_width = (prop.width as i32) / 2;
     let height = prop.height as i32;
@@ -3247,6 +3436,33 @@ fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
         ];
     }
     out
+}
+
+fn box_prop_static_face_vertices(
+    prop: &PlaytestBoxProp,
+) -> [[[i32; 3]; 4]; psx_level::BOX_PROP_FACE_COUNT] {
+    let mut vertices = [[0, 0, 0]; psx_level::BOX_PROP_VERTEX_COUNT];
+    for (idx, local) in prop.vertices.iter().enumerate() {
+        let rotated = rotate_image_prop_local(
+            [local[0] as i32, local[1] as i32, local[2] as i32],
+            prop.pitch as u16,
+            prop.yaw as u16,
+            prop.roll as u16,
+        );
+        vertices[idx] = [
+            prop.x.saturating_add(rotated[0]),
+            prop.y.saturating_add(rotated[1]),
+            prop.z.saturating_add(rotated[2]),
+        ];
+    }
+
+    let mut faces = [[[0, 0, 0]; 4]; psx_level::BOX_PROP_FACE_COUNT];
+    for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        for corner in 0..4 {
+            faces[face][corner] = vertices[BOX_PROP_FACE_VERTEX_INDICES[face][corner]];
+        }
+    }
+    faces
 }
 
 fn rotate_image_prop_local(v: [i32; 3], pitch: u16, yaw: u16, roll: u16) -> [i32; 3] {
@@ -6455,6 +6671,8 @@ mod tests {
         assert!(manifest.contains("pub static ROOMS: &[LevelRoomRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];"));
+        assert!(manifest.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 1;"));
+        assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 128;"));
         assert!(manifest.contains("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[];"));
         assert!(manifest.contains("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[];"));
         assert!(manifest.contains("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[];"));
@@ -8784,6 +9002,51 @@ mod tests {
     }
 
     #[test]
+    fn box_prop_cooks_faces_vertices_and_collision() {
+        let mut project = ProjectDocument::starter();
+        let material_id = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a material")
+            .id;
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        let vertices = crate::box_prop_vertices_for_size(512);
+        let prop_id = scene.add_node(
+            room_id,
+            "Cooked Box Prop",
+            NodeKind::BoxProp {
+                materials: [Some(material_id); crate::BOX_PROP_FACE_COUNT],
+                vertices,
+                collision_enabled: true,
+            },
+        );
+        if let Some(node) = scene.node_mut(prop_id) {
+            node.transform.rotation_degrees = [45.0, 90.0, 270.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        let prop = package
+            .box_props
+            .iter()
+            .find(|prop| prop.vertices == vertices)
+            .expect("box prop cooks");
+        assert!(prop.texture_asset_indices.iter().all(Option::is_some));
+        assert_eq!(prop.pitch, 512);
+        assert_eq!(prop.yaw, 1024);
+        assert_eq!(prop.roll, 3072);
+        assert_eq!(prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED, 1);
+    }
+
+    #[test]
     fn non_player_character_controller_cooks_idle_model_instance_with_yaw() {
         let mut project = project_with_one_room();
         let character_id = player_character_resource_id(&project);
@@ -9051,6 +9314,8 @@ mod tests {
         let src = render_manifest_source(&package);
         assert!(src.contains("pub static ASSETS: &[LevelAssetRecord] = &[\n];"));
         assert!(src.contains("pub static MATERIALS: &[LevelMaterialRecord] = &[\n];"));
+        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 1;"));
+        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;"));
         assert!(src.contains("pub static ROOMS: &[LevelRoomRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[\n];"));
