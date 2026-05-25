@@ -7144,6 +7144,9 @@ pub enum NodeKind {
         /// Whether this prop blocks the character motor.
         #[serde(default = "default_true")]
         collision_enabled: bool,
+        /// Authored break trigger bits from [`psx_level::box_prop_flags`].
+        #[serde(default)]
+        break_flags: u16,
     },
     /// Render a cooked [`ResourceData::Model`] from the transform
     /// on the nearest entity ancestor. This is the component form of
