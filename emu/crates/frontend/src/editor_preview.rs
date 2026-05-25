@@ -19,7 +19,7 @@
 //! returned as host-drawn overlay lines so they can use fractional UI
 //! strokes without PSX integer-pixel limitations.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
 use emulator_core::gpu::GpuCmdLogEntry;
@@ -49,6 +49,8 @@ use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
 /// 4096-cap caps the per-frame primitive count at a comfortable
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
+const EDITOR_PREVIEW_PORTAL_DEPTH: usize = 3;
+const EDITOR_PREVIEW_MAX_ROOMS: usize = 16;
 const SKY_QUAD_CAP: usize = psxed_project::SKY_CYCLORAMA_QUAD_MAX;
 const FAR_VISTA_QUAD_CAP: usize = 16;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
@@ -189,6 +191,12 @@ static SCRATCH: Mutex<PreviewScratch> = Mutex::new(PreviewScratch {
     clear_packet: [0; 4],
 });
 
+impl PreviewScratch {
+    fn geometry_full(&self) -> bool {
+        self.used >= TRI_CAP || self.tex_used >= TRI_CAP
+    }
+}
+
 /// Render data for one editable 3D preview frame.
 pub struct EditorPreviewFrame {
     /// PSX-style command log for the scene itself.
@@ -197,8 +205,8 @@ pub struct EditorPreviewFrame {
     pub overlay_lines: Vec<psxed_ui::EditorViewportOverlayLine>,
 }
 
-/// Build a fresh preview frame rendering the project's first Room from
-/// `camera`'s orbit angles.
+/// Build a fresh preview frame rendering the active editor room window
+/// from `camera`'s orbit angles.
 ///
 /// Returns an empty frame if the project has no Rooms -- the editor
 /// renderer will then paint a black panel, which is the correct "no
@@ -214,6 +222,7 @@ pub fn build_phase1_frame(
     show_portals: bool,
     show_lights: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
+    active_room: Option<psxed_project::NodeId>,
     selected: psxed_project::NodeId,
     hovered_primitive: Option<psxed_ui::Selection>,
     selected_primitive: Option<psxed_ui::Selection>,
@@ -227,7 +236,15 @@ pub fn build_phase1_frame(
     textures: &EditorTextures,
     assets: &crate::editor_assets::EditorAssets,
 ) -> EditorPreviewFrame {
-    let visible_rooms = visible_room_grids(project, hidden_scene_nodes);
+    let visible_rooms = preview_room_grids(
+        project,
+        hidden_scene_nodes,
+        active_room,
+        selected,
+        selected_primitive,
+        selected_primitives,
+        validation_issue_primitives,
+    );
     let Some(&(first_room_id, first_grid)) = visible_rooms.first() else {
         return EditorPreviewFrame {
             cmd_log: Vec::new(),
@@ -265,6 +282,9 @@ pub fn build_phase1_frame(
     );
     let preview_tick = PREVIEW_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     for &(room_id, grid) in &visible_rooms {
+        if scratch.geometry_full() {
+            break;
+        }
         let fog = PreviewFog::from_grid(grid, preview_fog);
         walk_room(
             project,
@@ -274,7 +294,6 @@ pub fn build_phase1_frame(
             world_camera,
             fog,
             preview_backface_wireframe,
-            show_lights,
             hidden_scene_nodes,
             &mut scratch,
         );
@@ -288,7 +307,6 @@ pub fn build_phase1_frame(
             selected,
             hovered_entity_node,
             preview_bounds,
-            show_lights,
             &mut scratch,
         );
         if show_grid {
@@ -373,7 +391,6 @@ pub fn build_phase1_frame(
             &world_camera,
             fog,
             hidden_scene_nodes,
-            show_lights,
             preview_tick,
             &mut scratch,
         );
@@ -431,6 +448,170 @@ fn visible_room_grids<'a>(
             Some((node.id, grid))
         })
         .collect()
+}
+
+/// Rooms considered by the editable 3D preview.
+///
+/// Coastal Ruins imports as a real TR room graph, not a toy single-map
+/// scene. Rendering every unhidden room every host frame turns the
+/// editor preview into a whole-level renderer. Instead, keep the 3D
+/// viewport TR-like: render the active room plus a bounded portal
+/// neighborhood. The scene tree and 2D map remain the whole-world
+/// inspection tools.
+fn preview_room_grids<'a>(
+    project: &'a ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    active_room: Option<NodeId>,
+    selected: NodeId,
+    selected_primitive: Option<psxed_ui::Selection>,
+    selected_primitives: &[psxed_ui::Selection],
+    validation_issue_primitives: &[psxed_ui::Selection],
+) -> Vec<(NodeId, &'a WorldGrid)> {
+    let scene = project.active_scene();
+    let mut seeds = Vec::new();
+    push_preview_room_seed(scene, hidden_scene_nodes, active_room, &mut seeds);
+    if let Some(selection) = selected_primitive {
+        push_preview_room_seed(
+            scene,
+            hidden_scene_nodes,
+            Some(selection.room()),
+            &mut seeds,
+        );
+    }
+    for selection in selected_primitives {
+        push_preview_room_seed(
+            scene,
+            hidden_scene_nodes,
+            Some(selection.room()),
+            &mut seeds,
+        );
+    }
+    if let Some(room) = selected_room_ancestor(scene, hidden_scene_nodes, selected) {
+        push_preview_room_seed(scene, hidden_scene_nodes, Some(room), &mut seeds);
+    }
+    for selection in validation_issue_primitives {
+        push_preview_room_seed(
+            scene,
+            hidden_scene_nodes,
+            Some(selection.room()),
+            &mut seeds,
+        );
+    }
+    if seeds.is_empty() {
+        if let Some((first, _)) = visible_room_grids(project, hidden_scene_nodes).first() {
+            seeds.push(*first);
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    for seed in seeds {
+        queue.push_back((seed, 0usize));
+    }
+
+    while let Some((room, depth)) = queue.pop_front() {
+        if !seen.insert(room) {
+            continue;
+        }
+        if scene_node_hidden(scene, hidden_scene_nodes, room) {
+            continue;
+        }
+        let Some(grid) = scene.node(room).and_then(|node| match &node.kind {
+            NodeKind::Room { grid } => Some(grid),
+            _ => None,
+        }) else {
+            continue;
+        };
+        result.push((room, grid));
+        if result.len() >= EDITOR_PREVIEW_MAX_ROOMS || depth >= EDITOR_PREVIEW_PORTAL_DEPTH {
+            continue;
+        }
+        for connected in connected_portal_rooms(scene, room) {
+            if !seen.contains(&connected) {
+                queue.push_back((connected, depth + 1));
+            }
+        }
+    }
+
+    result
+}
+
+fn push_preview_room_seed(
+    scene: &Scene,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    room: Option<NodeId>,
+    seeds: &mut Vec<NodeId>,
+) {
+    let Some(room) = room else {
+        return;
+    };
+    if seeds.contains(&room) || scene_node_hidden(scene, hidden_scene_nodes, room) {
+        return;
+    }
+    if scene
+        .node(room)
+        .is_some_and(|node| matches!(node.kind, NodeKind::Room { .. }))
+    {
+        seeds.push(room);
+    }
+}
+
+fn selected_room_ancestor(
+    scene: &Scene,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+) -> Option<NodeId> {
+    let mut current = Some(selected);
+    while let Some(id) = current {
+        if scene_node_hidden(scene, hidden_scene_nodes, id) {
+            return None;
+        }
+        let node = scene.node(id)?;
+        if matches!(node.kind, NodeKind::Room { .. }) {
+            return Some(id);
+        }
+        current = node.parent;
+    }
+    None
+}
+
+fn room_ancestor(scene: &Scene, node_id: NodeId) -> Option<NodeId> {
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        let node = scene.node(id)?;
+        if matches!(node.kind, NodeKind::Room { .. }) {
+            return Some(id);
+        }
+        current = node.parent;
+    }
+    None
+}
+
+fn connected_portal_rooms(scene: &Scene, room: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    for node in scene.nodes() {
+        let NodeKind::Portal {
+            target_room: Some(target),
+            ..
+        } = &node.kind
+        else {
+            continue;
+        };
+        let target = *target;
+        if room_ancestor(scene, node.id) == Some(room) {
+            if target != room && !out.contains(&target) {
+                out.push(target);
+            }
+        } else if target == room {
+            if let Some(source) = room_ancestor(scene, node.id) {
+                if source != room && !out.contains(&source) {
+                    out.push(source);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Configure the host-side GTE so subsequent `project_vertex` /
@@ -544,16 +725,11 @@ fn walk_room(
     camera: psx_engine::WorldCamera,
     fog: PreviewFog,
     preview_backface_wireframe: bool,
-    show_lights: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
     scratch: &mut PreviewScratch,
 ) {
     let s = grid.sector_size;
-    let lights = if show_lights {
-        collect_preview_lights(project, room_id, grid, hidden_scene_nodes)
-    } else {
-        Vec::new()
-    };
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
     let ambient = grid.ambient_color;
     for x in 0..grid.width {
         for z in 0..grid.depth {
@@ -1799,15 +1975,10 @@ fn walk_image_props(
     selected: NodeId,
     hovered: Option<NodeId>,
     preview_bounds: bool,
-    show_lights: bool,
     scratch: &mut PreviewScratch,
 ) {
     let scene = project.active_scene();
-    let lights = if show_lights {
-        collect_preview_lights(project, room_id, grid, hidden_scene_nodes)
-    } else {
-        Vec::new()
-    };
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
     for node in scene.nodes() {
         if scene_node_hidden(scene, hidden_scene_nodes, node.id)
             || !is_descendant_of_room(scene, node.id, room_id)
@@ -2160,7 +2331,6 @@ fn walk_model_instances(
     camera: &psx_engine::WorldCamera,
     fog: PreviewFog,
     hidden_scene_nodes: &HashSet<NodeId>,
-    show_lights: bool,
     tick: u32,
     scratch: &mut PreviewScratch,
 ) {
@@ -2170,11 +2340,7 @@ fn walk_model_instances(
     // active, where it lives in the world) lives in
     // `instances_meta`.
     let scene = project.active_scene();
-    let lights = if show_lights {
-        collect_preview_lights(project, room_id, grid, hidden_scene_nodes)
-    } else {
-        Vec::new()
-    };
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
     let ambient = grid.ambient_color;
     let mut instances_meta: Vec<InstanceMeta> = Vec::new();
 
@@ -3396,21 +3562,15 @@ fn material_sidedness(
 /// before clamp truncation kicks in -- comfortably the editor's
 /// budget cap.
 ///
-/// Debug builds assert; release silently saturates rather than
-/// crashing the editor mid-paint.
+/// Saturates out-of-range authoring coordinates rather than crashing
+/// the editor. Runtime room windows should keep PS1-visible geometry
+/// local, but the editor can inspect imported TR levels whose full
+/// world coordinates are much larger than a single GTE input range.
 fn world_to_view(world: [i32; 3]) -> Vec3I16 {
     let a = view_anchor();
     let lx = world[0] - a[0];
     let ly = world[1] - a[1];
     let lz = world[2] - a[2];
-    debug_assert!(
-        (i16::MIN as i32..=i16::MAX as i32).contains(&lx)
-            && (i16::MIN as i32..=i16::MAX as i32).contains(&ly)
-            && (i16::MIN as i32..=i16::MAX as i32).contains(&lz),
-        "vertex {:?} (anchor-relative {:?}) overflows i16 — room too big or camera anchor wrong",
-        world,
-        [lx, ly, lz]
-    );
     Vec3I16::new(clamp_i16(lx), clamp_i16(ly), clamp_i16(lz))
 }
 
@@ -5067,7 +5227,7 @@ mod tests {
     use psxed_project::portal_rooms::PortalEdge;
     use psxed_project::{
         Corner, GridDirection, GridSplit, GridUvTransform, GridVerticalFace, MaterialFaceSidedness,
-        MaterialResource, NodeKind, ProjectDocument, ResourceData, WorldGrid,
+        MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, WorldGrid,
     };
     use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
@@ -5271,6 +5431,89 @@ mod tests {
             .map(|(id, _)| id)
             .collect::<Vec<_>>();
         assert_eq!(visible, vec![room_b]);
+    }
+
+    #[test]
+    fn preview_room_grids_walks_bounded_portal_neighborhood() {
+        let mut project = ProjectDocument::new("test");
+        let scene = project.active_scene_mut();
+        let room_a = scene.add_node(
+            scene.root,
+            "Room A",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_b = scene.add_node(
+            scene.root,
+            "Room B",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_c = scene.add_node(
+            scene.root,
+            "Room C",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_d = scene.add_node(
+            scene.root,
+            "Room D",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_e = scene.add_node(
+            scene.root,
+            "Room E",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_far = scene.add_node(
+            scene.root,
+            "Room Far",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        for (source, target) in [
+            (room_a, room_b),
+            (room_b, room_c),
+            (room_c, room_d),
+            (room_d, room_e),
+        ] {
+            scene.add_node(
+                source,
+                "Portal",
+                NodeKind::Portal {
+                    target_room: Some(target),
+                    target_entry: String::new(),
+                    entry_name: String::new(),
+                    geometry: None,
+                },
+            );
+        }
+
+        let hidden = std::collections::HashSet::new();
+        let visible = super::preview_room_grids(
+            &project,
+            &hidden,
+            Some(room_a),
+            NodeId::ROOT,
+            None,
+            &[],
+            &[],
+        )
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+
+        assert_eq!(visible, vec![room_a, room_b, room_c, room_d]);
+        assert!(!visible.contains(&room_e));
+        assert!(!visible.contains(&room_far));
     }
 
     #[test]

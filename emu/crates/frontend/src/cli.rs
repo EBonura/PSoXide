@@ -820,6 +820,7 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         true,
         true,
         &empty_hidden,
+        None,
         NodeId::ROOT,
         None,
         None,
