@@ -44,10 +44,11 @@ use psxed_project::{
     GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
-    PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode, Scene, SceneNode,
-    SkyMode, SkySettings, WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget,
-    WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM,
-    MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
+    PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
+    RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings,
+    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
+    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
+    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
     MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
     MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE,
     MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -1032,6 +1033,13 @@ enum MaterialTarget {
     Triangle(HorizontalTriangleRef),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoxPropMaterialAssignment {
+    material: ResourceId,
+    targets: usize,
+    updated: usize,
+}
+
 fn world_cook_error_primitives(
     room: NodeId,
     error: &WorldGridCookError,
@@ -1724,6 +1732,7 @@ struct NodeGizmoTarget {
     start_translation: [f32; 3],
     start_rotation_degrees: [f32; 3],
     start_image_prop_size: Option<[u16; 2]>,
+    start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
     sector_size: i32,
 }
 
@@ -6586,6 +6595,10 @@ impl EditorWorkspace {
                         NodeKind::ImageProp { width, height, .. } => Some([*width, *height]),
                         _ => None,
                     },
+                    start_box_prop_vertices: match &node.kind {
+                        NodeKind::BoxProp { vertices, .. } => Some(*vertices),
+                        _ => None,
+                    },
                     sector_size: node_enclosing_sector_size(scene, id),
                 })
             })
@@ -6722,7 +6735,13 @@ impl EditorWorkspace {
                 }
                 TransformGizmoMode::Scale => {
                     if let NodeGizmoHandle::Axis(axis) = handle {
-                        apply_node_gizmo_scale(node, target.start_image_prop_size, axis, steps);
+                        apply_node_gizmo_scale(
+                            node,
+                            target.start_image_prop_size,
+                            target.start_box_prop_vertices,
+                            axis,
+                            steps,
+                        );
                     }
                 }
             }
@@ -8438,6 +8457,136 @@ impl EditorWorkspace {
         }
         if updated > 0 {
             self.mark_dirty();
+        }
+        updated
+    }
+
+    fn apply_selected_box_prop_resource_click(&mut self, click: ResourceClick) -> bool {
+        let plain_click =
+            !click.modifiers.shift && !click.modifiers.ctrl && !click.modifiers.command;
+        if !plain_click {
+            return false;
+        }
+        let Some(assignment) = self.assign_selected_box_props_resource(click.id) else {
+            return false;
+        };
+        self.status = match (assignment.targets, assignment.updated) {
+            (1, 0) => "Material already assigned to selected Box Prop".to_string(),
+            (1, _) => "Assigned material to Box Prop".to_string(),
+            (_, 0) => "Material already assigned to selected Box Props".to_string(),
+            (total, updated) if total == updated => {
+                format!("Assigned material to {updated} selected Box Props")
+            }
+            (total, updated) => {
+                format!("Assigned material to {updated}/{total} selected Box Props")
+            }
+        };
+        self.clear_resource_selection_state();
+        true
+    }
+
+    fn assign_selected_box_props_resource(
+        &mut self,
+        resource_id: ResourceId,
+    ) -> Option<BoxPropMaterialAssignment> {
+        let targets = self.selected_box_prop_nodes();
+        let target_count = targets.len();
+        if target_count == 0 {
+            return None;
+        }
+        let (resource_name, resource_data) = self
+            .project
+            .resource(resource_id)
+            .map(|resource| (resource.name.clone(), resource.data.clone()))?;
+        let mut material = match resource_data {
+            ResourceData::Material(_) => Some(resource_id),
+            ResourceData::Texture { .. } => self.project.resources.iter().find_map(|resource| {
+                matches!(
+                    &resource.data,
+                    ResourceData::Material(material) if material.texture == Some(resource_id)
+                )
+                .then_some(resource.id)
+            }),
+            _ => return None,
+        };
+        let needs_update = material
+            .map(|material| {
+                targets
+                    .iter()
+                    .any(|id| self.box_prop_materials_differ(*id, material))
+            })
+            .unwrap_or(true);
+        if !needs_update {
+            return Some(BoxPropMaterialAssignment {
+                material: material.expect("existing material checked above"),
+                targets: target_count,
+                updated: 0,
+            });
+        }
+
+        self.push_undo();
+        let created_material = material.is_none();
+        let material = *material.get_or_insert_with(|| {
+            let id = self.project.add_resource(
+                resource_name,
+                ResourceData::Material(MaterialResource::opaque(Some(resource_id))),
+            );
+            self.place_resource = Some(id);
+            id
+        });
+        let updated = self.assign_box_prop_nodes_material_no_undo(&targets, material);
+        if updated > 0 || created_material {
+            self.mark_dirty();
+        }
+        Some(BoxPropMaterialAssignment {
+            material,
+            targets: target_count,
+            updated,
+        })
+    }
+
+    fn selected_box_prop_nodes(&self) -> Vec<NodeId> {
+        self.selected_node_ids_in_hierarchy()
+            .into_iter()
+            .filter(|id| {
+                self.project
+                    .active_scene()
+                    .node(*id)
+                    .is_some_and(|node| matches!(node.kind, NodeKind::BoxProp { .. }))
+            })
+            .collect()
+    }
+
+    fn box_prop_materials_differ(&self, id: NodeId, material: ResourceId) -> bool {
+        self.project
+            .active_scene()
+            .node(id)
+            .and_then(|node| match &node.kind {
+                NodeKind::BoxProp { materials, .. } => Some(materials),
+                _ => None,
+            })
+            .is_some_and(|materials| materials.iter().any(|slot| *slot != Some(material)))
+    }
+
+    fn assign_box_prop_nodes_material_no_undo(
+        &mut self,
+        targets: &[NodeId],
+        material: ResourceId,
+    ) -> usize {
+        let scene = self.project.active_scene_mut();
+        let mut updated = 0usize;
+        for id in targets {
+            let Some(node) = scene.node_mut(*id) else {
+                continue;
+            };
+            let NodeKind::BoxProp { materials, .. } = &mut node.kind else {
+                continue;
+            };
+            if materials.iter().all(|slot| *slot == Some(material)) {
+                continue;
+            }
+            *materials = [Some(material); psxed_project::BOX_PROP_FACE_COUNT];
+            updated += 1;
         }
         updated
     }
@@ -10847,11 +10996,13 @@ impl EditorWorkspace {
             }
         }
         if let Some(click) = clicked_resource {
-            self.apply_resource_selection_modifiers(
-                click.id,
-                click.modifiers,
-                &visible_resource_order,
-            );
+            if !self.apply_selected_box_prop_resource_click(click) {
+                self.apply_resource_selection_modifiers(
+                    click.id,
+                    click.modifiers,
+                    &visible_resource_order,
+                );
+            }
         }
         ui.add(
             egui::TextEdit::singleline(&mut self.file_filter)
@@ -11043,6 +11194,8 @@ impl EditorWorkspace {
                                     changed |= draw_playtest_render_settings(
                                         ui,
                                         &mut self.project.runtime_depth_sort_mode,
+                                        &mut self.project.runtime_texture_split_mode,
+                                        &mut self.project.runtime_room_draw_order_mode,
                                         &mut self.project.runtime_texture_split_max_edge,
                                     );
                                 }
@@ -12842,8 +12995,8 @@ impl EditorWorkspace {
                     // Sims-style: with a face selected, clicking a
                     // Material card retargets the selected face set's
                     // material rather than swapping the inspector.
-                    // Texture / non-Material clicks still navigate
-                    // normally.
+                    // Box props also accept plain Material / Texture
+                    // clicks; other clicks still navigate normally.
                     let id = click.id;
                     let is_material = matches!(
                         self.project.resource(id).map(|r| &r.data),
@@ -12880,7 +13033,7 @@ impl EditorWorkspace {
                             }
                         }
                         self.replace_resource_selection(id);
-                    } else {
+                    } else if !self.apply_selected_box_prop_resource_click(click) {
                         self.apply_resource_selection_modifiers(
                             id,
                             click.modifiers,
@@ -17408,6 +17561,8 @@ fn draw_transform_policy_editor(
 fn draw_playtest_render_settings(
     ui: &mut egui::Ui,
     mode: &mut RuntimeDepthSortMode,
+    split_mode: &mut RuntimeTextureSplitMode,
+    room_order_mode: &mut RuntimeRoomDrawOrderMode,
     texture_split_max_edge: &mut u16,
 ) -> bool {
     let mut changed = false;
@@ -17428,6 +17583,34 @@ fn draw_playtest_render_settings(
                     });
             });
             ui.weak(mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Subdivision Scope").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-texture-split-mode")
+                    .selected_text(split_mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeTextureSplitMode::ALL {
+                            changed |= ui
+                                .selectable_value(split_mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(split_mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Room Order").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-room-draw-order-mode")
+                    .selected_text(room_order_mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeRoomDrawOrderMode::ALL {
+                            changed |= ui
+                                .selectable_value(room_order_mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(room_order_mode.description());
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Subdivision Edge").color(STUDIO_TEXT_WEAK));
                 let mut next = i32::from(*texture_split_max_edge);
@@ -18326,26 +18509,73 @@ fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
 fn apply_node_gizmo_scale(
     node: &mut psxed_project::SceneNode,
     start_image_prop_size: Option<[u16; 2]>,
+    start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
     axis: PrimitiveGizmoAxis,
     steps: i32,
 ) {
-    let Some([start_width, start_height]) = start_image_prop_size else {
-        return;
-    };
-    let NodeKind::ImageProp { width, height, .. } = &mut node.kind else {
-        return;
-    };
-    let delta = steps.saturating_mul(HEIGHT_QUANTUM);
-    let resize_axis = |start: u16| -> u16 {
-        (i32::from(start) + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16
-    };
-    match axis {
-        PrimitiveGizmoAxis::X => *width = resize_axis(start_width),
-        PrimitiveGizmoAxis::Y => *height = resize_axis(start_height),
-        PrimitiveGizmoAxis::Z => {
-            *width = resize_axis(start_width);
-            *height = resize_axis(start_height);
+    match &mut node.kind {
+        NodeKind::ImageProp { width, height, .. } => {
+            let Some([start_width, start_height]) = start_image_prop_size else {
+                return;
+            };
+            let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+            let resize_axis = |start: u16| -> u16 {
+                (i32::from(start) + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16
+            };
+            match axis {
+                PrimitiveGizmoAxis::X => *width = resize_axis(start_width),
+                PrimitiveGizmoAxis::Y => *height = resize_axis(start_height),
+                PrimitiveGizmoAxis::Z => {
+                    *width = resize_axis(start_width);
+                    *height = resize_axis(start_height);
+                }
+            }
         }
+        NodeKind::BoxProp { vertices, .. } => {
+            let Some(start_vertices) = start_box_prop_vertices else {
+                return;
+            };
+            apply_box_prop_gizmo_scale(vertices, start_vertices, axis, steps);
+        }
+        _ => {}
+    }
+}
+
+fn apply_box_prop_gizmo_scale(
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    start_vertices: [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+) {
+    let idx = axis.index();
+    let mut min = i32::MAX;
+    let mut max = i32::MIN;
+    for vertex in start_vertices {
+        let value = i32::from(vertex[idx]);
+        min = min.min(value);
+        max = max.max(value);
+    }
+    if min >= max {
+        *vertices = start_vertices;
+        return;
+    }
+
+    let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+    let old_size = max - min;
+    let new_size = (old_size + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE));
+    let pivot = if axis == PrimitiveGizmoAxis::Y {
+        min as f32
+    } else {
+        (min + max) as f32 * 0.5
+    };
+    let scale = new_size as f32 / old_size as f32;
+    *vertices = start_vertices;
+    for vertex in vertices.iter_mut() {
+        let value = pivot + (f32::from(vertex[idx]) - pivot) * scale;
+        vertex[idx] = value.round().clamp(
+            -f32::from(MAX_IMAGE_PROP_SIZE),
+            f32::from(MAX_IMAGE_PROP_SIZE),
+        ) as i16;
     }
 }
 
@@ -18374,7 +18604,9 @@ fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode)
                 | NodeKind::AudioSource { .. }
                 | NodeKind::Portal { .. }
         ),
-        TransformGizmoMode::Scale => matches!(kind, NodeKind::ImageProp { .. }),
+        TransformGizmoMode::Scale => {
+            matches!(kind, NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. })
+        }
     }
 }
 
@@ -35941,6 +36173,61 @@ mod tests {
     }
 
     #[test]
+    fn node_gizmo_scales_box_prop_width() {
+        let mut project = ProjectDocument::new("box-prop-gizmo-scale");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("box-prop-gizmo-scale"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.replace_node_selection(prop);
+        workspace.transform_gizmo_mode = TransformGizmoMode::Scale;
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+        let unit = (x_axis.end - x_axis.start).normalized();
+        assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+        workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+        workspace.end_node_gizmo_drag();
+
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::BoxProp { vertices, .. } = &node.kind else {
+            panic!("expected box prop");
+        };
+        let min_x = vertices.iter().map(|v| v[0]).min().unwrap();
+        let max_x = vertices.iter().map(|v| v[0]).max().unwrap();
+        let min_y = vertices.iter().map(|v| v[1]).min().unwrap();
+        let max_y = vertices.iter().map(|v| v[1]).max().unwrap();
+        assert_eq!(min_x, -544);
+        assert_eq!(max_x, 544);
+        assert_eq!(min_y, 0);
+        assert_eq!(max_y, 1024);
+        assert!(workspace.is_dirty());
+
+        workspace.do_undo();
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::BoxProp { vertices, .. } = &node.kind else {
+            panic!("expected box prop");
+        };
+        assert_eq!(*vertices, psxed_project::box_prop_vertices_for_size(1024));
+    }
+
+    #[test]
     fn duplicate_wall_cook_error_marks_both_authored_faces() {
         let mut project = ProjectDocument::new("duplicate-wall");
         let mut grid = WorldGrid::empty(4, 2, 1024);
@@ -36117,6 +36404,138 @@ mod tests {
             );
         }
         assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn material_click_assignment_updates_selected_box_prop_faces() {
+        let mut project = ProjectDocument::new("box-prop-materials");
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(prop);
+
+        let assignment = workspace
+            .assign_selected_box_props_resource(target)
+            .expect("material applies to selected box prop");
+        assert_eq!(assignment.updated, 1);
+        assert_eq!(assignment.targets, 1);
+
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::BoxProp { materials, .. } = &node.kind else {
+            panic!("expected box prop");
+        };
+        assert!(materials.iter().all(|material| *material == Some(target)));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn texture_click_assignment_creates_material_for_selected_box_prop() {
+        let mut project = ProjectDocument::new("box-prop-texture");
+        let texture = project.add_resource(
+            "Brick",
+            ResourceData::Texture {
+                psxt_path: "assets/textures/brick.psxt".to_string(),
+            },
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(prop);
+
+        let assignment = workspace
+            .assign_selected_box_props_resource(texture)
+            .expect("texture wraps into a material for selected box prop");
+        assert_eq!(assignment.updated, 1);
+        assert_ne!(assignment.material, texture);
+        let material = workspace.project.resource(assignment.material).unwrap();
+        assert!(matches!(
+            &material.data,
+            ResourceData::Material(material) if material.texture == Some(texture)
+        ));
+
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::BoxProp { materials, .. } = &node.kind else {
+            panic!("expected box prop");
+        };
+        assert!(materials
+            .iter()
+            .all(|material| *material == Some(assignment.material)));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn box_prop_resource_click_keeps_node_selection_active() {
+        let mut project = ProjectDocument::new("box-prop-click-selection");
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(prop);
+        workspace.replace_resource_selection(target);
+
+        assert!(
+            workspace.apply_selected_box_prop_resource_click(ResourceClick {
+                id: target,
+                modifiers: egui::Modifiers::NONE,
+            })
+        );
+
+        assert_eq!(workspace.selected_node, prop);
+        assert!(workspace.selected_nodes.contains(&prop));
+        assert_eq!(workspace.selected_resource, None);
+        assert!(workspace.selected_resources.is_empty());
     }
 
     #[test]
@@ -37629,6 +38048,43 @@ mod tests {
         let dir = [1.0, 0.0, 0.0];
         let t = ray_intersects_aabb(origin, dir, target.center, target.half_extents);
         assert!(t.is_some(), "ray straight at bound centre must hit");
+    }
+
+    #[test]
+    fn pick_entity_bound_includes_box_prop_bounds() {
+        let mut project = ProjectDocument::new("box-prop-pick");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let workspace = EditorWorkspace::with_project(test_temp_dir("box-prop-pick"), project);
+        let bounds = workspace.collect_entity_bounds(Some(room));
+        let target = bounds
+            .iter()
+            .find(|bound| bound.node == prop && bound.kind == EntityBoundKind::BoxProp)
+            .copied()
+            .expect("box prop produces a pickable entity bound");
+        let origin = [
+            target.center[0] - 4096.0,
+            target.center[1],
+            target.center[2],
+        ];
+        let dir = [1.0, 0.0, 0.0];
+        let t = ray_intersects_aabb(origin, dir, target.center, target.half_extents);
+        assert!(t.is_some(), "ray straight at box prop centre must hit");
     }
 
     #[test]

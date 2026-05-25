@@ -97,6 +97,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out,
         "pub const CACHED_ROOM_DEPTH_MODE: u8 = {runtime_depth_sort_mode};\n",
     );
+    let runtime_texture_split_mode = package.runtime_texture_split_mode.manifest_value();
+    let _ = writeln!(
+        out,
+        "pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = {runtime_texture_split_mode};\n",
+    );
+    let runtime_room_draw_order_mode = package.runtime_room_draw_order_mode.manifest_value();
+    let _ = writeln!(
+        out,
+        "pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = {runtime_room_draw_order_mode};\n",
+    );
     let runtime_texture_split_max_edge = package.runtime_texture_split_max_edge;
     let _ = writeln!(
         out,
@@ -2487,6 +2497,8 @@ mod tests {
     fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
         let mut package = PlaytestPackage::default();
         package.runtime_depth_sort_mode = crate::RuntimeDepthSortMode::PerTriangle;
+        package.runtime_texture_split_mode = crate::RuntimeTextureSplitMode::DepthSorted;
+        package.runtime_room_draw_order_mode = crate::RuntimeRoomDrawOrderMode::Portal;
         package.runtime_texture_split_max_edge = 96;
         package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
         package.rooms = vec![test_room(0)];
@@ -2503,7 +2515,9 @@ mod tests {
         }];
 
         let src = render_manifest_source(&package);
-        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 2;"));
+        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 3;"));
+        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 1;"));
+        assert!(src.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 1;"));
         assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 96;"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = &[];"));
         assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = include_bytes!(\"rooms/room_000.psxw\");"));
