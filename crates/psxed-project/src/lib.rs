@@ -15,6 +15,7 @@ pub mod model_import;
 pub mod playtest;
 pub mod portal_rooms;
 pub mod resolve;
+pub mod room_connections;
 pub mod spatial;
 pub mod streaming;
 pub mod texture_import;
@@ -383,7 +384,7 @@ impl GridSplit {
     }
 }
 
-/// Quarter-turn texture rotation for authored grid faces.
+/// Texture rotation preset for authored grid faces.
 ///
 /// PS1 textured polygons carry per-corner 8-bit UVs, not a texture
 /// matrix, so these rotations are represented by rewriting the UVs
@@ -393,12 +394,20 @@ pub enum GridUvRotation {
     /// No texture rotation.
     #[default]
     Deg0,
+    /// Rotate texture coordinates 45 degrees clockwise on the face.
+    Deg45,
     /// Rotate texture coordinates 90 degrees clockwise on the face.
     Deg90,
+    /// Rotate texture coordinates 135 degrees clockwise on the face.
+    Deg135,
     /// Rotate texture coordinates 180 degrees.
     Deg180,
+    /// Rotate texture coordinates 225 degrees clockwise on the face.
+    Deg225,
     /// Rotate texture coordinates 270 degrees clockwise on the face.
     Deg270,
+    /// Rotate texture coordinates 315 degrees clockwise on the face.
+    Deg315,
 }
 
 /// Non-destructive texture-coordinate transform for one grid face.
@@ -416,7 +425,7 @@ pub struct GridUvTransform {
     /// source quad's native span" for that axis.
     #[serde(default, skip_serializing_if = "is_default_uv_span")]
     pub span: [u16; 2],
-    /// Quarter-turn rotation.
+    /// Texture rotation preset.
     #[serde(default)]
     pub rotation: GridUvRotation,
     /// Mirror horizontally before rotation.
@@ -487,15 +496,19 @@ impl GridUvTransform {
 
         let (u, v) = match self.rotation {
             GridUvRotation::Deg0 => (u, v),
+            GridUvRotation::Deg45 => rotate_uv_diagonal_fit(u, v, width, height, 1),
             GridUvRotation::Deg90 => (
                 width - scale_rounded(v, width, height),
                 scale_rounded(u, height, width),
             ),
+            GridUvRotation::Deg135 => rotate_uv_diagonal_fit(u, v, width, height, 3),
             GridUvRotation::Deg180 => (width - u, height - v),
+            GridUvRotation::Deg225 => rotate_uv_diagonal_fit(u, v, width, height, 5),
             GridUvRotation::Deg270 => (
                 scale_rounded(v, width, height),
                 height - scale_rounded(u, height, width),
             ),
+            GridUvRotation::Deg315 => rotate_uv_diagonal_fit(u, v, width, height, 7),
         };
         let span_u = self.effective_span_axis(0, width);
         let span_v = self.effective_span_axis(1, height);
@@ -559,6 +572,54 @@ fn scale_rounded(value: i32, numerator: i32, denominator: i32) -> i32 {
     } else {
         (value.saturating_mul(numerator) + denominator / 2) / denominator
     }
+}
+
+fn signed_div_round(value: i32, denominator: i32) -> i32 {
+    if denominator == 0 {
+        0
+    } else if value >= 0 {
+        (value + denominator / 2) / denominator
+    } else {
+        (value - denominator / 2) / denominator
+    }
+}
+
+fn rotate_uv_diagonal_fit(
+    u: i32,
+    v: i32,
+    width: i32,
+    height: i32,
+    clockwise_steps: u8,
+) -> (i32, i32) {
+    const Q: i32 = 4096;
+    const HALF_Q: i32 = Q / 2;
+
+    let du = signed_div_round((u.saturating_mul(2) - width).saturating_mul(Q), width);
+    let dv = signed_div_round((v.saturating_mul(2) - height).saturating_mul(Q), height);
+    let (cos_q, sin_q) = match clockwise_steps & 7 {
+        1 => (HALF_Q, HALF_Q),
+        3 => (-HALF_Q, HALF_Q),
+        5 => (-HALF_Q, -HALF_Q),
+        7 => (HALF_Q, -HALF_Q),
+        _ => (Q, 0),
+    };
+    let rotated_u = signed_div_round(
+        cos_q
+            .saturating_mul(du)
+            .saturating_sub(sin_q.saturating_mul(dv)),
+        Q,
+    );
+    let rotated_v = signed_div_round(
+        sin_q
+            .saturating_mul(du)
+            .saturating_add(cos_q.saturating_mul(dv)),
+        Q,
+    );
+
+    (
+        signed_div_round((rotated_u + Q).saturating_mul(width), Q * 2),
+        signed_div_round((rotated_v + Q).saturating_mul(height), Q * 2),
+    )
 }
 
 fn wrap_uv(value: i32) -> u8 {
@@ -1519,6 +1580,12 @@ pub struct GridSector {
     pub ceiling: Option<GridHorizontalFace>,
     /// Sector edge walls.
     pub walls: GridWalls,
+    /// Room/floor reached by moving upward through this sector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_above: Option<GridFloorLink>,
+    /// Room/floor reached by moving downward through this sector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_below: Option<GridFloorLink>,
 }
 
 impl GridSector {
@@ -1545,6 +1612,35 @@ impl GridSector {
             || !self.walls.west.is_empty()
             || !self.walls.north_west_south_east.is_empty()
             || !self.walls.north_east_south_west.is_empty()
+    }
+
+    /// True when this sector carries vertical room/floor traversal metadata.
+    pub fn has_floor_links(&self) -> bool {
+        self.floor_above.is_some() || self.floor_below.is_some()
+    }
+}
+
+/// Link from one room sector to a vertically adjacent room floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridFloorLink {
+    /// Target room node. `None` keeps imported or partially-authored
+    /// floor links visible until the room can be repaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_room: Option<NodeId>,
+    /// Target floor within that room. PSoXide currently cooks floor
+    /// zero only; the field is present so TR-style vertical stacking
+    /// has a stable authored address before runtime traversal uses it.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub target_floor: u16,
+}
+
+impl GridFloorLink {
+    /// Link to floor zero of a target room.
+    pub const fn room(target_room: NodeId) -> Self {
+        Self {
+            target_room: Some(target_room),
+            target_floor: 0,
+        }
     }
 }
 
@@ -1723,6 +1819,10 @@ pub fn snap_world_sector_size(size: i32) -> i32 {
 
 fn default_world_sector_size() -> i32 {
     DEFAULT_WORLD_SECTOR_SIZE
+}
+
+const fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
 }
 
 fn default_world_camera_distance() -> i32 {
@@ -4345,6 +4445,32 @@ impl WorldGrid {
         if let Some(sector) = self.ensure_sector(x, z) {
             sector.floor = Some(GridHorizontalFace::flat(height, material));
         }
+    }
+
+    /// Set or clear the floor link above one sector.
+    pub fn set_floor_above(&mut self, x: u16, z: u16, link: Option<GridFloorLink>) {
+        if let Some(sector) = self.ensure_sector(x, z) {
+            sector.floor_above = link;
+        }
+    }
+
+    /// Set or clear the floor link below one sector.
+    pub fn set_floor_below(&mut self, x: u16, z: u16, link: Option<GridFloorLink>) {
+        if let Some(sector) = self.ensure_sector(x, z) {
+            sector.floor_below = link;
+        }
+    }
+
+    /// Number of authored vertical floor links in this grid.
+    pub fn floor_link_count(&self) -> usize {
+        self.sectors
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(|sector| {
+                usize::from(sector.floor_above.is_some())
+                    + usize::from(sector.floor_below.is_some())
+            })
+            .sum()
     }
 
     /// Set or replace a floor, inheriting edge heights from touching
@@ -11148,6 +11274,38 @@ mod tests {
         assert_eq!(
             transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
             [(64, 0), (64, 64), (0, 64), (0, 0)]
+        );
+    }
+
+    #[test]
+    fn grid_uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
+        let transform = GridUvTransform {
+            offset: [0, 0],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg45,
+            flip_u: false,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+            [(32, 0), (64, 32), (32, 64), (0, 32)]
+        );
+    }
+
+    #[test]
+    fn grid_uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
+        let transform = GridUvTransform {
+            offset: [0, 0],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg315,
+            flip_u: false,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+            [(0, 32), (32, 0), (64, 32), (32, 64)]
         );
     }
 
