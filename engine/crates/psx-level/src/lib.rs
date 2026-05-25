@@ -679,13 +679,16 @@ pub const STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT: u32 = 1 << 0;
 pub const COMPACT_COLLISION_MAGIC: [u8; 8] = *b"PSXCOLL\0";
 
 /// Version of the compact collision-only room payload.
-pub const COMPACT_COLLISION_VERSION: u32 = 1;
+pub const COMPACT_COLLISION_VERSION: u32 = 2;
 
 /// Byte length of the compact collision header.
 pub const COMPACT_COLLISION_HEADER_BYTES: usize = 36;
 
 /// Byte length of one compact collision sector record.
-pub const COMPACT_COLLISION_SECTOR_BYTES: usize = 44;
+pub const COMPACT_COLLISION_SECTOR_BYTES: usize = 48;
+
+/// Sentinel stored in compact collision sector floor links when no room exists.
+pub const COMPACT_COLLISION_NO_ROOM: u16 = u16::MAX;
 
 /// Byte length of one compact collision wall record.
 pub const COMPACT_COLLISION_WALL_BYTES: usize = 20;
@@ -727,6 +730,10 @@ pub mod compact_collision_sector_flags {
     pub const FLOOR_WALKABLE: u8 = 1 << 2;
     /// Ceiling has at least one walkable triangle.
     pub const CEILING_WALKABLE: u8 = 1 << 3;
+    /// Sector can move upward into another runtime room.
+    pub const HAS_FLOOR_ABOVE: u8 = 1 << 4;
+    /// Sector can move downward into another runtime room.
+    pub const HAS_FLOOR_BELOW: u8 = 1 << 5;
 }
 
 /// Triangle bits stored in compact collision sector records.
@@ -1816,9 +1823,10 @@ mod tests {
         assert_eq!(streamed_room_chunk_header::FLAGS, 60);
         assert_eq!(STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT, 1);
         assert_eq!(COMPACT_COLLISION_MAGIC, *b"PSXCOLL\0");
-        assert_eq!(COMPACT_COLLISION_VERSION, 1);
+        assert_eq!(COMPACT_COLLISION_VERSION, 2);
         assert_eq!(COMPACT_COLLISION_HEADER_BYTES, 36);
-        assert_eq!(COMPACT_COLLISION_SECTOR_BYTES, 44);
+        assert_eq!(COMPACT_COLLISION_SECTOR_BYTES, 48);
+        assert_eq!(COMPACT_COLLISION_NO_ROOM, u16::MAX);
         assert_eq!(COMPACT_COLLISION_WALL_BYTES, 20);
         assert_eq!(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES, 28);
         assert_eq!(core::mem::size_of::<LevelCachedRoomCellRecord>(), 36);

@@ -671,7 +671,7 @@ fn cook_sector(
     // structs by `cook_horizontal_face` / `cook_walls` already
     // -- listed here only so the future v2 split has an obvious
     // landing spot for any extra collision-only data
-    // (sector logic offset, traversal portal slots, …).
+    // (sector logic offset, vertical floor links, traversal portal slots, …).
 
     Ok(Some(CookedGridSector {
         floor,

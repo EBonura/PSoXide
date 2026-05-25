@@ -708,14 +708,17 @@ impl FrameProfiler {
     /// Most recent sample that contains one of the requested guest counters.
     pub fn latest_with_guest_counters(&self, counter_ids: &[u16]) -> Option<FrameProfileSample> {
         self.samples.iter().rev().copied().find(|sample| {
-            counter_ids.iter().any(|&id| {
-                sample.guest.has_counter_observation(id as usize)
-            })
+            counter_ids
+                .iter()
+                .any(|&id| sample.guest.has_counter_observation(id as usize))
         })
     }
 
     /// Most recent sample that contains every requested guest counter.
-    pub fn latest_with_all_guest_counters(&self, counter_ids: &[u16]) -> Option<FrameProfileSample> {
+    pub fn latest_with_all_guest_counters(
+        &self,
+        counter_ids: &[u16],
+    ) -> Option<FrameProfileSample> {
         self.samples.iter().rev().copied().find(|sample| {
             counter_ids
                 .iter()
