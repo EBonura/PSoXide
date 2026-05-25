@@ -1149,10 +1149,7 @@ mod tests {
             max_uv_v_span(cooked_sector.walls.south[0].uvs),
             world::TILE_UV
         );
-        assert_eq!(
-            max_uv_v_span(parsed_wall.uvs().corners()),
-            world::TILE_UV
-        );
+        assert_eq!(max_uv_v_span(parsed_wall.uvs().corners()), world::TILE_UV);
     }
 
     #[test]

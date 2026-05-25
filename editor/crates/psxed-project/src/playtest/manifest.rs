@@ -92,6 +92,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out,
         "pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = {world_pack_max_chunk_bytes};\n",
     );
+    let runtime_depth_sort_mode = package.runtime_depth_sort_mode.manifest_value();
+    let _ = writeln!(
+        out,
+        "pub const CACHED_ROOM_DEPTH_MODE: u8 = {runtime_depth_sort_mode};\n",
+    );
+    let runtime_texture_split_max_edge = package.runtime_texture_split_max_edge;
+    let _ = writeln!(
+        out,
+        "pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = {runtime_texture_split_max_edge};\n",
+    );
 
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
@@ -843,6 +853,28 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             prop.baked_vertex_rgb[3].0,
             prop.baked_vertex_rgb[3].1,
             prop.baked_vertex_rgb[3].2,
+            prop.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Placed editable box props, room-local coordinates.\n");
+    out.push_str("pub static BOX_PROPS: &[LevelBoxPropRecord] = &[\n");
+    for prop in &package.box_props {
+        let texture_assets = render_box_prop_texture_assets(&prop.texture_asset_indices);
+        let vertices = render_box_prop_vertices(&prop.vertices);
+        let tint_rgb = render_box_prop_tint_rgb(&prop.tint_rgb);
+        let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
+        let _ = writeln!(
+            out,
+            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
+            prop.room,
+            prop.x,
+            prop.y,
+            prop.z,
+            prop.pitch,
+            prop.yaw,
+            prop.roll,
             prop.flags,
         );
     }
@@ -1989,6 +2021,70 @@ fn render_weapon_hit_shape(shape: PlaytestWeaponHitShape) -> String {
     }
 }
 
+fn render_box_prop_texture_assets(
+    texture_assets: &[Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
+) -> String {
+    let mut out = String::from("[");
+    for (index, texture_asset) in texture_assets.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        match texture_asset {
+            Some(asset) => {
+                let _ = write!(out, "Some(AssetId({asset}))");
+            }
+            None => out.push_str("None"),
+        }
+    }
+    out.push(']');
+    out
+}
+
+fn render_box_prop_vertices(vertices: &[[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT]) -> String {
+    let mut out = String::from("[");
+    for (index, vertex) in vertices.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "[{}, {}, {}]", vertex[0], vertex[1], vertex[2]);
+    }
+    out.push(']');
+    out
+}
+
+fn render_box_prop_tint_rgb(tint_rgb: &[[u8; 3]; psx_level::BOX_PROP_FACE_COUNT]) -> String {
+    let mut out = String::from("[");
+    for (index, tint) in tint_rgb.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "[{}, {}, {}]", tint[0], tint[1], tint[2]);
+    }
+    out.push(']');
+    out
+}
+
+fn render_box_prop_baked_vertex_rgb(
+    baked: &[[(u8, u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
+) -> String {
+    let mut out = String::from("[");
+    for (face_index, face) in baked.iter().enumerate() {
+        if face_index > 0 {
+            out.push_str(", ");
+        }
+        out.push('[');
+        for (vertex_index, rgb) in face.iter().enumerate() {
+            if vertex_index > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "({}, {}, {})", rgb.0, rgb.1, rgb.2);
+        }
+        out.push(']');
+    }
+    out.push(']');
+    out
+}
+
 const fn material_flags_for_sidedness(sidedness: crate::MaterialFaceSidedness) -> u16 {
     match sidedness {
         crate::MaterialFaceSidedness::Front => 0,
@@ -2390,6 +2486,8 @@ mod tests {
     #[test]
     fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
         let mut package = PlaytestPackage::default();
+        package.runtime_depth_sort_mode = crate::RuntimeDepthSortMode::PerTriangle;
+        package.runtime_texture_split_max_edge = 96;
         package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
         package.rooms = vec![test_room(0)];
         package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
@@ -2405,6 +2503,8 @@ mod tests {
         }];
 
         let src = render_manifest_source(&package);
+        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 2;"));
+        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 96;"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = &[];"));
         assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = include_bytes!(\"rooms/room_000.psxw\");"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read room-surface cache slices from `.psxc` chunks.\npub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
@@ -2826,6 +2926,7 @@ use psx_level::{
     LevelCachedRoomSurfaceRecord,
     LevelCachedRoomVertexRecord,
     LevelAssetRecord,
+    LevelBoxPropRecord,
     LevelCameraRecord,
     LevelCloudLayerRecord,
     LevelCharacterRecord,
