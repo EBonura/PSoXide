@@ -33,6 +33,9 @@ use psxed_project::portal_rooms::{
     extract_portal_room_grid, plan_portal_rooms, portal_edge_for_node, portal_seam_edges_for_edge,
     portal_seam_edges_for_node, PortalEdge, PortalRoomConfig, DEFAULT_PORTAL_ROOM_MAX_SECTORS,
 };
+use psxed_project::room_connections::{
+    connection_for_portal, derive_room_connections, RoomConnection, RoomConnectionStatus,
+};
 use psxed_project::streaming::{collect_scene_resource_use, SceneResourceUse};
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
@@ -41,8 +44,8 @@ use psxed_project::{
     GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
-    PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
-    WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
+    PsxBlendMode, Resource, ResourceData, ResourceId, Scene, SceneNode, SkyMode, SkySettings,
+    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
     DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
     MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
@@ -71,11 +74,19 @@ const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
 const MAX_IMAGE_PROP_SIZE: u16 = 4096;
+const PLACEMENT_DUPLICATE_EPSILON: f32 = 0.001;
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
 const RESOURCE_CARD_WIDTH: f32 = 120.0;
 const RESOURCE_CARD_HEIGHT: f32 = 128.0;
+const MATERIAL_TEXTURE_PICKER_POPUP_WIDTH: f32 = 320.0;
+const MATERIAL_TEXTURE_PICKER_POPUP_HEIGHT: f32 = 320.0;
+const MATERIAL_TEXTURE_PICKER_ROW_HEIGHT: f32 = 44.0;
+const MATERIAL_TEXTURE_PICKER_THUMB_SIZE: f32 = 34.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
+const ACTION_BAR_COMPACT_HEIGHT: f32 = 50.0;
+const ACTION_BAR_EXPANDED_HEIGHT: f32 = 74.0;
+const ACTION_BAR_WRAP_STATUS_CHARS: usize = 96;
 const PLAY_FRAME_HISTORY_CAP: usize = 150;
 const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
@@ -96,6 +107,14 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/crowned_wraith",
     "assets/animations/standalone_fbx",
 ];
+
+fn action_bar_height_for_status(status: &str) -> f32 {
+    if status.contains('\n') || status.chars().count() > ACTION_BAR_WRAP_STATUS_CHARS {
+        ACTION_BAR_EXPANDED_HEIGHT
+    } else {
+        ACTION_BAR_COMPACT_HEIGHT
+    }
+}
 const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Obsidian Wraith",
     "Crimson Cross Knight",
@@ -316,6 +335,7 @@ pub struct EditorWorkspace {
     left_dock_scene_fraction: f32,
     resource_search: String,
     resource_filter: ResourceFilter,
+    material_texture_search: String,
     /// `Some((id, buffer))` while the resource inspector's name
     /// field is editing. Committed resource renames may move backing
     /// files, so they happen on focus loss / Enter rather than on
@@ -328,8 +348,8 @@ pub struct EditorWorkspace {
     active_tool: ViewTool,
     /// Kind of node the Place tool drops on a click. Surfaces in
     /// the toolbar as a small picker visible only when
-    /// `active_tool == Place`. Player Spawn enforces uniqueness
-    /// at place-time; the others are additive markers.
+    /// `active_tool == Place`. Player Spawn is unique per world;
+    /// the others are additive markers.
     place_kind: PlaceKind,
     /// Cardinal edge used by the dedicated Portal placement tool.
     /// The marker is written at the edge midpoint so the cooker can
@@ -420,6 +440,13 @@ struct TexturePreviewSnapshot {
     texture_id: egui::TextureId,
     image: ColorImage,
     stats: PsxtStats,
+}
+
+#[derive(Clone)]
+struct TexturePickerOption {
+    id: ResourceId,
+    name: String,
+    thumb: Option<(egui::TextureId, PsxtStats)>,
 }
 
 #[derive(Clone, Copy)]
@@ -660,6 +687,7 @@ struct PaintStamp {
     sx: u16,
     sz: u16,
     tool: ViewTool,
+    triangle: Option<HorizontalTriangleIndex>,
     edge: Option<GridDirection>,
     stack: Option<u8>,
 }
@@ -1977,8 +2005,8 @@ impl WallPaintShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaceKind {
     /// `SpawnPoint { player: true }` -- the editor enforces
-    /// player-source uniqueness by demoting existing player
-    /// SpawnPoints and CharacterControllers at place time.
+    /// player-source uniqueness by refusing a second player source
+    /// at place time.
     PlayerSpawn,
     /// `SpawnPoint { player: false }`. Multiple OK.
     SpawnMarker,
@@ -2286,6 +2314,7 @@ impl EditorWorkspace {
             left_dock_scene_fraction: LEFT_DOCK_DEFAULT_SCENE_FRACTION,
             resource_search: String::new(),
             resource_filter: ResourceFilter::All,
+            material_texture_search: String::new(),
             resource_renaming: None,
             resource_delete_confirm: None,
             active_tool: ViewTool::Select,
@@ -3468,6 +3497,15 @@ impl EditorWorkspace {
 
     fn drain_live_egui_textures(&mut self) -> Vec<egui::TextureHandle> {
         let mut handles = Vec::new();
+        if let Some(handle) = self.psoxide_logo_texture.take() {
+            handles.push(handle);
+        }
+        if let Some(handle) = self.model_resource_preview_texture.take() {
+            handles.push(handle);
+        }
+        if let Some(handle) = self.animation_viewer_preview_texture.take() {
+            handles.push(handle);
+        }
         handles.extend(self.texture_thumbs.drain().map(|(_, entry)| entry.handle));
         if let Some(preview) = self.texture_import_dialog.preview.take() {
             handles.push(preview.handle);
@@ -5044,6 +5082,14 @@ impl EditorWorkspace {
 
     pub fn show_lights_enabled(&self) -> bool {
         self.show_lights
+    }
+
+    /// Whether the central editor surface is currently showing the
+    /// editable 3D viewport. The frontend uses this to avoid spending
+    /// host frame time rebuilding the PSX-style preview while the user
+    /// is in 2D map or Animation Viewer.
+    pub fn editor_3d_preview_visible(&self) -> bool {
+        self.active_workspace == WorkspaceView::Room && !self.view_2d
     }
 
     /// Currently-selected scene node. The frontend reads this so the
@@ -7342,6 +7388,13 @@ impl EditorWorkspace {
 
         match resource.data {
             ResourceData::Model(_) => {
+                let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+                if let Some(existing) =
+                    self.find_duplicate_model_entity(room_id, resource_id, translation)
+                {
+                    self.reject_duplicate_placement(existing, "Prop");
+                    return;
+                }
                 self.push_undo();
                 let node = self.create_model_entity_at_room_hit(
                     room_id,
@@ -7356,6 +7409,13 @@ impl EditorWorkspace {
                 self.mark_dirty();
             }
             ResourceData::Character(character) => {
+                let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+                if let Some(existing) =
+                    self.find_duplicate_character_entity(room_id, resource_id, translation)
+                {
+                    self.reject_duplicate_placement(existing, "Character");
+                    return;
+                }
                 self.push_undo();
                 let player = !self.has_player_source();
                 let idle_clip = self.resolve_character_idle_preview_clip(&character);
@@ -7384,6 +7444,13 @@ impl EditorWorkspace {
                 self.mark_dirty();
             }
             ResourceData::Weapon(weapon) => {
+                let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+                if let Some(existing) =
+                    self.find_duplicate_weapon_entity(room_id, resource_id, translation)
+                {
+                    self.reject_duplicate_placement(existing, "Weapon");
+                    return;
+                }
                 self.push_undo();
                 let node = self.create_weapon_entity_at_room_hit(
                     room_id,
@@ -7420,6 +7487,14 @@ impl EditorWorkspace {
         }
     }
 
+    fn placement_translation_for_room_hit(&self, room_id: NodeId, hit_world: [f32; 3]) -> [f32; 3] {
+        let editor = self
+            .room_grid_view(room_id)
+            .map(|grid| grid.room_local_to_editor(hit_world))
+            .unwrap_or([hit_world[0], hit_world[2]]);
+        [editor[0], 0.0, editor[1]]
+    }
+
     fn create_model_entity_at_room_hit(
         &mut self,
         room_id: NodeId,
@@ -7427,14 +7502,11 @@ impl EditorWorkspace {
         name: &str,
         hit_world: [f32; 3],
     ) -> NodeId {
-        let editor = self
-            .room_grid_view(room_id)
-            .map(|grid| grid.room_local_to_editor(hit_world))
-            .unwrap_or([hit_world[0], hit_world[2]]);
+        let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
-            node.transform.translation = [editor[0], 0.0, editor[1]];
+            node.transform.translation = translation;
         }
         scene.add_node(
             entity,
@@ -7468,14 +7540,11 @@ impl EditorWorkspace {
         weapon_grip: &str,
         hit_world: [f32; 3],
     ) -> NodeId {
-        let editor = self
-            .room_grid_view(room_id)
-            .map(|grid| grid.room_local_to_editor(hit_world))
-            .unwrap_or([hit_world[0], hit_world[2]]);
+        let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
-            node.transform.translation = [editor[0], 0.0, editor[1]];
+            node.transform.translation = translation;
         }
         if let Some(model_id) = model_id {
             scene.add_node(
@@ -7513,14 +7582,11 @@ impl EditorWorkspace {
         player: bool,
         hit_world: [f32; 3],
     ) -> NodeId {
-        let editor = self
-            .room_grid_view(room_id)
-            .map(|grid| grid.room_local_to_editor(hit_world))
-            .unwrap_or([hit_world[0], hit_world[2]]);
+        let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
-            node.transform.translation = [editor[0], 0.0, editor[1]];
+            node.transform.translation = translation;
         }
         if let Some(model_id) = model_id {
             scene.add_node(
@@ -7566,6 +7632,116 @@ impl EditorWorkspace {
         entity
     }
 
+    fn find_duplicate_model_entity(
+        &self,
+        room_id: NodeId,
+        model_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |scene, node| {
+            matches!(node.kind, NodeKind::Entity)
+                && entity_model_resource_id(scene, node) == Some(model_id)
+                && entity_character_component_resource_id(scene, node).is_none()
+                && entity_weapon_resource_id(scene, node).is_none()
+        })
+    }
+
+    fn find_duplicate_character_entity(
+        &self,
+        room_id: NodeId,
+        character_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |scene, node| {
+            matches!(node.kind, NodeKind::Entity)
+                && entity_character_component_resource_id(scene, node) == Some(character_id)
+        })
+    }
+
+    fn find_duplicate_weapon_entity(
+        &self,
+        room_id: NodeId,
+        weapon_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |scene, node| {
+            matches!(node.kind, NodeKind::Entity)
+                && entity_weapon_resource_id(scene, node) == Some(weapon_id)
+        })
+    }
+
+    fn find_duplicate_image_prop(
+        &self,
+        room_id: NodeId,
+        material_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(
+                node.kind,
+                NodeKind::ImageProp {
+                    material: Some(id),
+                    ..
+                } if id == material_id
+            )
+        })
+    }
+
+    fn find_duplicate_spawn_marker(
+        &self,
+        room_id: NodeId,
+        player: bool,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(
+                node.kind,
+                NodeKind::SpawnPoint {
+                    player: node_player,
+                    character: None,
+                } if node_player == player
+            )
+        })
+    }
+
+    fn find_duplicate_point_light(&self, room_id: NodeId, translation: [f32; 3]) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(node.kind, NodeKind::PointLight { .. })
+        })
+    }
+
+    fn find_duplicate_portal(&self, room_id: NodeId, translation: [f32; 3]) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(node.kind, NodeKind::Portal { .. })
+        })
+    }
+
+    fn find_duplicate_room_child<F>(
+        &self,
+        room_id: NodeId,
+        translation: [f32; 3],
+        mut matches_placement: F,
+    ) -> Option<NodeId>
+    where
+        F: FnMut(&Scene, &SceneNode) -> bool,
+    {
+        let scene = self.project.active_scene();
+        let room = scene.node(room_id)?;
+        room.children.iter().copied().find(|child_id| {
+            scene.node(*child_id).is_some_and(|node| {
+                translations_match(node.transform.translation, translation)
+                    && matches_placement(scene, node)
+            })
+        })
+    }
+
+    fn reject_duplicate_placement(&mut self, existing: NodeId, label: &str) {
+        self.replace_node_selection(existing);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.status = format!("{label} already exists at this position");
+    }
+
     fn resolve_character_idle_preview_clip(
         &self,
         character: &psxed_project::CharacterResource,
@@ -7603,6 +7779,9 @@ impl EditorWorkspace {
         face_hit: Option<(FaceRef, [f32; 3])>,
         hit_world: [f32; 3],
     ) -> PaintStamp {
+        let triangle = self
+            .horizontal_paint_triangle_target(self.active_tool, room_id, sx, sz, hit_world)
+            .map(|triangle| triangle.index);
         let edge = if self.portal_place_active() {
             Some(self.portal_place_direction)
         } else if matches!(self.active_tool, ViewTool::PaintWall) {
@@ -7633,6 +7812,7 @@ impl EditorWorkspace {
             sx,
             sz,
             tool: self.active_tool,
+            triangle,
             edge,
             stack: None,
         }
@@ -7758,20 +7938,13 @@ impl EditorWorkspace {
         }
 
         if matches!(tool, ViewTool::Place) {
-            self.push_undo();
-            // World → editor (room-centre-relative, sector units)
-            // via `WorldGrid::room_local_to_editor`. Single helper,
-            // origin-aware, exact inverse of `editor_to_room_local`.
-            let editor = self
-                .room_grid_view(room_id)
-                .map(|grid| grid.room_local_to_editor(hit_world))
-                .unwrap_or([0.0, 0.0]);
+            let mut translation = self.placement_translation_for_room_hit(room_id, hit_world);
             let kind = self.place_kind;
-            // Player source is exclusive -- demote any existing
-            // player SpawnPoint / CharacterController so the
-            // cooker sees exactly one.
-            if matches!(kind, PlaceKind::PlayerSpawn) {
-                self.demote_player_sources_except(None);
+            if matches!(kind, PlaceKind::PlayerSpawn) && self.has_player_source() {
+                self.status =
+                    "Only one player source is allowed per world. Delete or demote the existing player first."
+                        .to_string();
+                return;
             }
             let (default_name, node_kind): (String, NodeKind) = match kind {
                 PlaceKind::PlayerSpawn => (
@@ -7781,13 +7954,21 @@ impl EditorWorkspace {
                         character: None,
                     },
                 ),
-                PlaceKind::SpawnMarker => (
-                    "Spawn".to_string(),
-                    NodeKind::SpawnPoint {
-                        player: false,
-                        character: None,
-                    },
-                ),
+                PlaceKind::SpawnMarker => {
+                    if let Some(existing) =
+                        self.find_duplicate_spawn_marker(room_id, false, translation)
+                    {
+                        self.reject_duplicate_placement(existing, "Spawn");
+                        return;
+                    }
+                    (
+                        "Spawn".to_string(),
+                        NodeKind::SpawnPoint {
+                            player: false,
+                            character: None,
+                        },
+                    )
+                }
                 PlaceKind::ModelInstance => {
                     // Resolve which Model resource to bind. Order:
                     // (a) user has a Model selected in the resource
@@ -7796,6 +7977,13 @@ impl EditorWorkspace {
                     //     (c) refuse with an actionable status.
                     match self.resolve_place_model_resource() {
                         Ok((model_id, name)) => {
+                            if let Some(existing) =
+                                self.find_duplicate_model_entity(room_id, model_id, translation)
+                            {
+                                self.reject_duplicate_placement(existing, "Prop");
+                                return;
+                            }
+                            self.push_undo();
                             let id = self.create_model_entity_at_room_hit(
                                 room_id, model_id, &name, hit_world,
                             );
@@ -7814,9 +8002,16 @@ impl EditorWorkspace {
                 }
                 PlaceKind::Character => match self.resolve_place_character_resource() {
                     Ok((character_id, name, character)) => {
+                        if let Some(existing) =
+                            self.find_duplicate_character_entity(room_id, character_id, translation)
+                        {
+                            self.reject_duplicate_placement(existing, "Character");
+                            return;
+                        }
                         let player = !self.has_player_source();
                         let idle_clip = self.resolve_character_idle_preview_clip(&character);
                         let settings = CharacterControllerSettings::from_character(&character);
+                        self.push_undo();
                         let id = self.create_character_entity_at_room_hit(
                             room_id,
                             character_id,
@@ -7846,6 +8041,13 @@ impl EditorWorkspace {
                 PlaceKind::ImageProp => match self.resolve_place_image_prop_material() {
                     Ok((material_id, name)) => {
                         let size = image_prop_default_size_for_sector(sector_size_i);
+                        translation[1] = hit_world[1] as f32 / sector_size;
+                        if let Some(existing) =
+                            self.find_duplicate_image_prop(room_id, material_id, translation)
+                        {
+                            self.reject_duplicate_placement(existing, "Image Prop");
+                            return;
+                        }
                         (
                             format!("{name} Image"),
                             NodeKind::ImageProp {
@@ -7863,33 +8065,58 @@ impl EditorWorkspace {
                         return;
                     }
                 },
-                PlaceKind::PointLightMarker => (
-                    "Point Light".to_string(),
-                    NodeKind::PointLight {
-                        color: [255, 240, 200],
-                        intensity: 1.0,
-                        // Sectors. Matches the Add Child default
-                        // and covers a typical 4×4 sector room.
-                        radius: 4.0,
-                    },
-                ),
+                PlaceKind::PointLightMarker => {
+                    if let Some(existing) = self.find_duplicate_point_light(room_id, translation) {
+                        self.reject_duplicate_placement(existing, "Point Light");
+                        return;
+                    }
+                    (
+                        "Point Light".to_string(),
+                        NodeKind::PointLight {
+                            color: [255, 240, 200],
+                            intensity: 1.0,
+                            // Sectors. Matches the Add Child default
+                            // and covers a typical 4×4 sector room.
+                            radius: 4.0,
+                        },
+                    )
+                }
                 PlaceKind::Portal => return,
             };
+            self.push_undo();
             let id = self
                 .project
                 .active_scene_mut()
                 .add_node(room_id, default_name, node_kind);
             if let Some(node) = self.project.active_scene_mut().node_mut(id) {
-                node.transform.translation = [editor[0], 0.0, editor[1]];
-                if matches!(kind, PlaceKind::ImageProp) {
-                    node.transform.translation[1] = hit_world[1] as f32 / sector_size;
-                }
+                node.transform.translation = translation;
             }
             self.replace_node_selection(id);
             self.clear_resource_selection_state();
             self.clear_primitive_selection_state();
             self.status = format!("Placed {} at {sx},{sz}", kind.label());
             self.mark_dirty();
+            return;
+        }
+
+        if let Some(triangle) =
+            self.horizontal_paint_triangle_target(tool, room_id, sx, sz, hit_world)
+        {
+            let already_assigned = self.triangle_material(triangle) == floor_mat;
+            self.select_painted_triangle(triangle);
+            if already_assigned {
+                self.status = format!(
+                    "{} already uses selected material",
+                    describe_triangle(triangle)
+                );
+                return;
+            }
+            self.push_undo();
+            if self.assign_triangle_material_no_undo(triangle, floor_mat) {
+                self.mark_dirty();
+            }
+            self.select_painted_triangle(triangle);
+            self.status = format!("Painted {}", describe_triangle(triangle));
             return;
         }
 
@@ -7972,6 +8199,40 @@ impl EditorWorkspace {
         self.status = status;
     }
 
+    fn horizontal_paint_triangle_target(
+        &self,
+        tool: ViewTool,
+        room_id: NodeId,
+        sx: u16,
+        sz: u16,
+        hit_world: [f32; 3],
+    ) -> Option<HorizontalTriangleRef> {
+        if !matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle) {
+            return None;
+        }
+        let kind = match tool {
+            ViewTool::PaintFloor => FaceKind::Floor,
+            ViewTool::PaintCeiling => FaceKind::Ceiling,
+            _ => return None,
+        };
+        self.horizontal_triangle_ref_at_hit(
+            FaceRef {
+                room: room_id,
+                sx,
+                sz,
+                kind,
+            },
+            hit_world,
+        )
+    }
+
+    fn select_painted_triangle(&mut self, triangle: HorizontalTriangleRef) {
+        self.replace_node_selection(triangle.room);
+        self.clear_sector_selection();
+        self.replace_primitive_selection(Selection::Triangle(triangle));
+        self.update_primitive_resource_selection();
+    }
+
     fn place_portal_marker(&mut self, room_id: NodeId, sx: u16, sz: u16) {
         let dir = self.portal_place_direction;
         let Some((editor, entry_name)) = self.room_grid_view(room_id).and_then(|grid| {
@@ -7994,6 +8255,16 @@ impl EditorWorkspace {
             return;
         };
 
+        let translation = [editor[0], 0.0, editor[1]];
+        if let Some(existing) = self.find_duplicate_portal(room_id, translation) {
+            self.reject_duplicate_placement(existing, "Portal");
+            self.status = format!(
+                "Portal already exists on {} edge at {sx},{sz}",
+                direction_label(dir)
+            );
+            return;
+        }
+
         self.push_undo();
         let id = self.project.active_scene_mut().add_node(
             room_id,
@@ -8006,7 +8277,7 @@ impl EditorWorkspace {
             },
         );
         if let Some(node) = self.project.active_scene_mut().node_mut(id) {
-            node.transform.translation = [editor[0], 0.0, editor[1]];
+            node.transform.translation = translation;
         }
         self.replace_node_selection(id);
         self.clear_resource_selection_state();
@@ -9481,8 +9752,10 @@ impl EditorWorkspace {
         playtest_status: EditorPlaytestStatus,
         play_metrics: Option<EditorPlaytestMetrics>,
     ) {
+        let action_bar_height = action_bar_height_for_status(&self.status);
+        let status_strip_height = (action_bar_height - 12.0).max(38.0);
         egui::TopBottomPanel::top("psxed_action_bar")
-            .exact_height(50.0)
+            .exact_height(action_bar_height)
             .frame(top_bar_frame())
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -9494,7 +9767,7 @@ impl EditorWorkspace {
                     ui.add_space(10.0);
 
                     ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width().max(180.0), 38.0),
+                        Vec2::new(ui.available_width().max(180.0), status_strip_height),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             self.draw_build_status_strip(ui, playtest_status);
@@ -10189,6 +10462,7 @@ impl EditorWorkspace {
     fn draw_build_status_strip(&self, ui: &mut egui::Ui, playtest_status: EditorPlaytestStatus) {
         let status = self.action_bar_status(playtest_status);
         let strip_width = ui.available_width().max(180.0);
+        let strip_height = ui.available_height().max(26.0);
         egui::Frame::new()
             .fill(STUDIO_PANEL_DARK)
             .stroke(Stroke::new(1.0, status.border))
@@ -10196,8 +10470,8 @@ impl EditorWorkspace {
             .inner_margin(egui::Margin::symmetric(9, 5))
             .show(ui, |ui| {
                 ui.set_min_width((strip_width - 18.0).max(80.0));
-                ui.set_min_height(26.0);
-                ui.horizontal_centered(|ui| {
+                ui.set_min_height((strip_height - 10.0).max(26.0));
+                ui.horizontal(|ui| {
                     ui.label(icons::text(status.icon, 14.0).color(status.accent));
                     ui.label(
                         RichText::new(status.badge)
@@ -10207,13 +10481,16 @@ impl EditorWorkspace {
                     );
                     ui.separator();
                     ui.add_sized(
-                        Vec2::new(ui.available_width(), 18.0),
+                        Vec2::new(
+                            ui.available_width().max(80.0),
+                            ui.available_height().max(18.0),
+                        ),
                         egui::Label::new(
                             RichText::new(status.message)
                                 .small()
                                 .color(STUDIO_TEXT_WEAK),
                         )
-                        .truncate(),
+                        .wrap(),
                     );
                 });
             });
@@ -10382,11 +10659,14 @@ impl EditorWorkspace {
         let display_rows = scene_tree_display_rows(&rows, &filter, &self.collapsed_scene_nodes);
         let visible_node_order: Vec<NodeId> = display_rows.iter().map(|row| row.id).collect();
         let mut actions: Vec<TreeAction> = Vec::new();
+        let mut connection_select: Option<NodeId> = None;
+        let mut connection_repair: Option<NodeId> = None;
         let selected_node = self.selected_node;
         let selected_nodes = self.selected_nodes.clone();
         let collapsed_scene_nodes = self.collapsed_scene_nodes.clone();
         let hidden_scene_nodes = self.hidden_scene_nodes.clone();
         let scene = self.project.active_scene();
+        let connections = derive_room_connections(scene);
         let renaming = &mut self.renaming;
         let pending_focus = &mut self.pending_rename_focus;
         let tree_scroll_height = (ui.available_height() - 30.0).max(24.0);
@@ -10409,10 +10689,31 @@ impl EditorWorkspace {
                         &mut actions,
                     );
                 }
+                ui.add_space(4.0);
+                draw_room_connections_rows(
+                    ui,
+                    scene,
+                    &connections,
+                    &filter,
+                    selected_node,
+                    &selected_nodes,
+                    &mut connection_select,
+                    &mut connection_repair,
+                );
+                draw_room_floor_link_rows(ui, scene, &filter);
             });
 
         for action in actions {
             self.apply_tree_action(action, &visible_node_order);
+        }
+        if let Some(portal) = connection_select {
+            self.replace_node_selection(portal);
+            self.clear_resource_selection_state();
+            self.clear_primitive_selection_state();
+            self.clear_sector_selection();
+        }
+        if let Some(portal) = connection_repair {
+            self.create_reciprocal_portal(portal);
         }
 
         ui.horizontal(|ui| {
@@ -10579,6 +10880,7 @@ impl EditorWorkspace {
                                 // Picker `→` jump-to requests bubble up here.
                                 // Applied after both phases release their borrows.
                                 let mut nav_target: Option<ResourceId> = None;
+                                let mut node_nav_target: Option<NodeId> = None;
                                 let mut world_sector_size_change: Option<i32> = None;
                                 let mut room_grid_resize: Option<(u16, u16)> = None;
                                 let inherited_sector_size =
@@ -10742,6 +11044,14 @@ impl EditorWorkspace {
                                     return;
                                 };
 
+                                if matches!(node.kind, NodeKind::Portal { .. }) {
+                                    if let Some(connection) = connection_for_portal(scene, selected)
+                                    {
+                                        node_nav_target =
+                                            draw_portal_connection_inspector(ui, scene, &connection);
+                                    }
+                                }
+
                                 egui::CollapsingHeader::new(icons::label(icons::BOX, "Render"))
                                     .default_open(false)
                                     .show(ui, |ui| {
@@ -10792,6 +11102,12 @@ impl EditorWorkspace {
                                 if let Some(target) = nav_target {
                                     self.replace_resource_selection(target);
                                     self.clear_node_selection_state();
+                                    self.clear_primitive_selection_state();
+                                    self.clear_sector_selection();
+                                }
+                                if let Some(target) = node_nav_target {
+                                    self.replace_node_selection(target);
+                                    self.clear_resource_selection_state();
                                     self.clear_primitive_selection_state();
                                     self.clear_sector_selection();
                                 }
@@ -11518,6 +11834,7 @@ impl EditorWorkspace {
     }
 
     fn draw_resource_inspector(&mut self, ui: &mut egui::Ui, id: ResourceId) {
+        self.refresh_texture_thumbs(ui.ctx());
         // Deferred jump-to navigation, same pattern as
         // `draw_face_inspector`. Applied after the mutable
         // resource borrow releases.
@@ -11543,15 +11860,23 @@ impl EditorWorkspace {
         // stats display). Cloned so the mutable resource borrow
         // below doesn't fight `&self.project_dir`.
         let project_root = self.project_dir.clone();
-        let texture_options: Vec<(ResourceId, String)> = self
+        let texture_options: Vec<TexturePickerOption> = self
             .project
             .resources
             .iter()
             .filter_map(|r| match &r.data {
-                ResourceData::Texture { .. } => Some((r.id, r.name.clone())),
+                ResourceData::Texture { .. } => Some(TexturePickerOption {
+                    id: r.id,
+                    name: r.name.clone(),
+                    thumb: self
+                        .texture_thumbs
+                        .get(&r.id)
+                        .map(|entry| (entry.handle.id(), entry.stats)),
+                }),
                 _ => None,
             })
             .collect();
+        let mut material_texture_search = self.material_texture_search.clone();
         // Snapshot Model resources + their clip names so the
         // Character Profile inspector can populate model + clip pickers
         // without borrowing `self.project` while the mutable
@@ -11682,6 +12007,7 @@ impl EditorWorkspace {
                             ui,
                             &mut material.texture,
                             &texture_options,
+                            &mut material_texture_search,
                             &mut nav_target,
                         );
                         changed |= blend_mode_editor(ui, &mut material.blend_mode);
@@ -11788,6 +12114,8 @@ impl EditorWorkspace {
                     });
             }
         }
+
+        self.material_texture_search = material_texture_search;
 
         if changed {
             self.mark_dirty();
@@ -12969,10 +13297,8 @@ impl EditorWorkspace {
         match self.active_tool {
             ViewTool::Place if self.place_kind != PlaceKind::Portal => {
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Kind");
-                    self.draw_place_kind_picker(ui);
-                });
+                ui.label("Place kind");
+                self.draw_place_kind_picker(ui);
             }
             ViewTool::PaintWall => {
                 ui.separator();
@@ -13121,6 +13447,20 @@ impl EditorWorkspace {
         }
     }
 
+    fn set_place_kind(&mut self, kind: PlaceKind) {
+        if self.place_kind == kind {
+            return;
+        }
+        self.place_kind = kind;
+        if self.place_kind == PlaceKind::Portal {
+            self.clear_sector_selection();
+            self.clear_primitive_selection_state();
+            self.hovered_primitive = None;
+        }
+        self.status = format!("Place kind: {}", self.place_kind.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+    }
+
     fn visibility_group_icon(&self) -> char {
         if self.editor_visibility_has_hidden_items() {
             icons::EYE_OFF
@@ -13193,25 +13533,23 @@ impl EditorWorkspace {
     }
 
     fn draw_place_kind_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(icons::text(self.place_kind.icon(), 14.0).color(STUDIO_TEXT_WEAK));
-        let before = self.place_kind;
-        egui::ComboBox::from_id_salt("place-kind-toolbar")
-            .selected_text(self.place_kind.label())
-            .show_ui(ui, |ui| {
-                for kind in [
-                    PlaceKind::PlayerSpawn,
-                    PlaceKind::SpawnMarker,
-                    PlaceKind::ModelInstance,
-                    PlaceKind::Character,
-                    PlaceKind::ImageProp,
-                    PlaceKind::PointLightMarker,
-                ] {
-                    ui.selectable_value(&mut self.place_kind, kind, kind.label());
-                }
-            });
-        if self.place_kind != before {
-            self.status = format!("Place kind: {}", self.place_kind.label());
-            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        for kind in [
+            PlaceKind::PlayerSpawn,
+            PlaceKind::SpawnMarker,
+            PlaceKind::ModelInstance,
+            PlaceKind::Character,
+            PlaceKind::ImageProp,
+            PlaceKind::PointLightMarker,
+        ] {
+            if ui
+                .selectable_label(
+                    self.place_kind == kind,
+                    icons::label(kind.icon(), kind.label()),
+                )
+                .clicked()
+            {
+                self.set_place_kind(kind);
+            }
         }
         match self.place_kind {
             PlaceKind::ModelInstance => {
@@ -13240,42 +13578,47 @@ impl EditorWorkspace {
             .filter(|resource| filter.matches(&resource.data))
             .map(|resource| (resource.id, resource.name.clone()))
             .collect();
-        let selected_id = self
-            .place_resource
-            .filter(|id| options.iter().any(|(candidate, _)| candidate == id))
-            .or_else(|| {
-                self.selected_resource
-                    .filter(|id| options.iter().any(|(candidate, _)| candidate == id))
-            });
-        let selected = selected_id
-            .and_then(|id| {
-                options
-                    .iter()
-                    .find(|(candidate, _)| *candidate == id)
-                    .map(|(_, name)| name.clone())
-            })
-            .unwrap_or_else(|| {
-                if options.len() == 1 {
-                    options[0].1.clone()
-                } else {
-                    format!("Select {label}")
-                }
-            });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(icons::text(filter.icon(), 14.0).color(STUDIO_TEXT_WEAK))
+                .on_hover_text(label);
+            ui.label(label);
+        });
 
-        ui.label(icons::text(filter.icon(), 14.0).color(STUDIO_TEXT_WEAK))
-            .on_hover_text(label);
         let before = self.place_resource;
-        egui::ComboBox::from_id_salt(("place-resource-picker", filter.label()))
-            .selected_text(selected)
-            .show_ui(ui, |ui| {
-                for (id, name) in options {
-                    if ui.selectable_label(selected_id == Some(id), name).clicked() {
-                        self.place_resource = Some(id);
-                        self.replace_resource_selection(id);
-                    }
-                }
-            });
+        let auto_label = if options.len() == 1 {
+            format!("Auto ({})", options[0].1)
+        } else {
+            format!("Auto {label}")
+        };
+        if ui
+            .selectable_label(self.place_resource.is_none(), auto_label)
+            .clicked()
+        {
+            self.place_resource = None;
+        }
+        if options.is_empty() {
+            ui.weak(format!("No {} resources", label.to_ascii_lowercase()));
+        }
+        for (id, name) in options {
+            if ui
+                .selectable_label(self.place_resource == Some(id), name)
+                .clicked()
+            {
+                self.place_resource = Some(id);
+                self.replace_resource_selection(id);
+            }
+        }
         if self.place_resource != before {
+            let name = self
+                .place_resource
+                .and_then(|id| {
+                    self.project
+                        .resource(id)
+                        .map(|resource| resource.name.clone())
+                })
+                .unwrap_or_else(|| "Auto".to_string());
+            self.status = format!("Place {label}: {name}");
             self.mark_shortcut_group_changed(ShortcutGroup::Tool);
         }
     }
@@ -13940,12 +14283,12 @@ impl EditorWorkspace {
 
     fn update_primitive_resource_selection(&mut self) {
         if self.selected_primitives.len() == 1 {
-            let face = match self.selected_primitives[0] {
-                Selection::Face(face) => Some(face),
-                Selection::Triangle(triangle) => Some(triangle.parent_face()),
+            let resource = match self.selected_primitives[0] {
+                Selection::Face(face) => self.face_material(face),
+                Selection::Triangle(triangle) => self.triangle_material(triangle),
                 Selection::Edge(_) | Selection::Vertex(_) => None,
             };
-            if let Some(id) = face.and_then(|face| self.face_material(face)) {
+            if let Some(id) = resource {
                 self.replace_resource_selection(id);
                 return;
             }
@@ -15472,6 +15815,82 @@ impl EditorWorkspace {
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
         self.status = format!("Added {name}");
+        self.mark_dirty();
+    }
+
+    fn create_reciprocal_portal(&mut self, source_portal: NodeId) {
+        let Some(connection) = connection_for_portal(self.project.active_scene(), source_portal)
+        else {
+            self.status = "Could not find portal connection".to_string();
+            return;
+        };
+        let source = if connection.a.portal == source_portal {
+            connection.a
+        } else if let Some(pair) = connection.b {
+            pair
+        } else {
+            connection.a
+        };
+        if source.target_room.is_none() {
+            self.status = "Assign a target room before creating a reciprocal portal".to_string();
+            return;
+        }
+        if connection.status != RoomConnectionStatus::Unpaired {
+            self.status = format!("Connection is {}", connection.status.label());
+            return;
+        }
+
+        let target_room = source.target_room.expect("checked target room");
+        let scene = self.project.active_scene();
+        let Some(source_node) = scene.node(source.portal) else {
+            self.status = "Source portal node is missing".to_string();
+            return;
+        };
+        let Some(target_room_node) = scene.node(target_room) else {
+            self.status = "Target room is missing".to_string();
+            return;
+        };
+        if !matches!(target_room_node.kind, NodeKind::Room { .. }) {
+            self.status = "Target node is not a room".to_string();
+            return;
+        }
+
+        let source_world = portal_marker_world_2d(scene, source_node);
+        let target_center = node_world(target_room_node);
+        let reciprocal_translation = [
+            source_world[0] - target_center[0],
+            source_node.transform.translation[1],
+            source_world[1] - target_center[1],
+        ];
+        let source_name = source_node.name.clone();
+        let source_entry = match &source_node.kind {
+            NodeKind::Portal { entry_name, .. } => entry_name.clone(),
+            _ => String::new(),
+        };
+        let source_room_name = room_display_name(scene, source.room);
+        let target_room_name = room_display_name(scene, target_room);
+        let geometry = source.geometry.as_ref().map(inverted_portal_geometry);
+
+        self.push_undo();
+        let scene = self.project.active_scene_mut();
+        let reciprocal = scene.add_node(
+            target_room,
+            format!("Portal {target_room_name} -> {source_room_name}"),
+            NodeKind::Portal {
+                target_room: Some(source.room),
+                target_entry: source_entry,
+                entry_name: format!("{}_reciprocal", source_name.trim().replace(' ', "_")),
+                geometry,
+            },
+        );
+        if let Some(node) = scene.node_mut(reciprocal) {
+            node.transform.translation = reciprocal_translation;
+        }
+        self.replace_node_selection(reciprocal);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.status = "Created reciprocal portal".to_string();
         self.mark_dirty();
     }
 
@@ -18765,6 +19184,47 @@ fn node_kind_is_player_source(kind: &NodeKind) -> bool {
     )
 }
 
+fn translations_match(a: [f32; 3], b: [f32; 3]) -> bool {
+    a.iter()
+        .zip(b)
+        .all(|(lhs, rhs)| (*lhs - rhs).abs() <= PLACEMENT_DUPLICATE_EPSILON)
+}
+
+fn entity_model_resource_id(scene: &Scene, entity: &SceneNode) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::ModelRenderer {
+                model: Some(model), ..
+            } => Some(model),
+            _ => None,
+        })
+    })
+}
+
+fn entity_character_component_resource_id(scene: &Scene, entity: &SceneNode) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::CharacterController {
+                character: Some(character),
+                ..
+            } => Some(character),
+            _ => None,
+        })
+    })
+}
+
+fn entity_weapon_resource_id(scene: &Scene, entity: &SceneNode) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::Equipment {
+                weapon: Some(weapon),
+                ..
+            } => Some(weapon),
+            _ => None,
+        })
+    })
+}
+
 fn node_lucide_icon(kind: &str, root: bool) -> char {
     if root {
         return icons::HOUSE;
@@ -20932,7 +21392,8 @@ fn draw_breadcrumb(
 fn material_texture_picker(
     ui: &mut egui::Ui,
     current: &mut Option<ResourceId>,
-    options: &[(ResourceId, String)],
+    options: &[TexturePickerOption],
+    search: &mut String,
     jump_to: &mut Option<ResourceId>,
 ) -> bool {
     let mut changed = false;
@@ -20942,27 +21403,84 @@ fn material_texture_picker(
             .and_then(|id| {
                 options
                     .iter()
-                    .find(|(rid, _)| *rid == id)
-                    .map(|(_, n)| n.as_str())
+                    .find(|option| option.id == id)
+                    .map(|option| option.name.as_str())
             })
             .unwrap_or("(none)");
         egui::ComboBox::from_id_salt("material-texture-picker")
             .selected_text(preview)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
+                ui.set_min_width(MATERIAL_TEXTURE_PICKER_POPUP_WIDTH);
+                ui.horizontal(|ui| {
+                    let search_width = (ui.available_width() - 58.0).max(96.0);
+                    ui.add_sized(
+                        [search_width, 24.0],
+                        egui::TextEdit::singleline(search).hint_text("Search textures"),
+                    );
+                    if ui
+                        .add_enabled(!search.is_empty(), egui::Button::new("Clear"))
+                        .clicked()
+                    {
+                        search.clear();
+                    }
+                });
+                ui.add_space(4.0);
+
+                let query = search.trim().to_ascii_lowercase();
+                let matches: Vec<&TexturePickerOption> = options
+                    .iter()
+                    .filter(|option| texture_picker_option_matches(&option.name, &query))
+                    .collect();
+                let match_count = matches.len();
+
+                if material_texture_picker_row(ui, "(none)", None, current.is_none()).clicked() {
                     *current = None;
                     changed = true;
+                    ui.close_menu();
                 }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
+
+                ui.separator();
+
+                if matches.is_empty() {
+                    ui.add_space(8.0);
+                    ui.centered_and_justified(|ui| {
+                        ui.label(RichText::new("No matching textures").color(STUDIO_TEXT_WEAK));
+                    });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("material_texture_picker_scroll")
+                        .max_height(MATERIAL_TEXTURE_PICKER_POPUP_HEIGHT)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for option in &matches {
+                                if material_texture_picker_row(
+                                    ui,
+                                    &option.name,
+                                    option.thumb,
+                                    *current == Some(option.id),
+                                )
+                                .clicked()
+                                {
+                                    *current = Some(option.id);
+                                    changed = true;
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                }
+
+                if !query.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("{} of {} textures", match_count, options.len()))
+                            .color(STUDIO_TEXT_WEAK)
+                            .small(),
+                    );
                 }
             });
         if let Some(id) = *current {
             if ui
-                .small_button("→")
+                .small_button("->")
                 .on_hover_text("Open this texture in the inspector")
                 .clicked()
             {
@@ -20971,6 +21489,114 @@ fn material_texture_picker(
         }
     });
     changed
+}
+
+fn texture_picker_option_matches(name: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    query.split_whitespace().all(|part| name.contains(part))
+}
+
+fn material_texture_picker_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    thumb: Option<(egui::TextureId, PsxtStats)>,
+    selected: bool,
+) -> egui::Response {
+    let width = ui.available_width().max(1.0);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width, MATERIAL_TEXTURE_PICKER_ROW_HEIGHT),
+        Sense::click(),
+    );
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+    let fill = if selected {
+        visuals.selection.bg_fill
+    } else if response.hovered() {
+        visuals.widgets.hovered.bg_fill
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        painter.rect_filled(rect.shrink2(Vec2::new(1.0, 2.0)), 4.0, fill);
+    }
+
+    let thumb_rect = Rect::from_min_size(
+        Pos2::new(
+            rect.left() + 5.0,
+            rect.center().y - MATERIAL_TEXTURE_PICKER_THUMB_SIZE * 0.5,
+        ),
+        Vec2::splat(MATERIAL_TEXTURE_PICKER_THUMB_SIZE),
+    );
+    painter.rect_filled(thumb_rect, 3.0, STUDIO_PANEL);
+    match thumb {
+        Some((id, stats)) => {
+            if stats.index_zero_transparent {
+                draw_checker_preview(&painter, thumb_rect, Color32::from_rgb(20, 26, 32));
+            }
+            painter.image(
+                id,
+                thumb_rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            painter.text(
+                thumb_rect.center(),
+                Align2::CENTER_CENTER,
+                "-",
+                FontId::proportional(13.0),
+                STUDIO_TEXT_WEAK,
+            );
+        }
+    }
+    painter.rect_stroke(
+        thumb_rect,
+        3.0,
+        Stroke::new(1.0, STUDIO_BORDER),
+        StrokeKind::Inside,
+    );
+
+    let text_x = thumb_rect.right() + 8.0;
+    let name_y = if thumb.is_some() {
+        rect.center().y - 7.0
+    } else {
+        rect.center().y
+    };
+    painter.text(
+        Pos2::new(text_x, name_y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(14.0),
+        if selected {
+            visuals.selection.stroke.color
+        } else {
+            STUDIO_TEXT
+        },
+    );
+    if let Some((_, stats)) = thumb {
+        painter.text(
+            Pos2::new(text_x, rect.center().y + 10.0),
+            Align2::LEFT_CENTER,
+            format!(
+                "{}x{}  {}bpp  {}",
+                stats.width,
+                stats.height,
+                stats.depth_bits,
+                human_bytes(stats.file_bytes)
+            ),
+            FontId::monospace(10.0),
+            STUDIO_TEXT_WEAK,
+        );
+    }
+    response
 }
 
 fn texture_resource_picker(
@@ -23530,6 +24156,464 @@ fn compact_middle(text: &str, max_chars: usize) -> String {
     let mut suffix = text.chars().rev().take(tail).collect::<Vec<_>>();
     suffix.reverse();
     out.extend(suffix);
+    out
+}
+
+fn scene_node_label(scene: &psxed_project::Scene, id: NodeId) -> String {
+    scene
+        .node(id)
+        .map(|node| node.name.clone())
+        .unwrap_or_else(|| format!("#{}", id.raw()))
+}
+
+fn draw_room_connections_rows(
+    ui: &mut egui::Ui,
+    scene: &psxed_project::Scene,
+    connections: &[RoomConnection],
+    filter: &str,
+    selected_node: NodeId,
+    selected_nodes: &HashSet<NodeId>,
+    selected: &mut Option<NodeId>,
+    repair: &mut Option<NodeId>,
+) {
+    let visible = connections
+        .iter()
+        .filter(|connection| room_connection_matches_filter(scene, connection, filter))
+        .collect::<Vec<_>>();
+    let repair_count = connections
+        .iter()
+        .filter(|connection| connection.status.needs_repair())
+        .count();
+    let heading = if repair_count > 0 {
+        format!(
+            "Connections ({}, {} repair)",
+            connections.len(),
+            repair_count
+        )
+    } else {
+        format!("Connections ({})", connections.len())
+    };
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::WAYPOINT, 13.0).color(STUDIO_TEXT_WEAK));
+        ui.strong(heading);
+    });
+    if connections.is_empty() {
+        ui.weak("No room portals yet.");
+        return;
+    }
+    if visible.is_empty() {
+        ui.weak("No connections match the filter.");
+        return;
+    }
+
+    for connection in visible {
+        draw_room_connection_row(
+            ui,
+            scene,
+            connection,
+            selected_node,
+            selected_nodes,
+            selected,
+            repair,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RoomFloorLinkDirection {
+    Above,
+    Below,
+}
+
+impl RoomFloorLinkDirection {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Above => "above",
+            Self::Below => "below",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoomFloorLinkRow {
+    source_room: NodeId,
+    target_room: Option<NodeId>,
+    target_floor: u16,
+    x: u16,
+    z: u16,
+    direction: RoomFloorLinkDirection,
+}
+
+fn draw_room_floor_link_rows(ui: &mut egui::Ui, scene: &psxed_project::Scene, filter: &str) {
+    let rows = collect_room_floor_link_rows(scene);
+    let visible = rows
+        .iter()
+        .copied()
+        .filter(|row| room_floor_link_matches_filter(scene, *row, filter))
+        .collect::<Vec<_>>();
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::LAYERS, 13.0).color(STUDIO_TEXT_WEAK));
+        ui.strong(format!("Floors ({})", rows.len()));
+    });
+    if rows.is_empty() {
+        ui.weak("No vertical floor links yet.");
+        return;
+    }
+    if visible.is_empty() {
+        ui.weak("No floor links match the filter.");
+        return;
+    }
+
+    let max_rows = 24usize;
+    for row in visible.iter().take(max_rows) {
+        draw_room_floor_link_row(ui, scene, *row);
+    }
+    if visible.len() > max_rows {
+        ui.weak(format!("... {} more floor links", visible.len() - max_rows));
+    }
+}
+
+fn collect_room_floor_link_rows(scene: &psxed_project::Scene) -> Vec<RoomFloorLinkRow> {
+    let mut rows = Vec::new();
+    for node in scene.nodes() {
+        let NodeKind::Room { grid } = &node.kind else {
+            continue;
+        };
+        for x in 0..grid.width {
+            for z in 0..grid.depth {
+                let Some(sector) = grid.sector(x, z) else {
+                    continue;
+                };
+                if let Some(link) = sector.floor_above {
+                    rows.push(RoomFloorLinkRow {
+                        source_room: node.id,
+                        target_room: link.target_room,
+                        target_floor: link.target_floor,
+                        x,
+                        z,
+                        direction: RoomFloorLinkDirection::Above,
+                    });
+                }
+                if let Some(link) = sector.floor_below {
+                    rows.push(RoomFloorLinkRow {
+                        source_room: node.id,
+                        target_room: link.target_room,
+                        target_floor: link.target_floor,
+                        x,
+                        z,
+                        direction: RoomFloorLinkDirection::Below,
+                    });
+                }
+            }
+        }
+    }
+    rows.sort_by_key(|row| {
+        (
+            row.source_room.raw(),
+            row.target_room.map(NodeId::raw).unwrap_or(u64::MAX),
+            row.x,
+            row.z,
+            match row.direction {
+                RoomFloorLinkDirection::Above => 0u8,
+                RoomFloorLinkDirection::Below => 1u8,
+            },
+        )
+    });
+    rows
+}
+
+fn draw_room_floor_link_row(
+    ui: &mut egui::Ui,
+    scene: &psxed_project::Scene,
+    row: RoomFloorLinkRow,
+) {
+    let source = scene_node_label(scene, row.source_room);
+    let target = row
+        .target_room
+        .map(|room| scene_node_label(scene, room))
+        .unwrap_or_else(|| "missing room".to_string());
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        ui.label(icons::text(icons::LAYERS, 11.0).color(STUDIO_TEXT_WEAK));
+        ui.label(format!(
+            "{} ({},{}) {} -> {} floor {}",
+            compact_middle(&source, 24),
+            row.x,
+            row.z,
+            row.direction.label(),
+            compact_middle(&target, 24),
+            row.target_floor
+        ));
+    });
+}
+
+fn room_floor_link_matches_filter(
+    scene: &psxed_project::Scene,
+    row: RoomFloorLinkRow,
+    filter: &str,
+) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let source = scene_node_label(scene, row.source_room).to_ascii_lowercase();
+    let target = row
+        .target_room
+        .map(|room| scene_node_label(scene, room).to_ascii_lowercase())
+        .unwrap_or_else(|| "missing room".to_string());
+    source.contains(filter) || target.contains(filter) || row.direction.label().contains(filter)
+}
+
+fn draw_room_connection_row(
+    ui: &mut egui::Ui,
+    scene: &psxed_project::Scene,
+    connection: &RoomConnection,
+    selected_node: NodeId,
+    selected_nodes: &HashSet<NodeId>,
+    selected: &mut Option<NodeId>,
+    repair: &mut Option<NodeId>,
+) {
+    let row_height = 24.0;
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height), Sense::click());
+    let painter = ui.painter_at(rect);
+    let connection_selected = connection.contains_portal(selected_node)
+        || selected_nodes
+            .iter()
+            .copied()
+            .any(|node| connection.contains_portal(node));
+    if connection_selected {
+        painter.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 3.0, STUDIO_ACCENT_DIM);
+    } else if response.hovered() {
+        painter.rect_filled(
+            rect.shrink2(Vec2::new(0.0, 1.0)),
+            3.0,
+            Color32::from_rgba_unmultiplied(42, 58, 70, 120),
+        );
+    }
+
+    let status_color = room_connection_status_color(connection.status);
+    let icon_pos = Pos2::new(rect.left() + 13.0, rect.center().y);
+    painter.text(
+        icon_pos,
+        Align2::CENTER_CENTER,
+        icons::WAYPOINT.to_string(),
+        icons::font(14.0),
+        status_color,
+    );
+
+    let label = room_connection_label(scene, connection);
+    let status = connection.status.label();
+    let label_left = rect.left() + 28.0;
+    let label_right = (rect.right() - 118.0).max(label_left + 48.0);
+    painter
+        .with_clip_rect(Rect::from_min_max(
+            Pos2::new(label_left, rect.top()),
+            Pos2::new(label_right, rect.bottom()),
+        ))
+        .text(
+            Pos2::new(label_left, rect.center().y),
+            Align2::LEFT_CENTER,
+            compact_middle(&label, 32),
+            FontId::proportional(12.5),
+            if connection_selected {
+                Color32::WHITE
+            } else {
+                STUDIO_TEXT
+            },
+        );
+    painter.text(
+        Pos2::new(rect.right() - 112.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        connection.kind.label(),
+        FontId::proportional(10.5),
+        STUDIO_TEXT_WEAK,
+    );
+    painter.text(
+        Pos2::new(rect.right() - 40.0, rect.center().y),
+        Align2::RIGHT_CENTER,
+        status,
+        FontId::proportional(10.5),
+        status_color,
+    );
+
+    let response = response.on_hover_text(room_connection_tooltip(scene, connection));
+    if response.clicked() {
+        *selected = Some(connection.primary_portal());
+    }
+    response.context_menu(|ui| {
+        if ui
+            .button(icons::label(icons::FOCUS, "Select source"))
+            .clicked()
+        {
+            *selected = Some(connection.a.portal);
+            ui.close_menu();
+        }
+        if let Some(pair) = &connection.b {
+            if ui
+                .button(icons::label(icons::FOCUS, "Select reciprocal"))
+                .clicked()
+            {
+                *selected = Some(pair.portal);
+                ui.close_menu();
+            }
+        }
+        if connection.status == RoomConnectionStatus::Unpaired
+            && ui
+                .button(icons::label(icons::PLUS, "Create reciprocal"))
+                .clicked()
+        {
+            *repair = Some(connection.a.portal);
+            ui.close_menu();
+        }
+    });
+}
+
+fn room_connection_matches_filter(
+    scene: &psxed_project::Scene,
+    connection: &RoomConnection,
+    filter: &str,
+) -> bool {
+    filter.is_empty()
+        || room_connection_label(scene, connection)
+            .to_ascii_lowercase()
+            .contains(filter)
+        || connection
+            .status
+            .label()
+            .to_ascii_lowercase()
+            .contains(filter)
+        || connection
+            .kind
+            .label()
+            .to_ascii_lowercase()
+            .contains(filter)
+}
+
+fn room_connection_label(scene: &psxed_project::Scene, connection: &RoomConnection) -> String {
+    let source = room_display_name(scene, connection.a.room);
+    let target = connection
+        .a
+        .target_room
+        .map(|room| room_display_name(scene, room))
+        .unwrap_or_else(|| "(none)".to_string());
+    let arrow = if connection.b.is_some() { "<->" } else { "->" };
+    format!("{source} {arrow} {target}")
+}
+
+fn room_connection_tooltip(scene: &psxed_project::Scene, connection: &RoomConnection) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        &mut out,
+        "{}\n{}",
+        room_connection_label(scene, connection),
+        connection.status.label()
+    );
+    let _ = writeln!(
+        &mut out,
+        "Source: {}",
+        portal_display_name(scene, connection.a.portal)
+    );
+    if let Some(pair) = &connection.b {
+        let _ = writeln!(
+            &mut out,
+            "Reciprocal: {}",
+            portal_display_name(scene, pair.portal)
+        );
+    }
+    if !connection.alternatives.is_empty() {
+        let _ = writeln!(
+            &mut out,
+            "Extra candidates: {}",
+            connection.alternatives.len()
+        );
+    }
+    out
+}
+
+fn room_connection_status_color(status: RoomConnectionStatus) -> Color32 {
+    match status {
+        RoomConnectionStatus::Paired => Color32::from_rgb(110, 218, 148),
+        RoomConnectionStatus::Unassigned => STUDIO_TEXT_WEAK,
+        RoomConnectionStatus::Unpaired => Color32::from_rgb(238, 176, 78),
+        RoomConnectionStatus::MissingTarget | RoomConnectionStatus::Ambiguous => {
+            Color32::from_rgb(238, 96, 112)
+        }
+    }
+}
+
+fn draw_portal_connection_inspector(
+    ui: &mut egui::Ui,
+    scene: &psxed_project::Scene,
+    connection: &RoomConnection,
+) -> Option<NodeId> {
+    let mut nav = None;
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Connection"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Route");
+                ui.label(room_connection_label(scene, connection));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Status");
+                ui.colored_label(
+                    room_connection_status_color(connection.status),
+                    connection.status.label(),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Kind");
+                ui.label(connection.kind.label());
+            });
+            ui.horizontal(|ui| {
+                if ui.button(icons::label(icons::FOCUS, "Source")).clicked() {
+                    nav = Some(connection.a.portal);
+                }
+                if let Some(pair) = &connection.b {
+                    if ui
+                        .button(icons::label(icons::FOCUS, "Reciprocal"))
+                        .clicked()
+                    {
+                        nav = Some(pair.portal);
+                    }
+                }
+            });
+            if connection.status == RoomConnectionStatus::Unpaired {
+                ui.weak("This portal has no reciprocal endpoint in the target room.");
+            } else if connection.status == RoomConnectionStatus::Ambiguous {
+                ui.weak(format!(
+                    "{} extra reciprocal candidate(s) found.",
+                    connection.alternatives.len()
+                ));
+            }
+        });
+    nav
+}
+
+fn room_display_name(scene: &psxed_project::Scene, room: NodeId) -> String {
+    scene
+        .node(room)
+        .map(|node| node.name.clone())
+        .unwrap_or_else(|| format!("Room #{}", room.raw()))
+}
+
+fn portal_display_name(scene: &psxed_project::Scene, portal: NodeId) -> String {
+    scene
+        .node(portal)
+        .map(|node| format!("{} #{}", node.name, node.id.raw()))
+        .unwrap_or_else(|| format!("Portal #{}", portal.raw()))
+}
+
+fn inverted_portal_geometry(
+    geometry: &psxed_project::PortalGeometry,
+) -> psxed_project::PortalGeometry {
+    let mut out = geometry.clone();
+    out.normal = [
+        out.normal[0].saturating_neg(),
+        out.normal[1].saturating_neg(),
+        out.normal[2].saturating_neg(),
+    ];
     out
 }
 
@@ -28289,6 +29373,8 @@ fn rotate_sector_cw(sector: &GridSector) -> GridSector {
     let mut rotated = GridSector::empty();
     rotated.floor = sector.floor.clone().map(rotate_horizontal_face_cw);
     rotated.ceiling = sector.ceiling.clone().map(rotate_horizontal_face_cw);
+    rotated.floor_above = sector.floor_above;
+    rotated.floor_below = sector.floor_below;
     for direction in GridDirection::ALL {
         let rotated_direction = rotate_direction_cw(direction);
         for wall in sector.walls.get(direction) {
@@ -28305,6 +29391,8 @@ fn flip_sector_x(sector: &GridSector) -> GridSector {
     let mut flipped = GridSector::empty();
     flipped.floor = sector.floor.clone().map(flip_horizontal_face_x);
     flipped.ceiling = sector.ceiling.clone().map(flip_horizontal_face_x);
+    flipped.floor_above = sector.floor_above;
+    flipped.floor_below = sector.floor_below;
     for direction in GridDirection::ALL {
         let flipped_direction = flip_direction_x(direction);
         for wall in sector.walls.get(direction) {
@@ -28321,6 +29409,8 @@ fn flip_sector_z(sector: &GridSector) -> GridSector {
     let mut flipped = GridSector::empty();
     flipped.floor = sector.floor.clone().map(flip_horizontal_face_z);
     flipped.ceiling = sector.ceiling.clone().map(flip_horizontal_face_z);
+    flipped.floor_above = sector.floor_above;
+    flipped.floor_below = sector.floor_below;
     for direction in GridDirection::ALL {
         let flipped_direction = flip_direction_z(direction);
         for wall in sector.walls.get(direction) {
@@ -28695,9 +29785,13 @@ fn flip_uv_transform_v(mut uv: GridUvTransform) -> GridUvTransform {
 const fn rotate_uv_rotation_cw(rotation: GridUvRotation) -> GridUvRotation {
     match rotation {
         GridUvRotation::Deg0 => GridUvRotation::Deg90,
+        GridUvRotation::Deg45 => GridUvRotation::Deg135,
         GridUvRotation::Deg90 => GridUvRotation::Deg180,
+        GridUvRotation::Deg135 => GridUvRotation::Deg225,
         GridUvRotation::Deg180 => GridUvRotation::Deg270,
+        GridUvRotation::Deg225 => GridUvRotation::Deg315,
         GridUvRotation::Deg270 => GridUvRotation::Deg0,
+        GridUvRotation::Deg315 => GridUvRotation::Deg45,
     }
 }
 
@@ -30889,9 +31983,13 @@ fn uv_transform_controls(uv: &mut GridUvTransform, ui: &mut egui::Ui) -> bool {
     ui.horizontal(|ui| {
         ui.label("Rotate");
         ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg0, "0");
+        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg45, "45");
         ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg90, "90");
+        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg135, "135");
         ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg180, "180");
+        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg225, "225");
         ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg270, "270");
+        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg315, "315");
     });
 
     ui.horizontal(|ui| {
@@ -31613,6 +32711,22 @@ mod tests {
     }
 
     #[test]
+    fn place_kind_selection_updates_toolbar_label() {
+        let mut workspace = EditorWorkspace::with_project(
+            test_temp_dir("place-kind-toolbar"),
+            ProjectDocument::new("place-kind-toolbar"),
+        );
+        workspace.active_tool = ViewTool::Place;
+
+        workspace.set_place_kind(PlaceKind::ImageProp);
+
+        assert_eq!(workspace.place_kind, PlaceKind::ImageProp);
+        assert_eq!(workspace.active_tool_group_label(), "Image Prop");
+        assert_eq!(workspace.active_tool_group_icon(), icons::PALETTE);
+        assert_eq!(workspace.status, "Place kind: Image Prop");
+    }
+
+    #[test]
     fn visibility_cycle_only_changes_editor_view_items() {
         let mut workspace = EditorWorkspace::with_project(
             test_temp_dir("visibility-cycle"),
@@ -32291,6 +33405,30 @@ mod tests {
                 },
             },
         );
+        ws.psoxide_logo_texture = Some(ctx.load_texture(
+            "project-switch-logo",
+            ColorImage {
+                size: [1, 1],
+                pixels: vec![Color32::WHITE],
+            },
+            egui::TextureOptions::NEAREST,
+        ));
+        ws.model_resource_preview_texture = Some(ctx.load_texture(
+            "project-switch-model-preview",
+            ColorImage {
+                size: [1, 1],
+                pixels: vec![Color32::WHITE],
+            },
+            egui::TextureOptions::NEAREST,
+        ));
+        ws.animation_viewer_preview_texture = Some(ctx.load_texture(
+            "project-switch-animation-preview",
+            ColorImage {
+                size: [1, 1],
+                pixels: vec![Color32::WHITE],
+            },
+            egui::TextureOptions::NEAREST,
+        ));
 
         let name = format!(
             "texture-retire-test-{}-{}",
@@ -32306,8 +33444,11 @@ mod tests {
         ws.create_and_open_project(&name).unwrap();
 
         assert!(ws.texture_thumbs.is_empty());
-        assert_eq!(ws.import_retired_textures.len(), 1);
-        assert_eq!(ws.import_retired_textures[0].0, EGUI_TEXTURE_RETIRE_FRAMES);
+        assert_eq!(ws.import_retired_textures.len(), 4);
+        assert!(ws
+            .import_retired_textures
+            .iter()
+            .all(|(frames, _)| *frames == EGUI_TEXTURE_RETIRE_FRAMES));
         let _ = std::fs::remove_dir_all(target);
     }
 
@@ -34647,6 +35788,95 @@ mod tests {
     }
 
     #[test]
+    fn place_player_spawn_refuses_second_player_source() {
+        let (mut workspace, room) = workspace_with_populated_grid("single-player-spawn", 1, 1);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::PlayerSpawn;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        let first_spawn = workspace.selected_node_id();
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [768.0, 0.0, 768.0]);
+
+        let player_sources: Vec<_> = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| node_kind_is_player_source(&node.kind))
+            .collect();
+        assert_eq!(player_sources.len(), 1);
+        assert_eq!(player_sources[0].id, first_spawn);
+        assert_eq!(workspace.selected_node_id(), first_spawn);
+        assert!(workspace
+            .status
+            .contains("Only one player source is allowed per world"));
+    }
+
+    #[test]
+    fn place_prop_refuses_duplicate_resource_at_same_position() {
+        let (mut workspace, room) = workspace_with_populated_grid("duplicate-prop-place", 1, 1);
+        let model = workspace
+            .project
+            .add_resource("Crate", ResourceData::Model(test_model_resource("crate")));
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::ModelInstance;
+        workspace.place_resource = Some(model);
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        let first = workspace.selected_node_id();
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let scene = workspace.project.active_scene();
+        let props: Vec<_> = scene
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.parent == Some(room)
+                    && matches!(node.kind, NodeKind::Entity)
+                    && entity_model_resource_id(scene, node) == Some(model)
+                    && entity_character_component_resource_id(scene, node).is_none()
+                    && entity_weapon_resource_id(scene, node).is_none()
+            })
+            .collect();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].id, first);
+        assert_eq!(workspace.selected_node_id(), first);
+        assert_eq!(workspace.status, "Prop already exists at this position");
+    }
+
+    #[test]
+    fn place_spawn_marker_refuses_duplicate_at_same_position() {
+        let (mut workspace, room) = workspace_with_populated_grid("duplicate-spawn-place", 1, 1);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::SpawnMarker;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        let first = workspace.selected_node_id();
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let spawns: Vec<_> = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.parent == Some(room)
+                    && matches!(
+                        node.kind,
+                        NodeKind::SpawnPoint {
+                            player: false,
+                            character: None
+                        }
+                    )
+            })
+            .collect();
+        assert_eq!(spawns.len(), 1);
+        assert_eq!(spawns[0].id, first);
+        assert_eq!(workspace.selected_node_id(), first);
+        assert_eq!(workspace.status, "Spawn already exists at this position");
+    }
+
+    #[test]
     fn place_image_prop_defaults_to_room_sector_size() {
         let mut project = ProjectDocument::new("image-prop-sector-size-place");
         let material = project.add_resource(
@@ -34756,6 +35986,43 @@ mod tests {
         assert_eq!(edge.direction, GridDirection::East);
         assert_eq!(workspace.status, "Placed Portal on East edge at 0,0");
         assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn portal_icon_place_refuses_duplicate_edge_marker() {
+        let mut project = ProjectDocument::new("portal-edge-duplicate");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        let first = workspace.selected_node_id();
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let portals: Vec<_> = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.parent == Some(room) && matches!(node.kind, NodeKind::Portal { .. })
+            })
+            .collect();
+        assert_eq!(portals.len(), 1);
+        assert_eq!(portals[0].id, first);
+        assert_eq!(workspace.selected_node_id(), first);
+        assert_eq!(
+            workspace.status,
+            "Portal already exists on East edge at 0,0"
+        );
     }
 
     #[test]
@@ -34870,6 +36137,94 @@ mod tests {
         assert_eq!(floor.material, Some(original));
         assert_eq!(floor.triangle_material(0), Some(target));
         assert_eq!(floor.triangle_material(1), Some(original));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn paint_floor_in_triangle_mode_targets_clicked_triangle_only() {
+        let mut project = ProjectDocument::new("triangle-floor-paint");
+        let original = project.add_resource(
+            "Original",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, Some(original));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.horizontal_edit_mode = HorizontalEditMode::Triangle;
+        workspace.brush_material = Some(target);
+
+        workspace.run_paint_action(ViewTool::PaintFloor, room, 0, 0, None, [800.0, 0.0, 300.0]);
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let floor = grid.sector(0, 0).unwrap().floor.as_ref().unwrap();
+        assert_eq!(floor.material, Some(original));
+        assert_eq!(floor.triangle_material(0), Some(target));
+        assert_eq!(floor.triangle_material(1), Some(original));
+        assert!(matches!(
+            workspace.selected_primitive,
+            Some(Selection::Triangle(HorizontalTriangleRef {
+                surface: HorizontalSurfaceKind::Floor,
+                index: HorizontalTriangleIndex::A,
+                ..
+            }))
+        ));
+        assert_eq!(workspace.selected_resource, Some(target));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn paint_ceiling_in_triangle_mode_targets_clicked_triangle_only() {
+        let mut project = ProjectDocument::new("triangle-ceiling-paint");
+        let original = project.add_resource(
+            "Original",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.ensure_sector(0, 0).unwrap().ceiling =
+            Some(GridHorizontalFace::flat(1024, Some(original)));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.horizontal_edit_mode = HorizontalEditMode::Triangle;
+        workspace.brush_material = Some(target);
+
+        workspace.run_paint_action(
+            ViewTool::PaintCeiling,
+            room,
+            0,
+            0,
+            None,
+            [200.0, 1024.0, 300.0],
+        );
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let ceiling = grid.sector(0, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.material, Some(original));
+        assert_eq!(ceiling.triangle_material(0), Some(original));
+        assert_eq!(ceiling.triangle_material(1), Some(target));
+        assert!(matches!(
+            workspace.selected_primitive,
+            Some(Selection::Triangle(HorizontalTriangleRef {
+                surface: HorizontalSurfaceKind::Ceiling,
+                index: HorizontalTriangleIndex::B,
+                ..
+            }))
+        ));
+        assert_eq!(workspace.selected_resource, Some(target));
         assert!(workspace.is_dirty());
     }
 
@@ -35846,15 +37201,22 @@ mod tests {
     fn project_filesystem_rows_are_generated_from_resources() {
         let project = ProjectDocument::starter();
         let rows = project_filesystem_rows(&project);
+        let texture_name = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Texture { .. }))
+            .map(resource_file_name)
+            .expect("starter project has a texture resource");
+        let material_name = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(resource_file_name)
+            .expect("starter project has a material resource");
 
         assert!(rows.iter().any(|row| row.name == "res://"));
         assert!(rows.iter().any(|row| row.name == "main.map"));
-        assert!(rows
-            .iter()
-            .any(|row| row.name == "delven_01_slateflr1a_q2.psxt"));
-        assert!(rows
-            .iter()
-            .any(|row| row.name == "delven_38_ground4b_q0.psxt"));
+        assert!(rows.iter().any(|row| row.name == texture_name));
         assert!(rows.iter().any(|row| row.name == "characters"));
         assert!(
             rows.iter()
@@ -35863,13 +37225,19 @@ mod tests {
         );
         assert!(rows
             .iter()
-            .any(|row| row.name == "delven_slateflr1a_q2.mat" && row.resource.is_some()));
+            .any(|row| row.name == material_name && row.resource.is_some()));
     }
 
     #[test]
     fn collapsed_project_filesystem_folder_hides_children() {
         let project = ProjectDocument::starter();
         let rows = project_filesystem_rows(&project);
+        let material_name = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(resource_file_name)
+            .expect("starter project has a material resource");
         let mut collapsed = HashSet::new();
         collapsed.insert("res://textures".to_string());
 
@@ -35877,9 +37245,7 @@ mod tests {
 
         assert!(display_rows.iter().any(|row| row.name == "textures"));
         assert!(!display_rows.iter().any(|row| row.name.ends_with(".psxt")));
-        assert!(display_rows
-            .iter()
-            .any(|row| row.name == "delven_slateflr1a_q2.mat"));
+        assert!(display_rows.iter().any(|row| row.name == material_name));
     }
 
     #[test]
@@ -35896,38 +37262,44 @@ mod tests {
     #[test]
     fn resource_filter_and_search_match_expected_resources() {
         let project = ProjectDocument::starter();
-        let delven_texture = project
+        let texture = project
             .resources
             .iter()
-            .find(|resource| {
-                resource.name == "Delven slateflr1a q2"
-                    && matches!(resource.data, ResourceData::Texture { .. })
-            })
+            .find(|resource| matches!(resource.data, ResourceData::Texture { .. }))
             .unwrap();
-        let delven_material = project
+        let material = project
             .resources
             .iter()
-            .find(|resource| {
-                resource.name == "Delven stonebrk1b q3"
-                    && matches!(resource.data, ResourceData::Material(_))
-            })
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
             .unwrap();
+        let texture_search = resource_search_token(texture);
+        let material_search = resource_search_token(material);
 
         assert!(resource_matches_filter(
-            delven_texture,
+            texture,
             ResourceFilter::Texture,
-            "slate"
+            &texture_search
         ));
         assert!(!resource_matches_filter(
-            delven_texture,
+            texture,
             ResourceFilter::Material,
-            "slate"
+            &texture_search
         ));
         assert!(resource_matches_filter(
-            delven_material,
+            material,
             ResourceFilter::Material,
-            "stonebrk"
+            &material_search
         ));
+    }
+
+    fn resource_search_token(resource: &Resource) -> String {
+        resource
+            .name
+            .to_ascii_lowercase()
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .find(|part| !part.is_empty())
+            .unwrap_or("")
+            .to_string()
     }
 
     fn cell_with_floor(material: Option<psxed_project::ResourceId>) -> psxed_project::GridSector {
@@ -35935,6 +37307,8 @@ mod tests {
             floor: Some(psxed_project::GridHorizontalFace::flat(0, material)),
             ceiling: None,
             walls: psxed_project::GridWalls::default(),
+            floor_above: None,
+            floor_below: None,
         }
     }
 
@@ -35967,6 +37341,22 @@ mod tests {
             EditorWorkspace::with_project(test_temp_dir(label), project),
             room,
         )
+    }
+
+    fn test_model_resource(name: &str) -> psxed_project::ModelResource {
+        psxed_project::ModelResource {
+            model_path: format!("assets/models/{name}.psxmdl"),
+            source_path: None,
+            texture_path: None,
+            skeleton: None,
+            clips: Vec::new(),
+            default_clip: None,
+            preview_clip: None,
+            world_height: 1024,
+            collision_radius: default_model_collision_radius_for_height(1024),
+            scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            attachments: Vec::new(),
+        }
     }
 
     #[test]
@@ -36105,5 +37495,23 @@ mod tests {
         assert_eq!(closest_edge_idx(&corners, [5.0, 0.0, 9.5]), 2);
         // (0.5, 0, 5) → near edge 3 (corners 3–0).
         assert_eq!(closest_edge_idx(&corners, [0.5, 0.0, 5.0]), 3);
+    }
+
+    #[test]
+    fn action_bar_height_expands_for_wrapped_status() {
+        assert_eq!(
+            action_bar_height_for_status("Ready"),
+            ACTION_BAR_COMPACT_HEIGHT
+        );
+        assert_eq!(
+            action_bar_height_for_status(
+                "Embedded Play failed while cooking assets: playtest validation failed: No player source. Place one Player Spawn, or select a Character Controller and enable Player controlled."
+            ),
+            ACTION_BAR_EXPANDED_HEIGHT
+        );
+        assert_eq!(
+            action_bar_height_for_status("First line\nSecond line"),
+            ACTION_BAR_EXPANDED_HEIGHT
+        );
     }
 }
