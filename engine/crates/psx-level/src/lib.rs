@@ -157,6 +157,14 @@ pub const BOX_PROP_VERTEX_COUNT: usize = 8;
 pub mod box_prop_flags {
     /// Prop emits a static collision blocker for the character motor.
     pub const COLLISION_ENABLED: u16 = 1 << 0;
+    /// Prop breaks when the player body overlaps it while walking.
+    pub const BREAK_ON_WALK: u16 = 1 << 1;
+    /// Prop breaks when the player body overlaps it while running.
+    pub const BREAK_ON_RUN: u16 = 1 << 2;
+    /// Prop breaks when the player's attack volume overlaps it.
+    pub const BREAK_ON_ATTACK: u16 = 1 << 3;
+    /// All authored break trigger bits.
+    pub const BREAK_ON_MASK: u16 = BREAK_ON_WALK | BREAK_ON_RUN | BREAK_ON_ATTACK;
 }
 
 /// Model clip bounds/calibration flags.
