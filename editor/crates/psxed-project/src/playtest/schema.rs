@@ -1,6 +1,9 @@
 //! Host-side package schema for embedded editor play mode.
 
-use crate::{MaterialFaceSidedness, ResourceId, RuntimeDepthSortMode, SkyCycloramaQuad};
+use crate::{
+    MaterialFaceSidedness, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
+    RuntimeTextureSplitMode, SkyCycloramaQuad,
+};
 
 /// Number of cooked character animation action slots.
 pub const PLAYTEST_CHARACTER_ACTION_COUNT: usize = psx_level::CHARACTER_ANIMATION_ACTION_COUNT;
@@ -884,6 +887,10 @@ pub struct PlaytestEntity {
 pub struct PlaytestPackage {
     /// Cached-room depth sorting mode selected by the project.
     pub runtime_depth_sort_mode: RuntimeDepthSortMode,
+    /// Runtime room triangle subdivision scope.
+    pub runtime_texture_split_mode: RuntimeTextureSplitMode,
+    /// Runtime active-room draw ordering policy.
+    pub runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode,
     /// Projected edge threshold for runtime room surface subdivision.
     pub runtime_texture_split_max_edge: u16,
     /// Master asset table -- rooms first, then room textures,

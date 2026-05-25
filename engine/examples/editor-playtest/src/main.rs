@@ -47,17 +47,17 @@ use psx_engine::GridVisibilityStats;
 use psx_engine::GridVisibleCell;
 use psx_engine::{
     apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
-    CachedRoomCell, CachedRoomDepthMode, CachedRoomSurface, CharacterCollision,
-    CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAnim,
-    CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config, Ctx, CullMode,
-    DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform, LocalToWorldScale,
-    Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame, PointLightSample, PrimitivePacketArena,
-    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint, RoomRender,
-    RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelGeometry, TexturedModelRenderFace,
-    TexturedModelRenderStats, ThirdPersonCameraConfig, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing, WorldCamera, WorldProjection,
-    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
-    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
+    CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface,
+    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
+    CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
+    Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
+    LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame, PointLightSample,
+    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
+    RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelGeometry,
+    TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing,
+    WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
+    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -122,8 +122,9 @@ mod generated {
 }
 
 use generated::{
-    ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CHARACTERS,
-    ENTITIES, EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
+    ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
+    CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS, ENTITIES,
+    EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
     MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS,
     ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
     ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY,
@@ -142,8 +143,32 @@ use generated::{
 const fn cached_room_depth_mode() -> CachedRoomDepthMode {
     match CACHED_ROOM_DEPTH_MODE {
         0 => CachedRoomDepthMode::FixedCell,
-        2 => CachedRoomDepthMode::PerTriangle,
+        2 => CachedRoomDepthMode::HybridWalls,
+        3 => CachedRoomDepthMode::PerTriangle,
         _ => CachedRoomDepthMode::Hybrid,
+    }
+}
+
+const fn cached_room_subdivision_mode() -> CachedRoomSubdivisionMode {
+    match CACHED_ROOM_TEXTURE_SPLIT_MODE {
+        1 => CachedRoomSubdivisionMode::DepthSorted,
+        2 => CachedRoomSubdivisionMode::Risky,
+        _ => CachedRoomSubdivisionMode::All,
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CachedRoomDrawOrderMode {
+    Distance,
+    Portal,
+    Slot,
+}
+
+const fn cached_room_draw_order_mode() -> CachedRoomDrawOrderMode {
+    match CACHED_ROOM_DRAW_ORDER_MODE {
+        1 => CachedRoomDrawOrderMode::Portal,
+        2 => CachedRoomDrawOrderMode::Slot,
+        _ => CachedRoomDrawOrderMode::Distance,
     }
 }
 
@@ -1394,7 +1419,8 @@ const MAX_BOX_PROP_STATE: usize = 128;
 const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
 /// Active baked break bursts retained after a prop is marked broken.
 const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
-const BOX_PROP_BREAK_FRAMES: u8 = 18;
+const BOX_PROP_BREAK_FRAMES: u8 = 24;
+const BOX_PROP_BREAK_MOTION_FRAMES: u8 = 20;
 const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
 const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
 /// Cap on attached weapon/equipment visuals rendered per frame.
@@ -1767,17 +1793,58 @@ const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
 struct BoxPropBreakEvent {
     prop_index: u16,
     age: u8,
+    impulse_x_q8: i16,
+    impulse_z_q8: i16,
 }
 
 impl BoxPropBreakEvent {
     const EMPTY: Self = Self {
         prop_index: u16::MAX,
         age: 0,
+        impulse_x_q8: 0,
+        impulse_z_q8: 0,
     };
 
     const fn is_active(self) -> bool {
         self.prop_index != u16::MAX
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BoxPropBreakShard {
+    face: u8,
+    u0_q8: u16,
+    v0_q8: u16,
+    u1_q8: u16,
+    v1_q8: u16,
+    drift_q8_per_frame: i8,
+    lift_per_frame: i8,
+    impulse_per_frame: u8,
+    twist_q8_per_frame: i8,
+    delay: u8,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BoxPropFloorDebrisChip {
+    face: u8,
+    offset_x_q8: i16,
+    offset_z_q8: i16,
+    half_length_q8: u16,
+    half_width_q8: u16,
+    yaw_q12: u16,
+    u0_q8: u16,
+    v0_q8: u16,
+    u1_q8: u16,
+    v1_q8: u16,
+    lift: u8,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BoxPropDebrisBounds {
+    center_x: i32,
+    center_z: i32,
+    span_x: i32,
+    span_z: i32,
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -3605,6 +3672,7 @@ impl Scene for Playtest {
                 camera,
                 &self.portal_visibility,
                 self.room_index,
+                cached_room_draw_order_mode(),
             );
             for &active_slot in &active_draw_order {
                 if active_slot == INVALID_ACTIVE_ROOM_SLOT {
@@ -3691,6 +3759,7 @@ impl Scene for Playtest {
                                     &room_camera,
                                     room_options,
                                     cached_room_depth_mode(),
+                                    cached_room_subdivision_mode(),
                                     ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                     &mut primitive_packets,
                                     &mut world,
@@ -3821,6 +3890,7 @@ impl Scene for Playtest {
                                         &room_camera,
                                         room_options,
                                         cached_room_depth_mode(),
+                                        cached_room_subdivision_mode(),
                                         cells,
                                         visibility.screen_margin,
                                         &mut primitive_packets,
@@ -3922,6 +3992,16 @@ impl Scene for Playtest {
                 telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
                 telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
                 draw_box_props(
+                    BOX_PROPS,
+                    &self.box_prop_broken,
+                    active.index,
+                    &room_camera,
+                    actor_options,
+                    &lighting,
+                    &mut primitive_packets,
+                    &mut world,
+                );
+                draw_box_prop_floor_debris(
                     BOX_PROPS,
                     &self.box_prop_broken,
                     active.index,
@@ -4503,7 +4583,7 @@ impl Playtest {
         self.box_prop_broken[word] & mask != 0
     }
 
-    fn mark_box_prop_broken(&mut self, index: usize) -> bool {
+    fn mark_box_prop_broken(&mut self, index: usize, impulse_x_q8: i16, impulse_z_q8: i16) -> bool {
         let Some((word, mask)) = box_prop_state_bit(index) else {
             return false;
         };
@@ -4511,17 +4591,23 @@ impl Playtest {
             return false;
         }
         self.box_prop_broken[word] |= mask;
-        self.spawn_box_prop_break_event(index);
+        self.spawn_box_prop_break_event(index, impulse_x_q8, impulse_z_q8);
         true
     }
 
-    fn spawn_box_prop_break_event(&mut self, index: usize) {
+    fn spawn_box_prop_break_event(&mut self, index: usize, impulse_x_q8: i16, impulse_z_q8: i16) {
         let prop_index = index.min(u16::MAX as usize) as u16;
+        let replacement = BoxPropBreakEvent {
+            prop_index,
+            age: 0,
+            impulse_x_q8,
+            impulse_z_q8,
+        };
         let mut target = 0usize;
         let mut oldest_age = 0u8;
         for (slot, event) in self.box_prop_break_events.iter().enumerate() {
             if !event.is_active() {
-                self.box_prop_break_events[slot] = BoxPropBreakEvent { prop_index, age: 0 };
+                self.box_prop_break_events[slot] = replacement;
                 return;
             }
             if event.age >= oldest_age {
@@ -4529,7 +4615,7 @@ impl Playtest {
                 target = slot;
             }
         }
-        self.box_prop_break_events[target] = BoxPropBreakEvent { prop_index, age: 0 };
+        self.box_prop_break_events[target] = replacement;
     }
 
     fn advance_box_prop_break_events(&mut self, delta_vblanks: u16) {
@@ -4572,7 +4658,11 @@ impl Playtest {
             if character_body_overlaps_aabb(current, config.radius, config.height, min, max)
                 || character_body_overlaps_aabb(target, config.radius, config.height, min, max)
             {
-                self.mark_box_prop_broken(index);
+                let (impulse_x_q8, impulse_z_q8) = box_prop_break_impulse_from_delta(
+                    target.x.saturating_sub(current.x),
+                    target.z.saturating_sub(current.z),
+                );
+                self.mark_box_prop_broken(index, impulse_x_q8, impulse_z_q8);
             }
         }
     }
@@ -4589,7 +4679,16 @@ impl Playtest {
             }
             let (min, max) = box_prop_aabb(prop);
             if box_prop_intersects_attack_volume(origin, yaw, config, min, max) {
-                self.mark_box_prop_broken(index);
+                let center_x = min.x.saturating_add(max.x) / 2;
+                let center_z = min.z.saturating_add(max.z) / 2;
+                let mut impulse = box_prop_break_impulse_from_delta(
+                    center_x.saturating_sub(origin.x),
+                    center_z.saturating_sub(origin.z),
+                );
+                if impulse == (0, 0) {
+                    impulse = box_prop_break_impulse_from_yaw(yaw);
+                }
+                self.mark_box_prop_broken(index, impulse.0, impulse.1);
             }
         }
     }
@@ -8453,6 +8552,26 @@ fn active_room_draw_order(
     camera: WorldCamera,
     visibility: &RuntimePortalVisibility,
     current_room: RoomIndex,
+    mode: CachedRoomDrawOrderMode,
+) -> [u8; MAX_ACTIVE_ROOMS] {
+    match mode {
+        CachedRoomDrawOrderMode::Distance => {
+            active_room_draw_order_by_distance(active_rooms, camera, visibility, current_room)
+        }
+        CachedRoomDrawOrderMode::Portal => {
+            active_room_draw_order_by_portal(active_rooms, visibility, current_room)
+        }
+        CachedRoomDrawOrderMode::Slot => {
+            active_room_draw_order_by_slot(active_rooms, visibility, current_room)
+        }
+    }
+}
+
+fn active_room_draw_order_by_distance(
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    camera: WorldCamera,
+    visibility: &RuntimePortalVisibility,
+    current_room: RoomIndex,
 ) -> [u8; MAX_ACTIVE_ROOMS] {
     let mut order = [INVALID_ACTIVE_ROOM_SLOT; MAX_ACTIVE_ROOMS];
     let mut depths = [i32::MIN; MAX_ACTIVE_ROOMS];
@@ -8478,6 +8597,88 @@ fn active_room_draw_order(
         slot += 1;
     }
     order
+}
+
+fn active_room_draw_order_by_portal(
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    visibility: &RuntimePortalVisibility,
+    current_room: RoomIndex,
+) -> [u8; MAX_ACTIVE_ROOMS] {
+    let mut order = [INVALID_ACTIVE_ROOM_SLOT; MAX_ACTIVE_ROOMS];
+    let mut count = 0usize;
+    let mut visible_index = 0usize;
+    while visible_index < visibility.room_count.min(MAX_ACTIVE_ROOMS) && count < MAX_ACTIVE_ROOMS {
+        let room = visibility.rooms[visible_index].room;
+        if let Some(slot) = active_room_slot_for_room(active_rooms, room) {
+            order[count] = slot;
+            count += 1;
+        }
+        visible_index += 1;
+    }
+    if count == 0 {
+        if let Some(slot) = active_room_slot_for_room(active_rooms, current_room) {
+            order[count] = slot;
+            count += 1;
+        }
+    }
+    let mut slot = 0usize;
+    while slot < MAX_ACTIVE_ROOMS && count < MAX_ACTIVE_ROOMS {
+        if let Some(active) = active_rooms[slot] {
+            if portal_visibility_result_draws_room(visibility, current_room, active.index)
+                && !active_draw_order_contains(&order, count, slot as u8)
+            {
+                order[count] = slot as u8;
+                count += 1;
+            }
+        }
+        slot += 1;
+    }
+    order
+}
+
+fn active_room_draw_order_by_slot(
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    visibility: &RuntimePortalVisibility,
+    current_room: RoomIndex,
+) -> [u8; MAX_ACTIVE_ROOMS] {
+    let mut order = [INVALID_ACTIVE_ROOM_SLOT; MAX_ACTIVE_ROOMS];
+    let mut count = 0usize;
+    let mut slot = 0usize;
+    while slot < MAX_ACTIVE_ROOMS {
+        if let Some(active) = active_rooms[slot] {
+            if portal_visibility_result_draws_room(visibility, current_room, active.index) {
+                order[count] = slot as u8;
+                count += 1;
+            }
+        }
+        slot += 1;
+    }
+    order
+}
+
+fn active_room_slot_for_room(
+    active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    room: RoomIndex,
+) -> Option<u8> {
+    let mut slot = 0usize;
+    while slot < MAX_ACTIVE_ROOMS {
+        if active_rooms[slot].is_some_and(|active| active.index == room) {
+            return Some(slot as u8);
+        }
+        slot += 1;
+    }
+    None
+}
+
+fn active_draw_order_contains(order: &[u8; MAX_ACTIVE_ROOMS], count: usize, slot: u8) -> bool {
+    let mut i = 0usize;
+    while i < count.min(MAX_ACTIVE_ROOMS) {
+        if order[i] == slot {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn portal_visibility_result_draws_room(
@@ -10885,6 +11086,408 @@ const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT]
     [0, 1, 2, 3],
 ];
 
+const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; 20] = [
+    BoxPropBreakShard {
+        face: 0,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 84,
+        v1_q8: 256,
+        drift_q8_per_frame: -3,
+        lift_per_frame: 28,
+        impulse_per_frame: 34,
+        twist_q8_per_frame: -4,
+        delay: 0,
+    },
+    BoxPropBreakShard {
+        face: 0,
+        u0_q8: 84,
+        v0_q8: 0,
+        u1_q8: 172,
+        v1_q8: 256,
+        drift_q8_per_frame: 1,
+        lift_per_frame: 36,
+        impulse_per_frame: 40,
+        twist_q8_per_frame: 5,
+        delay: 1,
+    },
+    BoxPropBreakShard {
+        face: 0,
+        u0_q8: 172,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 256,
+        drift_q8_per_frame: 4,
+        lift_per_frame: 24,
+        impulse_per_frame: 31,
+        twist_q8_per_frame: -6,
+        delay: 0,
+    },
+    BoxPropBreakShard {
+        face: 1,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 86,
+        v1_q8: 256,
+        drift_q8_per_frame: -4,
+        lift_per_frame: 30,
+        impulse_per_frame: 36,
+        twist_q8_per_frame: 6,
+        delay: 0,
+    },
+    BoxPropBreakShard {
+        face: 1,
+        u0_q8: 86,
+        v0_q8: 0,
+        u1_q8: 170,
+        v1_q8: 256,
+        drift_q8_per_frame: 2,
+        lift_per_frame: 38,
+        impulse_per_frame: 42,
+        twist_q8_per_frame: -4,
+        delay: 1,
+    },
+    BoxPropBreakShard {
+        face: 1,
+        u0_q8: 170,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 256,
+        drift_q8_per_frame: 5,
+        lift_per_frame: 26,
+        impulse_per_frame: 32,
+        twist_q8_per_frame: 5,
+        delay: 0,
+    },
+    BoxPropBreakShard {
+        face: 2,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 84,
+        v1_q8: 256,
+        drift_q8_per_frame: -5,
+        lift_per_frame: 24,
+        impulse_per_frame: 30,
+        twist_q8_per_frame: 5,
+        delay: 0,
+    },
+    BoxPropBreakShard {
+        face: 2,
+        u0_q8: 84,
+        v0_q8: 0,
+        u1_q8: 172,
+        v1_q8: 256,
+        drift_q8_per_frame: -1,
+        lift_per_frame: 34,
+        impulse_per_frame: 38,
+        twist_q8_per_frame: -5,
+        delay: 2,
+    },
+    BoxPropBreakShard {
+        face: 2,
+        u0_q8: 172,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 256,
+        drift_q8_per_frame: 3,
+        lift_per_frame: 28,
+        impulse_per_frame: 35,
+        twist_q8_per_frame: 7,
+        delay: 1,
+    },
+    BoxPropBreakShard {
+        face: 3,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 86,
+        v1_q8: 256,
+        drift_q8_per_frame: -4,
+        lift_per_frame: 32,
+        impulse_per_frame: 34,
+        twist_q8_per_frame: -6,
+        delay: 1,
+    },
+    BoxPropBreakShard {
+        face: 3,
+        u0_q8: 86,
+        v0_q8: 0,
+        u1_q8: 170,
+        v1_q8: 256,
+        drift_q8_per_frame: 1,
+        lift_per_frame: 40,
+        impulse_per_frame: 41,
+        twist_q8_per_frame: 4,
+        delay: 0,
+    },
+    BoxPropBreakShard {
+        face: 3,
+        u0_q8: 170,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 256,
+        drift_q8_per_frame: 4,
+        lift_per_frame: 25,
+        impulse_per_frame: 33,
+        twist_q8_per_frame: -5,
+        delay: 2,
+    },
+    BoxPropBreakShard {
+        face: 4,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 128,
+        v1_q8: 128,
+        drift_q8_per_frame: -3,
+        lift_per_frame: 48,
+        impulse_per_frame: 26,
+        twist_q8_per_frame: 5,
+        delay: 0,
+    },
+    BoxPropBreakShard {
+        face: 4,
+        u0_q8: 128,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 128,
+        drift_q8_per_frame: 4,
+        lift_per_frame: 44,
+        impulse_per_frame: 28,
+        twist_q8_per_frame: -5,
+        delay: 1,
+    },
+    BoxPropBreakShard {
+        face: 4,
+        u0_q8: 0,
+        v0_q8: 128,
+        u1_q8: 128,
+        v1_q8: 256,
+        drift_q8_per_frame: -5,
+        lift_per_frame: 42,
+        impulse_per_frame: 24,
+        twist_q8_per_frame: -4,
+        delay: 2,
+    },
+    BoxPropBreakShard {
+        face: 4,
+        u0_q8: 128,
+        v0_q8: 128,
+        u1_q8: 256,
+        v1_q8: 256,
+        drift_q8_per_frame: 3,
+        lift_per_frame: 50,
+        impulse_per_frame: 30,
+        twist_q8_per_frame: 6,
+        delay: 0,
+    },
+    BoxPropBreakShard {
+        face: 5,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 128,
+        v1_q8: 128,
+        drift_q8_per_frame: -2,
+        lift_per_frame: 16,
+        impulse_per_frame: 24,
+        twist_q8_per_frame: -4,
+        delay: 3,
+    },
+    BoxPropBreakShard {
+        face: 5,
+        u0_q8: 128,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 128,
+        drift_q8_per_frame: 3,
+        lift_per_frame: 14,
+        impulse_per_frame: 22,
+        twist_q8_per_frame: 4,
+        delay: 4,
+    },
+    BoxPropBreakShard {
+        face: 5,
+        u0_q8: 0,
+        v0_q8: 128,
+        u1_q8: 128,
+        v1_q8: 256,
+        drift_q8_per_frame: -4,
+        lift_per_frame: 12,
+        impulse_per_frame: 20,
+        twist_q8_per_frame: 3,
+        delay: 4,
+    },
+    BoxPropBreakShard {
+        face: 5,
+        u0_q8: 128,
+        v0_q8: 128,
+        u1_q8: 256,
+        v1_q8: 256,
+        drift_q8_per_frame: 4,
+        lift_per_frame: 18,
+        impulse_per_frame: 25,
+        twist_q8_per_frame: -3,
+        delay: 3,
+    },
+];
+
+const BOX_PROP_FLOOR_DEBRIS_CHIPS: [BoxPropFloorDebrisChip; 12] = [
+    BoxPropFloorDebrisChip {
+        face: 0,
+        offset_x_q8: -80,
+        offset_z_q8: -72,
+        half_length_q8: 46,
+        half_width_q8: 13,
+        yaw_q12: 384,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 84,
+        v1_q8: 256,
+        lift: 6,
+    },
+    BoxPropFloorDebrisChip {
+        face: 0,
+        offset_x_q8: 38,
+        offset_z_q8: -94,
+        half_length_q8: 58,
+        half_width_q8: 12,
+        yaw_q12: 960,
+        u0_q8: 84,
+        v0_q8: 0,
+        u1_q8: 172,
+        v1_q8: 256,
+        lift: 8,
+    },
+    BoxPropFloorDebrisChip {
+        face: 1,
+        offset_x_q8: 104,
+        offset_z_q8: -24,
+        half_length_q8: 42,
+        half_width_q8: 15,
+        yaw_q12: 1328,
+        u0_q8: 170,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 256,
+        lift: 7,
+    },
+    BoxPropFloorDebrisChip {
+        face: 1,
+        offset_x_q8: 42,
+        offset_z_q8: 72,
+        half_length_q8: 54,
+        half_width_q8: 13,
+        yaw_q12: 1888,
+        u0_q8: 0,
+        v0_q8: 16,
+        u1_q8: 86,
+        v1_q8: 240,
+        lift: 10,
+    },
+    BoxPropFloorDebrisChip {
+        face: 2,
+        offset_x_q8: -96,
+        offset_z_q8: 44,
+        half_length_q8: 50,
+        half_width_q8: 11,
+        yaw_q12: 2384,
+        u0_q8: 84,
+        v0_q8: 16,
+        u1_q8: 172,
+        v1_q8: 240,
+        lift: 9,
+    },
+    BoxPropFloorDebrisChip {
+        face: 2,
+        offset_x_q8: -28,
+        offset_z_q8: 104,
+        half_length_q8: 34,
+        half_width_q8: 16,
+        yaw_q12: 3040,
+        u0_q8: 172,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 256,
+        lift: 6,
+    },
+    BoxPropFloorDebrisChip {
+        face: 3,
+        offset_x_q8: -132,
+        offset_z_q8: -10,
+        half_length_q8: 44,
+        half_width_q8: 13,
+        yaw_q12: 3536,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 86,
+        v1_q8: 256,
+        lift: 8,
+    },
+    BoxPropFloorDebrisChip {
+        face: 3,
+        offset_x_q8: 116,
+        offset_z_q8: 92,
+        half_length_q8: 32,
+        half_width_q8: 14,
+        yaw_q12: 256,
+        u0_q8: 86,
+        v0_q8: 24,
+        u1_q8: 170,
+        v1_q8: 232,
+        lift: 11,
+    },
+    BoxPropFloorDebrisChip {
+        face: 4,
+        offset_x_q8: -24,
+        offset_z_q8: -8,
+        half_length_q8: 62,
+        half_width_q8: 24,
+        yaw_q12: 704,
+        u0_q8: 0,
+        v0_q8: 0,
+        u1_q8: 128,
+        v1_q8: 128,
+        lift: 5,
+    },
+    BoxPropFloorDebrisChip {
+        face: 4,
+        offset_x_q8: 82,
+        offset_z_q8: 36,
+        half_length_q8: 40,
+        half_width_q8: 20,
+        yaw_q12: 2656,
+        u0_q8: 128,
+        v0_q8: 0,
+        u1_q8: 256,
+        v1_q8: 128,
+        lift: 7,
+    },
+    BoxPropFloorDebrisChip {
+        face: 5,
+        offset_x_q8: -54,
+        offset_z_q8: 84,
+        half_length_q8: 36,
+        half_width_q8: 18,
+        yaw_q12: 1536,
+        u0_q8: 0,
+        v0_q8: 128,
+        u1_q8: 128,
+        v1_q8: 256,
+        lift: 6,
+    },
+    BoxPropFloorDebrisChip {
+        face: 5,
+        offset_x_q8: 8,
+        offset_z_q8: -126,
+        half_length_q8: 30,
+        half_width_q8: 16,
+        yaw_q12: 3264,
+        u0_q8: 128,
+        v0_q8: 128,
+        u1_q8: 256,
+        v1_q8: 256,
+        lift: 9,
+    },
+];
+
 fn box_prop_state_bit(index: usize) -> Option<(usize, u32)> {
     if index >= MAX_BOX_PROP_STATE {
         return None;
@@ -10932,6 +11535,150 @@ fn draw_box_props<T>(
     }
 }
 
+fn draw_box_prop_floor_debris<T>(
+    props: &[LevelBoxPropRecord],
+    broken: &[u32; BOX_PROP_BROKEN_WORDS],
+    current_room: RoomIndex,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
+    for (index, prop) in props.iter().enumerate() {
+        if prop.room != current_room || !box_prop_broken_in_words(broken, index) {
+            continue;
+        }
+        let vertices = box_prop_vertices(prop);
+        let (center, radius) = box_prop_cull_bounds(vertices);
+        let floor_y = box_prop_floor_y(vertices);
+        let debris_center = WorldVertex::new(center.x, floor_y.saturating_add(16), center.z);
+        if !sphere_visible_to_camera(
+            camera,
+            options,
+            debris_center,
+            radius.saturating_mul(2),
+            128,
+        ) {
+            continue;
+        }
+        draw_box_prop_floor_debris_chips(
+            prop, vertices, floor_y, camera, options, lighting, triangles, world,
+        );
+    }
+}
+
+fn draw_box_prop_floor_debris_chips<T>(
+    prop: &LevelBoxPropRecord,
+    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
+    floor_y: i32,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
+    let bounds = box_prop_debris_bounds(vertices);
+    for chip in BOX_PROP_FLOOR_DEBRIS_CHIPS {
+        let face = chip.face as usize;
+        if face >= psx_level::BOX_PROP_FACE_COUNT {
+            continue;
+        }
+        draw_box_prop_floor_debris_chip(
+            prop, face, bounds, floor_y, chip, camera, options, lighting, triangles, world,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_box_prop_floor_debris_chip<T>(
+    prop: &LevelBoxPropRecord,
+    face: usize,
+    bounds: BoxPropDebrisBounds,
+    floor_y: i32,
+    chip: BoxPropFloorDebrisChip,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
+    let Some(texture_asset) = prop.texture_assets[face] else {
+        return;
+    };
+    let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
+        return;
+    };
+    let Some(slot) = ensure_texture_uploaded_with_clut_mode(
+        asset.id,
+        asset.bytes,
+        VramSlotClutMode::TransparentZero,
+    ) else {
+        return;
+    };
+
+    let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
+        .with_texture_window(slot.texture_window);
+    let u_max = model_render_uv_max(slot.texture_width);
+    let v_max = model_render_uv_max(slot.texture_height);
+    let uvs = box_prop_floor_debris_uvs(u_max, v_max, chip);
+    let quad = box_prop_floor_debris_quad(bounds, floor_y, chip);
+    let colors = [
+        lighting.apply_vertex_fog(
+            box_prop_face_color_at(prop, face, chip.u0_q8, chip.v0_q8),
+            quad[0],
+        ),
+        lighting.apply_vertex_fog(
+            box_prop_face_color_at(prop, face, chip.u1_q8, chip.v0_q8),
+            quad[1],
+        ),
+        lighting.apply_vertex_fog(
+            box_prop_face_color_at(prop, face, chip.u1_q8, chip.v1_q8),
+            quad[2],
+        ),
+        lighting.apply_vertex_fog(
+            box_prop_face_color_at(prop, face, chip.u0_q8, chip.v1_q8),
+            quad[3],
+        ),
+    ];
+    let opts = options
+        .with_depth_policy(DepthPolicy::Average)
+        .with_cull_mode(CullMode::None)
+        .with_material_layer(material)
+        .with_textured_triangle_splitting(true)
+        .with_textured_triangle_max_edge(0);
+    if let Some(projected) = camera.project_world_quad(quad) {
+        let _ = world.submit_textured_gouraud_triangle(
+            triangles,
+            [projected[0], projected[1], projected[2]],
+            [uvs[0], uvs[1], uvs[2]],
+            [colors[0], colors[1], colors[2]],
+            material,
+            opts,
+        );
+        let _ = world.submit_textured_gouraud_triangle(
+            triangles,
+            [projected[0], projected[2], projected[3]],
+            [uvs[0], uvs[2], uvs[3]],
+            [colors[0], colors[2], colors[3]],
+            material,
+            opts,
+        );
+    } else {
+        let tint = average_vertex_rgb(colors);
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+            .with_texture_window(slot.texture_window);
+        let opts = opts.with_material_layer(material);
+        let _ = world.submit_textured_world_quad(triangles, *camera, quad, uvs, material, opts);
+    }
+}
+
 fn draw_box_prop_break_events<T>(
     events: &[BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
     props: &[LevelBoxPropRecord],
@@ -10959,8 +11706,142 @@ fn draw_box_prop_break_events<T>(
         if !sphere_visible_to_camera(camera, options, center, radius.saturating_mul(3), 128) {
             continue;
         }
-        let faces = box_prop_break_faces(vertices, event.age);
-        draw_box_prop_faces(prop, faces, camera, options, lighting, triangles, world);
+        draw_box_prop_break_shards(
+            prop,
+            box_prop_faces(vertices),
+            center,
+            *event,
+            camera,
+            options,
+            lighting,
+            triangles,
+            world,
+        );
+    }
+}
+
+fn draw_box_prop_break_shards<T>(
+    prop: &LevelBoxPropRecord,
+    faces: [[WorldVertex; 4]; psx_level::BOX_PROP_FACE_COUNT],
+    box_center: WorldVertex,
+    event: BoxPropBreakEvent,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
+    for (shard_index, shard) in BOX_PROP_BREAK_SHARDS.iter().copied().enumerate() {
+        if event.age < shard.delay {
+            continue;
+        }
+        let face = shard.face as usize;
+        if face >= psx_level::BOX_PROP_FACE_COUNT {
+            continue;
+        }
+        draw_box_prop_break_shard(
+            prop,
+            face,
+            faces[face],
+            box_center,
+            event,
+            shard,
+            shard_index,
+            camera,
+            options,
+            lighting,
+            triangles,
+            world,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_box_prop_break_shard<T>(
+    prop: &LevelBoxPropRecord,
+    face: usize,
+    face_vertices: [WorldVertex; 4],
+    box_center: WorldVertex,
+    event: BoxPropBreakEvent,
+    shard: BoxPropBreakShard,
+    shard_index: usize,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+{
+    let Some(texture_asset) = prop.texture_assets[face] else {
+        return;
+    };
+    let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
+        return;
+    };
+    let Some(slot) = ensure_texture_uploaded_with_clut_mode(
+        asset.id,
+        asset.bytes,
+        VramSlotClutMode::TransparentZero,
+    ) else {
+        return;
+    };
+
+    let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
+        .with_texture_window(slot.texture_window);
+    let u_max = model_render_uv_max(slot.texture_width);
+    let v_max = model_render_uv_max(slot.texture_height);
+    let uvs = box_prop_shard_uvs(u_max, v_max, shard);
+    let quad = box_prop_break_shard_quad(face_vertices, box_center, event, shard, shard_index);
+    let colors = [
+        lighting.apply_vertex_fog(
+            box_prop_face_color_at(prop, face, shard.u0_q8, shard.v0_q8),
+            quad[0],
+        ),
+        lighting.apply_vertex_fog(
+            box_prop_face_color_at(prop, face, shard.u1_q8, shard.v0_q8),
+            quad[1],
+        ),
+        lighting.apply_vertex_fog(
+            box_prop_face_color_at(prop, face, shard.u1_q8, shard.v1_q8),
+            quad[2],
+        ),
+        lighting.apply_vertex_fog(
+            box_prop_face_color_at(prop, face, shard.u0_q8, shard.v1_q8),
+            quad[3],
+        ),
+    ];
+    let opts = options
+        .with_depth_policy(DepthPolicy::Average)
+        .with_cull_mode(CullMode::None)
+        .with_material_layer(material)
+        .with_textured_triangle_splitting(true)
+        .with_textured_triangle_max_edge(0);
+    if let Some(projected) = camera.project_world_quad(quad) {
+        let _ = world.submit_textured_gouraud_triangle(
+            triangles,
+            [projected[0], projected[1], projected[2]],
+            [uvs[0], uvs[1], uvs[2]],
+            [colors[0], colors[1], colors[2]],
+            material,
+            opts,
+        );
+        let _ = world.submit_textured_gouraud_triangle(
+            triangles,
+            [projected[0], projected[2], projected[3]],
+            [uvs[0], uvs[2], uvs[3]],
+            [colors[0], colors[2], colors[3]],
+            material,
+            opts,
+        );
+    } else {
+        let tint = average_vertex_rgb(colors);
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+            .with_texture_window(slot.texture_window);
+        let opts = opts.with_material_layer(material);
+        let _ = world.submit_textured_world_quad(triangles, *camera, quad, uvs, material, opts);
     }
 }
 
@@ -10989,9 +11870,8 @@ fn draw_box_prop_faces<T>(
         ) else {
             continue;
         };
-        let material =
-            TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
-                .with_texture_window(slot.texture_window);
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
+            .with_texture_window(slot.texture_window);
         let u_max = model_render_uv_max(slot.texture_width);
         let v_max = model_render_uv_max(slot.texture_height);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
@@ -11040,6 +11920,257 @@ fn draw_box_prop_faces<T>(
             );
         }
     }
+}
+
+fn box_prop_break_shard_quad(
+    face: [WorldVertex; 4],
+    box_center: WorldVertex,
+    event: BoxPropBreakEvent,
+    shard: BoxPropBreakShard,
+    shard_index: usize,
+) -> [WorldVertex; 4] {
+    let age = event
+        .age
+        .saturating_sub(shard.delay)
+        .min(BOX_PROP_BREAK_MOTION_FRAMES) as i32;
+    let mut quad = [
+        box_prop_face_point_q8(face, shard.u0_q8, shard.v0_q8),
+        box_prop_face_point_q8(face, shard.u1_q8, shard.v0_q8),
+        box_prop_face_point_q8(face, shard.u1_q8, shard.v1_q8),
+        box_prop_face_point_q8(face, shard.u0_q8, shard.v1_q8),
+    ];
+    let shard_center = box_prop_quad_center(quad);
+    let face_center = box_prop_quad_center(face);
+    let edge_u = world_vertex_delta(face[0], face[1]);
+    let edge_v = world_vertex_delta(face[0], face[3]);
+    let spin_q12 = box_prop_break_shard_spin_q12(event.prop_index, shard_index, age);
+    let outward_q8 = age.saturating_mul(age);
+    let drift_q8 = (shard.drift_q8_per_frame as i32)
+        .saturating_mul(age)
+        .clamp(-96, 96);
+    let twist_q8 = (shard.twist_q8_per_frame as i32)
+        .saturating_mul(age)
+        .clamp(-96, 96);
+    let shrink_q8 = (252 - age.saturating_mul(3)).max(176);
+    let impulse_units = age.saturating_mul(shard.impulse_per_frame as i32);
+    let fall = age.saturating_mul(age).saturating_mul(4);
+    let face_delta = world_vertex_delta(box_center, face_center);
+    let drift = scale_world_delta_q8(edge_u, drift_q8);
+    let offset = [
+        scale_q8_i32_signed(face_delta[0], outward_q8)
+            .saturating_add((event.impulse_x_q8 as i32).saturating_mul(impulse_units) / 256)
+            .saturating_add(drift[0]),
+        scale_q8_i32_signed(face_delta[1], outward_q8)
+            .saturating_add((shard.lift_per_frame as i32).saturating_mul(age))
+            .saturating_sub(fall)
+            .saturating_add(drift[1]),
+        scale_q8_i32_signed(face_delta[2], outward_q8)
+            .saturating_add((event.impulse_z_q8 as i32).saturating_mul(impulse_units) / 256)
+            .saturating_add(drift[2]),
+    ];
+
+    for (corner, vertex) in quad.iter_mut().enumerate() {
+        let mut p = shrink_world_vertex_around(*vertex, shard_center, shrink_q8);
+        let sign_u = if corner == 0 || corner == 3 { -1 } else { 1 };
+        let sign_v = if corner == 0 || corner == 1 { -1 } else { 1 };
+        let tumble_u = scale_world_delta_q8(edge_u, sign_v * twist_q8 / 2);
+        let tumble_v = scale_world_delta_q8(edge_v, -sign_u * twist_q8);
+        p = add_world_vertex_offset(p, tumble_u);
+        p = add_world_vertex_offset(p, tumble_v);
+        p = rotate_world_vertex_y_around_q12(p, shard_center, spin_q12);
+        *vertex = add_world_vertex_offset(p, offset);
+    }
+    quad
+}
+
+fn box_prop_break_shard_spin_q12(prop_index: u16, shard_index: usize, age: i32) -> u16 {
+    let seed = (prop_index as u32)
+        .wrapping_mul(73)
+        .wrapping_add((shard_index as u32).wrapping_mul(151))
+        .wrapping_add(0x4d3);
+    let speed = 4 + (seed & 0x0f) as i32;
+    let wobble = (((seed >> 5) & 0x07) as i32).saturating_sub(3);
+    let signed = age.saturating_mul(speed.saturating_add(wobble).max(2));
+    let spin = if seed & 0x10 == 0 { signed } else { -signed };
+    spin.rem_euclid(4096) as u16
+}
+
+fn rotate_world_vertex_y_around_q12(
+    vertex: WorldVertex,
+    center: WorldVertex,
+    angle_q12: u16,
+) -> WorldVertex {
+    if angle_q12 == 0 {
+        return vertex;
+    }
+    let relative = [
+        vertex.x.saturating_sub(center.x),
+        vertex.y.saturating_sub(center.y),
+        vertex.z.saturating_sub(center.z),
+    ];
+    let rotated = rotate_y_q12(relative, angle_q12);
+    WorldVertex::new(
+        center.x.saturating_add(rotated[0]),
+        center.y.saturating_add(rotated[1]),
+        center.z.saturating_add(rotated[2]),
+    )
+}
+
+fn box_prop_floor_debris_quad(
+    bounds: BoxPropDebrisBounds,
+    floor_y: i32,
+    chip: BoxPropFloorDebrisChip,
+) -> [WorldVertex; 4] {
+    let base = bounds.span_x.max(bounds.span_z).max(128);
+    let half_length = (base.saturating_mul(chip.half_length_q8 as i32) / 256).clamp(32, base);
+    let half_width = (base.saturating_mul(chip.half_width_q8 as i32) / 256).clamp(16, base);
+    let center_x = bounds
+        .center_x
+        .saturating_add(bounds.span_x.saturating_mul(chip.offset_x_q8 as i32) / 256);
+    let center_z = bounds
+        .center_z
+        .saturating_add(bounds.span_z.saturating_mul(chip.offset_z_q8 as i32) / 256);
+    let long = rotate_y_q12([half_length, 0, 0], chip.yaw_q12);
+    let short = rotate_y_q12([0, 0, half_width], chip.yaw_q12);
+    let y = floor_y.saturating_add(chip.lift as i32);
+    [
+        WorldVertex::new(
+            center_x - long[0] - short[0],
+            y,
+            center_z - long[2] - short[2],
+        ),
+        WorldVertex::new(
+            center_x + long[0] - short[0],
+            y,
+            center_z + long[2] - short[2],
+        ),
+        WorldVertex::new(
+            center_x + long[0] + short[0],
+            y,
+            center_z + long[2] + short[2],
+        ),
+        WorldVertex::new(
+            center_x - long[0] + short[0],
+            y,
+            center_z - long[2] + short[2],
+        ),
+    ]
+}
+
+fn box_prop_floor_debris_uvs(u_max: u8, v_max: u8, chip: BoxPropFloorDebrisChip) -> [(u8, u8); 4] {
+    let u0 = uv_from_q8(u_max, chip.u0_q8);
+    let u1 = uv_from_q8(u_max, chip.u1_q8);
+    let v0 = uv_from_q8(v_max, chip.v0_q8);
+    let v1 = uv_from_q8(v_max, chip.v1_q8);
+    [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+}
+
+fn box_prop_shard_uvs(u_max: u8, v_max: u8, shard: BoxPropBreakShard) -> [(u8, u8); 4] {
+    let u0 = uv_from_q8(u_max, shard.u0_q8);
+    let u1 = uv_from_q8(u_max, shard.u1_q8);
+    let v0 = uv_from_q8(v_max, shard.v0_q8);
+    let v1 = uv_from_q8(v_max, shard.v1_q8);
+    [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+}
+
+fn box_prop_face_point_q8(face: [WorldVertex; 4], u_q8: u16, v_q8: u16) -> WorldVertex {
+    let left = lerp_world_vertex_q8(face[0], face[3], v_q8);
+    let right = lerp_world_vertex_q8(face[1], face[2], v_q8);
+    lerp_world_vertex_q8(left, right, u_q8)
+}
+
+fn box_prop_quad_center(quad: [WorldVertex; 4]) -> WorldVertex {
+    WorldVertex::new(
+        average4_i32(quad[0].x, quad[1].x, quad[2].x, quad[3].x),
+        average4_i32(quad[0].y, quad[1].y, quad[2].y, quad[3].y),
+        average4_i32(quad[0].z, quad[1].z, quad[2].z, quad[3].z),
+    )
+}
+
+fn box_prop_face_color_at(
+    prop: &LevelBoxPropRecord,
+    face: usize,
+    u_q8: u16,
+    v_q8: u16,
+) -> (u8, u8, u8) {
+    let colors = prop.baked_vertex_rgb[face];
+    let top = lerp_rgb_q8(colors[0], colors[1], u_q8);
+    let bottom = lerp_rgb_q8(colors[3], colors[2], u_q8);
+    lerp_rgb_q8(top, bottom, v_q8)
+}
+
+fn lerp_world_vertex_q8(a: WorldVertex, b: WorldVertex, t_q8: u16) -> WorldVertex {
+    WorldVertex::new(
+        lerp_i32_q8(a.x, b.x, t_q8),
+        lerp_i32_q8(a.y, b.y, t_q8),
+        lerp_i32_q8(a.z, b.z, t_q8),
+    )
+}
+
+fn lerp_rgb_q8(a: (u8, u8, u8), b: (u8, u8, u8), t_q8: u16) -> (u8, u8, u8) {
+    (
+        lerp_i32_q8(a.0 as i32, b.0 as i32, t_q8) as u8,
+        lerp_i32_q8(a.1 as i32, b.1 as i32, t_q8) as u8,
+        lerp_i32_q8(a.2 as i32, b.2 as i32, t_q8) as u8,
+    )
+}
+
+fn lerp_i32_q8(a: i32, b: i32, t_q8: u16) -> i32 {
+    let t = t_q8.min(256) as i32;
+    a.saturating_add(b.saturating_sub(a).saturating_mul(t) / 256)
+}
+
+fn uv_from_q8(max: u8, t_q8: u16) -> u8 {
+    ((max as u16).saturating_mul(t_q8.min(256)) / 256) as u8
+}
+
+fn shrink_world_vertex_around(
+    vertex: WorldVertex,
+    center: WorldVertex,
+    scale_q8: i32,
+) -> WorldVertex {
+    WorldVertex::new(
+        center.x.saturating_add(scale_q8_i32_signed(
+            vertex.x.saturating_sub(center.x),
+            scale_q8,
+        )),
+        center.y.saturating_add(scale_q8_i32_signed(
+            vertex.y.saturating_sub(center.y),
+            scale_q8,
+        )),
+        center.z.saturating_add(scale_q8_i32_signed(
+            vertex.z.saturating_sub(center.z),
+            scale_q8,
+        )),
+    )
+}
+
+fn world_vertex_delta(from: WorldVertex, to: WorldVertex) -> [i32; 3] {
+    [
+        to.x.saturating_sub(from.x),
+        to.y.saturating_sub(from.y),
+        to.z.saturating_sub(from.z),
+    ]
+}
+
+fn scale_world_delta_q8(delta: [i32; 3], scale_q8: i32) -> [i32; 3] {
+    [
+        scale_q8_i32_signed(delta[0], scale_q8),
+        scale_q8_i32_signed(delta[1], scale_q8),
+        scale_q8_i32_signed(delta[2], scale_q8),
+    ]
+}
+
+fn add_world_vertex_offset(vertex: WorldVertex, offset: [i32; 3]) -> WorldVertex {
+    WorldVertex::new(
+        vertex.x.saturating_add(offset[0]),
+        vertex.y.saturating_add(offset[1]),
+        vertex.z.saturating_add(offset[2]),
+    )
+}
+
+fn scale_q8_i32_signed(value: i32, scale_q8: i32) -> i32 {
+    value.saturating_mul(scale_q8) / 256
 }
 
 fn average_vertex_rgb(colors: [(u8, u8, u8); 4]) -> (u8, u8, u8) {
@@ -11212,6 +12343,35 @@ fn box_prop_cull_bounds(
     (center, radius.max(32))
 }
 
+fn box_prop_floor_y(vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT]) -> i32 {
+    let mut floor_y = vertices[0].y;
+    for vertex in vertices {
+        floor_y = floor_y.min(vertex.y);
+    }
+    floor_y
+}
+
+fn box_prop_debris_bounds(
+    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
+) -> BoxPropDebrisBounds {
+    let mut min_x = vertices[0].x;
+    let mut max_x = vertices[0].x;
+    let mut min_z = vertices[0].z;
+    let mut max_z = vertices[0].z;
+    for vertex in vertices {
+        min_x = min_x.min(vertex.x);
+        max_x = max_x.max(vertex.x);
+        min_z = min_z.min(vertex.z);
+        max_z = max_z.max(vertex.z);
+    }
+    BoxPropDebrisBounds {
+        center_x: min_x.saturating_add(max_x) / 2,
+        center_z: min_z.saturating_add(max_z) / 2,
+        span_x: max_x.saturating_sub(min_x).max(64),
+        span_z: max_z.saturating_sub(min_z).max(64),
+    }
+}
+
 fn box_prop_aabb(prop: &LevelBoxPropRecord) -> (RoomPoint, RoomPoint) {
     let vertices = box_prop_vertices(prop);
     let mut min_x = vertices[0].x;
@@ -11278,14 +12438,24 @@ fn box_prop_movement_probe_target(
     }
     let signed_speed = if input.walk < 0 { -speed } else { speed };
     RoomPoint::new(
-        origin
-            .x
-            .saturating_add(yaw.sin().mul_i32(signed_speed)),
+        origin.x.saturating_add(yaw.sin().mul_i32(signed_speed)),
         origin.y,
-        origin
-            .z
-            .saturating_add(yaw.cos().mul_i32(signed_speed)),
+        origin.z.saturating_add(yaw.cos().mul_i32(signed_speed)),
     )
+}
+
+fn box_prop_break_impulse_from_delta(dx: i32, dz: i32) -> (i16, i16) {
+    let denom = abs_i32_saturating(dx).saturating_add(abs_i32_saturating(dz));
+    if denom <= 0 {
+        return (0, 0);
+    }
+    let x = dx.saturating_mul(256) / denom;
+    let z = dz.saturating_mul(256) / denom;
+    (x.clamp(-256, 256) as i16, z.clamp(-256, 256) as i16)
+}
+
+fn box_prop_break_impulse_from_yaw(yaw: Angle) -> (i16, i16) {
+    ((yaw.sin().raw() / 16) as i16, (yaw.cos().raw() / 16) as i16)
 }
 
 fn character_body_overlaps_aabb(
@@ -11323,69 +12493,16 @@ fn box_prop_intersects_attack_volume(
     let dz = center_z.saturating_sub(origin.z);
     let sin_yaw = yaw.sin();
     let cos_yaw = yaw.cos();
-    let forward = sin_yaw
-        .mul_i32(dx)
-        .saturating_add(cos_yaw.mul_i32(dz));
-    let lateral = cos_yaw
-        .mul_i32(dx)
-        .saturating_sub(sin_yaw.mul_i32(dz));
-    let prop_extent = abs_delta_i32(max.x, min.x)
-        .saturating_add(abs_delta_i32(max.z, min.z))
-        / 2;
+    let forward = sin_yaw.mul_i32(dx).saturating_add(cos_yaw.mul_i32(dz));
+    let lateral = cos_yaw.mul_i32(dx).saturating_sub(sin_yaw.mul_i32(dz));
+    let prop_extent = abs_delta_i32(max.x, min.x).saturating_add(abs_delta_i32(max.z, min.z)) / 2;
     let reach = BOX_PROP_BREAK_ATTACK_REACH
         .saturating_add(config.radius.max(0))
         .saturating_add(prop_extent);
     let half_width = BOX_PROP_BREAK_ATTACK_WIDTH
         .saturating_add(config.radius.max(0))
         .saturating_add(prop_extent);
-    forward >= -prop_extent && forward <= reach && abs_i32(lateral) <= half_width
-}
-
-fn box_prop_break_faces(
-    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
-    age: u8,
-) -> [[WorldVertex; 4]; psx_level::BOX_PROP_FACE_COUNT] {
-    let base = box_prop_faces(vertices);
-    let (center, _) = box_prop_cull_bounds(vertices);
-    let t = age.min(BOX_PROP_BREAK_FRAMES) as i32;
-    let spread_q8 = t.saturating_mul(t).saturating_mul(2);
-    let drop = t.saturating_mul(t).saturating_mul(3);
-    let mut out = base;
-    for face in 0..psx_level::BOX_PROP_FACE_COUNT {
-        let face_center = WorldVertex::new(
-            average4_i32(
-                base[face][0].x,
-                base[face][1].x,
-                base[face][2].x,
-                base[face][3].x,
-            ),
-            average4_i32(
-                base[face][0].y,
-                base[face][1].y,
-                base[face][2].y,
-                base[face][3].y,
-            ),
-            average4_i32(
-                base[face][0].z,
-                base[face][1].z,
-                base[face][2].z,
-                base[face][3].z,
-            ),
-        );
-        let spread_q8 = spread_q8.min(u16::MAX as i32) as u16;
-        let offset_x = scale_q8_i32(face_center.x.saturating_sub(center.x), spread_q8);
-        let offset_y = scale_q8_i32(face_center.y.saturating_sub(center.y), spread_q8)
-            .saturating_sub(drop);
-        let offset_z = scale_q8_i32(face_center.z.saturating_sub(center.z), spread_q8);
-        for corner in 0..4 {
-            out[face][corner] = WorldVertex::new(
-                base[face][corner].x.saturating_add(offset_x),
-                base[face][corner].y.saturating_add(offset_y),
-                base[face][corner].z.saturating_add(offset_z),
-            );
-        }
-    }
-    out
+    forward >= -prop_extent && forward <= reach && abs_i32_saturating(lateral) <= half_width
 }
 
 fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
