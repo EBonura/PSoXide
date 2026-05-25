@@ -189,6 +189,21 @@ pub struct PlaytestRoomPortal {
     pub vertices: [[i32; 3]; 4],
 }
 
+/// Runtime floor-link metadata copied into compact collision sector records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestRoomFloorLink {
+    /// Owning runtime room in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Sector X inside the cooked runtime room.
+    pub x: u16,
+    /// Sector Z inside the cooked runtime room.
+    pub z: u16,
+    /// Runtime room reached by moving upward through this sector.
+    pub above_room: Option<u16>,
+    /// Runtime room reached by moving downward through this sector.
+    pub below_room: Option<u16>,
+}
+
 /// Resolved sky values written into one runtime room record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestSky {
@@ -848,6 +863,8 @@ pub struct PlaytestPackage {
     pub chunks: Vec<PlaytestChunk>,
     /// Directed runtime room portal graph.
     pub room_portals: Vec<PlaytestRoomPortal>,
+    /// Runtime floor links, indexed by `(room, x, z)` and copied into streamed collision chunks.
+    pub room_floor_links: Vec<PlaytestRoomFloorLink>,
     /// Reserved near-room index table for room coherence / streaming.
     pub room_near_rooms: Vec<u16>,
     /// Reserved overlapped-room index table for stacked-room coherence.

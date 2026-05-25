@@ -211,15 +211,13 @@ impl EditorTextures {
         let plan = preview_texture_upload_plan(project, project_root);
         let room_signature: Vec<PreviewTextureSignature> = plan
             .iter()
-            .map(|item| {
-                PreviewTextureSignature {
-                    id: item.id,
-                    path: item.signature.clone(),
-                    cache_signature: item.cache_signature.clone(),
-                    name: item.name.clone(),
-                    force_zero_opaque: item.force_zero_opaque,
-                    allow_procedural_fallback: item.allow_procedural_fallback,
-                }
+            .map(|item| PreviewTextureSignature {
+                id: item.id,
+                path: item.signature.clone(),
+                cache_signature: item.cache_signature.clone(),
+                name: item.name.clone(),
+                force_zero_opaque: item.force_zero_opaque,
+                allow_procedural_fallback: item.allow_procedural_fallback,
             })
             .collect();
         if self.room_signature == room_signature {
