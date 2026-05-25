@@ -2176,9 +2176,9 @@ fn walk_box_props(
             emit_box_prop_face(scratch, p, uvs, shade);
         }
 
-        if preview_bounds {
-            let is_selected = node.id == selected;
-            let is_hovered = hovered == Some(node.id);
+        let is_selected = node.id == selected;
+        let is_hovered = hovered == Some(node.id);
+        if preview_bounds || is_selected || is_hovered {
             push_box_prop_wireframe(
                 scratch,
                 world_vertices,
