@@ -80,8 +80,9 @@ use psx_gpu::{
     VideoMode,
 };
 use psx_level::portal_visibility::{
-    build_portal_visibility_with_room_bounds, PortalRoomBounds, PortalVisibilityCamera,
-    PortalVisibilityResult,
+    build_portal_visibility_with_room_bounds, debug_portal_clip, PortalClipDebug,
+    PortalClipDebugDecision, PortalClipDebugPlane, PortalClipDebugRect, PortalFrustum,
+    PortalRoomBounds, PortalVisibilityCamera, PortalVisibilityResult,
 };
 use psx_level::{
     character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind, image_prop_flags,
@@ -406,6 +407,11 @@ fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: u64) {
 }
 
 const DEBUG_LOG_LINE_CAP: usize = 256;
+const PORTAL_VIS_DEBUG_LOG_COOLDOWN_TICKS: u8 = 120;
+const PORTAL_VIS_DEBUG_VERBOSE_CLIPS: bool = false;
+const PORTAL_VIS_DEBUG_LOG_MAX_FRUSTUMS: usize = 4;
+const PORTAL_VIS_DEBUG_LOG_MAX_PORTALS: usize = 16;
+const POST_CROSS_RENDER_DEBUG_LOGS: bool = false;
 
 struct DebugLogLine {
     bytes: [u8; DEBUG_LOG_LINE_CAP],
@@ -572,6 +578,462 @@ fn debug_log_room_window_after_cross(
     line.push_str(" coll=");
     line.push_bool(current_collision_ready);
     line.emit();
+}
+
+fn portal_debug_mask_bit(index: usize) -> u64 {
+    if index < u64::BITS as usize {
+        1u64 << index
+    } else {
+        0
+    }
+}
+
+fn portal_debug_decision_name(decision: PortalClipDebugDecision) -> &'static str {
+    match decision {
+        PortalClipDebugDecision::Accepted => "accepted",
+        PortalClipDebugDecision::Backface => "backface",
+        PortalClipDebugDecision::EmptyProjection => "empty",
+        PortalClipDebugDecision::NoWindowOverlap => "no_window",
+        PortalClipDebugDecision::Tiny => "tiny",
+    }
+}
+
+fn portal_debug_plane_name(plane: PortalClipDebugPlane) -> &'static str {
+    match plane {
+        PortalClipDebugPlane::None => "none",
+        PortalClipDebugPlane::Near => "near",
+        PortalClipDebugPlane::Left => "left",
+        PortalClipDebugPlane::Right => "right",
+        PortalClipDebugPlane::Bottom => "bottom",
+        PortalClipDebugPlane::Top => "top",
+    }
+}
+
+fn push_portal_debug_rect(line: &mut DebugLogLine, rect: PortalClipDebugRect) {
+    line.push_byte(b'[');
+    line.push_i32(rect.left_tan_q12);
+    line.push_byte(b',');
+    line.push_i32(rect.right_tan_q12);
+    line.push_byte(b',');
+    line.push_i32(rect.min_y_tan_q12);
+    line.push_byte(b',');
+    line.push_i32(rect.max_y_tan_q12);
+    line.push_byte(b']');
+}
+
+fn push_optional_portal_debug_rect(line: &mut DebugLogLine, rect: Option<PortalClipDebugRect>) {
+    if let Some(rect) = rect {
+        push_portal_debug_rect(line, rect);
+    } else {
+        line.push_byte(b'-');
+    }
+}
+
+fn portal_debug_center(portal: psx_level::LevelRoomPortalRecord) -> RoomPoint {
+    RoomPoint::new(
+        (portal.vertex_x[0]
+            .saturating_add(portal.vertex_x[1])
+            .saturating_add(portal.vertex_x[2])
+            .saturating_add(portal.vertex_x[3]))
+            / 4,
+        (portal.vertex_y[0]
+            .saturating_add(portal.vertex_y[1])
+            .saturating_add(portal.vertex_y[2])
+            .saturating_add(portal.vertex_y[3]))
+            / 4,
+        (portal.vertex_z[0]
+            .saturating_add(portal.vertex_z[1])
+            .saturating_add(portal.vertex_z[2])
+            .saturating_add(portal.vertex_z[3]))
+            / 4,
+    )
+}
+
+fn portal_debug_view_center(clip: PortalClipDebug) -> RoomPoint {
+    let mut x = 0i32;
+    let mut y = 0i32;
+    let mut z = 0i32;
+    let mut i = 0usize;
+    while i < 4 {
+        let vertex = clip.view_vertices[i];
+        x = x.saturating_add(vertex.x);
+        y = y.saturating_add(vertex.y);
+        z = z.saturating_add(vertex.z);
+        i += 1;
+    }
+    RoomPoint::new(x / 4, y / 4, z / 4)
+}
+
+fn debug_log_portal_visibility_summary(
+    current_room: RoomIndex,
+    player_room: RoomIndex,
+    player_local: RoomPoint,
+    player_global: RoomPoint,
+    view: ActiveRoomView,
+    camera: PortalVisibilityCamera,
+    result: &RuntimePortalVisibility,
+) {
+    let mut line = DebugLogLine::new("portal vis pose room=");
+    line.push_room(current_room);
+    line.push_str(" player_room=");
+    line.push_room(player_room);
+    line.push_str(" player_local=");
+    line.push_point(player_local);
+    line.push_str(" player_global=");
+    line.push_point(player_global);
+    line.emit();
+
+    let stats = result.stats;
+    let mut line = DebugLogLine::new("portal vis camera local=");
+    line.push_point(view.position);
+    line.push_str(" global=");
+    line.push_point(RoomPoint::new(camera.x, camera.y, camera.z));
+    line.push_str(" sy/cy/sp/cp=(");
+    line.push_i32(camera.sin_yaw_q12);
+    line.push_byte(b',');
+    line.push_i32(camera.cos_yaw_q12);
+    line.push_byte(b',');
+    line.push_i32(camera.sin_pitch_q12);
+    line.push_byte(b',');
+    line.push_i32(camera.cos_pitch_q12);
+    line.push_str(") near/far=");
+    line.push_i32(camera.near_z);
+    line.push_byte(b'/');
+    line.push_i32(camera.far_z);
+    line.push_str(" fov=");
+    line.push_i32(camera.half_fov_x_tan_q12);
+    line.push_byte(b'/');
+    line.push_i32(camera.half_fov_y_tan_q12);
+    line.emit();
+
+    let mut line = DebugLogLine::new("portal vis stats rooms/fr=");
+    line.push_u32(result.room_count.min(u32::MAX as usize) as u32);
+    line.push_byte(b'/');
+    line.push_u32(result.frustum_count.min(u32::MAX as usize) as u32);
+    line.push_str(" test/acc=");
+    line.push_u32(stats.portals_tested as u32);
+    line.push_byte(b'/');
+    line.push_u32(stats.portals_accepted as u32);
+    line.push_str(" rej b/f/t=");
+    line.push_u32(stats.reject_backface as u32);
+    line.push_byte(b'/');
+    line.push_u32(stats.reject_frustum as u32);
+    line.push_byte(b'/');
+    line.push_u32(stats.reject_tiny as u32);
+    line.push_str(" cap r/f/d=");
+    line.push_u32(stats.cap_room as u32);
+    line.push_byte(b'/');
+    line.push_u32(stats.cap_frustum as u32);
+    line.push_byte(b'/');
+    line.push_u32(stats.cap_depth as u32);
+    line.emit();
+
+    let mut line = DebugLogLine::new("portal vis masks visible=");
+    line.push_hex_u64(result.visible_room_mask());
+    line.push_str(" tested=");
+    line.push_hex_u64(stats.tested_room_mask);
+    line.push_str(" accepted=");
+    line.push_hex_u64(stats.accepted_room_mask);
+    line.push_str(" rej_rooms=");
+    line.push_hex_u64(stats.reject_frustum_room_mask);
+    line.push_str(" rej_portals=");
+    line.push_hex_u64(stats.reject_frustum_portal_mask);
+    line.emit();
+}
+
+fn debug_log_portal_clip_summary_line(
+    portal_index: usize,
+    portal: psx_level::LevelRoomPortalRecord,
+    parent: PortalFrustum,
+    clip: PortalClipDebug,
+    stats: psx_level::portal_visibility::PortalVisibilityStats,
+) {
+    let portal_bit = portal_debug_mask_bit(portal_index);
+    let tested = portal_bit != 0 && (stats.tested_portal_mask & portal_bit) != 0;
+    let accepted = portal_bit != 0 && (stats.accepted_portal_mask & portal_bit) != 0;
+    let rejected = portal_bit != 0 && (stats.reject_frustum_portal_mask & portal_bit) != 0;
+
+    let mut line = DebugLogLine::new("portal p summary idx=");
+    line.push_u32(portal_index.min(u32::MAX as usize) as u32);
+    line.push_str(" src=");
+    line.push_room(portal.source_room);
+    line.push_str(" dst=");
+    line.push_room(portal.destination_room);
+    line.push_str(" depth=");
+    line.push_u32(parent.depth as u32);
+    line.push_str(" decision=");
+    line.push_str(portal_debug_decision_name(clip.decision));
+    line.push_str(" empty=");
+    line.push_str(portal_debug_plane_name(clip.first_empty_plane));
+    line.push_str(" t/a/r=");
+    line.push_bool(tested);
+    line.push_byte(b'/');
+    line.push_bool(accepted);
+    line.push_byte(b'/');
+    line.push_bool(rejected);
+    line.push_str(" world=");
+    line.push_point(portal_debug_center(portal));
+    line.emit();
+
+    let mut line = DebugLogLine::new("portal p view idx=");
+    line.push_u32(portal_index.min(u32::MAX as usize) as u32);
+    line.push_str(" center=");
+    line.push_point(portal_debug_view_center(clip));
+    line.push_str(" parent=");
+    push_portal_debug_rect(&mut line, clip.parent);
+    line.push_str(" proj=");
+    push_optional_portal_debug_rect(&mut line, clip.projected_bounds);
+    line.push_str(" result=");
+    push_optional_portal_debug_rect(&mut line, clip.result_bounds);
+    line.emit();
+}
+
+fn debug_log_portal_visible_rooms(result: &RuntimePortalVisibility) {
+    let mut line = DebugLogLine::new("portal vis rooms=");
+    let limit = result.room_count.min(MAX_ACTIVE_ROOMS);
+    let mut i = 0usize;
+    while i < limit {
+        if i > 0 {
+            line.push_byte(b',');
+        }
+        let room = result.rooms[i];
+        line.push_room(room.room);
+        line.push_byte(b':');
+        line.push_u32(room.depth as u32);
+        line.push_byte(b'/');
+        line.push_u32(room.frustum_count as u32);
+        i += 1;
+    }
+    line.emit();
+}
+
+fn debug_log_portal_visibility_source_portal_summaries(
+    camera: PortalVisibilityCamera,
+    result: &RuntimePortalVisibility,
+) {
+    let mut logged = 0usize;
+    let frustum_limit = result
+        .frustum_count
+        .min(PORTAL_VIS_DEBUG_LOG_MAX_FRUSTUMS)
+        .min(MAX_PORTAL_FRUSTUMS);
+    let mut frustum_slot = 0usize;
+    while frustum_slot < frustum_limit && logged < PORTAL_VIS_DEBUG_LOG_MAX_PORTALS {
+        let frustum = result.frustums[frustum_slot];
+        let Some(record) = ROOMS.get(frustum.room.to_usize()) else {
+            frustum_slot += 1;
+            continue;
+        };
+        let portal_first = record.portal_first as usize;
+        let portal_end = portal_first.saturating_add(record.portal_count as usize);
+        let mut portal_index = portal_first;
+        while portal_index < portal_end.min(ROOM_PORTALS.len())
+            && logged < PORTAL_VIS_DEBUG_LOG_MAX_PORTALS
+        {
+            let portal = ROOM_PORTALS[portal_index];
+            if portal.source_room == frustum.room {
+                let clip = debug_portal_clip(portal, camera, frustum);
+                debug_log_portal_clip_summary_line(
+                    portal_index,
+                    portal,
+                    frustum,
+                    clip,
+                    result.stats,
+                );
+                logged += 1;
+            }
+            portal_index += 1;
+        }
+        frustum_slot += 1;
+    }
+}
+
+fn debug_log_portal_clip_line(
+    root_room: RoomIndex,
+    portal_index: usize,
+    parent: PortalFrustum,
+    portal: psx_level::LevelRoomPortalRecord,
+    clip: PortalClipDebug,
+    stats: psx_level::portal_visibility::PortalVisibilityStats,
+) {
+    let portal_bit = portal_debug_mask_bit(portal_index);
+    let tested = portal_bit != 0 && (stats.tested_portal_mask & portal_bit) != 0;
+    let accepted = portal_bit != 0 && (stats.accepted_portal_mask & portal_bit) != 0;
+    let rejected = portal_bit != 0 && (stats.reject_frustum_portal_mask & portal_bit) != 0;
+    let skip_backlink =
+        portal.destination_room == root_room || portal.destination_room == parent.source_room;
+
+    let mut line = DebugLogLine::new("portal p idx=");
+    line.push_u32(portal_index.min(u32::MAX as usize) as u32);
+    line.push_str(" src=");
+    line.push_room(portal.source_room);
+    line.push_str(" dst=");
+    line.push_room(portal.destination_room);
+    line.push_str(" depth=");
+    line.push_u32(parent.depth as u32);
+    line.push_str(" decision=");
+    line.push_str(portal_debug_decision_name(clip.decision));
+    line.push_str(" flags t/a/r/skip=");
+    line.push_bool(tested);
+    line.push_byte(b'/');
+    line.push_bool(accepted);
+    line.push_byte(b'/');
+    line.push_bool(rejected);
+    line.push_byte(b'/');
+    line.push_bool(skip_backlink);
+    line.push_str(" front=");
+    line.push_bool(clip.front_faces_camera);
+    line.emit();
+
+    let mut line = DebugLogLine::new("portal p counts idx=");
+    line.push_u32(portal_index.min(u32::MAX as usize) as u32);
+    line.push_str(" n/l/r/b/t=");
+    line.push_u32(clip.near_count as u32);
+    line.push_byte(b'/');
+    line.push_u32(clip.left_count as u32);
+    line.push_byte(b'/');
+    line.push_u32(clip.right_count as u32);
+    line.push_byte(b'/');
+    line.push_u32(clip.bottom_count as u32);
+    line.push_byte(b'/');
+    line.push_u32(clip.top_count as u32);
+    line.push_str(" empty=");
+    line.push_str(portal_debug_plane_name(clip.first_empty_plane));
+    line.push_str(" tiny=");
+    line.push_bool(clip.tiny);
+    line.push_str(" normal=(");
+    line.push_i32(portal.normal_x as i32);
+    line.push_byte(b',');
+    line.push_i32(portal.normal_y as i32);
+    line.push_byte(b',');
+    line.push_i32(portal.normal_z as i32);
+    line.push_byte(b')');
+    line.emit();
+
+    let mut line = DebugLogLine::new("portal p geom idx=");
+    line.push_u32(portal_index.min(u32::MAX as usize) as u32);
+    let mut i = 0usize;
+    while i < 4 {
+        line.push_str(" v");
+        line.push_u32(i as u32);
+        line.push_byte(b'=');
+        line.push_point(RoomPoint::new(
+            portal.vertex_x[i],
+            portal.vertex_y[i],
+            portal.vertex_z[i],
+        ));
+        i += 1;
+    }
+    line.emit();
+
+    let mut line = DebugLogLine::new("portal p view idx=");
+    line.push_u32(portal_index.min(u32::MAX as usize) as u32);
+    let mut i = 0usize;
+    while i < 4 {
+        line.push_str(" v");
+        line.push_u32(i as u32);
+        line.push_byte(b'=');
+        let vertex = clip.view_vertices[i];
+        line.push_point(RoomPoint::new(vertex.x, vertex.y, vertex.z));
+        i += 1;
+    }
+    line.emit();
+
+    let mut line = DebugLogLine::new("portal p clip idx=");
+    line.push_u32(portal_index.min(u32::MAX as usize) as u32);
+    line.push_str(" parent=");
+    push_portal_debug_rect(&mut line, clip.parent);
+    line.push_str(" proj=");
+    push_optional_portal_debug_rect(&mut line, clip.projected_bounds);
+    line.push_str(" clipped=");
+    push_optional_portal_debug_rect(&mut line, clip.clipped_bounds);
+    line.push_str(" result=");
+    push_optional_portal_debug_rect(&mut line, clip.result_bounds);
+    line.emit();
+}
+
+fn debug_log_portal_visibility_source_portals(
+    root_room: RoomIndex,
+    camera: PortalVisibilityCamera,
+    result: &RuntimePortalVisibility,
+) {
+    let mut logged = 0usize;
+    let frustum_limit = result
+        .frustum_count
+        .min(PORTAL_VIS_DEBUG_LOG_MAX_FRUSTUMS)
+        .min(MAX_PORTAL_FRUSTUMS);
+    let mut frustum_slot = 0usize;
+    while frustum_slot < frustum_limit && logged < PORTAL_VIS_DEBUG_LOG_MAX_PORTALS {
+        let frustum = result.frustums[frustum_slot];
+        let Some(record) = ROOMS.get(frustum.room.to_usize()) else {
+            frustum_slot += 1;
+            continue;
+        };
+        let portal_first = record.portal_first as usize;
+        let portal_end = portal_first.saturating_add(record.portal_count as usize);
+        let mut portal_index = portal_first;
+        while portal_index < portal_end.min(ROOM_PORTALS.len())
+            && logged < PORTAL_VIS_DEBUG_LOG_MAX_PORTALS
+        {
+            let portal = ROOM_PORTALS[portal_index];
+            if portal.source_room == frustum.room {
+                let clip = debug_portal_clip(portal, camera, frustum);
+                debug_log_portal_clip_line(
+                    root_room,
+                    portal_index,
+                    frustum,
+                    portal,
+                    clip,
+                    result.stats,
+                );
+                logged += 1;
+            }
+            portal_index += 1;
+        }
+        frustum_slot += 1;
+    }
+}
+
+fn should_debug_log_portal_visibility(
+    current_record: &LevelRoomRecord,
+    result: &RuntimePortalVisibility,
+) -> bool {
+    let stats = result.stats;
+    stats.reject_backface != 0
+        || stats.reject_frustum != 0
+        || stats.reject_tiny != 0
+        || stats.cap_room != 0
+        || stats.cap_frustum != 0
+        || stats.cap_depth != 0
+        || (current_record.portal_count != 0 && current_record.portal_count <= 4)
+}
+
+fn debug_log_portal_visibility_snapshot(
+    current_room: RoomIndex,
+    current_record: &LevelRoomRecord,
+    player_room: RoomIndex,
+    player_local: RoomPoint,
+    player_global: RoomPoint,
+    view: ActiveRoomView,
+    camera: PortalVisibilityCamera,
+    result: &RuntimePortalVisibility,
+) {
+    if !should_debug_log_portal_visibility(current_record, result) {
+        return;
+    }
+    debug_log_portal_visibility_summary(
+        current_room,
+        player_room,
+        player_local,
+        player_global,
+        view,
+        camera,
+        result,
+    );
+    debug_log_portal_visible_rooms(result);
+    debug_log_portal_visibility_source_portal_summaries(camera, result);
+    if PORTAL_VIS_DEBUG_VERBOSE_CLIPS {
+        debug_log_portal_visibility_source_portals(current_room, camera, result);
+    }
 }
 
 fn active_room_cache_status_debug_code(status: ActiveRoomCacheStatus) -> u32 {
@@ -2635,6 +3097,9 @@ struct Playtest {
     /// Host-visible render breadcrumbs emitted for a few frames after
     /// crossing into another room.
     post_cross_debug_frames: u8,
+    /// Slow down verbose portal diagnostics so the host terminal cannot
+    /// stall the playtest when a portal is rejected every camera tick.
+    portal_debug_log_cooldown: u8,
 }
 
 impl Playtest {
@@ -2721,6 +3186,7 @@ impl Playtest {
             show_collision_debug: false,
             streaming_jobs: RuntimeStreamingJobs::new(),
             post_cross_debug_frames: 0,
+            portal_debug_log_cooldown: 0,
         }
     }
 
@@ -2809,6 +3275,7 @@ impl Scene for Playtest {
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         let background_tick = self.streaming_jobs.background_tick(ctx);
         #[cfg(feature = "cd-stream-bench")]
         let stream_progress = if background_tick {
@@ -3000,9 +3467,9 @@ impl Scene for Playtest {
         }
 
         let camera = self.render_camera;
-        let post_cross_debug = self.post_cross_debug_frames != 0;
-        let post_cross_detail =
-            self.post_cross_debug_frames == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
+        let post_cross_debug = POST_CROSS_RENDER_DEBUG_LOGS && self.post_cross_debug_frames != 0;
+        let post_cross_detail = post_cross_debug
+            && self.post_cross_debug_frames == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
         let mut post_cross_logged_end = false;
         if post_cross_debug {
             debug_log_post_cross_render_start(
@@ -4313,6 +4780,23 @@ impl Playtest {
             &mut self.portal_visibility,
         );
         telemetry::stage_end(telemetry::stage::PORTAL_VISIBILITY);
+        if self.portal_debug_log_cooldown == 0
+            && should_debug_log_portal_visibility(current_record, &self.portal_visibility)
+        {
+            let player_local = self.motor.position();
+            let player_global = local_to_global_room_point(self.room_index, player_local);
+            debug_log_portal_visibility_snapshot(
+                current_index,
+                current_record,
+                self.room_index,
+                player_local,
+                player_global,
+                view,
+                camera,
+                &self.portal_visibility,
+            );
+            self.portal_debug_log_cooldown = PORTAL_VIS_DEBUG_LOG_COOLDOWN_TICKS;
+        }
     }
 
     fn refresh_portal_visibility_for_view(
@@ -8168,10 +8652,6 @@ impl ActiveRoomView {
             cos_pitch: camera.cos_pitch.raw(),
         }
     }
-
-    fn with_position(self, position: RoomPoint) -> Self {
-        Self { position, ..self }
-    }
 }
 
 #[derive(Copy, Clone)]
@@ -8186,15 +8666,8 @@ fn portal_visibility_space_for_view(
     view: ActiveRoomView,
 ) -> PortalVisibilitySpace {
     let camera_global = local_to_global_room_point(current_index, view.position);
-    let room =
-        room_index_containing_global_from(current_index, camera_global).unwrap_or(current_index);
-    let view = if room == current_index {
-        view
-    } else {
-        view.with_position(global_to_local_room_point(room, camera_global))
-    };
     PortalVisibilitySpace {
-        room,
+        room: current_index,
         view,
         camera_global,
     }
