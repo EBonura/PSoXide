@@ -233,6 +233,7 @@ const IMAGE_PROP_DEPTH_BIAS: i32 = 256;
 const COLLISION_DEBUG_BUTTON: u16 = button::L3;
 const COLLISION_DEBUG_SEGMENTS: usize = 8;
 const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
+const FLOOR_LINK_CROSS_EPSILON: i32 = 32;
 const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
 
 const CAMERA_Y_OFFSET: i32 = 1100;
@@ -682,7 +683,13 @@ fn debug_log_stream_plan<const N: usize>(label: &str, plan: &RoomStreamLoadPlan<
 }
 
 #[cfg(feature = "cd-stream-bench")]
-fn debug_log_stream_entry(label: &str, room: RoomIndex, slot: usize, byte_count: usize, status: u32) {
+fn debug_log_stream_entry(
+    label: &str,
+    room: RoomIndex,
+    slot: usize,
+    byte_count: usize,
+    status: u32,
+) {
     let mut line = DebugLogLine::new(label);
     line.push_str(" room=");
     line.push_room(room);
@@ -1670,6 +1677,14 @@ fn square_i32_saturating(value: i32) -> i32 {
     } else {
         abs * abs
     }
+}
+
+fn min_i32x4(values: [i32; 4]) -> i32 {
+    values[0].min(values[1]).min(values[2]).min(values[3])
+}
+
+fn max_i32x4(values: [i32; 4]) -> i32 {
+    values[0].max(values[1]).max(values[2]).max(values[3])
 }
 
 fn model_render_uv_limits(texture_width: u16, texture_height: u16) -> (u8, u8) {
@@ -2986,8 +3001,8 @@ impl Scene for Playtest {
 
         let camera = self.render_camera;
         let post_cross_debug = self.post_cross_debug_frames != 0;
-        let post_cross_detail = self.post_cross_debug_frames
-            == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
+        let post_cross_detail =
+            self.post_cross_debug_frames == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
         let mut post_cross_logged_end = false;
         if post_cross_debug {
             debug_log_post_cross_render_start(
@@ -5047,6 +5062,13 @@ impl Playtest {
         ) {
             self.portal_stream_priority_current = 1;
         }
+        self.portal_stream_priority_frontier = self.portal_stream_priority_frontier.saturating_add(
+            self.push_current_floor_link_stream_requests(
+                &mut requested_rooms,
+                &mut requested_count,
+                request_limit,
+            ) as u16,
+        );
 
         let visible_limit = desired_visible_count
             .min(self.portal_visibility.room_count)
@@ -5145,6 +5167,13 @@ impl Playtest {
         ) {
             self.portal_stream_priority_current = 1;
         }
+        self.portal_stream_priority_frontier = self.portal_stream_priority_frontier.saturating_add(
+            self.push_current_floor_link_stream_requests(
+                &mut requested_rooms,
+                &mut requested_count,
+                request_limit,
+            ) as u16,
+        );
 
         let mut i = 0usize;
         while i < job_room_count
@@ -5215,6 +5244,28 @@ impl Playtest {
             protected_count,
             resident_capacity,
         );
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn push_current_floor_link_stream_requests(
+        &self,
+        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        requested_count: &mut usize,
+        request_limit: usize,
+    ) -> usize {
+        let (rooms, count) = self.current_floor_link_rooms();
+        let mut added = 0usize;
+        let mut i = 0usize;
+        while i < count
+            && *requested_count < request_limit
+            && *requested_count < STREAMED_ROOM_SLOT_COUNT
+        {
+            if push_stream_room_request(requested_rooms, requested_count, request_limit, rooms[i]) {
+                added += 1;
+            }
+            i += 1;
+        }
+        added
     }
 
     #[cfg(feature = "cd-stream-bench")]
@@ -5353,7 +5404,8 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     fn bootstrap_streamed_room_window(&mut self) {
         let mut pumps = 0usize;
-        while pumps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit && streamed_room_stream_active() {
+        while pumps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit && streamed_room_stream_active()
+        {
             if self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick) {
                 self.load_active_room_window();
             }
@@ -5364,12 +5416,108 @@ impl Playtest {
         }
     }
 
+    fn current_floor_link_sector(&self) -> Option<psx_engine::SectorCollision> {
+        let room = self.current_collision_room.as_ref()?.collision();
+        let sector_size = room.sector_size();
+        if sector_size <= 0 {
+            return None;
+        }
+        let player = self.motor.position();
+        if player.x < 0 || player.z < 0 {
+            return None;
+        }
+        let sx = player.x / sector_size;
+        let sz = player.z / sector_size;
+        if sx < 0 || sz < 0 || sx >= room.width() as i32 || sz >= room.depth() as i32 {
+            return None;
+        }
+        room.sector(sx as u16, sz as u16)
+    }
+
+    fn current_floor_link_rooms(&self) -> ([RoomIndex; 2], usize) {
+        let Some(sector) = self.current_floor_link_sector() else {
+            return ([INVALID_ROOM_INDEX; 2], 0);
+        };
+        let mut rooms = [INVALID_ROOM_INDEX; 2];
+        let mut count = 0usize;
+        if let Some(room) = sector.floor_above_room() {
+            self.push_valid_floor_link_room(&mut rooms, &mut count, room);
+        }
+        if let Some(room) = sector.floor_below_room() {
+            self.push_valid_floor_link_room(&mut rooms, &mut count, room);
+        }
+        (rooms, count)
+    }
+
+    fn push_valid_floor_link_room(
+        &self,
+        rooms: &mut [RoomIndex; 2],
+        count: &mut usize,
+        room: RoomIndex,
+    ) {
+        if *count >= rooms.len()
+            || room == self.room_index
+            || room == INVALID_ROOM_INDEX
+            || room.to_usize() >= ROOMS.len()
+        {
+            return;
+        }
+        let mut i = 0usize;
+        while i < *count {
+            if rooms[i] == room {
+                return;
+            }
+            i += 1;
+        }
+        rooms[*count] = room;
+        *count += 1;
+    }
+
+    fn current_floor_link_switch_target(&self) -> Option<RoomIndex> {
+        let sector = self.current_floor_link_sector()?;
+        let player_y = self.motor.position().y;
+
+        if let Some(room) = sector.floor_below_room() {
+            let crosses = !sector.has_floor()
+                || player_y
+                    < min_i32x4(sector.floor_heights()).saturating_sub(FLOOR_LINK_CROSS_EPSILON);
+            if crosses && self.can_switch_to_floor_link_room(room) {
+                return Some(room);
+            }
+        }
+
+        if let Some(room) = sector.floor_above_room() {
+            let crosses = sector.has_ceiling()
+                && player_y
+                    > max_i32x4(sector.ceiling_heights()).saturating_add(FLOOR_LINK_CROSS_EPSILON);
+            if crosses && self.can_switch_to_floor_link_room(room) {
+                return Some(room);
+            }
+        }
+
+        None
+    }
+
+    fn can_switch_to_floor_link_room(&self, room: RoomIndex) -> bool {
+        if room == self.room_index || room == INVALID_ROOM_INDEX || room.to_usize() >= ROOMS.len() {
+            return false;
+        }
+        #[cfg(feature = "cd-stream-bench")]
+        if self.chunked_level() && !streamed_room_is_resident(room) {
+            return false;
+        }
+        true
+    }
+
     fn update_current_room_from_player(&mut self) -> bool {
         if !self.chunked_level() {
             return false;
         }
         let global = local_to_global_room_point(self.room_index, self.motor.position());
-        let Some(next_room) = room_index_containing_global_from(self.room_index, global) else {
+        let Some(next_room) = self
+            .current_floor_link_switch_target()
+            .or_else(|| room_index_containing_global_from(self.room_index, global))
+        else {
             return false;
         };
         if next_room == self.room_index {
@@ -5446,8 +5594,7 @@ impl Playtest {
             return;
         };
         let sector_size = record.sector_size.max(1);
-        let threshold =
-            sector_size.saturating_mul(RUNTIME_SCHEDULE.active_refresh_sectors.max(1));
+        let threshold = sector_size.saturating_mul(RUNTIME_SCHEDULE.active_refresh_sectors.max(1));
         let view_threshold = sector_size;
         let player = self.motor.position();
         let view = self.active_room_selection_view();

@@ -62,7 +62,8 @@ Same room data, two consumers, two read paths:
 * `RoomRender` -- heights and splits for vertex emission, materials for tpage /
   CLUT lookup, world-level lighting state.
 * `RoomCollision` -- heights and splits for floor / ceiling sampling, walkable /
-  solid bits for stop-or-pass decisions.
+  solid bits for stop-or-pass decisions, plus authored vertical floor links for
+  runtime room traversal.
 
 Materials are render-only. Walkable / solid bits are collision-only. The two
 views are zero-cost `Copy` newtypes over `RuntimeRoom`; they exist to enforce
@@ -95,6 +96,13 @@ geometry, integer math throughout. Two lessons we keep:
   authoring side, keeping vertex data within i16 range from the camera target.
 
 Two lessons we deliberately ignore for now:
+
+* **Room/floor links are collision traversal, not render portals.** Imported TR
+  `room_above` / `room_below` sector links are preserved in the editor model,
+  resolved to runtime room indices during playtest cooking, and copied into the
+  compact collision sector payload. The runtime uses them to switch the current
+  room when the player crosses a floor/ceiling boundary; render visibility still
+  follows authored portal rectangles.
 
 * **No `tr_face4` / `tr_face3` lists** today. TR's render path iterates an
   explicit face list per room because sector geometry alone doesn't capture

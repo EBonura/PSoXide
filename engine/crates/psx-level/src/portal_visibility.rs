@@ -816,10 +816,10 @@ pub fn debug_portal_clip(
         first_empty_plane = PortalClipDebugPlane::Top;
     }
 
-    let clipped_bounds =
-        clipped_portal_surface_polygon_clip(portal, camera, parent).map(PortalClipDebugRect::from_clip);
-    let projected_bounds = projected_portal_surface_bounds(portal, camera)
+    let clipped_bounds = clipped_portal_surface_polygon_clip(portal, camera, parent)
         .map(PortalClipDebugRect::from_clip);
+    let projected_bounds =
+        projected_portal_surface_bounds(portal, camera).map(PortalClipDebugRect::from_clip);
     let fallback_bounds = projected_portal_surface_bounds_clip(portal, camera, parent)
         .map(PortalClipDebugRect::from_clip);
     let result_bounds = fallback_bounds;
