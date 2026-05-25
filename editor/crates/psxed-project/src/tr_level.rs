@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use flate2::read::ZlibDecoder;
 
 use crate::{
-    FarVistaSettings, GridDirection, GridHorizontalFace, GridVerticalFace, MaterialResource,
-    NodeKind, PortalGeometry, ProjectDocument, ResourceData, ResourceId, SkySettings, Transform3,
-    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldStreamingSettings,
+    FarVistaSettings, GridDirection, GridFloorLink, GridHorizontalFace, GridVerticalFace,
+    MaterialResource, NodeId, NodeKind, PortalGeometry, ProjectDocument, ResourceData, ResourceId,
+    SkySettings, Transform3, WorldCameraSettings, WorldCullingSettings, WorldGrid,
+    WorldStreamingSettings,
 };
 
 pub const TR4_VERSION: u32 = 0x0034_5254;
@@ -187,6 +188,7 @@ pub struct TrImportReport {
     pub rooms: usize,
     pub portals: usize,
     pub sectors: usize,
+    pub vertical_floor_links: usize,
     pub mesh_vertices: usize,
     pub mesh_rectangles: usize,
     pub mesh_triangles: usize,
@@ -250,6 +252,11 @@ impl TrLevel {
             rooms: self.rooms.len(),
             portals: self.rooms.iter().map(|room| room.portals.len()).sum(),
             sectors: self.rooms.iter().map(|room| room.sectors.len()).sum(),
+            vertical_floor_links: self
+                .rooms
+                .iter()
+                .map(|room| room.vertical_floor_link_count())
+                .sum(),
             mesh_vertices: self.rooms.iter().map(|room| room.mesh.vertices.len()).sum(),
             mesh_rectangles: self
                 .rooms
@@ -302,6 +309,19 @@ impl TrLevel {
                 },
             );
             room_nodes.push(id);
+        }
+
+        for room in &self.rooms {
+            let Some(&room_node) = room_nodes.get(room.index as usize) else {
+                continue;
+            };
+            let Some(node) = project.active_scene_mut().node_mut(room_node) else {
+                continue;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                continue;
+            };
+            room.apply_vertical_floor_links(grid, &room_nodes);
         }
 
         for room in &self.rooms {
@@ -372,6 +392,35 @@ impl TrRoom {
 
         add_sector_boundary_walls(self, &mut grid, material);
         grid
+    }
+
+    pub fn apply_vertical_floor_links(&self, grid: &mut WorldGrid, room_nodes: &[NodeId]) {
+        for x in 0..self.num_x_sectors {
+            for z in 0..self.num_z_sectors {
+                let Some(sector) = self.sector(x, z) else {
+                    continue;
+                };
+                let above = tr_floor_link(sector.room_above, room_nodes);
+                let below = tr_floor_link(sector.room_below, room_nodes);
+                if above.is_none() && below.is_none() {
+                    continue;
+                }
+                if let Some(editor_sector) = grid.ensure_sector(x, z) {
+                    editor_sector.floor_above = above;
+                    editor_sector.floor_below = below;
+                }
+            }
+        }
+    }
+
+    pub fn vertical_floor_link_count(&self) -> usize {
+        self.sectors
+            .iter()
+            .map(|sector| {
+                usize::from(sector.room_above != TR_NO_ROOM)
+                    + usize::from(sector.room_below != TR_NO_ROOM)
+            })
+            .sum()
     }
 
     pub fn sector(&self, x: u16, z: u16) -> Option<&TrRoomSector> {
@@ -748,6 +797,16 @@ fn sector_ceiling_height(sector: Option<&TrRoomSector>) -> Option<i32> {
     (sector.ceiling != TR_NO_HEIGHT).then(|| tr_height_to_editor(sector.ceiling))
 }
 
+fn tr_floor_link(room_index: u8, room_nodes: &[NodeId]) -> Option<GridFloorLink> {
+    if room_index == TR_NO_ROOM {
+        return None;
+    }
+    room_nodes
+        .get(room_index as usize)
+        .copied()
+        .map(GridFloorLink::room)
+}
+
 fn tr_height_to_editor(height: i8) -> i32 {
     -i32::from(height) * TR_HEIGHT_UNIT
 }
@@ -871,6 +930,7 @@ mod tests {
         assert_eq!(report.rooms, 177);
         assert_eq!(report.portals, 490);
         assert_eq!(report.sectors, 5894);
+        assert!(report.vertical_floor_links > 0);
         assert!(report.mesh_vertices > 0);
         assert!(report.mesh_rectangles > 0);
         let project = level.to_project("Coastal Ruins".to_string());
@@ -881,6 +941,16 @@ mod tests {
             .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
             .count();
         assert_eq!(portal_nodes, report.portals);
+        let project_floor_links = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.kind {
+                NodeKind::Room { grid } => Some(grid.floor_link_count()),
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(project_floor_links, report.vertical_floor_links);
     }
 
     fn local_coastal_ruins_path() -> Option<PathBuf> {

@@ -88,6 +88,10 @@ fn print_report(report: &TrImportReport, output: &PathBuf) {
         report.rooms, report.portals, report.sectors
     );
     println!(
+        "[import-tr-level] Vertical floor links: {}",
+        report.vertical_floor_links
+    );
+    println!(
         "[import-tr-level] Room mesh: vertices={} rectangles={} triangles={}",
         report.mesh_vertices, report.mesh_rectangles, report.mesh_triangles
     );

@@ -688,7 +688,9 @@ impl ApplicationHandler for Shell {
                         // timing model.
                         let audio_start = Instant::now();
                         let effective_audio_volume = self.state.effective_audio_volume();
-                        let (guest_events, guest_debug_logs) = if let Some(bus) = self.state.bus.as_mut() {
+                        let (guest_events, guest_debug_logs) = if let Some(bus) =
+                            self.state.bus.as_mut()
+                        {
                             let cycles_after = bus.cycles();
                             self.audio_cycle_accum = self
                                 .audio_cycle_accum
@@ -863,7 +865,7 @@ impl ApplicationHandler for Shell {
                 // Editor 3D preview: drive the editor-owned HwRenderer
                 // while editing. During embedded Play, the viewport
                 // paints the live emulator framebuffer instead.
-                if !state.embedded_playtest_running() {
+                if !state.embedded_playtest_running() && state.editor.editor_3d_preview_visible() {
                     let editor_camera = state.editor.viewport_3d_camera();
                     let editor_preview_fog = state.editor.preview_fog_enabled();
                     let editor_preview_backface_wireframe =
@@ -897,6 +899,7 @@ impl ApplicationHandler for Shell {
                         editor_show_portals,
                         editor_show_lights,
                         editor_hidden_scene_nodes,
+                        editor_active_room,
                         editor_selected,
                         editor_hover,
                         editor_selection,
@@ -1192,7 +1195,11 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
     let chunk_sample = state
         .profiler
         .latest_with_all_guest_counters(RENDER_MAP_REQUIRED_COUNTERS)
-        .or_else(|| state.profiler.latest_with_guest_counters(RENDER_MAP_COUNTERS))
+        .or_else(|| {
+            state
+                .profiler
+                .latest_with_guest_counters(RENDER_MAP_COUNTERS)
+        })
         .or_else(|| {
             state
                 .profiler
