@@ -1181,6 +1181,8 @@ pub fn build_package(
     (
         Some(PlaytestPackage {
             runtime_depth_sort_mode: project.runtime_depth_sort_mode,
+            runtime_texture_split_mode: project.runtime_texture_split_mode,
+            runtime_room_draw_order_mode: project.runtime_room_draw_order_mode,
             runtime_texture_split_max_edge: project.runtime_texture_split_max_edge,
             assets,
             rooms,
@@ -6676,6 +6678,8 @@ mod tests {
         assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];"));
         assert!(manifest.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 1;"));
+        assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;"));
+        assert!(manifest.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;"));
         assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 128;"));
         assert!(manifest.contains("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[];"));
         assert!(manifest.contains("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[];"));
@@ -9323,6 +9327,8 @@ mod tests {
         assert!(src.contains("pub static ASSETS: &[LevelAssetRecord] = &[\n];"));
         assert!(src.contains("pub static MATERIALS: &[LevelMaterialRecord] = &[\n];"));
         assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 1;"));
+        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;"));
+        assert!(src.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;"));
         assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;"));
         assert!(src.contains("pub static ROOMS: &[LevelRoomRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n];"));
