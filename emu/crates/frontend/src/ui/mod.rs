@@ -225,7 +225,10 @@ fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
                 .corner_radius(egui::CornerRadius::same(4))
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(msg).color(text).size(13.0));
+                    ui.set_max_width(420.0);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(msg).color(text).size(13.0)).wrap(),
+                    );
                 });
         });
 }

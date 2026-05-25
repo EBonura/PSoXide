@@ -100,6 +100,7 @@ struct AuthoredRoomChunk {
     room_index: u16,
     authored_room: u32,
     chunk_index: u16,
+    array_origin: [u16; 2],
     world_origin: [i32; 2],
     size: [u16; 2],
     cells: Vec<[u16; 2]>,
@@ -108,6 +109,16 @@ struct AuthoredRoomChunk {
     psxw_bytes: usize,
     static_lit_bytes: usize,
     populated_cells: u16,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRoomFloorLink {
+    room: u16,
+    x: u16,
+    z: u16,
+    world_cell: [i32; 2],
+    above_room: Option<NodeId>,
+    below_room: Option<NodeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +195,7 @@ pub fn build_package(
     let mut room_cache_vertices: Vec<PlaytestCachedRoomVertex> = Vec::new();
     let mut room_cache_surfaces: Vec<PlaytestCachedRoomSurface> = Vec::new();
     let mut room_portals: Vec<PlaytestRoomPortal> = Vec::new();
+    let mut pending_floor_links: Vec<PendingRoomFloorLink> = Vec::new();
     let room_near_rooms: Vec<u16> = Vec::new();
     let room_overlapped_rooms: Vec<u16> = Vec::new();
 
@@ -244,6 +256,7 @@ pub fn build_package(
                     room_index,
                     authored_room: room_node.id.raw() as u32,
                     chunk_index: u16::try_from(portal_room.index).unwrap_or(u16::MAX),
+                    array_origin: portal_room.array_origin,
                     world_origin: portal_room.world_origin,
                     size: portal_room.size,
                     cells: portal_room.cells.clone(),
@@ -258,6 +271,7 @@ pub fn build_package(
                     populated_cells: u16::try_from(chunk_grid.populated_sector_count())
                         .unwrap_or(u16::MAX),
                 });
+            collect_pending_floor_links(room_index, &chunk_grid, &mut pending_floor_links);
 
             // Room asset goes into the master table first (ahead of
             // any material textures discovered while walking it).
@@ -934,7 +948,7 @@ pub fn build_package(
     let spawn = match player_spawns.len() {
         0 => {
             report.error(
-                "playtest needs exactly one player source — mark a SpawnPoint as player or enable Player controlled on a Character Controller",
+                "No player source. Place one Player Spawn, or select a Character Controller and enable Player controlled.",
             );
             None
         }
@@ -954,7 +968,7 @@ pub fn build_package(
         }
         n => {
             report.error(format!(
-                "playtest needs exactly one player source, found {n}"
+                "Expected exactly one player source, found {n}. Keep one Player Spawn or one Player controlled Character Controller enabled."
             ));
             None
         }
@@ -1133,12 +1147,15 @@ pub fn build_package(
         }
     }
 
+    let room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
+
     (
         Some(PlaytestPackage {
             assets,
             rooms,
             chunks,
             room_portals,
+            room_floor_links,
             room_near_rooms,
             room_overlapped_rooms,
             materials,
@@ -4139,6 +4156,87 @@ fn has_full_height_solid_wall(
     })
 }
 
+fn collect_pending_floor_links(room: u16, grid: &WorldGrid, out: &mut Vec<PendingRoomFloorLink>) {
+    let mut x = 0u16;
+    while x < grid.width {
+        let mut z = 0u16;
+        while z < grid.depth {
+            if let Some(sector) = grid.sector(x, z) {
+                let above_room = sector.floor_above.and_then(|link| link.target_room);
+                let below_room = sector.floor_below.and_then(|link| link.target_room);
+                if above_room.is_some() || below_room.is_some() {
+                    out.push(PendingRoomFloorLink {
+                        room,
+                        x,
+                        z,
+                        world_cell: [
+                            grid.origin[0].saturating_add(x as i32),
+                            grid.origin[1].saturating_add(z as i32),
+                        ],
+                        above_room,
+                        below_room,
+                    });
+                }
+            }
+            z = z.saturating_add(1);
+        }
+        x = x.saturating_add(1);
+    }
+}
+
+fn resolve_room_floor_links(
+    pending: &[PendingRoomFloorLink],
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Vec<PlaytestRoomFloorLink> {
+    let mut out = Vec::new();
+    for link in pending {
+        let above_room =
+            resolve_floor_link_target(link.above_room, link.world_cell, chunks_by_node);
+        let below_room =
+            resolve_floor_link_target(link.below_room, link.world_cell, chunks_by_node);
+        if above_room.is_none() && below_room.is_none() {
+            continue;
+        }
+        out.push(PlaytestRoomFloorLink {
+            room: link.room,
+            x: link.x,
+            z: link.z,
+            above_room,
+            below_room,
+        });
+    }
+    out
+}
+
+fn resolve_floor_link_target(
+    target_room: Option<NodeId>,
+    world_cell: [i32; 2],
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Option<u16> {
+    let chunks = chunks_by_node.get(&target_room?)?;
+    chunks
+        .iter()
+        .find(|chunk| chunk_contains_world_cell(chunk, world_cell))
+        .or_else(|| chunks.first())
+        .map(|chunk| chunk.room_index)
+}
+
+fn chunk_contains_world_cell(chunk: &AuthoredRoomChunk, world_cell: [i32; 2]) -> bool {
+    chunk
+        .cells
+        .iter()
+        .any(|cell| chunk_cell_world_cell(chunk, *cell) == world_cell)
+}
+
+fn chunk_cell_world_cell(chunk: &AuthoredRoomChunk, cell: [u16; 2]) -> [i32; 2] {
+    [
+        chunk.world_origin[0]
+            .saturating_add((cell[0] as i32).saturating_sub(chunk.array_origin[0] as i32)),
+        chunk.world_origin[1]
+            .saturating_add((cell[1] as i32).saturating_sub(chunk.array_origin[1] as i32)),
+    ]
+}
+
 fn runtime_room_name(room_name: &str, room_count: usize, room_index: usize) -> String {
     if room_count <= 1 {
         room_name.to_string()
@@ -4579,6 +4677,26 @@ mod tests {
             .collect()
     }
 
+    fn current_room_floor_link_destinations(
+        package: &PlaytestPackage,
+        source_room: u16,
+    ) -> Vec<u16> {
+        let mut out = Vec::new();
+        for link in package
+            .room_floor_links
+            .iter()
+            .filter(|link| link.room == source_room)
+        {
+            if let Some(room) = link.above_room {
+                push_unique_room(&mut out, room, usize::MAX);
+            }
+            if let Some(room) = link.below_room {
+                push_unique_room(&mut out, room, usize::MAX);
+            }
+        }
+        out
+    }
+
     fn sweep_stream_requests(
         package: &PlaytestPackage,
         current_room: u16,
@@ -4600,6 +4718,9 @@ mod tests {
             push_unique_room(&mut out, room.room.raw(), request_limit);
         }
         for destination in current_room_portal_destinations(package, current_room) {
+            push_unique_room(&mut out, destination, request_limit);
+        }
+        for destination in current_room_floor_link_destinations(package, current_room) {
             push_unique_room(&mut out, destination, request_limit);
         }
         for room in result.frontier_rooms.iter().take(result.frontier_count) {
@@ -5903,6 +6024,14 @@ mod tests {
                         ));
                     }
                 }
+                for destination in current_room_floor_link_destinations(&package, cell.room) {
+                    if !stream.contains(&destination) {
+                        failures.push(format!(
+                            "floor-link neighbour not loaded/protected: room={} cell=({},{}) yaw={} destination={} visible={visible:?} frontier={frontier:?} loaded={stream:?}",
+                            cell.room, cell.x, cell.z, yaw_label, destination
+                        ));
+                    }
+                }
                 if result.stats.cap_room != 0
                     || result.stats.cap_frustum != 0
                     || result.stats.cap_depth != 0
@@ -6455,6 +6584,47 @@ mod tests {
             package.room_cache_surfaces[cache.surface_first as usize],
             playtest_cached_room_surface(surfaces[0])
         );
+    }
+
+    #[test]
+    fn package_resolves_vertical_floor_links_to_runtime_rooms() {
+        let mut project = project_with_one_room();
+        let room_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(|resource| resource.id);
+        let scene = project.active_scene_mut();
+        let world_id = scene.root;
+        let source_id = scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == "Room" && matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .expect("source room");
+        let target_grid = WorldGrid::stone_room(
+            1,
+            1,
+            crate::DEFAULT_WORLD_SECTOR_SIZE,
+            room_material,
+            room_material,
+        );
+        let target_id = scene.add_node(world_id, "Below", NodeKind::Room { grid: target_grid });
+        let source = scene.node_mut(source_id).expect("source node");
+        let NodeKind::Room { grid } = &mut source.kind else {
+            panic!("source should be room");
+        };
+        grid.set_floor_below(0, 0, Some(crate::GridFloorLink::room(target_id)));
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let package = package.expect("package");
+        assert_eq!(package.room_floor_links.len(), 1);
+        assert_eq!(package.room_floor_links[0].room, 0);
+        assert_eq!(package.room_floor_links[0].x, 0);
+        assert_eq!(package.room_floor_links[0].z, 0);
+        assert_eq!(package.room_floor_links[0].above_room, None);
+        assert_eq!(package.room_floor_links[0].below_room, Some(1));
     }
 
     #[test]

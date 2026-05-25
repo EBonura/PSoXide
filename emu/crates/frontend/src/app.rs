@@ -338,10 +338,10 @@ impl AppState {
         &mut self,
         logs: Vec<emulator_core::telemetry::GuestDebugLogLine>,
     ) {
-        self.editor
-            .append_play_debug_terminal_lines(logs.into_iter().map(|line| {
-                format!("[f{} c{}] {}", line.frame, line.cycles, line.text)
-            }));
+        self.editor.append_play_debug_terminal_lines(
+            logs.into_iter()
+                .map(|line| format!("[f{} c{}] {}", line.frame, line.cycles, line.text)),
+        );
     }
 
     /// Rebuild the emulator state around `entry`. Same flow the
