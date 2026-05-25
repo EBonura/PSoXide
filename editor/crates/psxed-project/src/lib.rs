@@ -1409,7 +1409,7 @@ impl GridVerticalFace {
         }
         let max_span = self.max_vertical_span();
         let (expected_span, clamped) = uv_span_for_world_span(max_span, sector_size);
-        clamped && (self.uv.span[1] == 0 || self.uv.span[1] == stored_uv_span(expected_span))
+        clamped && self.uv.span[1] == stored_uv_span(expected_span)
     }
 
     fn segment_heights(&self, start: i32, end: i32, max_span: i32) -> [i32; 4] {
@@ -11373,6 +11373,17 @@ mod tests {
         assert!(clamped);
         assert_eq!(wall.heights, [0, 0, 3840, 3840]);
         assert_eq!(wall.uv.span, [0, 255]);
+    }
+
+    #[test]
+    fn default_tall_wall_keeps_single_authored_uv_primitive() {
+        let wall = GridVerticalFace::flat(0, 768 * 5, None);
+
+        let segments = wall.split_into_autotile_segments(768);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].heights, [0, 0, 3840, 3840]);
+        assert_eq!(segments[0].uv.span, [0, 0]);
     }
 
     #[test]
