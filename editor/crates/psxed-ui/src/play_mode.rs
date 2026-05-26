@@ -26,6 +26,8 @@ pub enum EditorPlaytestRequest {
     StartInputReplay,
     /// Stop input replay and return to live input.
     StopInputReplay,
+    /// Write the rolling embedded Play profiler history to the project logs.
+    DumpProfilerHistory,
 }
 
 /// Frontend-owned embedded playtest state, mirrored into the editor
@@ -142,6 +144,8 @@ pub struct EditorPlaytestTapeStatus {
 /// Rolling emulator metrics shown over the live editor Play viewport.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EditorPlaytestMetrics {
+    /// Frontend profiler redraw sample id.
+    pub sample_serial: u32,
     /// Host redraw rate from the frontend profiler.
     pub host_fps: f32,
     /// Average host frame time.
@@ -152,8 +156,18 @@ pub struct EditorPlaytestMetrics {
     pub visual_hz: Option<f32>,
     /// VBlanks that produced draw traffic per guest refresh.
     pub draw_hz: f32,
+    /// Visual frames emitted by the most recent frontend redraw.
+    pub visual_frames: u32,
+    /// Guest VBlank interval per paced visual frame.
+    pub visual_interval_vblanks: f32,
+    /// Guest visual deadline misses emitted by the most recent frontend redraw.
+    pub visual_deadline_misses: u32,
+    /// Maximum guest visual lateness emitted by the most recent frontend redraw.
+    pub visual_lateness_vblanks: u32,
     /// Full frontend frame cost.
     pub total_ms: f32,
+    /// Estimated visual-frame interval, derived from the current visual cadence.
+    pub frame_ms: f32,
     /// Guest execution cost.
     pub emu_ms: f32,
     /// Hardware renderer cost.
@@ -172,6 +186,26 @@ pub struct EditorPlaytestMetrics {
     pub chunk_built: u32,
     /// Candidate chunks skipped because the active room cache was not ready.
     pub chunk_cache_skips: u32,
+    /// Runtime rooms accepted by portal traversal.
+    pub portal_visible_rooms: u32,
+    /// Portal-clipped rooms beyond the traversal depth/capacity edge.
+    pub portal_frontier_rooms: u32,
+    /// Portal-visible rooms neither resident nor loading when the active window was built.
+    pub portal_missing_resident: u32,
+    /// Portal-visible rooms resident in stream cache but not buildable.
+    pub portal_build_failed: u32,
+    /// Directed portals tested by the runtime traversal.
+    pub portal_tests: u32,
+    /// Directed portals accepted by the runtime traversal.
+    pub portal_accepts: u32,
+    /// Directed portals recovered by occupied-room-bounds fallback.
+    pub portal_bounds_fallbacks: u32,
+    /// Portal rejections from backface, frustum, and tiny-cone tests.
+    pub portal_rejects: [u32; 3],
+    /// Portal traversal capacity hits for rooms, frustums, and depth.
+    pub portal_caps: [u32; 3],
+    /// Stream request priorities for current, visible, and frontier rooms.
+    pub stream_priorities: [u32; 3],
     /// Stream scheduler requests considered by recent window refreshes.
     pub stream_requests: u32,
     /// Stream scheduler requests that were missing from resident slots.
@@ -180,26 +214,82 @@ pub struct EditorPlaytestMetrics {
     pub stream_prefetches: u32,
     /// Resident stream slots evicted by recent window refreshes.
     pub stream_evictions: u32,
+    /// Effective resident stream slot limit for the latest active window.
+    pub stream_slot_limit: u32,
     /// Stream loads currently pending.
     pub stream_pending: u32,
     /// Stream loads that failed validation or CD reads.
     pub stream_failed: u32,
     /// Resident streamed chunks, keyed by runtime room/chunk index.
     pub chunk_loaded_mask: u64,
+    /// Streamed chunks with in-flight loads, keyed by runtime room/chunk index.
+    pub chunk_loading_mask: u64,
     /// Active drawable chunks, keyed by runtime room/chunk index.
     pub chunk_active_mask: u64,
     /// Chunks that submitted room geometry, keyed by runtime room/chunk index.
     pub chunk_drawn_mask: u64,
+    /// Portal-accepted rooms, keyed by runtime room index.
+    pub portal_visible_mask: u64,
+    /// Portal depth/capacity frontier rooms, keyed by runtime room index.
+    pub portal_frontier_mask: u64,
+    /// Portal-accepted rooms missing residency and not loading, keyed by runtime room index.
+    pub portal_missing_mask: u64,
+    /// Portal-accepted resident rooms that failed active-room build.
+    pub portal_build_failed_mask: u64,
+    /// Destination rooms whose portals were tested by the latest traversal.
+    pub portal_tested_mask: u64,
+    /// Destination rooms whose portals were accepted by the latest traversal.
+    pub portal_accepted_mask: u64,
+    /// Destination rooms rejected by portal window clipping in the latest traversal.
+    pub portal_reject_frustum_mask: u64,
+    /// Destination rooms recovered by occupied-room-bounds fallback in the latest traversal.
+    pub portal_bounds_fallback_mask: u64,
+    /// Directed portal records tested in the latest traversal.
+    pub portal_tested_portal_mask: u64,
+    /// Directed portal records accepted in the latest traversal.
+    pub portal_accepted_portal_mask: u64,
+    /// Directed portal records rejected by camera/window clipping.
+    pub portal_reject_frustum_portal_mask: u64,
+    /// Directed portal records recovered by occupied-room-bounds fallback.
+    pub portal_bounds_fallback_portal_mask: u64,
     /// True when the profiler sample contains player map telemetry.
     pub player_map_valid: bool,
     /// Runtime room/chunk index containing the player.
     pub player_room_index: u32,
+    /// Runtime room/chunk index used as the root of portal traversal.
+    pub portal_current_room_index: u32,
     /// Player room-local X in engine units.
     pub player_local_x: i32,
     /// Player room-local Z in engine units.
     pub player_local_z: i32,
     /// Camera/view yaw in Q12 angle units for player-centred chunk diagnostics.
     pub player_view_yaw_q12: u16,
+    /// True when the profiler sample contains exact render-camera yaw basis telemetry.
+    pub camera_view_basis_valid: bool,
+    /// Render camera yaw sine in Q12 basis units.
+    pub camera_view_sin_yaw_q12: i32,
+    /// Render camera yaw cosine in Q12 basis units.
+    pub camera_view_cos_yaw_q12: i32,
+    /// Render camera pitch sine in Q12 basis units.
+    pub camera_view_sin_pitch_q12: i32,
+    /// Render camera pitch cosine in Q12 basis units.
+    pub camera_view_cos_pitch_q12: i32,
+    /// True when the profiler sample contains render-camera map telemetry.
+    pub camera_map_valid: bool,
+    /// True when the profiler sample contains exact level-space render-camera telemetry.
+    pub camera_global_valid: bool,
+    /// Render camera room-local X in engine units.
+    pub camera_local_x: i32,
+    /// Render camera room-local Y in engine units.
+    pub camera_local_y: i32,
+    /// Render camera room-local Z in engine units.
+    pub camera_local_z: i32,
+    /// Render camera absolute level X in engine units.
+    pub camera_global_x: i32,
+    /// Render camera absolute level Y in engine units.
+    pub camera_global_y: i32,
+    /// Render camera absolute level Z in engine units.
+    pub camera_global_z: i32,
 }
 
 /// One host-drawn editor overlay segment over the 3D preview.

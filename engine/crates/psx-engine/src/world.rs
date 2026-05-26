@@ -8,9 +8,10 @@
 use crate::WorldVertex;
 use psx_level::{
     compact_collision_header, compact_collision_sector_flags, compact_collision_surface,
-    compact_collision_triangle_flags, compact_collision_wall_flags, COMPACT_COLLISION_HEADER_BYTES,
-    COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES, COMPACT_COLLISION_MAGIC,
-    COMPACT_COLLISION_SECTOR_BYTES, COMPACT_COLLISION_VERSION, COMPACT_COLLISION_WALL_BYTES,
+    compact_collision_triangle_flags, compact_collision_wall_flags, RoomIndex,
+    COMPACT_COLLISION_HEADER_BYTES, COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES,
+    COMPACT_COLLISION_MAGIC, COMPACT_COLLISION_NO_ROOM, COMPACT_COLLISION_SECTOR_BYTES,
+    COMPACT_COLLISION_VERSION, COMPACT_COLLISION_WALL_BYTES,
 };
 
 /// World units per grid sector.
@@ -738,6 +739,8 @@ impl<'a> CompactCollisionRoom<'a> {
             ceiling_triangle_flags: *bytes.get(4)?,
             first_wall: read_u16(bytes, 6)?,
             wall_count: read_u16(bytes, 8)?,
+            floor_above_room: compact_room_link(read_u16(bytes, 44)?),
+            floor_below_room: compact_room_link(read_u16(bytes, 46)?),
             floor_heights,
             ceiling_heights,
             floor_triangle_heights: self
@@ -835,6 +838,8 @@ pub struct CompactSectorCollision {
     ceiling_triangle_flags: u8,
     first_wall: u16,
     wall_count: u16,
+    floor_above_room: Option<RoomIndex>,
+    floor_below_room: Option<RoomIndex>,
     floor_heights: [i32; 4],
     ceiling_heights: [i32; 4],
     floor_triangle_heights: [[i32; 3]; 2],
@@ -843,7 +848,11 @@ pub struct CompactSectorCollision {
 
 impl CompactSectorCollision {
     fn has_geometry(self) -> bool {
-        self.has_floor() || self.has_ceiling() || self.wall_count != 0
+        self.has_floor()
+            || self.has_ceiling()
+            || self.wall_count != 0
+            || self.floor_above_room.is_some()
+            || self.floor_below_room.is_some()
     }
 
     fn has_floor(self) -> bool {
@@ -1370,6 +1379,22 @@ impl SectorCollision {
             Self::Compact(sector) => sector.wall_count,
         }
     }
+
+    /// Runtime room reached by moving upward through this sector.
+    pub fn floor_above_room(self) -> Option<RoomIndex> {
+        match self {
+            Self::Runtime(_) => None,
+            Self::Compact(sector) => sector.floor_above_room,
+        }
+    }
+
+    /// Runtime room reached by moving downward through this sector.
+    pub fn floor_below_room(self) -> Option<RoomIndex> {
+        match self {
+            Self::Runtime(_) => None,
+            Self::Compact(sector) => sector.floor_below_room,
+        }
+    }
 }
 
 /// Collision probe projection of one decoded sector header.
@@ -1490,6 +1515,10 @@ fn checked_table_len(count: u16, stride: usize) -> Result<usize, CompactCollisio
     (count as usize)
         .checked_mul(stride)
         .ok_or(CompactCollisionParseError::InvalidLayout)
+}
+
+fn compact_room_link(raw: u16) -> Option<RoomIndex> {
+    (raw != COMPACT_COLLISION_NO_ROOM).then_some(RoomIndex(raw))
 }
 
 fn take_bytes<'a>(

@@ -7,24 +7,22 @@
 //! budget metrics are tracked separately so PS1 workload does not get hidden
 //! behind fast host wall-clock timings.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fmt::Write as _};
 
 use egui::{Color32, RichText};
 use emulator_core::telemetry::{
-    counter_name, stage, stage_name, GuestTelemetryEvent, COUNTER_COUNT, STAGE_COUNT,
+    counter, counter_name, stage, stage_name, GuestTelemetryEvent, COUNTER_COUNT, STAGE_COUNT,
 };
 
 use crate::theme;
 
-const HISTORY_CAP: usize = 240;
+const HISTORY_CAP: usize = 500;
 const LOG_INTERVAL_MS: f32 = 1000.0;
 const BUDGET_60_MS: f32 = 1000.0 / 60.0;
 const BUDGET_30_MS: f32 = 1000.0 / 30.0;
 const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
 const PSX_CYCLES_PER_MS: f32 = PSX_MASTER_CLOCK_HZ / 1000.0;
 const NTSC_CPU_CYCLES_PER_VBLANK: f32 = PSX_MASTER_CLOCK_HZ / 60.0;
-const PACED20_INTERVAL_VBLANKS: f32 = 3.0;
-const PACED20_VISUAL_BUDGET_CYCLES: f32 = NTSC_CPU_CYCLES_PER_VBLANK * PACED20_INTERVAL_VBLANKS;
 const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (stage::SKY, "sky"),
     (stage::FAR_VISTA, "far vista"),
@@ -36,6 +34,117 @@ const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (stage::EQUIPMENT, "equipment"),
     (stage::WORLD_FLUSH, "flush/sort"),
     (stage::OT_SUBMIT, "ot submit"),
+];
+const PROFILE_LOG_STAGE_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
+    (stage::FRAME_CLEAR, "guest_clear_v"),
+    (stage::RENDER, "guest_render_v"),
+    (stage::SKY, "guest_sky_v"),
+    (stage::FAR_VISTA, "guest_vista_v"),
+    (stage::ROOM, "guest_room_v"),
+    (stage::ROOM_VISIBLE_LIST, "guest_room_list_v"),
+    (stage::ROOM_CELL_SELECT, "guest_room_select_v"),
+    (stage::ROOM_PROJECT, "guest_room_project_v"),
+    (stage::ROOM_DEPTH_PREP, "guest_room_depth_v"),
+    (stage::ROOM_SURFACE_DRAW, "guest_room_surface_v"),
+    (stage::ENTITY_MARKERS, "guest_markers_v"),
+    (stage::IMAGE_PROPS, "guest_props_v"),
+    (stage::MODEL_INSTANCES, "guest_models_v"),
+    (stage::PLAYER, "guest_player_v"),
+    (stage::EQUIPMENT, "guest_equipment_v"),
+    (stage::WORLD_FLUSH, "guest_flush_v"),
+    (stage::OT_SUBMIT, "guest_ot_v"),
+    (stage::PRESENT, "guest_present_v"),
+];
+const PROFILE_LOG_STAGE_PER_HIT_FIELDS: &[(u16, &str)] = &[
+    (stage::UPDATE, "guest_update_hit"),
+    (stage::CAMERA, "guest_camera_hit"),
+    (stage::PORTAL_VISIBILITY, "guest_portal_vis_hit"),
+    (stage::ACTIVE_ROOM_WINDOW, "guest_room_window_hit"),
+    (stage::ROOM_SURFACE_CACHE, "guest_room_cache_hit"),
+    (stage::VRAM_UPLOAD, "guest_vram_hit"),
+    (stage::MODEL_BOUNDS, "guest_model_bounds_hit"),
+    (stage::MODEL_DRAW, "guest_model_draw_hit"),
+    (stage::PLAYER_BOUNDS, "guest_player_bounds_hit"),
+    (stage::PLAYER_DRAW, "guest_player_draw_hit"),
+    (stage::TEXTURED_MODEL_JOINTS, "guest_mdl_joints_hit"),
+    (stage::TEXTURED_MODEL_PROJECT, "guest_mdl_project_hit"),
+    (stage::TEXTURED_MODEL_FACES, "guest_mdl_faces_hit"),
+];
+const PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
+    (counter::ROOM_ACTIVE_CHUNKS, "room_chunks_v"),
+    (counter::ROOM_CACHED_DRAWS, "room_cached_v"),
+    (counter::ROOM_UNCACHED_DRAWS, "room_uncached_v"),
+    (counter::ROOM_CACHE_FALLBACK_DRAWS, "room_cache_fb_v"),
+    (
+        counter::ROOM_VISIBILITY_FALLBACK_DRAWS,
+        "room_visibility_fb_v",
+    ),
+    (counter::ROOM_CACHE_CELLS, "room_cache_cells_v"),
+    (counter::ROOM_CACHE_VERTICES, "room_cache_verts_v"),
+    (counter::ROOM_CACHE_SURFACES, "room_cache_surfaces_v"),
+    (counter::ROOM_VISIBLE_CELLS, "room_visible_cells_v"),
+    (counter::ROOM_CELLS_CONSIDERED, "room_cells_v"),
+    (counter::ROOM_CELLS_DRAWN, "room_cells_drawn_v"),
+    (counter::ROOM_CELLS_CULLED, "room_cells_culled_v"),
+    (counter::ROOM_CELLS_RANGE_CULLED, "room_range_culled_v"),
+    (counter::ROOM_SURFACES_CONSIDERED, "room_surfaces_v"),
+    (counter::ROOM_PROJECTED_VERTICES, "room_projected_verts_v"),
+    (counter::TRI_PRIMITIVES, "tri_prims_v"),
+    (counter::TRI_PRIMITIVE_REMAINING, "tri_free_v"),
+    (counter::WORLD_COMMANDS, "world_cmds_v"),
+    (counter::MODEL_INSTANCE_DRAWS, "model_draws_v"),
+    (counter::MODEL_INSTANCE_BOUNDS_TESTS, "model_bounds_v"),
+    (
+        counter::MODEL_INSTANCE_BOUNDS_CULLED,
+        "model_bounds_culled_v",
+    ),
+    (counter::MODEL_INSTANCE_PROJECTED_VERTICES, "model_verts_v"),
+    (counter::MODEL_INSTANCE_SUBMITTED_TRIS, "model_tris_v"),
+    (counter::PLAYER_BOUNDS_TESTS, "player_bounds_v"),
+    (counter::PLAYER_BOUNDS_CULLED, "player_bounds_culled_v"),
+    (counter::PLAYER_PROJECTED_VERTICES, "player_verts_v"),
+    (counter::PLAYER_SUBMITTED_TRIS, "player_tris_v"),
+    (counter::EQUIPMENT_DRAWS, "equipment_draws_v"),
+    (counter::EQUIPMENT_PROJECTED_VERTICES, "equipment_verts_v"),
+    (counter::EQUIPMENT_SUBMITTED_TRIS, "equipment_tris_v"),
+    (counter::ROOM_SURF_MATERIAL_CYCLES, "surf_material_cyc_v"),
+    (counter::ROOM_SURF_PROJECTED_CYCLES, "surf_projected_cyc_v"),
+    (counter::ROOM_SURF_SCREEN_CYCLES, "surf_screen_cyc_v"),
+    (counter::ROOM_SURF_KIND_CYCLES, "surf_kind_cyc_v"),
+    (counter::ROOM_SURF_BACKFACE_CYCLES, "surf_backface_cyc_v"),
+    (counter::ROOM_SURF_LIGHTING_CYCLES, "surf_lighting_cyc_v"),
+    (counter::ROOM_SURF_SUBMIT_CYCLES, "surf_submit_cyc_v"),
+    (counter::ROOM_SURF_PROFILED, "surf_profiled_v"),
+    (counter::ROOM_SURF_SCREEN_CULLED, "surf_screen_culled_v"),
+    (counter::ROOM_SURF_BACKFACE_CULLED, "surf_backface_culled_v"),
+    (
+        counter::ROOM_SUBMIT_HW_SAFE_TEST_CYCLES,
+        "submit_hw_test_cyc_v",
+    ),
+    (
+        counter::ROOM_SUBMIT_PACKET_FILL_CYCLES,
+        "submit_packet_cyc_v",
+    ),
+    (
+        counter::ROOM_SUBMIT_PRIMITIVE_PUSH_CYCLES,
+        "submit_prim_push_cyc_v",
+    ),
+    (counter::ROOM_SUBMIT_DEPTH_CYCLES, "submit_depth_cyc_v"),
+    (counter::ROOM_SUBMIT_COMMAND_CYCLES, "submit_command_cyc_v"),
+    (
+        counter::ROOM_SUBMIT_FALLBACK_CYCLES,
+        "submit_fallback_cyc_v",
+    ),
+    (counter::ROOM_SUBMIT_HW_SAFE_CALLS, "submit_hw_calls_v"),
+    (
+        counter::ROOM_SUBMIT_FALLBACK_CALLS,
+        "submit_fallback_calls_v",
+    ),
+    (counter::ROOM_STREAM_REQUESTS, "stream_req_v"),
+    (counter::ROOM_STREAM_MISSES, "stream_miss_v"),
+    (counter::ROOM_STREAM_PREFETCH_REQUESTS, "stream_prefetch_v"),
+    (counter::ROOM_STREAM_RESIDENT_SLOTS, "stream_resident_v"),
+    (counter::ROOM_STREAM_PENDING_LOADS, "stream_pending_v"),
 ];
 
 /// Timing breakdown returned by [`crate::gfx::Graphics::render`].
@@ -162,6 +271,15 @@ impl GuestRuntimeProfile {
         per_guest_frame(self.counters[counter_id], self.frames)
     }
 
+    fn counter_per_visual_frame(self, counter_id: usize) -> f32 {
+        let visual_frames = self.counter_total(counter::VISUAL_FRAMES as usize);
+        if visual_frames > 0.0 {
+            self.counters[counter_id] / visual_frames
+        } else {
+            self.counter_per_guest_frame(counter_id)
+        }
+    }
+
     fn counter_total(self, counter_id: usize) -> f32 {
         self.counters[counter_id]
     }
@@ -172,6 +290,12 @@ impl GuestRuntimeProfile {
 
     pub(crate) fn counter_latest_value(self, counter_id: usize) -> u32 {
         self.counter_latest_values[counter_id]
+    }
+
+    fn has_counter_observation(self, counter_id: usize) -> bool {
+        self.counter_latest_value(counter_id) > 0
+            || self.counter_max_value(counter_id) > 0.0
+            || self.counter_total(counter_id) > 0.0
     }
 
     fn has_pacing_data(self) -> bool {
@@ -201,11 +325,21 @@ impl GuestRuntimeProfile {
         }
     }
 
-    fn paced20_budget_status(self) -> &'static str {
+    fn stage_cycles_per_visual_frame(self, stage_id: usize) -> f32 {
+        let visual_frames = self.counter_total(counter::VISUAL_FRAMES as usize);
+        if visual_frames > 0.0 {
+            self.stage_cycles[stage_id] / visual_frames
+        } else {
+            self.stage_cycles_per_guest_frame(stage_id)
+        }
+    }
+
+    fn paced_visual_budget_status(self) -> &'static str {
         let render_cycles = self.render_cycles_per_visual_frame();
-        if render_cycles <= 0.0 {
+        let interval = self.visual_interval_vblanks();
+        if render_cycles <= 0.0 || interval <= 0.0 {
             "?"
-        } else if render_cycles <= PACED20_VISUAL_BUDGET_CYCLES {
+        } else if render_cycles <= NTSC_CPU_CYCLES_PER_VBLANK * interval {
             "pass"
         } else {
             "fail"
@@ -244,6 +378,8 @@ impl EguiRenderProfile {
 /// One frontend redraw sample.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameProfileSample {
+    /// Monotonic frontend redraw sample id, assigned by [`FrameProfiler::record`].
+    pub sample_serial: u32,
     /// Host delta between redraw callbacks.
     pub host_dt_ms: f32,
     /// Full RedrawRequested handler wall time.
@@ -441,6 +577,34 @@ impl FrameProfileSample {
         Some(visual_frames * 1000.0 / self.host_dt_ms)
     }
 
+    pub fn guest_visual_frame_count(self) -> f32 {
+        self.guest
+            .counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize)
+    }
+
+    pub fn guest_visual_interval_vblanks(self) -> Option<f32> {
+        if !self.guest.has_pacing_data() {
+            return None;
+        }
+        let interval = self.guest.visual_interval_vblanks();
+        if interval > 0.0 {
+            Some(interval)
+        } else {
+            None
+        }
+    }
+
+    pub fn guest_visual_deadline_misses(self) -> f32 {
+        self.guest
+            .counter_total(emulator_core::telemetry::counter::VISUAL_DEADLINE_MISSES as usize)
+    }
+
+    pub fn guest_visual_max_lateness_vblanks(self) -> f32 {
+        self.guest.counter_max_value(
+            emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS as usize,
+        )
+    }
+
     fn bus_cycles_per_guest_frame(self) -> f32 {
         per_guest_frame(self.bus_cycles, self.frames_run)
     }
@@ -488,6 +652,7 @@ enum LogMode {
 /// Rolling profiler state.
 pub struct FrameProfiler {
     samples: VecDeque<FrameProfileSample>,
+    next_sample_serial: u32,
     log_mode: LogMode,
     log_accum_ms: f32,
     guest_stage_starts: [Option<u64>; STAGE_COUNT],
@@ -502,6 +667,7 @@ impl Default for FrameProfiler {
         };
         Self {
             samples: VecDeque::with_capacity(HISTORY_CAP),
+            next_sample_serial: 0,
             log_mode,
             log_accum_ms: 0.0,
             guest_stage_starts: [None; STAGE_COUNT],
@@ -511,7 +677,9 @@ impl Default for FrameProfiler {
 
 impl FrameProfiler {
     /// Add one sample. Returns a log line when `PSOXIDE_PROFILE` asks for stderr output.
-    pub fn record(&mut self, sample: FrameProfileSample) -> Option<String> {
+    pub fn record(&mut self, mut sample: FrameProfileSample) -> Option<String> {
+        self.next_sample_serial = self.next_sample_serial.wrapping_add(1);
+        sample.sample_serial = self.next_sample_serial;
         if self.samples.len() >= HISTORY_CAP {
             self.samples.pop_front();
         }
@@ -540,11 +708,21 @@ impl FrameProfiler {
     /// Most recent sample that contains one of the requested guest counters.
     pub fn latest_with_guest_counters(&self, counter_ids: &[u16]) -> Option<FrameProfileSample> {
         self.samples.iter().rev().copied().find(|sample| {
-            counter_ids.iter().any(|&id| {
-                sample.guest.counter_max_value(id as usize) > 0.0
-                    || sample.guest.counter_latest_value(id as usize) > 0
-                    || sample.guest.counter_total(id as usize) > 0.0
-            })
+            counter_ids
+                .iter()
+                .any(|&id| sample.guest.has_counter_observation(id as usize))
+        })
+    }
+
+    /// Most recent sample that contains every requested guest counter.
+    pub fn latest_with_all_guest_counters(
+        &self,
+        counter_ids: &[u16],
+    ) -> Option<FrameProfileSample> {
+        self.samples.iter().rev().copied().find(|sample| {
+            counter_ids
+                .iter()
+                .all(|&id| sample.guest.has_counter_observation(id as usize))
         })
     }
 
@@ -567,6 +745,21 @@ impl FrameProfiler {
         self.samples.clear();
         self.log_accum_ms = 0.0;
         self.guest_stage_starts = [None; STAGE_COUNT];
+    }
+
+    /// Number of samples currently retained in the rolling history.
+    pub fn history_len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Export the rolling history as a wide CSV for offline diagnosis.
+    pub fn history_csv(&self) -> String {
+        let mut out = String::new();
+        push_history_csv_header(&mut out);
+        for (index, sample) in self.samples.iter().copied().enumerate() {
+            push_history_csv_sample(&mut out, index, sample);
+        }
+        out
     }
 
     /// Fold raw guest events into one frontend-frame sample, preserving
@@ -789,7 +982,11 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                     "REN/V",
                     format!("{:.0}", avg.guest.render_cycles_per_visual_frame()),
                 );
-                metric(ui, "3VB", avg.guest.paced20_budget_status().to_string());
+                metric(
+                    ui,
+                    "VBUD",
+                    avg.guest.paced_visual_budget_status().to_string(),
+                );
             });
         }
         draw_guest_render_breakdown(ui, avg.guest);
@@ -1072,6 +1269,145 @@ fn draw_budget_line(ui: &egui::Ui, rect: egui::Rect, max_ms: f32, budget: f32, l
     );
 }
 
+fn push_history_csv_header(out: &mut String) {
+    out.push_str(
+        "index,sample_serial,host_dt_ms,total_ms,input_ms,emu_ms,audio_ms,cmd_log_ms,\
+         compute_ms,vram_upload_ms,display_upload_ms,hw_scale_ms,hw_vram_clone_ms,\
+         hw_render_ms,egui_input_ms,egui_ui_ms,egui_platform_output_ms,\
+         egui_tessellate_ms,egui_texture_update_ms,egui_buffer_update_ms,\
+         egui_paint_ms,egui_submit_present_ms,egui_total_ms,frames_run,cpu_ticks,\
+         bus_cycles,psx_budget_cycles,psx_vblanks,psx_draw_vblanks,\
+         psx_step_cap_misses,gte_ops,gte_estimated_cycles,gpu_cmds,gpu_words,\
+         gpu_draw_cmds,gpu_image_cmds,hw_scale,host_fps,emulated_vblank_hz,\
+         psx_draw_hz,guest_visual_hz,guest_visual_frames,\
+         guest_visual_interval_vblanks,guest_visual_deadline_misses,\
+         guest_visual_max_lateness_vblanks,guest_render_cycles_per_visual,\
+         guest_visual_budget_status",
+    );
+    for id in 0..STAGE_COUNT {
+        push_csv_metric_header(out, "stage", id, stage_name(id as u16), "cycles");
+        push_csv_metric_header(out, "stage", id, stage_name(id as u16), "hits");
+    }
+    for id in 0..COUNTER_COUNT {
+        push_csv_metric_header(out, "counter", id, counter_name(id as u16), "total");
+        push_csv_metric_header(out, "counter", id, counter_name(id as u16), "max");
+        push_csv_metric_header(out, "counter", id, counter_name(id as u16), "latest");
+    }
+    out.push('\n');
+}
+
+fn push_csv_metric_header(out: &mut String, prefix: &str, id: usize, name: &str, suffix: &str) {
+    let _ = write!(
+        out,
+        ",{prefix}_{id}_{name}_{suffix}",
+        name = csv_identifier(name)
+    );
+}
+
+fn csv_identifier(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().max(1));
+    let mut last_was_underscore = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_underscore = false;
+        } else if !last_was_underscore {
+            out.push('_');
+            last_was_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push('x');
+    }
+    out
+}
+
+fn push_history_csv_sample(out: &mut String, index: usize, sample: FrameProfileSample) {
+    let _ = write!(out, "{index}");
+    push_csv_display(out, sample.sample_serial);
+    push_csv_f32_3(out, sample.host_dt_ms);
+    push_csv_f32_3(out, sample.total_ms);
+    push_csv_f32_3(out, sample.input_ms);
+    push_csv_f32_3(out, sample.emu_ms);
+    push_csv_f32_3(out, sample.audio_ms);
+    push_csv_f32_3(out, sample.cmd_log_ms);
+    push_csv_f32_3(out, sample.compute_ms);
+    push_csv_f32_3(out, sample.vram_upload_ms);
+    push_csv_f32_3(out, sample.display_upload_ms);
+    push_csv_f32_3(out, sample.hw_scale_ms);
+    push_csv_f32_3(out, sample.hw_vram_clone_ms);
+    push_csv_f32_3(out, sample.hw_render_ms);
+    push_csv_f32_3(out, sample.egui.input_ms);
+    push_csv_f32_3(out, sample.egui.ui_ms);
+    push_csv_f32_3(out, sample.egui.platform_output_ms);
+    push_csv_f32_3(out, sample.egui.tessellate_ms);
+    push_csv_f32_3(out, sample.egui.texture_update_ms);
+    push_csv_f32_3(out, sample.egui.buffer_update_ms);
+    push_csv_f32_3(out, sample.egui.paint_ms);
+    push_csv_f32_3(out, sample.egui.submit_present_ms);
+    push_csv_f32_3(out, sample.egui.total_ms);
+    push_csv_f32_1(out, sample.frames_run);
+    push_csv_f32_0(out, sample.cpu_ticks);
+    push_csv_f32_0(out, sample.bus_cycles);
+    push_csv_f32_0(out, sample.psx_budget_cycles);
+    push_csv_f32_1(out, sample.psx_vblanks);
+    push_csv_f32_1(out, sample.psx_draw_vblanks);
+    push_csv_f32_0(out, sample.psx_step_cap_misses);
+    push_csv_f32_0(out, sample.gte_ops);
+    push_csv_f32_0(out, sample.gte_estimated_cycles);
+    push_csv_f32_0(out, sample.gpu_cmds);
+    push_csv_f32_0(out, sample.gpu_words);
+    push_csv_f32_0(out, sample.gpu_draw_cmds);
+    push_csv_f32_0(out, sample.gpu_image_cmds);
+    push_csv_f32_1(out, sample.hw_scale);
+    push_csv_f32_3(out, sample.host_fps());
+    push_csv_f32_3(out, sample.emulated_vblank_hz());
+    push_csv_f32_3(out, sample.psx_draw_hz());
+    push_csv_f32_3(out, sample.guest_visual_frame_hz().unwrap_or(0.0));
+    push_csv_f32_0(out, sample.guest_visual_frame_count());
+    push_csv_f32_3(out, sample.guest_visual_interval_vblanks().unwrap_or(0.0));
+    push_csv_f32_0(out, sample.guest_visual_deadline_misses());
+    push_csv_f32_0(out, sample.guest_visual_max_lateness_vblanks());
+    push_csv_f32_0(out, sample.guest.render_cycles_per_visual_frame());
+    push_csv_display(out, sample.guest.paced_visual_budget_status());
+    for id in 0..STAGE_COUNT {
+        let _ = write!(
+            out,
+            ",{:.0},{:.0}",
+            sample.guest.stage_cycles[id], sample.guest.stage_hits[id]
+        );
+    }
+    for id in 0..COUNTER_COUNT {
+        let _ = write!(
+            out,
+            ",{:.0},{:.0},{}",
+            sample.guest.counters[id],
+            sample.guest.counter_max_values[id],
+            sample.guest.counter_latest_values[id]
+        );
+    }
+    out.push('\n');
+}
+
+fn push_csv_display(out: &mut String, value: impl std::fmt::Display) {
+    let _ = write!(out, ",{value}");
+}
+
+fn push_csv_f32_3(out: &mut String, value: f32) {
+    let _ = write!(out, ",{value:.3}");
+}
+
+fn push_csv_f32_1(out: &mut String, value: f32) {
+    let _ = write!(out, ",{value:.1}");
+}
+
+fn push_csv_f32_0(out: &mut String, value: f32) {
+    let _ = write!(out, ",{value:.0}");
+}
+
 fn color_for_ms(ms: f32) -> Color32 {
     if ms >= BUDGET_30_MS {
         Color32::from_rgb(230, 93, 76)
@@ -1099,7 +1435,7 @@ fn per_guest_frame(total: f32, frames_run: f32) -> f32 {
 }
 
 fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
-    format!(
+    let mut line = format!(
         "[profile {kind}] total={:.2}ms host_dt={:.2}ms fps={:.1} run={:.1} \
          emu={:.2}ms audio={:.2}ms vram={:.2}ms hw={:.2}ms ui={:.2}ms \
          host_fps={:.1} emu_hz={:.1} vis_hz={:.1} draw_hz={:.1} step={:.1}% \
@@ -1108,7 +1444,7 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
          guest_frames={:.1} guest_render_hit={:.0} guest_models_hit={:.0} guest_player_hit={:.0} \
          guest_flush_hit={:.0} guest_prims_f={:.0} guest_cmds_f={:.0} \
          guest_sim={:.0} guest_visual={:.0} guest_int={:.2} guest_miss={:.0} \
-         guest_late={:.0} guest_render_visual={:.0} guest_20hz={} \
+         guest_late={:.0} guest_render_visual={:.0} guest_vbud={} \
          scale={:.0}x ticks={:.0} cycles={:.0}",
         sample.total_ms,
         sample.host_dt_ms,
@@ -1168,11 +1504,28 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
             emulator_core::telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS as usize,
         ),
         sample.guest.render_cycles_per_visual_frame(),
-        sample.guest.paced20_budget_status(),
+        sample.guest.paced_visual_budget_status(),
         sample.hw_scale.max(1.0),
         sample.cpu_ticks,
         sample.bus_cycles,
-    )
+    );
+    append_guest_profile_log_fields(&mut line, sample.guest);
+    line
+}
+
+fn append_guest_profile_log_fields(line: &mut String, guest: GuestRuntimeProfile) {
+    for &(stage_id, label) in PROFILE_LOG_STAGE_PER_VISUAL_FIELDS {
+        let cycles = guest.stage_cycles_per_visual_frame(stage_id as usize);
+        let _ = write!(line, " {label}={cycles:.0}");
+    }
+    for &(stage_id, label) in PROFILE_LOG_STAGE_PER_HIT_FIELDS {
+        let cycles = guest.stage_cycles_per_hit(stage_id as usize);
+        let _ = write!(line, " {label}={cycles:.0}");
+    }
+    for &(counter_id, label) in PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS {
+        let value = guest.counter_per_visual_frame(counter_id as usize);
+        let _ = write!(line, " {label}={value:.0}");
+    }
 }
 
 #[cfg(test)]
@@ -1183,6 +1536,7 @@ mod tests {
     fn averages_samples() {
         let mut profiler = FrameProfiler {
             samples: VecDeque::with_capacity(HISTORY_CAP),
+            next_sample_serial: 0,
             log_mode: LogMode::Off,
             log_accum_ms: 0.0,
             guest_stage_starts: [None; STAGE_COUNT],
@@ -1323,7 +1677,47 @@ mod tests {
         );
         assert_eq!(guest.visual_interval_vblanks(), 3.0);
         assert_eq!(guest.render_cycles_per_visual_frame(), 100.0);
-        assert_eq!(guest.paced20_budget_status(), "pass");
+        assert_eq!(guest.paced_visual_budget_status(), "pass");
+    }
+
+    #[test]
+    fn latest_with_all_guest_counters_ignores_partial_scheduler_samples() {
+        let mut profiler = FrameProfiler::default();
+        let required = [
+            emulator_core::telemetry::counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+            emulator_core::telemetry::counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+            emulator_core::telemetry::counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
+            emulator_core::telemetry::counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        ];
+        let loading_counter = emulator_core::telemetry::counter::ROOM_STREAM_LOADING_MASK_LO;
+
+        let mut render_sample = FrameProfileSample::default();
+        for &counter_id in &required {
+            render_sample.guest.counter_latest_values[counter_id as usize] = 1;
+        }
+        render_sample.guest.counter_latest_values[loading_counter as usize] = 2;
+        profiler.record(render_sample);
+
+        let mut scheduler_sample = FrameProfileSample::default();
+        scheduler_sample.guest.counter_latest_values[loading_counter as usize] = 4;
+        profiler.record(scheduler_sample);
+
+        assert_eq!(
+            profiler
+                .latest_with_guest_counters(&[loading_counter])
+                .unwrap()
+                .guest
+                .counter_latest_value(loading_counter as usize),
+            4
+        );
+        assert_eq!(
+            profiler
+                .latest_with_all_guest_counters(&required)
+                .unwrap()
+                .guest
+                .counter_latest_value(loading_counter as usize),
+            2
+        );
     }
 
     #[test]
@@ -1370,6 +1764,6 @@ mod tests {
         assert!(line.contains("cyc_f=564398"));
         assert!(line.contains("gte_f=96"));
         assert!(line.contains("draw_f=32"));
-        assert!(line.contains("guest_20hz=?"));
+        assert!(line.contains("guest_vbud=?"));
     }
 }

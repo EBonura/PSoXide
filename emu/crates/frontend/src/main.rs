@@ -688,7 +688,9 @@ impl ApplicationHandler for Shell {
                         // timing model.
                         let audio_start = Instant::now();
                         let effective_audio_volume = self.state.effective_audio_volume();
-                        let guest_events = if let Some(bus) = self.state.bus.as_mut() {
+                        let (guest_events, guest_debug_logs) = if let Some(bus) =
+                            self.state.bus.as_mut()
+                        {
                             let cycles_after = bus.cycles();
                             self.audio_cycle_accum = self
                                 .audio_cycle_accum
@@ -711,11 +713,16 @@ impl ApplicationHandler for Shell {
                                 // SPU's internal queue doesn't grow unbounded.
                                 let _ = bus.spu.drain_audio();
                             }
-                            bus.telemetry.drain_events()
+                            let events = bus.telemetry.drain_events();
+                            let logs = bus.telemetry.drain_debug_logs();
+                            (events, logs)
                         } else {
-                            Vec::new()
+                            (Vec::new(), Vec::new())
                         };
                         let guest_profile = self.state.profiler.consume_guest_events(&guest_events);
+                        if !guest_debug_logs.is_empty() {
+                            self.state.append_guest_debug_logs(guest_debug_logs);
+                        }
                         profile.add_guest_profile(guest_profile);
                         profile.audio_ms += elapsed_ms(audio_start);
                     }
@@ -858,13 +865,15 @@ impl ApplicationHandler for Shell {
                 // Editor 3D preview: drive the editor-owned HwRenderer
                 // while editing. During embedded Play, the viewport
                 // paints the live emulator framebuffer instead.
-                if !state.embedded_playtest_running() {
+                if !state.embedded_playtest_running() && state.editor.editor_3d_preview_visible() {
                     let editor_camera = state.editor.viewport_3d_camera();
                     let editor_preview_fog = state.editor.preview_fog_enabled();
                     let editor_preview_backface_wireframe =
                         state.editor.preview_backface_wireframe_enabled();
                     let editor_preview_bounds = state.editor.preview_bounds_enabled();
                     let editor_show_grid = state.editor.show_grid_enabled();
+                    let editor_show_portals = state.editor.show_portals_enabled();
+                    let editor_show_lights = state.editor.show_lights_enabled();
                     let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
                     let editor_selected = state.editor.selected_node_id();
                     let editor_root = state.editor.project_root();
@@ -887,7 +896,10 @@ impl ApplicationHandler for Shell {
                         editor_preview_backface_wireframe,
                         editor_preview_bounds,
                         editor_show_grid,
+                        editor_show_portals,
+                        editor_show_lights,
                         editor_hidden_scene_nodes,
+                        editor_active_room,
                         editor_selected,
                         editor_hover,
                         editor_selection,
@@ -1051,26 +1063,148 @@ fn hw_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
 }
 
 fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytestMetrics> {
-    let sample = state
-        .profiler
-        .average()
-        .or_else(|| state.profiler.latest())?;
+    let latest = state.profiler.latest()?;
+    let sample = state.profiler.average().unwrap_or(latest);
+    let visual_hz = sample.guest_visual_frame_hz();
+    let display_hz = visual_hz.unwrap_or_else(|| sample.psx_draw_hz());
+    let visual_interval_vblanks = latest
+        .guest_visual_interval_vblanks()
+        .or_else(|| sample.guest_visual_interval_vblanks())
+        .unwrap_or(0.0);
+    let visual_deadline_misses = latest
+        .guest_visual_deadline_misses()
+        .round()
+        .clamp(0.0, u32::MAX as f32) as u32;
+    let visual_lateness_vblanks = latest
+        .guest_visual_max_lateness_vblanks()
+        .round()
+        .clamp(0.0, u32::MAX as f32) as u32;
+    let frame_ms = if display_hz > 0.0 {
+        1000.0 / display_hz
+    } else {
+        latest.total_ms
+    };
     const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
     const CHUNK_MAP_COUNTERS: &[u16] = &[
         counter::ROOM_STREAM_RESIDENT_MASK_LO,
         counter::ROOM_STREAM_RESIDENT_MASK_HI,
+        counter::ROOM_STREAM_LOADING_MASK_LO,
+        counter::ROOM_STREAM_LOADING_MASK_HI,
         counter::ROOM_ACTIVE_CHUNK_MASK_LO,
         counter::ROOM_ACTIVE_CHUNK_MASK_HI,
         counter::ROOM_DRAWN_CHUNK_MASK_LO,
         counter::ROOM_DRAWN_CHUNK_MASK_HI,
         counter::ROOM_PLAYER_ROOM_INDEX,
+        counter::PORTAL_VIS_CURRENT_ROOM,
         counter::ROOM_PLAYER_LOCAL_X_BIASED,
         counter::ROOM_PLAYER_LOCAL_Z_BIASED,
         counter::ROOM_PLAYER_VIEW_YAW_Q12,
+        counter::ROOM_CAMERA_LOCAL_X_BIASED,
+        counter::ROOM_CAMERA_LOCAL_Y_BIASED,
+        counter::ROOM_CAMERA_LOCAL_Z_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
+        counter::PORTAL_VIS_VISIBLE_MASK_LO,
+        counter::PORTAL_VIS_VISIBLE_MASK_HI,
+        counter::PORTAL_VIS_FRONTIER_MASK_LO,
+        counter::PORTAL_VIS_FRONTIER_MASK_HI,
+        counter::PORTAL_VIS_MISSING_MASK_LO,
+        counter::PORTAL_VIS_MISSING_MASK_HI,
+        counter::PORTAL_VIS_BUILD_FAILED_MASK_LO,
+        counter::PORTAL_VIS_BUILD_FAILED_MASK_HI,
+        counter::PORTAL_VIS_TESTED_MASK_LO,
+        counter::PORTAL_VIS_TESTED_MASK_HI,
+        counter::PORTAL_VIS_ACCEPTED_MASK_LO,
+        counter::PORTAL_VIS_ACCEPTED_MASK_HI,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
+    ];
+    const RENDER_MAP_COUNTERS: &[u16] = &[
+        counter::ROOM_ACTIVE_CHUNK_MASK_LO,
+        counter::ROOM_ACTIVE_CHUNK_MASK_HI,
+        counter::ROOM_DRAWN_CHUNK_MASK_LO,
+        counter::ROOM_DRAWN_CHUNK_MASK_HI,
+        counter::ROOM_STREAM_LOADING_MASK_LO,
+        counter::ROOM_STREAM_LOADING_MASK_HI,
+        counter::ROOM_PLAYER_ROOM_INDEX,
+        counter::PORTAL_VIS_CURRENT_ROOM,
+        counter::ROOM_PLAYER_LOCAL_X_BIASED,
+        counter::ROOM_PLAYER_LOCAL_Z_BIASED,
+        counter::ROOM_PLAYER_VIEW_YAW_Q12,
+        counter::ROOM_CAMERA_LOCAL_X_BIASED,
+        counter::ROOM_CAMERA_LOCAL_Y_BIASED,
+        counter::ROOM_CAMERA_LOCAL_Z_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
+        counter::PORTAL_VIS_VISIBLE_MASK_LO,
+        counter::PORTAL_VIS_VISIBLE_MASK_HI,
+        counter::PORTAL_VIS_FRONTIER_MASK_LO,
+        counter::PORTAL_VIS_FRONTIER_MASK_HI,
+        counter::PORTAL_VIS_MISSING_MASK_LO,
+        counter::PORTAL_VIS_MISSING_MASK_HI,
+        counter::PORTAL_VIS_BUILD_FAILED_MASK_LO,
+        counter::PORTAL_VIS_BUILD_FAILED_MASK_HI,
+        counter::PORTAL_VIS_TESTED_MASK_LO,
+        counter::PORTAL_VIS_TESTED_MASK_HI,
+        counter::PORTAL_VIS_ACCEPTED_MASK_LO,
+        counter::PORTAL_VIS_ACCEPTED_MASK_HI,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
+    ];
+    const RENDER_MAP_REQUIRED_COUNTERS: &[u16] = &[
+        counter::ROOM_PLAYER_LOCAL_X_BIASED,
+        counter::ROOM_PLAYER_LOCAL_Z_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_X_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
+        counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
+        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
     ];
     let chunk_sample = state
         .profiler
-        .latest_with_guest_counters(CHUNK_MAP_COUNTERS)
+        .latest_with_all_guest_counters(RENDER_MAP_REQUIRED_COUNTERS)
+        .or_else(|| {
+            state
+                .profiler
+                .latest_with_guest_counters(RENDER_MAP_COUNTERS)
+        })
+        .or_else(|| {
+            state
+                .profiler
+                .latest_with_guest_counters(CHUNK_MAP_COUNTERS)
+        })
         .unwrap_or(sample);
     let recent_counter = |id: u16| profile_counter_u32(sample.guest.counter_max_value(id as usize));
     let chunk_mask = |lo: u16, hi: u16| {
@@ -1084,13 +1218,52 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
     let player_z_biased = chunk_sample
         .guest
         .counter_latest_value(counter::ROOM_PLAYER_LOCAL_Z_BIASED as usize);
+    let camera_x_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_LOCAL_X_BIASED as usize);
+    let camera_y_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Y_BIASED as usize);
+    let camera_z_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Z_BIASED as usize);
+    let camera_global_x_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_X_BIASED as usize);
+    let camera_global_y_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_Y_BIASED as usize);
+    let camera_global_z_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_Z_BIASED as usize);
+    let camera_view_sin_yaw_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED as usize);
+    let camera_view_cos_yaw_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED as usize);
+    let camera_view_sin_pitch_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED as usize);
+    let camera_view_cos_pitch_biased = chunk_sample
+        .guest
+        .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED as usize);
     Some(psxed_ui::EditorPlaytestMetrics {
+        sample_serial: latest.sample_serial,
         host_fps: sample.host_fps(),
         host_ms: sample.host_dt_ms,
         emu_hz: sample.emulated_vblank_hz(),
-        visual_hz: sample.guest_visual_frame_hz(),
+        visual_hz,
         draw_hz: sample.psx_draw_hz(),
+        visual_frames: latest
+            .guest_visual_frame_count()
+            .round()
+            .clamp(0.0, u32::MAX as f32) as u32,
+        visual_interval_vblanks,
+        visual_deadline_misses,
+        visual_lateness_vblanks,
         total_ms: sample.total_ms,
+        frame_ms,
         emu_ms: sample.emu_ms,
         hw_ms: sample.hw_render_ms,
         ui_ms: sample.egui.total_ms,
@@ -1100,15 +1273,42 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         chunk_candidates: recent_counter(counter::ROOM_CHUNKS_CONSIDERED),
         chunk_built: recent_counter(counter::ROOM_WINDOW_BUILT_CHUNKS),
         chunk_cache_skips: recent_counter(counter::ROOM_CHUNK_CACHE_SKIPS),
+        portal_visible_rooms: recent_counter(counter::PORTAL_VIS_VISIBLE_ROOMS),
+        portal_frontier_rooms: recent_counter(counter::PORTAL_VIS_FRONTIER_ROOMS),
+        portal_missing_resident: recent_counter(counter::PORTAL_VIS_VISIBLE_MISSING_RESIDENT),
+        portal_build_failed: recent_counter(counter::PORTAL_VIS_VISIBLE_BUILD_FAILED),
+        portal_tests: recent_counter(counter::PORTAL_VIS_PORTALS_TESTED),
+        portal_accepts: recent_counter(counter::PORTAL_VIS_PORTALS_ACCEPTED),
+        portal_bounds_fallbacks: recent_counter(counter::PORTAL_VIS_BOUNDS_FALLBACKS),
+        portal_rejects: [
+            recent_counter(counter::PORTAL_VIS_REJECT_BACKFACE),
+            recent_counter(counter::PORTAL_VIS_REJECT_FRUSTUM),
+            recent_counter(counter::PORTAL_VIS_REJECT_TINY),
+        ],
+        portal_caps: [
+            recent_counter(counter::PORTAL_VIS_CAP_ROOM),
+            recent_counter(counter::PORTAL_VIS_CAP_FRUSTUM),
+            recent_counter(counter::PORTAL_VIS_CAP_DEPTH),
+        ],
+        stream_priorities: [
+            recent_counter(counter::ROOM_STREAM_PRIORITY_CURRENT),
+            recent_counter(counter::ROOM_STREAM_PRIORITY_VISIBLE),
+            recent_counter(counter::ROOM_STREAM_PRIORITY_FRONTIER),
+        ],
         stream_requests: recent_counter(counter::ROOM_STREAM_REQUESTS),
         stream_misses: recent_counter(counter::ROOM_STREAM_MISSES),
         stream_prefetches: recent_counter(counter::ROOM_STREAM_PREFETCH_REQUESTS),
         stream_evictions: recent_counter(counter::ROOM_STREAM_EVICTIONS),
+        stream_slot_limit: recent_counter(counter::ROOM_STREAM_SLOT_LIMIT),
         stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
         stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
         chunk_loaded_mask: chunk_mask(
             counter::ROOM_STREAM_RESIDENT_MASK_LO,
             counter::ROOM_STREAM_RESIDENT_MASK_HI,
+        ),
+        chunk_loading_mask: chunk_mask(
+            counter::ROOM_STREAM_LOADING_MASK_LO,
+            counter::ROOM_STREAM_LOADING_MASK_HI,
         ),
         chunk_active_mask: chunk_mask(
             counter::ROOM_ACTIVE_CHUNK_MASK_LO,
@@ -1118,16 +1318,98 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             counter::ROOM_DRAWN_CHUNK_MASK_LO,
             counter::ROOM_DRAWN_CHUNK_MASK_HI,
         ),
+        portal_visible_mask: chunk_mask(
+            counter::PORTAL_VIS_VISIBLE_MASK_LO,
+            counter::PORTAL_VIS_VISIBLE_MASK_HI,
+        ),
+        portal_frontier_mask: chunk_mask(
+            counter::PORTAL_VIS_FRONTIER_MASK_LO,
+            counter::PORTAL_VIS_FRONTIER_MASK_HI,
+        ),
+        portal_missing_mask: chunk_mask(
+            counter::PORTAL_VIS_MISSING_MASK_LO,
+            counter::PORTAL_VIS_MISSING_MASK_HI,
+        ),
+        portal_build_failed_mask: chunk_mask(
+            counter::PORTAL_VIS_BUILD_FAILED_MASK_LO,
+            counter::PORTAL_VIS_BUILD_FAILED_MASK_HI,
+        ),
+        portal_tested_mask: chunk_mask(
+            counter::PORTAL_VIS_TESTED_MASK_LO,
+            counter::PORTAL_VIS_TESTED_MASK_HI,
+        ),
+        portal_accepted_mask: chunk_mask(
+            counter::PORTAL_VIS_ACCEPTED_MASK_LO,
+            counter::PORTAL_VIS_ACCEPTED_MASK_HI,
+        ),
+        portal_reject_frustum_mask: chunk_mask(
+            counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO,
+            counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI,
+        ),
+        portal_bounds_fallback_mask: chunk_mask(
+            counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO,
+            counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI,
+        ),
+        portal_tested_portal_mask: chunk_mask(
+            counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO,
+            counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI,
+        ),
+        portal_accepted_portal_mask: chunk_mask(
+            counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO,
+            counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI,
+        ),
+        portal_reject_frustum_portal_mask: chunk_mask(
+            counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO,
+            counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI,
+        ),
+        portal_bounds_fallback_portal_mask: chunk_mask(
+            counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
+            counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
+        ),
         player_map_valid: player_x_biased > 0 || player_z_biased > 0,
         player_room_index: chunk_sample
             .guest
             .counter_latest_value(counter::ROOM_PLAYER_ROOM_INDEX as usize),
+        portal_current_room_index: chunk_sample
+            .guest
+            .counter_latest_value(counter::PORTAL_VIS_CURRENT_ROOM as usize),
         player_local_x: profile_counter_i32_biased(player_x_biased, DEBUG_MAP_POSITION_BIAS),
         player_local_z: profile_counter_i32_biased(player_z_biased, DEBUG_MAP_POSITION_BIAS),
         player_view_yaw_q12: chunk_sample
             .guest
             .counter_latest_value(counter::ROOM_PLAYER_VIEW_YAW_Q12 as usize)
             .min(u16::MAX as u32) as u16,
+        camera_view_basis_valid: camera_view_sin_yaw_biased > 0
+            || camera_view_cos_yaw_biased > 0
+            || camera_view_sin_pitch_biased > 0
+            || camera_view_cos_pitch_biased > 0,
+        camera_view_sin_yaw_q12: profile_counter_i32_biased(camera_view_sin_yaw_biased, 4096)
+            .clamp(-4096, 4096),
+        camera_view_cos_yaw_q12: profile_counter_i32_biased(camera_view_cos_yaw_biased, 4096)
+            .clamp(-4096, 4096),
+        camera_view_sin_pitch_q12: profile_counter_i32_biased(camera_view_sin_pitch_biased, 4096)
+            .clamp(-4096, 4096),
+        camera_view_cos_pitch_q12: profile_counter_i32_biased(camera_view_cos_pitch_biased, 4096)
+            .clamp(-4096, 4096),
+        camera_map_valid: camera_x_biased > 0 || camera_y_biased > 0 || camera_z_biased > 0,
+        camera_global_valid: camera_global_x_biased > 0
+            || camera_global_y_biased > 0
+            || camera_global_z_biased > 0,
+        camera_local_x: profile_counter_i32_biased(camera_x_biased, DEBUG_MAP_POSITION_BIAS),
+        camera_local_y: profile_counter_i32_biased(camera_y_biased, DEBUG_MAP_POSITION_BIAS),
+        camera_local_z: profile_counter_i32_biased(camera_z_biased, DEBUG_MAP_POSITION_BIAS),
+        camera_global_x: profile_counter_i32_biased(
+            camera_global_x_biased,
+            DEBUG_MAP_POSITION_BIAS,
+        ),
+        camera_global_y: profile_counter_i32_biased(
+            camera_global_y_biased,
+            DEBUG_MAP_POSITION_BIAS,
+        ),
+        camera_global_z: profile_counter_i32_biased(
+            camera_global_z_biased,
+            DEBUG_MAP_POSITION_BIAS,
+        ),
     })
 }
 

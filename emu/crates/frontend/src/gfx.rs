@@ -201,8 +201,8 @@ impl Graphics {
     /// Render one frame of the editor preview through the second
     /// `HwRenderer` instance.
     ///
-    /// Phase 1: walks the editor project's first Room, projects each
-    /// floor through the host GTE shim, and feeds the resulting
+    /// Phase 1: walks the editor's active room window, projects each
+    /// surface through the host GTE shim, and feeds the resulting
     /// `TriFlat` packets to the renderer. The path is intentionally
     /// the same one PS1 runtime code follows -- only the final DMA
     /// step is replaced by `build_cmd_log` + `render_frame`. Editor
@@ -218,7 +218,10 @@ impl Graphics {
         preview_backface_wireframe: bool,
         preview_bounds: bool,
         show_grid: bool,
+        show_portals: bool,
+        show_lights: bool,
         hidden_scene_nodes: &std::collections::HashSet<psxed_project::NodeId>,
+        active_room: Option<psxed_project::NodeId>,
         selected: psxed_project::NodeId,
         hovered_primitive: Option<psxed_ui::Selection>,
         selected_primitive: Option<psxed_ui::Selection>,
@@ -240,7 +243,10 @@ impl Graphics {
             preview_backface_wireframe,
             preview_bounds,
             show_grid,
+            show_portals,
+            show_lights,
             hidden_scene_nodes,
+            active_room,
             selected,
             hovered_primitive,
             selected_primitive,
@@ -510,12 +516,11 @@ impl Graphics {
         }
         profile.paint_ms = elapsed_ms(t);
 
+        let t = Instant::now();
+        self.queue.submit(Some(encoder.finish()));
         for id in &full_output.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
-
-        let t = Instant::now();
-        self.queue.submit(Some(encoder.finish()));
         self.window.pre_present_notify();
         output.present();
         profile.submit_present_ms = elapsed_ms(t);
