@@ -7969,7 +7969,7 @@ impl RuntimeDepthSortMode {
 
 impl Default for RuntimeDepthSortMode {
     fn default() -> Self {
-        Self::Hybrid
+        Self::FixedCell
     }
 }
 
@@ -7977,7 +7977,7 @@ impl Default for RuntimeDepthSortMode {
 ///
 /// `0` disables visual subdivision and keeps splitting limited to PS1
 /// hardware packet bounds. Lower positive values split more aggressively.
-pub const DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE: u16 = 128;
+pub const DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 
 const fn default_runtime_texture_split_max_edge() -> u16 {
     DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE
