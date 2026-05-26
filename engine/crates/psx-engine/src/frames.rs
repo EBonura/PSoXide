@@ -2,12 +2,11 @@
 //!
 //! # Why a newtype
 //!
-//! Games reach for `ctx.frame` for a grab-bag of reasons: as a
-//! timer (`frame & N` for periodic strobes), as a seed for
-//! per-frame variation, as input to the engine's [`Angle`][crate::Angle]
-//! math. Each call site wants a `u32` back, but *what the counter
-//! measures* should be explicit -- is this a visible frame, a
-//! simulation step, an SPU sample?
+//! Engine code sometimes needs counters for a grab-bag of reasons:
+//! visible-frame strobes, seeds for per-frame variation, or inputs to
+//! the engine's [`Angle`][crate::Angle] math. Each call site wants a
+//! `u32` back, but *what the counter measures* should be explicit -- is
+//! this a visible frame, a simulation step, an SPU sample?
 //!
 //! Two distinct counters show up at different scales:
 //!

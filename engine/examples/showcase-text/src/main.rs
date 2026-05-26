@@ -36,8 +36,8 @@ extern crate psx_rt;
 
 use psx_engine::{App, Config, Ctx, Scene};
 use psx_font::{
-    FontAtlas,
     fonts::{BASIC, BASIC_8X16},
+    FontAtlas,
 };
 use psx_vram::{Clut, TexDepth, Tpage};
 
@@ -85,7 +85,7 @@ impl Scene for Showcase {
 
     fn update(&mut self, _ctx: &mut Ctx) {
         // Pure demo -- no user input, no state changes. The rotation
-        // demo reads `ctx.frame` directly in render.
+        // demo reads `ctx.sim_tick` directly in render.
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
@@ -99,9 +99,9 @@ impl Scene for Showcase {
         size_ladder(font8);
         tint_palette(font8);
         gradient_varieties(font8);
-        rotation_demo(font16, ctx.frame);
+        rotation_demo(font16, ctx.sim_tick);
         affine_skew_demo(font16);
-        footer(font8, ctx.frame);
+        footer(font8, ctx.sim_tick);
     }
 }
 
@@ -139,9 +139,13 @@ fn main() -> ! {
 /// than an upscaled 8×8.
 fn gradient_title(font16: &FontAtlas) {
     font16.draw_text_scaled_gradient(
-        104, 4, "PSOXIDE", 2, 2,
-        (255, 220, 80),  // bright yellow at the top
-        (200, 40, 20),   // deep red at the bottom
+        104,
+        4,
+        "PSOXIDE",
+        2,
+        2,
+        (255, 220, 80), // bright yellow at the top
+        (200, 40, 20),  // deep red at the bottom
     );
 }
 

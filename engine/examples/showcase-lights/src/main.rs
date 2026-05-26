@@ -30,7 +30,7 @@
 //! Ported to `psx-engine` in Phase 3e. The `Scene` struct (renamed
 //! to `Lighting` to avoid collision with the engine trait) now
 //! holds per-frame state inline; GTE one-time setup moved to
-//! `Scene::init`; geometry animation drives off `ctx.frame` instead
+//! `Scene::init`; geometry animation drives off `ctx.sim_tick` instead
 //! of an incrementing `static mut SCENE.frame`.
 
 #![no_std]
@@ -366,7 +366,7 @@ impl Scene for Lighting {
         ];
         for i in 0..NUM_LIGHTS {
             let (r, speed, y, phase) = phases[i];
-            let angle = (ctx.frame.wrapping_mul(speed as u32) as u16).wrapping_add(phase);
+            let angle = (ctx.sim_tick.wrapping_mul(speed as u32) as u16).wrapping_add(phase);
             // Q1.12 sin/cos scaled by Q3.12 radius → Q4.24 position,
             // shift right 12 to bring back to Q3.12.
             let x = ((sincos::cos_q12(angle) * r as i32) >> 12) as i16;
@@ -376,9 +376,9 @@ impl Scene for Lighting {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        self.build_frame_ot(ctx.frame);
+        self.build_frame_ot(ctx.sim_tick);
         let font = self.font.as_ref().expect("font uploaded in init");
-        self.draw_hud(font, ctx.frame);
+        self.draw_hud(font, ctx.sim_tick);
     }
 }
 
