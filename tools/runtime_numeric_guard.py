@@ -17,25 +17,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 FLOAT_TYPES = {"f32", "f64"}
-WIDE_INT_TYPES = {"u64", "i64", "u128", "i128"}
 FORBIDDEN_TYPE_RE = re.compile(r"\b(f32|f64|u64|i64|u128|i128)\b")
 FLOAT_LITERAL_RE = re.compile(
     r"(?<![\w.])\d+\.\d+(?:[eE][+-]?\d+)?(?:_?f(?:32|64))?\b"
     r"|(?<![\w.])\d+[eE][+-]?\d+(?:_?f(?:32|64))?\b"
 )
-
-# Existing debt that should be migrated to u32 pairs or fixed 32-bit math. The
-# baseline count keeps these files from quietly gaining more wide-integer uses.
-WIDE_INT_ALLOWLIST = {
-    "engine/crates/psx-level/src/portal_visibility.rs": {
-        "max": 14,
-        "reason": "temporary portal debug masks; migrate to u32 pairs",
-    },
-    "engine/examples/editor-playtest/src/main.rs": {
-        "max": 44,
-        "reason": "temporary debug masks and projection safety math",
-    },
-}
+ALLOW_LINE_MARKER = "psx-numeric-allow-line"
+ALLOW_NEXT_LINE_MARKER = "psx-numeric-allow-next-line"
 
 
 def runtime_roots() -> list[Path]:
@@ -183,9 +171,19 @@ def report_context(src: str, line: int) -> str:
     return ""
 
 
+def allowed_lines(src: str) -> set[int]:
+    allowed: set[int] = set()
+    for number, line in enumerate(src.splitlines(), start=1):
+        if ALLOW_LINE_MARKER in line:
+            allowed.add(number)
+        if ALLOW_NEXT_LINE_MARKER in line:
+            allowed.add(number + 1)
+    return allowed
+
+
 def main() -> int:
     violations: list[str] = []
-    allowed_wide_counts = {path: 0 for path in WIDE_INT_ALLOWLIST}
+    allowed_hit_count = 0
     checked_files = 0
 
     for path in runtime_files():
@@ -193,12 +191,13 @@ def main() -> int:
         rel = relative(path)
         src = path.read_text(encoding="utf-8")
         code = blank_comments_and_literals(src)
+        allowed = allowed_lines(src)
 
         for match in FORBIDDEN_TYPE_RE.finditer(code):
             token = match.group(1)
             line, col = line_col(code, match.start())
-            if token in WIDE_INT_TYPES and rel in WIDE_INT_ALLOWLIST:
-                allowed_wide_counts[rel] += 1
+            if line in allowed:
+                allowed_hit_count += 1
                 continue
             kind = "float type" if token in FLOAT_TYPES else "wide integer type"
             violations.append(
@@ -208,18 +207,12 @@ def main() -> int:
 
         for match in FLOAT_LITERAL_RE.finditer(code):
             line, col = line_col(code, match.start())
+            if line in allowed:
+                allowed_hit_count += 1
+                continue
             violations.append(
                 f"{rel}:{line}:{col}: forbidden float literal `{match.group(0)}`\n"
                 f"    {report_context(src, line)}"
-            )
-
-    for rel, spec in WIDE_INT_ALLOWLIST.items():
-        count = allowed_wide_counts.get(rel, 0)
-        max_count = int(spec["max"])
-        if count > max_count:
-            violations.append(
-                f"{rel}: wide integer allowlist grew from {max_count} to {count}; "
-                f"{spec['reason']}"
             )
 
     if violations:
@@ -235,14 +228,19 @@ def main() -> int:
             file=sys.stderr,
         )
         print("", file=sys.stderr)
+        print(
+            f"Use `// {ALLOW_NEXT_LINE_MARKER}: reason` only for a reviewed "
+            "exception that cannot move out of runtime code.",
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
         for violation in violations:
             print(violation, file=sys.stderr)
         return 1
 
-    allowed_total = sum(allowed_wide_counts.values())
     print(
         f"runtime numeric guard: ok "
-        f"({checked_files} files, {allowed_total} allowlisted wide-int hits)"
+        f"({checked_files} files, {allowed_hit_count} line-level allow hits)"
     )
     return 0
 
