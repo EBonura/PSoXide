@@ -86,12 +86,13 @@ use psx_level::portal_visibility::{
 };
 use psx_level::{
     box_prop_flags, character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind,
-    image_prop_flags, model_clip_flags, room_flags, sky_flags, visibility_cell_flags, AssetId,
-    AssetKind, CharacterAnimationAction, EntityRecord, LevelBoxPropRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
+    image_prop_flags, model_clip_flags, particle_emitter_flags, room_flags, sky_flags,
+    visibility_cell_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
+    LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
+    LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness,
+    LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
+    LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
+    OptionalModelClipIndex, ParticleEmitterRecord, ResidencyManager, RoomIndex,
     WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
 };
 #[cfg(feature = "cd-stream-bench")]
@@ -125,10 +126,10 @@ use generated::{
     ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS, ENTITIES,
     EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
-    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS,
-    ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
-    ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_NODES,
-    VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
+    PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
+    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
+    ROOM_VISIBILITY, UI_NODES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -254,6 +255,9 @@ const ATMOSPHERE_PARTICLE_MAX: u32 = 96;
 const ATMOSPHERE_SCREEN_MARGIN: i32 = 24;
 const ATMOSPHERE_WRAP_W: i32 = SCREEN_W as i32 + ATMOSPHERE_SCREEN_MARGIN * 2;
 const ATMOSPHERE_WRAP_H: i32 = SCREEN_H as i32 + ATMOSPHERE_SCREEN_MARGIN * 2;
+const PARTICLE_EMITTER_DRAW_CAP: u16 = 64;
+const PARTICLE_MIN_SCREEN_SIZE: i16 = 2;
+const PARTICLE_MAX_SCREEN_SIZE: i16 = 18;
 const FOCAL: i32 = 320;
 const NEAR_Z: i32 = 64;
 const FAR_Z: i32 = 16384;
@@ -4398,6 +4402,8 @@ impl Scene for Playtest {
         ot.submit();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
 
+        self.draw_particle_emitters(camera, ctx.time.elapsed_vblanks());
+
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
             draw_room_atmosphere_overlay(room_record, ctx.time.elapsed_vblanks());
         }
@@ -4917,6 +4923,21 @@ impl Playtest {
                     room_camera,
                     (0xff, 0xd0, 0x40),
                 );
+            }
+        }
+    }
+
+    fn draw_particle_emitters(&self, camera: WorldCamera, elapsed_vblanks: u32) {
+        for active in self.active_rooms.iter().flatten().copied() {
+            if !self.portal_visibility_draws_room(active.index) {
+                continue;
+            }
+            let room_camera = camera_for_room(camera, active);
+            for emitter in PARTICLE_EMITTERS {
+                if emitter.room != active.index {
+                    continue;
+                }
+                draw_particle_emitter(*emitter, room_camera, elapsed_vblanks);
             }
         }
     }
@@ -12677,6 +12698,189 @@ fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle)
         clamp_i16((center.sx as i32).saturating_add(rx)),
         clamp_i16((center.sy as i32).saturating_add(ry)),
     )
+}
+
+fn draw_particle_emitter(
+    emitter: ParticleEmitterRecord,
+    camera: WorldCamera,
+    elapsed_vblanks: u32,
+) {
+    if emitter.flags & particle_emitter_flags::ENABLED == 0
+        || emitter.max_particles == 0
+        || emitter.lifetime_frames == 0
+        || emitter.spawn_rate_q8 == 0
+    {
+        return;
+    }
+
+    let lifetime = emitter.lifetime_frames as u32;
+    let steady_count = ((emitter.spawn_rate_q8 as u32)
+        .saturating_mul(lifetime)
+        .saturating_add(60 * 256 - 1))
+        / (60 * 256);
+    let count = (emitter.max_particles as u32)
+        .min(PARTICLE_EMITTER_DRAW_CAP as u32)
+        .min(steady_count.max(1));
+    if count == 0 {
+        return;
+    }
+
+    let mut i = 0u32;
+    while i < count {
+        let seed = particle_seed(
+            emitter.room.to_usize() as u32,
+            emitter.x as u32,
+            emitter.z as u32,
+            i,
+        );
+        let age = (elapsed_vblanks + (i * lifetime / count)) % lifetime;
+        draw_particle_sample(emitter, camera, seed, age as i32, lifetime as i32);
+        i += 1;
+    }
+}
+
+fn draw_particle_sample(
+    emitter: ParticleEmitterRecord,
+    camera: WorldCamera,
+    seed: u32,
+    age: i32,
+    lifetime: i32,
+) {
+    let spawn_radius = emitter.spawn_radius as i32;
+    let origin_x = emitter
+        .x
+        .saturating_add(particle_signed_spread(seed, spawn_radius));
+    let origin_y = emitter.y.saturating_add(particle_signed_spread(
+        seed.rotate_left(9),
+        spawn_radius / 2,
+    ));
+    let origin_z = emitter
+        .z
+        .saturating_add(particle_signed_spread(seed.rotate_left(17), spawn_radius));
+    let x = particle_axis_position(
+        origin_x,
+        emitter.base_velocity_q4[0],
+        emitter.random_velocity_q4[0],
+        emitter.acceleration_q4[0],
+        age,
+        seed.rotate_left(3),
+    );
+    let y = particle_axis_position(
+        origin_y,
+        emitter.base_velocity_q4[1],
+        emitter.random_velocity_q4[1],
+        emitter.acceleration_q4[1],
+        age,
+        seed.rotate_left(11),
+    );
+    let z = particle_axis_position(
+        origin_z,
+        emitter.base_velocity_q4[2],
+        emitter.random_velocity_q4[2],
+        emitter.acceleration_q4[2],
+        age,
+        seed.rotate_left(21),
+    );
+    let Some(center) = camera.project_world(WorldVertex::new(x, y, z)) else {
+        return;
+    };
+
+    let t_q8 = if lifetime <= 1 {
+        255
+    } else {
+        ((age * 255) / (lifetime - 1)).clamp(0, 255)
+    };
+    let size = particle_lerp_u16(emitter.start_size, emitter.end_size, t_q8);
+    let half = ((i32::from(size) * camera.projection.focal_length) / center.sz.max(1)).clamp(
+        i32::from(PARTICLE_MIN_SCREEN_SIZE),
+        i32::from(PARTICLE_MAX_SCREEN_SIZE),
+    ) as i16;
+    let tint = particle_lerp_rgb(emitter.start_color, emitter.end_color, t_q8);
+    let blend = particle_blend_mode(emitter.blend_mode);
+    let sx = center.sx;
+    let sy = center.sy;
+    draw_tri_flat_blended(
+        [(sx, sy - half), (sx + half, sy), (sx, sy + half)],
+        tint.0,
+        tint.1,
+        tint.2,
+        blend,
+    );
+    draw_tri_flat_blended(
+        [(sx, sy - half), (sx, sy + half), (sx - half, sy)],
+        tint.0,
+        tint.1,
+        tint.2,
+        blend,
+    );
+}
+
+fn particle_axis_position(
+    origin: i32,
+    base_velocity_q4: i16,
+    random_velocity_q4: u16,
+    acceleration_q4: i16,
+    age: i32,
+    seed: u32,
+) -> i32 {
+    let random_velocity = particle_signed_spread(seed, random_velocity_q4 as i32);
+    let velocity = i32::from(base_velocity_q4).saturating_add(random_velocity);
+    let velocity_term = velocity.saturating_mul(age) >> 4;
+    let acceleration_term = i32::from(acceleration_q4)
+        .saturating_mul(age)
+        .saturating_mul(age)
+        >> 5;
+    origin
+        .saturating_add(velocity_term)
+        .saturating_add(acceleration_term)
+}
+
+fn particle_seed(room: u32, x: u32, z: u32, index: u32) -> u32 {
+    let mut value = room
+        .wrapping_mul(0x9E37_79B9)
+        .wrapping_add(x.rotate_left(7))
+        .wrapping_add(z.rotate_left(17))
+        .wrapping_add(index.wrapping_mul(0x85EB_CA6B));
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7FEB_352D);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846C_A68B);
+    value ^ (value >> 16)
+}
+
+fn particle_signed_spread(seed: u32, spread: i32) -> i32 {
+    if spread <= 0 {
+        return 0;
+    }
+    let span = spread.saturating_mul(2).saturating_add(1) as u32;
+    (seed % span) as i32 - spread
+}
+
+fn particle_lerp_u16(a: u16, b: u16, t_q8: i32) -> u16 {
+    let inv = 255 - t_q8;
+    (((i32::from(a) * inv) + (i32::from(b) * t_q8)) / 255).clamp(0, u16::MAX as i32) as u16
+}
+
+fn particle_lerp_rgb(a: [u8; 3], b: [u8; 3], t_q8: i32) -> (u8, u8, u8) {
+    (
+        particle_lerp_u8(a[0], b[0], t_q8),
+        particle_lerp_u8(a[1], b[1], t_q8),
+        particle_lerp_u8(a[2], b[2], t_q8),
+    )
+}
+
+fn particle_lerp_u8(a: u8, b: u8, t_q8: i32) -> u8 {
+    let inv = 255 - t_q8;
+    (((i32::from(a) * inv) + (i32::from(b) * t_q8)) / 255).clamp(0, 255) as u8
+}
+
+const fn particle_blend_mode(mode: u8) -> BlendMode {
+    match mode & 3 {
+        1 => BlendMode::Add,
+        2 => BlendMode::Subtract,
+        3 => BlendMode::AddQuarter,
+        _ => BlendMode::Average,
+    }
 }
 
 fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_vblanks: u32) {

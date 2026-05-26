@@ -995,6 +995,43 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Placed point-projected particle emitters, room-local coordinates.\n");
+    out.push_str("pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[\n");
+    for emitter in &package.particle_emitters {
+        let _ = writeln!(
+            out,
+            "    ParticleEmitterRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, max_particles: {}, spawn_rate_q8: {}, lifetime_frames: {}, start_size: {}, end_size: {}, start_color: [{}, {}, {}], end_color: [{}, {}, {}], blend_mode: {}, base_velocity_q4: [{}, {}, {}], random_velocity_q4: [{}, {}, {}], acceleration_q4: [{}, {}, {}], spawn_radius: {}, flags: {} }},",
+            emitter.room,
+            emitter.x,
+            emitter.y,
+            emitter.z,
+            emitter.max_particles,
+            emitter.spawn_rate_q8,
+            emitter.lifetime_frames,
+            emitter.start_size,
+            emitter.end_size,
+            emitter.start_color[0],
+            emitter.start_color[1],
+            emitter.start_color[2],
+            emitter.end_color[0],
+            emitter.end_color[1],
+            emitter.end_color[2],
+            emitter.blend_mode,
+            emitter.base_velocity_q4[0],
+            emitter.base_velocity_q4[1],
+            emitter.base_velocity_q4[2],
+            emitter.random_velocity_q4[0],
+            emitter.random_velocity_q4[1],
+            emitter.random_velocity_q4[2],
+            emitter.acceleration_q4[0],
+            emitter.acceleration_q4[1],
+            emitter.acceleration_q4[2],
+            emitter.spawn_radius,
+            emitter.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Cooked Character resources — gameplay metadata layered on top of MODELS.\n");
     out.push_str("pub static CHARACTERS: &[LevelCharacterRecord] = &[\n");
     for character in &package.characters {
@@ -3028,6 +3065,7 @@ use psx_level::{
     ModelFrameBoundsIndex,
     ModelIndex,
     ModelSocketIndex,
+    ParticleEmitterRecord,
     PlayerControllerRecord,
     PlayerSpawnRecord,
     PointLightRecord,

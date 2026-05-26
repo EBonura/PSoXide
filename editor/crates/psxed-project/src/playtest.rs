@@ -37,7 +37,8 @@ use psx_engine::{
 };
 use psx_level::{
     box_prop_flags, character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags,
-    model_clip_flags, room_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
+    model_clip_flags, particle_emitter_flags, room_flags, sky_flags, visibility_cell_flags,
+    visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
@@ -47,9 +48,9 @@ use crate::world_cook::{
 };
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
-    NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, UiNodeId, UiNodeKind,
-    UiValueBinding, WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT,
-    MAX_ROOM_BYTES,
+    NodeKind, ParticleEmitterSettings, ProjectDocument, PsxBlendMode, ResourceData, ResourceId,
+    SceneNode, UiNodeId, UiNodeKind, UiValueBinding, WorldGrid, WorldStreamingSettings,
+    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -587,6 +588,7 @@ pub fn build_package(
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
     let mut lights: Vec<PlaytestLight> = Vec::new();
+    let mut particle_emitters: Vec<PlaytestParticleEmitter> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
     let runtime_model_clips = collect_runtime_model_clip_requirements(project, scene);
     let mut model_for_resource: HashMap<ResourceId, u16> = HashMap::new();
@@ -959,6 +961,18 @@ pub fn build_package(
                         .warn("Portal markers define runtime-room seams; not emitted as entities");
                 }
             }
+            NodeKind::ParticleEmitter { settings } => {
+                if !push_particle_emitter(
+                    node.name.as_str(),
+                    room_index,
+                    raw_pos,
+                    settings,
+                    &mut particle_emitters,
+                    &mut report,
+                ) {
+                    return (None, report);
+                }
+            }
             NodeKind::Node
             | NodeKind::Node3D
             | NodeKind::World { .. }
@@ -1216,6 +1230,7 @@ pub fn build_package(
             weapons,
             equipment,
             lights,
+            particle_emitters,
             spawn,
             characters,
             player_controller,
@@ -3283,6 +3298,60 @@ fn push_point_light(
         color,
     });
     true
+}
+
+fn push_particle_emitter(
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    settings: &ParticleEmitterSettings,
+    particle_emitters: &mut Vec<PlaytestParticleEmitter>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    if !settings.enabled {
+        return true;
+    }
+    if settings.max_particles == 0 {
+        report.warn(format!(
+            "Particle Emitter '{node_name}' has max_particles=0 -- skipped"
+        ));
+        return true;
+    }
+    if settings.lifetime_frames == 0 {
+        report.warn(format!(
+            "Particle Emitter '{node_name}' has lifetime_frames=0 -- skipped"
+        ));
+        return true;
+    }
+    particle_emitters.push(PlaytestParticleEmitter {
+        room: room_index,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        max_particles: settings.max_particles,
+        spawn_rate_q8: settings.spawn_rate_q8,
+        lifetime_frames: settings.lifetime_frames,
+        start_size: settings.start_size,
+        end_size: settings.end_size,
+        start_color: settings.start_color,
+        end_color: settings.end_color,
+        blend_mode: particle_blend_mode_code(settings.blend_mode),
+        base_velocity_q4: settings.base_velocity_q4,
+        random_velocity_q4: settings.random_velocity_q4,
+        acceleration_q4: settings.acceleration_q4,
+        spawn_radius: settings.spawn_radius,
+        flags: particle_emitter_flags::ENABLED,
+    });
+    true
+}
+
+const fn particle_blend_mode_code(mode: PsxBlendMode) -> u8 {
+    match mode {
+        PsxBlendMode::Opaque | PsxBlendMode::Average => 0,
+        PsxBlendMode::Add => 1,
+        PsxBlendMode::Subtract => 2,
+        PsxBlendMode::AddQuarter => 3,
+    }
 }
 
 fn expand_lights_across_chunks(
