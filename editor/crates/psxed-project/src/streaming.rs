@@ -21,6 +21,7 @@ pub struct SceneResourceUse {
     pub interactables: usize,
     pub image_props: usize,
     pub lights: usize,
+    pub particle_emitters: usize,
     pub triggers: usize,
     pub portals: usize,
 }
@@ -114,6 +115,12 @@ fn collect_resource_use(
             NodeKind::Collider { .. } => use_set.colliders += 1,
             NodeKind::Interactable { .. } => use_set.interactables += 1,
             NodeKind::PointLight { .. } => use_set.lights += 1,
+            NodeKind::ParticleEmitter { settings } => {
+                use_set.particle_emitters += 1;
+                if let Some(texture_id) = settings.texture {
+                    push_unique(texture_id, &mut use_set.textures, &mut textures);
+                }
+            }
             NodeKind::Trigger { .. } => use_set.triggers += 1,
             NodeKind::Portal { .. } => use_set.portals += 1,
             _ => {}
@@ -195,7 +202,9 @@ fn push_unique(id: ResourceId, out: &mut Vec<ResourceId>, seen: &mut HashSet<Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CharacterResource, MaterialResource, NodeKind, ResourceData};
+    use crate::{
+        CharacterResource, MaterialResource, NodeKind, ParticleEmitterSettings, ResourceData,
+    };
 
     #[test]
     fn budget_for_rect_counts_only_requested_area() {
@@ -225,6 +234,12 @@ mod tests {
         let material = project.add_resource(
             "mat",
             ResourceData::Material(MaterialResource::opaque(Some(texture))),
+        );
+        let particle_texture = project.add_resource(
+            "particle_mask",
+            ResourceData::Texture {
+                psxt_path: "particle_mask.psxt".to_string(),
+            },
         );
         let model = project.add_resource(
             "model",
@@ -258,6 +273,16 @@ mod tests {
                 grid: WorldGrid::stone_room(2, 2, 1024, Some(material), None),
             },
         );
+        scene.add_node(
+            room,
+            "Emitter",
+            NodeKind::ParticleEmitter {
+                settings: ParticleEmitterSettings {
+                    texture: Some(particle_texture),
+                    ..ParticleEmitterSettings::default()
+                },
+            },
+        );
         let entity = scene.add_node(room, "Entity", NodeKind::Entity);
         scene.add_node(
             entity,
@@ -282,10 +307,13 @@ mod tests {
         let use_set = collect_scene_resource_use(&project);
 
         assert_eq!(use_set.materials, vec![material]);
-        assert_eq!(use_set.textures, vec![texture]);
+        assert!(use_set.textures.contains(&texture));
+        assert!(use_set.textures.contains(&particle_texture));
+        assert_eq!(use_set.textures.len(), 2);
         assert_eq!(use_set.models, vec![model]);
         assert_eq!(use_set.characters, vec![character]);
         assert_eq!(use_set.model_instances, 1);
         assert_eq!(use_set.character_controllers, 1);
+        assert_eq!(use_set.particle_emitters, 1);
     }
 }

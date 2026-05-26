@@ -43,8 +43,8 @@ use psxed_project::{
     ColliderShape, EditorCameraMode, EditorCameraState, EditorVisibilityState, FarVistaSettings,
     GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
-    MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
-    PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
+    MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ParticleEmitterSettings,
+    ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
     RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings,
     UiNodeId, UiNodeKind, UiRect, UiValueBinding, WorldCameraSettings, WorldCullingSettings,
     WorldGrid, WorldGridBudget, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
@@ -1119,6 +1119,8 @@ pub enum EntityBoundKind {
     /// separately so a wide-radius light doesn't intercept
     /// every click in the room.
     PointLight,
+    /// `ParticleEmitter`.
+    ParticleEmitter,
     /// `Trigger`.
     Trigger,
     /// `Portal`.
@@ -2186,12 +2188,26 @@ enum PlaceKind {
     BoxProp,
     /// `PointLight` with default color / intensity / radius.
     PointLightMarker,
+    /// Fixed-budget point-projected sprite particle emitter.
+    ParticleEmitter,
     /// `Portal` marker. Runtime cooking snaps it to the nearest
     /// cardinal sector edge and treats that edge as an open seam.
     Portal,
 }
 
 impl PlaceKind {
+    const ALL: [Self; 9] = [
+        Self::PlayerSpawn,
+        Self::SpawnMarker,
+        Self::ModelInstance,
+        Self::Character,
+        Self::ImageProp,
+        Self::BoxProp,
+        Self::PointLightMarker,
+        Self::ParticleEmitter,
+        Self::Portal,
+    ];
+
     const fn label(self) -> &'static str {
         match self {
             Self::PlayerSpawn => "Player Spawn",
@@ -2201,6 +2217,7 @@ impl PlaceKind {
             Self::ImageProp => "Image Prop",
             Self::BoxProp => "Box Prop",
             Self::PointLightMarker => "Point Light",
+            Self::ParticleEmitter => "Particle Emitter",
             Self::Portal => "Portal",
         }
     }
@@ -2213,6 +2230,7 @@ impl PlaceKind {
             Self::ImageProp => icons::PALETTE,
             Self::BoxProp => icons::BOX,
             Self::PointLightMarker => icons::SUN,
+            Self::ParticleEmitter => icons::FOCUS,
             Self::Portal => icons::WAYPOINT,
         }
     }
@@ -8231,6 +8249,16 @@ impl EditorWorkspace {
         })
     }
 
+    fn find_duplicate_particle_emitter(
+        &self,
+        room_id: NodeId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(node.kind, NodeKind::ParticleEmitter { .. })
+        })
+    }
+
     fn find_duplicate_portal(&self, room_id: NodeId, translation: [f32; 3]) -> Option<NodeId> {
         self.find_duplicate_room_child(room_id, translation, |_, node| {
             matches!(node.kind, NodeKind::Portal { .. })
@@ -8513,6 +8541,7 @@ impl EditorWorkspace {
                             self.clear_primitive_selection_state();
                             self.status = format!("Placed Prop at {sx},{sz}");
                             self.mark_dirty();
+                            self.return_to_select_after_place();
                             return;
                         }
                         Err(message) => {
@@ -8552,6 +8581,7 @@ impl EditorWorkspace {
                             format!("Placed Character at {sx},{sz}")
                         };
                         self.mark_dirty();
+                        self.return_to_select_after_place();
                         return;
                     }
                     Err(message) => {
@@ -8627,6 +8657,21 @@ impl EditorWorkspace {
                         },
                     )
                 }
+                PlaceKind::ParticleEmitter => {
+                    translation[1] = hit_world[1] as f32 / sector_size;
+                    if let Some(existing) =
+                        self.find_duplicate_particle_emitter(room_id, translation)
+                    {
+                        self.reject_duplicate_placement(existing, "Particle Emitter");
+                        return;
+                    }
+                    (
+                        "Particle Emitter".to_string(),
+                        NodeKind::ParticleEmitter {
+                            settings: ParticleEmitterSettings::default(),
+                        },
+                    )
+                }
                 PlaceKind::Portal => return,
             };
             self.push_undo();
@@ -8642,6 +8687,7 @@ impl EditorWorkspace {
             self.clear_primitive_selection_state();
             self.status = format!("Placed {} at {sx},{sz}", kind.label());
             self.mark_dirty();
+            self.return_to_select_after_place();
             return;
         }
 
@@ -8833,6 +8879,7 @@ impl EditorWorkspace {
             direction_label(dir)
         );
         self.mark_dirty();
+        self.return_to_select_after_place();
     }
 
     /// Material id currently applied to `face`, or `None` if the
@@ -10024,6 +10071,13 @@ impl EditorWorkspace {
             (ViewTool::PaintCeiling, None),
             (ViewTool::Erase, None),
             (ViewTool::Place, Some(PlaceKind::PlayerSpawn)),
+            (ViewTool::Place, Some(PlaceKind::SpawnMarker)),
+            (ViewTool::Place, Some(PlaceKind::ModelInstance)),
+            (ViewTool::Place, Some(PlaceKind::Character)),
+            (ViewTool::Place, Some(PlaceKind::ImageProp)),
+            (ViewTool::Place, Some(PlaceKind::BoxProp)),
+            (ViewTool::Place, Some(PlaceKind::PointLightMarker)),
+            (ViewTool::Place, Some(PlaceKind::ParticleEmitter)),
             (ViewTool::Place, Some(PlaceKind::Portal)),
         ];
         const SELECT_ONLY: &[(ViewTool, Option<PlaceKind>)] = &[(ViewTool::Select, None)];
@@ -10038,10 +10092,8 @@ impl EditorWorkspace {
     }
 
     fn active_tool_cycle_value(&self) -> (ViewTool, Option<PlaceKind>) {
-        if self.active_tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
-            (ViewTool::Place, Some(PlaceKind::Portal))
-        } else if self.active_tool == ViewTool::Place {
-            (ViewTool::Place, Some(PlaceKind::PlayerSpawn))
+        if self.active_tool == ViewTool::Place {
+            (ViewTool::Place, Some(self.place_kind))
         } else {
             (self.active_tool, None)
         }
@@ -10061,12 +10113,19 @@ impl EditorWorkspace {
             self.clear_primitive_selection_state();
             self.hovered_primitive = None;
         }
-        self.status = if tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
-            "Tool: Portal".to_string()
+        self.status = if tool == ViewTool::Place {
+            format!("Tool: {}", self.place_kind.label())
         } else {
             format!("Tool: {}", tool.label())
         };
         if changed {
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
+    }
+
+    fn return_to_select_after_place(&mut self) {
+        if self.active_tool == ViewTool::Place {
+            self.active_tool = ViewTool::Select;
             self.mark_shortcut_group_changed(ShortcutGroup::Tool);
         }
     }
@@ -11814,6 +11873,7 @@ impl EditorWorkspace {
                                             ui,
                                             &mut node.kind,
                                             &material_options,
+                                            &texture_options,
                                             &room_options,
                                             &model_options,
                                             &character_options,
@@ -14133,45 +14193,33 @@ impl EditorWorkspace {
     fn draw_tool_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(236.0);
         let room_active = self.active_room_id().is_some();
-        for (tool, place_kind, icon, label) in [
-            (ViewTool::Select, None, ViewTool::Select.icon(), "Select"),
-            (
-                ViewTool::PaintFloor,
-                None,
-                ViewTool::PaintFloor.icon(),
-                "Floor",
-            ),
-            (
-                ViewTool::PaintWall,
-                None,
-                ViewTool::PaintWall.icon(),
-                "Wall",
-            ),
+        for (tool, icon, label) in [
+            (ViewTool::Select, ViewTool::Select.icon(), "Select"),
+            (ViewTool::PaintFloor, ViewTool::PaintFloor.icon(), "Floor"),
+            (ViewTool::PaintWall, ViewTool::PaintWall.icon(), "Wall"),
             (
                 ViewTool::PaintCeiling,
-                None,
                 ViewTool::PaintCeiling.icon(),
                 "Ceiling",
             ),
-            (ViewTool::Erase, None, ViewTool::Erase.icon(), "Erase"),
-            (
-                ViewTool::Place,
-                Some(PlaceKind::PlayerSpawn),
-                ViewTool::Place.icon(),
-                "Place",
-            ),
-            (
-                ViewTool::Place,
-                Some(PlaceKind::Portal),
-                PlaceKind::Portal.icon(),
-                "Portal",
-            ),
+            (ViewTool::Erase, ViewTool::Erase.icon(), "Erase"),
         ] {
             let enabled = room_active || !tool.requires_room_context();
-            let selected = self.active_tool_cycle_value() == (tool, place_kind);
+            let selected = self.active_tool_cycle_value() == (tool, None);
             ui.add_enabled_ui(enabled, |ui| {
                 if toolbar_menu_choice(ui, icons::label(icon, label), selected) {
-                    self.set_active_tool_cycle_value((tool, place_kind));
+                    self.set_active_tool_cycle_value((tool, None));
+                }
+            });
+        }
+
+        ui.separator();
+        ui.label("Add");
+        for kind in PlaceKind::ALL {
+            let selected = self.active_tool_cycle_value() == (ViewTool::Place, Some(kind));
+            ui.add_enabled_ui(room_active, |ui| {
+                if toolbar_menu_choice(ui, icons::label(kind.icon(), kind.label()), selected) {
+                    self.set_active_tool_cycle_value((ViewTool::Place, Some(kind)));
                 }
             });
         }
@@ -14196,8 +14244,7 @@ impl EditorWorkspace {
         match self.active_tool {
             ViewTool::Place if self.place_kind != PlaceKind::Portal => {
                 ui.separator();
-                ui.label("Place kind");
-                self.draw_place_kind_picker(ui);
+                self.draw_active_place_options(ui);
             }
             ViewTool::PaintWall => {
                 ui.separator();
@@ -14346,20 +14393,6 @@ impl EditorWorkspace {
         }
     }
 
-    fn set_place_kind(&mut self, kind: PlaceKind) {
-        if self.place_kind == kind {
-            return;
-        }
-        self.place_kind = kind;
-        if self.place_kind == PlaceKind::Portal {
-            self.clear_sector_selection();
-            self.clear_primitive_selection_state();
-            self.hovered_primitive = None;
-        }
-        self.status = format!("Place kind: {}", self.place_kind.label());
-        self.mark_shortcut_group_changed(ShortcutGroup::Tool);
-    }
-
     fn visibility_group_icon(&self) -> char {
         if self.editor_visibility_has_hidden_items() {
             icons::EYE_OFF
@@ -14431,26 +14464,7 @@ impl EditorWorkspace {
         }
     }
 
-    fn draw_place_kind_picker(&mut self, ui: &mut egui::Ui) {
-        for kind in [
-            PlaceKind::PlayerSpawn,
-            PlaceKind::SpawnMarker,
-            PlaceKind::ModelInstance,
-            PlaceKind::Character,
-            PlaceKind::ImageProp,
-            PlaceKind::BoxProp,
-            PlaceKind::PointLightMarker,
-        ] {
-            if ui
-                .selectable_label(
-                    self.place_kind == kind,
-                    icons::label(kind.icon(), kind.label()),
-                )
-                .clicked()
-            {
-                self.set_place_kind(kind);
-            }
-        }
+    fn draw_active_place_options(&mut self, ui: &mut egui::Ui) {
         match self.place_kind {
             PlaceKind::ModelInstance => {
                 self.draw_place_resource_picker(ui, ResourceFilter::Model, "Model")
@@ -14463,6 +14477,11 @@ impl EditorWorkspace {
             }
             PlaceKind::BoxProp => {
                 self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Material")
+            }
+            PlaceKind::ParticleEmitter => {
+                ui.weak(
+                    "Point-projected sprite emitter. Configure texture and budget after placement.",
+                );
             }
             _ => {}
         }
@@ -18200,7 +18219,7 @@ fn draw_transform_policy_editor(
                 });
             changed
         }
-        NodeKind::PointLight { .. } => {
+        NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } => {
             let mut changed = false;
             egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
                 .default_open(true)
@@ -19074,6 +19093,7 @@ fn node_gizmo_translation(
         (
             NodeKind::Entity
             | NodeKind::PointLight { .. }
+            | NodeKind::ParticleEmitter { .. }
             | NodeKind::ImageProp { .. }
             | NodeKind::BoxProp { .. },
             _,
@@ -19085,6 +19105,7 @@ fn node_gizmo_translation(
     match &node.kind {
         NodeKind::Entity
         | NodeKind::PointLight { .. }
+        | NodeKind::ParticleEmitter { .. }
         | NodeKind::ImageProp { .. }
         | NodeKind::BoxProp { .. } => {
             if steps != 0 {
@@ -19114,6 +19135,7 @@ fn node_gizmo_plane_translation(
     match &node.kind {
         NodeKind::Entity
         | NodeKind::PointLight { .. }
+        | NodeKind::ParticleEmitter { .. }
         | NodeKind::ImageProp { .. }
         | NodeKind::BoxProp { .. } => {
             for axis in plane.axes() {
@@ -19272,6 +19294,7 @@ fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode)
             kind,
             NodeKind::Entity
                 | NodeKind::PointLight { .. }
+                | NodeKind::ParticleEmitter { .. }
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
                 | NodeKind::MeshInstance { .. }
@@ -19528,6 +19551,7 @@ fn draw_node_kind_editor(
     ui: &mut egui::Ui,
     kind: &mut NodeKind,
     material_options: &[(ResourceId, String)],
+    texture_options: &[(ResourceId, String)],
     room_options: &[(NodeId, String)],
     model_options: &[(ResourceId, String, Vec<String>)],
     character_options: &[(ResourceId, String)],
@@ -20263,6 +20287,12 @@ fn draw_node_kind_editor(
                 );
             }
         }
+        NodeKind::ParticleEmitter { settings } => {
+            ui.weak(
+                "Fixed-budget world particle emitter. Runtime projects each particle center and draws one tinted sprite.",
+            );
+            changed |= draw_particle_emitter_settings(ui, settings, texture_options, nav_target);
+        }
         NodeKind::SpawnPoint { player, character } => {
             changed |= ui
                 .checkbox(player, icons::label(icons::MAP_PIN, "Player spawn"))
@@ -20377,6 +20407,143 @@ fn blend_mode_editor(ui: &mut egui::Ui, mode: &mut PsxBlendMode) -> bool {
             changed = true;
         }
     }
+    changed
+}
+
+fn draw_particle_emitter_settings(
+    ui: &mut egui::Ui,
+    settings: &mut ParticleEmitterSettings,
+    texture_options: &[(ResourceId, String)],
+    nav_target: &mut Option<ResourceId>,
+) -> bool {
+    let mut changed = false;
+    changed |= ui.checkbox(&mut settings.enabled, "Enabled").changed();
+    changed |= texture_resource_picker(
+        ui,
+        "Mask Texture",
+        &mut settings.texture,
+        texture_options,
+        nav_target,
+    );
+    ui.label(
+        RichText::new("Use 16x16 greyscale/white masks; particle tint comes from the curve below.")
+            .color(STUDIO_TEXT_WEAK)
+            .small(),
+    );
+    changed |= blend_mode_editor(ui, &mut settings.blend_mode);
+    ui.separator();
+    ui.label(RichText::new("Budget").color(STUDIO_TEXT_WEAK));
+    changed |= drag_u16(ui, "Max Particles", &mut settings.max_particles, 1, 256);
+    ui.horizontal(|ui| {
+        ui.label("Spawn Rate");
+        let mut per_second = settings.spawn_rate_q8 as f32 / 256.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut per_second)
+                    .speed(0.25)
+                    .range(0.0..=120.0)
+                    .suffix(" /s"),
+            )
+            .changed()
+        {
+            settings.spawn_rate_q8 = (per_second.clamp(0.0, 120.0) * 256.0).round() as u16;
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Lifetime");
+        let mut lifetime = i32::from(settings.lifetime_frames);
+        if ui
+            .add(
+                egui::DragValue::new(&mut lifetime)
+                    .speed(1.0)
+                    .range(1..=255)
+                    .suffix(" frames"),
+            )
+            .changed()
+        {
+            settings.lifetime_frames = lifetime.clamp(1, 255) as u8;
+            changed = true;
+        }
+    });
+    changed |= drag_u16(ui, "Spawn Radius", &mut settings.spawn_radius, 0, 8192);
+    ui.separator();
+    ui.label(RichText::new("Size Curve").color(STUDIO_TEXT_WEAK));
+    changed |= drag_u16(ui, "Start Size", &mut settings.start_size, 1, 8192);
+    changed |= drag_u16(ui, "End Size", &mut settings.end_size, 1, 8192);
+    ui.separator();
+    ui.label(RichText::new("Tint Curve").color(STUDIO_TEXT_WEAK));
+    changed |= color_editor(ui, "Start", &mut settings.start_color);
+    changed |= color_editor(ui, "End", &mut settings.end_color);
+    ui.separator();
+    ui.label(RichText::new("Velocity Q4.4").color(STUDIO_TEXT_WEAK));
+    changed |= draw_particle_i16_vec3(ui, "Base", &mut settings.base_velocity_q4, -4096, 4096);
+    changed |= draw_particle_u16_vec3(ui, "Random", &mut settings.random_velocity_q4, 0, 4096);
+    changed |= draw_particle_i16_vec3(
+        ui,
+        "Acceleration",
+        &mut settings.acceleration_q4,
+        -4096,
+        4096,
+    );
+    changed
+}
+
+fn draw_particle_i16_vec3(
+    ui: &mut egui::Ui,
+    label: &str,
+    values: &mut [i16; 3],
+    min: i16,
+    max: i16,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for (axis, value) in ["X", "Y", "Z"].into_iter().zip(values.iter_mut()) {
+            let mut next = i32::from(*value);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut next)
+                        .speed(1.0)
+                        .range(i32::from(min)..=i32::from(max))
+                        .prefix(format!("{axis} ")),
+                )
+                .changed()
+            {
+                *value = next.clamp(i32::from(min), i32::from(max)) as i16;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+fn draw_particle_u16_vec3(
+    ui: &mut egui::Ui,
+    label: &str,
+    values: &mut [u16; 3],
+    min: u16,
+    max: u16,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for (axis, value) in ["X", "Y", "Z"].into_iter().zip(values.iter_mut()) {
+            let mut next = i32::from(*value);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut next)
+                        .speed(1.0)
+                        .range(i32::from(min)..=i32::from(max))
+                        .prefix(format!("{axis} ")),
+                )
+                .changed()
+            {
+                *value = next.clamp(i32::from(min), i32::from(max)) as u16;
+                changed = true;
+            }
+        }
+    });
     changed
 }
 
@@ -20514,6 +20681,7 @@ fn node_lucide_icon(kind: &str, root: bool) -> char {
         "Equipment" => icons::WAYPOINT,
         "Light" => icons::SUN,
         "Point Light" | "PointLight" => icons::SUN,
+        "Particle Emitter" | "ParticleEmitter" => icons::FOCUS,
         "Spawn Point" | "SpawnPoint" => icons::MAP_PIN,
         "Trigger" => icons::SCAN,
         "Audio Source" | "AudioSource" => icons::AUDIO_LINES,
@@ -20547,6 +20715,7 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
         "Equipment" => Color32::from_rgb(210, 190, 104),
         "Light" => Color32::from_rgb(238, 203, 116),
         "Point Light" | "PointLight" => Color32::from_rgb(238, 203, 116),
+        "Particle Emitter" | "ParticleEmitter" => Color32::from_rgb(152, 214, 230),
         "Spawn Point" | "SpawnPoint" => Color32::from_rgb(236, 188, 104),
         "Trigger" => Color32::from_rgb(190, 128, 232),
         "Audio Source" | "AudioSource" => Color32::from_rgb(104, 202, 188),
@@ -26473,7 +26642,7 @@ fn scene_tree_kind_label(kind: &'static str) -> &'static str {
 
 /// Default `(menu label, kind template)` pairs for "Add Child" menus.
 /// Each menu entry uses the label as the new node's display name.
-fn default_addable_kinds() -> [(&'static str, NodeKind); 16] {
+fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
     [
         (
             "Room",
@@ -26549,6 +26718,12 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 16] {
                 color: [255, 240, 200],
                 intensity: 1.0,
                 radius: 4.0,
+            },
+        ),
+        (
+            "Particle Emitter",
+            NodeKind::ParticleEmitter {
+                settings: ParticleEmitterSettings::default(),
             },
         ),
         (
@@ -27070,6 +27245,7 @@ fn node_draw_mode(kind: &NodeKind) -> &'static str {
         NodeKind::Entity => "Entity Host",
         NodeKind::Room { .. } => "Editable Room Sector Grid",
         NodeKind::PointLight { .. } => "Static Light",
+        NodeKind::ParticleEmitter { .. } => "Particle Emitter",
         NodeKind::SpawnPoint { .. } => "Spawn Marker",
         NodeKind::Trigger { .. } => "Trigger Volume",
         NodeKind::AudioSource { .. } => "Audio Marker",
@@ -28173,6 +28349,18 @@ fn draw_scene_viewport(
                     *color,
                     *intensity,
                     *radius,
+                    &mut hits,
+                );
+            }
+            NodeKind::ParticleEmitter { .. } => {
+                draw_simple_marker(
+                    painter,
+                    transform,
+                    node,
+                    selected_nodes.contains(&node.id)
+                        || (selected_nodes.is_empty() && selected == node.id),
+                    "P",
+                    Color32::from_rgb(152, 214, 230),
                     &mut hits,
                 );
             }
@@ -32056,6 +32244,9 @@ fn entity_bound_kind_and_size(
         }
         NodeKind::SpawnPoint { .. } => Some((EntityBoundKind::SpawnPoint, [128.0, 256.0, 128.0])),
         NodeKind::PointLight { .. } => Some((EntityBoundKind::PointLight, [128.0, 128.0, 128.0])),
+        NodeKind::ParticleEmitter { .. } => {
+            Some((EntityBoundKind::ParticleEmitter, [160.0, 160.0, 160.0]))
+        }
         NodeKind::Trigger { .. } => Some((EntityBoundKind::Trigger, [256.0, 256.0, 256.0])),
         NodeKind::Portal { .. } => Some((EntityBoundKind::Portal, [256.0, 256.0, 64.0])),
         NodeKind::AudioSource { .. } => Some((EntityBoundKind::AudioSource, [128.0, 128.0, 128.0])),
@@ -33426,11 +33617,12 @@ fn resource_count_summary(resource_use: &SceneResourceUse) -> String {
 
 fn component_count_summary(resource_use: &SceneResourceUse) -> String {
     format!(
-        "{} renderer, {} controller, {} collider, {} light, {} interactable",
+        "{} renderer, {} controller, {} collider, {} light, {} emitter, {} interactable",
         resource_use.model_instances,
         resource_use.character_controllers,
         resource_use.colliders,
         resource_use.lights,
+        resource_use.particle_emitters,
         resource_use.interactables
     )
 }
@@ -34463,7 +34655,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_group_cycle_includes_place_and_portal_slots() {
+    fn tool_group_cycle_includes_explicit_add_slots() {
         let (mut workspace, room) = workspace_with_populated_grid("tool-group-cycle", 1, 1);
         workspace.replace_node_selection(room);
         workspace.active_tool = ViewTool::Erase;
@@ -34475,7 +34667,21 @@ mod tests {
 
         workspace.cycle_tool_group(false);
         assert_eq!(workspace.active_tool, ViewTool::Place);
-        assert_eq!(workspace.place_kind, PlaceKind::Portal);
+        assert_eq!(workspace.place_kind, PlaceKind::SpawnMarker);
+
+        for expected in [
+            PlaceKind::ModelInstance,
+            PlaceKind::Character,
+            PlaceKind::ImageProp,
+            PlaceKind::BoxProp,
+            PlaceKind::PointLightMarker,
+            PlaceKind::ParticleEmitter,
+            PlaceKind::Portal,
+        ] {
+            workspace.cycle_tool_group(false);
+            assert_eq!(workspace.active_tool, ViewTool::Place);
+            assert_eq!(workspace.place_kind, expected);
+        }
 
         workspace.cycle_tool_group(false);
         assert_eq!(workspace.active_tool, ViewTool::Select);
@@ -34491,14 +34697,12 @@ mod tests {
             test_temp_dir("place-kind-toolbar"),
             ProjectDocument::new("place-kind-toolbar"),
         );
-        workspace.active_tool = ViewTool::Place;
-
-        workspace.set_place_kind(PlaceKind::ImageProp);
+        workspace.set_active_tool_cycle_value((ViewTool::Place, Some(PlaceKind::ImageProp)));
 
         assert_eq!(workspace.place_kind, PlaceKind::ImageProp);
         assert_eq!(workspace.active_tool_group_label(), "Image Prop");
         assert_eq!(workspace.active_tool_group_icon(), icons::PALETTE);
-        assert_eq!(workspace.status, "Place kind: Image Prop");
+        assert_eq!(workspace.status, "Tool: Image Prop");
     }
 
     #[test]
@@ -37804,6 +38008,7 @@ mod tests {
             .node(workspace.selected_node_id())
             .expect("placed image prop is selected");
         assert_eq!(node.name, "Banner Image");
+        assert_eq!(workspace.active_tool, ViewTool::Select);
         assert_eq!(node.transform.translation[1], 384.0 / 1024.0);
         let NodeKind::ImageProp {
             material: Some(actual),
@@ -38015,6 +38220,7 @@ mod tests {
             .expect("placed portal is selected");
         assert!(matches!(node.kind, NodeKind::Portal { .. }));
         assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+        assert_eq!(workspace.active_tool, ViewTool::Select);
         let grid = workspace.room_grid_view(room).unwrap();
         let edge = portal_edge_for_node(grid, node).expect("portal snaps to edge");
         assert_eq!(edge.x, 0);
