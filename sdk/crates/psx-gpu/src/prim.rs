@@ -613,6 +613,70 @@ impl QuadTextured {
     }
 }
 
+/// Textured quad with inline texture-window state. 11 words (tag + 10 data).
+///
+/// This mirrors [`TriTextured`]'s self-contained OT packet shape for
+/// quads: GP0(E2) texture-window state immediately followed by the
+/// GP0(2Ch) textured-quad command. Use it when OT interleaving must
+/// not leak window state across different textured draws.
+#[repr(C, align(4))]
+pub struct QuadTexturedMaterial {
+    /// OT linkage.
+    pub tag: u32,
+    /// GP0(E2) texture-window command.
+    pub tex_window: u32,
+    /// `0x2C000000 | tint` header.
+    pub color_cmd: u32,
+    /// V0 position.
+    pub v0: u32,
+    /// `(u0, v0, clut)`.
+    pub uv0_clut: u32,
+    /// V1 position.
+    pub v1: u32,
+    /// `(u1, v1, tpage)`.
+    pub uv1_tpage: u32,
+    /// V2 position.
+    pub v2: u32,
+    /// `(u2, v2, 0)`.
+    pub uv2: u32,
+    /// V3 position.
+    pub v3: u32,
+    /// `(u3, v3, 0)`.
+    pub uv3: u32,
+}
+
+impl QuadTexturedMaterial {
+    /// Data-word count.
+    pub const WORDS: u8 = 10;
+
+    /// Build a textured quad with self-contained material state.
+    pub const fn with_material(
+        verts: [(i16, i16); 4],
+        uvs: [(u8, u8); 4],
+        material: TextureMaterial,
+    ) -> Self {
+        let (u0, v0) = uvs[0];
+        let (u1, v1) = uvs[1];
+        let (u2, v2) = uvs[2];
+        let (u3, v3) = uvs[3];
+        let clut = material.clut_word();
+        let tpage = material.tpage_word();
+        Self {
+            tag: 0,
+            tex_window: material.texture_window_word(),
+            color_cmd: material.flat_textured_polygon_header(true),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: pack_texcoord(u0, v0, clut),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: pack_texcoord(u1, v1, tpage),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: pack_texcoord(u2, v2, 0),
+            v3: pack_vertex(verts[3].0, verts[3].1),
+            uv3: pack_texcoord(u3, v3, 0),
+        }
+    }
+}
+
 /// Textured sprite (variable size). 5 words (tag + 4 data).
 #[repr(C, align(4))]
 pub struct Sprite {

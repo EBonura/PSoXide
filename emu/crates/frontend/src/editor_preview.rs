@@ -21,12 +21,14 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use emulator_core::gpu::GpuCmdLogEntry;
 use psx_gpu::material::{BlendMode, TextureMaterial};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::QuadFlat;
 use psx_gpu::prim::QuadGouraud;
+use psx_gpu::prim::QuadTexturedMaterial;
 use psx_gpu::prim::TriFlat;
 use psx_gpu::prim::TriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
@@ -60,9 +62,11 @@ const PREVIEW_MODEL_SOURCE_VERTEX_CAP: usize = PREVIEW_MODEL_VERTEX_CAP;
 const PREVIEW_MODEL_FACE_CAP: usize = 2048;
 const PREVIEW_MODEL_PART_CAP: usize = 128;
 const PREVIEW_MODEL_COMMAND_CAP: usize = TRI_CAP;
-const PREVIEW_PARTICLE_DRAW_CAP: u16 = 48;
+const PREVIEW_PARTICLE_DRAW_CAP: usize = 48;
 const PREVIEW_PARTICLE_MIN_SCREEN_SIZE: i16 = 2;
 const PREVIEW_PARTICLE_MAX_SCREEN_SIZE: i16 = 16;
+const PREVIEW_PARTICLE_TEXEL_U: u8 = 64;
+const PREVIEW_PARTICLE_TEXEL_V: u8 = 0;
 /// Cap on placed model-rendering nodes the editor preview will
 /// render in one frame. Excess instances skip silently (the
 /// manifest hasn't filtered them) -- keeps a runaway scene from
@@ -165,6 +169,7 @@ struct PreviewScratch {
     far_vista_quads: [QuadFlat; FAR_VISTA_QUAD_CAP],
     tris: [TriFlat; TRI_CAP],
     tex_tris: [TriTextured; TRI_CAP],
+    particle_quads: [QuadTexturedMaterial; PREVIEW_PARTICLE_DRAW_CAP],
     model_vertices: [psx_engine::ProjectedVertex; PREVIEW_MODEL_VERTEX_CAP],
     model_faces: [psx_engine::TexturedModelRenderFace; PREVIEW_MODEL_FACE_CAP],
     model_parts: [psx_asset::ModelPart; PREVIEW_MODEL_PART_CAP],
@@ -176,6 +181,7 @@ struct PreviewScratch {
     sky_used: usize,
     far_vista_used: usize,
     tex_used: usize,
+    particle_used: usize,
     /// Host-drawn overlay lines for editor affordances. These stay
     /// outside the GP0 command log so the UI can draw fractional,
     /// overlaid strokes that are not limited by PSX integer pixels.
@@ -207,6 +213,11 @@ const EMPTY_TEX_TRI: TriTextured = TriTextured::new(
     0,
     (0x80, 0x80, 0x80),
 );
+const EMPTY_PARTICLE_QUAD: QuadTexturedMaterial = QuadTexturedMaterial::with_material(
+    [(0, 0), (0, 0), (0, 0), (0, 0)],
+    [(0, 0), (0, 0), (0, 0), (0, 0)],
+    TextureMaterial::opaque(0, 0, (0, 0, 0)),
+);
 
 static SCRATCH: OnceLock<Mutex<Box<PreviewScratch>>> = OnceLock::new();
 
@@ -229,6 +240,8 @@ fn new_preview_scratch() -> Box<PreviewScratch> {
             .write([EMPTY_FAR_VISTA_QUAD; FAR_VISTA_QUAD_CAP]);
         std::ptr::addr_of_mut!((*ptr).tris).write([EMPTY_TRI; TRI_CAP]);
         std::ptr::addr_of_mut!((*ptr).tex_tris).write([EMPTY_TEX_TRI; TRI_CAP]);
+        std::ptr::addr_of_mut!((*ptr).particle_quads)
+            .write([EMPTY_PARTICLE_QUAD; PREVIEW_PARTICLE_DRAW_CAP]);
         std::ptr::addr_of_mut!((*ptr).model_vertices)
             .write([psx_engine::ProjectedVertex::new(0, 0, 0); PREVIEW_MODEL_VERTEX_CAP]);
         std::ptr::addr_of_mut!((*ptr).model_faces)
@@ -243,6 +256,7 @@ fn new_preview_scratch() -> Box<PreviewScratch> {
         std::ptr::addr_of_mut!((*ptr).sky_used).write(0);
         std::ptr::addr_of_mut!((*ptr).far_vista_used).write(0);
         std::ptr::addr_of_mut!((*ptr).tex_used).write(0);
+        std::ptr::addr_of_mut!((*ptr).particle_used).write(0);
         std::ptr::addr_of_mut!((*ptr).overlay_lines).write(Vec::new());
         std::ptr::addr_of_mut!((*ptr).clear_packet).write([0; 4]);
         scratch.assume_init()
@@ -317,6 +331,7 @@ pub fn build_phase1_frame(
     scratch.sky_used = 0;
     scratch.far_vista_used = 0;
     scratch.tex_used = 0;
+    scratch.particle_used = 0;
     scratch.overlay_lines.clear();
     scratch.ot.clear();
 
@@ -340,7 +355,7 @@ pub fn build_phase1_frame(
         resolved_far_vista,
         textures,
     );
-    let preview_tick = PREVIEW_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let preview_tick = preview_elapsed_vblanks();
     for &(room_id, grid) in &visible_rooms {
         if scratch.geometry_full() {
             break;
@@ -389,6 +404,7 @@ pub fn build_phase1_frame(
             project,
             room_id,
             grid,
+            textures,
             hidden_scene_nodes,
             selected,
             preview_tick,
@@ -1969,6 +1985,7 @@ fn walk_entities(
     project: &ProjectDocument,
     room_id: NodeId,
     grid: &WorldGrid,
+    textures: &EditorTextures,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
     preview_tick: u32,
@@ -1989,7 +2006,13 @@ fn walk_entities(
         }
         let entity_world = node_room_local_origin(grid, &node.transform);
         if let NodeKind::ParticleEmitter { settings } = &node.kind {
-            push_particle_emitter_preview(settings, entity_world, preview_tick, scratch);
+            push_particle_emitter_preview(
+                settings,
+                entity_world,
+                textures.particle_slot(),
+                preview_tick,
+                scratch,
+            );
         }
         let Some(kind_color) = entity_marker_color(&node.kind) else {
             continue;
@@ -2047,6 +2070,7 @@ fn walk_entities(
 fn push_particle_emitter_preview(
     settings: &psxed_project::ParticleEmitterSettings,
     origin: psx_engine::WorldVertex,
+    particle_slot: MaterialSlot,
     preview_tick: u32,
     scratch: &mut PreviewScratch,
 ) {
@@ -2072,7 +2096,15 @@ fn push_particle_emitter_preview(
     while i < count {
         let seed = preview_particle_seed(origin.x as u32, origin.z as u32, i);
         let age = (preview_tick + (i * lifetime / count)) % lifetime;
-        push_particle_preview_sample(settings, origin, seed, age as i32, lifetime as i32, scratch);
+        push_particle_preview_sample(
+            settings,
+            origin,
+            particle_slot,
+            seed,
+            age as i32,
+            lifetime as i32,
+            scratch,
+        );
         i += 1;
     }
 }
@@ -2080,6 +2112,7 @@ fn push_particle_emitter_preview(
 fn push_particle_preview_sample(
     settings: &psxed_project::ParticleEmitterSettings,
     origin: psx_engine::WorldVertex,
+    particle_slot: MaterialSlot,
     seed: u32,
     age: i32,
     lifetime: i32,
@@ -2136,14 +2169,58 @@ fn push_particle_preview_sample(
         i32::from(PREVIEW_PARTICLE_MAX_SCREEN_SIZE),
     ) as i16;
     let tint = preview_particle_lerp_rgb(settings.start_color, settings.end_color, t_q8);
-    let sx = projected.sx;
-    let sy = projected.sy;
-    let top = synth(sx, sy - half, projected.sz);
-    let right = synth(sx + half, sy, projected.sz);
-    let bottom = synth(sx, sy + half, projected.sz);
-    let left = synth(sx - half, sy, projected.sz);
-    push_tri(scratch, [top, right, bottom], tint);
-    push_tri(scratch, [top, bottom, left], tint);
+    push_particle_preview_quad(
+        projected,
+        half,
+        particle_slot,
+        tint,
+        psx_blend_mode(settings.blend_mode),
+        scratch,
+    );
+}
+
+fn push_particle_preview_quad(
+    center: psx_gte::scene::Projected,
+    half: i16,
+    particle_slot: MaterialSlot,
+    tint: (u8, u8, u8),
+    blend_mode: BlendMode,
+    scratch: &mut PreviewScratch,
+) {
+    if scratch.particle_used >= PREVIEW_PARTICLE_DRAW_CAP {
+        return;
+    }
+    let left = (i32::from(center.sx).saturating_sub(i32::from(half)))
+        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let right = (i32::from(center.sx).saturating_add(i32::from(half)))
+        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let top = (i32::from(center.sy).saturating_sub(i32::from(half)))
+        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let bottom = (i32::from(center.sy).saturating_add(i32::from(half)))
+        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    if left == right || top == bottom {
+        return;
+    }
+    let u0 = PREVIEW_PARTICLE_TEXEL_U;
+    let v0 = PREVIEW_PARTICLE_TEXEL_V;
+    let u1 = u0 + particle_slot.texture_width.saturating_sub(1);
+    let v1 = v0 + particle_slot.texture_height.saturating_sub(1);
+    let material = preview_texture_material(particle_slot, tint, blend_mode);
+    let idx = scratch.particle_used;
+    scratch.particle_quads[idx] = QuadTexturedMaterial::with_material(
+        [(left, top), (right, top), (left, bottom), (right, bottom)],
+        [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
+        material,
+    );
+    scratch.particle_used = idx + 1;
+    let packet_ptr: *mut QuadTexturedMaterial = &mut scratch.particle_quads[idx];
+    unsafe {
+        scratch.ot.insert(
+            room_depth_slot(center.sz as u32),
+            packet_ptr.cast::<u32>(),
+            QuadTexturedMaterial::WORDS,
+        );
+    }
 }
 
 fn preview_particle_axis_position(
@@ -2683,7 +2760,18 @@ fn preview_projected_from_engine(
 /// monotonic ticks rather than wall-clock, and the editor
 /// frame rate fluctuates on host -- so this is "preview
 /// frames", not real-time. Good enough for inspector preview.
-static PREVIEW_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static PREVIEW_START: OnceLock<Instant> = OnceLock::new();
+
+fn preview_elapsed_vblanks() -> u32 {
+    const VBLANKS_PER_SECOND: u128 = 60;
+    let start = PREVIEW_START.get_or_init(Instant::now);
+    let ticks = start
+        .elapsed()
+        .as_micros()
+        .saturating_mul(VBLANKS_PER_SECOND)
+        / 1_000_000;
+    ticks.min(u128::from(u32::MAX)) as u32
+}
 
 /// One placed model the preview pass should render. Resolved
 /// once per call to `walk_model_instances` so the per-instance
