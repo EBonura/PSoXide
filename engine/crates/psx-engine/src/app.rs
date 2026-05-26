@@ -20,13 +20,13 @@
 //!       wait for the next display VBlank, leaving the last framebuffer visible
 //! ```
 //!
-//! Paced rendering intentionally bounds simulation catch-up before a visual
-//! frame. Startup streaming or a heavy update can make the CPU fall behind the
-//! display clock; if the loop drains the entire backlog first, rendering can
-//! starve and the player sees a black viewport. The scheduler therefore runs at
-//! most one visual interval worth of simulation ticks once a visual is due, then
-//! renders the latest state and reports the remaining backlog as missed visual
-//! intervals.
+//! Paced rendering intentionally bounds simulation catch-up before the first
+//! visual frame. Startup streaming or a heavy update can make the CPU fall
+//! behind the display clock; if the loop drains the entire backlog first,
+//! rendering can starve and the player sees a black viewport. After the first
+//! frame is visible, the scheduler allows a much larger catch-up window so
+//! gameplay time can stay tied to elapsed VBlanks even when visual frames are
+//! late.
 //!
 //! This mirrors every `sdk/examples/game-*/src/main.rs` file's
 //! inner loop by eye -- the engine just factors the shared cadence
@@ -175,9 +175,15 @@ fn emit_visual_frame_counters(lateness_vblanks: u16) {
     );
 }
 
+const MAX_STEADY_STATE_SIM_CATCHUP_TICKS: u16 = 12;
+
 #[inline(always)]
-fn max_sim_ticks_before_visual(visual_interval: u16) -> u16 {
-    visual_interval.max(1)
+fn max_sim_ticks_before_visual(visual_interval: u16, visual_frame: VisualFrame) -> u16 {
+    if visual_frame == VisualFrame::ZERO {
+        visual_interval.max(1)
+    } else {
+        MAX_STEADY_STATE_SIM_CATCHUP_TICKS.max(visual_interval.max(1))
+    }
 }
 
 /// Engine entry point. Namespaced as a type (rather than a free
@@ -271,9 +277,8 @@ impl App {
                 }
                 next_simulation_tick = next_simulation_tick.wrapping_add(1);
                 simulation_ticks_this_pass = simulation_ticks_this_pass.saturating_add(1);
-                if due_visual_intervals != 0
-                    && simulation_ticks_this_pass >= max_sim_ticks_before_visual(visual_interval)
-                {
+                let catchup_limit = max_sim_ticks_before_visual(visual_interval, ctx.visual_frame);
+                if due_visual_intervals != 0 && simulation_ticks_this_pass >= catchup_limit {
                     break;
                 }
             }
@@ -341,9 +346,13 @@ mod tests {
 
     #[test]
     fn visual_catchup_budget_tracks_visual_interval() {
-        assert_eq!(max_sim_ticks_before_visual(0), 1);
-        assert_eq!(max_sim_ticks_before_visual(1), 1);
-        assert_eq!(max_sim_ticks_before_visual(2), 2);
-        assert_eq!(max_sim_ticks_before_visual(4), 4);
+        assert_eq!(max_sim_ticks_before_visual(0, VisualFrame::ZERO), 1);
+        assert_eq!(max_sim_ticks_before_visual(1, VisualFrame::ZERO), 1);
+        assert_eq!(max_sim_ticks_before_visual(2, VisualFrame::ZERO), 2);
+        assert_eq!(max_sim_ticks_before_visual(4, VisualFrame::ZERO), 4);
+        assert_eq!(
+            max_sim_ticks_before_visual(2, VisualFrame::from_u32(1)),
+            MAX_STEADY_STATE_SIM_CATCHUP_TICKS
+        );
     }
 }
