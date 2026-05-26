@@ -466,12 +466,12 @@ impl AppState {
         Ok(())
     }
 
-    /// Convenience: look up an entry by its stable ID and launch
-    /// it. The Menu dispatches [`MenuAction::LaunchGame`] with only
-    /// the ID, and we resolve it here so the Menu never needs a
-    /// reference to the full library.
+    /// Convenience: look up an entry by menu launch token and launch
+    /// it. Most tokens are stable library IDs; project builds use
+    /// path-qualified tokens because all authored PSoXide discs share
+    /// the same PSX volume ID.
     pub fn launch_by_id(&mut self, id: &str) -> Result<(), String> {
-        let Some(entry) = self.library.entries.iter().find(|e| e.id == id).cloned() else {
+        let Some(entry) = library_entry_for_launch_id(&self.library.entries, id).cloned() else {
             return Err(format!("no library entry with id={id}"));
         };
         self.launch_entry(&entry)
@@ -729,7 +729,7 @@ impl AppState {
                                 continue;
                             }
                             projects.push(MenuLibraryItem {
-                                id: e.id.clone(),
+                                id: project_build_launch_id(&e.path),
                                 title: metadata.title,
                                 subtitle: metadata.subtitle,
                             });
@@ -766,13 +766,13 @@ impl AppState {
                                 continue;
                             }
                             projects.push(MenuLibraryItem {
-                                id: e.id.clone(),
+                                id: project_build_launch_id(&e.path),
                                 title: metadata.title,
                                 subtitle: metadata.subtitle,
                             });
                         } else {
                             projects.push(MenuLibraryItem {
-                                id: e.id.clone(),
+                                id: project_build_launch_id(&e.path),
                                 title: e.title.clone(),
                                 subtitle: format_subtitle(e),
                             });
@@ -1556,6 +1556,27 @@ fn format_subtitle(e: &LibraryEntry) -> String {
         }
         _ => String::new(),
     }
+}
+
+const PROJECT_LAUNCH_ID_PREFIX: &str = "project-path:";
+
+fn project_build_launch_id(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    format!(
+        "{PROJECT_LAUNCH_ID_PREFIX}{}",
+        canonical.to_string_lossy()
+    )
+}
+
+fn library_entry_for_launch_id<'a>(
+    entries: &'a [LibraryEntry],
+    launch_id: &str,
+) -> Option<&'a LibraryEntry> {
+    if let Some(path) = launch_id.strip_prefix(PROJECT_LAUNCH_ID_PREFIX) {
+        let path = Path::new(path);
+        return entries.iter().find(|entry| paths_equivalent(&entry.path, path));
+    }
+    entries.iter().find(|entry| entry.id == launch_id)
 }
 
 fn is_internal_example_artifact(path: &Path) -> bool {
@@ -2347,6 +2368,55 @@ mod tests {
         let stale_metadata = project_build_menu_metadata(&stale, &root).unwrap();
         assert_eq!(stale_metadata.title, "Demo Two");
         assert!(!stale_metadata.current);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_build_launch_ids_resolve_by_path_when_disc_ids_collide() {
+        let root = frontend_test_temp_dir("project-build-launch-ids");
+        let a_path = root.join("demo4").join("baked").join("demo4.bin");
+        let b_path = root.join("demo10").join("baked").join("demo10.bin");
+        std::fs::create_dir_all(a_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(b_path.parent().unwrap()).unwrap();
+        std::fs::write(&a_path, b"disc a").unwrap();
+        std::fs::write(&b_path, b"disc b").unwrap();
+
+        let entries = vec![
+            LibraryEntry {
+                id: "same-disc-id".to_string(),
+                path: a_path.clone(),
+                kind: GameKind::DiscBin,
+                title: "PSOXIDE".to_string(),
+                region: Region::Unknown,
+                size: 6,
+                mtime: 0,
+                diagnostic: None,
+            },
+            LibraryEntry {
+                id: "same-disc-id".to_string(),
+                path: b_path.clone(),
+                kind: GameKind::DiscBin,
+                title: "PSOXIDE".to_string(),
+                region: Region::Unknown,
+                size: 6,
+                mtime: 0,
+                diagnostic: None,
+            },
+        ];
+
+        assert_eq!(
+            library_entry_for_launch_id(&entries, "same-disc-id")
+                .unwrap()
+                .path,
+            a_path
+        );
+        assert_eq!(
+            library_entry_for_launch_id(&entries, &project_build_launch_id(&b_path))
+                .unwrap()
+                .path,
+            b_path
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

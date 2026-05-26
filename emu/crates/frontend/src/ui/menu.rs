@@ -44,9 +44,9 @@ pub enum MenuAction {
     ToggleFastBoot,
     /// Paint a test pattern into VRAM (dev aid until the GPU renders).
     FillVramTestPattern,
-    /// Launch a game by its stable library ID. The app layer
-    /// looks the entry up in `AppState::library` and rebuilds
-    /// the emulator around it.
+    /// Launch a game by its menu launch token. Retail games use the
+    /// stable library ID; authored project builds use a path-qualified
+    /// token so projects sharing the same PSX volume ID remain distinct.
     LaunchGame(String),
     /// Re-walk the configured library root and refresh
     /// `library.ron`. Surfaced as a "Refresh library" item in
