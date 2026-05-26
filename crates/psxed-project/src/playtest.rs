@@ -47,8 +47,9 @@ use crate::world_cook::{
 };
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
-    NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
-    WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, UiNodeId, UiNodeKind,
+    UiValueBinding, WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT,
+    MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -1177,6 +1178,7 @@ pub fn build_package(
     }
 
     let room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
+    let ui_nodes = cook_ui_nodes(project);
 
     (
         Some(PlaytestPackage {
@@ -1209,6 +1211,7 @@ pub fn build_package(
             model_instances,
             image_props,
             box_props,
+            ui_nodes,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -1233,6 +1236,103 @@ fn active_far_vista_panel_count(
         .unwrap_or(0)
         .min(segments as usize)
         .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
+}
+
+fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
+    let Some(scene) = project.active_ui_scene() else {
+        return Vec::new();
+    };
+    let id_to_index: HashMap<UiNodeId, u16> = scene
+        .nodes()
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id, index.min(u16::MAX as usize) as u16))
+        .collect();
+
+    scene
+        .nodes()
+        .iter()
+        .map(|node| {
+            let parent = node.parent.and_then(|id| id_to_index.get(&id).copied());
+            let (x, y, width, height, color, background, value, max, text) = match &node.kind {
+                UiNodeKind::Canvas { width, height } => (
+                    0,
+                    0,
+                    (*width).max(1),
+                    (*height).max(1),
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    String::new(),
+                ),
+                UiNodeKind::Group { rect } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    String::new(),
+                ),
+                UiNodeKind::Rect { rect, color } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *color,
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    String::new(),
+                ),
+                UiNodeKind::Label { rect, text, color } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *color,
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    text.clone(),
+                ),
+                UiNodeKind::Bar {
+                    rect,
+                    value,
+                    max,
+                    fill,
+                    background,
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *fill,
+                    *background,
+                    *value,
+                    *max,
+                    String::new(),
+                ),
+            };
+            PlaytestUiNode {
+                parent,
+                kind: node.kind.clone(),
+                x,
+                y,
+                width,
+                height,
+                color,
+                background,
+                value,
+                max,
+                text,
+                flags: 0,
+            }
+        })
+        .collect()
 }
 
 fn cook_sky_panorama_texture_asset(
@@ -6695,6 +6795,7 @@ mod tests {
         assert!(manifest
             .contains("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];"));
         assert!(manifest.contains("pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];"));
+        assert!(manifest.contains("pub static UI_NODES: &[LevelUiNodeRecord] = &[];"));
         assert!(manifest.contains("pub static WEAPONS: &[LevelWeaponRecord] = &[];"));
         assert!(manifest.contains("pub static EQUIPMENT: &[EquipmentRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[];"));
@@ -9347,6 +9448,7 @@ mod tests {
         assert!(src
             .contains("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[\n];"));
+        assert!(src.contains("pub static UI_NODES: &[LevelUiNodeRecord] = &[\n];"));
         assert!(src.contains("pub static ENTITIES: &[EntityRecord] = &[\n];"));
         assert!(src.contains("pub static PLAYER_SPAWN"));
     }
