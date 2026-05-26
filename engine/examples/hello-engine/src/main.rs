@@ -105,10 +105,10 @@ impl Scene for Game {
         ot.add_packet(3, bg);
 
         // Foreground: a 24×24 solid quad oscillating horizontally
-        // via `Angle`. `per_frames(N).mul_frame(frame)` is the
+        // via `Angle`. `per_frames(N).mul_tick(tick)` is the
         // canonical way to drive a periodic motion -- no modulo
         // snap-back, no unit mismatch.
-        let phase = Angle::per_frames(OSCILLATION_FRAMES).mul_frame(ctx.sim_tick);
+        let phase = Angle::per_frames(OSCILLATION_FRAMES).mul_tick(ctx.sim_tick);
         let dx = (sincos::sin_q12(phase.sin_q12_arg()) * AMPLITUDE_PX as i32) >> 12;
         let cx = 160 - 12 + dx as i16;
         let cy = 120 - 12 + self.y_offset;

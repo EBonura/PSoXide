@@ -41,6 +41,7 @@ use psx_pad::{poll_port1, PadState};
 use crate::scene::{Ctx, Scene};
 use crate::telemetry;
 use crate::time::EngineClock;
+use crate::{SimTick, VideoHz, VisualFrame};
 
 /// Configuration passed to [`App::run`]. Sensible defaults via
 /// [`Config::default`] so simple games can just write
@@ -82,10 +83,10 @@ pub enum VisualPacing {
 impl Config {
     /// Display cadence in whole frames per second.
     #[inline]
-    pub const fn video_hz(self) -> u16 {
+    pub const fn video_hz(self) -> VideoHz {
         match self.video_mode {
-            VideoMode::Ntsc => 60,
-            VideoMode::Pal => 50,
+            VideoMode::Ntsc => VideoHz::NTSC,
+            VideoMode::Pal => VideoHz::PAL,
         }
     }
 }
@@ -200,8 +201,8 @@ impl App {
         gpu::set_draw_offset(0, 0);
 
         let mut ctx = Ctx {
-            sim_tick: 0,
-            visual_frame: 0,
+            sim_tick: SimTick::ZERO,
+            visual_frame: VisualFrame::ZERO,
             video_hz: config.video_hz(),
             pad: PadState::NONE,
             pad_prev: PadState::NONE,
@@ -237,7 +238,7 @@ impl App {
             // and movement still advance at the display clock.
             while next_simulation_tick <= elapsed_sim_ticks {
                 telemetry::frame_begin(next_simulation_tick);
-                ctx.sim_tick = next_simulation_tick;
+                ctx.sim_tick = SimTick::from_u32(next_simulation_tick);
                 emit_sim_tick_counters(visual_interval);
                 ctx.pad_prev = ctx.pad;
                 ctx.pad = poll_port1();
@@ -290,7 +291,7 @@ impl App {
             ctx.fb.swap();
             telemetry::stage_end(telemetry::stage::PRESENT);
             emit_visual_frame_counters(missed_visual_intervals);
-            ctx.visual_frame = ctx.visual_frame.wrapping_add(1);
+            ctx.visual_frame = ctx.visual_frame.advance();
         }
     }
 }

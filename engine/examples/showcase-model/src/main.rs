@@ -19,7 +19,7 @@ use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 use psx_engine::{
     button, Angle, App, Config, Ctx, CullMode, DepthBand, DepthPolicy, DepthRange,
     JointViewTransform, LocalToWorldScale, Mat3I16, ModelPoseTranslation, OtDepth, OtFrame,
-    PrimitiveArena, ProjectedVertex, Scene, TexturedModelGeometry, TexturedModelRenderFace,
+    PrimitiveArena, ProjectedVertex, Scene, SimTick, TexturedModelGeometry, TexturedModelRenderFace,
     WorldCamera, WorldProjection, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
     WorldVertex,
 };
@@ -188,7 +188,7 @@ struct ModelShowcase {
     current_clip: usize,
     model: Option<Model<'static>>,
     animations: [Option<Animation<'static>>; MAX_CLIPS],
-    clip_origin_vblanks: u32,
+    clip_origin_tick: SimTick,
     camera_yaw: Angle,
     camera_pitch: Angle,
     camera_radius: i32,
@@ -198,7 +198,7 @@ struct ModelShowcase {
 impl Scene for ModelShowcase {
     fn init(&mut self, _ctx: &mut Ctx) {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
-        self.activate_model(0, 0);
+        self.activate_model(0, SimTick::ZERO);
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
@@ -263,8 +263,8 @@ impl Scene for ModelShowcase {
                 self.camera_pitch,
             );
 
-            let clip_tick = ctx.sim_tick.wrapping_sub(self.clip_origin_vblanks);
-            let frame_q12 = animation.phase_at_tick_q12(clip_tick, ctx.video_hz);
+            let clip_tick = ctx.sim_tick.wrapping_sub(self.clip_origin_tick);
+            let frame_q12 = animation.phase_at_tick_q12(clip_tick, ctx.video_hz.as_u16());
             let mut ot = unsafe { OtFrame::begin(&mut OT) };
             let mut triangles = unsafe { PrimitiveArena::new(&mut TEXTURED_TRIS) };
             let mut world = unsafe { WorldRenderPass::new(&mut ot, &mut WORLD_COMMANDS) };
@@ -304,7 +304,7 @@ impl ModelShowcase {
             current_clip: 0,
             model: None,
             animations: [const { None }; MAX_CLIPS],
-            clip_origin_vblanks: 0,
+            clip_origin_tick: SimTick::ZERO,
             camera_yaw: Angle::ZERO,
             camera_pitch: CAMERA_PITCH_START,
             camera_radius: CAMERA_RADIUS_START,
@@ -314,13 +314,13 @@ impl ModelShowcase {
 
     /// Swap to the model at `index`. Re-parses model, re-uploads
     /// texture into the shared VRAM slot, re-parses every clip, and
-    /// resets clip phase to `now_vblanks` so the new clip starts at
+    /// resets clip phase to `now_tick` so the new clip starts at
     /// frame 0.
-    fn activate_model(&mut self, index: usize, now_vblanks: u32) {
+    fn activate_model(&mut self, index: usize, now_tick: SimTick) {
         self.current_model = index;
         let entry = &MODELS[index];
         self.current_clip = SHOWCASE_START_CLIP.min(entry.clips.len().saturating_sub(1));
-        self.clip_origin_vblanks = now_vblanks;
+        self.clip_origin_tick = now_tick;
         self.model = Some(Model::from_bytes(entry.model).expect(entry.label));
         upload_model_texture(entry.texture);
         for slot in self.animations.iter_mut() {
@@ -337,7 +337,7 @@ impl ModelShowcase {
     fn advance_clip(&mut self, ctx: &Ctx, step: usize) {
         let count = MODELS[self.current_model].clips.len().max(1);
         self.current_clip = (self.current_clip + step) % count;
-        self.clip_origin_vblanks = ctx.sim_tick;
+        self.clip_origin_tick = ctx.sim_tick;
     }
 }
 

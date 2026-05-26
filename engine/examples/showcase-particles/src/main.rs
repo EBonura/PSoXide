@@ -82,8 +82,9 @@ impl Scene for ShowcaseParticles {
             self.emitter.1 = self.emitter.1.saturating_add(2).min(SCREEN_H - 28);
         }
 
-        if ctx.sim_tick % 4 == 0 {
-            let angle = ((ctx.sim_tick as u16).wrapping_mul(7)) & 0x0FFF;
+        if ctx.sim_tick.every(4) {
+            let tick = ctx.sim_tick.as_u32();
+            let angle = ((tick as u16).wrapping_mul(7)) & 0x0FFF;
             let x = SCREEN_W / 2 + ((sin_q12(angle) * 84) >> 12) as i16;
             let y = 112 + ((cos_q12(angle.wrapping_mul(2)) * 32) >> 12) as i16;
             let color = auto_color(ctx.sim_tick);
@@ -164,8 +165,8 @@ fn render_particles<const N: usize, const OT_N: usize>(
     written
 }
 
-fn auto_color(frame: u32) -> (u8, u8, u8) {
-    match (frame / 32) & 3 {
+fn auto_color(tick: psx_engine::SimTick) -> (u8, u8, u8) {
+    match (tick.as_u32() / 32) & 3 {
         0 => (96, 180, 255),
         1 => (255, 120, 180),
         2 => (120, 255, 160),

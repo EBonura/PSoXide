@@ -15,6 +15,8 @@
 use psx_gpu::framebuf::FrameBuffer;
 use psx_pad::{button, PadState};
 
+use crate::frames::{SimTick, VideoHz, VisualFrame};
+
 /// Per-frame context passed to [`Scene::update`] and
 /// [`Scene::render`]. The engine owns and updates this between
 /// frames; the scene reads from it and draws through it.
@@ -22,13 +24,13 @@ pub struct Ctx {
     /// Fixed simulation/control tick. Advances once per display
     /// VBlank, including VBlanks where the app runner intentionally
     /// keeps the previous framebuffer visible.
-    pub sim_tick: u32,
+    pub sim_tick: SimTick,
     /// Monotonic visible-frame counter. Advances once per rendered
     /// frame, so it can diverge from `sim_tick` when visuals are paced
     /// below the simulation cadence.
-    pub visual_frame: u32,
+    pub visual_frame: VisualFrame,
     /// Display cadence used for time conversion (`60` NTSC, `50` PAL).
-    pub video_hz: u16,
+    pub video_hz: VideoHz,
     /// Port-1 pad state this frame.
     pub pad: PadState,
     /// Port-1 pad state last frame -- used by [`Ctx::just_pressed`]
@@ -44,13 +46,13 @@ impl Ctx {
     /// Fixed simulation delta as Q12 seconds.
     #[inline]
     pub fn fixed_delta_seconds_q12(&self) -> u32 {
-        (1 << 12) / self.video_hz.max(1) as u32
+        self.video_hz.fixed_delta_seconds_q12()
     }
 
     /// Elapsed simulation time as Q12 seconds.
     #[inline]
     pub fn elapsed_seconds_q12(&self) -> u32 {
-        self.sim_tick.saturating_mul(1 << 12) / self.video_hz.max(1) as u32
+        self.sim_tick.elapsed_seconds_q12(self.video_hz)
     }
 
     /// `true` if `button` is pressed right now (held).

@@ -300,6 +300,18 @@ struct RoomSurfaceMicroProfile;
 
 impl RoomSurfaceMicroProfile {
     #[inline(always)]
+    fn new() -> Self {
+        #[cfg(feature = "room-surface-profile")]
+        {
+            Self::default()
+        }
+        #[cfg(not(feature = "room-surface-profile"))]
+        {
+            Self
+        }
+    }
+
+    #[inline(always)]
     fn cycle() -> u32 {
         #[cfg(feature = "room-surface-profile")]
         {
@@ -2040,7 +2052,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         crate::telemetry::stage_end(crate::telemetry::stage::ROOM_DEPTH_PREP);
     }
 
-    let mut surface_profile = RoomSurfaceMicroProfile::default();
+    let mut surface_profile = RoomSurfaceMicroProfile::new();
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_SURFACE_DRAW);
     for accepted_index in 0..accepted_cell_count {
         let Some(&cell_index) = accepted_cell_indices.get(accepted_index) else {
@@ -2197,7 +2209,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
         crate::telemetry::stage_end(crate::telemetry::stage::ROOM_DEPTH_PREP);
     }
 
-    let mut surface_profile = RoomSurfaceMicroProfile::default();
+    let mut surface_profile = RoomSurfaceMicroProfile::new();
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_SURFACE_DRAW);
     for accepted_index in 0..accepted_cell_count {
         let Some(&cell_index) = accepted_cell_indices.get(accepted_index) else {
