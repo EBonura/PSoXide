@@ -82,11 +82,11 @@ impl Scene for ShowcaseParticles {
             self.emitter.1 = self.emitter.1.saturating_add(2).min(SCREEN_H - 28);
         }
 
-        if ctx.frame % 4 == 0 {
-            let angle = ((ctx.frame as u16).wrapping_mul(7)) & 0x0FFF;
+        if ctx.sim_tick % 4 == 0 {
+            let angle = ((ctx.sim_tick as u16).wrapping_mul(7)) & 0x0FFF;
             let x = SCREEN_W / 2 + ((sin_q12(angle) * 84) >> 12) as i16;
             let y = 112 + ((cos_q12(angle.wrapping_mul(2)) * 32) >> 12) as i16;
-            let color = auto_color(ctx.frame);
+            let color = auto_color(ctx.sim_tick);
             self.particles
                 .spawn_burst(&mut self.rng, (x, y), color, 5, 22, 42);
         }

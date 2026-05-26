@@ -4,7 +4,7 @@
 //! [`Scene::init`] once at boot, then [`Scene::update`] + [`Scene::render`]
 //! in a loop, passing a [`Ctx`] that carries the live-per-frame
 //! things the scene needs: the current pad state (with edge-detection
-//! helpers), the render-frame and simulation counters, engine time,
+//! helpers), the simulation and visual-frame counters, the display cadence,
 //! and a [`FrameBuffer`] ready to draw into.
 //!
 //! The split into `update` + `render` is cosmetic -- both get the
@@ -15,35 +15,20 @@
 use psx_gpu::framebuf::FrameBuffer;
 use psx_pad::{button, PadState};
 
-use crate::time::EngineTime;
-
 /// Per-frame context passed to [`Scene::update`] and
 /// [`Scene::render`]. The engine owns and updates this between
 /// frames; the scene reads from it and draws through it.
 pub struct Ctx {
-    /// Monotonic visible-frame counter. Both `update` and `render`
-    /// see the same value on a given iteration; the engine
-    /// advances it once per end-of-loop. Wraps at `u32::MAX`
-    /// (≈828 days at 60 fps). Engine APIs that want the type-
-    /// safe variant take [`crate::Frames`]; `ctx.frame` stays a
-    /// raw `u32` so the common `frame % N` / `frame & N` cases
-    /// compose without unwrap ceremony.
-    pub frame: u32,
-    /// Monotonic simulation/control tick counter. In default engine
-    /// pacing this advances with `frame`. In paced visual modes it
-    /// advances once per display VBlank, including VBlanks where the
-    /// engine intentionally keeps the previous framebuffer visible.
-    pub simulation_tick: u32,
-    /// Visual intervals that elapsed before the current render beyond
-    /// the first due interval. `0` means the render is on its chosen
-    /// visual cadence; non-zero values let profiling/reporting code
-    /// identify missed visual deadlines.
-    pub missed_visual_intervals: u16,
-    /// PS1 display-time snapshot for this app iteration. Unlike
-    /// `frame`, this advances by elapsed VBlanks, so heavy render
-    /// paths can keep animation/simulation time independent of
-    /// rendered FPS.
-    pub time: EngineTime,
+    /// Fixed simulation/control tick. Advances once per display
+    /// VBlank, including VBlanks where the app runner intentionally
+    /// keeps the previous framebuffer visible.
+    pub sim_tick: u32,
+    /// Monotonic visible-frame counter. Advances once per rendered
+    /// frame, so it can diverge from `sim_tick` when visuals are paced
+    /// below the simulation cadence.
+    pub visual_frame: u32,
+    /// Display cadence used for time conversion (`60` NTSC, `50` PAL).
+    pub video_hz: u16,
     /// Port-1 pad state this frame.
     pub pad: PadState,
     /// Port-1 pad state last frame -- used by [`Ctx::just_pressed`]
@@ -56,6 +41,18 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// Fixed simulation delta as Q12 seconds.
+    #[inline]
+    pub fn fixed_delta_seconds_q12(&self) -> u32 {
+        (1 << 12) / self.video_hz.max(1) as u32
+    }
+
+    /// Elapsed simulation time as Q12 seconds.
+    #[inline]
+    pub fn elapsed_seconds_q12(&self) -> u32 {
+        self.sim_tick.saturating_mul(1 << 12) / self.video_hz.max(1) as u32
+    }
+
     /// `true` if `button` is pressed right now (held).
     #[inline]
     pub fn is_held(&self, button: u16) -> bool {
@@ -101,10 +98,9 @@ pub trait Scene {
     #[allow(unused_variables)]
     fn init(&mut self, ctx: &mut Ctx) {}
 
-    /// Advance game state for the current display-time snapshot.
-    /// Called before [`render`]. Read pad input from `ctx`, use
-    /// `ctx.time.delta_vblanks()` for elapsed display ticks, and
-    /// write your internal state.
+    /// Advance game state for the current fixed simulation tick.
+    /// Called before [`render`]. Read pad input from `ctx` and use
+    /// `ctx.sim_tick` for deterministic timers and animation phase.
     ///
     /// [`render`]: Scene::render
     fn update(&mut self, ctx: &mut Ctx);
