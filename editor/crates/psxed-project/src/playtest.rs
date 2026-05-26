@@ -6677,10 +6677,10 @@ mod tests {
         assert!(manifest.contains("pub static ROOMS: &[LevelRoomRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];"));
-        assert!(manifest.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 1;"));
+        assert!(manifest.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 0;"));
         assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;"));
         assert!(manifest.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;"));
-        assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 128;"));
+        assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;"));
         assert!(manifest.contains("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[];"));
         assert!(manifest.contains("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[];"));
         assert!(manifest.contains("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[];"));
@@ -9326,7 +9326,7 @@ mod tests {
         let src = render_manifest_source(&package);
         assert!(src.contains("pub static ASSETS: &[LevelAssetRecord] = &[\n];"));
         assert!(src.contains("pub static MATERIALS: &[LevelMaterialRecord] = &[\n];"));
-        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 1;"));
+        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 0;"));
         assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;"));
         assert!(src.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;"));
         assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;"));
