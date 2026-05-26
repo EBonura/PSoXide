@@ -9,8 +9,8 @@
 use psx_gpu::{
     ot::OrderingTable,
     prim::{
-        LineMono, QuadFlat, QuadGouraud, QuadTextured, RectFlat, Sprite, TriFlat, TriGouraud,
-        TriTextured, TriTexturedGouraud,
+        LineMono, QuadFlat, QuadGouraud, QuadTextured, QuadTexturedMaterial, RectFlat, Sprite,
+        TriFlat, TriGouraud, TriTextured, TriTexturedGouraud,
     },
 };
 
@@ -45,6 +45,7 @@ impl_gpu_packet!(
     TriTextured,
     TriTexturedGouraud,
     QuadTextured,
+    QuadTexturedMaterial,
     Sprite,
 );
 
