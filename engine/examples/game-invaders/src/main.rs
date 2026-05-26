@@ -11,7 +11,7 @@
 //! rolled main loop, replace `static mut GAME` with a scene
 //! struct, delegate the per-frame cadence to [`App::run`]. The
 //! per-game `frame` counter that invaders tracked by hand
-//! collapses into [`Ctx::frame`].
+//! collapses into [`Ctx::sim_tick`].
 //!
 //! What stays in `static mut`: the DMA arena (OT + RECTS +
 //! BG_QUAD). Fixed bus addresses the walker can follow.
@@ -24,7 +24,7 @@
 
 extern crate psx_rt;
 
-use psx_engine::{button, sfx, App, Config, Ctx, Scene};
+use psx_engine::{button, sfx, App, Config, Ctx, Scene, SimTick};
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::ot::OrderingTable;
@@ -314,7 +314,8 @@ impl Invaders {
 
     /// Every 40 frames, a random surviving column's lowest alien
     /// drops a bomb (if a free bomb slot exists).
-    fn maybe_drop_enemy_bomb(&mut self, frame: u32) {
+    fn maybe_drop_enemy_bomb(&mut self, tick: SimTick) {
+        let frame = tick.as_u32();
         if (frame % 40) != 0 {
             return;
         }
@@ -527,7 +528,8 @@ impl Scene for Invaders {
 }
 
 impl Invaders {
-    fn build_frame_ot(&mut self, frame: u32) {
+    fn build_frame_ot(&mut self, tick: SimTick) {
+        let frame = tick.as_u32();
         let ot = unsafe { &mut OT };
         let rects = unsafe { &mut RECTS };
         let bg = unsafe { &mut BG_QUAD };
