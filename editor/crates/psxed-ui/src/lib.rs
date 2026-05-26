@@ -29304,12 +29304,39 @@ fn command_shift_shortcut(key: egui::Key) -> egui::KeyboardShortcut {
 
 fn consume_command_shortcut(ctx: &egui::Context, key: egui::Key) -> bool {
     let shortcut = command_shortcut(key);
-    ctx.input_mut(|input| input.consume_shortcut(&shortcut))
+    ctx.input_mut(|input| consume_shortcut_once(input, &shortcut))
 }
 
 fn consume_command_shift_shortcut(ctx: &egui::Context, key: egui::Key) -> bool {
     let shortcut = command_shift_shortcut(key);
-    ctx.input_mut(|input| input.consume_shortcut(&shortcut))
+    ctx.input_mut(|input| consume_shortcut_once(input, &shortcut))
+}
+
+fn consume_shortcut_once(input: &mut egui::InputState, shortcut: &egui::KeyboardShortcut) -> bool {
+    let egui::KeyboardShortcut {
+        modifiers,
+        logical_key,
+    } = *shortcut;
+    let mut triggered = false;
+    input.events.retain(|event| {
+        let is_match = matches!(
+            event,
+            egui::Event::Key {
+                key,
+                modifiers: event_modifiers,
+                pressed: true,
+                ..
+            } if *key == logical_key && event_modifiers.matches_logically(modifiers)
+        );
+        if !is_match {
+            return true;
+        }
+        if matches!(event, egui::Event::Key { repeat: false, .. }) {
+            triggered = true;
+        }
+        false
+    });
+    triggered
 }
 
 fn consume_command_cycle_shortcut(ctx: &egui::Context, key: egui::Key) -> Option<bool> {
@@ -34398,6 +34425,31 @@ mod tests {
         assert!(!bare_shortcuts_available(true, egui::Modifiers::NONE));
         assert!(!bare_shortcuts_available(false, egui::Modifiers::COMMAND));
         assert!(!bare_shortcuts_available(false, egui::Modifiers::CTRL));
+    }
+
+    #[test]
+    fn command_shortcut_consumes_but_ignores_key_repeat() {
+        let mut input = egui::InputState::default();
+        let shortcut = command_shortcut(egui::Key::Z);
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: Some(egui::Key::Z),
+            pressed: true,
+            repeat: true,
+            modifiers: egui::Modifiers::COMMAND,
+        });
+        assert!(!consume_shortcut_once(&mut input, &shortcut));
+        assert!(input.events.is_empty());
+
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: Some(egui::Key::Z),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        });
+        assert!(consume_shortcut_once(&mut input, &shortcut));
+        assert!(input.events.is_empty());
     }
 
     #[test]
