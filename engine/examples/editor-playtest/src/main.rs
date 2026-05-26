@@ -127,7 +127,7 @@ use generated::{
     EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
     MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS,
     ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
-    ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY,
+    ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_NODES,
     VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(all(
@@ -4412,6 +4412,8 @@ impl Scene for Playtest {
 
         if self.character.is_some() {
             draw_player_hud(
+                UI_NODES,
+                self.font.as_ref(),
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );
