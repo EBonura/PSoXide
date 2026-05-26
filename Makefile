@@ -13,7 +13,7 @@
 # with cargo build in their own directory so they can use their own
 # .cargo/config.toml for the mipsel-sony-psx target.
 
-.PHONY: help check test canaries fmt lint clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run \
+.PHONY: help check test canaries fmt lint runtime-numeric-guard clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run \
         test-sdk \
         psxed assets \
         examples hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
@@ -43,6 +43,8 @@ help:
 	@echo "    make canaries     - commercial-game canary tests (Milestones D-K)"
 	@echo "    make fmt          - format all code"
 	@echo "    make lint         - clippy -D warnings"
+	@echo "    make runtime-numeric-guard"
+	@echo "                      - reject floats/wide ints in PS1 runtime code"
 	@echo "    make clean        - cargo clean all workspaces"
 	@echo "    make run          - launch the desktop frontend (no EXE)"
 	@echo "    make parity       - step both emulators and assert bit-identical traces"
@@ -139,6 +141,7 @@ fmt:
 	cd tools/psx-exe-pack && cargo fmt --all
 
 lint:
+	python3 tools/runtime_numeric_guard.py
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd editor && cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd emu && cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -146,6 +149,9 @@ lint:
 	cd sdk && cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd tools/mkisopsx && cargo clippy --all-targets --all-features -- -D warnings
 	cd tools/psx-exe-pack && cargo clippy --all-targets --all-features -- -D warnings
+
+runtime-numeric-guard:
+	python3 tools/runtime_numeric_guard.py
 
 clean:
 	cargo clean
