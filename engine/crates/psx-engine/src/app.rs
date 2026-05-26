@@ -10,13 +10,12 @@
 //!   loop:
 //!     ctx.pad_prev ← ctx.pad           (one-frame input history)
 //!     ctx.pad      ← poll_port1()
-//!     ctx.time     ← elapsed display-time snapshot
 //!     scene.update(&mut ctx)
 //!     if a visual frame is due:
 //!       ctx.fb.clear(config.clear_color)
 //!       scene.render(&mut ctx)
 //!       display-clock wait + draw_sync + fb.swap
-//!       ctx.frame += 1
+//!       ctx.visual_frame += 1
 //!     else:
 //!       wait for the next display VBlank, leaving the last framebuffer visible
 //! ```
@@ -41,7 +40,7 @@ use psx_pad::{poll_port1, PadState};
 
 use crate::scene::{Ctx, Scene};
 use crate::telemetry;
-use crate::time::{EngineClock, EngineTime};
+use crate::time::EngineClock;
 
 /// Configuration passed to [`App::run`]. Sensible defaults via
 /// [`Config::default`] so simple games can just write
@@ -190,7 +189,7 @@ impl App {
     /// ```
     pub fn run<S: Scene>(config: Config, scene: &mut S) -> ! {
         gpu::init(config.video_mode, config.resolution);
-        let clock = EngineClock::new(config.video_hz());
+        let clock = EngineClock::new();
         let fb = FrameBuffer::new(config.screen_w, config.screen_h);
         gpu::set_draw_area(
             0,
@@ -201,10 +200,9 @@ impl App {
         gpu::set_draw_offset(0, 0);
 
         let mut ctx = Ctx {
-            frame: 0,
-            simulation_tick: 0,
-            missed_visual_intervals: 0,
-            time: EngineTime::start(config.video_hz()),
+            sim_tick: 0,
+            visual_frame: 0,
+            video_hz: config.video_hz(),
             pad: PadState::NONE,
             pad_prev: PadState::NONE,
             fb,
@@ -213,51 +211,7 @@ impl App {
         scene.init(&mut ctx);
 
         let visual_interval = config.visual_pacing.interval_vblanks();
-        if visual_interval <= 1 {
-            Self::run_every_vblank(config, scene, clock, ctx);
-        }
         Self::run_paced_visuals(config, scene, clock, ctx, visual_interval);
-    }
-
-    fn run_every_vblank<S: Scene>(
-        config: Config,
-        scene: &mut S,
-        mut clock: EngineClock,
-        mut ctx: Ctx,
-    ) -> ! {
-        loop {
-            telemetry::frame_begin(ctx.frame);
-            ctx.time = clock.begin_frame(ctx.frame, ctx.simulation_tick);
-            ctx.missed_visual_intervals = 0;
-            emit_sim_tick_counters(1);
-            ctx.pad_prev = ctx.pad;
-            ctx.pad = poll_port1();
-
-            telemetry::stage_begin(telemetry::stage::UPDATE);
-            scene.update(&mut ctx);
-            telemetry::stage_end(telemetry::stage::UPDATE);
-
-            telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
-            ctx.fb.clear(
-                config.clear_color.0,
-                config.clear_color.1,
-                config.clear_color.2,
-            );
-            telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
-
-            telemetry::stage_begin(telemetry::stage::RENDER);
-            scene.render(&mut ctx);
-            telemetry::stage_end(telemetry::stage::RENDER);
-
-            telemetry::stage_begin(telemetry::stage::PRESENT);
-            clock.wait_next_vblank();
-            gpu::draw_sync();
-            ctx.fb.swap();
-            telemetry::stage_end(telemetry::stage::PRESENT);
-            emit_visual_frame_counters(ctx.time.delta_vblanks().saturating_sub(1));
-            ctx.frame = ctx.frame.wrapping_add(1);
-            ctx.simulation_tick = ctx.frame;
-        }
     }
 
     fn run_paced_visuals<S: Scene>(
@@ -271,8 +225,8 @@ impl App {
         let mut next_simulation_tick = 0u32;
 
         loop {
-            let elapsed_vblanks = clock.elapsed_vblanks();
-            if next_simulation_tick > elapsed_vblanks {
+            let elapsed_sim_ticks = clock.elapsed_sim_ticks();
+            if next_simulation_tick > elapsed_sim_ticks {
                 clock.wait_next_vblank();
                 continue;
             }
@@ -281,15 +235,9 @@ impl App {
             // Simulation owns real time: drain every elapsed VBlank before
             // drawing. If rendering is too expensive, VIS drops, but controls
             // and movement still advance at the display clock.
-            while next_simulation_tick <= elapsed_vblanks {
+            while next_simulation_tick <= elapsed_sim_ticks {
                 telemetry::frame_begin(next_simulation_tick);
-                ctx.simulation_tick = next_simulation_tick;
-                ctx.time = EngineTime::fixed_simulation_tick(
-                    ctx.frame,
-                    next_simulation_tick,
-                    config.video_hz(),
-                );
-                ctx.missed_visual_intervals = 0;
+                ctx.sim_tick = next_simulation_tick;
                 emit_sim_tick_counters(visual_interval);
                 ctx.pad_prev = ctx.pad;
                 ctx.pad = poll_port1();
@@ -312,16 +260,15 @@ impl App {
                 continue;
             }
 
-            let pending_vblanks = if next_simulation_tick <= elapsed_vblanks {
-                elapsed_vblanks
+            let pending_vblanks = if next_simulation_tick <= elapsed_sim_ticks {
+                elapsed_sim_ticks
                     .wrapping_sub(next_simulation_tick)
                     .saturating_add(1)
             } else {
                 0
             };
-            let pending_visual_intervals =
-                pending_vblanks / visual_interval.max(1) as u32;
-            ctx.missed_visual_intervals = due_visual_intervals
+            let pending_visual_intervals = pending_vblanks / visual_interval.max(1) as u32;
+            let missed_visual_intervals = due_visual_intervals
                 .saturating_sub(1)
                 .saturating_add(pending_visual_intervals.min(u16::MAX as u32) as u16);
 
@@ -342,8 +289,8 @@ impl App {
             gpu::draw_sync();
             ctx.fb.swap();
             telemetry::stage_end(telemetry::stage::PRESENT);
-            emit_visual_frame_counters(ctx.missed_visual_intervals);
-            ctx.frame = ctx.frame.wrapping_add(1);
+            emit_visual_frame_counters(missed_visual_intervals);
+            ctx.visual_frame = ctx.visual_frame.wrapping_add(1);
         }
     }
 }
