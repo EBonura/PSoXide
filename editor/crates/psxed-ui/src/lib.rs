@@ -46,13 +46,13 @@ use psxed_project::{
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
     PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
     RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings,
-    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
-    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
-    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
-    MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE,
-    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
-    MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
+    UiNodeId, UiNodeKind, UiRect, UiValueBinding, WorldCameraSettings, WorldCullingSettings,
+    WorldGrid, WorldGridBudget, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
+    MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
+    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE, MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
+    MAX_WORLD_STREAMING_VISIBLE_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
     MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE, MIN_WORLD_SECTOR_SIZE,
     MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
     MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
@@ -74,6 +74,11 @@ const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
+const UI_RESIZE_HANDLE_SIZE: f32 = 8.0;
+const UI_NODE_MIN_SIZE: i32 = 1;
+const UI_NODE_COORD_MIN: i32 = -4096;
+const UI_NODE_COORD_MAX: i32 = 4096;
+const UI_NODE_SIZE_MAX: i32 = 4096;
 const MAX_IMAGE_PROP_SIZE: u16 = 4096;
 const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psxed_project::BOX_PROP_FACE_COUNT] = [
     [4, 5, 1, 0],
@@ -239,6 +244,7 @@ pub struct EditorWorkspace {
     delete_project_dialog_open: bool,
     delete_project_error: Option<String>,
     selected_node: NodeId,
+    selected_ui_node: UiNodeId,
     selected_nodes: HashSet<NodeId>,
     node_selection_anchor: Option<NodeId>,
     selected_resource: Option<ResourceId>,
@@ -326,6 +332,8 @@ pub struct EditorWorkspace {
     /// presses on an entity bound; updated each frame the
     /// pointer moves while held; cleared on release.
     node_drag: Option<NodeDrag>,
+    /// Active drag/resize stroke in the UI canvas workspace.
+    ui_canvas_drag: Option<UiCanvasDrag>,
     /// What the next paint click would target. Cell variant fires
     /// for floor / ceiling / erase / place; Wall variant fires for
     /// PaintWall. World-cell coords let the preview track cells
@@ -1636,6 +1644,55 @@ impl NodeGizmoHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Viewport3dPointerTarget {
+    PrimitiveGizmo(PrimitiveGizmoAxis),
+    NodeGizmo(NodeGizmoHandle),
+    Entity(EntityBoundHit),
+    Surface {
+        face: FaceRef,
+        hit: [f32; 3],
+        selection: Selection,
+    },
+}
+
+impl Viewport3dPointerTarget {
+    fn primitive_axis(self) -> Option<PrimitiveGizmoAxis> {
+        match self {
+            Self::PrimitiveGizmo(axis) => Some(axis),
+            _ => None,
+        }
+    }
+
+    fn node_handle(self) -> Option<NodeGizmoHandle> {
+        match self {
+            Self::NodeGizmo(handle) => Some(handle),
+            _ => None,
+        }
+    }
+
+    fn entity_hit(self) -> Option<EntityBoundHit> {
+        match self {
+            Self::Entity(hit) => Some(hit),
+            _ => None,
+        }
+    }
+
+    fn face_hit(self) -> Option<(FaceRef, [f32; 3])> {
+        match self {
+            Self::Surface { face, hit, .. } => Some((face, hit)),
+            _ => None,
+        }
+    }
+
+    fn primitive_selection(self) -> Option<Selection> {
+        match self {
+            Self::Surface { selection, .. } => Some(selection),
+            _ => None,
+        }
+    }
+}
+
 fn gizmo_axis_color(axis: PrimitiveGizmoAxis, highlighted: bool) -> Color32 {
     gizmo_highlight_color(axis.color(), highlighted)
 }
@@ -1831,6 +1888,76 @@ struct NodeDrag {
     /// Cached enclosing room id so per-frame updates don't
     /// re-walk the scene tree.
     room: Option<NodeId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiResizeHandle {
+    TopLeft,
+    Top,
+    TopRight,
+    Right,
+    BottomRight,
+    Bottom,
+    BottomLeft,
+    Left,
+}
+
+impl UiResizeHandle {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::Top => "top",
+            Self::TopRight => "top-right",
+            Self::Right => "right",
+            Self::BottomRight => "bottom-right",
+            Self::Bottom => "bottom",
+            Self::BottomLeft => "bottom-left",
+            Self::Left => "left",
+        }
+    }
+
+    const fn cursor(self) -> egui::CursorIcon {
+        match self {
+            Self::TopLeft | Self::BottomRight => egui::CursorIcon::ResizeNwSe,
+            Self::TopRight | Self::BottomLeft => egui::CursorIcon::ResizeNeSw,
+            Self::Top | Self::Bottom => egui::CursorIcon::ResizeVertical,
+            Self::Right | Self::Left => egui::CursorIcon::ResizeHorizontal,
+        }
+    }
+
+    const fn moves_left(self) -> bool {
+        matches!(self, Self::TopLeft | Self::BottomLeft | Self::Left)
+    }
+
+    const fn moves_right(self) -> bool {
+        matches!(self, Self::TopRight | Self::Right | Self::BottomRight)
+    }
+
+    const fn moves_top(self) -> bool {
+        matches!(self, Self::TopLeft | Self::Top | Self::TopRight)
+    }
+
+    const fn moves_bottom(self) -> bool {
+        matches!(self, Self::BottomLeft | Self::Bottom | Self::BottomRight)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiCanvasDragMode {
+    Move,
+    Resize(UiResizeHandle),
+}
+
+/// Active UI-canvas edit stroke. Coordinates are in authored
+/// canvas pixels, so preview scaling does not affect the stored
+/// rect values.
+#[derive(Debug, Clone)]
+struct UiCanvasDrag {
+    node: UiNodeId,
+    mode: UiCanvasDragMode,
+    start_pointer_canvas: [f32; 2],
+    start_rect: UiRect,
+    snapshot_pushed: bool,
 }
 
 /// Resolved physical vertex: every face-corner that currently
@@ -2143,6 +2270,7 @@ enum ResourceFilter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceView {
     Room,
+    Ui,
     Animation,
 }
 
@@ -2150,6 +2278,7 @@ impl WorkspaceView {
     const fn label(self) -> &'static str {
         match self {
             Self::Room => "Room",
+            Self::Ui => "UI",
             Self::Animation => "Animation Viewer",
         }
     }
@@ -2157,6 +2286,7 @@ impl WorkspaceView {
     const fn icon(self) -> char {
         match self {
             Self::Room => icons::GRID,
+            Self::Ui => icons::SQUARE,
             Self::Animation => icons::PLAY,
         }
     }
@@ -2300,6 +2430,10 @@ impl EditorWorkspace {
                 editor_camera.orbit_target,
             )
         };
+        let selected_ui_node = project
+            .active_ui_scene()
+            .map(|scene| scene.root)
+            .unwrap_or(UiNodeId::ROOT);
         Self {
             project,
             project_dir,
@@ -2312,6 +2446,7 @@ impl EditorWorkspace {
             delete_project_dialog_open: false,
             delete_project_error: None,
             selected_node: NodeId::ROOT,
+            selected_ui_node,
             selected_nodes: HashSet::new(),
             node_selection_anchor: None,
             selected_resource: None,
@@ -2338,6 +2473,7 @@ impl EditorWorkspace {
             floating_geometry: None,
             hovered_entity_node: None,
             node_drag: None,
+            ui_canvas_drag: None,
             paint_target_preview: None,
             last_paint_stamp: None,
             wall_paint_shape: WallPaintShape::Cardinal,
@@ -4284,6 +4420,273 @@ impl EditorWorkspace {
         path.to_string_lossy().into_owned()
     }
 
+    fn draw_ui_workspace_body(&mut self, ui: &mut egui::Ui) {
+        let Some(scene) = self.project.active_ui_scene().cloned() else {
+            ui.centered_and_justified(|ui| {
+                ui.weak("No UI scene");
+            });
+            return;
+        };
+        let (canvas_w, canvas_h) = ui_scene_canvas_size(&scene);
+        let aspect = (canvas_w as f32 / canvas_h.max(1) as f32).max(0.01);
+        let avail = ui.available_size();
+        let container_size = Vec2::new(avail.x.max(1.0), avail.y.max(1.0));
+        let (container, _) = ui.allocate_exact_size(container_size, Sense::hover());
+        let canvas_rect = centered_aspect_rect(container, aspect);
+        let canvas_size = [canvas_w, canvas_h];
+        let response = ui.interact(
+            canvas_rect,
+            ui.id().with("ui_canvas_preview"),
+            Sense::click_and_drag(),
+        );
+        let pointer = response
+            .hover_pos()
+            .or_else(|| response.interact_pointer_pos());
+        let hovered_handle = pointer.and_then(|pos| {
+            ui_scene_resize_handle_hit(&scene, self.selected_ui_node, canvas_rect, canvas_size, pos)
+        });
+        let hovered_node =
+            pointer.and_then(|pos| ui_scene_hit_test(&scene, canvas_rect, canvas_size, pos));
+        if response.hovered() {
+            if let Some(handle) = hovered_handle {
+                ui.output_mut(|output| output.cursor_icon = handle.cursor());
+            } else if hovered_node.is_some() {
+                ui.output_mut(|output| output.cursor_icon = egui::CursorIcon::Grab);
+            }
+        }
+
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let picked_handle = ui_scene_resize_handle_hit(
+                    &scene,
+                    self.selected_ui_node,
+                    canvas_rect,
+                    canvas_size,
+                    pos,
+                );
+                if let Some(handle) = picked_handle {
+                    self.begin_ui_canvas_drag(
+                        self.selected_ui_node,
+                        UiCanvasDragMode::Resize(handle),
+                        canvas_rect,
+                        canvas_size,
+                        pos,
+                    );
+                } else if let Some(id) = ui_scene_hit_test(&scene, canvas_rect, canvas_size, pos) {
+                    self.begin_ui_canvas_drag(
+                        id,
+                        UiCanvasDragMode::Move,
+                        canvas_rect,
+                        canvas_size,
+                        pos,
+                    );
+                }
+            }
+        }
+        if response.dragged_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos().or(response.hover_pos()) {
+                self.update_ui_canvas_drag(canvas_rect, canvas_size, pos);
+            }
+        }
+        if response.clicked_by(egui::PointerButton::Primary) {
+            let picked = response
+                .interact_pointer_pos()
+                .or(response.hover_pos())
+                .and_then(|pos| ui_scene_hit_test(&scene, canvas_rect, canvas_size, pos))
+                .unwrap_or(scene.root);
+            self.select_ui_node(picked);
+        }
+        let primary_down =
+            ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
+        if !primary_down {
+            self.ui_canvas_drag = None;
+        }
+
+        let painter = ui.painter_at(container);
+        painter.rect_filled(container, 0.0, STUDIO_VIEWPORT);
+        painter.rect_filled(canvas_rect, 0.0, Color32::from_rgb(10, 12, 18));
+        painter.rect_stroke(
+            canvas_rect,
+            0.0,
+            Stroke::new(1.0, STUDIO_BORDER),
+            StrokeKind::Inside,
+        );
+        let preview_scene = self.project.active_ui_scene().cloned().unwrap_or(scene);
+        draw_ui_scene_preview(
+            &painter,
+            &preview_scene,
+            canvas_rect,
+            canvas_size,
+            self.selected_ui_node,
+            hovered_handle,
+        );
+
+        let label = format!("{}  {}x{}", preview_scene.name, canvas_w, canvas_h);
+        painter.text(
+            canvas_rect.left_top() + egui::vec2(8.0, 8.0),
+            Align2::LEFT_TOP,
+            label,
+            FontId::monospace(11.0),
+            STUDIO_TEXT_WEAK,
+        );
+    }
+
+    fn select_ui_node(&mut self, id: UiNodeId) {
+        self.selected_ui_node = id;
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+    }
+
+    fn begin_ui_canvas_drag(
+        &mut self,
+        node: UiNodeId,
+        mode: UiCanvasDragMode,
+        canvas: Rect,
+        canvas_size: [u16; 2],
+        pointer: Pos2,
+    ) {
+        let Some(start_pointer_canvas) = ui_screen_to_canvas(pointer, canvas, canvas_size) else {
+            return;
+        };
+        let Some(start_rect) = self
+            .project
+            .active_ui_scene()
+            .and_then(|scene| scene.node(node))
+            .and_then(|node| node.kind.rect())
+        else {
+            self.select_ui_node(node);
+            return;
+        };
+        self.select_ui_node(node);
+        self.ui_canvas_drag = Some(UiCanvasDrag {
+            node,
+            mode,
+            start_pointer_canvas,
+            start_rect,
+            snapshot_pushed: false,
+        });
+        self.status = match mode {
+            UiCanvasDragMode::Move => "Move UI node".to_string(),
+            UiCanvasDragMode::Resize(handle) => format!("Resize UI node from {}", handle.label()),
+        };
+    }
+
+    fn update_ui_canvas_drag(&mut self, canvas: Rect, canvas_size: [u16; 2], pointer: Pos2) {
+        let Some(drag) = self.ui_canvas_drag.clone() else {
+            return;
+        };
+        let Some(pointer_canvas) = ui_screen_to_canvas(pointer, canvas, canvas_size) else {
+            return;
+        };
+        let delta = [
+            (pointer_canvas[0] - drag.start_pointer_canvas[0]).round() as i32,
+            (pointer_canvas[1] - drag.start_pointer_canvas[1]).round() as i32,
+        ];
+        let next_rect = match drag.mode {
+            UiCanvasDragMode::Move => move_ui_rect(drag.start_rect, delta),
+            UiCanvasDragMode::Resize(handle) => resize_ui_rect(drag.start_rect, handle, delta),
+        };
+
+        let current_rect = self
+            .project
+            .active_ui_scene()
+            .and_then(|scene| scene.node(drag.node))
+            .and_then(|node| node.kind.rect());
+        if current_rect == Some(next_rect) {
+            return;
+        }
+        if !drag.snapshot_pushed {
+            self.push_undo();
+            if let Some(active) = self.ui_canvas_drag.as_mut() {
+                active.snapshot_pushed = true;
+            }
+        }
+        if let Some(rect) = self
+            .project
+            .active_ui_scene_mut()
+            .and_then(|scene| scene.node_mut(drag.node))
+            .and_then(|node| node.kind.rect_mut())
+        {
+            *rect = next_rect;
+            self.mark_dirty();
+            self.status = format!(
+                "UI node {} at {},{} {}x{}",
+                drag.node.raw(),
+                next_rect.x,
+                next_rect.y,
+                next_rect.width,
+                next_rect.height
+            );
+        }
+    }
+
+    fn nudge_selected_ui_node(&mut self, dx: i32, dy: i32) -> bool {
+        if dx == 0 && dy == 0 {
+            return false;
+        }
+        let selected = self.selected_ui_node;
+        let Some(rect) = self
+            .project
+            .active_ui_scene()
+            .and_then(|scene| scene.node(selected))
+            .and_then(|node| node.kind.rect())
+        else {
+            return false;
+        };
+        let next = move_ui_rect(rect, [dx, dy]);
+        if next == rect {
+            return false;
+        }
+        self.push_undo();
+        if let Some(rect) = self
+            .project
+            .active_ui_scene_mut()
+            .and_then(|scene| scene.node_mut(selected))
+            .and_then(|node| node.kind.rect_mut())
+        {
+            *rect = next;
+            self.mark_dirty();
+            self.status = format!("Nudged UI node #{}", selected.raw());
+            return true;
+        }
+        false
+    }
+
+    fn delete_selected_ui_node(&mut self) -> bool {
+        let selected = self.selected_ui_node;
+        let Some((root, parent, name)) = self.project.active_ui_scene().and_then(|scene| {
+            let node = scene.node(selected)?;
+            Some((
+                scene.root,
+                node.parent.unwrap_or(scene.root),
+                node.name.clone(),
+            ))
+        }) else {
+            self.status = "No UI node selected".to_string();
+            return false;
+        };
+        if selected == root {
+            self.status = "Canvas cannot be deleted".to_string();
+            return false;
+        }
+
+        self.push_undo();
+        let removed = self
+            .project
+            .active_ui_scene_mut()
+            .is_some_and(|scene| scene.remove_node(selected));
+        if !removed {
+            self.status = "UI node no longer exists".to_string();
+            return false;
+        }
+        self.selected_ui_node = parent;
+        self.ui_canvas_drag = None;
+        self.mark_dirty();
+        self.status = format!("Deleted UI {name}");
+        true
+    }
+
     /// 3D viewport body -- paints the HwRenderer texture into the
     /// central area's working space and turns pointer input into
     /// camera updates. Called from `draw_viewport` when the
@@ -4346,30 +4749,42 @@ impl EditorWorkspace {
                 | ViewTool::Place
         );
         let select_tool = matches!(self.active_tool, ViewTool::Select);
-        let hover_entity_hit = if select_tool {
+        let select_drag_active = self.primitive_drag.is_some()
+            || self.primitive_grid_drag.is_some()
+            || self.primitive_gizmo_drag.is_some()
+            || self.node_gizmo_drag.is_some()
+            || self.node_drag.is_some()
+            || self.viewport_3d_box_select.is_some();
+        let pointer_target = if select_tool && select_drag_active {
+            None
+        } else {
             response
                 .hover_pos()
-                .and_then(|pointer| self.pick_entity_bound(rect, pointer, hover_room))
-        } else {
-            None
+                .or_else(|| response.interact_pointer_pos())
+                .and_then(|pointer| {
+                    self.resolve_viewport_3d_pointer_target(
+                        rect,
+                        pointer,
+                        hover_room,
+                        select_tool && !dnd_active,
+                    )
+                })
         };
+        let hover_entity_hit = pointer_target.and_then(|target| target.entity_hit());
         // Face hover ray-tests every floor / wall / ceiling in the
         // active Room and reports the closest hit. Used by Select
         // for the outline UI, AND by paint tools to anchor their
         // dispatch onto the actual face the user clicked rather
         // than the floor-plane projection (which lies under wall
         // surfaces and gets the wrong cell for back-row clicks).
-        let face_hit = response
-            .hover_pos()
-            .and_then(|pointer| self.pick_face_with_hit(rect, pointer));
-        // Hover-track via the unified primitive selection, but let
-        // entity bounds occlude the grid hover in Select mode. Click
-        // and drag already give entity bounds priority; the hover
-        // affordance should match that hit-testing model.
-        self.hovered_primitive = if self.portal_place_active() || hover_entity_hit.is_some() {
+        let face_hit = pointer_target.and_then(|target| target.face_hit());
+        // Hover-track via the same target resolver used for clicks
+        // and drags, so foreground gizmos/entities consume the
+        // pointer before scene faces behind them can highlight.
+        self.hovered_primitive = if self.portal_place_active() {
             None
         } else {
-            face_hit.map(|(face, hit)| self.pick_primitive_from_hit(face, hit))
+            pointer_target.and_then(|target| target.primitive_selection())
         };
         // Paint preview: world-cell coords let the ghost outline
         // appear over cells outside the current grid, exactly
@@ -4447,30 +4862,26 @@ impl EditorWorkspace {
             if select_tool {
                 if response.drag_started_by(egui::PointerButton::Primary) {
                     if let Some(pointer) = response.interact_pointer_pos() {
-                        let primitive_axis = (self.transform_gizmo_mode
-                            == TransformGizmoMode::Move)
-                            .then(|| self.pick_primitive_gizmo_axis(rect, pointer))
-                            .flatten();
-                        if let Some(axis) = primitive_axis {
-                            self.begin_primitive_gizmo_drag(axis, rect, pointer);
-                        } else if let Some(handle) = self.pick_node_gizmo_handle(rect, pointer) {
-                            self.begin_node_gizmo_handle_drag(handle, rect, pointer);
-                        } else {
-                            let entity_hit =
-                                self.pick_entity_bound(rect, pointer, self.active_room_id());
-                            if let (TransformGizmoMode::Move, Some(hit)) =
-                                (self.transform_gizmo_mode, entity_hit)
+                        match pointer_target {
+                            Some(Viewport3dPointerTarget::PrimitiveGizmo(axis)) => {
+                                self.begin_primitive_gizmo_drag(axis, rect, pointer);
+                            }
+                            Some(Viewport3dPointerTarget::NodeGizmo(handle)) => {
+                                self.begin_node_gizmo_handle_drag(handle, rect, pointer);
+                            }
+                            Some(Viewport3dPointerTarget::Entity(hit))
+                                if self.transform_gizmo_mode == TransformGizmoMode::Move =>
                             {
                                 self.begin_node_drag(hit, rect);
-                            } else {
+                            }
+                            Some(Viewport3dPointerTarget::Entity(_)) => {}
+                            Some(Viewport3dPointerTarget::Surface { .. }) => {
                                 let modifiers = ui.input(|input| input.modifiers);
-                                if self.pick_face_with_hit(rect, pointer).is_some() {
-                                    self.begin_primitive_pointer_drag(rect, pointer, modifiers);
-                                } else {
-                                    self.begin_viewport_3d_box_select(
-                                        pointer, hover_room, modifiers,
-                                    );
-                                }
+                                self.begin_primitive_pointer_drag(rect, pointer, modifiers);
+                            }
+                            None => {
+                                let modifiers = ui.input(|input| input.modifiers);
+                                self.begin_viewport_3d_box_select(pointer, hover_room, modifiers);
                             }
                         }
                     }
@@ -4517,17 +4928,27 @@ impl EditorWorkspace {
                     }
                 }
                 if response.clicked_by(egui::PointerButton::Primary) {
-                    // Entity click takes priority over face click --
-                    // matches the drag flow above.
+                    // Click selection consumes the same topmost
+                    // target as hover and drag start. Gizmo clicks
+                    // are therefore handled by the gizmo path above
+                    // and never fall through to a face behind them.
                     let modifiers = ui.input(|input| input.modifiers);
-                    let entity_hit = response
-                        .interact_pointer_pos()
-                        .and_then(|p| self.pick_entity_bound(rect, p, self.active_room_id()));
-                    if let Some(hit) = entity_hit {
-                        let visible_order = self.scene_node_order();
-                        self.apply_node_selection_modifiers(hit.node, modifiers, &visible_order);
-                    } else {
-                        self.commit_face_selection(modifiers);
+                    match pointer_target {
+                        Some(Viewport3dPointerTarget::Entity(hit)) => {
+                            let visible_order = self.scene_node_order();
+                            self.apply_node_selection_modifiers(
+                                hit.node,
+                                modifiers,
+                                &visible_order,
+                            );
+                        }
+                        Some(Viewport3dPointerTarget::Surface { .. }) | None => {
+                            self.commit_face_selection(modifiers);
+                        }
+                        Some(
+                            Viewport3dPointerTarget::PrimitiveGizmo(_)
+                            | Viewport3dPointerTarget::NodeGizmo(_),
+                        ) => {}
                     }
                 }
             } else {
@@ -4555,22 +4976,8 @@ impl EditorWorkspace {
             }
         }
 
-        let hovered_gizmo = if select_tool && !dnd_active && response.hovered() {
-            response.hover_pos().map(|pointer| {
-                let primitive_axis = (self.transform_gizmo_mode == TransformGizmoMode::Move)
-                    .then(|| self.pick_primitive_gizmo_axis(rect, pointer))
-                    .flatten();
-                let node_handle = if primitive_axis.is_none() {
-                    self.pick_node_gizmo_handle(rect, pointer)
-                } else {
-                    None
-                };
-                (primitive_axis, node_handle)
-            })
-        } else {
-            None
-        };
-        let (hovered_primitive_axis, hovered_node_handle) = hovered_gizmo.unwrap_or((None, None));
+        let hovered_primitive_axis = pointer_target.and_then(|target| target.primitive_axis());
+        let hovered_node_handle = pointer_target.and_then(|target| target.node_handle());
 
         egui::Image::new((viewport_3d.texture, rect.size()))
             .uv(viewport_3d.uv)
@@ -6145,16 +6552,8 @@ impl EditorWorkspace {
                 .min_by(|(a, _), (b, _)| a.total_cmp(b))
                 .map(|(_, axis)| NodeGizmoHandle::Axis(axis));
         }
-        if self.transform_gizmo_mode == TransformGizmoMode::Move {
-            if let Some(plane) = self
-                .node_gizmo_screen_planes(rect)
-                .into_iter()
-                .find(|screen_plane| point_in_polygon_2d(pointer, &screen_plane.corners))
-            {
-                return Some(NodeGizmoHandle::Plane(plane.plane));
-            }
-        }
-        self.node_gizmo_screen_axes(rect)
+        if let Some(handle) = self
+            .node_gizmo_screen_axes(rect)
             .into_iter()
             .filter_map(|screen_axis| {
                 let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
@@ -6164,6 +6563,65 @@ impl EditorWorkspace {
             })
             .min_by(|(a, _), (b, _)| a.total_cmp(b))
             .map(|(_, handle)| handle)
+        {
+            return Some(handle);
+        }
+        if self.transform_gizmo_mode == TransformGizmoMode::Move {
+            return self
+                .node_gizmo_screen_planes(rect)
+                .into_iter()
+                .find(|screen_plane| point_in_polygon_2d(pointer, &screen_plane.corners))
+                .map(|plane| NodeGizmoHandle::Plane(plane.plane));
+        }
+        None
+    }
+
+    fn resolve_viewport_3d_pointer_target(
+        &self,
+        rect: Rect,
+        pointer: Pos2,
+        room_filter: Option<NodeId>,
+        select_pick_enabled: bool,
+    ) -> Option<Viewport3dPointerTarget> {
+        if select_pick_enabled {
+            if self.transform_gizmo_mode == TransformGizmoMode::Move {
+                if let Some(axis) = self.pick_primitive_gizmo_axis(rect, pointer) {
+                    return Some(Viewport3dPointerTarget::PrimitiveGizmo(axis));
+                }
+            }
+            if let Some(handle) = self.pick_node_gizmo_handle(rect, pointer) {
+                return Some(Viewport3dPointerTarget::NodeGizmo(handle));
+            }
+        }
+
+        let surface = self
+            .pick_face_with_hit(rect, pointer)
+            .and_then(|(face, hit)| {
+                let (origin, _) = self.camera_ray_for_pointer(rect, pointer)?;
+                Some((
+                    Viewport3dPointerTarget::Surface {
+                        face,
+                        hit,
+                        selection: self.pick_primitive_from_hit(face, hit),
+                    },
+                    distance3_f32(origin, hit),
+                ))
+            });
+        if !select_pick_enabled {
+            return surface.map(|(target, _)| target);
+        }
+
+        match (self.pick_entity_bound(rect, pointer, room_filter), surface) {
+            (Some(entity), Some((_surface, surface_distance)))
+                if entity.distance <= surface_distance =>
+            {
+                Some(Viewport3dPointerTarget::Entity(entity))
+            }
+            (Some(_), Some((surface, _))) => Some(surface),
+            (Some(entity), None) => Some(Viewport3dPointerTarget::Entity(entity)),
+            (None, Some((surface, _))) => Some(surface),
+            (None, None) => None,
+        }
     }
 
     fn draw_node_gizmo(
@@ -9381,7 +9839,7 @@ impl EditorWorkspace {
         let consume_redo = consume_command_shift_shortcut(ctx, egui::Key::Z);
         let consume_undo = consume_command_shortcut(ctx, egui::Key::Z);
         let focus_taken = ctx.memory(|m| m.focused().is_some());
-        let consume_duplicate = if focus_taken {
+        let consume_duplicate = if focus_taken || self.active_workspace == WorkspaceView::Ui {
             false
         } else {
             consume_command_shortcut(ctx, egui::Key::D)
@@ -9413,6 +9871,7 @@ impl EditorWorkspace {
         }
         if !focus_taken
             && self.floating_geometry.is_none()
+            && self.active_workspace != WorkspaceView::Ui
             && consume_command_shortcut(ctx, egui::Key::A)
         {
             self.select_all_current_scope();
@@ -9426,6 +9885,10 @@ impl EditorWorkspace {
         // don't fight TextEdit content while the user is typing.
         let modifiers = ctx.input(|i| i.modifiers);
         if bare_shortcuts_available(focus_taken, modifiers) {
+            if self.active_workspace == WorkspaceView::Ui {
+                self.handle_ui_workspace_shortcuts(ctx, modifiers);
+                return;
+            }
             let rot = ctx.input_mut(|i| i.key_pressed(egui::Key::R));
             if rot && self.renaming.is_none() {
                 if self.portal_place_active() {
@@ -9474,6 +9937,44 @@ impl EditorWorkspace {
         }
     }
 
+    fn handle_ui_workspace_shortcuts(
+        &mut self,
+        ctx: &egui::Context,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        let step = if modifiers.shift { 8 } else { 1 };
+        let delta = ctx.input_mut(|input| {
+            let mut dx = 0;
+            let mut dy = 0;
+            if input.key_pressed(egui::Key::ArrowLeft) {
+                dx -= step;
+            }
+            if input.key_pressed(egui::Key::ArrowRight) {
+                dx += step;
+            }
+            if input.key_pressed(egui::Key::ArrowUp) {
+                dy -= step;
+            }
+            if input.key_pressed(egui::Key::ArrowDown) {
+                dy += step;
+            }
+            [dx, dy]
+        });
+        if delta != [0, 0] {
+            self.nudge_selected_ui_node(delta[0], delta[1]);
+            return true;
+        }
+
+        let del = ctx.input_mut(|input| {
+            input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
+        });
+        if del {
+            self.delete_selected_ui_node();
+            return true;
+        }
+        false
+    }
+
     fn handle_toolbar_group_shortcuts(&mut self, ctx: &egui::Context) {
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num1) {
             self.cycle_workspace_group(reverse);
@@ -9505,7 +10006,11 @@ impl EditorWorkspace {
     }
 
     fn cycle_workspace_group(&mut self, reverse: bool) {
-        const VALUES: &[WorkspaceView] = &[WorkspaceView::Room, WorkspaceView::Animation];
+        const VALUES: &[WorkspaceView] = &[
+            WorkspaceView::Room,
+            WorkspaceView::Ui,
+            WorkspaceView::Animation,
+        ];
         self.active_workspace = cycle_value(VALUES, self.active_workspace, reverse);
         self.status = format!("Workspace: {}", self.active_workspace.label());
         self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
@@ -10171,6 +10676,10 @@ impl EditorWorkspace {
                 self.active_workspace = WorkspaceView::Room;
                 ui.close_menu();
             }
+            if ui.button("UI Workspace").clicked() {
+                self.active_workspace = WorkspaceView::Ui;
+                ui.close_menu();
+            }
             if ui.button("Animation Viewer").clicked() {
                 self.open_animation_viewer_for_current_selection();
                 ui.close_menu();
@@ -10796,7 +11305,11 @@ impl EditorWorkspace {
             |ui| {
                 ui.set_min_size(Vec2::new(content_width, scene_height));
                 ui.set_max_width(content_width);
-                self.draw_scene_tree_panel(ui);
+                if self.active_workspace == WorkspaceView::Ui {
+                    self.draw_ui_tree_panel(ui);
+                } else {
+                    self.draw_scene_tree_panel(ui);
+                }
             },
         );
         self.draw_scene_filesystem_splitter(ui, content_width, panel_height);
@@ -10945,6 +11458,82 @@ impl EditorWorkspace {
         });
     }
 
+    fn draw_ui_tree_panel(&mut self, ui: &mut egui::Ui) {
+        tool_panel_frame().show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
+            tool_panel_header(ui, icons::SQUARE, "UI", |ui| {
+                ui.menu_button(icons::text(icons::PLUS, 14.0), |ui| {
+                    for (label, kind) in default_addable_ui_kinds() {
+                        if ui.button(label).clicked() {
+                            self.add_ui_child(kind, label);
+                            ui.close_menu();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Add UI node to the selected UI node");
+            });
+            tool_panel_body(ui, |ui| self.draw_ui_tree_panel_body(ui));
+        });
+    }
+
+    fn draw_ui_tree_panel_body(&mut self, ui: &mut egui::Ui) {
+        let Some(scene) = self.project.active_ui_scene() else {
+            ui.weak("No UI scene");
+            return;
+        };
+        let rows = scene.hierarchy_rows();
+        let selected = self.selected_ui_node;
+        let mut clicked = None;
+        let tree_scroll_height = (ui.available_height() - 30.0).max(24.0);
+        egui::ScrollArea::vertical()
+            .id_salt("psxed_ui_tree")
+            .auto_shrink([false, false])
+            .max_height(tree_scroll_height)
+            .show(ui, |ui| {
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        ui.add_space((row.depth as f32) * 14.0);
+                        let icon = ui_node_kind_icon(row.kind);
+                        let label = if row.child_count == 0 {
+                            format!("{}  {}", icon, row.name)
+                        } else {
+                            format!("{}  {} ({})", icon, row.name, row.child_count)
+                        };
+                        if ui.selectable_label(selected == row.id, label).clicked() {
+                            clicked = Some(row.id);
+                        }
+                    });
+                }
+            });
+        if let Some(id) = clicked {
+            self.selected_ui_node = id;
+            self.clear_resource_selection_state();
+            self.clear_primitive_selection_state();
+            self.clear_sector_selection();
+        }
+        ui.horizontal(|ui| {
+            if ui.button(icons::label(icons::FOCUS, "Canvas")).clicked() {
+                if let Some(scene) = self.project.active_ui_scene() {
+                    self.selected_ui_node = scene.root;
+                }
+            }
+            let can_delete = self
+                .project
+                .active_ui_scene()
+                .is_some_and(|scene| self.selected_ui_node != scene.root);
+            if ui
+                .add_enabled(
+                    can_delete,
+                    egui::Button::new(icons::label(icons::TRASH, "Delete")),
+                )
+                .clicked()
+            {
+                self.delete_selected_ui_node();
+            }
+        });
+    }
+
     fn draw_filesystem_panel(&mut self, ui: &mut egui::Ui) {
         tool_panel_frame().show(ui, |ui| {
             ui.set_min_height(ui.available_height());
@@ -11011,6 +11600,74 @@ impl EditorWorkspace {
         );
     }
 
+    fn draw_ui_inspector(&mut self, ui: &mut egui::Ui) {
+        let selected = self.selected_ui_node;
+        let mut changed = false;
+        let Some(scene) = self.project.active_ui_scene_mut() else {
+            ui.weak("No UI scene");
+            return;
+        };
+        if scene.node(selected).is_none() {
+            self.selected_ui_node = scene.root;
+        }
+        let selected = self.selected_ui_node;
+        let Some(node) = scene.node_mut(selected) else {
+            ui.weak("No UI node selected");
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.label(icons::text(ui_node_kind_icon(node.kind.label()), 14.0).color(STUDIO_ACCENT));
+            ui.strong(format!("{} #{}", node.kind.label(), node.id.raw()));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            changed |= ui.text_edit_singleline(&mut node.name).changed();
+        });
+        ui.separator();
+
+        match &mut node.kind {
+            UiNodeKind::Canvas { width, height } => {
+                ui.weak("Root screen-space canvas.");
+                changed |= drag_u16(ui, "Width", width, 1, 4096);
+                changed |= drag_u16(ui, "Height", height, 1, 4096);
+            }
+            UiNodeKind::Group { rect } => {
+                ui.weak("Organizes child UI nodes.");
+                changed |= draw_ui_rect_editor(ui, rect);
+            }
+            UiNodeKind::Rect { rect, color } => {
+                changed |= draw_ui_rect_editor(ui, rect);
+                changed |= color_editor(ui, "Color", color);
+            }
+            UiNodeKind::Label { rect, text, color } => {
+                changed |= draw_ui_rect_editor(ui, rect);
+                ui.horizontal(|ui| {
+                    ui.label("Text");
+                    changed |= ui.text_edit_singleline(text).changed();
+                });
+                changed |= color_editor(ui, "Color", color);
+            }
+            UiNodeKind::Bar {
+                rect,
+                value,
+                max,
+                fill,
+                background,
+            } => {
+                changed |= draw_ui_rect_editor(ui, rect);
+                changed |= draw_ui_value_binding_editor(ui, "Value", value);
+                changed |= draw_ui_value_binding_editor(ui, "Max", max);
+                changed |= color_editor(ui, "Fill", fill);
+                changed |= color_editor(ui, "Background", background);
+            }
+        }
+
+        if changed {
+            self.mark_dirty();
+        }
+    }
+
     fn draw_inspector(&mut self, ctx: &egui::Context) {
         if !self.inspector_open {
             return;
@@ -11061,6 +11718,11 @@ impl EditorWorkspace {
                                         }
                                         return;
                                     }
+
+                                if self.active_workspace == WorkspaceView::Ui {
+                                    self.draw_ui_inspector(ui);
+                                    return;
+                                }
 
                                 if let Some(resource_id) = self.selected_resource {
                                     self.draw_resource_inspector(ui, resource_id);
@@ -13114,6 +13776,11 @@ impl EditorWorkspace {
                             return;
                         }
 
+                        if self.active_workspace == WorkspaceView::Ui {
+                            self.draw_ui_workspace_body(ui);
+                            return;
+                        }
+
                         if viewport_3d.mode == EditorViewport3dMode::Play {
                             self.draw_viewport_3d_play_body(ui, viewport_3d, playtest_status);
                             return;
@@ -13444,7 +14111,11 @@ impl EditorWorkspace {
 
     fn draw_workspace_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(180.0);
-        for view in [WorkspaceView::Room, WorkspaceView::Animation] {
+        for view in [
+            WorkspaceView::Room,
+            WorkspaceView::Ui,
+            WorkspaceView::Animation,
+        ] {
             if toolbar_menu_choice(
                 ui,
                 icons::label(view.icon(), view.label()),
@@ -16047,6 +16718,22 @@ impl EditorWorkspace {
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
         self.status = format!("Added {name}");
+        self.mark_dirty();
+    }
+
+    fn add_ui_child(&mut self, kind: UiNodeKind, name: &str) {
+        self.push_undo();
+        let parent = self.selected_ui_node;
+        let Some(scene) = self.project.active_ui_scene_mut() else {
+            self.status = "No UI scene available".to_string();
+            return;
+        };
+        let id = scene.add_node(parent, name.to_string(), kind);
+        self.selected_ui_node = id;
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.status = format!("Added UI {name}");
         self.mark_dirty();
     }
 
@@ -23159,6 +23846,92 @@ fn drag_u16(ui: &mut egui::Ui, label: &str, value: &mut u16, min: u16, max: u16)
     changed
 }
 
+fn drag_i16(ui: &mut egui::Ui, label: &str, value: &mut i16, min: i16, max: i16) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut v = *value as i64;
+        if ui
+            .add(egui::DragValue::new(&mut v).range(min as i64..=max as i64))
+            .changed()
+        {
+            *value = v.clamp(min as i64, max as i64) as i16;
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn draw_ui_rect_editor(ui: &mut egui::Ui, rect: &mut UiRect) -> bool {
+    let mut changed = false;
+    egui::Grid::new(ui.id().with("ui_rect_grid"))
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            changed |= drag_i16(ui, "X", &mut rect.x, -4096, 4096);
+            changed |= drag_i16(ui, "Y", &mut rect.y, -4096, 4096);
+            ui.end_row();
+            changed |= drag_u16(ui, "W", &mut rect.width, 1, 4096);
+            changed |= drag_u16(ui, "H", &mut rect.height, 1, 4096);
+            ui.end_row();
+        });
+    changed
+}
+
+fn draw_ui_value_binding_editor(
+    ui: &mut egui::Ui,
+    label: &str,
+    binding: &mut UiValueBinding,
+) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_label(label)
+        .selected_text(binding.label())
+        .show_ui(ui, |ui| {
+            for (candidate_label, candidate) in [
+                ("Player Health", UiValueBinding::PlayerHealth),
+                ("Player Health Max", UiValueBinding::PlayerHealthMax),
+                ("Player Stamina", UiValueBinding::PlayerStamina),
+                ("Player Stamina Max", UiValueBinding::PlayerStaminaMax),
+                ("Constant", UiValueBinding::ConstantQ12(4096)),
+            ] {
+                if ui
+                    .selectable_label(
+                        ui_value_binding_same_variant(*binding, candidate),
+                        candidate_label,
+                    )
+                    .clicked()
+                    && !ui_value_binding_same_variant(*binding, candidate)
+                {
+                    *binding = candidate;
+                    changed = true;
+                }
+            }
+        });
+    if let UiValueBinding::ConstantQ12(value) = binding {
+        changed |= drag_i32(ui, "Q12", value, 0, 65536);
+    }
+    changed
+}
+
+fn ui_value_binding_same_variant(a: UiValueBinding, b: UiValueBinding) -> bool {
+    matches!(
+        (a, b),
+        (
+            UiValueBinding::ConstantQ12(_),
+            UiValueBinding::ConstantQ12(_)
+        ) | (UiValueBinding::PlayerHealth, UiValueBinding::PlayerHealth)
+            | (
+                UiValueBinding::PlayerHealthMax,
+                UiValueBinding::PlayerHealthMax
+            )
+            | (UiValueBinding::PlayerStamina, UiValueBinding::PlayerStamina)
+            | (
+                UiValueBinding::PlayerStaminaMax,
+                UiValueBinding::PlayerStaminaMax
+            )
+    )
+}
+
 fn drag_u8(ui: &mut egui::Ui, label: &str, value: &mut u8, min: u8, max: u8) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -25813,6 +26586,324 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 16] {
     ]
 }
 
+/// Default UI node templates for the UI tree "Add" menu.
+fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
+    vec![
+        (
+            "Group",
+            UiNodeKind::Group {
+                rect: UiRect::new(0, 0, 64, 32),
+            },
+        ),
+        (
+            "Rect",
+            UiNodeKind::Rect {
+                rect: UiRect::new(24, 24, 80, 24),
+                color: [32, 36, 48],
+            },
+        ),
+        (
+            "Label",
+            UiNodeKind::Label {
+                rect: UiRect::new(24, 24, 96, 12),
+                text: "Label".to_string(),
+                color: [220, 226, 240],
+            },
+        ),
+        (
+            "Bar",
+            UiNodeKind::Bar {
+                rect: UiRect::new(24, 42, 96, 8),
+                value: UiValueBinding::ConstantQ12(4096),
+                max: UiValueBinding::ConstantQ12(4096),
+                fill: [72, 136, 96],
+                background: [30, 26, 28],
+            },
+        ),
+    ]
+}
+
+fn ui_node_kind_icon(kind: &str) -> char {
+    match kind {
+        "Canvas" => icons::SQUARE,
+        "Group" => icons::LAYERS,
+        "Rect" => icons::SQUARE,
+        "Label" => icons::FILE,
+        "Bar" => icons::BLEND,
+        _ => icons::CIRCLE_DOT,
+    }
+}
+
+fn ui_scene_canvas_size(scene: &psxed_project::UiScene) -> (u16, u16) {
+    scene
+        .node(scene.root)
+        .and_then(|node| match &node.kind {
+            UiNodeKind::Canvas { width, height } => Some(((*width).max(1), (*height).max(1))),
+            _ => None,
+        })
+        .unwrap_or((320, 240))
+}
+
+fn draw_ui_scene_preview(
+    painter: &egui::Painter,
+    scene: &psxed_project::UiScene,
+    canvas: Rect,
+    canvas_size: [u16; 2],
+    selected: UiNodeId,
+    hovered_handle: Option<UiResizeHandle>,
+) {
+    for node in scene.nodes() {
+        match &node.kind {
+            UiNodeKind::Canvas { .. } => {}
+            UiNodeKind::Group { rect } => {
+                let screen = ui_rect_to_screen(*rect, canvas, canvas_size);
+                painter.rect_stroke(
+                    screen,
+                    0.0,
+                    Stroke::new(1.0, Color32::from_rgb(74, 83, 102)),
+                    StrokeKind::Inside,
+                );
+            }
+            UiNodeKind::Rect { rect, color } => {
+                let screen = ui_rect_to_screen(*rect, canvas, canvas_size);
+                painter.rect_filled(screen, 0.0, Color32::from_rgb(color[0], color[1], color[2]));
+            }
+            UiNodeKind::Label { rect, text, color } => {
+                let screen = ui_rect_to_screen(*rect, canvas, canvas_size);
+                let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
+                painter.text(
+                    screen.left_top(),
+                    Align2::LEFT_TOP,
+                    text,
+                    FontId::monospace((8.0 * scale).clamp(8.0, 22.0)),
+                    Color32::from_rgb(color[0], color[1], color[2]),
+                );
+            }
+            UiNodeKind::Bar {
+                rect,
+                value,
+                max,
+                fill,
+                background,
+            } => {
+                let screen = ui_rect_to_screen(*rect, canvas, canvas_size);
+                painter.rect_filled(
+                    screen,
+                    0.0,
+                    Color32::from_rgb(background[0], background[1], background[2]),
+                );
+                let max_q12 = ui_binding_preview_q12(*max).max(1);
+                let value_q12 = ui_binding_preview_q12(*value).clamp(0, max_q12);
+                let fill_w = screen.width() * (value_q12 as f32 / max_q12 as f32);
+                if fill_w > 0.0 {
+                    let fill_rect =
+                        Rect::from_min_size(screen.min, Vec2::new(fill_w, screen.height()));
+                    painter.rect_filled(
+                        fill_rect,
+                        0.0,
+                        Color32::from_rgb(fill[0], fill[1], fill[2]),
+                    );
+                }
+            }
+        }
+        if node.id == selected {
+            let selected_rect = match &node.kind {
+                UiNodeKind::Canvas { .. } => Some(canvas),
+                _ => node
+                    .kind
+                    .rect()
+                    .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size)),
+            };
+            if let Some(rect) = selected_rect {
+                painter.rect_stroke(
+                    rect.expand(2.0),
+                    0.0,
+                    Stroke::new(2.0, STUDIO_ACCENT),
+                    StrokeKind::Outside,
+                );
+                if !matches!(node.kind, UiNodeKind::Canvas { .. }) {
+                    draw_ui_resize_handles(painter, rect, hovered_handle);
+                }
+            }
+        }
+    }
+}
+
+fn draw_ui_resize_handles(painter: &egui::Painter, rect: Rect, hovered: Option<UiResizeHandle>) {
+    for (handle, handle_rect) in ui_resize_handle_rects(rect) {
+        let fill = if Some(handle) == hovered {
+            Color32::from_rgb(235, 242, 248)
+        } else {
+            Color32::from_rgb(18, 22, 30)
+        };
+        painter.rect_filled(handle_rect, 1.0, fill);
+        painter.rect_stroke(
+            handle_rect,
+            1.0,
+            Stroke::new(1.0, STUDIO_ACCENT),
+            StrokeKind::Outside,
+        );
+    }
+}
+
+fn ui_scene_resize_handle_hit(
+    scene: &psxed_project::UiScene,
+    selected: UiNodeId,
+    canvas: Rect,
+    canvas_size: [u16; 2],
+    pos: Pos2,
+) -> Option<UiResizeHandle> {
+    let rect = scene
+        .node(selected)
+        .and_then(|node| node.kind.rect())
+        .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size))?;
+    ui_resize_handle_rects(rect)
+        .into_iter()
+        .find_map(|(handle, handle_rect)| handle_rect.contains(pos).then_some(handle))
+}
+
+fn ui_resize_handle_rects(rect: Rect) -> Vec<(UiResizeHandle, Rect)> {
+    let c = rect.center();
+    let centers = [
+        (UiResizeHandle::TopLeft, rect.left_top()),
+        (UiResizeHandle::Top, Pos2::new(c.x, rect.top())),
+        (UiResizeHandle::TopRight, rect.right_top()),
+        (UiResizeHandle::Right, Pos2::new(rect.right(), c.y)),
+        (UiResizeHandle::BottomRight, rect.right_bottom()),
+        (UiResizeHandle::Bottom, Pos2::new(c.x, rect.bottom())),
+        (UiResizeHandle::BottomLeft, rect.left_bottom()),
+        (UiResizeHandle::Left, Pos2::new(rect.left(), c.y)),
+    ];
+    centers
+        .into_iter()
+        .map(|(handle, center)| {
+            (
+                handle,
+                Rect::from_center_size(center, Vec2::splat(UI_RESIZE_HANDLE_SIZE)),
+            )
+        })
+        .collect()
+}
+
+fn ui_scene_hit_test(
+    scene: &psxed_project::UiScene,
+    canvas: Rect,
+    canvas_size: [u16; 2],
+    pos: Pos2,
+) -> Option<UiNodeId> {
+    scene.nodes().iter().rev().find_map(|node| {
+        let rect = node.kind.rect()?;
+        ui_rect_to_screen(rect, canvas, canvas_size)
+            .contains(pos)
+            .then_some(node.id)
+    })
+}
+
+fn ui_screen_to_canvas(pos: Pos2, canvas: Rect, canvas_size: [u16; 2]) -> Option<[f32; 2]> {
+    if canvas.width() <= f32::EPSILON || canvas.height() <= f32::EPSILON {
+        return None;
+    }
+    Some([
+        (pos.x - canvas.left()) * canvas_size[0].max(1) as f32 / canvas.width(),
+        (pos.y - canvas.top()) * canvas_size[1].max(1) as f32 / canvas.height(),
+    ])
+}
+
+fn ui_rect_to_screen(rect: UiRect, canvas: Rect, canvas_size: [u16; 2]) -> Rect {
+    let scale_x = canvas.width() / canvas_size[0].max(1) as f32;
+    let scale_y = canvas.height() / canvas_size[1].max(1) as f32;
+    Rect::from_min_size(
+        Pos2::new(
+            canvas.left() + rect.x as f32 * scale_x,
+            canvas.top() + rect.y as f32 * scale_y,
+        ),
+        Vec2::new(rect.width as f32 * scale_x, rect.height as f32 * scale_y),
+    )
+}
+
+fn move_ui_rect(rect: UiRect, delta: [i32; 2]) -> UiRect {
+    UiRect {
+        x: clamp_ui_coord(rect.x as i32 + delta[0]) as i16,
+        y: clamp_ui_coord(rect.y as i32 + delta[1]) as i16,
+        width: rect.width.min(UI_NODE_SIZE_MAX as u16).max(1),
+        height: rect.height.min(UI_NODE_SIZE_MAX as u16).max(1),
+    }
+}
+
+fn resize_ui_rect(rect: UiRect, handle: UiResizeHandle, delta: [i32; 2]) -> UiRect {
+    let mut left = rect.x as i32;
+    let mut top = rect.y as i32;
+    let mut right = left + rect.width as i32;
+    let mut bottom = top + rect.height as i32;
+
+    if handle.moves_left() {
+        left += delta[0];
+    }
+    if handle.moves_right() {
+        right += delta[0];
+    }
+    if handle.moves_top() {
+        top += delta[1];
+    }
+    if handle.moves_bottom() {
+        bottom += delta[1];
+    }
+
+    if right - left < UI_NODE_MIN_SIZE {
+        if handle.moves_left() {
+            left = right - UI_NODE_MIN_SIZE;
+        } else {
+            right = left + UI_NODE_MIN_SIZE;
+        }
+    }
+    if bottom - top < UI_NODE_MIN_SIZE {
+        if handle.moves_top() {
+            top = bottom - UI_NODE_MIN_SIZE;
+        } else {
+            bottom = top + UI_NODE_MIN_SIZE;
+        }
+    }
+    if right - left > UI_NODE_SIZE_MAX {
+        if handle.moves_left() {
+            left = right - UI_NODE_SIZE_MAX;
+        } else {
+            right = left + UI_NODE_SIZE_MAX;
+        }
+    }
+    if bottom - top > UI_NODE_SIZE_MAX {
+        if handle.moves_top() {
+            top = bottom - UI_NODE_SIZE_MAX;
+        } else {
+            bottom = top + UI_NODE_SIZE_MAX;
+        }
+    }
+
+    let x = clamp_ui_coord(left);
+    let y = clamp_ui_coord(top);
+    let width = (right - left).clamp(UI_NODE_MIN_SIZE, UI_NODE_SIZE_MAX) as u16;
+    let height = (bottom - top).clamp(UI_NODE_MIN_SIZE, UI_NODE_SIZE_MAX) as u16;
+    UiRect {
+        x: x as i16,
+        y: y as i16,
+        width,
+        height,
+    }
+}
+
+fn clamp_ui_coord(value: i32) -> i32 {
+    value.clamp(UI_NODE_COORD_MIN, UI_NODE_COORD_MAX)
+}
+
+fn ui_binding_preview_q12(binding: UiValueBinding) -> i32 {
+    match binding {
+        UiValueBinding::ConstantQ12(value) => value,
+        UiValueBinding::PlayerHealth => 4096,
+        UiValueBinding::PlayerHealthMax => 4096,
+        UiValueBinding::PlayerStamina => 3072,
+        UiValueBinding::PlayerStaminaMax => 4096,
+    }
+}
+
 fn starter_room_grid(sector_size: i32, material: Option<ResourceId>) -> WorldGrid {
     let mut grid = WorldGrid::empty(3, 3, sector_size);
     for x in 0..3 {
@@ -28325,6 +29416,13 @@ fn distance_i32(a: [i32; 3], b: [i32; 3]) -> i32 {
     (dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt())
         .round()
         .clamp(0.0, i32::MAX as f32) as i32
+}
+
+fn distance3_f32(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt()
 }
 
 fn camera_angles_to_look_at(position: [i32; 3], target: [i32; 3]) -> Option<(u16, u16)> {
@@ -35724,6 +36822,39 @@ mod tests {
     }
 
     #[test]
+    fn viewport_3d_pointer_target_prefers_primitive_gizmo_over_surface() {
+        let mut project = ProjectDocument::new("primitive-gizmo-target-priority");
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-target"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.replace_primitive_selection(Selection::Face(FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Floor,
+        }));
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let z_axis = projected_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Z);
+        let target =
+            workspace.resolve_viewport_3d_pointer_target(viewport, z_axis.end, Some(room), true);
+
+        assert!(
+            matches!(target, Some(Viewport3dPointerTarget::PrimitiveGizmo(_))),
+            "target was {target:?}"
+        );
+        assert!(target
+            .and_then(Viewport3dPointerTarget::primitive_selection)
+            .is_none());
+    }
+
+    #[test]
     fn primitive_gizmo_y_moves_selected_triangle_by_height_quantum() {
         let mut project = ProjectDocument::new("primitive-gizmo-triangle-y");
         let mut grid = WorldGrid::empty(1, 1, 1024);
@@ -37544,6 +38675,31 @@ mod tests {
         assert!(spawn_bound.half_extents[0] > 0.0);
         assert!(spawn_bound.half_extents[1] > 0.0);
         assert!(spawn_bound.half_extents[2] > 0.0);
+    }
+
+    #[test]
+    fn selecting_character_component_uses_parent_entity_bounds() {
+        let mut workspace =
+            EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+        let scene = workspace.project.active_scene();
+        let entity = starter_player_entity(scene);
+        let controller = entity
+            .children
+            .iter()
+            .copied()
+            .find(|id| {
+                scene
+                    .node(*id)
+                    .is_some_and(|node| matches!(node.kind, NodeKind::CharacterController { .. }))
+            })
+            .expect("starter player has a character controller");
+        let entity_bounds = workspace
+            .node_frame_bounds_3d(entity.id)
+            .expect("entity has selectable bounds");
+
+        workspace.replace_node_selection(controller);
+
+        assert_eq!(workspace.selected_bounds_3d(), Some(entity_bounds));
     }
 
     #[test]
