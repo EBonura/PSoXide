@@ -92,7 +92,7 @@ use psx_level::{
     LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness,
     LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
     LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
-    OptionalModelClipIndex, ParticleEmitterRecord, ResidencyManager, RoomIndex,
+    OptionalModelClipIndex, ParticleEmitterRecord, ResidencyManager, RoomIndex, RuntimeDebugMask,
     WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
 };
 #[cfg(feature = "cd-stream-bench")]
@@ -362,12 +362,12 @@ const ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS: i32 = 3;
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-const ROOM_VISIBLE_CELL_WEDGE_NUM: u64 = 3;
+const ROOM_VISIBLE_CELL_WEDGE_NUM: i32 = 3;
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-const ROOM_VISIBLE_CELL_WEDGE_DEN: u64 = 4;
+const ROOM_VISIBLE_CELL_WEDGE_DEN: i32 = 4;
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
@@ -440,18 +440,13 @@ fn room_active_chunk_limit(record: &LevelRoomRecord) -> usize {
     }
 }
 
-fn room_index_debug_mask(index: RoomIndex) -> u64 {
-    let raw = index.to_usize();
-    if raw < u64::BITS as usize {
-        1u64 << raw
-    } else {
-        0
-    }
+fn room_index_debug_mask(index: RoomIndex) -> RuntimeDebugMask {
+    RuntimeDebugMask::from_room(index)
 }
 
-fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: u64) {
-    telemetry::counter(counter_lo, (mask & 0xffff_ffff) as u32);
-    telemetry::counter(counter_hi, (mask >> 32) as u32);
+fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: RuntimeDebugMask) {
+    telemetry::counter(counter_lo, mask.lo());
+    telemetry::counter(counter_hi, mask.hi());
 }
 
 const DEBUG_LOG_LINE_CAP: usize = 256;
@@ -534,22 +529,31 @@ impl DebugLogLine {
         self.push_byte(b')');
     }
 
-    fn push_hex_u64(&mut self, value: u64) {
+    fn push_hex_u32_digits(&mut self, value: u32, pad_to_eight: bool) {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
-        self.push_str("0x");
-        if value == 0 {
+        if value == 0 && !pad_to_eight {
             self.push_byte(b'0');
             return;
         }
         let mut started = false;
-        let mut shift = 60i32;
+        let mut shift = 28i32;
         while shift >= 0 {
             let nibble = ((value >> shift) & 0xF) as usize;
-            if nibble != 0 || started {
+            if nibble != 0 || started || pad_to_eight || shift == 0 {
                 started = true;
                 self.push_byte(DIGITS[nibble]);
             }
             shift -= 4;
+        }
+    }
+
+    fn push_hex_mask(&mut self, mask: RuntimeDebugMask) {
+        self.push_str("0x");
+        if mask.hi() != 0 {
+            self.push_hex_u32_digits(mask.hi(), false);
+            self.push_hex_u32_digits(mask.lo(), true);
+        } else {
+            self.push_hex_u32_digits(mask.lo(), false);
         }
     }
 
@@ -588,12 +592,12 @@ fn debug_log_room_window_after_cross(
     room: RoomIndex,
     visible_count: usize,
     frontier_count: usize,
-    visible_mask: u64,
-    active_mask: u64,
-    drawable_mask: u64,
-    loading_mask: u64,
-    missing_mask: u64,
-    build_failed_mask: u64,
+    visible_mask: RuntimeDebugMask,
+    active_mask: RuntimeDebugMask,
+    drawable_mask: RuntimeDebugMask,
+    loading_mask: RuntimeDebugMask,
+    missing_mask: RuntimeDebugMask,
+    build_failed_mask: RuntimeDebugMask,
     current_render_ready: bool,
     current_collision_ready: bool,
     portals_tested: u16,
@@ -610,17 +614,17 @@ fn debug_log_room_window_after_cross(
     line.push_str(" accepted=");
     line.push_u32(portals_accepted as u32);
     line.push_str(" vis=");
-    line.push_hex_u64(visible_mask);
+    line.push_hex_mask(visible_mask);
     line.push_str(" active=");
-    line.push_hex_u64(active_mask);
+    line.push_hex_mask(active_mask);
     line.push_str(" draw=");
-    line.push_hex_u64(drawable_mask);
+    line.push_hex_mask(drawable_mask);
     line.push_str(" loading=");
-    line.push_hex_u64(loading_mask);
+    line.push_hex_mask(loading_mask);
     line.push_str(" missing=");
-    line.push_hex_u64(missing_mask);
+    line.push_hex_mask(missing_mask);
     line.push_str(" build_fail=");
-    line.push_hex_u64(build_failed_mask);
+    line.push_hex_mask(build_failed_mask);
     line.push_str(" render=");
     line.push_bool(current_render_ready);
     line.push_str(" coll=");
@@ -628,12 +632,8 @@ fn debug_log_room_window_after_cross(
     line.emit();
 }
 
-fn portal_debug_mask_bit(index: usize) -> u64 {
-    if index < u64::BITS as usize {
-        1u64 << index
-    } else {
-        0
-    }
+fn portal_debug_mask_bit(index: usize) -> RuntimeDebugMask {
+    RuntimeDebugMask::from_index(index)
 }
 
 fn portal_debug_decision_name(decision: PortalClipDebugDecision) -> &'static str {
@@ -777,15 +777,15 @@ fn debug_log_portal_visibility_summary(
     line.emit();
 
     let mut line = DebugLogLine::new("portal vis masks visible=");
-    line.push_hex_u64(result.visible_room_mask());
+    line.push_hex_mask(result.visible_room_mask());
     line.push_str(" tested=");
-    line.push_hex_u64(stats.tested_room_mask);
+    line.push_hex_mask(stats.tested_room_mask);
     line.push_str(" accepted=");
-    line.push_hex_u64(stats.accepted_room_mask);
+    line.push_hex_mask(stats.accepted_room_mask);
     line.push_str(" rej_rooms=");
-    line.push_hex_u64(stats.reject_frustum_room_mask);
+    line.push_hex_mask(stats.reject_frustum_room_mask);
     line.push_str(" rej_portals=");
-    line.push_hex_u64(stats.reject_frustum_portal_mask);
+    line.push_hex_mask(stats.reject_frustum_portal_mask);
     line.emit();
 }
 
@@ -797,9 +797,13 @@ fn debug_log_portal_clip_summary_line(
     stats: psx_level::portal_visibility::PortalVisibilityStats,
 ) {
     let portal_bit = portal_debug_mask_bit(portal_index);
-    let tested = portal_bit != 0 && (stats.tested_portal_mask & portal_bit) != 0;
-    let accepted = portal_bit != 0 && (stats.accepted_portal_mask & portal_bit) != 0;
-    let rejected = portal_bit != 0 && (stats.reject_frustum_portal_mask & portal_bit) != 0;
+    let tested = !portal_bit.is_empty() && stats.tested_portal_mask.contains_index(portal_index);
+    let accepted =
+        !portal_bit.is_empty() && stats.accepted_portal_mask.contains_index(portal_index);
+    let rejected = !portal_bit.is_empty()
+        && stats
+            .reject_frustum_portal_mask
+            .contains_index(portal_index);
 
     let mut line = DebugLogLine::new("portal p summary idx=");
     line.push_u32(portal_index.min(u32::MAX as usize) as u32);
@@ -904,9 +908,13 @@ fn debug_log_portal_clip_line(
     stats: psx_level::portal_visibility::PortalVisibilityStats,
 ) {
     let portal_bit = portal_debug_mask_bit(portal_index);
-    let tested = portal_bit != 0 && (stats.tested_portal_mask & portal_bit) != 0;
-    let accepted = portal_bit != 0 && (stats.accepted_portal_mask & portal_bit) != 0;
-    let rejected = portal_bit != 0 && (stats.reject_frustum_portal_mask & portal_bit) != 0;
+    let tested = !portal_bit.is_empty() && stats.tested_portal_mask.contains_index(portal_index);
+    let accepted =
+        !portal_bit.is_empty() && stats.accepted_portal_mask.contains_index(portal_index);
+    let rejected = !portal_bit.is_empty()
+        && stats
+            .reject_frustum_portal_mask
+            .contains_index(portal_index);
     let skip_backlink =
         portal.destination_room == root_room || portal.destination_room == parent.source_room;
 
@@ -1096,8 +1104,8 @@ fn active_room_cache_status_debug_code(status: ActiveRoomCacheStatus) -> u32 {
 fn debug_log_post_cross_render_start(
     room: RoomIndex,
     camera: WorldCamera,
-    visible_mask: u64,
-    active_mask: u64,
+    visible_mask: RuntimeDebugMask,
+    active_mask: RuntimeDebugMask,
     current_collision_ready: bool,
 ) {
     let mut line = DebugLogLine::new("render start room=");
@@ -1109,9 +1117,9 @@ fn debug_log_post_cross_render_start(
         camera.position.z,
     ));
     line.push_str(" vis=");
-    line.push_hex_u64(visible_mask);
+    line.push_hex_mask(visible_mask);
     line.push_str(" active=");
-    line.push_hex_u64(active_mask);
+    line.push_hex_mask(active_mask);
     line.push_str(" coll=");
     line.push_bool(current_collision_ready);
     line.emit();
@@ -1151,8 +1159,8 @@ fn debug_log_post_cross_render_room(slot: usize, active: ActiveRuntimeRoom, draw
 
 fn debug_log_post_cross_render_end(
     room: RoomIndex,
-    active_mask: u64,
-    drawn_mask: u64,
+    active_mask: RuntimeDebugMask,
+    drawn_mask: RuntimeDebugMask,
     primitive_count: usize,
     primitive_remaining: usize,
     world_commands: usize,
@@ -1160,9 +1168,9 @@ fn debug_log_post_cross_render_end(
     let mut line = DebugLogLine::new("render end room=");
     line.push_room(room);
     line.push_str(" active=");
-    line.push_hex_u64(active_mask);
+    line.push_hex_mask(active_mask);
     line.push_str(" drawn=");
-    line.push_hex_u64(drawn_mask);
+    line.push_hex_mask(drawn_mask);
     line.push_str(" prim=");
     line.push_u32(primitive_count.min(u32::MAX as usize) as u32);
     line.push_str(" rem=");
@@ -2910,28 +2918,28 @@ impl<const N: usize> RoomStreamScheduler<N> {
         count
     }
 
-    fn resident_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn resident_room_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut slot = 0usize;
         let limit = self.effective_slot_limit();
         while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Resident {
-                mask |= room_index_debug_mask(meta.room);
+                mask.insert_room(meta.room);
             }
             slot += 1;
         }
         mask
     }
 
-    fn loading_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn loading_room_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut slot = 0usize;
         let limit = self.effective_slot_limit();
         while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Loading {
-                mask |= room_index_debug_mask(meta.room);
+                mask.insert_room(meta.room);
             }
             slot += 1;
         }
@@ -3107,9 +3115,9 @@ struct Playtest {
     /// Global chunk bounds retained for portal diagnostics and streaming.
     portal_room_bounds: [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
     portal_visible_missing_resident: u16,
-    portal_visible_missing_mask: u64,
+    portal_visible_missing_mask: RuntimeDebugMask,
     portal_visible_build_failed: u16,
-    portal_visible_build_failed_mask: u64,
+    portal_visible_build_failed_mask: RuntimeDebugMask,
     portal_stream_priority_current: u16,
     portal_stream_priority_visible: u16,
     portal_stream_priority_frontier: u16,
@@ -3243,9 +3251,9 @@ impl Playtest {
             portal_visibility_camera_global: RoomPoint::ZERO,
             portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
             portal_visible_missing_resident: 0,
-            portal_visible_missing_mask: 0,
+            portal_visible_missing_mask: RuntimeDebugMask::EMPTY,
             portal_visible_build_failed: 0,
-            portal_visible_build_failed_mask: 0,
+            portal_visible_build_failed_mask: RuntimeDebugMask::EMPTY,
             portal_stream_priority_current: 0,
             portal_stream_priority_visible: 0,
             portal_stream_priority_frontier: 0,
@@ -3669,8 +3677,8 @@ impl Scene for Playtest {
                 not(feature = "vis-full-active-chunks")
             )))]
             let room_visibility_fallback_draws = 0u32;
-            let mut room_active_chunk_mask = 0u64;
-            let mut room_drawn_chunk_mask = 0u64;
+            let mut room_active_chunk_mask = RuntimeDebugMask::EMPTY;
+            let mut room_drawn_chunk_mask = RuntimeDebugMask::EMPTY;
             #[cfg(feature = "world-grid-visible")]
             let mut room_visible_cells = 0u32;
             #[cfg(all(
@@ -4384,8 +4392,8 @@ impl Scene for Playtest {
         if post_cross_debug && !post_cross_logged_end {
             debug_log_post_cross_render_end(
                 self.room_index,
-                0,
-                0,
+                RuntimeDebugMask::EMPTY,
+                RuntimeDebugMask::EMPTY,
                 primitive_packets.len(),
                 primitive_packets.remaining(),
                 world.command_len(),
@@ -5184,9 +5192,9 @@ impl Playtest {
         );
         self.active_room_candidates = self.portal_visibility.stats.portals_tested.min(u16::MAX);
         self.portal_visible_missing_resident = 0;
-        self.portal_visible_missing_mask = 0;
+        self.portal_visible_missing_mask = RuntimeDebugMask::EMPTY;
         self.portal_visible_build_failed = 0;
-        self.portal_visible_build_failed_mask = 0;
+        self.portal_visible_build_failed_mask = RuntimeDebugMask::EMPTY;
     }
 
     fn portal_visible_room_limit(&self, current_record: &LevelRoomRecord) -> usize {
@@ -5268,20 +5276,20 @@ impl Playtest {
         false
     }
 
-    fn active_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn active_room_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
             if let Some(active) = self.active_rooms[slot] {
-                mask |= room_index_debug_mask(active.index);
+                mask.insert_room(active.index);
             }
             slot += 1;
         }
         mask
     }
 
-    fn active_room_drawable_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn active_room_drawable_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
             if let Some(active) = self.active_rooms[slot] {
@@ -5289,7 +5297,7 @@ impl Playtest {
                     || active.render_room.is_some()
                     || active.surface_cache.ready
                 {
-                    mask |= room_index_debug_mask(active.index);
+                    mask.insert_room(active.index);
                 }
             }
             slot += 1;
@@ -5789,9 +5797,9 @@ impl Playtest {
         }
         if self.portal_visibility.room_count == 0 {
             self.portal_visible_missing_resident = 0;
-            self.portal_visible_missing_mask = 0;
+            self.portal_visible_missing_mask = RuntimeDebugMask::EMPTY;
             self.portal_visible_build_failed = 0;
-            self.portal_visible_build_failed_mask = 0;
+            self.portal_visible_build_failed_mask = RuntimeDebugMask::EMPTY;
         }
         telemetry::counter(
             telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
@@ -5819,9 +5827,9 @@ impl Playtest {
         let active_limit = room_active_chunk_limit(current_record).min(MAX_ACTIVE_ROOMS);
         let mut visible_slot = 0usize;
         self.portal_visible_missing_resident = 0;
-        self.portal_visible_missing_mask = 0;
+        self.portal_visible_missing_mask = RuntimeDebugMask::EMPTY;
         self.portal_visible_build_failed = 0;
-        self.portal_visible_build_failed_mask = 0;
+        self.portal_visible_build_failed_mask = RuntimeDebugMask::EMPTY;
         if next_slot < active_limit {
             match reuse_or_build_active_room(
                 next_slot,
@@ -6408,7 +6416,7 @@ impl Playtest {
         #[cfg(feature = "cd-stream-bench")]
         let loading_mask = unsafe { ROOM_STREAM_SCHEDULER.loading_room_mask() };
         #[cfg(not(feature = "cd-stream-bench"))]
-        let loading_mask = 0;
+        let loading_mask = RuntimeDebugMask::EMPTY;
         let stats = self.portal_visibility.stats;
         debug_log_room_window_after_cross(
             next_room,
@@ -8390,31 +8398,26 @@ fn visibility_cell_in_view_wedge(
         .anchor_z
         .saturating_mul(sector_size)
         .saturating_add(half);
-    let dx = center_x.saturating_sub(anchor_x) as i64;
-    let dz = center_z.saturating_sub(anchor_z) as i64;
-    let sin_yaw = filter.camera.sin_yaw.raw() as i64;
-    let cos_yaw = filter.camera.cos_yaw.raw() as i64;
+    let dx = center_x.saturating_sub(anchor_x);
+    let dz = center_z.saturating_sub(anchor_z);
+    let sin_yaw = filter.camera.sin_yaw.raw();
+    let cos_yaw = filter.camera.cos_yaw.raw();
     let forward_x = -sin_yaw;
     let forward_z = -cos_yaw;
-    let depth = dx
-        .saturating_mul(forward_x)
-        .saturating_add(dz.saturating_mul(forward_z))
-        >> 12;
+    let depth = mul_q12_i32(dx, forward_x).saturating_add(mul_q12_i32(dz, forward_z));
     if depth < 0 {
         return anchor_distance <= ROOM_VISIBLE_CELL_REAR_RING;
     }
-    let lateral = (dx
-        .saturating_mul(cos_yaw)
-        .saturating_sub(dz.saturating_mul(sin_yaw))
-        >> 12)
+    let lateral = mul_q12_i32(dx, cos_yaw)
+        .saturating_sub(mul_q12_i32(dz, sin_yaw))
         .unsigned_abs();
-    let lateral_limit = (depth as u64)
+    let lateral_limit = depth
         .saturating_mul(ROOM_VISIBLE_CELL_WEDGE_NUM)
         .checked_div(ROOM_VISIBLE_CELL_WEDGE_DEN.max(1))
-        .unwrap_or(u64::MAX)
-        .saturating_add(
-            (sector_size as u64).saturating_mul(ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS as u64),
-        );
+        .unwrap_or(i32::MAX)
+        .saturating_add(sector_size.saturating_mul(ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS))
+        .max(0)
+        .unsigned_abs();
     lateral <= lateral_limit
 }
 
@@ -8465,13 +8468,13 @@ fn aabb_intersects_camera_frustum(
 ) -> bool {
     let near = camera.projection.near_z.max(1);
     let far = far_z.max(near);
-    let focal = camera.projection.focal_length.max(1) as i64;
+    let focal = camera.projection.focal_length.max(1);
     let half_w = (camera.projection.screen_x as i32)
         .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
-        .max(1) as i64;
+        .max(1);
     let half_h = (camera.projection.screen_y as i32)
         .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
-        .max(1) as i64;
+        .max(1);
     let mut max_depth = i32::MIN;
     let mut min_depth = i32::MAX;
     let mut all_right = true;
@@ -8491,10 +8494,10 @@ fn aabb_intersects_camera_frustum(
                     all_below = false;
                     continue;
                 }
-                let depth_limit_x = half_w.saturating_mul(view.z as i64);
-                let depth_limit_y = half_h.saturating_mul(view.z as i64);
-                let projected_x = (view.x as i64).saturating_mul(focal);
-                let projected_y = (view.y as i64).saturating_mul(focal);
+                let depth_limit_x = half_w.saturating_mul(view.z);
+                let depth_limit_y = half_h.saturating_mul(view.z);
+                let projected_x = view.x.saturating_mul(focal);
+                let projected_y = view.y.saturating_mul(focal);
                 if projected_x <= depth_limit_x {
                     all_right = false;
                 }
@@ -8775,10 +8778,10 @@ fn nearest_runtime_visibility_cell(
     z: i32,
 ) -> Option<usize> {
     let mut best_index = None;
-    let mut best_score = u64::MAX;
+    let mut best_score = u32::MAX;
     for (index, cell) in cells.iter().enumerate() {
-        let dx = (cell.x as i64).saturating_sub(x as i64).unsigned_abs();
-        let dz = (cell.z as i64).saturating_sub(z as i64).unsigned_abs();
+        let dx = (cell.x as i32).saturating_sub(x).unsigned_abs();
+        let dz = (cell.z as i32).saturating_sub(z).unsigned_abs();
         let score = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
         if best_index.is_none() || score < best_score {
             best_index = Some(index);
