@@ -278,6 +278,9 @@ impl App {
             }
 
             let mut due_visual_intervals = 0u16;
+            // Simulation owns real time: drain every elapsed VBlank before
+            // drawing. If rendering is too expensive, VIS drops, but controls
+            // and movement still advance at the display clock.
             while next_simulation_tick <= elapsed_vblanks {
                 telemetry::frame_begin(next_simulation_tick);
                 ctx.simulation_tick = next_simulation_tick;
@@ -309,7 +312,18 @@ impl App {
                 continue;
             }
 
-            ctx.missed_visual_intervals = due_visual_intervals.saturating_sub(1);
+            let pending_vblanks = if next_simulation_tick <= elapsed_vblanks {
+                elapsed_vblanks
+                    .wrapping_sub(next_simulation_tick)
+                    .saturating_add(1)
+            } else {
+                0
+            };
+            let pending_visual_intervals =
+                pending_vblanks / visual_interval.max(1) as u32;
+            ctx.missed_visual_intervals = due_visual_intervals
+                .saturating_sub(1)
+                .saturating_add(pending_visual_intervals.min(u16::MAX as u32) as u16);
 
             telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
             ctx.fb.clear(

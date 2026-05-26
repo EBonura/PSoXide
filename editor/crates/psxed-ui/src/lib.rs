@@ -21,52 +21,109 @@ use crate::model_animation_viewer::ModelAnimationViewerState;
 use crate::style::*;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
-use psxed_project::playtest::playtest_streaming_chunk_config;
-use psxed_project::streaming::{
-    collect_scene_resource_use, plan_generated_chunks, SceneResourceUse, StreamingChunkConfig,
+use psxed_project::portal_rooms::{
+    extract_portal_room_grid, plan_portal_rooms, portal_edge_for_node, portal_seam_edges_for_edge,
+    portal_seam_edges_for_node, PortalEdge, PortalRoomConfig, DEFAULT_PORTAL_ROOM_MAX_SECTORS,
 };
+use psxed_project::room_connections::{
+    connection_for_portal, derive_room_connections, RoomConnection, RoomConnectionStatus,
+};
+use psxed_project::streaming::{collect_scene_resource_use, SceneResourceUse};
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
     default_model_collision_radius_for_height, snap_height, CharacterControllerSettings,
-    ColliderShape, FarVistaSettings, GridCellBounds, GridDirection, GridHorizontalFace, GridSector,
-    GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
+    ColliderShape, EditorCameraMode, EditorCameraState, EditorVisibilityState, FarVistaSettings,
+    GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
+    GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ProjectDocument,
-    PsxBlendMode, Resource, ResourceData, ResourceId, SkyMode, SkySettings, WorldCameraSettings,
-    WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
+    PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
+    RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings,
+    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
     DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
     MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE,
-    MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MAX_WORLD_STREAMING_VISIBLE_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
-    MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
-    MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MIN_WORLD_STREAMING_VISIBLE_CHUNKS, MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8,
-    SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN,
-    SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_PRESETS,
+    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE,
+    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+    MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
+    MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE, MIN_WORLD_SECTOR_SIZE,
+    MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
+    MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
+    SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
 const CONTENT_BROWSER_MIN_HEIGHT: f32 = 48.0;
 const CENTRAL_WORKSPACE_MIN_WIDTH: f32 = 360.0;
 const CENTRAL_WORKSPACE_MIN_HEIGHT: f32 = 220.0;
+const LEFT_DOCK_MIN_SPLIT_PANEL_HEIGHT: f32 = 116.0;
+const LEFT_DOCK_SPLITTER_HEIGHT: f32 = 8.0;
+const LEFT_DOCK_DEFAULT_SCENE_FRACTION: f32 = 0.58;
 const LEFT_DOCK_LABEL_CHARS: usize = 34;
 const EDITOR_OUTLINE_STROKE_WIDTH: f32 = 1.25;
 const EDITOR_SELECTED_OUTLINE_STROKE_WIDTH: f32 = 3.0;
 const EDITOR_OUTLINE_ACCENT: Color32 = Color32::from_rgb(165, 238, 255);
 const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
+const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
 const MAX_IMAGE_PROP_SIZE: u16 = 4096;
+const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psxed_project::BOX_PROP_FACE_COUNT] = [
+    [4, 5, 1, 0],
+    [5, 6, 2, 1],
+    [6, 7, 3, 2],
+    [7, 4, 0, 3],
+    [7, 6, 5, 4],
+    [0, 1, 2, 3],
+];
+const BOX_PROP_EDGE_VERTEX_INDICES: [[usize; 2]; 12] = [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+];
+const PLACEMENT_DUPLICATE_EPSILON: f32 = 0.001;
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
 const RESOURCE_CARD_WIDTH: f32 = 120.0;
 const RESOURCE_CARD_HEIGHT: f32 = 128.0;
+const MATERIAL_TEXTURE_PICKER_POPUP_WIDTH: f32 = 320.0;
+const MATERIAL_TEXTURE_PICKER_POPUP_HEIGHT: f32 = 320.0;
+const MATERIAL_TEXTURE_PICKER_ROW_HEIGHT: f32 = 44.0;
+const MATERIAL_TEXTURE_PICKER_THUMB_SIZE: f32 = 34.0;
+const MATERIAL_TEXTURE_PICKER_BUTTON_WIDTH: f32 = 190.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
+const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
+const ACTION_BAR_COMPACT_HEIGHT: f32 = 50.0;
+const ACTION_BAR_EXPANDED_HEIGHT: f32 = 74.0;
+const ACTION_BAR_WRAP_STATUS_CHARS: usize = 96;
+const PLAY_FRAME_HISTORY_CAP: usize = 150;
+const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
+const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
+const PLAY_NTSC_VBLANK_MS: f32 = 1000.0 / 60.0;
+const PSOXIDE_LOGO_ICON_PNG: &[u8] =
+    include_bytes!("../../../../assets/branding/logo-icon-player.png");
+const PLAY_PORTAL_DEBUG_SCREEN_CX: i32 = 160;
+const PLAY_PORTAL_DEBUG_SCREEN_CY: i32 = 120;
+const PLAY_PORTAL_DEBUG_FOCAL: i32 = 320;
+const PLAY_PORTAL_DEBUG_NEAR_Z: i32 = 64;
+const PLAY_PORTAL_DEBUG_FAR_Z: i32 = 16_384;
+const PLAY_PORTAL_DEBUG_MAX_DEPTH: u8 = 8;
+const PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12: i32 = 4;
 const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/obsidian_wraith",
     "assets/models/crimson_cross_knight",
@@ -74,6 +131,14 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/crowned_wraith",
     "assets/animations/standalone_fbx",
 ];
+
+fn action_bar_height_for_status(status: &str) -> f32 {
+    if status.contains('\n') || status.chars().count() > ACTION_BAR_WRAP_STATUS_CHARS {
+        ACTION_BAR_EXPANDED_HEIGHT
+    } else {
+        ACTION_BAR_COMPACT_HEIGHT
+    }
+}
 const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Obsidian Wraith",
     "Crimson Cross Knight",
@@ -134,11 +199,40 @@ enum TreeAction {
     },
 }
 
+struct ActionBarStatus<'a> {
+    icon: char,
+    badge: &'static str,
+    message: &'a str,
+    accent: Color32,
+    border: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutGroup {
+    Workspace,
+    Tool,
+    Transform,
+    Selection,
+    Surface,
+    Vertex,
+    Visibility,
+    Camera,
+    Viewport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentBrowserView {
+    Resources,
+    Debug,
+}
+
 /// Embedded editor workspace state.
 pub struct EditorWorkspace {
     project: ProjectDocument,
     project_dir: PathBuf,
     saved_project_name: String,
+    project_name_editing: bool,
+    project_name_focus_pending: bool,
     new_project_dialog_open: bool,
     new_project_name: String,
     new_project_error: Option<String>,
@@ -165,8 +259,7 @@ pub struct EditorWorkspace {
     /// Active 3D viewport screen-space marquee selection.
     viewport_3d_box_select: Option<Viewport3dBoxSelect>,
     /// Selection mode the Select tool picks at: a whole face,
-    /// one of its edges, or one of its corners. Hotkeys 1 / 2 / 3
-    /// toggle.
+    /// one of its edges, or one of its corners.
     selection_mode: SelectionMode,
     /// Transform gizmo mode for selected scene nodes in the 3D
     /// viewport. Move keeps the existing axis handles; Rotate edits
@@ -258,12 +351,15 @@ pub struct EditorWorkspace {
     /// requests focus + selects the text inside the rename TextEdit.
     pending_rename_focus: bool,
     collapsed_scene_nodes: HashSet<NodeId>,
+    collapsed_file_folders: HashSet<String>,
     hidden_scene_nodes: HashSet<NodeId>,
     history: UndoStack,
     scene_filter: String,
     file_filter: String,
+    left_dock_scene_fraction: f32,
     resource_search: String,
     resource_filter: ResourceFilter,
+    material_texture_search: String,
     /// `Some((id, buffer))` while the resource inspector's name
     /// field is editing. Committed resource renames may move backing
     /// files, so they happen on focus loss / Enter rather than on
@@ -276,9 +372,13 @@ pub struct EditorWorkspace {
     active_tool: ViewTool,
     /// Kind of node the Place tool drops on a click. Surfaces in
     /// the toolbar as a small picker visible only when
-    /// `active_tool == Place`. Player Spawn enforces uniqueness
-    /// at place-time; the others are additive markers.
+    /// `active_tool == Place`. Player Spawn is unique per world;
+    /// the others are additive markers.
     place_kind: PlaceKind,
+    /// Cardinal edge used by the dedicated Portal placement tool.
+    /// The marker is written at the edge midpoint so the cooker can
+    /// snap it back to the authored seam.
+    portal_place_direction: GridDirection,
     /// Resource chosen in the Place toolbar. Kept separate from the
     /// resource browser selection so repeated placement doesn't lose
     /// the chosen Model/Profile/Image after each click.
@@ -291,15 +391,23 @@ pub struct EditorWorkspace {
     snap_to_grid: bool,
     snap_units: u16,
     show_grid: bool,
+    show_portals: bool,
+    show_lights: bool,
     preview_fog: bool,
     preview_backface_wireframe: bool,
     preview_bounds: bool,
     show_play_debug_overlays: bool,
+    show_play_debug_map: bool,
+    play_frame_times_ms: VecDeque<f32>,
+    play_frame_last_sample_serial: Option<u32>,
+    play_debug_terminal_lines: VecDeque<String>,
+    shortcut_group_flash: Option<(ShortcutGroup, Instant)>,
     view_2d: bool,
     active_workspace: WorkspaceView,
     left_dock_open: bool,
     inspector_open: bool,
     resources_open: bool,
+    content_browser_view: ContentBrowserView,
     viewport_pan: Vec2,
     viewport_zoom: f32,
     last_viewport_size: Vec2,
@@ -322,6 +430,7 @@ pub struct EditorWorkspace {
     /// re-decoding. Keyed on the *Texture* resource id; Materials
     /// follow `material.texture` to the same key.
     texture_thumbs: HashMap<ResourceId, ThumbnailEntry>,
+    psoxide_logo_texture: Option<egui::TextureHandle>,
     /// Persistent texture used by the Model resource inspector's
     /// animated preview. Keeping the handle alive across frames
     /// avoids submitting a texture id that egui has already freed.
@@ -346,7 +455,29 @@ pub struct EditorWorkspace {
 struct ThumbnailEntry {
     signature: String,
     handle: egui::TextureHandle,
+    image: ColorImage,
     stats: PsxtStats,
+}
+
+#[derive(Clone)]
+struct TexturePreviewSnapshot {
+    texture_id: egui::TextureId,
+    image: ColorImage,
+    stats: PsxtStats,
+}
+
+#[derive(Clone)]
+struct TexturePickerOption {
+    id: ResourceId,
+    name: String,
+    thumb: Option<(egui::TextureId, PsxtStats)>,
+}
+
+#[derive(Clone, Copy)]
+struct PickedPsxtTexel {
+    x: u16,
+    y: u16,
+    color: Color32,
 }
 
 struct TextureImportDialog {
@@ -448,6 +579,11 @@ struct ResourceClick {
     modifiers: egui::Modifiers,
 }
 
+enum ProjectFileRowAction {
+    Select(ResourceClick),
+    ToggleFolder(String),
+}
+
 struct ModelImportDialog {
     open: bool,
     source_path: String,
@@ -540,6 +676,7 @@ struct PsxtStats {
     depth_bits: u8,
     /// 16 for 4bpp, 256 for 8bpp, 0 for 15bpp.
     clut_entries: u16,
+    index_zero_transparent: bool,
     pixel_bytes: u32,
     clut_bytes: u32,
     file_bytes: u32,
@@ -574,6 +711,7 @@ struct PaintStamp {
     sx: u16,
     sz: u16,
     tool: ViewTool,
+    triangle: Option<HorizontalTriangleIndex>,
     edge: Option<GridDirection>,
     stack: Option<u8>,
 }
@@ -602,6 +740,16 @@ pub enum PaintTargetPreview {
         world_cell_z: i32,
         dir: GridDirection,
         stack: u8,
+    },
+    /// Portal placement -- highlights the cardinal edge that will
+    /// become an open seam. `valid` is false when either side of the
+    /// edge is missing authored geometry, so the click will be
+    /// rejected instead of creating a marker the cooker ignores.
+    PortalEdge {
+        world_cell_x: i32,
+        world_cell_z: i32,
+        dir: GridDirection,
+        valid: bool,
     },
 }
 
@@ -885,30 +1033,11 @@ enum MaterialTarget {
     Triangle(HorizontalTriangleRef),
 }
 
-fn grid_rect_for_validation_issue(
-    grid: &WorldGrid,
-    origin: [u16; 2],
-    size: [u16; 2],
-) -> Option<WorldGrid> {
-    let mut out = WorldGrid::empty(size[0], size[1], grid.sector_size);
-    out.origin = [
-        grid.origin[0] + origin[0] as i32,
-        grid.origin[1] + origin[1] as i32,
-    ];
-    out.ambient_color = grid.ambient_color;
-    out.fog_enabled = grid.fog_enabled;
-    out.fog_color = grid.fog_color;
-    out.fog_near = grid.fog_near;
-    out.fog_far = grid.fog_far;
-
-    for x in 0..size[0] {
-        for z in 0..size[1] {
-            let src = grid.sector_index(origin[0] + x, origin[1] + z)?;
-            let dst = out.sector_index(x, z)?;
-            out.sectors[dst] = grid.sectors[src].clone();
-        }
-    }
-    Some(out)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoxPropMaterialAssignment {
+    material: ResourceId,
+    targets: usize,
+    updated: usize,
 }
 
 fn world_cook_error_primitives(
@@ -974,6 +1103,8 @@ pub enum EntityBoundKind {
     MeshFallback,
     /// Flat `ImageProp`.
     ImageProp,
+    /// Editable boxed prop.
+    BoxProp,
     /// `SpawnPoint` (player or non-player).
     SpawnPoint,
     /// `PointLight`. Marker box only -- radius ring is drawn
@@ -1255,6 +1386,14 @@ impl SelectionMode {
             Self::Vertex => "Vertex",
         }
     }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Face => icons::SQUARE,
+            Self::Edge => icons::SCAN,
+            Self::Vertex => icons::CIRCLE_DOT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1280,14 +1419,6 @@ impl TransformGizmoMode {
             Self::Scale => icons::SCALE_3D,
         }
     }
-
-    const fn hint(self) -> &'static str {
-        match self {
-            Self::Move => "Drag axis handles to move selected nodes.",
-            Self::Rotate => "Drag the ring to rotate selected nodes around Y.",
-            Self::Scale => "Drag handles to resize selected image props.",
-        }
-    }
 }
 
 /// Floor/ceiling edit granularity for Select mode.
@@ -1303,6 +1434,13 @@ impl HorizontalEditMode {
         match self {
             Self::Quad => "Quad",
             Self::Triangle => "Tri",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Quad => icons::SQUARE,
+            Self::Triangle => icons::PLAY,
         }
     }
 }
@@ -1323,6 +1461,13 @@ impl VertexConnectivity {
         match self {
             Self::Welded => "Welded",
             Self::Detached => "Detached",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Welded => icons::BLEND,
+            Self::Detached => icons::COPY,
         }
     }
 }
@@ -1587,6 +1732,7 @@ struct NodeGizmoTarget {
     start_translation: [f32; 3],
     start_rotation_degrees: [f32; 3],
     start_image_prop_size: Option<[u16; 2]>,
+    start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
     sector_size: i32,
 }
 
@@ -1710,10 +1856,10 @@ pub enum ViewportCameraMode {
 }
 
 impl ViewportCameraMode {
-    const fn label(self) -> &'static str {
+    const fn icon(self) -> char {
         match self {
-            Self::Orbit => "Orbit",
-            Self::Free => "Free",
+            Self::Orbit => icons::ROTATE_3D,
+            Self::Free => icons::MOVE,
         }
     }
 }
@@ -1893,8 +2039,8 @@ impl WallPaintShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaceKind {
     /// `SpawnPoint { player: true }` -- the editor enforces
-    /// player-source uniqueness by demoting existing player
-    /// SpawnPoints and CharacterControllers at place time.
+    /// player-source uniqueness by refusing a second player source
+    /// at place time.
     PlayerSpawn,
     /// `SpawnPoint { player: false }`. Multiple OK.
     SpawnMarker,
@@ -1909,8 +2055,13 @@ enum PlaceKind {
     Character,
     /// Flat material-backed image prop.
     ImageProp,
+    /// Editable material-backed box prop.
+    BoxProp,
     /// `PointLight` with default color / intensity / radius.
     PointLightMarker,
+    /// `Portal` marker. Runtime cooking snaps it to the nearest
+    /// cardinal sector edge and treats that edge as an open seam.
+    Portal,
 }
 
 impl PlaceKind {
@@ -1921,7 +2072,21 @@ impl PlaceKind {
             Self::ModelInstance => "Prop",
             Self::Character => "Character",
             Self::ImageProp => "Image Prop",
+            Self::BoxProp => "Box Prop",
             Self::PointLightMarker => "Point Light",
+            Self::Portal => "Portal",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::PlayerSpawn | Self::SpawnMarker => icons::MAP_PIN,
+            Self::ModelInstance => icons::BOX,
+            Self::Character => icons::CIRCLE_DOT,
+            Self::ImageProp => icons::PALETTE,
+            Self::BoxProp => icons::BOX,
+            Self::PointLightMarker => icons::SUN,
+            Self::Portal => icons::WAYPOINT,
         }
     }
 }
@@ -2087,6 +2252,12 @@ fn centered_aspect_rect(container: Rect, target_aspect: f32) -> Rect {
     Rect::from_center_size(container.center(), Vec2::new(w, h))
 }
 
+fn decode_embedded_png(bytes: &[u8]) -> Option<ColorImage> {
+    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    Some(ColorImage::from_rgba_unmultiplied(size, image.as_raw()))
+}
+
 impl EditorWorkspace {
     /// Open the project at `dir`. Errors when `dir/project.ron` is
     /// missing or malformed -- the frontend wraps the error and falls
@@ -2101,6 +2272,8 @@ impl EditorWorkspace {
         workspace.status =
             sync_status.unwrap_or_else(|| format!("Loaded {}", short_path(&workspace.project_dir)));
         workspace.select_first_room();
+        workspace.apply_project_editor_camera();
+        workspace.apply_project_editor_visibility();
         Ok(workspace)
     }
 
@@ -2109,10 +2282,30 @@ impl EditorWorkspace {
     /// of the public API.
     fn with_project(project_dir: PathBuf, project: ProjectDocument) -> Self {
         let saved_project_name = project.name.clone();
+        let editor_camera = project.editor_camera;
+        let editor_visibility = project.editor_visibility;
+        let camera_mode = match editor_camera.mode {
+            EditorCameraMode::Orbit => ViewportCameraMode::Orbit,
+            EditorCameraMode::Free => ViewportCameraMode::Free,
+        };
+        let free_initialized =
+            editor_camera.free_initialized || editor_camera.mode == EditorCameraMode::Free;
+        let free_position = if editor_camera.free_initialized {
+            editor_camera.free_position
+        } else {
+            orbit_camera_position_i32(
+                editor_camera.orbit_yaw_q12,
+                editor_camera.orbit_pitch_q12,
+                editor_camera.orbit_radius,
+                editor_camera.orbit_target,
+            )
+        };
         Self {
             project,
             project_dir,
             saved_project_name,
+            project_name_editing: false,
+            project_name_focus_pending: false,
             new_project_dialog_open: false,
             new_project_name: String::new(),
             new_project_error: None,
@@ -2151,25 +2344,36 @@ impl EditorWorkspace {
             renaming: None,
             pending_rename_focus: false,
             collapsed_scene_nodes: HashSet::new(),
+            collapsed_file_folders: HashSet::new(),
             hidden_scene_nodes: HashSet::new(),
             history: UndoStack::default(),
             scene_filter: String::new(),
             file_filter: String::new(),
+            left_dock_scene_fraction: LEFT_DOCK_DEFAULT_SCENE_FRACTION,
             resource_search: String::new(),
             resource_filter: ResourceFilter::All,
+            material_texture_search: String::new(),
             resource_renaming: None,
             resource_delete_confirm: None,
             active_tool: ViewTool::Select,
             place_kind: PlaceKind::PlayerSpawn,
+            portal_place_direction: GridDirection::North,
             place_resource: None,
             brush_material: None,
             snap_to_grid: true,
             snap_units: 16,
-            show_grid: true,
-            preview_fog: true,
-            preview_backface_wireframe: true,
-            preview_bounds: true,
-            show_play_debug_overlays: true,
+            show_grid: editor_visibility.show_grid,
+            show_portals: editor_visibility.show_portals,
+            show_lights: editor_visibility.show_lights,
+            preview_fog: editor_visibility.preview_fog,
+            preview_backface_wireframe: editor_visibility.preview_backface_wireframe,
+            preview_bounds: editor_visibility.preview_bounds,
+            show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
+            show_play_debug_map: editor_visibility.show_play_debug_map,
+            play_frame_times_ms: VecDeque::with_capacity(PLAY_FRAME_HISTORY_CAP),
+            play_frame_last_sample_serial: None,
+            play_debug_terminal_lines: VecDeque::with_capacity(PLAY_DEBUG_TERMINAL_LINE_CAP),
+            shortcut_group_flash: None,
             // Default to the 3D preview so the bit-faithful HwRenderer
             // is the first thing the user sees on opening the editor.
             // The 2D top-down view stays one toolbar click away.
@@ -2178,22 +2382,21 @@ impl EditorWorkspace {
             left_dock_open: true,
             inspector_open: true,
             resources_open: true,
+            content_browser_view: ContentBrowserView::Resources,
             viewport_pan: Vec2::ZERO,
             viewport_zoom: DEFAULT_VIEWPORT_ZOOM,
             last_viewport_size: Vec2::new(1280.0, 720.0),
-            // Default orbit: ~22° pitch above the target, looking
-            // toward +Z, radius wide enough to frame a 4×4 stone room
-            // at the cooker's standard 1024-unit sector size.
-            viewport_3d_camera_mode: ViewportCameraMode::Orbit,
-            viewport_3d_yaw: 256,
-            viewport_3d_pitch: 256,
-            viewport_3d_radius: 6144,
-            viewport_3d_target: [0, 512, 0],
-            viewport_3d_free_yaw: 256,
-            viewport_3d_free_pitch: 256,
-            viewport_3d_free_position: orbit_camera_position_i32(256, 256, 6144, [0, 512, 0]),
-            viewport_3d_free_initialized: false,
+            viewport_3d_camera_mode: camera_mode,
+            viewport_3d_yaw: editor_camera.orbit_yaw_q12,
+            viewport_3d_pitch: editor_camera.orbit_pitch_q12,
+            viewport_3d_radius: editor_camera.orbit_radius,
+            viewport_3d_target: editor_camera.orbit_target,
+            viewport_3d_free_yaw: editor_camera.free_yaw_q12,
+            viewport_3d_free_pitch: editor_camera.free_pitch_q12,
+            viewport_3d_free_position: free_position,
+            viewport_3d_free_initialized: free_initialized,
             texture_thumbs: HashMap::new(),
+            psoxide_logo_texture: None,
             model_resource_preview_texture: None,
             animation_viewer: ModelAnimationViewerState::default(),
             animation_viewer_preview_texture: None,
@@ -2204,6 +2407,96 @@ impl EditorWorkspace {
             status: "Editor ready".to_string(),
             pending_playtest_request: None,
         }
+    }
+
+    fn current_editor_camera_state(&self) -> EditorCameraState {
+        EditorCameraState {
+            mode: match self.viewport_3d_camera_mode {
+                ViewportCameraMode::Orbit => EditorCameraMode::Orbit,
+                ViewportCameraMode::Free => EditorCameraMode::Free,
+            },
+            orbit_yaw_q12: self.viewport_3d_yaw,
+            orbit_pitch_q12: self.viewport_3d_pitch,
+            orbit_radius: self.viewport_3d_radius,
+            orbit_target: self.viewport_3d_target,
+            free_yaw_q12: self.viewport_3d_free_yaw,
+            free_pitch_q12: self.viewport_3d_free_pitch,
+            free_position: if self.viewport_3d_free_initialized {
+                self.viewport_3d_free_position
+            } else {
+                [0, 0, 0]
+            },
+            free_initialized: self.viewport_3d_free_initialized,
+        }
+    }
+
+    fn persist_editor_camera_state(&mut self) {
+        let mut editor_camera = self.current_editor_camera_state();
+        editor_camera.normalize();
+        if self.project.editor_camera != editor_camera {
+            self.project.editor_camera = editor_camera;
+            self.dirty = true;
+        }
+    }
+
+    fn apply_project_editor_camera(&mut self) {
+        let mut editor_camera = self.project.editor_camera;
+        editor_camera.normalize();
+        self.viewport_3d_camera_mode = match editor_camera.mode {
+            EditorCameraMode::Orbit => ViewportCameraMode::Orbit,
+            EditorCameraMode::Free => ViewportCameraMode::Free,
+        };
+        self.viewport_3d_yaw = editor_camera.orbit_yaw_q12;
+        self.viewport_3d_pitch = editor_camera.orbit_pitch_q12;
+        self.viewport_3d_radius = editor_camera.orbit_radius;
+        self.viewport_3d_target = editor_camera.orbit_target;
+        self.viewport_3d_free_yaw = editor_camera.free_yaw_q12;
+        self.viewport_3d_free_pitch = editor_camera.free_pitch_q12;
+        self.viewport_3d_free_position = if editor_camera.free_initialized {
+            editor_camera.free_position
+        } else {
+            orbit_camera_position_i32(
+                editor_camera.orbit_yaw_q12,
+                editor_camera.orbit_pitch_q12,
+                editor_camera.orbit_radius,
+                editor_camera.orbit_target,
+            )
+        };
+        self.viewport_3d_free_initialized =
+            editor_camera.free_initialized || editor_camera.mode == EditorCameraMode::Free;
+    }
+
+    fn current_editor_visibility_state(&self) -> EditorVisibilityState {
+        EditorVisibilityState {
+            show_grid: self.show_grid,
+            show_portals: self.show_portals,
+            show_lights: self.show_lights,
+            preview_fog: self.preview_fog,
+            preview_backface_wireframe: self.preview_backface_wireframe,
+            preview_bounds: self.preview_bounds,
+            show_play_debug_overlays: self.show_play_debug_overlays,
+            show_play_debug_map: self.show_play_debug_map,
+        }
+    }
+
+    fn persist_editor_visibility_state(&mut self) {
+        let editor_visibility = self.current_editor_visibility_state();
+        if self.project.editor_visibility != editor_visibility {
+            self.project.editor_visibility = editor_visibility;
+            self.dirty = true;
+        }
+    }
+
+    fn apply_project_editor_visibility(&mut self) {
+        let editor_visibility = self.project.editor_visibility;
+        self.show_grid = editor_visibility.show_grid;
+        self.show_portals = editor_visibility.show_portals;
+        self.show_lights = editor_visibility.show_lights;
+        self.preview_fog = editor_visibility.preview_fog;
+        self.preview_backface_wireframe = editor_visibility.preview_backface_wireframe;
+        self.preview_bounds = editor_visibility.preview_bounds;
+        self.show_play_debug_overlays = editor_visibility.show_play_debug_overlays;
+        self.show_play_debug_map = editor_visibility.show_play_debug_map;
     }
 
     /// Current project document.
@@ -2231,6 +2524,8 @@ impl EditorWorkspace {
     /// Save to `<project_dir>/project.ron`, retargeting the project
     /// directory when the user-facing project name changes.
     pub fn save(&mut self) -> Result<(), String> {
+        self.persist_editor_camera_state();
+        self.persist_editor_visibility_state();
         if self.floating_geometry.is_some() {
             return Err("Place or cancel the duplicate preview before saving".to_string());
         }
@@ -2281,6 +2576,8 @@ impl EditorWorkspace {
 
     /// Save only when the project contains unsaved edits.
     pub fn save_if_dirty(&mut self) -> Result<bool, String> {
+        self.persist_editor_camera_state();
+        self.persist_editor_visibility_state();
         if !self.dirty {
             return Ok(false);
         }
@@ -2320,6 +2617,8 @@ impl EditorWorkspace {
                 self.status = sync_status
                     .unwrap_or_else(|| format!("Reloaded {}", short_path(&self.project_dir)));
                 self.select_first_room();
+                self.apply_project_editor_camera();
+                self.apply_project_editor_visibility();
             }
             Err(error) => {
                 self.status = format!("Reload failed: {error}");
@@ -2794,6 +3093,20 @@ impl EditorWorkspace {
         self.status = status.into();
     }
 
+    /// Append guest-runtime debug lines to the bottom debug terminal.
+    pub fn append_play_debug_terminal_lines<I, S>(&mut self, lines: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for line in lines {
+            if self.play_debug_terminal_lines.len() >= PLAY_DEBUG_TERMINAL_LINE_CAP {
+                self.play_debug_terminal_lines.pop_front();
+            }
+            self.play_debug_terminal_lines.push_back(line.into());
+        }
+    }
+
     /// Draw the full editor workspace.
     ///
     /// `viewport_3d` describes what texture the central 3D viewport
@@ -2823,7 +3136,8 @@ impl EditorWorkspace {
         if !playtest_captured {
             self.handle_global_shortcuts(ctx, playtest_status);
         }
-        self.draw_action_bar(ctx, playtest_status);
+        let play_metrics = viewport_3d.play_metrics;
+        self.draw_action_bar(ctx, playtest_status, play_metrics);
         self.draw_left_dock(ctx);
         self.draw_inspector(ctx);
         self.draw_content_browser(ctx);
@@ -3221,6 +3535,15 @@ impl EditorWorkspace {
 
     fn drain_live_egui_textures(&mut self) -> Vec<egui::TextureHandle> {
         let mut handles = Vec::new();
+        if let Some(handle) = self.psoxide_logo_texture.take() {
+            handles.push(handle);
+        }
+        if let Some(handle) = self.model_resource_preview_texture.take() {
+            handles.push(handle);
+        }
+        if let Some(handle) = self.animation_viewer_preview_texture.take() {
+            handles.push(handle);
+        }
         handles.extend(self.texture_thumbs.drain().map(|(_, entry)| entry.handle));
         if let Some(preview) = self.texture_import_dialog.preview.take() {
             handles.push(preview.handle);
@@ -4043,7 +4366,7 @@ impl EditorWorkspace {
         // entity bounds occlude the grid hover in Select mode. Click
         // and drag already give entity bounds priority; the hover
         // affordance should match that hit-testing model.
-        self.hovered_primitive = if hover_entity_hit.is_some() {
+        self.hovered_primitive = if self.portal_place_active() || hover_entity_hit.is_some() {
             None
         } else {
             face_hit.map(|(face, hit)| self.pick_primitive_from_hit(face, hit))
@@ -4293,6 +4616,7 @@ impl EditorWorkspace {
                 self.viewport_3d_free_initialized = true;
             }
         }
+        self.persist_editor_camera_state();
     }
 
     fn pan_viewport_3d_camera(&mut self, delta: Vec2, panel_size: Vec2) {
@@ -4303,6 +4627,7 @@ impl EditorWorkspace {
                     self.viewport_3d_target[axis] =
                         round_to_i32(self.viewport_3d_target[axis] as f32 + amount);
                 }
+                self.persist_editor_camera_state();
             }
             ViewportCameraMode::Free => {
                 self.move_free_camera_world(world_delta);
@@ -4319,6 +4644,7 @@ impl EditorWorkspace {
                 let factor = if scroll > 0.0 { 0.92 } else { 1.08 };
                 self.viewport_3d_radius =
                     ((self.viewport_3d_radius as f32) * factor).clamp(512.0, 262_144.0) as i32;
+                self.persist_editor_camera_state();
             }
             ViewportCameraMode::Free => {
                 let amount = (scroll * 8.0).clamp(-4096.0, 4096.0);
@@ -4374,13 +4700,19 @@ impl EditorWorkspace {
                 round_to_i32(self.viewport_3d_free_position[axis] as f32 + amount);
         }
         self.viewport_3d_free_initialized = true;
+        self.persist_editor_camera_state();
     }
 
     fn set_viewport_3d_camera_mode(&mut self, mode: ViewportCameraMode) {
+        if self.viewport_3d_camera_mode == mode {
+            return;
+        }
         if mode == ViewportCameraMode::Free && !self.viewport_3d_free_initialized {
             self.sync_free_camera_to_orbit();
         }
         self.viewport_3d_camera_mode = mode;
+        self.persist_editor_camera_state();
+        self.mark_shortcut_group_changed(ShortcutGroup::Camera);
     }
 
     fn sync_free_camera_to_orbit(&mut self) {
@@ -4420,6 +4752,34 @@ impl EditorWorkspace {
 
     /// Play-mode 3D body -- paints the live emulator framebuffer into
     /// the viewport and suppresses all authoring hit-testing.
+    fn record_play_frame_time(&mut self, metrics: EditorPlaytestMetrics) {
+        if self.play_frame_last_sample_serial == Some(metrics.sample_serial) {
+            return;
+        }
+        self.play_frame_last_sample_serial = Some(metrics.sample_serial);
+        if metrics.visual_frames == 0 {
+            return;
+        }
+        let frame_ms = if metrics.frame_ms.is_finite() && metrics.frame_ms > 0.0 {
+            metrics.frame_ms
+        } else if metrics.visual_interval_vblanks > 0.0 {
+            metrics.visual_interval_vblanks * PLAY_NTSC_VBLANK_MS
+        } else {
+            metrics.frame_ms
+        };
+        if !frame_ms.is_finite() || frame_ms <= 0.0 {
+            return;
+        }
+        let frames = metrics.visual_frames.min(4);
+        for _ in 0..frames {
+            if self.play_frame_times_ms.len() >= PLAY_FRAME_HISTORY_CAP {
+                self.play_frame_times_ms.pop_front();
+            }
+            self.play_frame_times_ms
+                .push_back(frame_ms.clamp(0.0, 120.0));
+        }
+    }
+
     fn draw_viewport_3d_play_body(
         &mut self,
         ui: &mut egui::Ui,
@@ -4438,42 +4798,36 @@ impl EditorWorkspace {
             .uv(viewport_3d.uv)
             .paint_at(ui, rect);
 
-        let toggle_rect = Rect::from_min_size(
-            Pos2::new(rect.right() - 36.0, rect.top() + 8.0),
-            Vec2::splat(28.0),
+        let control_size = Vec2::splat(28.0);
+        let control_gap = 6.0;
+        let controls_origin = rect.left_top() + Vec2::new(8.0, 8.0);
+        let visibility_rect = Rect::from_min_size(controls_origin, control_size);
+        let record_rect = Rect::from_min_size(
+            visibility_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            control_size,
         );
-        let toggle_response = ui
-            .interact(
-                toggle_rect,
-                ui.id().with("play_debug_overlay_toggle"),
-                Sense::click(),
-            )
-            .on_hover_text(if self.show_play_debug_overlays {
-                "Hide play debug overlays"
-            } else {
-                "Show play debug overlays"
-            });
-        if toggle_response.clicked() {
-            self.show_play_debug_overlays = !self.show_play_debug_overlays;
-        }
+        let replay_rect = Rect::from_min_size(
+            record_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            control_size,
+        );
+        let dump_rect = Rect::from_min_size(
+            replay_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            control_size,
+        );
+        let controls_rect = Rect::from_min_max(visibility_rect.min, dump_rect.max);
+        let recording = viewport_3d.play_tape.mode == EditorPlaytestTapeMode::Recording;
+        let replaying = viewport_3d.play_tape.mode == EditorPlaytestTapeMode::Replaying;
+        let can_record = !replaying;
+        let can_replay = !recording;
+
         let show_debug_overlays = self.show_play_debug_overlays;
+        let show_debug_map = self.show_play_debug_map;
         let debug_rect = Rect::from_min_size(
-            rect.left_top() + Vec2::new(8.0, 8.0),
-            Vec2::new(238.0, 177.0),
-        );
-        let tape_top = if show_debug_overlays {
-            debug_rect.bottom() + 6.0
-        } else {
-            rect.top() + 8.0
-        };
-        let tape_controls_rect = Rect::from_min_size(
-            Pos2::new(debug_rect.left(), tape_top),
-            Vec2::new(238.0, 28.0),
+            rect.left_top() + Vec2::new(44.0, 8.0),
+            Vec2::new(272.0, 145.0),
         );
         let clicked_overlay = response.interact_pointer_pos().is_some_and(|pos| {
-            toggle_rect.contains(pos)
-                || tape_controls_rect.contains(pos)
-                || (show_debug_overlays && debug_rect.contains(pos))
+            controls_rect.contains(pos) || (show_debug_overlays && debug_rect.contains(pos))
         });
         if response.clicked() && !clicked_overlay {
             self.pending_playtest_request = Some(EditorPlaytestRequest::CaptureInput);
@@ -4491,6 +4845,9 @@ impl EditorWorkspace {
             );
         }
         if show_debug_overlays {
+            if let Some(metrics) = viewport_3d.play_metrics {
+                self.record_play_frame_time(metrics);
+            }
             painter.rect_filled(debug_rect, 4.0, Color32::from_black_alpha(164));
             let mut y = debug_rect.top() + 7.0;
             draw_play_metric_line(
@@ -4501,23 +4858,12 @@ impl EditorWorkspace {
                 STUDIO_TEXT,
             );
             if let Some(metrics) = viewport_3d.play_metrics {
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!("EMU  {:>5.1} Hz", metrics.emu_hz),
-                    STUDIO_TEXT,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &match metrics.visual_hz {
-                        Some(visual_hz) => format!("VIS  {:>5.1} Hz", visual_hz),
-                        None => format!("DRAW {:>5.1} Hz", metrics.draw_hz),
-                    },
-                    STUDIO_TEXT,
-                );
+                let visual_hz = metrics.visual_hz.unwrap_or(metrics.draw_hz);
+                let frame_ms = self
+                    .play_frame_times_ms
+                    .back()
+                    .copied()
+                    .unwrap_or(metrics.frame_ms);
                 draw_play_metric_line(
                     &painter,
                     debug_rect.left() + 8.0,
@@ -4529,33 +4875,12 @@ impl EditorWorkspace {
                     &painter,
                     debug_rect.left() + 8.0,
                     &mut y,
-                    &format!("FRAME {:>5.2} ms", metrics.total_ms),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
                     &format!(
-                        "EMU/HW/UI {:>4.1}/{:>4.1}/{:>4.1}",
-                        metrics.emu_ms, metrics.hw_ms, metrics.ui_ms
-                    ),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!("STEP {:>5.1}%", metrics.step_budget_percent),
-                    STUDIO_TEXT_WEAK,
-                );
-                draw_play_metric_line(
-                    &painter,
-                    debug_rect.left() + 8.0,
-                    &mut y,
-                    &format!(
-                        "CHNK vis/load {:>2}/{:<2}",
-                        metrics.chunk_visible, metrics.chunk_loaded
+                        "VIS {:>5.1}Hz {:>5.1}ms M/L {}/{}",
+                        visual_hz,
+                        frame_ms,
+                        metrics.visual_deadline_misses,
+                        metrics.visual_lateness_vblanks
                     ),
                     STUDIO_TEXT,
                 );
@@ -4564,8 +4889,8 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "WIN  cand/built/skip {:>2}/{:<2}/{:<2}",
-                        metrics.chunk_candidates, metrics.chunk_built, metrics.chunk_cache_skips
+                        "AVG {:>5.1} ms  EMU/HW/UI {:>4.1}/{:>4.1}/{:>4.1}",
+                        metrics.total_ms, metrics.emu_ms, metrics.hw_ms, metrics.ui_ms
                     ),
                     STUDIO_TEXT_WEAK,
                 );
@@ -4574,21 +4899,33 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "STRM req/miss/pf {:>2}/{:<2}/{:<2}",
-                        metrics.stream_requests, metrics.stream_misses, metrics.stream_prefetches
+                        "PORT rooms {:>2}/{:<2}  tests {:>2}  rej {:>2}",
+                        metrics.portal_visible_rooms,
+                        metrics.chunk_loaded,
+                        metrics.portal_tests,
+                        metrics.portal_rejects.iter().copied().sum::<u32>()
                     ),
-                    STUDIO_TEXT_WEAK,
+                    STUDIO_TEXT,
                 );
                 draw_play_metric_line(
                     &painter,
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "STRM ev/pnd/fail {:>2}/{:<2}/{:<2}",
-                        metrics.stream_evictions, metrics.stream_pending, metrics.stream_failed
+                        "STRM slots {:>2}/{:<2}  req {:>2}  miss/fail {:>2}/{:<2}",
+                        metrics.chunk_loaded,
+                        metrics.stream_slot_limit,
+                        metrics.stream_requests,
+                        metrics.stream_misses,
+                        metrics.stream_failed
                     ),
                     STUDIO_TEXT_WEAK,
                 );
+                let chart_rect = Rect::from_min_size(
+                    Pos2::new(debug_rect.left() + 8.0, y + 2.0),
+                    Vec2::new(debug_rect.width() - 16.0, 42.0),
+                );
+                draw_play_frame_rate_chart(&painter, chart_rect, &self.play_frame_times_ms);
             } else {
                 draw_play_metric_line(
                     &painter,
@@ -4598,18 +4935,19 @@ impl EditorWorkspace {
                     STUDIO_TEXT_WEAK,
                 );
             }
+            y = (debug_rect.bottom() - 18.0).max(y);
             let tape_line = match viewport_3d.play_tape.mode {
                 EditorPlaytestTapeMode::Idle if viewport_3d.play_tape.frames == 0 => {
-                    "TAPE empty".to_string()
+                    "Tape empty".to_string()
                 }
                 EditorPlaytestTapeMode::Idle => {
-                    format!("TAPE {:>5} fr", viewport_3d.play_tape.frames)
+                    format!("Tape {:>5} fr", viewport_3d.play_tape.frames)
                 }
                 EditorPlaytestTapeMode::Recording => {
-                    format!("REC  {:>5} fr", viewport_3d.play_tape.frames)
+                    format!("Rec  {:>5} fr", viewport_3d.play_tape.frames)
                 }
                 EditorPlaytestTapeMode::Replaying => format!(
-                    "PLAY {:>5}/{:<5}",
+                    "Replay {:>5}/{:<5}",
                     viewport_3d.play_tape.cursor, viewport_3d.play_tape.frames
                 ),
             };
@@ -4621,104 +4959,109 @@ impl EditorWorkspace {
                 STUDIO_TEXT,
             );
         }
-        self.draw_play_input_tape_controls(ui, tape_controls_rect, viewport_3d.play_tape);
-        if show_debug_overlays {
+        if show_debug_map {
             if let Some(metrics) = viewport_3d.play_metrics {
                 draw_play_chunk_debug_map(&painter, rect, &self.project, metrics);
             }
         }
-        draw_play_debug_overlay_toggle(
-            &painter,
-            toggle_rect,
-            show_debug_overlays,
-            toggle_response.hovered(),
-        );
-    }
-
-    fn draw_play_input_tape_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        rect: Rect,
-        tape: EditorPlaytestTapeStatus,
-    ) {
-        ui.painter()
-            .rect_filled(rect, 4.0, Color32::from_black_alpha(164));
-        let gap = 6.0;
-        let button_width = (rect.width() - gap) * 0.5;
-        let record_rect =
-            Rect::from_min_size(rect.left_top(), Vec2::new(button_width, rect.height()));
-        let replay_rect = Rect::from_min_size(
-            Pos2::new(record_rect.right() + gap, rect.top()),
-            Vec2::new(button_width, rect.height()),
-        );
-        let recording = tape.mode == EditorPlaytestTapeMode::Recording;
-        let replaying = tape.mode == EditorPlaytestTapeMode::Replaying;
-        let can_record = !replaying;
-        let can_replay = !recording;
-
-        let record_label = if recording {
-            "Stop Rec".to_string()
-        } else {
-            icons::label(icons::CIRCLE_DOT, "Rec")
-        };
-        let record_response = ui.put(
+        self.draw_play_overlay_visibility_menu(ui, visibility_rect);
+        if draw_play_overlay_icon_button(
+            ui,
             record_rect,
-            egui::Button::new(RichText::new(record_label).color(if can_record {
-                STUDIO_TEXT
+            "play_input_record_toggle",
+            icons::CIRCLE_DOT,
+            if recording {
+                "Stop recording input"
             } else {
-                STUDIO_TEXT_WEAK
-            }))
-            .fill(if recording {
-                Color32::from_rgb(92, 34, 34)
-            } else {
-                STUDIO_PANEL_DARK
-            }),
-        );
-        let record_clicked = record_response.clicked();
-        record_response.on_hover_text(if recording {
-            "Stop recording input"
-        } else {
-            "Record embedded play input"
-        });
-        if can_record && record_clicked {
+                "Record embedded play input"
+            },
+            recording,
+            can_record,
+            Some(Color32::from_rgb(92, 34, 34)),
+        ) {
             self.pending_playtest_request = Some(if recording {
                 EditorPlaytestRequest::StopInputRecording
             } else {
                 EditorPlaytestRequest::StartInputRecording
             });
         }
-
-        let replay_label = if replaying {
-            "Stop".to_string()
-        } else {
-            icons::label(icons::PLAY, "Replay")
-        };
-        let replay_response = ui.put(
+        if draw_play_overlay_icon_button(
+            ui,
             replay_rect,
-            egui::Button::new(RichText::new(replay_label).color(if can_replay {
-                STUDIO_TEXT
+            "play_input_replay_toggle",
+            if replaying {
+                icons::SQUARE
             } else {
-                STUDIO_TEXT_WEAK
-            }))
-            .fill(if replaying {
-                STUDIO_ACCENT_DIM
+                icons::PLAY
+            },
+            if replaying {
+                "Stop replaying input"
             } else {
-                STUDIO_PANEL_DARK
-            }),
-        );
-        let replay_clicked = replay_response.clicked();
-        replay_response.on_hover_text(if replaying {
-            "Stop replaying input"
-        } else {
-            "Replay saved input"
-        });
-        if can_replay && replay_clicked {
+                "Replay saved input"
+            },
+            replaying,
+            can_replay,
+            Some(STUDIO_ACCENT_DIM),
+        ) {
             self.pending_playtest_request = Some(if replaying {
                 EditorPlaytestRequest::StopInputReplay
             } else {
                 EditorPlaytestRequest::StartInputReplay
             });
         }
+        if draw_play_overlay_icon_button(
+            ui,
+            dump_rect,
+            "play_profiler_history_dump",
+            icons::FILE,
+            "Dump last profiler frames",
+            false,
+            true,
+            Some(STUDIO_ACCENT_DIM),
+        ) {
+            self.pending_playtest_request = Some(EditorPlaytestRequest::DumpProfilerHistory);
+        }
+    }
+
+    fn draw_play_overlay_visibility_menu(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let icon = if !self.show_play_debug_overlays || !self.show_play_debug_map {
+            icons::EYE_OFF
+        } else {
+            icons::EYE
+        };
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.set_min_size(rect.size());
+            let response = egui::menu::menu_custom_button(
+                ui,
+                egui::Button::new(icons::text(icon, 14.0)).min_size(rect.size()),
+                |ui| {
+                    ui.set_min_width(190.0);
+                    let mut changed = false;
+                    egui::Grid::new("play-overlay-visibility-menu-grid")
+                        .num_columns(2)
+                        .spacing(Vec2::new(14.0, 5.0))
+                        .show(ui, |ui| {
+                            changed |= visibility_menu_row(
+                                ui,
+                                "play-overlay-profiler",
+                                "Profiler",
+                                &mut self.show_play_debug_overlays,
+                            );
+                            changed |= visibility_menu_row(
+                                ui,
+                                "play-overlay-map",
+                                "Portal map",
+                                &mut self.show_play_debug_map,
+                            );
+                        });
+                    if changed {
+                        self.persist_editor_visibility_state();
+                    }
+                },
+            )
+            .response;
+            response.on_hover_text("Visibility");
+        });
     }
 
     /// Snapshot of the 3D camera the frontend needs to drive the
@@ -4769,6 +5112,22 @@ impl EditorWorkspace {
     /// same button hides both grid-style affordances at once.
     pub fn show_grid_enabled(&self) -> bool {
         self.show_grid
+    }
+
+    pub fn show_portals_enabled(&self) -> bool {
+        self.show_portals
+    }
+
+    pub fn show_lights_enabled(&self) -> bool {
+        self.show_lights
+    }
+
+    /// Whether the central editor surface is currently showing the
+    /// editable 3D viewport. The frontend uses this to avoid spending
+    /// host frame time rebuilding the PSX-style preview while the user
+    /// is in 2D map or Animation Viewer.
+    pub fn editor_3d_preview_visible(&self) -> bool {
+        self.active_workspace == WorkspaceView::Room && !self.view_2d
     }
 
     /// Currently-selected scene node. The frontend reads this so the
@@ -4865,8 +5224,7 @@ impl EditorWorkspace {
         faces
     }
 
-    /// Active selection mode (Face / Edge / Vertex). Hotkeys
-    /// 1 / 2 / 3 cycle.
+    /// Active selection mode (Face / Edge / Vertex).
     pub fn selection_mode(&self) -> SelectionMode {
         self.selection_mode
     }
@@ -4920,6 +5278,21 @@ impl EditorWorkspace {
         fallback_hit: Option<[f32; 2]>,
     ) -> Option<PaintTargetPreview> {
         let grid = self.room_grid_view(room_id)?;
+        if self.portal_place_active() {
+            let (world_cell_x, world_cell_z) =
+                self.paint_preview_world_cell(room_id, grid, face_hit, fallback_hit)?;
+            return Some(PaintTargetPreview::PortalEdge {
+                world_cell_x,
+                world_cell_z,
+                dir: self.portal_place_direction,
+                valid: portal_edge_valid_for_world_cell(
+                    grid,
+                    world_cell_x,
+                    world_cell_z,
+                    self.portal_place_direction,
+                ),
+            });
+        }
         let is_paint_wall = matches!(self.active_tool, ViewTool::PaintWall);
         let face_hit = self.face_hit_for_paint_tool(face_hit);
 
@@ -5186,6 +5559,107 @@ impl EditorWorkspace {
                 );
             }
         }
+    }
+
+    fn portal_place_active(&self) -> bool {
+        matches!(self.active_tool, ViewTool::Place) && matches!(self.place_kind, PlaceKind::Portal)
+    }
+
+    fn rotate_portal_place_direction(&mut self) {
+        if !self.portal_place_active() {
+            return;
+        }
+        self.portal_place_direction = next_cardinal_direction(self.portal_place_direction);
+        self.status = format!(
+            "Portal edge: {}",
+            direction_label(self.portal_place_direction)
+        );
+    }
+
+    fn draw_portal_place_preview_2d(
+        &self,
+        painter: &egui::Painter,
+        transform: ViewportTransform,
+        world: [f32; 2],
+    ) {
+        if !self.portal_place_active() {
+            return;
+        }
+        let Some(room_id) = self.active_room_id() else {
+            return;
+        };
+        let scene = self.project.active_scene();
+        let Some(room) = scene.node(room_id) else {
+            return;
+        };
+        let NodeKind::Room { grid } = &room.kind else {
+            return;
+        };
+        let room_center = node_world(room);
+        let editor = [world[0] - room_center[0], world[1] - room_center[1]];
+        let world_cells = grid.editor_to_world_cells(editor);
+        let wcx = world_cells[0].floor() as i32;
+        let wcz = world_cells[1].floor() as i32;
+        let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+            return;
+        };
+        let dir = self.portal_place_direction;
+        let valid = portal_edge_valid_for_array_cell(grid, sx, sz, dir);
+        let color = if valid {
+            PORTAL_PINK
+        } else {
+            Color32::from_rgb(255, 64, 96)
+        };
+        let halo = Stroke::new(
+            8.0,
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 48),
+        );
+        let stroke = Stroke::new(3.0, color);
+        if valid {
+            if let Some(edge) = canonical_portal_edge_for_array_cell(sx, sz, dir) {
+                let seam = portal_seam_edges_for_edge(grid, edge);
+                if !seam.is_empty() {
+                    for edge in seam {
+                        draw_portal_edge_segment_2d(
+                            painter,
+                            transform,
+                            grid,
+                            room_center,
+                            edge,
+                            halo,
+                            stroke,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some((local_a, local_b)) = portal_edge_editor_segment_for_array(grid, sx, sz, dir) {
+            let a = transform
+                .world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]);
+            let b = transform
+                .world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]);
+            painter.line_segment([a, b], halo);
+            painter.line_segment([a, b], stroke);
+        }
+    }
+
+    fn paint_preview_world_cell(
+        &self,
+        room_id: NodeId,
+        grid: &WorldGrid,
+        face_hit: Option<(FaceRef, [f32; 3])>,
+        fallback_hit: Option<[f32; 2]>,
+    ) -> Option<(i32, i32)> {
+        if let Some((face, _)) = self.face_hit_for_paint_tool(face_hit) {
+            return Some((
+                grid.origin[0] + face.sx as i32,
+                grid.origin[1] + face.sz as i32,
+            ));
+        }
+        let editor = fallback_hit?;
+        let hit = self.editor_world_to_world3(room_id, editor);
+        Some((grid.world_x_to_cell(hit[0]), grid.world_z_to_cell(hit[2])))
     }
 
     fn update_primitive_grid_drag(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
@@ -5851,12 +6325,12 @@ impl EditorWorkspace {
         let pointer_delta = pointer - drag.start_pointer;
         let steps = match drag.axis {
             PrimitiveGizmoAxis::Y => {
-                const PIXELS_PER_QUANTUM: f32 = 8.0;
+                const PIXELS_PER_QUANTUM: f32 = 4.0;
                 let unit = drag.screen_axis / axis_len_sq.sqrt();
                 (pointer_delta.dot(unit) / PIXELS_PER_QUANTUM).round() as i32
             }
             PrimitiveGizmoAxis::X | PrimitiveGizmoAxis::Z => {
-                (pointer_delta.dot(drag.screen_axis) / axis_len_sq).round() as i32
+                (pointer_delta.dot(drag.screen_axis) * 2.0 / axis_len_sq).round() as i32
             }
         };
         if steps == drag.current_steps {
@@ -6121,6 +6595,10 @@ impl EditorWorkspace {
                         NodeKind::ImageProp { width, height, .. } => Some([*width, *height]),
                         _ => None,
                     },
+                    start_box_prop_vertices: match &node.kind {
+                        NodeKind::BoxProp { vertices, .. } => Some(*vertices),
+                        _ => None,
+                    },
                     sector_size: node_enclosing_sector_size(scene, id),
                 })
             })
@@ -6180,7 +6658,8 @@ impl EditorWorkspace {
             return;
         }
         let pixels_per_step = match drag.mode {
-            TransformGizmoMode::Move | TransformGizmoMode::Scale => 8.0,
+            TransformGizmoMode::Move => 4.0,
+            TransformGizmoMode::Scale => 8.0,
             // Rotation steps are 1° each, so a low pixels-per-step
             // makes the ring feel hair-trigger. 12 px / ° (a full
             // 360° revolution costs roughly screen-width of drag)
@@ -6256,7 +6735,13 @@ impl EditorWorkspace {
                 }
                 TransformGizmoMode::Scale => {
                     if let NodeGizmoHandle::Axis(axis) = handle {
-                        apply_node_gizmo_scale(node, target.start_image_prop_size, axis, steps);
+                        apply_node_gizmo_scale(
+                            node,
+                            target.start_image_prop_size,
+                            target.start_box_prop_vertices,
+                            axis,
+                            steps,
+                        );
                     }
                 }
             }
@@ -6859,6 +7344,7 @@ impl EditorWorkspace {
                 | ViewTool::Erase
                 | ViewTool::Place
         );
+        let portal_tool = self.portal_place_active();
         let face_hit = self.face_hit_for_paint_tool(face_hit);
         let (cell, hit_world) = match face_hit {
             Some((face, hit)) => ((face.sx, face.sz), hit),
@@ -6871,7 +7357,7 @@ impl EditorWorkspace {
                 // by stamping a floor in empty space -- Sims-style.
                 // Move just bails (it never made sense for it to
                 // grow the room).
-                let cell = if paint_tool {
+                let cell = if paint_tool && !portal_tool {
                     self.ensure_cell_in_grid(room_id, world)
                 } else {
                     self.world_to_sector(room_id, world)
@@ -6889,7 +7375,11 @@ impl EditorWorkspace {
             return;
         }
         self.last_paint_stamp = Some(stamp);
-        self.selected_sector = Some((sx, sz));
+        if portal_tool {
+            self.clear_sector_selection();
+        } else {
+            self.selected_sector = Some((sx, sz));
+        }
         let tool = self.active_tool;
         self.run_paint_action(tool, room_id, sx, sz, face_hit.map(|(f, _)| f), hit_world)
     }
@@ -6946,6 +7436,13 @@ impl EditorWorkspace {
 
         match resource.data {
             ResourceData::Model(_) => {
+                let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+                if let Some(existing) =
+                    self.find_duplicate_model_entity(room_id, resource_id, translation)
+                {
+                    self.reject_duplicate_placement(existing, "Prop");
+                    return;
+                }
                 self.push_undo();
                 let node = self.create_model_entity_at_room_hit(
                     room_id,
@@ -6960,6 +7457,13 @@ impl EditorWorkspace {
                 self.mark_dirty();
             }
             ResourceData::Character(character) => {
+                let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+                if let Some(existing) =
+                    self.find_duplicate_character_entity(room_id, resource_id, translation)
+                {
+                    self.reject_duplicate_placement(existing, "Character");
+                    return;
+                }
                 self.push_undo();
                 let player = !self.has_player_source();
                 let idle_clip = self.resolve_character_idle_preview_clip(&character);
@@ -6988,6 +7492,13 @@ impl EditorWorkspace {
                 self.mark_dirty();
             }
             ResourceData::Weapon(weapon) => {
+                let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+                if let Some(existing) =
+                    self.find_duplicate_weapon_entity(room_id, resource_id, translation)
+                {
+                    self.reject_duplicate_placement(existing, "Weapon");
+                    return;
+                }
                 self.push_undo();
                 let node = self.create_weapon_entity_at_room_hit(
                     room_id,
@@ -7024,6 +7535,14 @@ impl EditorWorkspace {
         }
     }
 
+    fn placement_translation_for_room_hit(&self, room_id: NodeId, hit_world: [f32; 3]) -> [f32; 3] {
+        let editor = self
+            .room_grid_view(room_id)
+            .map(|grid| grid.room_local_to_editor(hit_world))
+            .unwrap_or([hit_world[0], hit_world[2]]);
+        [editor[0], 0.0, editor[1]]
+    }
+
     fn create_model_entity_at_room_hit(
         &mut self,
         room_id: NodeId,
@@ -7031,14 +7550,11 @@ impl EditorWorkspace {
         name: &str,
         hit_world: [f32; 3],
     ) -> NodeId {
-        let editor = self
-            .room_grid_view(room_id)
-            .map(|grid| grid.room_local_to_editor(hit_world))
-            .unwrap_or([hit_world[0], hit_world[2]]);
+        let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
-            node.transform.translation = [editor[0], 0.0, editor[1]];
+            node.transform.translation = translation;
         }
         scene.add_node(
             entity,
@@ -7072,14 +7588,11 @@ impl EditorWorkspace {
         weapon_grip: &str,
         hit_world: [f32; 3],
     ) -> NodeId {
-        let editor = self
-            .room_grid_view(room_id)
-            .map(|grid| grid.room_local_to_editor(hit_world))
-            .unwrap_or([hit_world[0], hit_world[2]]);
+        let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
-            node.transform.translation = [editor[0], 0.0, editor[1]];
+            node.transform.translation = translation;
         }
         if let Some(model_id) = model_id {
             scene.add_node(
@@ -7117,14 +7630,11 @@ impl EditorWorkspace {
         player: bool,
         hit_world: [f32; 3],
     ) -> NodeId {
-        let editor = self
-            .room_grid_view(room_id)
-            .map(|grid| grid.room_local_to_editor(hit_world))
-            .unwrap_or([hit_world[0], hit_world[2]]);
+        let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
-            node.transform.translation = [editor[0], 0.0, editor[1]];
+            node.transform.translation = translation;
         }
         if let Some(model_id) = model_id {
             scene.add_node(
@@ -7170,6 +7680,131 @@ impl EditorWorkspace {
         entity
     }
 
+    fn find_duplicate_model_entity(
+        &self,
+        room_id: NodeId,
+        model_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |scene, node| {
+            matches!(node.kind, NodeKind::Entity)
+                && entity_model_resource_id(scene, node) == Some(model_id)
+                && entity_character_component_resource_id(scene, node).is_none()
+                && entity_weapon_resource_id(scene, node).is_none()
+        })
+    }
+
+    fn find_duplicate_character_entity(
+        &self,
+        room_id: NodeId,
+        character_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |scene, node| {
+            matches!(node.kind, NodeKind::Entity)
+                && entity_character_component_resource_id(scene, node) == Some(character_id)
+        })
+    }
+
+    fn find_duplicate_weapon_entity(
+        &self,
+        room_id: NodeId,
+        weapon_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |scene, node| {
+            matches!(node.kind, NodeKind::Entity)
+                && entity_weapon_resource_id(scene, node) == Some(weapon_id)
+        })
+    }
+
+    fn find_duplicate_image_prop(
+        &self,
+        room_id: NodeId,
+        material_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(
+                node.kind,
+                NodeKind::ImageProp {
+                    material: Some(id),
+                    ..
+                } if id == material_id
+            )
+        })
+    }
+
+    fn find_duplicate_box_prop(
+        &self,
+        room_id: NodeId,
+        material_id: ResourceId,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(
+                node.kind,
+                NodeKind::BoxProp { materials, .. }
+                    if materials.iter().any(|material| *material == Some(material_id))
+            )
+        })
+    }
+
+    fn find_duplicate_spawn_marker(
+        &self,
+        room_id: NodeId,
+        player: bool,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(
+                node.kind,
+                NodeKind::SpawnPoint {
+                    player: node_player,
+                    character: None,
+                } if node_player == player
+            )
+        })
+    }
+
+    fn find_duplicate_point_light(&self, room_id: NodeId, translation: [f32; 3]) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(node.kind, NodeKind::PointLight { .. })
+        })
+    }
+
+    fn find_duplicate_portal(&self, room_id: NodeId, translation: [f32; 3]) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(node.kind, NodeKind::Portal { .. })
+        })
+    }
+
+    fn find_duplicate_room_child<F>(
+        &self,
+        room_id: NodeId,
+        translation: [f32; 3],
+        mut matches_placement: F,
+    ) -> Option<NodeId>
+    where
+        F: FnMut(&Scene, &SceneNode) -> bool,
+    {
+        let scene = self.project.active_scene();
+        let room = scene.node(room_id)?;
+        room.children.iter().copied().find(|child_id| {
+            scene.node(*child_id).is_some_and(|node| {
+                translations_match(node.transform.translation, translation)
+                    && matches_placement(scene, node)
+            })
+        })
+    }
+
+    fn reject_duplicate_placement(&mut self, existing: NodeId, label: &str) {
+        self.replace_node_selection(existing);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.status = format!("{label} already exists at this position");
+    }
+
     fn resolve_character_idle_preview_clip(
         &self,
         character: &psxed_project::CharacterResource,
@@ -7207,7 +7842,12 @@ impl EditorWorkspace {
         face_hit: Option<(FaceRef, [f32; 3])>,
         hit_world: [f32; 3],
     ) -> PaintStamp {
-        let edge = if matches!(self.active_tool, ViewTool::PaintWall) {
+        let triangle = self
+            .horizontal_paint_triangle_target(self.active_tool, room_id, sx, sz, hit_world)
+            .map(|triangle| triangle.index);
+        let edge = if self.portal_place_active() {
+            Some(self.portal_place_direction)
+        } else if matches!(self.active_tool, ViewTool::PaintWall) {
             match face_hit {
                 Some((
                     FaceRef {
@@ -7235,6 +7875,7 @@ impl EditorWorkspace {
             sx,
             sz,
             tool: self.active_tool,
+            triangle,
             edge,
             stack: None,
         }
@@ -7354,21 +7995,19 @@ impl EditorWorkspace {
                 (sz as f32 + 0.5) * sector_size,
             ]);
 
+        if matches!(tool, ViewTool::Place) && matches!(self.place_kind, PlaceKind::Portal) {
+            self.place_portal_marker(room_id, sx, sz);
+            return;
+        }
+
         if matches!(tool, ViewTool::Place) {
-            self.push_undo();
-            // World → editor (room-centre-relative, sector units)
-            // via `WorldGrid::room_local_to_editor`. Single helper,
-            // origin-aware, exact inverse of `editor_to_room_local`.
-            let editor = self
-                .room_grid_view(room_id)
-                .map(|grid| grid.room_local_to_editor(hit_world))
-                .unwrap_or([0.0, 0.0]);
+            let mut translation = self.placement_translation_for_room_hit(room_id, hit_world);
             let kind = self.place_kind;
-            // Player source is exclusive -- demote any existing
-            // player SpawnPoint / CharacterController so the
-            // cooker sees exactly one.
-            if matches!(kind, PlaceKind::PlayerSpawn) {
-                self.demote_player_sources_except(None);
+            if matches!(kind, PlaceKind::PlayerSpawn) && self.has_player_source() {
+                self.status =
+                    "Only one player source is allowed per world. Delete or demote the existing player first."
+                        .to_string();
+                return;
             }
             let (default_name, node_kind): (String, NodeKind) = match kind {
                 PlaceKind::PlayerSpawn => (
@@ -7378,13 +8017,21 @@ impl EditorWorkspace {
                         character: None,
                     },
                 ),
-                PlaceKind::SpawnMarker => (
-                    "Spawn".to_string(),
-                    NodeKind::SpawnPoint {
-                        player: false,
-                        character: None,
-                    },
-                ),
+                PlaceKind::SpawnMarker => {
+                    if let Some(existing) =
+                        self.find_duplicate_spawn_marker(room_id, false, translation)
+                    {
+                        self.reject_duplicate_placement(existing, "Spawn");
+                        return;
+                    }
+                    (
+                        "Spawn".to_string(),
+                        NodeKind::SpawnPoint {
+                            player: false,
+                            character: None,
+                        },
+                    )
+                }
                 PlaceKind::ModelInstance => {
                     // Resolve which Model resource to bind. Order:
                     // (a) user has a Model selected in the resource
@@ -7393,6 +8040,13 @@ impl EditorWorkspace {
                     //     (c) refuse with an actionable status.
                     match self.resolve_place_model_resource() {
                         Ok((model_id, name)) => {
+                            if let Some(existing) =
+                                self.find_duplicate_model_entity(room_id, model_id, translation)
+                            {
+                                self.reject_duplicate_placement(existing, "Prop");
+                                return;
+                            }
+                            self.push_undo();
                             let id = self.create_model_entity_at_room_hit(
                                 room_id, model_id, &name, hit_world,
                             );
@@ -7411,9 +8065,16 @@ impl EditorWorkspace {
                 }
                 PlaceKind::Character => match self.resolve_place_character_resource() {
                     Ok((character_id, name, character)) => {
+                        if let Some(existing) =
+                            self.find_duplicate_character_entity(room_id, character_id, translation)
+                        {
+                            self.reject_duplicate_placement(existing, "Character");
+                            return;
+                        }
                         let player = !self.has_player_source();
                         let idle_clip = self.resolve_character_idle_preview_clip(&character);
                         let settings = CharacterControllerSettings::from_character(&character);
+                        self.push_undo();
                         let id = self.create_character_entity_at_room_hit(
                             room_id,
                             character_id,
@@ -7443,6 +8104,13 @@ impl EditorWorkspace {
                 PlaceKind::ImageProp => match self.resolve_place_image_prop_material() {
                     Ok((material_id, name)) => {
                         let size = image_prop_default_size_for_sector(sector_size_i);
+                        translation[1] = hit_world[1] as f32 / sector_size;
+                        if let Some(existing) =
+                            self.find_duplicate_image_prop(room_id, material_id, translation)
+                        {
+                            self.reject_duplicate_placement(existing, "Image Prop");
+                            return;
+                        }
                         (
                             format!("{name} Image"),
                             NodeKind::ImageProp {
@@ -7460,32 +8128,83 @@ impl EditorWorkspace {
                         return;
                     }
                 },
-                PlaceKind::PointLightMarker => (
-                    "Point Light".to_string(),
-                    NodeKind::PointLight {
-                        color: [255, 240, 200],
-                        intensity: 1.0,
-                        // Sectors. Matches the Add Child default
-                        // and covers a typical 4×4 sector room.
-                        radius: 4.0,
-                    },
-                ),
+                PlaceKind::BoxProp => match self.resolve_place_image_prop_material() {
+                    Ok((material_id, name)) => {
+                        let size = image_prop_default_size_for_sector(sector_size_i);
+                        translation[1] = hit_world[1] as f32 / sector_size;
+                        if let Some(existing) =
+                            self.find_duplicate_box_prop(room_id, material_id, translation)
+                        {
+                            self.reject_duplicate_placement(existing, "Box Prop");
+                            return;
+                        }
+                        (
+                            format!("{name} Box"),
+                            NodeKind::BoxProp {
+                                materials: [Some(material_id); psxed_project::BOX_PROP_FACE_COUNT],
+                                vertices: psxed_project::box_prop_vertices_for_size(size),
+                                collision_enabled: true,
+                                break_flags: 0,
+                            },
+                        )
+                    }
+                    Err(message) => {
+                        self.status = message;
+                        return;
+                    }
+                },
+                PlaceKind::PointLightMarker => {
+                    if let Some(existing) = self.find_duplicate_point_light(room_id, translation) {
+                        self.reject_duplicate_placement(existing, "Point Light");
+                        return;
+                    }
+                    (
+                        "Point Light".to_string(),
+                        NodeKind::PointLight {
+                            color: [255, 240, 200],
+                            intensity: 1.0,
+                            // Sectors. Matches the Add Child default
+                            // and covers a typical 4×4 sector room.
+                            radius: 4.0,
+                        },
+                    )
+                }
+                PlaceKind::Portal => return,
             };
+            self.push_undo();
             let id = self
                 .project
                 .active_scene_mut()
                 .add_node(room_id, default_name, node_kind);
             if let Some(node) = self.project.active_scene_mut().node_mut(id) {
-                node.transform.translation = [editor[0], 0.0, editor[1]];
-                if matches!(kind, PlaceKind::ImageProp) {
-                    node.transform.translation[1] = hit_world[1] as f32 / sector_size;
-                }
+                node.transform.translation = translation;
             }
             self.replace_node_selection(id);
             self.clear_resource_selection_state();
             self.clear_primitive_selection_state();
             self.status = format!("Placed {} at {sx},{sz}", kind.label());
             self.mark_dirty();
+            return;
+        }
+
+        if let Some(triangle) =
+            self.horizontal_paint_triangle_target(tool, room_id, sx, sz, hit_world)
+        {
+            let already_assigned = self.triangle_material(triangle) == floor_mat;
+            self.select_painted_triangle(triangle);
+            if already_assigned {
+                self.status = format!(
+                    "{} already uses selected material",
+                    describe_triangle(triangle)
+                );
+                return;
+            }
+            self.push_undo();
+            if self.assign_triangle_material_no_undo(triangle, floor_mat) {
+                self.mark_dirty();
+            }
+            self.select_painted_triangle(triangle);
+            self.status = format!("Painted {}", describe_triangle(triangle));
             return;
         }
 
@@ -7568,6 +8287,96 @@ impl EditorWorkspace {
         self.status = status;
     }
 
+    fn horizontal_paint_triangle_target(
+        &self,
+        tool: ViewTool,
+        room_id: NodeId,
+        sx: u16,
+        sz: u16,
+        hit_world: [f32; 3],
+    ) -> Option<HorizontalTriangleRef> {
+        if !matches!(self.horizontal_edit_mode, HorizontalEditMode::Triangle) {
+            return None;
+        }
+        let kind = match tool {
+            ViewTool::PaintFloor => FaceKind::Floor,
+            ViewTool::PaintCeiling => FaceKind::Ceiling,
+            _ => return None,
+        };
+        self.horizontal_triangle_ref_at_hit(
+            FaceRef {
+                room: room_id,
+                sx,
+                sz,
+                kind,
+            },
+            hit_world,
+        )
+    }
+
+    fn select_painted_triangle(&mut self, triangle: HorizontalTriangleRef) {
+        self.replace_node_selection(triangle.room);
+        self.clear_sector_selection();
+        self.replace_primitive_selection(Selection::Triangle(triangle));
+        self.update_primitive_resource_selection();
+    }
+
+    fn place_portal_marker(&mut self, room_id: NodeId, sx: u16, sz: u16) {
+        let dir = self.portal_place_direction;
+        let Some((editor, entry_name)) = self.room_grid_view(room_id).and_then(|grid| {
+            if !portal_edge_valid_for_array_cell(grid, sx, sz, dir) {
+                return None;
+            }
+            let editor = portal_edge_midpoint_editor(grid, sx, sz, dir);
+            let entry_name = format!(
+                "portal_{}_{}_{}",
+                sx,
+                sz,
+                direction_label(dir).to_ascii_lowercase()
+            );
+            Some((editor, entry_name))
+        }) else {
+            self.status = format!(
+                "Portal needs populated sectors on both sides of the {} edge",
+                direction_label(dir)
+            );
+            return;
+        };
+
+        let translation = [editor[0], 0.0, editor[1]];
+        if let Some(existing) = self.find_duplicate_portal(room_id, translation) {
+            self.reject_duplicate_placement(existing, "Portal");
+            self.status = format!(
+                "Portal already exists on {} edge at {sx},{sz}",
+                direction_label(dir)
+            );
+            return;
+        }
+
+        self.push_undo();
+        let id = self.project.active_scene_mut().add_node(
+            room_id,
+            format!("Portal {}", direction_label(dir)),
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name,
+                geometry: None,
+            },
+        );
+        if let Some(node) = self.project.active_scene_mut().node_mut(id) {
+            node.transform.translation = translation;
+        }
+        self.replace_node_selection(id);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.status = format!(
+            "Placed Portal on {} edge at {sx},{sz}",
+            direction_label(dir)
+        );
+        self.mark_dirty();
+    }
+
     /// Material id currently applied to `face`, or `None` if the
     /// face is unassigned / its referent went away.
     fn face_material(&self, face: FaceRef) -> Option<ResourceId> {
@@ -7648,6 +8457,136 @@ impl EditorWorkspace {
         }
         if updated > 0 {
             self.mark_dirty();
+        }
+        updated
+    }
+
+    fn apply_selected_box_prop_resource_click(&mut self, click: ResourceClick) -> bool {
+        let plain_click =
+            !click.modifiers.shift && !click.modifiers.ctrl && !click.modifiers.command;
+        if !plain_click {
+            return false;
+        }
+        let Some(assignment) = self.assign_selected_box_props_resource(click.id) else {
+            return false;
+        };
+        self.status = match (assignment.targets, assignment.updated) {
+            (1, 0) => "Material already assigned to selected Box Prop".to_string(),
+            (1, _) => "Assigned material to Box Prop".to_string(),
+            (_, 0) => "Material already assigned to selected Box Props".to_string(),
+            (total, updated) if total == updated => {
+                format!("Assigned material to {updated} selected Box Props")
+            }
+            (total, updated) => {
+                format!("Assigned material to {updated}/{total} selected Box Props")
+            }
+        };
+        self.clear_resource_selection_state();
+        true
+    }
+
+    fn assign_selected_box_props_resource(
+        &mut self,
+        resource_id: ResourceId,
+    ) -> Option<BoxPropMaterialAssignment> {
+        let targets = self.selected_box_prop_nodes();
+        let target_count = targets.len();
+        if target_count == 0 {
+            return None;
+        }
+        let (resource_name, resource_data) = self
+            .project
+            .resource(resource_id)
+            .map(|resource| (resource.name.clone(), resource.data.clone()))?;
+        let mut material = match resource_data {
+            ResourceData::Material(_) => Some(resource_id),
+            ResourceData::Texture { .. } => self.project.resources.iter().find_map(|resource| {
+                matches!(
+                    &resource.data,
+                    ResourceData::Material(material) if material.texture == Some(resource_id)
+                )
+                .then_some(resource.id)
+            }),
+            _ => return None,
+        };
+        let needs_update = material
+            .map(|material| {
+                targets
+                    .iter()
+                    .any(|id| self.box_prop_materials_differ(*id, material))
+            })
+            .unwrap_or(true);
+        if !needs_update {
+            return Some(BoxPropMaterialAssignment {
+                material: material.expect("existing material checked above"),
+                targets: target_count,
+                updated: 0,
+            });
+        }
+
+        self.push_undo();
+        let created_material = material.is_none();
+        let material = *material.get_or_insert_with(|| {
+            let id = self.project.add_resource(
+                resource_name,
+                ResourceData::Material(MaterialResource::opaque(Some(resource_id))),
+            );
+            self.place_resource = Some(id);
+            id
+        });
+        let updated = self.assign_box_prop_nodes_material_no_undo(&targets, material);
+        if updated > 0 || created_material {
+            self.mark_dirty();
+        }
+        Some(BoxPropMaterialAssignment {
+            material,
+            targets: target_count,
+            updated,
+        })
+    }
+
+    fn selected_box_prop_nodes(&self) -> Vec<NodeId> {
+        self.selected_node_ids_in_hierarchy()
+            .into_iter()
+            .filter(|id| {
+                self.project
+                    .active_scene()
+                    .node(*id)
+                    .is_some_and(|node| matches!(node.kind, NodeKind::BoxProp { .. }))
+            })
+            .collect()
+    }
+
+    fn box_prop_materials_differ(&self, id: NodeId, material: ResourceId) -> bool {
+        self.project
+            .active_scene()
+            .node(id)
+            .and_then(|node| match &node.kind {
+                NodeKind::BoxProp { materials, .. } => Some(materials),
+                _ => None,
+            })
+            .is_some_and(|materials| materials.iter().any(|slot| *slot != Some(material)))
+    }
+
+    fn assign_box_prop_nodes_material_no_undo(
+        &mut self,
+        targets: &[NodeId],
+        material: ResourceId,
+    ) -> usize {
+        let scene = self.project.active_scene_mut();
+        let mut updated = 0usize;
+        for id in targets {
+            let Some(node) = scene.node_mut(*id) else {
+                continue;
+            };
+            let NodeKind::BoxProp { materials, .. } = &mut node.kind else {
+                continue;
+            };
+            if materials.iter().all(|slot| *slot == Some(material)) {
+                continue;
+            }
+            *materials = [Some(material); psxed_project::BOX_PROP_FACE_COUNT];
+            updated += 1;
         }
         updated
     }
@@ -7884,23 +8823,26 @@ impl EditorWorkspace {
             if grid.populated_sector_count() == 0 {
                 continue;
             }
-            let config = playtest_streaming_chunk_config_for_room(project, room_node.id);
-            let plan = plan_generated_chunks(grid, config);
-            for chunk in plan.chunks {
-                let Some(chunk_grid) =
-                    grid_rect_for_validation_issue(grid, chunk.array_origin, chunk.size)
-                else {
-                    continue;
-                };
+            let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
+            for portal_room in plan.rooms {
+                let chunk_grid = extract_portal_room_grid(grid, &portal_room);
                 match world_cook::cook_world_grid(project, &chunk_grid) {
                     Ok(cooked) => {
                         if let Err(error) = cooked.to_psxw_bytes() {
-                            self.record_world_cook_error(room_node.id, &error, chunk.array_origin);
+                            self.record_world_cook_error(
+                                room_node.id,
+                                &error,
+                                portal_room.array_origin,
+                            );
                             return;
                         }
                     }
                     Err(error) => {
-                        self.record_world_cook_error(room_node.id, &error, chunk.array_origin);
+                        self.record_world_cook_error(
+                            room_node.id,
+                            &error,
+                            portal_room.array_origin,
+                        );
                         return;
                     }
                 }
@@ -7917,13 +8859,37 @@ impl EditorWorkspace {
         let mapped = world_cook_error_primitives(room, error, array_origin);
         if mapped.is_empty() {
             self.validation_issue_rooms.insert(room);
+            self.replace_node_selection(room);
+            self.clear_sector_selection();
+            self.clear_primitive_selection_state();
+            self.frame_viewport();
         } else {
-            for selection in mapped {
-                if !self.validation_issue_primitives.contains(&selection) {
-                    self.validation_issue_primitives.push(selection);
+            for selection in &mapped {
+                if !self.validation_issue_primitives.contains(selection) {
+                    self.validation_issue_primitives.push(*selection);
                 }
             }
+            self.select_and_frame_validation_issue_primitives(&mapped);
         }
+    }
+
+    fn select_and_frame_validation_issue_primitives(&mut self, selections: &[Selection]) {
+        let mut selected = Vec::new();
+        for &selection in selections {
+            if !selected.contains(&selection) {
+                selected.push(selection);
+            }
+        }
+        let Some(first) = selected.first().copied() else {
+            return;
+        };
+
+        self.replace_node_selection(first.room());
+        self.clear_sector_selection();
+        self.selected_primitives = selected;
+        self.selected_primitive = Some(first);
+        self.update_primitive_resource_selection();
+        self.frame_viewport();
     }
 
     /// Map a `(face, world-hit)` pair from `pick_face_with_hit`
@@ -8410,7 +9376,6 @@ impl EditorWorkspace {
     ) {
         let consume_save = consume_command_shortcut(ctx, egui::Key::S);
         let consume_new = consume_command_shortcut(ctx, egui::Key::N);
-        let consume_reload = consume_command_shortcut(ctx, egui::Key::R);
         let consume_build = consume_command_shortcut(ctx, egui::Key::B);
         let consume_play = consume_command_shortcut(ctx, egui::Key::Enter);
         let consume_redo = consume_command_shift_shortcut(ctx, egui::Key::Z);
@@ -8426,9 +9391,6 @@ impl EditorWorkspace {
         }
         if consume_new {
             self.open_new_project_dialog();
-        }
-        if consume_reload {
-            self.reload();
         }
         if consume_build {
             self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
@@ -8458,6 +9420,7 @@ impl EditorWorkspace {
         if consume_duplicate {
             self.duplicate_current_selection();
         }
+        self.handle_toolbar_group_shortcuts(ctx);
 
         // F2 / Delete only fire when no widget owns focus -- so they
         // don't fight TextEdit content while the user is typing.
@@ -8465,7 +9428,11 @@ impl EditorWorkspace {
         if bare_shortcuts_available(focus_taken, modifiers) {
             let rot = ctx.input_mut(|i| i.key_pressed(egui::Key::R));
             if rot && self.renaming.is_none() {
-                self.rotate_current_selection_90();
+                if self.portal_place_active() {
+                    self.rotate_portal_place_direction();
+                } else {
+                    self.rotate_current_selection_90();
+                }
             }
             let flip = ctx.input_mut(|i| i.key_pressed(egui::Key::F));
             if flip && self.floating_geometry.is_some() {
@@ -8504,23 +9471,181 @@ impl EditorWorkspace {
                     self.apply_tree_action(TreeAction::Delete(self.selected_node), &[]);
                 }
             }
-            // Selection-mode hotkeys: 1 / 2 / 3 = Face / Edge /
-            // Vertex (Blender convention). The focus guard above
-            // already keeps these from firing while a TextEdit
-            // owns focus.
-            let num1 = ctx.input_mut(|i| i.key_pressed(egui::Key::Num1));
-            if num1 {
-                self.set_selection_mode(SelectionMode::Face);
-            }
-            let num2 = ctx.input_mut(|i| i.key_pressed(egui::Key::Num2));
-            if num2 {
-                self.set_selection_mode(SelectionMode::Edge);
-            }
-            let num3 = ctx.input_mut(|i| i.key_pressed(egui::Key::Num3));
-            if num3 {
-                self.set_selection_mode(SelectionMode::Vertex);
-            }
         }
+    }
+
+    fn handle_toolbar_group_shortcuts(&mut self, ctx: &egui::Context) {
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num1) {
+            self.cycle_workspace_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num2) {
+            self.cycle_tool_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num3) {
+            self.cycle_transform_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num4) {
+            self.cycle_selection_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num5) {
+            self.cycle_horizontal_edit_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num6) {
+            self.cycle_vertex_connectivity_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num7) {
+            self.cycle_visibility_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num8) {
+            self.cycle_camera_group(reverse);
+        }
+        if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num9) {
+            self.cycle_view_dimension_group(reverse);
+        }
+    }
+
+    fn cycle_workspace_group(&mut self, reverse: bool) {
+        const VALUES: &[WorkspaceView] = &[WorkspaceView::Room, WorkspaceView::Animation];
+        self.active_workspace = cycle_value(VALUES, self.active_workspace, reverse);
+        self.status = format!("Workspace: {}", self.active_workspace.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
+    }
+
+    fn cycle_tool_group(&mut self, reverse: bool) {
+        const ALL_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
+            (ViewTool::Select, None),
+            (ViewTool::PaintFloor, None),
+            (ViewTool::PaintWall, None),
+            (ViewTool::PaintCeiling, None),
+            (ViewTool::Erase, None),
+            (ViewTool::Place, Some(PlaceKind::PlayerSpawn)),
+            (ViewTool::Place, Some(PlaceKind::Portal)),
+        ];
+        const SELECT_ONLY: &[(ViewTool, Option<PlaceKind>)] = &[(ViewTool::Select, None)];
+        let values = if self.active_room_id().is_some() {
+            ALL_VALUES
+        } else {
+            SELECT_ONLY
+        };
+        let current = self.active_tool_cycle_value();
+        let next = cycle_value(values, current, reverse);
+        self.set_active_tool_cycle_value(next);
+    }
+
+    fn active_tool_cycle_value(&self) -> (ViewTool, Option<PlaceKind>) {
+        if self.active_tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
+            (ViewTool::Place, Some(PlaceKind::Portal))
+        } else if self.active_tool == ViewTool::Place {
+            (ViewTool::Place, Some(PlaceKind::PlayerSpawn))
+        } else {
+            (self.active_tool, None)
+        }
+    }
+
+    fn set_active_tool_cycle_value(&mut self, value: (ViewTool, Option<PlaceKind>)) {
+        let changed =
+            self.active_tool_cycle_value() != value || self.active_workspace != WorkspaceView::Room;
+        self.active_workspace = WorkspaceView::Room;
+        let (tool, place_kind) = value;
+        self.active_tool = tool;
+        if let Some(place_kind) = place_kind {
+            self.place_kind = place_kind;
+        }
+        if self.place_kind == PlaceKind::Portal {
+            self.clear_sector_selection();
+            self.clear_primitive_selection_state();
+            self.hovered_primitive = None;
+        }
+        self.status = if tool == ViewTool::Place && self.place_kind == PlaceKind::Portal {
+            "Tool: Portal".to_string()
+        } else {
+            format!("Tool: {}", tool.label())
+        };
+        if changed {
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
+    }
+
+    fn cycle_transform_group(&mut self, reverse: bool) {
+        const VALUES: &[TransformGizmoMode] = &[
+            TransformGizmoMode::Move,
+            TransformGizmoMode::Rotate,
+            TransformGizmoMode::Scale,
+        ];
+        self.set_transform_gizmo_mode(cycle_value(VALUES, self.transform_gizmo_mode, reverse));
+    }
+
+    fn set_transform_gizmo_mode(&mut self, mode: TransformGizmoMode) {
+        if self.transform_gizmo_mode == mode {
+            return;
+        }
+        self.transform_gizmo_mode = mode;
+        self.primitive_gizmo_drag = None;
+        self.node_gizmo_drag = None;
+        self.node_drag = None;
+        self.status = format!("Transform: {}", mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Transform);
+    }
+
+    fn cycle_selection_group(&mut self, reverse: bool) {
+        const VALUES: &[SelectionMode] = &[
+            SelectionMode::Face,
+            SelectionMode::Edge,
+            SelectionMode::Vertex,
+        ];
+        self.set_selection_mode(cycle_value(VALUES, self.selection_mode, reverse));
+    }
+
+    fn cycle_horizontal_edit_group(&mut self, reverse: bool) {
+        const VALUES: &[HorizontalEditMode] =
+            &[HorizontalEditMode::Quad, HorizontalEditMode::Triangle];
+        self.set_horizontal_edit_mode(cycle_value(VALUES, self.horizontal_edit_mode, reverse));
+    }
+
+    fn cycle_vertex_connectivity_group(&mut self, reverse: bool) {
+        const VALUES: &[VertexConnectivity] =
+            &[VertexConnectivity::Welded, VertexConnectivity::Detached];
+        self.set_vertex_connectivity(cycle_value(VALUES, self.vertex_connectivity, reverse));
+    }
+
+    fn cycle_visibility_group(&mut self, reverse: bool) {
+        let all_visible = !self.editor_visibility_has_hidden_items();
+        let show_all = reverse || !all_visible;
+        self.show_grid = show_all;
+        self.show_portals = show_all;
+        self.show_lights = show_all;
+        self.preview_fog = show_all;
+        self.preview_backface_wireframe = show_all;
+        self.preview_bounds = show_all;
+        self.persist_editor_visibility_state();
+        self.status = if show_all {
+            "Visibility: all shown".to_string()
+        } else {
+            "Visibility: all hidden".to_string()
+        };
+        self.mark_shortcut_group_changed(ShortcutGroup::Visibility);
+    }
+
+    fn cycle_camera_group(&mut self, reverse: bool) {
+        const VALUES: &[ViewportCameraMode] =
+            &[ViewportCameraMode::Orbit, ViewportCameraMode::Free];
+        let mode = cycle_value(VALUES, self.viewport_3d_camera_mode, reverse);
+        self.set_viewport_3d_camera_mode(mode);
+        self.status = match mode {
+            ViewportCameraMode::Orbit => "Camera: Orbit".to_string(),
+            ViewportCameraMode::Free => "Camera: Free".to_string(),
+        };
+    }
+
+    fn cycle_view_dimension_group(&mut self, reverse: bool) {
+        const VALUES: &[bool] = &[true, false];
+        self.view_2d = cycle_value(VALUES, self.view_2d, reverse);
+        self.status = if self.view_2d {
+            "Viewport: 2D".to_string()
+        } else {
+            "Viewport: 3D".to_string()
+        };
+        self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
     }
 
     /// Switch the Select tool's primitive mode. Tries to adapt
@@ -8552,6 +9677,7 @@ impl EditorWorkspace {
         // new mode anyway.
         self.hovered_primitive = None;
         self.status = format!("Selection mode: {}", mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Selection);
     }
 
     fn set_horizontal_edit_mode(&mut self, mode: HorizontalEditMode) {
@@ -8575,6 +9701,16 @@ impl EditorWorkspace {
         self.selected_primitive = active.or_else(|| self.selected_primitives.first().copied());
         self.hovered_primitive = None;
         self.status = format!("Surface edit: {}", mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Surface);
+    }
+
+    fn set_vertex_connectivity(&mut self, mode: VertexConnectivity) {
+        if self.vertex_connectivity == mode {
+            return;
+        }
+        self.vertex_connectivity = mode;
+        self.status = format!("Vertex edits: {}", mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Vertex);
     }
 
     fn selection_as_horizontal_mode(
@@ -8644,7 +9780,7 @@ impl EditorWorkspace {
     }
 
     /// Snap the selected node's Y-rotation up by 90°. No-op on
-    /// macro / structural nodes (Root, World, Room, plain
+    /// macro / structural nodes (World, Room, plain
     /// transform-only nodes) since they have no in-world heading.
     /// Entity hosts, the legacy `MeshInstance` card, and directional
     /// markers (spawn / trigger / audio / portal) are rotatable.
@@ -8660,6 +9796,7 @@ impl EditorWorkspace {
             NodeKind::Entity
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Trigger { .. }
                 | NodeKind::AudioSource { .. }
@@ -8686,6 +9823,7 @@ impl EditorWorkspace {
                 // No-op when `id` isn't a Room -- keeps the camera
                 // put while the user clicks through entity nodes.
                 self.frame_3d_on_room(self.selected_node);
+                self.persist_editor_camera_state();
             }
             TreeAction::BeginRename(id) => {
                 if let Some(node) = self.project.active_scene().node(id) {
@@ -8814,6 +9952,8 @@ impl EditorWorkspace {
     }
 
     fn request_play_or_rebuild(&mut self, playtest_status: EditorPlaytestStatus) {
+        self.resources_open = true;
+        self.content_browser_view = ContentBrowserView::Debug;
         self.pending_playtest_request = Some(if playtest_status.is_active() {
             EditorPlaytestRequest::Rebuild
         } else {
@@ -8821,299 +9961,798 @@ impl EditorWorkspace {
         });
     }
 
-    fn draw_action_bar(&mut self, ctx: &egui::Context, playtest_status: EditorPlaytestStatus) {
+    fn draw_action_bar(
+        &mut self,
+        ctx: &egui::Context,
+        playtest_status: EditorPlaytestStatus,
+        play_metrics: Option<EditorPlaytestMetrics>,
+    ) {
+        let action_bar_height = action_bar_height_for_status(&self.status);
+        let status_strip_height = (action_bar_height - 12.0).max(38.0);
         egui::TopBottomPanel::top("psxed_action_bar")
-            .exact_height(50.0)
+            .exact_height(action_bar_height)
             .frame(top_bar_frame())
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    egui::Frame::new()
-                        .fill(STUDIO_PANEL_DARK)
-                        .stroke(Stroke::new(1.0, STUDIO_BORDER))
-                        .corner_radius(egui::CornerRadius::same(4))
-                        .inner_margin(egui::Margin::symmetric(7, 5))
-                        .show(ui, |ui| {
-                            ui.label(icons::text(icons::BOX, 18.0).color(STUDIO_ACCENT));
-                        })
-                        .response
-                        .on_hover_text("PSoXide");
-
-                    ui.add_space(4.0);
-
-                    ui.menu_button("File", |ui| {
-                        if ui
-                            .button(menu_label("New Project...", &command_shortcut_text("N")))
-                            .clicked()
-                        {
-                            self.open_new_project_dialog();
-                            ui.close_menu();
-                        }
-                        ui.menu_button(icons::label(icons::FOLDER, "Project"), |ui| {
-                            self.draw_project_switch_menu(ui);
-                        });
-                        let can_delete_project = !self.current_project_is_default();
-                        let delete_response = ui.add_enabled(
-                            can_delete_project,
-                            egui::Button::new("Delete Project..."),
-                        );
-                        let delete_clicked = delete_response.clicked();
-                        if !can_delete_project {
-                            delete_response.on_hover_text("The default project cannot be deleted");
-                        }
-                        if delete_clicked {
-                            self.delete_project_dialog_open = true;
-                            self.delete_project_error = None;
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui
-                            .button(menu_label("Save", &command_shortcut_text("S")))
-                            .clicked()
-                        {
-                            self.save_project_from_ui();
-                            ui.close_menu();
-                        }
-                        if ui
-                            .button(menu_label("Reload", &command_shortcut_text("R")))
-                            .clicked()
-                        {
-                            self.reload();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Quit").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.menu_button("Edit", |ui| {
-                        let can_node_delete = self.selected_node != NodeId::ROOT;
-                        let has_geometry_selection = self.has_geometry_selection();
-                        if ui
-                            .button(menu_label(
-                                "Duplicate Selection",
-                                &command_shortcut_text("D"),
-                            ))
-                            .clicked()
-                        {
-                            self.duplicate_current_selection();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui
-                            .add_enabled(
-                                has_geometry_selection,
-                                egui::Button::new("Rotate World Geometry 90°"),
-                            )
-                            .clicked()
-                        {
-                            self.rotate_current_selection_90();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui
-                            .add_enabled(can_node_delete, egui::Button::new("Delete Selection"))
-                            .clicked()
-                        {
-                            self.delete_selected();
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("View", |ui| {
-                        if ui
-                            .checkbox(&mut self.left_dock_open, "Scene and files")
-                            .clicked()
-                        {
-                            ui.close_menu();
-                        }
-                        if ui
-                            .checkbox(&mut self.resources_open, "Resources")
-                            .clicked()
-                        {
-                            ui.close_menu();
-                        }
-                        if ui.checkbox(&mut self.inspector_open, "Inspector").clicked() {
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Frame Selection").clicked() {
-                            self.frame_viewport();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Room Workspace").clicked() {
-                            self.active_workspace = WorkspaceView::Room;
-                            ui.close_menu();
-                        }
-                        if ui.button("Animation Viewer").clicked() {
-                            self.open_animation_viewer_for_current_selection();
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Tools", |ui| {
-                        if ui.button("Build Project").clicked() {
-                            self.pending_playtest_request =
-                                Some(EditorPlaytestRequest::BuildProject);
-                            ui.close_menu();
-                        }
-                        let play_label = if playtest_status.is_active() {
-                            "Rebuild and Play"
-                        } else {
-                            "Play"
-                        };
-                        if ui.button(play_label).clicked() {
-                            self.request_play_or_rebuild(playtest_status);
-                            ui.close_menu();
-                        }
-                    });
-                    ui.menu_button("Help", |ui| {
-                        ui.label(RichText::new("PSoXide Editor").strong());
-                        ui.weak("Build cooks assets and compiles the PS1 runtime.");
-                        ui.weak("Play builds and runs inside the viewport.");
-                    });
-
+                    self.draw_project_identity(ui);
+                    ui.add_space(8.0);
+                    self.draw_main_menus(ctx, ui, playtest_status);
                     ui.add_space(10.0);
-
-                    if ui
-                        .selectable_label(self.left_dock_open, icons::text(icons::LAYERS, 14.0))
-                        .on_hover_text("Toggle scene/files panel")
-                        .clicked()
-                    {
-                        self.left_dock_open = !self.left_dock_open;
-                    }
-                    if ui
-                        .selectable_label(self.resources_open, icons::text(icons::FOLDER, 14.0))
-                        .on_hover_text("Toggle resources panel")
-                        .clicked()
-                    {
-                        self.resources_open = !self.resources_open;
-                    }
-                    if ui
-                        .selectable_label(self.inspector_open, icons::text(icons::SCAN, 14.0))
-                        .on_hover_text("Toggle inspector panel")
-                        .clicked()
-                    {
-                        self.inspector_open = !self.inspector_open;
-                    }
-
+                    self.draw_build_play_controls(ui, playtest_status, play_metrics);
                     ui.add_space(10.0);
-
-                    if ui
-                        .button(icons::label(icons::FILE_PLUS, "New"))
-                        .on_hover_text(
-                            format!(
-                                "Create a new project from the default template. Shortcut: {}.",
-                                command_shortcut_text("N")
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.open_new_project_dialog();
-                    }
-                    if ui
-                        .button(icons::label(icons::SAVE, "Save"))
-                        .on_hover_text(format!(
-                            "Save the project. Shortcut: {}.",
-                            command_shortcut_text("S")
-                        ))
-                        .clicked()
-                    {
-                        self.save_project_from_ui();
-                    }
-                    if ui
-                        .button(icons::label(icons::ROTATE_CCW, "Reload"))
-                        .on_hover_text(format!(
-                            "Reload project.ron from disk. Shortcut: {}.",
-                            command_shortcut_text("R")
-                        ))
-                        .clicked()
-                    {
-                        self.reload();
-                    }
-                    if ui
-                        .button(icons::label(icons::FOCUS, "Frame"))
-                        .on_hover_text("Frame the current node or tile selection. Shortcut: .")
-                        .clicked()
-                    {
-                        self.frame_viewport();
-                    }
-
-                    ui.add_space(10.0);
-
-                    if ui
-                        .button(icons::label(icons::BOX, "Build"))
-                        .on_hover_text(
-                            format!(
-                                "Cook assets, build the runtime EXE, and export it into the launcher Projects list. Shortcut: {}.",
-                                command_shortcut_text("B")
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
-                    }
-                    let playtest_active = playtest_status.is_active();
-                    let play_label = if playtest_active {
-                        "Rebuild & Play"
-                    } else {
-                        "Play"
-                    };
-                    if ui
-                        .button(icons::label(icons::PLAY, play_label))
-                        .on_hover_text(
-                            format!(
-                                "Cook assets, build the runtime, and run it inside the 3D viewport. Shortcut: {}.",
-                                command_shortcut_text("Enter")
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.request_play_or_rebuild(playtest_status);
-                    }
-                    if playtest_active
-                        && ui
-                            .button(icons::label(icons::TRASH, "Stop"))
-                            .on_hover_text("Stop embedded play mode and return the viewport to editing.")
-                            .clicked()
-                    {
-                        self.pending_playtest_request = Some(EditorPlaytestRequest::Stop);
-                    }
-
-                    ui.add_space(12.0);
 
                     ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width().max(160.0), 38.0),
-                        egui::Layout::top_down(egui::Align::LEFT),
+                        Vec2::new(ui.available_width().max(180.0), status_strip_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            self.draw_project_title_status(ui);
+                            self.draw_build_status_strip(ui, playtest_status);
                         },
                     );
                 });
             });
     }
 
-    fn draw_project_title_status(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing.y = 1.0;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            let dirty_width = if self.dirty { 12.0 } else { 0.0 };
-            let title_width = (ui.available_width() - dirty_width).max(96.0);
+    fn draw_project_identity(&mut self, ui: &mut egui::Ui) {
+        let logo_texture = self.psoxide_logo_texture_id(ui.ctx());
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_DARK)
+            .stroke(Stroke::new(1.0, STUDIO_BORDER))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(4, 4))
+            .show(ui, |ui| {
+                if let Some(texture_id) = logo_texture {
+                    ui.add(egui::Image::new((texture_id, Vec2::splat(28.0))));
+                } else {
+                    ui.label(icons::text(icons::BOX, 18.0).color(STUDIO_ACCENT));
+                }
+            })
+            .response
+            .on_hover_text("PSoXide");
+
+        ui.add_space(2.0);
+
+        if self.project_name_editing {
+            let edit_id = ui.id().with("project_name_inline_edit");
             let response = ui.add_sized(
-                Vec2::new(title_width, 21.0),
+                Vec2::new(154.0, 23.0),
                 egui::TextEdit::singleline(&mut self.project.name)
                     .hint_text("Project name")
-                    .font(egui::TextStyle::Button),
+                    .font(egui::TextStyle::Button)
+                    .id(edit_id),
             );
+            if self.project_name_focus_pending {
+                response.request_focus();
+                self.project_name_focus_pending = false;
+            }
             if response.changed() {
                 self.mark_dirty();
+            }
+            let finish_edit = response.lost_focus()
+                || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+            if finish_edit {
+                self.project_name_editing = false;
             }
             if self.dirty {
                 ui.label(RichText::new("*").strong().color(STUDIO_ACCENT));
             }
+            return;
+        }
+
+        let display_name = if self.project.name.trim().is_empty() {
+            "Untitled"
+        } else {
+            self.project.name.trim()
+        };
+        ui.label(RichText::new(display_name).strong().size(15.0));
+        if self.dirty {
+            ui.label(RichText::new("*").strong().color(STUDIO_ACCENT));
+        }
+        if ui
+            .add_sized(
+                Vec2::new(24.0, 23.0),
+                egui::Button::new(icons::text(icons::PEN_LINE, 13.0)),
+            )
+            .on_hover_text("Edit project name")
+            .clicked()
+        {
+            self.project_name_editing = true;
+            self.project_name_focus_pending = true;
+        }
+    }
+
+    fn psoxide_logo_texture_id(&mut self, ctx: &egui::Context) -> Option<egui::TextureId> {
+        if self.psoxide_logo_texture.is_none() {
+            let logo = decode_embedded_png(PSOXIDE_LOGO_ICON_PNG)?;
+            self.psoxide_logo_texture =
+                Some(ctx.load_texture("psoxide-logo-icon", logo, egui::TextureOptions::LINEAR));
+        }
+        self.psoxide_logo_texture.as_ref().map(|handle| handle.id())
+    }
+
+    fn draw_main_menus(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        playtest_status: EditorPlaytestStatus,
+    ) {
+        ui.menu_button("File", |ui| {
+            if ui
+                .button(menu_label("New Project...", &command_shortcut_text("N")))
+                .clicked()
+            {
+                self.open_new_project_dialog();
+                ui.close_menu();
+            }
+            ui.menu_button(icons::label(icons::FOLDER, "Project"), |ui| {
+                self.draw_project_switch_menu(ui);
+            });
+            let can_delete_project = !self.current_project_is_default();
+            let delete_response =
+                ui.add_enabled(can_delete_project, egui::Button::new("Delete Project..."));
+            let delete_clicked = delete_response.clicked();
+            if !can_delete_project {
+                delete_response.on_hover_text("The default project cannot be deleted");
+            }
+            if delete_clicked {
+                self.delete_project_dialog_open = true;
+                self.delete_project_error = None;
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .button(menu_label("Save", &command_shortcut_text("S")))
+                .clicked()
+            {
+                self.save_project_from_ui();
+                ui.close_menu();
+            }
+            if ui.button("Reload").clicked() {
+                self.reload();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Quit").clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         });
-        ui.add_sized(
-            Vec2::new(ui.available_width(), 16.0),
-            egui::Label::new(RichText::new(&self.status).small().color(STUDIO_TEXT_WEAK)),
+        ui.menu_button("Edit", |ui| {
+            let can_node_delete = self.selected_node != NodeId::ROOT;
+            let has_geometry_selection = self.has_geometry_selection();
+            if ui
+                .button(menu_label(
+                    "Duplicate Selection",
+                    &command_shortcut_text("D"),
+                ))
+                .clicked()
+            {
+                self.duplicate_current_selection();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    has_geometry_selection,
+                    egui::Button::new("Rotate World Geometry 90°"),
+                )
+                .clicked()
+            {
+                self.rotate_current_selection_90();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(can_node_delete, egui::Button::new("Delete Selection"))
+                .clicked()
+            {
+                self.delete_selected();
+                ui.close_menu();
+            }
+        });
+        ui.menu_button("View", |ui| {
+            if ui
+                .checkbox(&mut self.left_dock_open, "World and files")
+                .clicked()
+            {
+                ui.close_menu();
+            }
+            if ui.checkbox(&mut self.resources_open, "Resources").clicked() {
+                ui.close_menu();
+            }
+            if ui.checkbox(&mut self.inspector_open, "Inspector").clicked() {
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Frame Selection").clicked() {
+                self.frame_viewport();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Room Workspace").clicked() {
+                self.active_workspace = WorkspaceView::Room;
+                ui.close_menu();
+            }
+            if ui.button("Animation Viewer").clicked() {
+                self.open_animation_viewer_for_current_selection();
+                ui.close_menu();
+            }
+        });
+        ui.menu_button("Tools", |ui| {
+            if ui.button("Build Project").clicked() {
+                self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
+                ui.close_menu();
+            }
+            let play_label = if playtest_status.is_active() {
+                "Rebuild and Play"
+            } else {
+                "Play"
+            };
+            if ui.button(play_label).clicked() {
+                self.request_play_or_rebuild(playtest_status);
+                ui.close_menu();
+            }
+            if playtest_status.is_active() {
+                ui.separator();
+                if ui.button("Stop Embedded Play").clicked() {
+                    self.pending_playtest_request = Some(EditorPlaytestRequest::Stop);
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.menu_button("Help", |ui| {
+            ui.label(RichText::new("PSoXide Editor").strong());
+            ui.weak("Build cooks assets and compiles the PS1 runtime.");
+            ui.weak("Play builds and runs inside the viewport.");
+        });
+    }
+
+    fn draw_build_play_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        playtest_status: EditorPlaytestStatus,
+        play_metrics: Option<EditorPlaytestMetrics>,
+    ) {
+        if ui
+            .button(icons::label(icons::BOX, "Build"))
+            .on_hover_text(format!(
+                "Cook assets, build the runtime EXE, and export it into the launcher Projects list. Shortcut: {}.",
+                command_shortcut_text("B")
+            ))
+            .clicked()
+        {
+            self.pending_playtest_request = Some(EditorPlaytestRequest::BuildProject);
+        }
+
+        let playtest_active = playtest_status.is_active();
+        let play_label = if playtest_active {
+            "Rebuild & Play"
+        } else {
+            "Play"
+        };
+        if ui
+            .button(icons::label(icons::PLAY, play_label))
+            .on_hover_text(format!(
+                "Cook assets, build the runtime, and run it inside the 3D viewport. Shortcut: {}.",
+                command_shortcut_text("Enter")
+            ))
+            .clicked()
+        {
+            self.request_play_or_rebuild(playtest_status);
+        }
+
+        if playtest_active
+            && ui
+                .button(icons::label(icons::TRASH, "Stop"))
+                .on_hover_text("Stop embedded play mode and return the viewport to editing.")
+                .clicked()
+        {
+            self.pending_playtest_request = Some(EditorPlaytestRequest::Stop);
+        }
+
+        if ui
+            .button(icons::label(icons::FOCUS, "Debug"))
+            .on_hover_text("Append camera, player, room, and portal visibility diagnostics to logs/editor_debug.log.")
+            .clicked()
+        {
+            self.capture_debug_snapshot(play_metrics);
+        }
+    }
+
+    fn capture_debug_snapshot(&mut self, play_metrics: Option<EditorPlaytestMetrics>) {
+        let path = self.debug_log_path();
+        match self.write_debug_snapshot(&path, play_metrics) {
+            Ok(()) => {
+                let label = path
+                    .strip_prefix(&self.project_dir)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| path.display().to_string());
+                self.status = format!("Debug snapshot appended to {label}");
+            }
+            Err(error) => {
+                self.status = format!("Debug snapshot failed: {error}");
+            }
+        }
+    }
+
+    fn debug_log_path(&self) -> PathBuf {
+        self.project_dir.join("logs").join("editor_debug.log")
+    }
+
+    fn write_debug_snapshot(
+        &self,
+        path: &Path,
+        play_metrics: Option<EditorPlaytestMetrics>,
+    ) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+        }
+        let mut text = String::new();
+        self.append_debug_snapshot_text(&mut text, play_metrics);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| format!("open {}: {error}", path.display()))?;
+        std::io::Write::write_all(&mut file, text.as_bytes())
+            .map_err(|error| format!("write {}: {error}", path.display()))?;
+        Ok(())
+    }
+
+    fn append_debug_snapshot_text(
+        &self,
+        out: &mut String,
+        play_metrics: Option<EditorPlaytestMetrics>,
+    ) {
+        let unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let editor_camera = self.viewport_3d_camera();
+        let editor_basis = editor_camera.basis();
+        let editor_position = editor_camera.position_i32();
+        let _ = writeln!(out, "---- PSoXide editor debug snapshot ----");
+        let _ = writeln!(out, "unix_ms: {unix_ms}");
+        let _ = writeln!(out, "project: {}", self.project.name);
+        let _ = writeln!(out, "project_dir: {}", self.project_dir.display());
+        let _ = writeln!(out, "status: {}", self.status);
+        let _ = writeln!(
+            out,
+            "editor_camera: mode={:?} pos={:?} target={:?} yaw_q12={} yaw_deg={:.2} pitch_q12={} pitch_deg={:.2} radius={}",
+            editor_camera.mode,
+            editor_position,
+            editor_camera.target,
+            editor_camera.yaw_q12,
+            q12_degrees(editor_camera.yaw_q12),
+            editor_camera.pitch_q12,
+            q12_degrees(editor_camera.pitch_q12),
+            editor_camera.radius
         );
+        let _ = writeln!(
+            out,
+            "editor_camera_basis: forward={:?} right={:?} up={:?}",
+            editor_basis.forward, editor_basis.right, editor_basis.up
+        );
+        match play_metrics {
+            Some(metrics) => self.append_play_metrics_debug_snapshot(out, metrics),
+            None => {
+                let _ = writeln!(out, "play_metrics: unavailable");
+            }
+        }
+        let _ = writeln!(out);
+    }
+
+    fn append_play_metrics_debug_snapshot(&self, out: &mut String, metrics: EditorPlaytestMetrics) {
+        let _ = writeln!(
+            out,
+            "runtime_player: valid={} room_index={} local=({}, {}) yaw_q12={} yaw_deg={:.2}",
+            metrics.player_map_valid,
+            metrics.player_room_index,
+            metrics.player_local_x,
+            metrics.player_local_z,
+            metrics.player_view_yaw_q12,
+            q12_degrees(metrics.player_view_yaw_q12)
+        );
+        let camera_forward = if metrics.camera_view_basis_valid {
+            let x = -(metrics.camera_view_sin_yaw_q12 as f32) / 4096.0;
+            let z = -(metrics.camera_view_cos_yaw_q12 as f32) / 4096.0;
+            Some([x, z])
+        } else {
+            None
+        };
+        let _ = writeln!(
+            out,
+            "runtime_camera: map_valid={} local=({}, {}, {}) global_valid={} global=({}, {}, {}) visibility_room={} basis_valid={} yaw_sin_q12={} yaw_cos_q12={} pitch_sin_q12={} pitch_cos_q12={} forward_xz={:?}",
+            metrics.camera_map_valid,
+            metrics.camera_local_x,
+            metrics.camera_local_y,
+            metrics.camera_local_z,
+            metrics.camera_global_valid,
+            metrics.camera_global_x,
+            metrics.camera_global_y,
+            metrics.camera_global_z,
+            metrics.portal_current_room_index,
+            metrics.camera_view_basis_valid,
+            metrics.camera_view_sin_yaw_q12,
+            metrics.camera_view_cos_yaw_q12,
+            metrics.camera_view_sin_pitch_q12,
+            metrics.camera_view_cos_pitch_q12,
+            camera_forward
+        );
+        let _ = writeln!(
+            out,
+            "portal_counts: visible={} frontier={} missing_resident={} build_failed={} tests={} accepts={} bounds_fb={} rejects_b/f/t={:?} caps_r/f/d={:?}",
+            metrics.portal_visible_rooms,
+            metrics.portal_frontier_rooms,
+            metrics.portal_missing_resident,
+            metrics.portal_build_failed,
+            metrics.portal_tests,
+            metrics.portal_accepts,
+            metrics.portal_bounds_fallbacks,
+            metrics.portal_rejects,
+            metrics.portal_caps
+        );
+        let _ = writeln!(
+            out,
+            "stream_counts: visible_chunks={} loaded={} candidates={} built={} cache_skips={} priorities_c/v/f={:?} req={} miss={} prefetch={} evict={} slot_limit={} pending={} failed={}",
+            metrics.chunk_visible,
+            metrics.chunk_loaded,
+            metrics.chunk_candidates,
+            metrics.chunk_built,
+            metrics.chunk_cache_skips,
+            metrics.stream_priorities,
+            metrics.stream_requests,
+            metrics.stream_misses,
+            metrics.stream_prefetches,
+            metrics.stream_evictions,
+            metrics.stream_slot_limit,
+            metrics.stream_pending,
+            metrics.stream_failed
+        );
+        let _ = writeln!(
+            out,
+            "masks: loaded={:#018x} loading={:#018x} active={:#018x} drawn={:#018x} visible={:#018x} frontier={:#018x} missing={:#018x} build_failed={:#018x}",
+            metrics.chunk_loaded_mask,
+            metrics.chunk_loading_mask,
+            metrics.chunk_active_mask,
+            metrics.chunk_drawn_mask,
+            metrics.portal_visible_mask,
+            metrics.portal_frontier_mask,
+            metrics.portal_missing_mask,
+            metrics.portal_build_failed_mask
+        );
+        let _ = writeln!(
+            out,
+            "portal_masks: room_tested={:#018x} room_accepted={:#018x} room_reject_frustum={:#018x} room_bounds_fb={:#018x} portal_tested={:#018x} portal_accepted={:#018x} portal_reject_frustum={:#018x} portal_bounds_fb={:#018x}",
+            metrics.portal_tested_mask,
+            metrics.portal_accepted_mask,
+            metrics.portal_reject_frustum_mask,
+            metrics.portal_bounds_fallback_mask,
+            metrics.portal_tested_portal_mask,
+            metrics.portal_accepted_portal_mask,
+            metrics.portal_reject_frustum_portal_mask,
+            metrics.portal_bounds_fallback_portal_mask
+        );
+        self.append_portal_map_debug_snapshot(out, metrics);
+    }
+
+    fn append_portal_map_debug_snapshot(&self, out: &mut String, metrics: EditorPlaytestMetrics) {
+        let map = collect_play_chunk_debug_map(&self.project);
+        let player_room = metrics
+            .player_map_valid
+            .then_some(metrics.player_room_index as usize);
+        let current_room = if metrics.camera_global_valid {
+            Some(metrics.portal_current_room_index as usize)
+        } else {
+            player_room
+        };
+        let trace = collect_portal_clip_trace(&map, metrics, current_room);
+        let _ = writeln!(
+            out,
+            "portal_map: runtime_rooms={} directed_portals={} player_runtime_room={:?} visibility_runtime_room={:?}",
+            map.runtime_room_count(),
+            map.portals.len(),
+            player_room,
+            current_room
+        );
+        if let Some(trace) = &trace {
+            let _ = writeln!(
+                out,
+                "portal_clip_trace: camera_global={:?} entries={} half_fov_q12=({}, {}) near={} far={} max_depth={} min_width={}",
+                trace.camera_global,
+                trace.entries.len(),
+                trace.camera.half_fov_x_tan_q12,
+                trace.camera.half_fov_y_tan_q12,
+                trace.camera.near_z,
+                trace.camera.far_z,
+                PLAY_PORTAL_DEBUG_MAX_DEPTH,
+                trace.camera.min_portal_width_q12
+            );
+        } else {
+            let _ = writeln!(out, "portal_clip_trace: unavailable");
+        }
+        if let Some(room_index) = current_room {
+            self.append_runtime_room_debug_snapshot(out, &map, metrics, room_index, "current_room");
+        }
+        if player_room.is_some() && player_room != current_room {
+            self.append_runtime_room_debug_snapshot(
+                out,
+                &map,
+                metrics,
+                player_room.unwrap(),
+                "player_room",
+            );
+        }
+        let connected: Vec<_> = map
+            .portals
+            .iter()
+            .filter(|portal| {
+                current_room.is_none_or(|room| {
+                    portal.source_room_index == room || portal.destination_room_index == room
+                })
+            })
+            .collect();
+        let _ = writeln!(out, "connected_portals: count={}", connected.len());
+        let connected_indices: HashSet<usize> =
+            connected.iter().map(|portal| portal.portal_index).collect();
+        for portal in connected {
+            self.append_portal_debug_snapshot(out, &map, metrics, portal, trace.as_ref());
+        }
+        let traversal_portals: Vec<_> = map
+            .portals
+            .iter()
+            .filter(|portal| {
+                if connected_indices.contains(&portal.portal_index) {
+                    return false;
+                }
+                let source_bit = debug_chunk_bit(portal.source_room_index);
+                let portal_bit = debug_chunk_bit(portal.portal_index);
+                source_bit != 0
+                    && portal_bit != 0
+                    && metrics.portal_visible_mask & source_bit != 0
+                    && metrics.portal_tested_portal_mask & portal_bit != 0
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "visible_source_traversal_portals: count={}",
+            traversal_portals.len()
+        );
+        for portal in traversal_portals {
+            self.append_portal_debug_snapshot(out, &map, metrics, portal, trace.as_ref());
+        }
+    }
+
+    fn append_runtime_room_debug_snapshot(
+        &self,
+        out: &mut String,
+        map: &PlayChunkDebugMap,
+        metrics: EditorPlaytestMetrics,
+        room_index: usize,
+        label: &str,
+    ) {
+        let cells: Vec<_> = map
+            .cells
+            .iter()
+            .filter(|cell| cell.runtime_room_index == room_index)
+            .collect();
+        let Some(first) = cells.first() else {
+            let _ = writeln!(out, "{label}: runtime_room={room_index} missing_from_map");
+            return;
+        };
+        let room_name = self
+            .project
+            .active_scene()
+            .node(first.project_room_id)
+            .map(|node| node.name.as_str())
+            .unwrap_or("<missing room node>");
+        let _ = writeln!(
+            out,
+            "{label}: runtime_room={} project_room=#{} '{}' portal_room={} flags=[{}] cell_count={}",
+            room_index,
+            first.project_room_id.raw(),
+            room_name,
+            first.portal_room_index,
+            debug_room_flags(metrics, room_index),
+            cells.len()
+        );
+        for cell in cells {
+            let _ = writeln!(
+                out,
+                "  cell: array={:?} center={:?} half={:?} map_origin={:?} runtime_origin={:?} sector_size={}",
+                cell.array_cell,
+                cell.center,
+                cell.half,
+                cell.room_origin,
+                cell.runtime_origin,
+                cell.sector_size
+            );
+        }
+    }
+
+    fn append_portal_debug_snapshot(
+        &self,
+        out: &mut String,
+        map: &PlayChunkDebugMap,
+        metrics: EditorPlaytestMetrics,
+        portal: &PlayChunkDebugMapPortal,
+        trace: Option<&PortalClipTrace>,
+    ) {
+        let portal_bit = debug_chunk_bit(portal.portal_index);
+        let tested = portal_bit != 0 && metrics.portal_tested_portal_mask & portal_bit != 0;
+        let accepted = portal_bit != 0 && metrics.portal_accepted_portal_mask & portal_bit != 0;
+        let rejected =
+            portal_bit != 0 && metrics.portal_reject_frustum_portal_mask & portal_bit != 0;
+        let bounds_fb =
+            portal_bit != 0 && metrics.portal_bounds_fallback_portal_mask & portal_bit != 0;
+        let _ = writeln!(
+            out,
+            "portal #{}: {} -> {} dir={:?} normal={:?} marker={:?} status tested={} accepted={} reject_frustum={} bounds_fb={} map_a={:?} map_b={:?} world={:?}",
+            portal.portal_index,
+            portal.source_room_index,
+            portal.destination_room_index,
+            portal.direction,
+            portal.normal_world,
+            portal.source_marker.map(NodeId::raw),
+            tested,
+            accepted,
+            rejected,
+            bounds_fb,
+            portal.a,
+            portal.b,
+            portal.vertices_world
+        );
+        self.append_portal_clip_debug_snapshot(out, portal, trace);
+        self.append_runtime_room_debug_snapshot(
+            out,
+            map,
+            metrics,
+            portal.source_room_index,
+            "  source",
+        );
+        self.append_runtime_room_debug_snapshot(
+            out,
+            map,
+            metrics,
+            portal.destination_room_index,
+            "  destination",
+        );
+    }
+
+    fn append_portal_clip_debug_snapshot(
+        &self,
+        out: &mut String,
+        portal: &PlayChunkDebugMapPortal,
+        trace: Option<&PortalClipTrace>,
+    ) {
+        let Some(trace) = trace else {
+            let _ = writeln!(out, "  clip: unavailable");
+            return;
+        };
+        let mut matches = 0usize;
+        for entry in trace
+            .entries
+            .iter()
+            .filter(|entry| entry.portal_index == portal.portal_index)
+        {
+            matches += 1;
+            let debug = entry.debug;
+            let _ = writeln!(
+                out,
+                "  clip[{}]: parent_room={} parent_portal={} depth={} skipped_return={} decision={:?} front={} first_empty={:?} counts_n/l/r/b/t={}/{}/{}/{}/{} tiny={} parent={} padded={} projected={} clipped={} fallback={} result={}",
+                matches - 1,
+                entry.parent.room.raw(),
+                debug_parent_portal_label(entry.parent.source_portal),
+                entry.parent.depth,
+                entry.skipped_return,
+                debug.decision,
+                debug.front_faces_camera,
+                debug.first_empty_plane,
+                debug.near_count,
+                debug.left_count,
+                debug.right_count,
+                debug.bottom_count,
+                debug.top_count,
+                debug.tiny,
+                portal_clip_debug_rect_text(Some(debug.parent)),
+                portal_clip_debug_rect_text(Some(debug.padded_parent)),
+                portal_clip_debug_rect_text(debug.projected_bounds),
+                portal_clip_debug_rect_text(debug.clipped_bounds),
+                portal_clip_debug_rect_text(debug.fallback_bounds),
+                portal_clip_debug_rect_text(debug.result_bounds),
+            );
+            let _ = writeln!(
+                out,
+                "    view_vertices: {}",
+                portal_clip_debug_vertices_text(debug.view_vertices)
+            );
+        }
+        if matches == 0 {
+            let _ = writeln!(out, "  clip: no traversal entry for this portal");
+        }
+    }
+
+    fn draw_build_status_strip(&self, ui: &mut egui::Ui, playtest_status: EditorPlaytestStatus) {
+        let status = self.action_bar_status(playtest_status);
+        let strip_width = ui.available_width().max(180.0);
+        let strip_height = ui.available_height().max(26.0);
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_DARK)
+            .stroke(Stroke::new(1.0, status.border))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(9, 5))
+            .show(ui, |ui| {
+                ui.set_min_width((strip_width - 18.0).max(80.0));
+                ui.set_min_height((strip_height - 10.0).max(26.0));
+                ui.horizontal(|ui| {
+                    ui.label(icons::text(status.icon, 14.0).color(status.accent));
+                    ui.label(
+                        RichText::new(status.badge)
+                            .small()
+                            .strong()
+                            .color(status.accent),
+                    );
+                    ui.separator();
+                    ui.add_sized(
+                        Vec2::new(
+                            ui.available_width().max(80.0),
+                            ui.available_height().max(18.0),
+                        ),
+                        egui::Label::new(
+                            RichText::new(status.message)
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                        )
+                        .wrap(),
+                    );
+                });
+            });
+    }
+
+    fn action_bar_status(&self, playtest_status: EditorPlaytestStatus) -> ActionBarStatus<'_> {
+        match playtest_status {
+            EditorPlaytestStatus::Cooking => ActionBarStatus {
+                icon: icons::BOX,
+                badge: "COOKING",
+                message: &self.status,
+                accent: STUDIO_ACCENT,
+                border: STUDIO_ACCENT_DIM,
+            },
+            EditorPlaytestStatus::Building => ActionBarStatus {
+                icon: icons::TERMINAL,
+                badge: "BUILDING",
+                message: &self.status,
+                accent: STUDIO_ACCENT,
+                border: STUDIO_ACCENT_DIM,
+            },
+            EditorPlaytestStatus::Running { input_captured } => ActionBarStatus {
+                icon: icons::PLAY,
+                badge: if input_captured { "PLAY INPUT" } else { "PLAY" },
+                message: &self.status,
+                accent: Color32::from_rgb(114, 207, 138),
+                border: Color32::from_rgb(40, 93, 55),
+            },
+            EditorPlaytestStatus::Failed => ActionBarStatus {
+                icon: icons::TERMINAL,
+                badge: "FAILED",
+                message: &self.status,
+                accent: Color32::from_rgb(239, 106, 106),
+                border: Color32::from_rgb(104, 42, 42),
+            },
+            EditorPlaytestStatus::Idle if self.dirty => ActionBarStatus {
+                icon: icons::SAVE,
+                badge: "UNSAVED",
+                message: &self.status,
+                accent: STUDIO_ACCENT,
+                border: STUDIO_ACCENT_DIM,
+            },
+            EditorPlaytestStatus::Idle => ActionBarStatus {
+                icon: icons::CIRCLE_DOT,
+                badge: "READY",
+                message: &self.status,
+                accent: STUDIO_TEXT_WEAK,
+                border: STUDIO_BORDER,
+            },
+        }
     }
 
     fn draw_left_dock(&mut self, ctx: &egui::Context) {
@@ -9131,16 +10770,79 @@ impl EditorWorkspace {
                 fixed_panel_content(ui, "psxed_left_dock_fixed_content", |ui| {
                     let content_width = ui.available_width().max(1.0);
                     constrain_resizable_dock_content(ui, content_width);
-                    self.draw_scene_tree_panel(ui);
-                    ui.add_space(6.0);
-                    self.draw_filesystem_panel(ui);
+                    self.draw_scene_filesystem_split(ui);
                 });
             });
     }
 
+    fn draw_scene_filesystem_split(&mut self, ui: &mut egui::Ui) {
+        let content_width = ui.available_width().max(1.0);
+        let total_height = ui.available_height().max(1.0);
+        let splitter_height = LEFT_DOCK_SPLITTER_HEIGHT.min(total_height);
+        let panel_height = (total_height - splitter_height).max(1.0);
+        let min_panel = LEFT_DOCK_MIN_SPLIT_PANEL_HEIGHT.min(panel_height * 0.5);
+        let min_fraction = (min_panel / panel_height).clamp(0.0, 0.5);
+        self.left_dock_scene_fraction = self
+            .left_dock_scene_fraction
+            .clamp(min_fraction, 1.0 - min_fraction);
+
+        let scene_height = (panel_height * self.left_dock_scene_fraction)
+            .clamp(min_panel, panel_height - min_panel);
+        let filesystem_height = (panel_height - scene_height).max(0.0);
+
+        ui.allocate_ui_with_layout(
+            Vec2::new(content_width, scene_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(Vec2::new(content_width, scene_height));
+                ui.set_max_width(content_width);
+                self.draw_scene_tree_panel(ui);
+            },
+        );
+        self.draw_scene_filesystem_splitter(ui, content_width, panel_height);
+        ui.allocate_ui_with_layout(
+            Vec2::new(content_width, filesystem_height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(Vec2::new(content_width, filesystem_height));
+                ui.set_max_width(content_width);
+                self.draw_filesystem_panel(ui);
+            },
+        );
+    }
+
+    fn draw_scene_filesystem_splitter(&mut self, ui: &mut egui::Ui, width: f32, panel_height: f32) {
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, LEFT_DOCK_SPLITTER_HEIGHT), Sense::drag());
+        let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        if response.dragged() && panel_height > 1.0 {
+            let delta = ui.input(|input| input.pointer.delta().y);
+            let min_fraction = (LEFT_DOCK_MIN_SPLIT_PANEL_HEIGHT.min(panel_height * 0.5)
+                / panel_height)
+                .clamp(0.0, 0.5);
+            self.left_dock_scene_fraction = (self.left_dock_scene_fraction + delta / panel_height)
+                .clamp(min_fraction, 1.0 - min_fraction);
+        }
+
+        let color = if response.dragged() || response.hovered() {
+            STUDIO_ACCENT
+        } else {
+            STUDIO_BORDER
+        };
+        let y = rect.center().y;
+        ui.painter().line_segment(
+            [
+                Pos2::new(rect.left() + 10.0, y),
+                Pos2::new(rect.right() - 10.0, y),
+            ],
+            Stroke::new(1.0, color),
+        );
+    }
+
     fn draw_scene_tree_panel(&mut self, ui: &mut egui::Ui) {
         tool_panel_frame().show(ui, |ui| {
-            tool_panel_header(ui, icons::LAYERS, "Scene", |ui| {
+            ui.set_min_height(ui.available_height());
+            tool_panel_header(ui, icons::LAYERS, "World", |ui| {
                 ui.menu_button(icons::text(icons::PLUS, 14.0), |ui| {
                     for (label, kind) in default_addable_kinds() {
                         if ui.button(label).clicked() {
@@ -9159,7 +10861,7 @@ impl EditorWorkspace {
     fn draw_scene_tree_panel_body(&mut self, ui: &mut egui::Ui) {
         ui.add(
             egui::TextEdit::singleline(&mut self.scene_filter)
-                .hint_text("Filter nodes")
+                .hint_text("Filter world")
                 .desired_width(f32::INFINITY),
         );
         ui.separator();
@@ -9169,14 +10871,17 @@ impl EditorWorkspace {
         let display_rows = scene_tree_display_rows(&rows, &filter, &self.collapsed_scene_nodes);
         let visible_node_order: Vec<NodeId> = display_rows.iter().map(|row| row.id).collect();
         let mut actions: Vec<TreeAction> = Vec::new();
+        let mut connection_select: Option<NodeId> = None;
+        let mut connection_repair: Option<NodeId> = None;
         let selected_node = self.selected_node;
         let selected_nodes = self.selected_nodes.clone();
         let collapsed_scene_nodes = self.collapsed_scene_nodes.clone();
         let hidden_scene_nodes = self.hidden_scene_nodes.clone();
         let scene = self.project.active_scene();
+        let connections = derive_room_connections(scene);
         let renaming = &mut self.renaming;
         let pending_focus = &mut self.pending_rename_focus;
-        let tree_scroll_height = ui.available_height().clamp(180.0, 420.0);
+        let tree_scroll_height = (ui.available_height() - 30.0).max(24.0);
         egui::ScrollArea::vertical()
             .id_salt("psxed_scene_tree")
             .auto_shrink([false, false])
@@ -9196,10 +10901,31 @@ impl EditorWorkspace {
                         &mut actions,
                     );
                 }
+                ui.add_space(4.0);
+                draw_room_connections_rows(
+                    ui,
+                    scene,
+                    &connections,
+                    &filter,
+                    selected_node,
+                    &selected_nodes,
+                    &mut connection_select,
+                    &mut connection_repair,
+                );
+                draw_room_floor_link_rows(ui, scene, &filter);
             });
 
         for action in actions {
             self.apply_tree_action(action, &visible_node_order);
+        }
+        if let Some(portal) = connection_select {
+            self.replace_node_selection(portal);
+            self.clear_resource_selection_state();
+            self.clear_primitive_selection_state();
+            self.clear_sector_selection();
+        }
+        if let Some(portal) = connection_repair {
+            self.create_reciprocal_portal(portal);
         }
 
         ui.horizontal(|ui| {
@@ -9217,38 +10943,11 @@ impl EditorWorkspace {
                 self.delete_selected();
             }
         });
-
-        ui.separator();
-        draw_scene_group(
-            ui,
-            icons::GRID,
-            "Rooms",
-            count_nodes(&self.project, |kind| matches!(kind, NodeKind::Room { .. })),
-        );
-        draw_scene_group(
-            ui,
-            icons::BOX,
-            "Entities",
-            count_nodes(&self.project, |kind| matches!(kind, NodeKind::Entity)),
-        );
-        draw_scene_group(
-            ui,
-            icons::LAYERS,
-            "Components",
-            count_nodes(&self.project, NodeKind::is_component),
-        );
-        draw_scene_group(
-            ui,
-            icons::SUN,
-            "Lights",
-            count_nodes(&self.project, |kind| {
-                matches!(kind, NodeKind::PointLight { .. })
-            }),
-        );
     }
 
     fn draw_filesystem_panel(&mut self, ui: &mut egui::Ui) {
         tool_panel_frame().show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
             tool_panel_header(ui, icons::FOLDER, "FileSystem", |_| {});
             tool_panel_body(ui, |ui| self.draw_filesystem_panel_body(ui));
         });
@@ -9257,39 +10956,53 @@ impl EditorWorkspace {
     fn draw_filesystem_panel_body(&mut self, ui: &mut egui::Ui) {
         let rows = project_filesystem_rows(&self.project);
         let filter = self.file_filter.to_ascii_lowercase();
-        let visible_resource_order: Vec<ResourceId> = rows
-            .iter()
-            .filter(|row| {
-                row.resource.is_some()
-                    && (filter.is_empty() || row.name.to_ascii_lowercase().contains(&filter))
-            })
-            .filter_map(|row| row.resource)
-            .collect();
+        let visible_rows =
+            project_filesystem_display_rows(&rows, &filter, &self.collapsed_file_folders);
+        let visible_resource_order: Vec<ResourceId> =
+            visible_rows.iter().filter_map(|row| row.resource).collect();
         let mut clicked_resource = None;
+        let mut toggled_folder = None;
         let selected_resource = self.selected_resource;
         let selected_resources = self.selected_resources.clone();
+        let collapsed_folders = self.collapsed_file_folders.clone();
+        let file_scroll_height = (ui.available_height() - 28.0).max(24.0);
         egui::ScrollArea::vertical()
             .id_salt("psxed_filesystem")
-            .max_height(190.0)
+            .auto_shrink([false, false])
+            .max_height(file_scroll_height)
             .show(ui, |ui| {
-                for row in &rows {
-                    if let Some(click) = draw_project_file_row(
+                for row in visible_rows {
+                    match draw_project_file_row(
                         ui,
                         row,
                         selected_resource,
                         &selected_resources,
                         &filter,
+                        &collapsed_folders,
                     ) {
-                        clicked_resource = Some(click);
+                        Some(ProjectFileRowAction::Select(click)) => {
+                            clicked_resource = Some(click);
+                        }
+                        Some(ProjectFileRowAction::ToggleFolder(key)) => {
+                            toggled_folder = Some(key);
+                        }
+                        None => {}
                     }
                 }
             });
+        if let Some(key) = toggled_folder {
+            if !self.collapsed_file_folders.insert(key.clone()) {
+                self.collapsed_file_folders.remove(&key);
+            }
+        }
         if let Some(click) = clicked_resource {
-            self.apply_resource_selection_modifiers(
-                click.id,
-                click.modifiers,
-                &visible_resource_order,
-            );
+            if !self.apply_selected_box_prop_resource_click(click) {
+                self.apply_resource_selection_modifiers(
+                    click.id,
+                    click.modifiers,
+                    &visible_resource_order,
+                );
+            }
         }
         ui.add(
             egui::TextEdit::singleline(&mut self.file_filter)
@@ -9381,6 +11094,7 @@ impl EditorWorkspace {
                                 // Picker `→` jump-to requests bubble up here.
                                 // Applied after both phases release their borrows.
                                 let mut nav_target: Option<ResourceId> = None;
+                                let mut node_nav_target: Option<NodeId> = None;
                                 let mut world_sector_size_change: Option<i32> = None;
                                 let mut room_grid_resize: Option<(u16, u16)> = None;
                                 let inherited_sector_size =
@@ -9471,6 +11185,20 @@ impl EditorWorkspace {
                                 if changed && self.selected_node_is_player_source() {
                                     self.demote_player_sources_except(Some(selected));
                                 }
+                                let selected_is_world = self
+                                    .project
+                                    .active_scene()
+                                    .node(selected)
+                                    .is_some_and(|node| matches!(node.kind, NodeKind::World { .. }));
+                                if selected_is_world {
+                                    changed |= draw_playtest_render_settings(
+                                        ui,
+                                        &mut self.project.runtime_depth_sort_mode,
+                                        &mut self.project.runtime_texture_split_mode,
+                                        &mut self.project.runtime_room_draw_order_mode,
+                                        &mut self.project.runtime_texture_split_max_edge,
+                                    );
+                                }
 
                                 // Phase 2: component host/member authoring. This uses
                                 // its own borrow so adding/selecting component nodes does
@@ -9481,7 +11209,7 @@ impl EditorWorkspace {
                                 // project so it can edit the active Room's grid.
                                 if let Some(room_id) = active_room {
                                     if let Some(grid) = self.room_grid_view(room_id) {
-                                        draw_streaming_budget(
+                                        draw_portal_room_budget(
                                             ui,
                                             &self.project,
                                             self.project_root(),
@@ -9544,6 +11272,14 @@ impl EditorWorkspace {
                                     return;
                                 };
 
+                                if matches!(node.kind, NodeKind::Portal { .. }) {
+                                    if let Some(connection) = connection_for_portal(scene, selected)
+                                    {
+                                        node_nav_target =
+                                            draw_portal_connection_inspector(ui, scene, &connection);
+                                    }
+                                }
+
                                 egui::CollapsingHeader::new(icons::label(icons::BOX, "Render"))
                                     .default_open(false)
                                     .show(ui, |ui| {
@@ -9578,7 +11314,7 @@ impl EditorWorkspace {
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.label("Path");
-                                            ui.label(format!("/Root/{}", node.name));
+                                            ui.label(format!("/World/{}", node.name));
                                         });
                                     });
 
@@ -9594,6 +11330,12 @@ impl EditorWorkspace {
                                 if let Some(target) = nav_target {
                                     self.replace_resource_selection(target);
                                     self.clear_node_selection_state();
+                                    self.clear_primitive_selection_state();
+                                    self.clear_sector_selection();
+                                }
+                                if let Some(target) = node_nav_target {
+                                    self.replace_node_selection(target);
+                                    self.clear_resource_selection_state();
                                     self.clear_primitive_selection_state();
                                     self.clear_sector_selection();
                                 }
@@ -10320,6 +12062,7 @@ impl EditorWorkspace {
     }
 
     fn draw_resource_inspector(&mut self, ui: &mut egui::Ui, id: ResourceId) {
+        self.refresh_texture_thumbs(ui.ctx());
         // Deferred jump-to navigation, same pattern as
         // `draw_face_inspector`. Applied after the mutable
         // resource borrow releases.
@@ -10328,25 +12071,40 @@ impl EditorWorkspace {
         // mutably below. `texture_thumb_entry` takes `&self` and
         // walks Texture / Material → cached `.psxt` decode, so this
         // copy is the only way to keep both alive in one inspector.
-        let preview_thumb = self
+        let preview_snapshot = self
             .project
             .resource(id)
             .and_then(|resource| self.texture_thumb_entry(resource))
-            .map(|entry| (entry.handle.id(), entry.stats));
+            .map(|entry| TexturePreviewSnapshot {
+                texture_id: entry.handle.id(),
+                image: entry.image.clone(),
+                stats: entry.stats,
+            });
+        let preview_thumb = preview_snapshot
+            .as_ref()
+            .map(|entry| (entry.texture_id, entry.stats));
         // Snapshot project_dir for path resolution inside the
         // model inspector (parses .psxmdl / .psxanim for live
         // stats display). Cloned so the mutable resource borrow
         // below doesn't fight `&self.project_dir`.
         let project_root = self.project_dir.clone();
-        let texture_options: Vec<(ResourceId, String)> = self
+        let texture_options: Vec<TexturePickerOption> = self
             .project
             .resources
             .iter()
             .filter_map(|r| match &r.data {
-                ResourceData::Texture { .. } => Some((r.id, r.name.clone())),
+                ResourceData::Texture { .. } => Some(TexturePickerOption {
+                    id: r.id,
+                    name: r.name.clone(),
+                    thumb: self
+                        .texture_thumbs
+                        .get(&r.id)
+                        .map(|entry| (entry.handle.id(), entry.stats)),
+                }),
                 _ => None,
             })
             .collect();
+        let mut material_texture_search = self.material_texture_search.clone();
         // Snapshot Model resources + their clip names so the
         // Character Profile inspector can populate model + clip pickers
         // without borrowing `self.project` while the mutable
@@ -10386,6 +12144,7 @@ impl EditorWorkspace {
 
         let mut rename_commit: Option<String> = None;
         let mut rename_cancelled = false;
+        let mut transparency_key_action: Option<(ResourceId, PickedPsxtTexel)> = None;
         let mut changed = false;
         ui.horizontal(|ui| {
             draw_inline_icon(
@@ -10439,7 +12198,10 @@ impl EditorWorkspace {
 
         match &mut resource.data {
             ResourceData::Texture { psxt_path } => {
-                draw_psxt_preview_block(ui, preview_thumb);
+                if let Some(pick) = draw_psxt_preview_block_pickable(ui, preview_snapshot.as_ref())
+                {
+                    transparency_key_action = Some((id, pick));
+                }
                 egui::CollapsingHeader::new(icons::label(icons::FILE, "PSXT"))
                     .default_open(true)
                     .show(ui, |ui| {
@@ -10460,7 +12222,12 @@ impl EditorWorkspace {
                 }
             }
             ResourceData::Material(material) => {
-                draw_psxt_preview_block(ui, preview_thumb);
+                if let Some(pick) = draw_psxt_preview_block_pickable(ui, preview_snapshot.as_ref())
+                {
+                    if let Some(texture_id) = material.texture {
+                        transparency_key_action = Some((texture_id, pick));
+                    }
+                }
                 egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
                     .default_open(true)
                     .show(ui, |ui| {
@@ -10468,6 +12235,7 @@ impl EditorWorkspace {
                             ui,
                             &mut material.texture,
                             &texture_options,
+                            &mut material_texture_search,
                             &mut nav_target,
                         );
                         changed |= blend_mode_editor(ui, &mut material.blend_mode);
@@ -10575,8 +12343,14 @@ impl EditorWorkspace {
             }
         }
 
+        self.material_texture_search = material_texture_search;
+
         if changed {
             self.mark_dirty();
+        }
+
+        if let Some((texture_id, pick)) = transparency_key_action {
+            self.apply_texture_transparency_key(ui.ctx(), texture_id, pick);
         }
 
         // Apply deferred nav so the user can drill straight
@@ -10597,7 +12371,9 @@ impl EditorWorkspace {
         // cards rendered below have something to blit instead of the
         // name-keyword procedural fallback. Cheap when nothing's
         // changed -- the signature cache short-circuits per-resource.
-        self.refresh_texture_thumbs(ctx);
+        if self.content_browser_view == ContentBrowserView::Resources {
+            self.refresh_texture_thumbs(ctx);
+        }
         let max_height = max_resizable_bottom_dock_height(ctx);
         egui::TopBottomPanel::bottom("psxed_content_browser")
             .resizable(true)
@@ -10614,7 +12390,10 @@ impl EditorWorkspace {
                         tool_panel_body(ui, |ui| {
                             let content_width = ui.available_width().max(1.0);
                             ui.set_width(content_width);
-                            self.draw_resources_tab(ui);
+                            match self.content_browser_view {
+                                ContentBrowserView::Resources => self.draw_resources_tab(ui),
+                                ContentBrowserView::Debug => self.draw_debug_terminal_tab(ui),
+                            }
                         });
                     });
                 });
@@ -10628,14 +12407,55 @@ impl EditorWorkspace {
             .show(ui, |ui| {
                 ui.set_min_height(PANEL_HEADER_MIN_HEIGHT);
                 ui.horizontal(|ui| {
-                    ui.label(icons::text(icons::LAYERS, 15.0).color(STUDIO_ACCENT));
-                    ui.label(RichText::new("Resources").strong().color(STUDIO_TEXT));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.draw_resource_panel_actions(ui);
-                    });
+                    ui.label(
+                        icons::text(
+                            match self.content_browser_view {
+                                ContentBrowserView::Resources => icons::LAYERS,
+                                ContentBrowserView::Debug => icons::TERMINAL,
+                            },
+                            15.0,
+                        )
+                        .color(STUDIO_ACCENT),
+                    );
+                    ui.selectable_value(
+                        &mut self.content_browser_view,
+                        ContentBrowserView::Resources,
+                        "Resources",
+                    );
+                    ui.selectable_value(
+                        &mut self.content_browser_view,
+                        ContentBrowserView::Debug,
+                        "Debug Viz",
+                    );
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| match self.content_browser_view {
+                            ContentBrowserView::Resources => self.draw_resource_panel_actions(ui),
+                            ContentBrowserView::Debug => self.draw_debug_terminal_actions(ui),
+                        },
+                    );
                 });
             });
         ui.separator();
+    }
+
+    fn draw_debug_terminal_actions(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add(egui::Button::new(icons::text(icons::COPY, 14.0)).min_size(Vec2::new(28.0, 24.0)))
+            .on_hover_text("Copy all guest debug terminal lines")
+            .clicked()
+        {
+            ui.ctx().copy_text(self.play_debug_terminal_text());
+            self.status = "Copied guest debug terminal".to_string();
+        }
+        if ui
+            .add(egui::Button::new(icons::text(icons::TRASH, 14.0)).min_size(Vec2::new(28.0, 24.0)))
+            .on_hover_text("Clear the guest debug terminal")
+            .clicked()
+        {
+            self.play_debug_terminal_lines.clear();
+            self.status = "Cleared guest debug terminal".to_string();
+        }
     }
 
     fn draw_resource_panel_actions(&mut self, ui: &mut egui::Ui) {
@@ -10849,6 +12669,50 @@ impl EditorWorkspace {
         .on_hover_text("Add, import, or sync resources");
     }
 
+    fn play_debug_terminal_text(&self) -> String {
+        let mut out = String::new();
+        for line in &self.play_debug_terminal_lines {
+            let _ = writeln!(out, "{line}");
+        }
+        out
+    }
+
+    fn draw_debug_terminal_tab(&mut self, ui: &mut egui::Ui) {
+        let terminal_height = ui.available_height().max(1.0);
+        egui::Frame::new()
+            .fill(Color32::from_black_alpha(170))
+            .stroke(Stroke::new(1.0, STUDIO_BORDER))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(8, 7))
+            .show(ui, |ui| {
+                ui.set_min_height((terminal_height - 14.0).max(1.0));
+                if self.play_debug_terminal_lines.is_empty() {
+                    ui.weak("Guest debug terminal is waiting for PSX log output.");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt("psxed_play_debug_terminal")
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .max_height(ui.available_height().max(1.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width().max(1.0));
+                        let mut terminal_text = self.play_debug_terminal_text();
+                        let rows = self.play_debug_terminal_lines.len().max(1);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut terminal_text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(rows)
+                                .frame(false)
+                                .margin(egui::Margin::same(0))
+                                .interactive(true),
+                        )
+                        .on_hover_text("Select log text and press Ctrl+C or Cmd+C to copy it.");
+                    });
+            });
+    }
+
     /// Walk every Texture resource and ensure its `.psxt` blob has
     /// been decoded into an egui texture handle the resource cards
     /// can blit. Skips entries whose `psxt_path` matches the cached
@@ -10922,13 +12786,16 @@ impl EditorWorkspace {
         stats: PsxtStats,
     ) {
         if let Some(entry) = self.texture_thumbs.get_mut(&id) {
-            entry.handle.set(image, egui::TextureOptions::NEAREST);
+            entry
+                .handle
+                .set(image.clone(), egui::TextureOptions::NEAREST);
             entry.signature = signature;
+            entry.image = image;
             entry.stats = stats;
         } else {
             let handle = ctx.load_texture(
                 format!("psxt-thumb-{}", id.raw()),
-                image,
+                image.clone(),
                 egui::TextureOptions::NEAREST,
             );
             self.texture_thumbs.insert(
@@ -10936,10 +12803,71 @@ impl EditorWorkspace {
                 ThumbnailEntry {
                     signature,
                     handle,
+                    image,
                     stats,
                 },
             );
         }
+    }
+
+    fn apply_texture_transparency_key(
+        &mut self,
+        ctx: &egui::Context,
+        texture_id: ResourceId,
+        pick: PickedPsxtTexel,
+    ) {
+        let Some(resource) = self.project.resource(texture_id) else {
+            self.status = "Texture resource missing".to_string();
+            return;
+        };
+        let psxt_path = match &resource.data {
+            ResourceData::Texture { psxt_path } => psxt_path.clone(),
+            _ => {
+                self.status = "Selected resource is not a Texture".to_string();
+                return;
+            }
+        };
+        if psxt_path.is_empty() {
+            self.status = "Texture path is empty".to_string();
+            return;
+        }
+        let abs = psxed_project::model_import::resolve_path(&psxt_path, Some(&self.project_dir));
+        let mut bytes = match std::fs::read(&abs) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = format!("Could not read {}: {err}", abs.display());
+                return;
+            }
+        };
+        let report = match psxed_project::texture_import::apply_texel_color_key_transparency(
+            &mut bytes, pick.x, pick.y,
+        ) {
+            Ok(report) => report,
+            Err(err) => {
+                self.status = format!("Transparency key failed: {err}");
+                return;
+            }
+        };
+        if let Err(err) = std::fs::write(&abs, &bytes) {
+            self.status = format!("Could not write {}: {err}", abs.display());
+            return;
+        }
+        if let Some((image, stats)) = decode_psxt_thumbnail(&bytes) {
+            self.set_texture_thumb(ctx, texture_id, psxt_path, image, stats);
+        } else {
+            self.remove_texture_thumb(texture_id);
+        }
+        self.status = format!(
+            "Transparent key #{:02X} RGB({},{},{}) rewrote {} texel(s) from click RGB({},{},{})",
+            report.picked_index,
+            report.picked_rgb[0],
+            report.picked_rgb[1],
+            report.picked_rgb[2],
+            report.rewritten_texels,
+            pick.color.r(),
+            pick.color.g(),
+            pick.color.b()
+        );
     }
 
     fn remove_texture_thumb(&mut self, id: ResourceId) {
@@ -11067,8 +12995,8 @@ impl EditorWorkspace {
                     // Sims-style: with a face selected, clicking a
                     // Material card retargets the selected face set's
                     // material rather than swapping the inspector.
-                    // Texture / non-Material clicks still navigate
-                    // normally.
+                    // Box props also accept plain Material / Texture
+                    // clicks; other clicks still navigate normally.
                     let id = click.id;
                     let is_material = matches!(
                         self.project.resource(id).map(|r| &r.data),
@@ -11105,7 +13033,7 @@ impl EditorWorkspace {
                             }
                         }
                         self.replace_resource_selection(id);
-                    } else {
+                    } else if !self.apply_selected_box_prop_resource_click(click) {
                         self.apply_resource_selection_modifiers(
                             id,
                             click.modifiers,
@@ -11156,64 +13084,6 @@ impl EditorWorkspace {
         true
     }
 
-    fn viewport_context_chips(&self) -> Vec<String> {
-        if self.active_workspace == WorkspaceView::Animation {
-            return vec!["Animation Viewer".to_string()];
-        }
-
-        let mut chips = vec![
-            "Room Edit".to_string(),
-            self.active_tool.label().to_string(),
-        ];
-        match self.active_tool {
-            ViewTool::Select => {
-                chips.push(self.selection_mode.label().to_string());
-                chips.push(self.horizontal_edit_mode.label().to_string());
-                chips.push(self.vertex_connectivity.label().to_string());
-            }
-            ViewTool::PaintWall => {
-                chips.push(self.wall_paint_shape.label().to_string());
-            }
-            ViewTool::Place => {
-                chips.push(self.place_kind.label().to_string());
-            }
-            ViewTool::PaintFloor | ViewTool::PaintCeiling | ViewTool::Erase => {}
-        }
-        chips.push(if self.view_2d {
-            "2D".to_string()
-        } else {
-            format!("3D {}", self.viewport_3d_camera_mode.label())
-        });
-        chips
-    }
-
-    fn viewport_header_status(&self) -> String {
-        if self.active_workspace == WorkspaceView::Animation {
-            return "Animation Preview".to_string();
-        }
-        if self.view_2d {
-            let zoom = (self.viewport_zoom / DEFAULT_VIEWPORT_ZOOM * 100.0).round() as u16;
-            return format!("2D Preview · Zoom {zoom}%");
-        }
-        self.viewport_3d_status_text()
-    }
-
-    fn viewport_3d_status_text(&self) -> String {
-        match self.viewport_3d_camera_mode {
-            ViewportCameraMode::Orbit => format!(
-                "3D Preview · Orbit yaw {} pitch {} r {}",
-                self.viewport_3d_yaw, self.viewport_3d_pitch, self.viewport_3d_radius
-            ),
-            ViewportCameraMode::Free => {
-                let [x, y, z] = self.viewport_3d_free_position;
-                format!(
-                    "3D Preview · Free x {x} y {y} z {z} yaw {} pitch {}",
-                    self.viewport_3d_free_yaw, self.viewport_3d_free_pitch
-                )
-            }
-        }
-    }
-
     fn draw_viewport(
         &mut self,
         ctx: &egui::Context,
@@ -11228,7 +13098,7 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 tool_panel_frame().show(ui, |ui| {
                     ui.expand_to_include_rect(ui.max_rect());
-                    self.draw_viewport_tabs(ui);
+                    self.draw_viewport_header_toolbar(ui);
                     tool_panel_body(ui, |ui| {
                         if self.active_workspace == WorkspaceView::Animation {
                             let action = model_animation_viewer::draw_model_animation_viewer(
@@ -11243,9 +13113,6 @@ impl EditorWorkspace {
                             }
                             return;
                         }
-
-                        self.draw_viewport_toolbar(ui);
-                        ui.separator();
 
                         if viewport_3d.mode == EditorViewport3dMode::Play {
                             self.draw_viewport_3d_play_body(ui, viewport_3d, playtest_status);
@@ -11329,11 +13196,17 @@ impl EditorWorkspace {
                             &self.selected_sectors,
                             &self.validation_issue_primitives,
                             &self.validation_issue_rooms,
+                            self.show_portals,
+                            self.show_lights,
                         );
 
                         let pointer_world = response
-                            .interact_pointer_pos()
+                            .hover_pos()
+                            .or_else(|| response.interact_pointer_pos())
                             .map(|pos| transform.screen_to_world(pos));
+                        if let Some(world) = pointer_world {
+                            self.draw_portal_place_preview_2d(&painter, transform, world);
+                        }
                         if let (Some(room), Some(world)) = (
                             self.floating_geometry.as_ref().map(|preview| preview.room),
                             pointer_world,
@@ -11440,210 +13313,425 @@ impl EditorWorkspace {
             });
     }
 
-    fn draw_viewport_tabs(&mut self, ui: &mut egui::Ui) {
-        let room_label = self
-            .active_room_id()
-            .and_then(|id| self.project.active_scene().node(id))
-            .map(|node| node.name.as_str())
-            .unwrap_or("(no room)");
-        let title = format!("{room_label}.room");
-        let context_chips = self.viewport_context_chips();
-        let header_status = self.viewport_header_status();
+    fn draw_viewport_header_toolbar(&mut self, ui: &mut egui::Ui) {
         egui::Frame::new()
             .fill(STUDIO_PANEL_HEADER)
-            .inner_margin(panel_header_margin())
+            .inner_margin(egui::Margin::symmetric(8, 5))
             .show(ui, |ui| {
-                ui.set_min_height(PANEL_HEADER_MIN_HEIGHT);
+                ui.set_min_height(32.0);
+                ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
                 ui.horizontal_wrapped(|ui| {
-                    for (view, label) in [
-                        (WorkspaceView::Room, title.as_str()),
-                        (WorkspaceView::Animation, WorkspaceView::Animation.label()),
-                    ] {
-                        let selected = self.active_workspace == view;
-                        if ui
-                            .selectable_label(selected, icons::label(view.icon(), label))
-                            .clicked()
-                        {
-                            self.active_workspace = view;
-                        }
-                    }
-                    ui.separator();
-                    for (index, chip) in context_chips.iter().enumerate() {
-                        context_chip(ui, chip, index == 1);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("Project: {}", self.project.name))
-                                .color(STUDIO_TEXT_WEAK),
-                        );
-                        ui.label(RichText::new(header_status).small().color(STUDIO_TEXT_WEAK));
-                    });
+                    self.draw_viewport_toolbar(ui);
                 });
             });
-        ui.separator();
+    }
+
+    fn mark_shortcut_group_changed(&mut self, group: ShortcutGroup) {
+        self.shortcut_group_flash = Some((group, Instant::now()));
+    }
+
+    fn retain_shortcut_group_flash(&mut self) {
+        if self.shortcut_group_flash.is_some_and(|(_, started)| {
+            started.elapsed().as_secs_f32() >= SHORTCUT_GROUP_FLASH_SECONDS
+        }) {
+            self.shortcut_group_flash = None;
+        }
+    }
+
+    fn shortcut_group_glow(&self, group: ShortcutGroup) -> f32 {
+        let Some((active, started)) = self.shortcut_group_flash else {
+            return 0.0;
+        };
+        if active != group {
+            return 0.0;
+        }
+        let elapsed = started.elapsed().as_secs_f32();
+        (1.0 - elapsed / SHORTCUT_GROUP_FLASH_SECONDS).clamp(0.0, 1.0)
     }
 
     fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
-        let room_active = self.active_room_id().is_some();
-        if !room_active && self.active_tool.requires_room_context() {
+        if self.active_room_id().is_none() && self.active_tool.requires_room_context() {
             self.active_tool = ViewTool::Select;
         }
-        egui::ScrollArea::horizontal()
-            .id_salt("viewport-toolbar-scroll")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for (tool, hint) in [
-                        (
-                            ViewTool::Select,
-                            "Click to select; use Move, Rotate, or Scale gizmo handles on selected nodes.",
-                        ),
-                        (
-                            ViewTool::PaintFloor,
-                            "Paint a floor on each cell you click or drag over.",
-                        ),
-                        (
-                            ViewTool::PaintWall,
-                            "Paint a wall on the edge nearest the click.",
-                        ),
-                        (ViewTool::PaintCeiling, "Paint a ceiling on each cell."),
-                        (ViewTool::Erase, "Clear floor/walls/ceiling from the cell."),
-                        (
-                            ViewTool::Place,
-                            "Drop a Spawn Point or entity marker at the clicked cell.",
-                        ),
-                    ] {
-                        let enabled = room_active || !tool.requires_room_context();
-                        let clicked = ui
-                            .add_enabled_ui(enabled, |ui| {
-                                toolbar_icon_button(
-                                    ui,
-                                    self.active_tool == tool,
-                                    tool.icon(),
-                                    tool.label(),
-                                    hint,
-                                )
-                            })
-                            .inner;
-                        if clicked {
-                            self.active_tool = tool;
-                        }
-                    }
-                    ui.separator();
-                    if matches!(self.active_tool, ViewTool::Select) {
-                        self.draw_transform_gizmo_mode_picker(ui);
-                        ui.separator();
-                        self.draw_selection_mode_picker(ui);
-                        ui.separator();
-                        self.draw_horizontal_edit_mode_picker(ui);
-                        ui.separator();
-                        self.draw_vertex_connectivity_picker(ui);
-                    } else if matches!(self.active_tool, ViewTool::Place) {
-                        self.draw_place_kind_picker(ui);
-                    } else if matches!(self.active_tool, ViewTool::PaintWall) {
-                        self.draw_wall_paint_shape_picker(ui);
-                        ui.separator();
-                        self.draw_brush_material_picker(ui);
-                    } else {
-                        self.draw_brush_material_picker(ui);
-                    }
-                    ui.separator();
-                    if toolbar_icon_button(
-                        ui,
-                        self.snap_to_grid,
-                        icons::WAYPOINT,
-                        "Snap",
-                        "Snap movement and placement to the grid.",
-                    ) {
-                        self.snap_to_grid = !self.snap_to_grid;
-                    }
-                    ui.add_sized(
-                        [48.0, 22.0],
-                        egui::DragValue::new(&mut self.snap_units)
-                            .speed(1.0)
-                            .range(1..=256),
-                    )
-                    .on_hover_text("Snap interval.");
-                    if toolbar_icon_button(
-                        ui,
-                        self.show_grid,
-                        icons::GRID,
-                        "Grid",
-                        "Toggle grid overlay.",
-                    ) {
-                        self.show_grid = !self.show_grid;
-                    }
-                    ui.add_enabled_ui(!self.view_2d, |ui| {
-                        if toolbar_icon_button(
-                            ui,
-                            self.preview_fog,
-                            icons::EYE,
-                            "Fog",
-                            "Toggle authored room fog in the editor 3D preview.",
-                        ) {
-                            self.preview_fog = !self.preview_fog;
-                        }
-                        if toolbar_icon_button(
-                            ui,
-                            self.preview_backface_wireframe,
-                            icons::SCAN,
-                            "Backfaces",
-                            "Toggle passive outlines for culled backfaces.",
-                        ) {
-                            self.preview_backface_wireframe = !self.preview_backface_wireframe;
-                        }
-                        if toolbar_icon_button(
-                            ui,
-                            self.preview_bounds,
-                            icons::BOX,
-                            "Bounds",
-                            "Toggle entity, prop, and collision bounds in the 3D preview.",
-                        ) {
-                            self.preview_bounds = !self.preview_bounds;
-                        }
-                    });
-                    ui.separator();
-                    ui.add_enabled_ui(!self.view_2d, |ui| {
-                        if toolbar_text_segment(
-                            ui,
-                            self.viewport_3d_camera_mode == ViewportCameraMode::Orbit,
-                            "Orbit",
-                            "Use the target/radius orbit camera.",
-                        ) {
-                            self.set_viewport_3d_camera_mode(ViewportCameraMode::Orbit);
-                        }
-                        if toolbar_text_segment(
-                            ui,
-                            self.viewport_3d_camera_mode == ViewportCameraMode::Free,
-                            "Free",
-                            "Use the free camera. Right/middle drag looks; WASD moves.",
-                        ) {
-                            self.set_viewport_3d_camera_mode(ViewportCameraMode::Free);
-                        }
-                    });
-                    ui.separator();
-                    ui.selectable_value(&mut self.view_2d, true, "2D");
-                    ui.selectable_value(&mut self.view_2d, false, "3D");
-                    ui.separator();
-                    let mut zoom_percent =
-                        (self.viewport_zoom / DEFAULT_VIEWPORT_ZOOM * 100.0) as u16;
-                    if ui
-                        .add_sized(
-                            [58.0, 22.0],
-                            egui::DragValue::new(&mut zoom_percent)
-                                .speed(1.0)
-                                .range(25..=250)
-                                .suffix("%"),
-                        )
-                        .on_hover_text("Viewport zoom.")
-                        .changed()
-                    {
-                        self.viewport_zoom = (zoom_percent as f32 / 100.0 * DEFAULT_VIEWPORT_ZOOM)
-                            .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
-                    }
-                });
+        self.retain_shortcut_group_flash();
+        if self.shortcut_group_flash.is_some() {
+            ui.ctx().request_repaint();
+        }
+        ui.spacing_mut().item_spacing.x = 4.0;
+
+        toolbar_group_menu(
+            ui,
+            1,
+            self.shortcut_group_glow(ShortcutGroup::Workspace),
+            self.active_workspace.icon(),
+            "Workspace",
+            self.active_workspace.label(),
+            |ui| self.draw_workspace_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            2,
+            self.shortcut_group_glow(ShortcutGroup::Tool),
+            self.active_tool_group_icon(),
+            "Tool",
+            self.active_tool_group_label(),
+            |ui| self.draw_tool_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            3,
+            self.shortcut_group_glow(ShortcutGroup::Transform),
+            self.transform_gizmo_mode.icon(),
+            "Transform",
+            self.transform_gizmo_mode.label(),
+            |ui| self.draw_transform_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            4,
+            self.shortcut_group_glow(ShortcutGroup::Selection),
+            self.selection_mode.icon(),
+            "Selection",
+            self.selection_mode.label(),
+            |ui| self.draw_selection_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            5,
+            self.shortcut_group_glow(ShortcutGroup::Surface),
+            self.horizontal_edit_mode.icon(),
+            "Surface",
+            self.horizontal_edit_mode.label(),
+            |ui| self.draw_horizontal_edit_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            6,
+            self.shortcut_group_glow(ShortcutGroup::Vertex),
+            self.vertex_connectivity.icon(),
+            "Vertex Edits",
+            self.vertex_connectivity.label(),
+            |ui| self.draw_vertex_connectivity_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            7,
+            self.shortcut_group_glow(ShortcutGroup::Visibility),
+            self.visibility_group_icon(),
+            "Visibility",
+            self.visibility_group_label(),
+            |ui| self.draw_visibility_menu_contents(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            8,
+            self.shortcut_group_glow(ShortcutGroup::Camera),
+            self.viewport_3d_camera_mode.icon(),
+            "Camera",
+            self.viewport_camera_mode_label(),
+            |ui| self.draw_camera_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            9,
+            self.shortcut_group_glow(ShortcutGroup::Viewport),
+            self.view_dimension_group_icon(),
+            "Viewport",
+            self.view_dimension_group_label(),
+            |ui| self.draw_view_dimension_group_menu(ui),
+        );
+    }
+
+    fn draw_workspace_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(180.0);
+        for view in [WorkspaceView::Room, WorkspaceView::Animation] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(view.icon(), view.label()),
+                self.active_workspace == view,
+            ) {
+                if self.active_workspace != view {
+                    self.active_workspace = view;
+                    self.status = format!("Workspace: {}", view.label());
+                    self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
+                }
+            }
+        }
+    }
+
+    fn draw_tool_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(236.0);
+        let room_active = self.active_room_id().is_some();
+        for (tool, place_kind, icon, label) in [
+            (ViewTool::Select, None, ViewTool::Select.icon(), "Select"),
+            (
+                ViewTool::PaintFloor,
+                None,
+                ViewTool::PaintFloor.icon(),
+                "Floor",
+            ),
+            (
+                ViewTool::PaintWall,
+                None,
+                ViewTool::PaintWall.icon(),
+                "Wall",
+            ),
+            (
+                ViewTool::PaintCeiling,
+                None,
+                ViewTool::PaintCeiling.icon(),
+                "Ceiling",
+            ),
+            (ViewTool::Erase, None, ViewTool::Erase.icon(), "Erase"),
+            (
+                ViewTool::Place,
+                Some(PlaceKind::PlayerSpawn),
+                ViewTool::Place.icon(),
+                "Place",
+            ),
+            (
+                ViewTool::Place,
+                Some(PlaceKind::Portal),
+                PlaceKind::Portal.icon(),
+                "Portal",
+            ),
+        ] {
+            let enabled = room_active || !tool.requires_room_context();
+            let selected = self.active_tool_cycle_value() == (tool, place_kind);
+            ui.add_enabled_ui(enabled, |ui| {
+                if toolbar_menu_choice(ui, icons::label(icon, label), selected) {
+                    self.set_active_tool_cycle_value((tool, place_kind));
+                }
             });
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.snap_to_grid, "Snap").changed() {
+                self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+            }
+            let snap_response = ui.add_sized(
+                [64.0, 22.0],
+                egui::DragValue::new(&mut self.snap_units)
+                    .speed(1.0)
+                    .range(1..=256),
+            );
+            if snap_response.changed() {
+                self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+            }
+            snap_response.on_hover_text("Snap interval.");
+        });
+
+        match self.active_tool {
+            ViewTool::Place if self.place_kind != PlaceKind::Portal => {
+                ui.separator();
+                ui.label("Place kind");
+                self.draw_place_kind_picker(ui);
+            }
+            ViewTool::PaintWall => {
+                ui.separator();
+                ui.label("Wall shape");
+                ui.horizontal(|ui| self.draw_wall_paint_shape_picker(ui));
+                ui.separator();
+                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
+            }
+            ViewTool::PaintFloor | ViewTool::PaintCeiling => {
+                ui.separator();
+                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
+            }
+            ViewTool::Select | ViewTool::Erase | ViewTool::Place => {}
+        }
+    }
+
+    fn draw_transform_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(176.0);
+        for mode in [
+            TransformGizmoMode::Move,
+            TransformGizmoMode::Rotate,
+            TransformGizmoMode::Scale,
+        ] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.transform_gizmo_mode == mode,
+            ) {
+                self.set_transform_gizmo_mode(mode);
+            }
+        }
+    }
+
+    fn draw_selection_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(156.0);
+        for mode in [
+            SelectionMode::Face,
+            SelectionMode::Edge,
+            SelectionMode::Vertex,
+        ] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.selection_mode == mode,
+            ) {
+                self.set_selection_mode(mode);
+            }
+        }
+    }
+
+    fn draw_horizontal_edit_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(156.0);
+        for mode in [HorizontalEditMode::Quad, HorizontalEditMode::Triangle] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.horizontal_edit_mode == mode,
+            ) {
+                self.set_horizontal_edit_mode(mode);
+            }
+        }
+    }
+
+    fn draw_vertex_connectivity_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(168.0);
+        for mode in [VertexConnectivity::Welded, VertexConnectivity::Detached] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.vertex_connectivity == mode,
+            ) {
+                self.set_vertex_connectivity(mode);
+            }
+        }
+    }
+
+    fn draw_visibility_menu_contents(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(224.0);
+        let mut changed = false;
+        egui::Grid::new("viewport-visibility-menu-grid")
+            .num_columns(2)
+            .spacing(Vec2::new(14.0, 5.0))
+            .show(ui, |ui| {
+                changed |= visibility_menu_row(ui, "grid", "Grid", &mut self.show_grid);
+                changed |= visibility_menu_row(ui, "portals", "Portals", &mut self.show_portals);
+                changed |= visibility_menu_row(ui, "lights", "Lights", &mut self.show_lights);
+                changed |= visibility_menu_row(ui, "fog", "Fog", &mut self.preview_fog);
+                changed |= visibility_menu_row(
+                    ui,
+                    "backfaces",
+                    "Backfaces",
+                    &mut self.preview_backface_wireframe,
+                );
+                changed |= visibility_menu_row(ui, "bounds", "Bounds", &mut self.preview_bounds);
+            });
+        if changed {
+            self.persist_editor_visibility_state();
+            self.mark_shortcut_group_changed(ShortcutGroup::Visibility);
+        }
+    }
+
+    fn draw_camera_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(148.0);
+        for mode in [ViewportCameraMode::Orbit, ViewportCameraMode::Free] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), viewport_camera_mode_label(mode)),
+                self.viewport_3d_camera_mode == mode,
+            ) {
+                self.set_viewport_3d_camera_mode(mode);
+                self.status = format!("Camera: {}", viewport_camera_mode_label(mode));
+            }
+        }
+    }
+
+    fn draw_view_dimension_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(120.0);
+        if toolbar_menu_choice(ui, icons::label(icons::SQUARE, "2D"), self.view_2d) {
+            if !self.view_2d {
+                self.view_2d = true;
+                self.status = "Viewport: 2D".to_string();
+                self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
+            }
+        }
+        if toolbar_menu_choice(ui, icons::label(icons::BOX, "3D"), !self.view_2d) {
+            if self.view_2d {
+                self.view_2d = false;
+                self.status = "Viewport: 3D".to_string();
+                self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
+            }
+        }
+    }
+
+    fn active_tool_group_icon(&self) -> char {
+        match self.active_tool {
+            ViewTool::Place => self.place_kind.icon(),
+            tool => tool.icon(),
+        }
+    }
+
+    fn active_tool_group_label(&self) -> &'static str {
+        if self.active_tool == ViewTool::Place {
+            self.place_kind.label()
+        } else {
+            self.active_tool.label()
+        }
+    }
+
+    fn set_place_kind(&mut self, kind: PlaceKind) {
+        if self.place_kind == kind {
+            return;
+        }
+        self.place_kind = kind;
+        if self.place_kind == PlaceKind::Portal {
+            self.clear_sector_selection();
+            self.clear_primitive_selection_state();
+            self.hovered_primitive = None;
+        }
+        self.status = format!("Place kind: {}", self.place_kind.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+    }
+
+    fn visibility_group_icon(&self) -> char {
+        if self.editor_visibility_has_hidden_items() {
+            icons::EYE_OFF
+        } else {
+            icons::EYE
+        }
+    }
+
+    fn visibility_group_label(&self) -> &'static str {
+        if self.editor_visibility_has_hidden_items() {
+            "Some Hidden"
+        } else {
+            "All Shown"
+        }
+    }
+
+    fn viewport_camera_mode_label(&self) -> &'static str {
+        viewport_camera_mode_label(self.viewport_3d_camera_mode)
+    }
+
+    fn view_dimension_group_icon(&self) -> char {
+        if self.view_2d {
+            icons::SQUARE
+        } else {
+            icons::BOX
+        }
+    }
+
+    fn view_dimension_group_label(&self) -> &'static str {
+        if self.view_2d {
+            "2D"
+        } else {
+            "3D"
+        }
+    }
+
+    fn editor_visibility_has_hidden_items(&self) -> bool {
+        !self.show_grid
+            || !self.show_portals
+            || !self.show_lights
+            || !self.preview_fog
+            || !self.preview_backface_wireframe
+            || !self.preview_bounds
     }
 
     /// Toolbar combobox for the active brush material. Selecting
@@ -11655,124 +13743,43 @@ impl EditorWorkspace {
     /// only while `active_tool == Place` -- otherwise the brush
     /// material picker takes the same slot.
     /// Toolbar selector for the Select tool's primitive mode.
-    /// Visible only while `active_tool == Select`. Mirrors the
-    /// `1` / `2` / `3` hotkeys; clicking goes through
-    /// `set_selection_mode` so the existing selection adapts.
-    fn draw_transform_gizmo_mode_picker(&mut self, ui: &mut egui::Ui) {
-        for mode in [
-            TransformGizmoMode::Move,
-            TransformGizmoMode::Rotate,
-            TransformGizmoMode::Scale,
-        ] {
-            if toolbar_icon_button(
-                ui,
-                self.transform_gizmo_mode == mode,
-                mode.icon(),
-                mode.label(),
-                mode.hint(),
-            ) {
-                self.transform_gizmo_mode = mode;
-                self.primitive_gizmo_drag = None;
-                self.node_gizmo_drag = None;
-                self.node_drag = None;
-            }
-        }
-    }
-
-    fn draw_selection_mode_picker(&mut self, ui: &mut egui::Ui) {
-        for mode in [
-            SelectionMode::Face,
-            SelectionMode::Edge,
-            SelectionMode::Vertex,
-        ] {
-            if toolbar_text_segment(
-                ui,
-                self.selection_mode == mode,
-                mode.label(),
-                match mode {
-                    SelectionMode::Face => "Pick a whole face (1).",
-                    SelectionMode::Edge => {
-                        "Pick the closest edge of the face under the cursor (2)."
-                    }
-                    SelectionMode::Vertex => {
-                        "Pick the closest corner of the face under the cursor (3)."
-                    }
-                },
-            ) {
-                self.set_selection_mode(mode);
-            }
-        }
-    }
-
-    fn draw_horizontal_edit_mode_picker(&mut self, ui: &mut egui::Ui) {
-        for mode in [HorizontalEditMode::Quad, HorizontalEditMode::Triangle] {
-            if toolbar_text_segment(
-                ui,
-                self.horizontal_edit_mode == mode,
-                mode.label(),
-                match mode {
-                    HorizontalEditMode::Quad => "Pick floor and ceiling quads.",
-                    HorizontalEditMode::Triangle => "Pick one triangle half of a floor or ceiling.",
-                },
-            ) {
-                self.set_horizontal_edit_mode(mode);
-            }
-        }
-    }
-
-    fn draw_vertex_connectivity_picker(&mut self, ui: &mut egui::Ui) {
-        for mode in [VertexConnectivity::Welded, VertexConnectivity::Detached] {
-            if toolbar_text_segment(
-                ui,
-                self.vertex_connectivity == mode,
-                mode.label(),
-                match mode {
-                    VertexConnectivity::Welded => {
-                        "Move every face-corner sharing the selected physical vertex."
-                    }
-                    VertexConnectivity::Detached => {
-                        "Move only the selected face, edge, or vertex corner records."
-                    }
-                },
-            ) {
-                self.vertex_connectivity = mode;
-            }
-        }
-    }
-
+    /// Visible only while `active_tool == Select`. Clicking goes
+    /// through `set_selection_mode` so the existing selection adapts.
     fn draw_wall_paint_shape_picker(&mut self, ui: &mut egui::Ui) {
         for shape in [
             WallPaintShape::Cardinal,
             WallPaintShape::NorthWestSouthEast,
             WallPaintShape::NorthEastSouthWest,
         ] {
-            if toolbar_text_segment(
-                ui,
-                self.wall_paint_shape == shape,
-                shape.label(),
-                "Choose how wall paint picks cell edges.",
-            ) {
-                self.wall_paint_shape = shape;
+            if toolbar_menu_choice(ui, shape.label(), self.wall_paint_shape == shape) {
+                if self.wall_paint_shape != shape {
+                    self.wall_paint_shape = shape;
+                    self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+                }
             }
         }
     }
 
     fn draw_place_kind_picker(&mut self, ui: &mut egui::Ui) {
-        ui.label(icons::text(icons::PLUS, 14.0).color(STUDIO_TEXT_WEAK));
-        egui::ComboBox::from_id_salt("place-kind-toolbar")
-            .selected_text(self.place_kind.label())
-            .show_ui(ui, |ui| {
-                for kind in [
-                    PlaceKind::PlayerSpawn,
-                    PlaceKind::SpawnMarker,
-                    PlaceKind::ModelInstance,
-                    PlaceKind::Character,
-                    PlaceKind::ImageProp,
-                    PlaceKind::PointLightMarker,
-                ] {
-                    ui.selectable_value(&mut self.place_kind, kind, kind.label());
-                }
-            });
+        for kind in [
+            PlaceKind::PlayerSpawn,
+            PlaceKind::SpawnMarker,
+            PlaceKind::ModelInstance,
+            PlaceKind::Character,
+            PlaceKind::ImageProp,
+            PlaceKind::BoxProp,
+            PlaceKind::PointLightMarker,
+        ] {
+            if ui
+                .selectable_label(
+                    self.place_kind == kind,
+                    icons::label(kind.icon(), kind.label()),
+                )
+                .clicked()
+            {
+                self.set_place_kind(kind);
+            }
+        }
         match self.place_kind {
             PlaceKind::ModelInstance => {
                 self.draw_place_resource_picker(ui, ResourceFilter::Model, "Model")
@@ -11782,6 +13789,9 @@ impl EditorWorkspace {
             }
             PlaceKind::ImageProp => {
                 self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Image")
+            }
+            PlaceKind::BoxProp => {
+                self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Material")
             }
             _ => {}
         }
@@ -11800,40 +13810,49 @@ impl EditorWorkspace {
             .filter(|resource| filter.matches(&resource.data))
             .map(|resource| (resource.id, resource.name.clone()))
             .collect();
-        let selected_id = self
-            .place_resource
-            .filter(|id| options.iter().any(|(candidate, _)| candidate == id))
-            .or_else(|| {
-                self.selected_resource
-                    .filter(|id| options.iter().any(|(candidate, _)| candidate == id))
-            });
-        let selected = selected_id
-            .and_then(|id| {
-                options
-                    .iter()
-                    .find(|(candidate, _)| *candidate == id)
-                    .map(|(_, name)| name.clone())
-            })
-            .unwrap_or_else(|| {
-                if options.len() == 1 {
-                    options[0].1.clone()
-                } else {
-                    format!("Select {label}")
-                }
-            });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(icons::text(filter.icon(), 14.0).color(STUDIO_TEXT_WEAK))
+                .on_hover_text(label);
+            ui.label(label);
+        });
 
-        ui.label(icons::text(filter.icon(), 14.0).color(STUDIO_TEXT_WEAK))
-            .on_hover_text(label);
-        egui::ComboBox::from_id_salt(("place-resource-picker", filter.label()))
-            .selected_text(selected)
-            .show_ui(ui, |ui| {
-                for (id, name) in options {
-                    if ui.selectable_label(selected_id == Some(id), name).clicked() {
-                        self.place_resource = Some(id);
-                        self.replace_resource_selection(id);
-                    }
-                }
-            });
+        let before = self.place_resource;
+        let auto_label = if options.len() == 1 {
+            format!("Auto ({})", options[0].1)
+        } else {
+            format!("Auto {label}")
+        };
+        if ui
+            .selectable_label(self.place_resource.is_none(), auto_label)
+            .clicked()
+        {
+            self.place_resource = None;
+        }
+        if options.is_empty() {
+            ui.weak(format!("No {} resources", label.to_ascii_lowercase()));
+        }
+        for (id, name) in options {
+            if ui
+                .selectable_label(self.place_resource == Some(id), name)
+                .clicked()
+            {
+                self.place_resource = Some(id);
+                self.replace_resource_selection(id);
+            }
+        }
+        if self.place_resource != before {
+            let name = self
+                .place_resource
+                .and_then(|id| {
+                    self.project
+                        .resource(id)
+                        .map(|resource| resource.name.clone())
+                })
+                .unwrap_or_else(|| "Auto".to_string());
+            self.status = format!("Place {label}: {name}");
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
     }
 
     fn place_resource_candidates(&self) -> impl Iterator<Item = ResourceId> {
@@ -11981,6 +14000,7 @@ impl EditorWorkspace {
         };
         ui.label(icons::text(icons::PALETTE, 14.0).color(STUDIO_TEXT_WEAK))
             .on_hover_text("Brush material");
+        let before = self.brush_material;
         egui::ComboBox::from_id_salt("brush-material-picker")
             .selected_text(label)
             .show_ui(ui, |ui| {
@@ -11990,6 +14010,9 @@ impl EditorWorkspace {
                     ui.selectable_value(&mut self.brush_material, Some(*id), name);
                 }
             });
+        if self.brush_material != before {
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
     }
 
     /// Resolve the Room node that owns the current selection, if any.
@@ -11997,7 +14020,7 @@ impl EditorWorkspace {
     /// Order: selected face's room → climb the selected node's
     /// Walk the active scene and collect a selectable AABB for
     /// every entity-kind node -- every node that's neither the
-    /// scene root, nor a structural Node/World, nor a Room.
+    /// world root, nor a structural Node/World, nor a Room.
     ///
     /// `room_filter` confines the walk to descendants of one
     /// Room (Some(id)) or includes everything (None). The 3D
@@ -12013,6 +14036,12 @@ impl EditorWorkspace {
             if self.scene_node_effectively_hidden(node.id) {
                 continue;
             }
+            if matches!(node.kind, NodeKind::PointLight { .. }) && !self.show_lights {
+                continue;
+            }
+            if matches!(node.kind, NodeKind::Portal { .. }) && !self.show_portals {
+                continue;
+            }
             // Find this node's enclosing Room.
             let enclosing_room = enclosing_room_id(scene, node.id);
             if let (Some(want), Some(actual)) = (room_filter, enclosing_room) {
@@ -12020,7 +14049,7 @@ impl EditorWorkspace {
                     continue;
                 }
             }
-            let Some((kind, half_extents)) = entity_bound_kind_and_size(self, node) else {
+            let Some((kind, mut half_extents)) = entity_bound_kind_and_size(self, node) else {
                 continue;
             };
             // World position. Entities under a Room use the
@@ -12029,7 +14058,13 @@ impl EditorWorkspace {
             let center_world = match enclosing_room.and_then(|id| scene.node(id)) {
                 Some(room_node) => match &room_node.kind {
                     NodeKind::Room { grid } => {
-                        if node_is_floor_anchored(&node.kind) {
+                        if kind == EntityBoundKind::Portal {
+                            let Some((center, half)) = portal_seam_bounds_3d(grid, node) else {
+                                continue;
+                            };
+                            half_extents = half;
+                            center
+                        } else if node_is_floor_anchored(&node.kind) {
                             psxed_project::spatial::floor_anchored_node_preview_bounds_center(
                                 grid,
                                 &node.transform,
@@ -12480,12 +14515,12 @@ impl EditorWorkspace {
 
     fn update_primitive_resource_selection(&mut self) {
         if self.selected_primitives.len() == 1 {
-            let face = match self.selected_primitives[0] {
-                Selection::Face(face) => Some(face),
-                Selection::Triangle(triangle) => Some(triangle.parent_face()),
+            let resource = match self.selected_primitives[0] {
+                Selection::Face(face) => self.face_material(face),
+                Selection::Triangle(triangle) => self.triangle_material(triangle),
                 Selection::Edge(_) | Selection::Vertex(_) => None,
             };
-            if let Some(id) = face.and_then(|face| self.face_material(face)) {
+            if let Some(id) = resource {
                 self.replace_resource_selection(id);
                 return;
             }
@@ -13347,9 +15382,13 @@ impl EditorWorkspace {
                     self.clear_sector_selection();
                     return;
                 };
-                self.selected_sector = Some((x, z));
-                self.selected_sectors.clear();
-                self.selected_sectors.insert((room_id, x, z));
+                if self.portal_place_active() {
+                    self.clear_sector_selection();
+                } else {
+                    self.selected_sector = Some((x, z));
+                    self.selected_sectors.clear();
+                    self.selected_sectors.insert((room_id, x, z));
+                }
                 self.apply_paint(tool, room_id, x, z, world);
             }
         }
@@ -14008,6 +16047,82 @@ impl EditorWorkspace {
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
         self.status = format!("Added {name}");
+        self.mark_dirty();
+    }
+
+    fn create_reciprocal_portal(&mut self, source_portal: NodeId) {
+        let Some(connection) = connection_for_portal(self.project.active_scene(), source_portal)
+        else {
+            self.status = "Could not find portal connection".to_string();
+            return;
+        };
+        let source = if connection.a.portal == source_portal {
+            connection.a
+        } else if let Some(pair) = connection.b {
+            pair
+        } else {
+            connection.a
+        };
+        if source.target_room.is_none() {
+            self.status = "Assign a target room before creating a reciprocal portal".to_string();
+            return;
+        }
+        if connection.status != RoomConnectionStatus::Unpaired {
+            self.status = format!("Connection is {}", connection.status.label());
+            return;
+        }
+
+        let target_room = source.target_room.expect("checked target room");
+        let scene = self.project.active_scene();
+        let Some(source_node) = scene.node(source.portal) else {
+            self.status = "Source portal node is missing".to_string();
+            return;
+        };
+        let Some(target_room_node) = scene.node(target_room) else {
+            self.status = "Target room is missing".to_string();
+            return;
+        };
+        if !matches!(target_room_node.kind, NodeKind::Room { .. }) {
+            self.status = "Target node is not a room".to_string();
+            return;
+        }
+
+        let source_world = portal_marker_world_2d(scene, source_node);
+        let target_center = node_world(target_room_node);
+        let reciprocal_translation = [
+            source_world[0] - target_center[0],
+            source_node.transform.translation[1],
+            source_world[1] - target_center[1],
+        ];
+        let source_name = source_node.name.clone();
+        let source_entry = match &source_node.kind {
+            NodeKind::Portal { entry_name, .. } => entry_name.clone(),
+            _ => String::new(),
+        };
+        let source_room_name = room_display_name(scene, source.room);
+        let target_room_name = room_display_name(scene, target_room);
+        let geometry = source.geometry.as_ref().map(inverted_portal_geometry);
+
+        self.push_undo();
+        let scene = self.project.active_scene_mut();
+        let reciprocal = scene.add_node(
+            target_room,
+            format!("Portal {target_room_name} -> {source_room_name}"),
+            NodeKind::Portal {
+                target_room: Some(source.room),
+                target_entry: source_entry,
+                entry_name: format!("{}_reciprocal", source_name.trim().replace(' ', "_")),
+                geometry,
+            },
+        );
+        if let Some(node) = scene.node_mut(reciprocal) {
+            node.transform.translation = reciprocal_translation;
+        }
+        self.replace_node_selection(reciprocal);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.status = "Created reciprocal portal".to_string();
         self.mark_dirty();
     }
 
@@ -14747,6 +16862,7 @@ impl EditorWorkspace {
         if !self.view_2d {
             if let Some((center, _half)) = self.current_frame_bounds_3d() {
                 self.focus_3d_on_point_preserving_distance(center);
+                self.persist_editor_camera_state();
                 self.status = "Framed selection".to_string();
             } else {
                 self.status = "Nothing to frame".to_string();
@@ -14937,7 +17053,10 @@ impl EditorWorkspace {
                 node.transform.translation[2] += world_delta[1];
                 if matches!(
                     node.kind,
-                    NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. }
+                    NodeKind::Entity
+                        | NodeKind::PointLight { .. }
+                        | NodeKind::ImageProp { .. }
+                        | NodeKind::BoxProp { .. }
                 ) {
                     node.transform.translation[0] = snap_node_transform_component_to_world_step(
                         node.transform.translation[0],
@@ -15405,9 +17524,12 @@ fn draw_transform_policy_editor(
             changed
         }
         kind if kind.is_component() => false,
-        NodeKind::Entity | NodeKind::ImageProp { .. } => {
+        NodeKind::Entity | NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
             let mut changed = false;
-            let allow_full_rotation = matches!(node.kind, NodeKind::ImageProp { .. });
+            let allow_full_rotation = matches!(
+                node.kind,
+                NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. }
+            );
             egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -15436,6 +17558,84 @@ fn draw_transform_policy_editor(
     }
 }
 
+fn draw_playtest_render_settings(
+    ui: &mut egui::Ui,
+    mode: &mut RuntimeDepthSortMode,
+    split_mode: &mut RuntimeTextureSplitMode,
+    room_order_mode: &mut RuntimeRoomDrawOrderMode,
+    texture_split_max_edge: &mut u16,
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::BOX, "Playtest Render"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Depth Sorting").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-depth-sort-mode")
+                    .selected_text(mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeDepthSortMode::ALL {
+                            changed |= ui
+                                .selectable_value(mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Subdivision Scope").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-texture-split-mode")
+                    .selected_text(split_mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeTextureSplitMode::ALL {
+                            changed |= ui
+                                .selectable_value(split_mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(split_mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Room Order").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-room-draw-order-mode")
+                    .selected_text(room_order_mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeRoomDrawOrderMode::ALL {
+                            changed |= ui
+                                .selectable_value(room_order_mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(room_order_mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Subdivision Edge").color(STUDIO_TEXT_WEAK));
+                let mut next = i32::from(*texture_split_max_edge);
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut next)
+                            .speed(8.0)
+                            .range(0..=512)
+                            .update_while_editing(false),
+                    )
+                    .on_hover_text(
+                        "Maximum projected edge length before cached room triangles are split. \
+                         Lower values reduce PS1 ordering artifacts at higher CPU cost; 0 disables visual subdivision.",
+                    )
+                    .changed()
+                {
+                    *texture_split_max_edge = next.clamp(0, 512) as u16;
+                    changed = true;
+                }
+            });
+            ui.weak("0 disables visual subdivision. Lower values split room triangles more aggressively.");
+        });
+    changed
+}
+
 fn draw_world_grid_settings(
     ui: &mut egui::Ui,
     sector_size: i32,
@@ -15455,59 +17655,33 @@ fn draw_world_grid_settings(
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Sector Size").color(STUDIO_TEXT_WEAK));
                 let mut next = sector_size;
-                egui::ComboBox::from_id_salt("world-sector-size")
-                    .selected_text(sector_size.to_string())
-                    .show_ui(ui, |ui| {
-                        for &preset in WORLD_SECTOR_SIZE_PRESETS {
-                            ui.selectable_value(&mut next, preset, preset.to_string());
-                        }
-                    });
+                let response = ui.add(
+                    egui::DragValue::new(&mut next)
+                        .speed(WORLD_SECTOR_SIZE_QUANTUM as f64)
+                        .range(MIN_WORLD_SECTOR_SIZE..=MAX_WORLD_SECTOR_SIZE)
+                        .update_while_editing(false),
+                );
                 if next != sector_size {
                     *world_sector_size_change = Some(psxed_project::snap_world_sector_size(next));
                     changed = true;
                 }
+                response
+                    .on_hover_text(format!("Snaps to {}-unit steps", WORLD_SECTOR_SIZE_QUANTUM));
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
             });
         });
-    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Streaming"))
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Manual Portal Rooms"))
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Chunk Target").color(STUDIO_TEXT_WEAK));
-                let mut width = streaming.chunk_target_width as i32;
-                let mut depth = streaming.chunk_target_depth as i32;
-                let width_changed = ui
-                    .add(
-                        egui::DragValue::new(&mut width)
-                            .speed(1.0)
-                            .range(
-                                MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32
-                                    ..=MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32,
-                            )
-                            .prefix("W "),
-                    )
-                    .changed();
-                let depth_changed = ui
-                    .add(
-                        egui::DragValue::new(&mut depth)
-                            .speed(1.0)
-                            .range(
-                                MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32
-                                    ..=MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS as i32,
-                            )
-                            .prefix("D "),
-                    )
-                    .changed();
-                if width_changed || depth_changed {
-                    streaming.chunk_target_width = width as u16;
-                    streaming.chunk_target_depth = depth as u16;
-                    *streaming = streaming.normalized();
-                    changed = true;
-                }
-                ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Room Hard Cap").color(STUDIO_TEXT_WEAK));
+                ui.label(format!(
+                    "{}×{} sectors",
+                    DEFAULT_PORTAL_ROOM_MAX_SECTORS, DEFAULT_PORTAL_ROOM_MAX_SECTORS
+                ));
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Resident Budget").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Resident Rooms").color(STUDIO_TEXT_WEAK));
                 let mut limit = streaming.resident_chunk_limit as i32;
                 if ui
                     .add(egui::DragValue::new(&mut limit).speed(1.0).range(
@@ -15520,10 +17694,10 @@ fn draw_world_grid_settings(
                     *streaming = streaming.normalized();
                     changed = true;
                 }
-                ui.label(RichText::new("32 KiB units").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("rooms").color(STUDIO_TEXT_WEAK));
             });
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Visible Chunks").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("Visible Rooms").color(STUDIO_TEXT_WEAK));
                 let mut limit = streaming.visible_chunk_limit as i32;
                 let max_visible = streaming.resident_chunk_limit.clamp(
                     MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -15541,7 +17715,7 @@ fn draw_world_grid_settings(
                     *streaming = streaming.normalized();
                     changed = true;
                 }
-                ui.label(RichText::new("chunks").color(STUDIO_TEXT_WEAK));
+                ui.label(RichText::new("rooms").color(STUDIO_TEXT_WEAK));
             });
         });
     egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
@@ -16210,15 +18384,22 @@ fn node_gizmo_translation(
         PrimitiveGizmoAxis::Z => 2,
     };
     let step = match (&node.kind, axis) {
-        (NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. }, _) => {
-            node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
-        }
+        (
+            NodeKind::Entity
+            | NodeKind::PointLight { .. }
+            | NodeKind::ImageProp { .. }
+            | NodeKind::BoxProp { .. },
+            _,
+        ) => node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size),
         _ => 1.0,
     };
     translation[index] = start[index] + steps as f32 * step;
 
     match &node.kind {
-        NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. } => {
+        NodeKind::Entity
+        | NodeKind::PointLight { .. }
+        | NodeKind::ImageProp { .. }
+        | NodeKind::BoxProp { .. } => {
             if steps != 0 {
                 translation[index] =
                     snap_node_transform_component_to_world_step(translation[index], sector_size);
@@ -16244,7 +18425,10 @@ fn node_gizmo_plane_translation(
     }
 
     match &node.kind {
-        NodeKind::Entity | NodeKind::PointLight { .. } | NodeKind::ImageProp { .. } => {
+        NodeKind::Entity
+        | NodeKind::PointLight { .. }
+        | NodeKind::ImageProp { .. }
+        | NodeKind::BoxProp { .. } => {
             for axis in plane.axes() {
                 let index = axis.index();
                 if delta_world[index].abs() > f32::EPSILON {
@@ -16313,7 +18497,7 @@ fn node_gizmo_rotation(
 /// trigger transforms stay flat without stray pitch / roll.
 fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
     match kind {
-        NodeKind::ImageProp { .. } => &[
+        NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => &[
             PrimitiveGizmoAxis::X,
             PrimitiveGizmoAxis::Y,
             PrimitiveGizmoAxis::Z,
@@ -16325,26 +18509,73 @@ fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
 fn apply_node_gizmo_scale(
     node: &mut psxed_project::SceneNode,
     start_image_prop_size: Option<[u16; 2]>,
+    start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
     axis: PrimitiveGizmoAxis,
     steps: i32,
 ) {
-    let Some([start_width, start_height]) = start_image_prop_size else {
-        return;
-    };
-    let NodeKind::ImageProp { width, height, .. } = &mut node.kind else {
-        return;
-    };
-    let delta = steps.saturating_mul(HEIGHT_QUANTUM);
-    let resize_axis = |start: u16| -> u16 {
-        (i32::from(start) + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16
-    };
-    match axis {
-        PrimitiveGizmoAxis::X => *width = resize_axis(start_width),
-        PrimitiveGizmoAxis::Y => *height = resize_axis(start_height),
-        PrimitiveGizmoAxis::Z => {
-            *width = resize_axis(start_width);
-            *height = resize_axis(start_height);
+    match &mut node.kind {
+        NodeKind::ImageProp { width, height, .. } => {
+            let Some([start_width, start_height]) = start_image_prop_size else {
+                return;
+            };
+            let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+            let resize_axis = |start: u16| -> u16 {
+                (i32::from(start) + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16
+            };
+            match axis {
+                PrimitiveGizmoAxis::X => *width = resize_axis(start_width),
+                PrimitiveGizmoAxis::Y => *height = resize_axis(start_height),
+                PrimitiveGizmoAxis::Z => {
+                    *width = resize_axis(start_width);
+                    *height = resize_axis(start_height);
+                }
+            }
         }
+        NodeKind::BoxProp { vertices, .. } => {
+            let Some(start_vertices) = start_box_prop_vertices else {
+                return;
+            };
+            apply_box_prop_gizmo_scale(vertices, start_vertices, axis, steps);
+        }
+        _ => {}
+    }
+}
+
+fn apply_box_prop_gizmo_scale(
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    start_vertices: [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+) {
+    let idx = axis.index();
+    let mut min = i32::MAX;
+    let mut max = i32::MIN;
+    for vertex in start_vertices {
+        let value = i32::from(vertex[idx]);
+        min = min.min(value);
+        max = max.max(value);
+    }
+    if min >= max {
+        *vertices = start_vertices;
+        return;
+    }
+
+    let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+    let old_size = max - min;
+    let new_size = (old_size + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE));
+    let pivot = if axis == PrimitiveGizmoAxis::Y {
+        min as f32
+    } else {
+        (min + max) as f32 * 0.5
+    };
+    let scale = new_size as f32 / old_size as f32;
+    *vertices = start_vertices;
+    for vertex in vertices.iter_mut() {
+        let value = pivot + (f32::from(vertex[idx]) - pivot) * scale;
+        vertex[idx] = value.round().clamp(
+            -f32::from(MAX_IMAGE_PROP_SIZE),
+            f32::from(MAX_IMAGE_PROP_SIZE),
+        ) as i16;
     }
 }
 
@@ -16355,6 +18586,7 @@ fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode)
             NodeKind::Entity
                 | NodeKind::PointLight { .. }
                 | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Trigger { .. }
@@ -16365,13 +18597,16 @@ fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode)
             kind,
             NodeKind::Entity
                 | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Trigger { .. }
                 | NodeKind::AudioSource { .. }
                 | NodeKind::Portal { .. }
         ),
-        TransformGizmoMode::Scale => matches!(kind, NodeKind::ImageProp { .. }),
+        TransformGizmoMode::Scale => {
+            matches!(kind, NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. })
+        }
     }
 }
 
@@ -16465,6 +18700,59 @@ struct AnimatorClipContext {
     clip_in_place_defaults: Vec<bool>,
     profile_name: Option<String>,
     profile_action_clips: [Option<u16>; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT],
+}
+
+fn draw_box_prop_nudge_buttons(
+    ui: &mut egui::Ui,
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    indices: &[usize],
+) -> bool {
+    let mut changed = false;
+    let step = HEIGHT_QUANTUM as i16;
+    for (axis, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+        if ui.small_button(format!("{label}-")).clicked() {
+            nudge_box_prop_vertices(vertices, indices, axis, -step);
+            changed = true;
+        }
+        if ui.small_button(format!("{label}+")).clicked() {
+            nudge_box_prop_vertices(vertices, indices, axis, step);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn draw_box_prop_break_flag_checkbox(
+    ui: &mut egui::Ui,
+    flags: &mut u16,
+    flag: u16,
+    label: &str,
+) -> bool {
+    let mut checked = *flags & flag != 0;
+    if !ui.checkbox(&mut checked, label).changed() {
+        return false;
+    }
+    if checked {
+        *flags |= flag;
+    } else {
+        *flags &= !flag;
+    }
+    true
+}
+
+fn nudge_box_prop_vertices(
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    indices: &[usize],
+    axis: usize,
+    delta: i16,
+) {
+    for index in indices {
+        let value = i32::from(vertices[*index][axis]) + i32::from(delta);
+        vertices[*index][axis] = value.clamp(
+            -i32::from(MAX_IMAGE_PROP_SIZE),
+            i32::from(MAX_IMAGE_PROP_SIZE),
+        ) as i16;
+    }
 }
 
 fn selected_animator_clip_context(
@@ -16886,6 +19174,155 @@ fn draw_node_kind_editor(
                 });
             });
         }
+        NodeKind::BoxProp {
+            materials,
+            vertices,
+            collision_enabled,
+            break_flags,
+        } => {
+            ui.weak(
+                "Editable material-backed box. Transform position is the bottom-center anchor.",
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Faces").color(STUDIO_TEXT_WEAK));
+                if ui.small_button("Fill from Front").clicked() {
+                    if let Some(material) = materials[0] {
+                        for slot in materials.iter_mut() {
+                            *slot = Some(material);
+                        }
+                        changed = true;
+                    }
+                }
+            });
+            for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+                changed |= material_picker(
+                    ui,
+                    psxed_project::BOX_PROP_FACE_NAMES[face],
+                    &mut materials[face],
+                    material_options,
+                    nav_target,
+                );
+            }
+            ui.separator();
+            changed |= ui.checkbox(collision_enabled, "Collision").changed();
+            ui.separator();
+            ui.label(RichText::new("Break On").color(STUDIO_TEXT_WEAK));
+            ui.horizontal(|ui| {
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_WALK,
+                    "Walk",
+                );
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_RUN,
+                    "Run",
+                );
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_ATTACK,
+                    "Attack",
+                );
+            });
+            ui.separator();
+            egui::CollapsingHeader::new("Move Faces")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+                        ui.horizontal(|ui| {
+                            ui.label(psxed_project::BOX_PROP_FACE_NAMES[face]);
+                            changed |= draw_box_prop_nudge_buttons(
+                                ui,
+                                vertices,
+                                &BOX_PROP_FACE_VERTEX_INDICES[face],
+                            );
+                        });
+                    }
+                });
+            egui::CollapsingHeader::new("Move Edges")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for (edge, indices) in BOX_PROP_EDGE_VERTEX_INDICES.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("E{edge}"));
+                            changed |= draw_box_prop_nudge_buttons(ui, vertices, indices);
+                        });
+                    }
+                });
+            ui.separator();
+            egui::CollapsingHeader::new("Vertices")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Preset").color(STUDIO_TEXT_WEAK));
+                        if ui.small_button("Reset Cube").clicked() {
+                            *vertices = psxed_project::box_prop_vertices_for_size(
+                                psxed_project::DEFAULT_BOX_PROP_SIZE,
+                            );
+                            changed = true;
+                        }
+                    });
+                    for (index, vertex) in vertices.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("V{index}"));
+                            let mut x = i32::from(vertex[0]);
+                            let mut y = i32::from(vertex[1]);
+                            let mut z = i32::from(vertex[2]);
+                            let vertex_changed = ui
+                                .add(
+                                    egui::DragValue::new(&mut x)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("X "),
+                                )
+                                .changed()
+                                | ui.add(
+                                    egui::DragValue::new(&mut y)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("Y "),
+                                )
+                                .changed()
+                                | ui.add(
+                                    egui::DragValue::new(&mut z)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("Z "),
+                                )
+                                .changed();
+                            if vertex_changed {
+                                *vertex = [
+                                    x.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                    y.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                    z.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                ];
+                                changed = true;
+                            }
+                        });
+                    }
+                });
+        }
         NodeKind::ModelRenderer {
             model,
             material: _,
@@ -17173,6 +19610,7 @@ fn draw_node_kind_editor(
             target_room,
             target_entry,
             entry_name,
+            geometry,
         } => {
             ui.horizontal(|ui| {
                 ui.label(icons::text(icons::WAYPOINT, 12.0).color(STUDIO_TEXT_WEAK));
@@ -17216,6 +19654,15 @@ fn draw_node_kind_editor(
                 ui.label("Target entry");
                 changed |= ui.text_edit_singleline(target_entry).changed();
             });
+            if let Some(geometry) = geometry {
+                ui.horizontal(|ui| {
+                    ui.label(icons::text(icons::BOX, 12.0).color(STUDIO_TEXT_WEAK));
+                    ui.label(format!(
+                        "Imported plane n=({}, {}, {})",
+                        geometry.normal[0], geometry.normal[1], geometry.normal[2]
+                    ));
+                });
+            }
         }
     }
     changed
@@ -17316,6 +19763,47 @@ fn node_kind_is_player_source(kind: &NodeKind) -> bool {
     )
 }
 
+fn translations_match(a: [f32; 3], b: [f32; 3]) -> bool {
+    a.iter()
+        .zip(b)
+        .all(|(lhs, rhs)| (*lhs - rhs).abs() <= PLACEMENT_DUPLICATE_EPSILON)
+}
+
+fn entity_model_resource_id(scene: &Scene, entity: &SceneNode) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::ModelRenderer {
+                model: Some(model), ..
+            } => Some(model),
+            _ => None,
+        })
+    })
+}
+
+fn entity_character_component_resource_id(scene: &Scene, entity: &SceneNode) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::CharacterController {
+                character: Some(character),
+                ..
+            } => Some(character),
+            _ => None,
+        })
+    })
+}
+
+fn entity_weapon_resource_id(scene: &Scene, entity: &SceneNode) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::Equipment {
+                weapon: Some(weapon),
+                ..
+            } => Some(weapon),
+            _ => None,
+        })
+    })
+}
+
 fn node_lucide_icon(kind: &str, root: bool) -> char {
     if root {
         return icons::HOUSE;
@@ -17325,9 +19813,10 @@ fn node_lucide_icon(kind: &str, root: bool) -> char {
         "Node3D" => icons::CIRCLE_DOT,
         "Entity" => icons::BOX,
         "World" => icons::HOUSE,
-        "Room" => icons::GRID,
+        "Room" | "Map" => icons::GRID,
         "Mesh Instance" | "MeshInstance" => icons::BOX,
         "Image Prop" | "ImageProp" => icons::PALETTE,
+        "Box Prop" | "BoxProp" => icons::BOX,
         "Model Renderer" | "ModelRenderer" => icons::BOX,
         "Animator" => icons::PLAY,
         "Collider" => icons::SCALE_3D,
@@ -17357,9 +19846,10 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
     match kind {
         "Entity" => Color32::from_rgb(156, 174, 190),
         "World" => Color32::from_rgb(232, 152, 96),
-        "Room" => Color32::from_rgb(209, 118, 71),
+        "Room" | "Map" => Color32::from_rgb(209, 118, 71),
         "Mesh Instance" | "MeshInstance" => Color32::from_rgb(156, 174, 190),
         "Image Prop" | "ImageProp" => Color32::from_rgb(210, 170, 120),
+        "Box Prop" | "BoxProp" => Color32::from_rgb(135, 180, 220),
         "Model Renderer" | "ModelRenderer" => Color32::from_rgb(134, 168, 196),
         "Animator" => Color32::from_rgb(126, 164, 220),
         "Collider" => Color32::from_rgb(180, 170, 112),
@@ -17373,7 +19863,7 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
         "Spawn Point" | "SpawnPoint" => Color32::from_rgb(236, 188, 104),
         "Trigger" => Color32::from_rgb(190, 128, 232),
         "Audio Source" | "AudioSource" => Color32::from_rgb(104, 202, 188),
-        "Portal" => Color32::from_rgb(255, 188, 100),
+        "Portal" => PORTAL_PINK,
         _ => Color32::from_rgb(141, 160, 180),
     }
 }
@@ -17382,46 +19872,91 @@ fn draw_inline_icon(ui: &mut egui::Ui, icon: char, color: Color32) {
     ui.label(icons::text(icon, 16.0).color(color));
 }
 
-fn context_chip(ui: &mut egui::Ui, text: &str, strong: bool) {
-    let fill = if strong {
-        STUDIO_ACCENT_DIM
-    } else {
-        STUDIO_PANEL_DARK
-    };
-    egui::Frame::new()
-        .fill(fill)
-        .stroke(Stroke::new(1.0, STUDIO_BORDER))
-        .corner_radius(egui::CornerRadius::same(3))
-        .inner_margin(egui::Margin::symmetric(6, 1))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).small().color(STUDIO_TEXT));
-        });
-}
-
-fn toolbar_icon_button(
+fn toolbar_group_menu<R>(
     ui: &mut egui::Ui,
-    selected: bool,
+    number: u8,
+    glow: f32,
     icon: char,
     label: &str,
-    hint: &str,
+    current: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    let number_text = number.to_string();
+    let shortcut = command_shortcut_text(&number_text);
+    let reverse_shortcut = command_shift_shortcut_text(&number_text);
+    let shortcut_summary = format!("Shortcut: {shortcut} / Reverse: {reverse_shortcut}");
+    let glow = glow.clamp(0.0, 1.0);
+    let mut button = egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0));
+    if glow > 0.0 {
+        let fill_alpha = (34.0 + 58.0 * glow).round() as u8;
+        let stroke_alpha = (120.0 + 120.0 * glow).round() as u8;
+        button = button
+            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, fill_alpha))
+            .stroke(Stroke::new(
+                1.0 + glow * 0.75,
+                Color32::from_rgba_unmultiplied(165, 238, 255, stroke_alpha),
+            ));
+    }
+    let footer = shortcut_summary.clone();
+    let response = egui::menu::menu_custom_button(ui, button, |ui| {
+        let result = add_contents(ui);
+        ui.separator();
+        ui.label(RichText::new(footer).small().color(STUDIO_TEXT_WEAK));
+        result
+    })
+    .response;
+    response.on_hover_text(format!(
+        "{label}: {current}\n{shortcut} cycles forward\n{reverse_shortcut} cycles backward"
+    ));
+}
+
+fn toolbar_menu_choice(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    selected: bool,
 ) -> bool {
-    let response = ui.add_sized(
-        [30.0, 23.0],
-        egui::SelectableLabel::new(selected, icons::text(icon, 15.0)),
-    );
-    let clicked = response.clicked();
-    response.on_hover_text(format!("{label}: {hint}"));
+    let clicked = ui.selectable_label(selected, label).clicked();
+    if clicked {
+        ui.close_menu();
+    }
     clicked
 }
 
-fn toolbar_text_segment(ui: &mut egui::Ui, selected: bool, label: &str, hint: &str) -> bool {
-    let response = ui.add_sized(
-        [label.len() as f32 * 7.0 + 18.0, 23.0],
-        egui::SelectableLabel::new(selected, label),
-    );
-    let clicked = response.clicked();
-    response.on_hover_text(hint);
-    clicked
+fn visibility_menu_row(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    label: &str,
+    visible: &mut bool,
+) -> bool {
+    ui.label(label);
+    let icon = if *visible { icons::EYE } else { icons::EYE_OFF };
+    let icon_color = if *visible {
+        STUDIO_TEXT
+    } else {
+        Color32::from_rgb(82, 92, 102)
+    };
+    let response = ui
+        .push_id(id_salt, |ui| {
+            ui.add_sized(
+                [32.0, 22.0],
+                egui::Button::new(icons::text(icon, 14.0).color(icon_color)),
+            )
+            .on_hover_text(if *visible { "Hide" } else { "Show" })
+        })
+        .inner;
+    let changed = response.clicked();
+    if changed {
+        *visible = !*visible;
+    }
+    ui.end_row();
+    changed
+}
+
+fn viewport_camera_mode_label(mode: ViewportCameraMode) -> &'static str {
+    match mode {
+        ViewportCameraMode::Orbit => "Orbit",
+        ViewportCameraMode::Free => "Free",
+    }
 }
 
 fn draw_model_import_preview(
@@ -17818,6 +20353,9 @@ fn draw_psxt_preview_block_sized(
             let (rect, _) = ui.allocate_exact_size(preview_size, Sense::hover());
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 4.0, STUDIO_PANEL);
+            if stats.index_zero_transparent {
+                draw_checker_preview(&painter, rect, Color32::from_rgb(20, 26, 32));
+            }
             painter.image(
                 id,
                 rect,
@@ -17865,6 +20403,90 @@ fn draw_psxt_preview_block_sized(
     ui.add_space(6.0);
 }
 
+fn draw_psxt_preview_block_pickable(
+    ui: &mut egui::Ui,
+    thumb: Option<&TexturePreviewSnapshot>,
+) -> Option<PickedPsxtTexel> {
+    draw_psxt_preview_block_sized_pickable(ui, thumb, Vec2::splat(128.0))
+}
+
+fn draw_psxt_preview_block_sized_pickable(
+    ui: &mut egui::Ui,
+    thumb: Option<&TexturePreviewSnapshot>,
+    preview_size: Vec2,
+) -> Option<PickedPsxtTexel> {
+    let mut picked = None;
+    ui.vertical_centered(|ui| match thumb {
+        Some(snapshot) => {
+            let (rect, response) = ui.allocate_exact_size(preview_size, Sense::click());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 4.0, STUDIO_PANEL);
+            if snapshot.stats.index_zero_transparent {
+                draw_checker_preview(&painter, rect, Color32::from_rgb(20, 26, 32));
+            }
+            painter.image(
+                snapshot.texture_id,
+                rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            painter.rect_stroke(
+                rect,
+                4.0,
+                Stroke::new(1.0, STUDIO_BORDER),
+                StrokeKind::Inside,
+            );
+            if response.hovered() {
+                ui.output_mut(|out| out.cursor_icon = egui::CursorIcon::Crosshair);
+            }
+            let response =
+                response.on_hover_text("Click a texel to make that indexed colour transparent.");
+            if response.clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    picked = sample_psxt_preview(snapshot, rect, pos);
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "{}×{}  {}bpp  {}",
+                    snapshot.stats.width,
+                    snapshot.stats.height,
+                    snapshot.stats.depth_bits,
+                    human_bytes(snapshot.stats.file_bytes)
+                ))
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
+        }
+        None => draw_psxt_preview_block(ui, None),
+    });
+    ui.add_space(6.0);
+    picked
+}
+
+fn sample_psxt_preview(
+    snapshot: &TexturePreviewSnapshot,
+    rect: Rect,
+    pos: Pos2,
+) -> Option<PickedPsxtTexel> {
+    let width = snapshot.image.size[0];
+    let height = snapshot.image.size[1];
+    if width == 0 || height == 0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return None;
+    }
+    let rel_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 0.999_999);
+    let rel_y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 0.999_999);
+    let x = (rel_x * width as f32).floor() as usize;
+    let y = (rel_y * height as f32).floor() as usize;
+    let color = *snapshot.image.pixels.get(y * width + x)?;
+    Some(PickedPsxtTexel {
+        x: x as u16,
+        y: y as u16,
+        color,
+    })
+}
+
 /// Tabular `key -- value` rows summarizing a `.psxt`. Mirrors the
 /// fields the cooker writes so authors can sanity-check that their
 /// material's texture lines up with the dimensions they expect.
@@ -17887,6 +20509,15 @@ fn draw_psxt_stats(ui: &mut egui::Ui, stats: PsxtStats) {
         },
     );
     row(ui, "CLUT entries", format!("{}", stats.clut_entries));
+    row(
+        ui,
+        "Transparent 0",
+        if stats.index_zero_transparent {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        },
+    );
     row(ui, "Pixel data", human_bytes(stats.pixel_bytes));
     if stats.clut_bytes > 0 {
         row(ui, "CLUT data", human_bytes(stats.clut_bytes));
@@ -19342,7 +21973,8 @@ fn draw_breadcrumb(
 fn material_texture_picker(
     ui: &mut egui::Ui,
     current: &mut Option<ResourceId>,
-    options: &[(ResourceId, String)],
+    options: &[TexturePickerOption],
+    search: &mut String,
     jump_to: &mut Option<ResourceId>,
 ) -> bool {
     let mut changed = false;
@@ -19352,27 +21984,104 @@ fn material_texture_picker(
             .and_then(|id| {
                 options
                     .iter()
-                    .find(|(rid, _)| *rid == id)
-                    .map(|(_, n)| n.as_str())
+                    .find(|option| option.id == id)
+                    .map(|option| option.name.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt("material-texture-picker")
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
+        let popup_id = ui.make_persistent_id("material-texture-picker-popup");
+        let open = ui.memory(|mem| mem.is_popup_open(popup_id));
+        let button = egui::Button::new(format!("{preview}  v"))
+            .selected(open)
+            .truncate();
+        let response = ui.add_sized(
+            [
+                MATERIAL_TEXTURE_PICKER_BUTTON_WIDTH,
+                ui.spacing().interact_size.y,
+            ],
+            button,
+        );
+        if response.clicked() {
+            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+        }
+
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &response,
+            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                ui.set_min_width(MATERIAL_TEXTURE_PICKER_POPUP_WIDTH);
+                ui.horizontal(|ui| {
+                    let search_width = (ui.available_width() - 58.0).max(96.0);
+                    ui.add_sized(
+                        [search_width, 24.0],
+                        egui::TextEdit::singleline(search).hint_text("Search textures"),
+                    );
+                    if ui
+                        .add_enabled(!search.is_empty(), egui::Button::new("Clear"))
+                        .clicked()
+                    {
+                        search.clear();
+                    }
+                });
+                ui.add_space(4.0);
+
+                let query = search.trim().to_ascii_lowercase();
+                let matches: Vec<&TexturePickerOption> = options
+                    .iter()
+                    .filter(|option| texture_picker_option_matches(&option.name, &query))
+                    .collect();
+                let match_count = matches.len();
+
+                if material_texture_picker_row(ui, "(none)", None, current.is_none()).clicked() {
                     *current = None;
                     changed = true;
+                    ui.memory_mut(|mem| mem.close_popup());
                 }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
+
+                ui.separator();
+
+                if matches.is_empty() {
+                    ui.add_space(8.0);
+                    ui.centered_and_justified(|ui| {
+                        ui.label(RichText::new("No matching textures").color(STUDIO_TEXT_WEAK));
+                    });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("material_texture_picker_scroll")
+                        .max_height(MATERIAL_TEXTURE_PICKER_POPUP_HEIGHT)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for option in &matches {
+                                if material_texture_picker_row(
+                                    ui,
+                                    &option.name,
+                                    option.thumb,
+                                    *current == Some(option.id),
+                                )
+                                .clicked()
+                                {
+                                    *current = Some(option.id);
+                                    changed = true;
+                                    ui.memory_mut(|mem| mem.close_popup());
+                                }
+                            }
+                        });
                 }
-            });
+
+                if !query.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("{} of {} textures", match_count, options.len()))
+                            .color(STUDIO_TEXT_WEAK)
+                            .small(),
+                    );
+                }
+            },
+        );
         if let Some(id) = *current {
             if ui
-                .small_button("→")
+                .small_button("->")
                 .on_hover_text("Open this texture in the inspector")
                 .clicked()
             {
@@ -19381,6 +22090,114 @@ fn material_texture_picker(
         }
     });
     changed
+}
+
+fn texture_picker_option_matches(name: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    query.split_whitespace().all(|part| name.contains(part))
+}
+
+fn material_texture_picker_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    thumb: Option<(egui::TextureId, PsxtStats)>,
+    selected: bool,
+) -> egui::Response {
+    let width = ui.available_width().max(1.0);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width, MATERIAL_TEXTURE_PICKER_ROW_HEIGHT),
+        Sense::click(),
+    );
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+    let fill = if selected {
+        visuals.selection.bg_fill
+    } else if response.hovered() {
+        visuals.widgets.hovered.bg_fill
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        painter.rect_filled(rect.shrink2(Vec2::new(1.0, 2.0)), 4.0, fill);
+    }
+
+    let thumb_rect = Rect::from_min_size(
+        Pos2::new(
+            rect.left() + 5.0,
+            rect.center().y - MATERIAL_TEXTURE_PICKER_THUMB_SIZE * 0.5,
+        ),
+        Vec2::splat(MATERIAL_TEXTURE_PICKER_THUMB_SIZE),
+    );
+    painter.rect_filled(thumb_rect, 3.0, STUDIO_PANEL);
+    match thumb {
+        Some((id, stats)) => {
+            if stats.index_zero_transparent {
+                draw_checker_preview(&painter, thumb_rect, Color32::from_rgb(20, 26, 32));
+            }
+            painter.image(
+                id,
+                thumb_rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        None => {
+            painter.text(
+                thumb_rect.center(),
+                Align2::CENTER_CENTER,
+                "-",
+                FontId::proportional(13.0),
+                STUDIO_TEXT_WEAK,
+            );
+        }
+    }
+    painter.rect_stroke(
+        thumb_rect,
+        3.0,
+        Stroke::new(1.0, STUDIO_BORDER),
+        StrokeKind::Inside,
+    );
+
+    let text_x = thumb_rect.right() + 8.0;
+    let name_y = if thumb.is_some() {
+        rect.center().y - 7.0
+    } else {
+        rect.center().y
+    };
+    painter.text(
+        Pos2::new(text_x, name_y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(14.0),
+        if selected {
+            visuals.selection.stroke.color
+        } else {
+            STUDIO_TEXT
+        },
+    );
+    if let Some((_, stats)) = thumb {
+        painter.text(
+            Pos2::new(text_x, rect.center().y + 10.0),
+            Align2::LEFT_CENTER,
+            format!(
+                "{}x{}  {}bpp  {}",
+                stats.width,
+                stats.height,
+                stats.depth_bits,
+                human_bytes(stats.file_bytes)
+            ),
+            FontId::monospace(10.0),
+            STUDIO_TEXT_WEAK,
+        );
+    }
+    response
 }
 
 fn texture_resource_picker(
@@ -20965,39 +23782,336 @@ fn human_bytes_u64(n: u64) -> String {
     }
 }
 
-fn draw_play_debug_overlay_toggle(
-    painter: &egui::Painter,
+fn draw_play_overlay_icon_button(
+    ui: &mut egui::Ui,
     rect: Rect,
-    visible: bool,
-    hovered: bool,
-) {
-    let fill = if hovered {
+    id_source: &'static str,
+    icon: char,
+    tooltip: &'static str,
+    active: bool,
+    enabled: bool,
+    active_fill: Option<Color32>,
+) -> bool {
+    let response = ui
+        .interact(
+            rect,
+            ui.id().with(("play_overlay_icon_button", id_source)),
+            if enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        )
+        .on_hover_text(tooltip);
+    let hovered = response.hovered();
+    let fill = if active {
+        active_fill.unwrap_or(STUDIO_ACCENT_DIM)
+    } else if hovered && enabled {
         Color32::from_rgba_unmultiplied(34, 48, 58, 232)
-    } else {
+    } else if enabled {
         Color32::from_black_alpha(176)
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 112)
     };
+    let stroke = if active {
+        Stroke::new(1.0, STUDIO_ACCENT)
+    } else if hovered && enabled {
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 128))
+    } else {
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 84))
+    };
+    let icon_color = if !enabled {
+        Color32::from_rgba_unmultiplied(142, 154, 168, 108)
+    } else if hovered || active {
+        Color32::WHITE
+    } else {
+        STUDIO_TEXT
+    };
+    let painter = ui.painter();
     painter.rect_filled(rect, 4.0, fill);
-    painter.rect_stroke(
-        rect,
-        4.0,
-        Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 84)),
-        StrokeKind::Inside,
-    );
+    painter.rect_stroke(rect, 4.0, stroke, StrokeKind::Inside);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
-        if visible { icons::EYE_OFF } else { icons::EYE }.to_string(),
+        icon.to_string(),
         icons::font(14.0),
-        if hovered { Color32::WHITE } else { STUDIO_TEXT },
+        icon_color,
     );
+    enabled && response.clicked()
 }
 
 #[derive(Clone, Copy)]
 struct PlayChunkDebugMapCell {
     runtime_room_index: usize,
+    project_room_id: NodeId,
+    portal_room_index: usize,
+    array_cell: [u16; 2],
     center: [f32; 2],
     half: [f32; 2],
+    room_origin: [f32; 2],
+    runtime_origin: [i32; 2],
     sector_size: f32,
+}
+
+#[derive(Clone)]
+struct PlayChunkDebugMapPortal {
+    portal_index: usize,
+    source_room_index: usize,
+    destination_room_index: usize,
+    a: [f32; 2],
+    b: [f32; 2],
+    vertices_world: [[i32; 3]; 4],
+    direction: GridDirection,
+    normal_world: [i16; 3],
+    source_marker: Option<NodeId>,
+}
+
+struct PlayChunkDebugMap {
+    cells: Vec<PlayChunkDebugMapCell>,
+    portals: Vec<PlayChunkDebugMapPortal>,
+}
+
+#[derive(Clone, Copy)]
+struct PortalClipTraceEntry {
+    portal_index: usize,
+    parent: psx_level::portal_visibility::PortalFrustum,
+    debug: psx_level::portal_visibility::PortalClipDebug,
+    skipped_return: bool,
+}
+
+struct PortalClipTrace {
+    camera: psx_level::portal_visibility::PortalVisibilityCamera,
+    camera_global: [i32; 3],
+    entries: Vec<PortalClipTraceEntry>,
+}
+
+impl PlayChunkDebugMap {
+    fn runtime_room_count(&self) -> usize {
+        self.cells
+            .iter()
+            .map(|cell| cell.runtime_room_index + 1)
+            .max()
+            .unwrap_or_default()
+    }
+}
+
+fn collect_portal_clip_trace(
+    map: &PlayChunkDebugMap,
+    metrics: EditorPlaytestMetrics,
+    current_room: Option<usize>,
+) -> Option<PortalClipTrace> {
+    let current_room = current_room?;
+    let (camera, camera_global) = portal_clip_debug_camera(map, metrics, current_room)?;
+    let root = psx_level::portal_visibility::PortalFrustum {
+        room: psx_level::RoomIndex(current_room.min(u16::MAX as usize) as u16),
+        source_room: psx_level::RoomIndex(u16::MAX),
+        source_portal: u16::MAX,
+        depth: 0,
+        left_tan_q12: -camera.half_fov_x_tan_q12,
+        right_tan_q12: camera.half_fov_x_tan_q12,
+        min_y_tan_q12: -camera.half_fov_y_tan_q12,
+        max_y_tan_q12: camera.half_fov_y_tan_q12,
+    };
+    let mut frustums = vec![root];
+    let mut entries = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < frustums.len() {
+        let parent = frustums[cursor];
+        cursor += 1;
+        if parent.depth >= PLAY_PORTAL_DEBUG_MAX_DEPTH {
+            continue;
+        }
+        for portal in map
+            .portals
+            .iter()
+            .filter(|portal| portal.source_room_index == parent.room.to_usize())
+        {
+            let record = portal_level_record(portal);
+            let debug = psx_level::portal_visibility::debug_portal_clip(record, camera, parent);
+            let destination =
+                psx_level::RoomIndex(portal.destination_room_index.min(u16::MAX as usize) as u16);
+            let skipped_return =
+                portal.destination_room_index == current_room || destination == parent.source_room;
+            entries.push(PortalClipTraceEntry {
+                portal_index: portal.portal_index,
+                parent,
+                debug,
+                skipped_return,
+            });
+            if skipped_return
+                || debug.decision != psx_level::portal_visibility::PortalClipDebugDecision::Accepted
+            {
+                continue;
+            }
+            let Some(bounds) = debug.result_bounds else {
+                continue;
+            };
+            let child = psx_level::portal_visibility::PortalFrustum {
+                room: destination,
+                source_room: parent.room,
+                source_portal: portal.portal_index.min(u16::MAX as usize) as u16,
+                depth: parent.depth.saturating_add(1),
+                left_tan_q12: bounds.left_tan_q12,
+                right_tan_q12: bounds.right_tan_q12,
+                min_y_tan_q12: bounds.min_y_tan_q12,
+                max_y_tan_q12: bounds.max_y_tan_q12,
+            };
+            if !portal_debug_trace_contains_redundant_frustum(&frustums, child) {
+                frustums.push(child);
+            }
+        }
+    }
+    Some(PortalClipTrace {
+        camera,
+        camera_global,
+        entries,
+    })
+}
+
+fn portal_clip_debug_camera(
+    map: &PlayChunkDebugMap,
+    metrics: EditorPlaytestMetrics,
+    current_room: usize,
+) -> Option<(
+    psx_level::portal_visibility::PortalVisibilityCamera,
+    [i32; 3],
+)> {
+    if !metrics.camera_view_basis_valid
+        || (!metrics.camera_map_valid && !metrics.camera_global_valid)
+    {
+        return None;
+    }
+    if !metrics.camera_global_valid
+        && (metrics.camera_local_y < -900_000 || metrics.camera_view_cos_pitch_q12 <= 0)
+    {
+        return None;
+    }
+    let (global_x, global_y, global_z) = if metrics.camera_global_valid {
+        (
+            metrics.camera_global_x,
+            metrics.camera_global_y,
+            metrics.camera_global_z,
+        )
+    } else {
+        let room_cell = map
+            .cells
+            .iter()
+            .find(|cell| cell.runtime_room_index == current_room)?;
+        let sector_size = room_cell.sector_size.max(1.0);
+        (
+            room_cell.runtime_origin[0]
+                .saturating_mul(sector_size.round().max(1.0) as i32)
+                .saturating_add(metrics.camera_local_x),
+            metrics.camera_local_y,
+            room_cell.runtime_origin[1]
+                .saturating_mul(sector_size.round().max(1.0) as i32)
+                .saturating_add(metrics.camera_local_z),
+        )
+    };
+    let half_fov_x = (PLAY_PORTAL_DEBUG_SCREEN_CX * 4096 / PLAY_PORTAL_DEBUG_FOCAL.max(1)).max(1);
+    let half_fov_y = (PLAY_PORTAL_DEBUG_SCREEN_CY * 4096 / PLAY_PORTAL_DEBUG_FOCAL.max(1)).max(1);
+    let camera = psx_level::portal_visibility::PortalVisibilityCamera::new(
+        global_x,
+        global_y,
+        global_z,
+        metrics.camera_view_sin_yaw_q12,
+        metrics.camera_view_cos_yaw_q12,
+        metrics.camera_view_sin_pitch_q12,
+        metrics.camera_view_cos_pitch_q12,
+        PLAY_PORTAL_DEBUG_NEAR_Z,
+        PLAY_PORTAL_DEBUG_FAR_Z,
+        half_fov_x,
+        half_fov_y,
+        PLAY_PORTAL_DEBUG_MIN_WIDTH_Q12,
+    );
+    Some((camera, [global_x, global_y, global_z]))
+}
+
+fn portal_level_record(portal: &PlayChunkDebugMapPortal) -> psx_level::LevelRoomPortalRecord {
+    psx_level::LevelRoomPortalRecord {
+        source_room: psx_level::RoomIndex(portal.source_room_index.min(u16::MAX as usize) as u16),
+        destination_room: psx_level::RoomIndex(
+            portal.destination_room_index.min(u16::MAX as usize) as u16,
+        ),
+        kind: 0,
+        normal_x: portal.normal_world[0],
+        normal_y: portal.normal_world[1],
+        normal_z: portal.normal_world[2],
+        vertex_x: [
+            portal.vertices_world[0][0],
+            portal.vertices_world[1][0],
+            portal.vertices_world[2][0],
+            portal.vertices_world[3][0],
+        ],
+        vertex_y: [
+            portal.vertices_world[0][1],
+            portal.vertices_world[1][1],
+            portal.vertices_world[2][1],
+            portal.vertices_world[3][1],
+        ],
+        vertex_z: [
+            portal.vertices_world[0][2],
+            portal.vertices_world[1][2],
+            portal.vertices_world[2][2],
+            portal.vertices_world[3][2],
+        ],
+    }
+}
+
+fn portal_debug_trace_contains_redundant_frustum(
+    frustums: &[psx_level::portal_visibility::PortalFrustum],
+    frustum: psx_level::portal_visibility::PortalFrustum,
+) -> bool {
+    frustums.iter().any(|existing| {
+        existing.room == frustum.room
+            && existing.source_room == frustum.source_room
+            && existing.source_portal == frustum.source_portal
+            && existing.depth <= frustum.depth
+            && existing.left_tan_q12 <= frustum.left_tan_q12
+            && existing.right_tan_q12 >= frustum.right_tan_q12
+            && existing.min_y_tan_q12 <= frustum.min_y_tan_q12
+            && existing.max_y_tan_q12 >= frustum.max_y_tan_q12
+    })
+}
+
+fn portal_clip_debug_rect_text(
+    rect: Option<psx_level::portal_visibility::PortalClipDebugRect>,
+) -> String {
+    rect.map(|rect| {
+        format!(
+            "x=[{},{}] y=[{},{}]",
+            rect.left_tan_q12, rect.right_tan_q12, rect.min_y_tan_q12, rect.max_y_tan_q12
+        )
+    })
+    .unwrap_or_else(|| "none".to_owned())
+}
+
+fn portal_clip_debug_vertices_text(
+    vertices: [psx_level::portal_visibility::PortalClipDebugVertex; 4],
+) -> String {
+    format!(
+        "[({}, {}, {}), ({}, {}, {}), ({}, {}, {}), ({}, {}, {})]",
+        vertices[0].x,
+        vertices[0].y,
+        vertices[0].z,
+        vertices[1].x,
+        vertices[1].y,
+        vertices[1].z,
+        vertices[2].x,
+        vertices[2].y,
+        vertices[2].z,
+        vertices[3].x,
+        vertices[3].y,
+        vertices[3].z
+    )
+}
+
+fn debug_parent_portal_label(portal: u16) -> String {
+    if portal == u16::MAX {
+        "root".to_owned()
+    } else {
+        format!("#{portal}")
+    }
 }
 
 fn draw_play_chunk_debug_map(
@@ -21006,12 +24120,12 @@ fn draw_play_chunk_debug_map(
     project: &ProjectDocument,
     metrics: EditorPlaytestMetrics,
 ) {
-    let cells = collect_play_chunk_debug_map_cells(project);
-    if cells.is_empty() {
+    let map = collect_play_chunk_debug_map(project);
+    if map.cells.is_empty() {
         return;
     }
 
-    let map_size = Vec2::new(230.0, 180.0);
+    let map_size = Vec2::new(300.0, 224.0);
     let mut map_rect = Rect::from_min_size(
         Pos2::new(
             viewport_rect.right() - map_size.x - 8.0,
@@ -21033,7 +24147,7 @@ fn draw_play_chunk_debug_map(
     let mut max_x = f32::NEG_INFINITY;
     let mut min_z = f32::INFINITY;
     let mut max_z = f32::NEG_INFINITY;
-    for cell in &cells {
+    for cell in &map.cells {
         min_x = min_x.min(cell.center[0] - cell.half[0]);
         max_x = max_x.max(cell.center[0] + cell.half[0]);
         min_z = min_z.min(cell.center[1] - cell.half[1]);
@@ -21053,14 +24167,14 @@ fn draw_play_chunk_debug_map(
     painter.text(
         map_rect.left_top() + Vec2::new(8.0, 7.0),
         Align2::LEFT_TOP,
-        "Chunk map",
+        "Portal map",
         FontId::monospace(11.0),
         STUDIO_TEXT,
     );
 
     let plot = Rect::from_min_max(
         map_rect.left_top() + Vec2::new(8.0, 24.0),
-        map_rect.right_bottom() - Vec2::new(8.0, 24.0),
+        map_rect.right_bottom() - Vec2::new(8.0, 60.0),
     );
     let world_w = (max_x - min_x).max(1.0);
     let world_h = (max_z - min_z).max(1.0);
@@ -21074,10 +24188,14 @@ fn draw_play_chunk_debug_map(
     let map_x = |x: f32| origin.x + (x - min_x) * scale;
     let map_z = |z: f32| origin.y + (z - min_z) * scale;
 
-    for cell in &cells {
+    for cell in &map.cells {
         let bit = debug_chunk_bit(cell.runtime_room_index);
         let loaded = bit != 0 && metrics.chunk_loaded_mask & bit != 0;
-        let active = bit != 0 && metrics.chunk_active_mask & bit != 0;
+        let loading = bit != 0 && metrics.chunk_loading_mask & bit != 0;
+        let visible = bit != 0 && metrics.portal_visible_mask & bit != 0;
+        let frontier = bit != 0 && metrics.portal_frontier_mask & bit != 0;
+        let missing = bit != 0 && metrics.portal_missing_mask & bit != 0;
+        let build_failed = bit != 0 && metrics.portal_build_failed_mask & bit != 0;
         let drawn = bit != 0 && metrics.chunk_drawn_mask & bit != 0;
         let rect = Rect::from_min_max(
             Pos2::new(
@@ -21091,9 +24209,17 @@ fn draw_play_chunk_debug_map(
         )
         .shrink(0.75);
         let fill = if drawn {
-            Color32::from_rgba_unmultiplied(40, 210, 112, 150)
+            Color32::from_rgba_unmultiplied(42, 214, 124, 156)
+        } else if build_failed {
+            Color32::from_rgba_unmultiplied(232, 76, 196, 112)
+        } else if missing {
+            Color32::from_rgba_unmultiplied(226, 54, 74, 112)
+        } else if loading {
+            Color32::from_rgba_unmultiplied(72, 150, 255, 96)
+        } else if visible {
+            Color32::from_rgba_unmultiplied(244, 170, 48, 96)
         } else if loaded {
-            Color32::from_rgba_unmultiplied(220, 56, 64, 104)
+            Color32::from_rgba_unmultiplied(132, 148, 164, 48)
         } else {
             Color32::from_rgba_unmultiplied(0, 0, 0, 0)
         };
@@ -21101,112 +24227,313 @@ fn draw_play_chunk_debug_map(
             painter.rect_filled(rect, 0.0, fill);
         }
         let stroke = if drawn {
-            Stroke::new(1.5, Color32::from_rgb(76, 255, 144))
-        } else if active {
-            Stroke::new(1.7, Color32::from_rgb(255, 206, 82))
+            Stroke::new(1.6, Color32::from_rgb(72, 255, 152))
+        } else if build_failed {
+            Stroke::new(1.8, Color32::from_rgb(255, 92, 214))
+        } else if missing {
+            Stroke::new(1.8, Color32::from_rgb(255, 82, 104))
+        } else if loading {
+            Stroke::new(1.8, Color32::from_rgb(96, 178, 255))
+        } else if visible {
+            Stroke::new(1.7, Color32::from_rgb(255, 184, 58))
+        } else if frontier {
+            Stroke::new(1.6, Color32::from_rgb(172, 128, 255))
         } else if loaded {
-            Stroke::new(1.2, Color32::from_rgb(255, 84, 92))
+            Stroke::new(1.2, Color32::from_rgb(154, 170, 188))
         } else {
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 120))
         };
         painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
     }
 
+    let clipped = painter.with_clip_rect(plot);
+    for portal in &map.portals {
+        let source_bit = debug_chunk_bit(portal.source_room_index);
+        let dest_bit = debug_chunk_bit(portal.destination_room_index);
+        let portal_bit = debug_chunk_bit(portal.portal_index);
+        let source_visible = source_bit != 0 && metrics.portal_visible_mask & source_bit != 0;
+        let dest_frontier = dest_bit != 0 && metrics.portal_frontier_mask & dest_bit != 0;
+        let dest_loading = dest_bit != 0 && metrics.chunk_loading_mask & dest_bit != 0;
+        let dest_build_failed = dest_bit != 0 && metrics.portal_build_failed_mask & dest_bit != 0;
+        let portal_accepted =
+            portal_bit != 0 && metrics.portal_accepted_portal_mask & portal_bit != 0;
+        let portal_rejected =
+            portal_bit != 0 && metrics.portal_reject_frustum_portal_mask & portal_bit != 0;
+        let color = if source_visible && portal_accepted {
+            Color32::from_rgb(255, 190, 72)
+        } else if source_visible && dest_build_failed {
+            Color32::from_rgb(255, 92, 214)
+        } else if source_visible && dest_loading {
+            Color32::from_rgb(96, 178, 255)
+        } else if source_visible && portal_rejected {
+            Color32::from_rgb(255, 142, 48)
+        } else if source_visible && dest_frontier {
+            Color32::from_rgb(172, 128, 255)
+        } else {
+            Color32::from_rgba_unmultiplied(210, 220, 235, 112)
+        };
+        let (a, b) = directed_portal_map_segment(
+            Pos2::new(map_x(portal.a[0]), map_z(portal.a[1])),
+            Pos2::new(map_x(portal.b[0]), map_z(portal.b[1])),
+            portal.source_room_index,
+            portal.destination_room_index,
+        );
+        clipped.line_segment([a, b], Stroke::new(2.0, color));
+        if source_visible && portal_rejected && !portal_accepted {
+            draw_rejected_portal_marker(&clipped, a, b);
+        }
+        if source_visible && (portal_accepted || portal_rejected) {
+            let label = if portal_rejected && !portal_accepted {
+                format!("#{} R", portal.portal_index)
+            } else {
+                format!("#{}", portal.portal_index)
+            };
+            clipped.text(
+                a.lerp(b, 0.5) + Vec2::new(0.0, -7.0),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::monospace(8.5),
+                color,
+            );
+        }
+    }
+
     if metrics.player_map_valid {
-        if let Some(cell) = cells
+        if let Some(cell) = map
+            .cells
             .iter()
             .find(|cell| cell.runtime_room_index == metrics.player_room_index as usize)
         {
             let sector_size = cell.sector_size.max(1.0);
-            let cell_min_x = cell.center[0] - cell.half[0];
-            let cell_min_z = cell.center[1] - cell.half[1];
-            let player_x = cell_min_x + metrics.player_local_x as f32 / sector_size;
-            let player_z = cell_min_z + metrics.player_local_z as f32 / sector_size;
-            let player_pos = Pos2::new(map_x(player_x), map_z(player_z));
-            if player_pos.x.is_finite() && player_pos.y.is_finite() {
+            let local_to_map_pos = |local_x: i32, local_z: i32| {
+                let x = cell.room_origin[0] + local_x as f32 / sector_size;
+                let z = cell.room_origin[1] + local_z as f32 / sector_size;
+                Pos2::new(map_x(x), map_z(z))
+            };
+            let global_to_map_pos = |cell: &PlayChunkDebugMapCell, global_x: i32, global_z: i32| {
+                let sector_size = cell.sector_size.max(1.0);
+                let x = cell.room_origin[0] + global_x as f32 / sector_size
+                    - cell.runtime_origin[0] as f32;
+                let z = cell.room_origin[1] + global_z as f32 / sector_size
+                    - cell.runtime_origin[1] as f32;
+                Pos2::new(map_x(x), map_z(z))
+            };
+            let player_pos = local_to_map_pos(metrics.player_local_x, metrics.player_local_z);
+            let camera_pos = if metrics.camera_global_valid {
+                let camera_cell = map
+                    .cells
+                    .iter()
+                    .find(|cell| {
+                        cell.runtime_room_index == metrics.portal_current_room_index as usize
+                    })
+                    .unwrap_or(cell);
+                global_to_map_pos(
+                    camera_cell,
+                    metrics.camera_global_x,
+                    metrics.camera_global_z,
+                )
+            } else if metrics.camera_map_valid {
+                local_to_map_pos(metrics.camera_local_x, metrics.camera_local_z)
+            } else {
+                player_pos
+            };
+            if player_pos.x.is_finite()
+                && player_pos.y.is_finite()
+                && camera_pos.x.is_finite()
+                && camera_pos.y.is_finite()
+            {
                 let yaw = metrics.player_view_yaw_q12 as f32 * std::f32::consts::TAU / 4096.0;
-                let forward = Vec2::new(-yaw.sin(), -yaw.cos());
-                let cone_len = (scale * 3.0).clamp(20.0, 42.0);
-                let cone_half_angle = 0.48;
+                let forward = if metrics.camera_view_basis_valid {
+                    let basis = Vec2::new(
+                        -(metrics.camera_view_sin_yaw_q12 as f32) / 4096.0,
+                        -(metrics.camera_view_cos_yaw_q12 as f32) / 4096.0,
+                    );
+                    let len = basis.length();
+                    if len > 0.001 {
+                        basis / len
+                    } else {
+                        Vec2::new(-yaw.sin(), -yaw.cos())
+                    }
+                } else {
+                    Vec2::new(-yaw.sin(), -yaw.cos())
+                };
+                let cone_len = (content_w * content_w + content_h * content_h)
+                    .sqrt()
+                    .max(42.0);
+                let cone_half_angle = (160.0_f32 / 320.0_f32).atan();
                 let left = rotate_vec2(forward, -cone_half_angle) * cone_len;
                 let right = rotate_vec2(forward, cone_half_angle) * cone_len;
                 let clipped = painter.with_clip_rect(plot);
+                if metrics.camera_map_valid && player_pos.distance(camera_pos) > 2.0 {
+                    clipped.line_segment(
+                        [player_pos, camera_pos],
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(232, 240, 252, 160)),
+                    );
+                }
                 clipped.add(egui::Shape::convex_polygon(
-                    vec![player_pos, player_pos + left, player_pos + right],
-                    Color32::from_rgba_unmultiplied(92, 190, 255, 62),
-                    Stroke::new(1.2, Color32::from_rgb(112, 210, 255)),
+                    vec![camera_pos, camera_pos + left, camera_pos + right],
+                    Color32::from_rgba_unmultiplied(235, 240, 248, 44),
+                    Stroke::new(1.2, Color32::from_rgb(232, 240, 252)),
                 ));
                 clipped.line_segment(
-                    [player_pos, player_pos + forward * (cone_len * 0.82)],
+                    [camera_pos, camera_pos + forward * (cone_len * 0.82)],
                     Stroke::new(1.2, Color32::from_rgb(218, 244, 255)),
                 );
-                clipped.circle_filled(player_pos, 3.5, Color32::from_rgb(245, 250, 255));
-                clipped.circle_stroke(player_pos, 3.5, Stroke::new(1.0, Color32::BLACK));
+                clipped.circle_filled(player_pos, 2.6, Color32::from_rgb(72, 255, 152));
+                clipped.circle_stroke(player_pos, 2.6, Stroke::new(1.0, Color32::BLACK));
+                clipped.circle_filled(camera_pos, 3.5, Color32::from_rgb(245, 250, 255));
+                clipped.circle_stroke(camera_pos, 3.5, Stroke::new(1.0, Color32::BLACK));
             }
         }
     }
 
+    let legend_row0 = map_rect.left_bottom() + Vec2::new(8.0, -51.0);
+    let legend_row1 = map_rect.left_bottom() + Vec2::new(8.0, -34.0);
+    let legend_row2 = map_rect.left_bottom() + Vec2::new(8.0, -17.0);
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(8.0, -16.0),
-        Color32::from_rgba_unmultiplied(40, 210, 112, 150),
-        Color32::from_rgb(76, 255, 144),
+        legend_row0,
+        Color32::from_rgba_unmultiplied(42, 214, 124, 156),
+        Color32::from_rgb(72, 255, 152),
         "drawn",
     );
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(74.0, -16.0),
-        Color32::from_rgba_unmultiplied(220, 56, 64, 104),
-        Color32::from_rgb(255, 84, 92),
-        "loaded",
+        legend_row0 + Vec2::new(70.0, 0.0),
+        Color32::from_rgba_unmultiplied(244, 170, 48, 96),
+        Color32::from_rgb(255, 184, 58),
+        "accepted",
     );
     draw_chunk_map_legend_item(
         painter,
-        map_rect.left_bottom() + Vec2::new(140.0, -16.0),
+        legend_row0 + Vec2::new(158.0, 0.0),
         Color32::from_rgba_unmultiplied(0, 0, 0, 0),
-        Color32::from_rgba_unmultiplied(210, 220, 235, 120),
-        "unloaded",
+        Color32::from_rgb(172, 128, 255),
+        "depth/cap",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row1,
+        Color32::from_rgba_unmultiplied(132, 148, 164, 48),
+        Color32::from_rgb(154, 170, 188),
+        "resident",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row1 + Vec2::new(94.0, 0.0),
+        Color32::from_rgba_unmultiplied(72, 150, 255, 96),
+        Color32::from_rgb(96, 178, 255),
+        "loading",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row1 + Vec2::new(188.0, 0.0),
+        Color32::from_rgba_unmultiplied(226, 54, 74, 112),
+        Color32::from_rgb(255, 82, 104),
+        "not loaded",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row2,
+        Color32::from_rgba_unmultiplied(232, 76, 196, 112),
+        Color32::from_rgb(255, 92, 214),
+        "build fail",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        legend_row2 + Vec2::new(94.0, 0.0),
+        Color32::from_rgba_unmultiplied(255, 124, 36, 84),
+        Color32::from_rgb(255, 142, 48),
+        "rejected",
+    );
+    draw_rejected_map_marker(
+        painter,
+        Rect::from_min_size(legend_row2 + Vec2::new(94.0, 0.0), Vec2::new(9.0, 9.0)),
     );
 }
 
-fn collect_play_chunk_debug_map_cells(project: &ProjectDocument) -> Vec<PlayChunkDebugMapCell> {
+fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap {
     let scene = project.active_scene();
     let mut cells = Vec::new();
+    let mut portals = Vec::new();
     let mut runtime_room_index = 0usize;
-    for node in scene.nodes() {
+    let mut room_nodes: Vec<_> = scene
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .collect();
+    room_nodes.sort_by_key(|node| node.id.raw());
+    for node in room_nodes {
         let NodeKind::Room { grid } = &node.kind else {
             continue;
         };
         if grid.populated_sector_count() == 0 {
             continue;
         }
-        let config = playtest_streaming_chunk_config_for_room(project, node.id);
-        let plan = plan_generated_chunks(grid, config);
+        let plan = plan_portal_rooms(scene, node.id, grid, PortalRoomConfig::default());
         let node_center = node_world(node);
-        for chunk in plan.chunks {
-            let Some(chunk_grid) =
-                grid_rect_for_validation_issue(grid, chunk.array_origin, chunk.size)
-            else {
-                continue;
-            };
-            if chunk_grid.populated_sector_count() == 0 {
-                continue;
+        let room_base_index = runtime_room_index;
+        for portal_room in &plan.rooms {
+            let room_origin = [
+                node_center[0] + portal_room.array_origin[0] as f32 - grid.width as f32 * 0.5,
+                node_center[1] + portal_room.array_origin[1] as f32 - grid.depth as f32 * 0.5,
+            ];
+            for [cell_x, cell_z] in &portal_room.cells {
+                let local_center = grid_cell_editor_center(grid, *cell_x, *cell_z);
+                cells.push(PlayChunkDebugMapCell {
+                    runtime_room_index,
+                    project_room_id: node.id,
+                    portal_room_index: portal_room.index,
+                    array_cell: [*cell_x, *cell_z],
+                    center: [
+                        node_center[0] + local_center[0],
+                        node_center[1] + local_center[1],
+                    ],
+                    half: [0.5, 0.5],
+                    room_origin,
+                    runtime_origin: portal_room.world_origin,
+                    sector_size: grid.sector_size.max(1) as f32,
+                });
             }
-            let (local_center, half) =
-                grid_rect_editor_center_half(grid, chunk.array_origin, chunk.size);
-            cells.push(PlayChunkDebugMapCell {
-                runtime_room_index,
-                center: [
-                    node_center[0] + local_center[0],
-                    node_center[1] + local_center[1],
-                ],
-                half,
-                sector_size: grid.sector_size.max(1) as f32,
-            });
             runtime_room_index += 1;
         }
+        let sector_size = grid.sector_size.max(1) as f32;
+        let room_portal_base = portals.len();
+        for portal in plan.portals {
+            let a =
+                portal_debug_map_point(grid, node_center, sector_size, portal.vertices_world[0]);
+            let b =
+                portal_debug_map_point(grid, node_center, sector_size, portal.vertices_world[1]);
+            portals.push(PlayChunkDebugMapPortal {
+                portal_index: room_portal_base + portal.index,
+                source_room_index: room_base_index + portal.source_room,
+                destination_room_index: room_base_index + portal.destination_room,
+                a,
+                b,
+                vertices_world: portal.vertices_world,
+                direction: portal.direction,
+                normal_world: portal.normal_world,
+                source_marker: portal.source_marker,
+            });
+        }
     }
-    cells
+    PlayChunkDebugMap { cells, portals }
+}
+
+fn portal_debug_map_point(
+    grid: &WorldGrid,
+    node_center: [f32; 2],
+    sector_size: f32,
+    vertex: [i32; 3],
+) -> [f32; 2] {
+    [
+        node_center[0] + vertex[0] as f32 / sector_size
+            - grid.origin[0] as f32
+            - grid.width as f32 * 0.5,
+        node_center[1] + vertex[2] as f32 / sector_size
+            - grid.origin[1] as f32
+            - grid.depth as f32 * 0.5,
+    ]
 }
 
 fn debug_chunk_bit(index: usize) -> u64 {
@@ -21217,9 +24544,93 @@ fn debug_chunk_bit(index: usize) -> u64 {
     }
 }
 
+fn debug_room_flags(metrics: EditorPlaytestMetrics, index: usize) -> String {
+    let bit = debug_chunk_bit(index);
+    let flag = |mask: u64| bit != 0 && mask & bit != 0;
+    format!(
+        "loaded={} loading={} active={} drawn={} visible={} frontier={} missing={} build_failed={} tested={} accepted={} reject_frustum={} bounds_fb={}",
+        flag(metrics.chunk_loaded_mask),
+        flag(metrics.chunk_loading_mask),
+        flag(metrics.chunk_active_mask),
+        flag(metrics.chunk_drawn_mask),
+        flag(metrics.portal_visible_mask),
+        flag(metrics.portal_frontier_mask),
+        flag(metrics.portal_missing_mask),
+        flag(metrics.portal_build_failed_mask),
+        flag(metrics.portal_tested_mask),
+        flag(metrics.portal_accepted_mask),
+        flag(metrics.portal_reject_frustum_mask),
+        flag(metrics.portal_bounds_fallback_mask)
+    )
+}
+
+fn q12_degrees(angle: u16) -> f32 {
+    angle as f32 * 360.0 / 4096.0
+}
+
 fn rotate_vec2(v: Vec2, radians: f32) -> Vec2 {
     let (sin, cos) = radians.sin_cos();
     Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos)
+}
+
+fn directed_portal_map_segment(
+    a: Pos2,
+    b: Pos2,
+    source_room_index: usize,
+    destination_room_index: usize,
+) -> (Pos2, Pos2) {
+    let edge = b - a;
+    let len = (edge.x * edge.x + edge.y * edge.y).sqrt();
+    if len <= 0.001 {
+        return (a, b);
+    }
+    let side = if source_room_index <= destination_room_index {
+        1.0
+    } else {
+        -1.0
+    };
+    let offset = Vec2::new(-edge.y / len, edge.x / len) * (1.6 * side);
+    (a + offset, b + offset)
+}
+
+fn draw_rejected_map_marker(painter: &egui::Painter, rect: Rect) {
+    let inset = (rect.width().min(rect.height()) * 0.22).clamp(1.0, 4.0);
+    let a = rect.left_top() + Vec2::splat(inset);
+    let b = rect.right_bottom() - Vec2::splat(inset);
+    painter.line_segment(
+        [a, b],
+        Stroke::new(2.4, Color32::from_rgba_unmultiplied(20, 14, 10, 160)),
+    );
+    painter.line_segment([a, b], Stroke::new(1.2, Color32::from_rgb(255, 238, 204)));
+}
+
+fn draw_rejected_portal_marker(painter: &egui::Painter, a: Pos2, b: Pos2) {
+    let edge = b - a;
+    let len = (edge.x * edge.x + edge.y * edge.y).sqrt();
+    if len <= 0.001 {
+        return;
+    }
+    let tangent = edge / len;
+    let normal = Vec2::new(-tangent.y, tangent.x);
+    let center = a + edge * 0.5;
+    let half_a = tangent * 4.5 + normal * 4.5;
+    let half_b = tangent * 4.5 - normal * 4.5;
+    painter.line_segment(
+        [center - half_a, center + half_a],
+        Stroke::new(2.4, Color32::from_rgba_unmultiplied(20, 14, 10, 170)),
+    );
+    painter.line_segment(
+        [center - half_a, center + half_a],
+        Stroke::new(1.2, Color32::from_rgb(255, 238, 204)),
+    );
+    painter.line_segment(
+        [center - half_b, center + half_b],
+        Stroke::new(2.4, Color32::from_rgba_unmultiplied(20, 14, 10, 170)),
+    );
+    painter.line_segment(
+        [center - half_b, center + half_b],
+        Stroke::new(1.2, Color32::from_rgb(255, 238, 204)),
+    );
 }
 
 fn draw_chunk_map_legend_item(
@@ -21241,6 +24652,76 @@ fn draw_chunk_map_legend_item(
         FontId::monospace(10.0),
         STUDIO_TEXT_WEAK,
     );
+}
+
+fn play_frame_rate_from_ms(frame_ms: f32) -> f32 {
+    if frame_ms > 0.0 && frame_ms.is_finite() {
+        (1000.0 / frame_ms).clamp(0.0, PLAY_FRAME_TARGET_FPS)
+    } else {
+        0.0
+    }
+}
+
+fn draw_play_frame_rate_chart(painter: &egui::Painter, rect: Rect, samples: &VecDeque<f32>) {
+    painter.rect_filled(rect, 3.0, Color32::from_black_alpha(88));
+    painter.rect_stroke(
+        rect,
+        3.0,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(180, 200, 220, 64)),
+        StrokeKind::Inside,
+    );
+    let plot = rect.shrink2(Vec2::new(2.0, 3.0));
+    let target_y = plot.top();
+    painter.line_segment(
+        [
+            Pos2::new(plot.left(), target_y),
+            Pos2::new(plot.right(), target_y),
+        ],
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(235, 240, 248, 126)),
+    );
+
+    if samples.len() < 2 {
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "VIS fps",
+            FontId::monospace(9.0),
+            STUDIO_TEXT_WEAK,
+        );
+        return;
+    }
+
+    let step = plot.width() / (samples.len().saturating_sub(1) as f32).max(1.0);
+    let mut fps_points = Vec::with_capacity(samples.len());
+    let fill = Color32::from_rgba_unmultiplied(42, 214, 124, 38);
+    for (index, frame_ms) in samples.iter().copied().enumerate() {
+        let rate = play_frame_rate_from_ms(frame_ms);
+        let t = (rate / PLAY_FRAME_TARGET_FPS).clamp(0.0, 1.0);
+        let point = Pos2::new(
+            plot.left() + step * index as f32,
+            plot.bottom() - plot.height() * t,
+        );
+        let x0 = if index == 0 {
+            plot.left()
+        } else {
+            point.x - step * 0.5
+        };
+        let x1 = if index + 1 == samples.len() {
+            plot.right()
+        } else {
+            point.x + step * 0.5
+        };
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(x0, point.y), Pos2::new(x1, plot.bottom())),
+            0.0,
+            fill,
+        );
+        fps_points.push(point);
+    }
+    painter.add(egui::Shape::line(
+        fps_points,
+        Stroke::new(1.2, Color32::from_rgba_unmultiplied(150, 238, 172, 184)),
+    ));
 }
 
 fn draw_play_metric_line(painter: &egui::Painter, x: f32, y: &mut f32, text: &str, color: Color32) {
@@ -21276,6 +24757,464 @@ fn compact_middle(text: &str, max_chars: usize) -> String {
     let mut suffix = text.chars().rev().take(tail).collect::<Vec<_>>();
     suffix.reverse();
     out.extend(suffix);
+    out
+}
+
+fn scene_node_label(scene: &psxed_project::Scene, id: NodeId) -> String {
+    scene
+        .node(id)
+        .map(|node| node.name.clone())
+        .unwrap_or_else(|| format!("#{}", id.raw()))
+}
+
+fn draw_room_connections_rows(
+    ui: &mut egui::Ui,
+    scene: &psxed_project::Scene,
+    connections: &[RoomConnection],
+    filter: &str,
+    selected_node: NodeId,
+    selected_nodes: &HashSet<NodeId>,
+    selected: &mut Option<NodeId>,
+    repair: &mut Option<NodeId>,
+) {
+    let visible = connections
+        .iter()
+        .filter(|connection| room_connection_matches_filter(scene, connection, filter))
+        .collect::<Vec<_>>();
+    let repair_count = connections
+        .iter()
+        .filter(|connection| connection.status.needs_repair())
+        .count();
+    let heading = if repair_count > 0 {
+        format!(
+            "Connections ({}, {} repair)",
+            connections.len(),
+            repair_count
+        )
+    } else {
+        format!("Connections ({})", connections.len())
+    };
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::WAYPOINT, 13.0).color(STUDIO_TEXT_WEAK));
+        ui.strong(heading);
+    });
+    if connections.is_empty() {
+        ui.weak("No room portals yet.");
+        return;
+    }
+    if visible.is_empty() {
+        ui.weak("No connections match the filter.");
+        return;
+    }
+
+    for connection in visible {
+        draw_room_connection_row(
+            ui,
+            scene,
+            connection,
+            selected_node,
+            selected_nodes,
+            selected,
+            repair,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RoomFloorLinkDirection {
+    Above,
+    Below,
+}
+
+impl RoomFloorLinkDirection {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Above => "above",
+            Self::Below => "below",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoomFloorLinkRow {
+    source_room: NodeId,
+    target_room: Option<NodeId>,
+    target_floor: u16,
+    x: u16,
+    z: u16,
+    direction: RoomFloorLinkDirection,
+}
+
+fn draw_room_floor_link_rows(ui: &mut egui::Ui, scene: &psxed_project::Scene, filter: &str) {
+    let rows = collect_room_floor_link_rows(scene);
+    let visible = rows
+        .iter()
+        .copied()
+        .filter(|row| room_floor_link_matches_filter(scene, *row, filter))
+        .collect::<Vec<_>>();
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::LAYERS, 13.0).color(STUDIO_TEXT_WEAK));
+        ui.strong(format!("Floors ({})", rows.len()));
+    });
+    if rows.is_empty() {
+        ui.weak("No vertical floor links yet.");
+        return;
+    }
+    if visible.is_empty() {
+        ui.weak("No floor links match the filter.");
+        return;
+    }
+
+    let max_rows = 24usize;
+    for row in visible.iter().take(max_rows) {
+        draw_room_floor_link_row(ui, scene, *row);
+    }
+    if visible.len() > max_rows {
+        ui.weak(format!("... {} more floor links", visible.len() - max_rows));
+    }
+}
+
+fn collect_room_floor_link_rows(scene: &psxed_project::Scene) -> Vec<RoomFloorLinkRow> {
+    let mut rows = Vec::new();
+    for node in scene.nodes() {
+        let NodeKind::Room { grid } = &node.kind else {
+            continue;
+        };
+        for x in 0..grid.width {
+            for z in 0..grid.depth {
+                let Some(sector) = grid.sector(x, z) else {
+                    continue;
+                };
+                if let Some(link) = sector.floor_above {
+                    rows.push(RoomFloorLinkRow {
+                        source_room: node.id,
+                        target_room: link.target_room,
+                        target_floor: link.target_floor,
+                        x,
+                        z,
+                        direction: RoomFloorLinkDirection::Above,
+                    });
+                }
+                if let Some(link) = sector.floor_below {
+                    rows.push(RoomFloorLinkRow {
+                        source_room: node.id,
+                        target_room: link.target_room,
+                        target_floor: link.target_floor,
+                        x,
+                        z,
+                        direction: RoomFloorLinkDirection::Below,
+                    });
+                }
+            }
+        }
+    }
+    rows.sort_by_key(|row| {
+        (
+            row.source_room.raw(),
+            row.target_room.map(NodeId::raw).unwrap_or(u64::MAX),
+            row.x,
+            row.z,
+            match row.direction {
+                RoomFloorLinkDirection::Above => 0u8,
+                RoomFloorLinkDirection::Below => 1u8,
+            },
+        )
+    });
+    rows
+}
+
+fn draw_room_floor_link_row(
+    ui: &mut egui::Ui,
+    scene: &psxed_project::Scene,
+    row: RoomFloorLinkRow,
+) {
+    let source = scene_node_label(scene, row.source_room);
+    let target = row
+        .target_room
+        .map(|room| scene_node_label(scene, room))
+        .unwrap_or_else(|| "missing room".to_string());
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        ui.label(icons::text(icons::LAYERS, 11.0).color(STUDIO_TEXT_WEAK));
+        ui.label(format!(
+            "{} ({},{}) {} -> {} floor {}",
+            compact_middle(&source, 24),
+            row.x,
+            row.z,
+            row.direction.label(),
+            compact_middle(&target, 24),
+            row.target_floor
+        ));
+    });
+}
+
+fn room_floor_link_matches_filter(
+    scene: &psxed_project::Scene,
+    row: RoomFloorLinkRow,
+    filter: &str,
+) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let source = scene_node_label(scene, row.source_room).to_ascii_lowercase();
+    let target = row
+        .target_room
+        .map(|room| scene_node_label(scene, room).to_ascii_lowercase())
+        .unwrap_or_else(|| "missing room".to_string());
+    source.contains(filter) || target.contains(filter) || row.direction.label().contains(filter)
+}
+
+fn draw_room_connection_row(
+    ui: &mut egui::Ui,
+    scene: &psxed_project::Scene,
+    connection: &RoomConnection,
+    selected_node: NodeId,
+    selected_nodes: &HashSet<NodeId>,
+    selected: &mut Option<NodeId>,
+    repair: &mut Option<NodeId>,
+) {
+    let row_height = 24.0;
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height), Sense::click());
+    let painter = ui.painter_at(rect);
+    let connection_selected = connection.contains_portal(selected_node)
+        || selected_nodes
+            .iter()
+            .copied()
+            .any(|node| connection.contains_portal(node));
+    if connection_selected {
+        painter.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 3.0, STUDIO_ACCENT_DIM);
+    } else if response.hovered() {
+        painter.rect_filled(
+            rect.shrink2(Vec2::new(0.0, 1.0)),
+            3.0,
+            Color32::from_rgba_unmultiplied(42, 58, 70, 120),
+        );
+    }
+
+    let status_color = room_connection_status_color(connection.status);
+    let icon_pos = Pos2::new(rect.left() + 13.0, rect.center().y);
+    painter.text(
+        icon_pos,
+        Align2::CENTER_CENTER,
+        icons::WAYPOINT.to_string(),
+        icons::font(14.0),
+        status_color,
+    );
+
+    let label = room_connection_label(scene, connection);
+    let status = connection.status.label();
+    let label_left = rect.left() + 28.0;
+    let label_right = (rect.right() - 118.0).max(label_left + 48.0);
+    painter
+        .with_clip_rect(Rect::from_min_max(
+            Pos2::new(label_left, rect.top()),
+            Pos2::new(label_right, rect.bottom()),
+        ))
+        .text(
+            Pos2::new(label_left, rect.center().y),
+            Align2::LEFT_CENTER,
+            compact_middle(&label, 32),
+            FontId::proportional(12.5),
+            if connection_selected {
+                Color32::WHITE
+            } else {
+                STUDIO_TEXT
+            },
+        );
+    painter.text(
+        Pos2::new(rect.right() - 112.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        connection.kind.label(),
+        FontId::proportional(10.5),
+        STUDIO_TEXT_WEAK,
+    );
+    painter.text(
+        Pos2::new(rect.right() - 40.0, rect.center().y),
+        Align2::RIGHT_CENTER,
+        status,
+        FontId::proportional(10.5),
+        status_color,
+    );
+
+    let response = response.on_hover_text(room_connection_tooltip(scene, connection));
+    if response.clicked() {
+        *selected = Some(connection.primary_portal());
+    }
+    response.context_menu(|ui| {
+        if ui
+            .button(icons::label(icons::FOCUS, "Select source"))
+            .clicked()
+        {
+            *selected = Some(connection.a.portal);
+            ui.close_menu();
+        }
+        if let Some(pair) = &connection.b {
+            if ui
+                .button(icons::label(icons::FOCUS, "Select reciprocal"))
+                .clicked()
+            {
+                *selected = Some(pair.portal);
+                ui.close_menu();
+            }
+        }
+        if connection.status == RoomConnectionStatus::Unpaired
+            && ui
+                .button(icons::label(icons::PLUS, "Create reciprocal"))
+                .clicked()
+        {
+            *repair = Some(connection.a.portal);
+            ui.close_menu();
+        }
+    });
+}
+
+fn room_connection_matches_filter(
+    scene: &psxed_project::Scene,
+    connection: &RoomConnection,
+    filter: &str,
+) -> bool {
+    filter.is_empty()
+        || room_connection_label(scene, connection)
+            .to_ascii_lowercase()
+            .contains(filter)
+        || connection
+            .status
+            .label()
+            .to_ascii_lowercase()
+            .contains(filter)
+        || connection
+            .kind
+            .label()
+            .to_ascii_lowercase()
+            .contains(filter)
+}
+
+fn room_connection_label(scene: &psxed_project::Scene, connection: &RoomConnection) -> String {
+    let source = room_display_name(scene, connection.a.room);
+    let target = connection
+        .a
+        .target_room
+        .map(|room| room_display_name(scene, room))
+        .unwrap_or_else(|| "(none)".to_string());
+    let arrow = if connection.b.is_some() { "<->" } else { "->" };
+    format!("{source} {arrow} {target}")
+}
+
+fn room_connection_tooltip(scene: &psxed_project::Scene, connection: &RoomConnection) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        &mut out,
+        "{}\n{}",
+        room_connection_label(scene, connection),
+        connection.status.label()
+    );
+    let _ = writeln!(
+        &mut out,
+        "Source: {}",
+        portal_display_name(scene, connection.a.portal)
+    );
+    if let Some(pair) = &connection.b {
+        let _ = writeln!(
+            &mut out,
+            "Reciprocal: {}",
+            portal_display_name(scene, pair.portal)
+        );
+    }
+    if !connection.alternatives.is_empty() {
+        let _ = writeln!(
+            &mut out,
+            "Extra candidates: {}",
+            connection.alternatives.len()
+        );
+    }
+    out
+}
+
+fn room_connection_status_color(status: RoomConnectionStatus) -> Color32 {
+    match status {
+        RoomConnectionStatus::Paired => Color32::from_rgb(110, 218, 148),
+        RoomConnectionStatus::Unassigned => STUDIO_TEXT_WEAK,
+        RoomConnectionStatus::Unpaired => Color32::from_rgb(238, 176, 78),
+        RoomConnectionStatus::MissingTarget | RoomConnectionStatus::Ambiguous => {
+            Color32::from_rgb(238, 96, 112)
+        }
+    }
+}
+
+fn draw_portal_connection_inspector(
+    ui: &mut egui::Ui,
+    scene: &psxed_project::Scene,
+    connection: &RoomConnection,
+) -> Option<NodeId> {
+    let mut nav = None;
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Connection"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Route");
+                ui.label(room_connection_label(scene, connection));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Status");
+                ui.colored_label(
+                    room_connection_status_color(connection.status),
+                    connection.status.label(),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Kind");
+                ui.label(connection.kind.label());
+            });
+            ui.horizontal(|ui| {
+                if ui.button(icons::label(icons::FOCUS, "Source")).clicked() {
+                    nav = Some(connection.a.portal);
+                }
+                if let Some(pair) = &connection.b {
+                    if ui
+                        .button(icons::label(icons::FOCUS, "Reciprocal"))
+                        .clicked()
+                    {
+                        nav = Some(pair.portal);
+                    }
+                }
+            });
+            if connection.status == RoomConnectionStatus::Unpaired {
+                ui.weak("This portal has no reciprocal endpoint in the target room.");
+            } else if connection.status == RoomConnectionStatus::Ambiguous {
+                ui.weak(format!(
+                    "{} extra reciprocal candidate(s) found.",
+                    connection.alternatives.len()
+                ));
+            }
+        });
+    nav
+}
+
+fn room_display_name(scene: &psxed_project::Scene, room: NodeId) -> String {
+    scene
+        .node(room)
+        .map(|node| node.name.clone())
+        .unwrap_or_else(|| format!("Room #{}", room.raw()))
+}
+
+fn portal_display_name(scene: &psxed_project::Scene, portal: NodeId) -> String {
+    scene
+        .node(portal)
+        .map(|node| format!("{} #{}", node.name, node.id.raw()))
+        .unwrap_or_else(|| format!("Portal #{}", portal.raw()))
+}
+
+fn inverted_portal_geometry(
+    geometry: &psxed_project::PortalGeometry,
+) -> psxed_project::PortalGeometry {
+    let mut out = geometry.clone();
+    out.normal = [
+        out.normal[0].saturating_neg(),
+        out.normal[1].saturating_neg(),
+        out.normal[2].saturating_neg(),
+    ];
     out
 }
 
@@ -21323,6 +25262,7 @@ fn draw_scene_node_row(
     );
     let painter = ui.painter_at(rect);
     let hovered = response.hovered();
+    let display_kind = scene_tree_kind_label(row.kind);
 
     if selected {
         painter.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 3.0, STUDIO_ACCENT_DIM);
@@ -21387,9 +25327,9 @@ fn draw_scene_node_row(
     painter.text(
         icon_rect.center(),
         Align2::CENTER_CENTER,
-        node_lucide_icon(row.kind, row.id == NodeId::ROOT).to_string(),
+        node_lucide_icon(display_kind, row.id == NodeId::ROOT).to_string(),
         icons::font(15.0),
-        node_lucide_color(row.kind, row.id == NodeId::ROOT, selected),
+        node_lucide_color(display_kind, row.id == NodeId::ROOT, selected),
     );
 
     let text_color = if effectively_hidden {
@@ -21400,11 +25340,7 @@ fn draw_scene_node_row(
         STUDIO_TEXT
     };
     let in_rename = matches!(renaming, Some((id, _)) if *id == row.id);
-    let label = if row.id == NodeId::ROOT {
-        format!("Root: {}", row.kind)
-    } else {
-        row.name.clone()
-    };
+    let label = row.name.clone();
     let display_label = compact_middle(&label, dock_label_limit(row.depth));
     let response = if !in_rename && display_label != label {
         response.on_hover_text(label.clone())
@@ -21466,7 +25402,7 @@ fn draw_scene_node_row(
                 rect.center().y,
             ),
             Align2::LEFT_CENTER,
-            row.kind,
+            display_kind,
             FontId::proportional(11.0),
             if effectively_hidden {
                 Color32::from_rgb(84, 96, 108)
@@ -21542,7 +25478,7 @@ fn draw_scene_node_row(
     let icon_clicked =
         (row.child_count > 0 && chevron_response.clicked()) || eye_response.clicked();
 
-    // Drag source: only descendants of root can be dragged.
+    // Drag source: only descendants of the World root can be dragged.
     if row.id != NodeId::ROOT && response.dragged() {
         response.dnd_set_drag_payload::<NodeId>(row.id);
         let label_text = label_for_drag(row);
@@ -21619,7 +25555,7 @@ fn draw_scene_node_row(
             }
         });
     } else {
-        // Even root accepts "Add Child" for top-level Worlds.
+        // The root is the World; children are rooms, entities, and components.
         response.context_menu(|ui| {
             ui.menu_button(icons::label(icons::PLUS, "Add Child"), |ui| {
                 for (label, kind) in default_addable_kinds() {
@@ -21685,9 +25621,11 @@ fn scene_node_hidden(
 }
 
 fn scene_tree_row_matches_filter(row: &NodeRow, filter: &str) -> bool {
+    let display_kind = scene_tree_kind_label(row.kind);
     filter.is_empty()
         || row.name.to_ascii_lowercase().contains(filter)
         || row.kind.to_ascii_lowercase().contains(filter)
+        || display_kind.to_ascii_lowercase().contains(filter)
 }
 
 fn scene_tree_display_rows<'a>(
@@ -21748,27 +25686,22 @@ fn max_resizable_bottom_dock_height(ctx: &egui::Context) -> f32 {
 /// Friendly label for the drag-tooltip preview.
 fn label_for_drag(row: &NodeRow) -> String {
     if row.name.is_empty() {
-        row.kind.to_string()
+        scene_tree_kind_label(row.kind).to_string()
     } else {
         row.name.clone()
     }
 }
 
+fn scene_tree_kind_label(kind: &'static str) -> &'static str {
+    match kind {
+        other => other,
+    }
+}
+
 /// Default `(menu label, kind template)` pairs for "Add Child" menus.
 /// Each menu entry uses the label as the new node's display name.
-fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
+fn default_addable_kinds() -> [(&'static str, NodeKind); 16] {
     [
-        (
-            "World",
-            NodeKind::World {
-                sector_size: DEFAULT_WORLD_SECTOR_SIZE,
-                sky: SkySettings::default(),
-                far_vista: FarVistaSettings::default(),
-                camera: WorldCameraSettings::default(),
-                culling: WorldCullingSettings::default(),
-                streaming: WorldStreamingSettings::default(),
-            },
-        ),
         (
             "Room",
             NodeKind::Room {
@@ -21861,17 +25794,20 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
             },
         ),
         (
-            "Trigger",
-            NodeKind::Trigger {
-                trigger_id: String::new(),
+            "Box Prop",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(
+                    psxed_project::DEFAULT_BOX_PROP_SIZE,
+                ),
+                collision_enabled: true,
+                break_flags: 0,
             },
         ),
         (
-            "Portal",
-            NodeKind::Portal {
-                target_room: None,
-                target_entry: String::new(),
-                entry_name: String::new(),
+            "Trigger",
+            NodeKind::Trigger {
+                trigger_id: String::new(),
             },
         ),
     ]
@@ -22030,6 +25966,7 @@ fn node_draw_mode(kind: &NodeKind) -> &'static str {
     match kind {
         NodeKind::MeshInstance { .. } => "Textured Triangles",
         NodeKind::ImageProp { .. } => "Flat Image",
+        NodeKind::BoxProp { .. } => "Box Prop",
         NodeKind::ModelRenderer { .. } => "Render Component",
         NodeKind::Animator { .. } => "Animation Component",
         NodeKind::Collider { .. } => "Collision Component",
@@ -22038,33 +25975,16 @@ fn node_draw_mode(kind: &NodeKind) -> &'static str {
         NodeKind::AiController { .. } => "AI Component",
         NodeKind::Combat { .. } => "Combat Component",
         NodeKind::Equipment { .. } => "Equipment Component",
-        NodeKind::World { .. } => "Streaming Region",
+        NodeKind::World { .. } => "Portal Region",
         NodeKind::Entity => "Entity Host",
-        NodeKind::Room { .. } => "Sector Grid",
+        NodeKind::Room { .. } => "Editable Room Sector Grid",
         NodeKind::PointLight { .. } => "Static Light",
         NodeKind::SpawnPoint { .. } => "Spawn Marker",
         NodeKind::Trigger { .. } => "Trigger Volume",
         NodeKind::AudioSource { .. } => "Audio Marker",
-        NodeKind::Portal { .. } => "Portal Volume",
+        NodeKind::Portal { .. } => "Portal Seam",
         NodeKind::Node | NodeKind::Node3D => "None",
     }
-}
-
-fn count_nodes(project: &ProjectDocument, predicate: impl Fn(&NodeKind) -> bool) -> usize {
-    project
-        .active_scene()
-        .nodes()
-        .iter()
-        .filter(|node| predicate(&node.kind))
-        .count()
-}
-
-fn draw_scene_group(ui: &mut egui::Ui, icon: char, label: &str, count: usize) {
-    egui::CollapsingHeader::new(format!("{} ({count})", icons::label(icon, label)))
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.weak("Filtered collection");
-        });
 }
 
 #[derive(Debug, Clone)]
@@ -22072,6 +25992,8 @@ struct ProjectFileRow {
     depth: usize,
     name: String,
     folder: bool,
+    key: String,
+    ancestors: Vec<String>,
     icon: char,
     resource: Option<ResourceId>,
 }
@@ -22082,20 +26004,26 @@ fn project_filesystem_rows(project: &ProjectDocument) -> Vec<ProjectFileRow> {
         depth: 0,
         name: "res://".to_string(),
         folder: true,
+        key: "res://".to_string(),
+        ancestors: Vec::new(),
         icon: icons::FOLDER,
         resource: None,
     });
     rows.push(ProjectFileRow {
         depth: 1,
-        name: "rooms".to_string(),
+        name: "maps".to_string(),
         folder: true,
+        key: "res://maps".to_string(),
+        ancestors: vec!["res://".to_string()],
         icon: icons::FOLDER,
         resource: None,
     });
     rows.push(ProjectFileRow {
         depth: 2,
-        name: format!("{}.room", snake_name(&project.active_scene().name)),
+        name: format!("{}.map", snake_name(&project.active_scene().name)),
         folder: false,
+        key: "res://maps/main.map".to_string(),
+        ancestors: vec!["res://".to_string(), "res://maps".to_string()],
         icon: icons::GRID,
         resource: None,
     });
@@ -22117,10 +26045,13 @@ fn push_resource_folder(
     folder: &str,
     filter: ResourceFilter,
 ) {
+    let key = format!("res://{folder}");
     rows.push(ProjectFileRow {
         depth: 1,
         name: folder.to_string(),
         folder: true,
+        key: key.clone(),
+        ancestors: vec!["res://".to_string()],
         icon: icons::FOLDER,
         resource: None,
     });
@@ -22133,10 +26064,31 @@ fn push_resource_folder(
             depth: 2,
             name: resource_file_name(resource),
             folder: false,
+            key: format!("{key}/{}", resource.id.raw()),
+            ancestors: vec!["res://".to_string(), key.clone()],
             icon: resource_lucide_icon(&resource.data),
             resource: Some(resource.id),
         });
     }
+}
+
+fn project_filesystem_display_rows<'a>(
+    rows: &'a [ProjectFileRow],
+    filter: &str,
+    collapsed_folders: &HashSet<String>,
+) -> Vec<&'a ProjectFileRow> {
+    rows.iter()
+        .filter(|row| {
+            if row
+                .ancestors
+                .iter()
+                .any(|ancestor| collapsed_folders.contains(ancestor))
+            {
+                return false;
+            }
+            row.folder || filter.is_empty() || row.name.to_ascii_lowercase().contains(filter)
+        })
+        .collect()
 }
 
 fn draw_project_file_row(
@@ -22145,23 +26097,37 @@ fn draw_project_file_row(
     selected_resource: Option<ResourceId>,
     selected_resources: &HashSet<ResourceId>,
     filter: &str,
-) -> Option<ResourceClick> {
+    collapsed_folders: &HashSet<String>,
+) -> Option<ProjectFileRowAction> {
     if !row.folder && !filter.is_empty() && !row.name.to_ascii_lowercase().contains(filter) {
         return None;
     }
 
-    let mut clicked = None;
+    let mut action = None;
     ui.horizontal(|ui| {
         ui.add_space(row.depth as f32 * 14.0);
         let display_name = compact_middle(&row.name, dock_label_limit(row.depth));
-        let label = icons::label(row.icon, &display_name);
         let label_was_compacted = display_name != row.name;
         if row.folder {
-            let response = ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK));
+            let chevron = if collapsed_folders.contains(&row.key) {
+                icons::CHEVRON_RIGHT
+            } else {
+                icons::CHEVRON_DOWN
+            };
+            let label = format!("{chevron}  {}", icons::label(row.icon, &display_name));
+            let response = ui.add(egui::SelectableLabel::new(
+                false,
+                RichText::new(label).color(STUDIO_TEXT_WEAK),
+            ));
+            if response.clicked() {
+                action = Some(ProjectFileRowAction::ToggleFolder(row.key.clone()));
+            }
             if label_was_compacted {
                 response.on_hover_text(row.name.clone());
             }
         } else {
+            ui.add_space(18.0);
+            let label = icons::label(row.icon, &display_name);
             let selected = row
                 .resource
                 .is_some_and(|id| selected_resources.contains(&id))
@@ -22169,10 +26135,10 @@ fn draw_project_file_row(
             let response = ui.selectable_label(selected, label);
             if response.clicked() {
                 if let Some(id) = row.resource {
-                    clicked = Some(ResourceClick {
+                    action = Some(ProjectFileRowAction::Select(ResourceClick {
                         id,
                         modifiers: ui.input(|input| input.modifiers),
-                    });
+                    }));
                 }
             }
             if label_was_compacted {
@@ -22180,7 +26146,7 @@ fn draw_project_file_row(
             }
         }
     });
-    clicked
+    action
 }
 
 fn resource_file_name(resource: &Resource) -> String {
@@ -22608,13 +26574,18 @@ fn decode_psxt_thumbnail(bytes: &[u8]) -> Option<(ColorImage, PsxtStats)> {
         height: texture.height(),
         depth_bits,
         clut_entries: clut_entries as u16,
+        index_zero_transparent: texture.index_zero_transparent(),
         pixel_bytes: texture.pixel_bytes().len() as u32,
         clut_bytes: clut_bytes.len() as u32,
         file_bytes: bytes.len() as u32,
     };
     let palette: Vec<Color32> = (0..clut_entries)
         .map(|i| {
-            let raw = u16::from_le_bytes([clut_bytes[i * 2], clut_bytes[i * 2 + 1]]) & 0x7FFF;
+            let raw_full = u16::from_le_bytes([clut_bytes[i * 2], clut_bytes[i * 2 + 1]]);
+            if i == 0 && texture.index_zero_transparent() && raw_full == 0 {
+                return Color32::TRANSPARENT;
+            }
+            let raw = raw_full & 0x7FFF;
             let r5 = (raw & 0x1F) as u8;
             let g5 = ((raw >> 5) & 0x1F) as u8;
             let b5 = ((raw >> 10) & 0x1F) as u8;
@@ -22920,6 +26891,19 @@ impl ViewportHit {
         }
     }
 
+    fn segment(
+        id: NodeId,
+        _name: impl Into<String>,
+        a: [f32; 2],
+        b: [f32; 2],
+        radius: f32,
+    ) -> Self {
+        Self {
+            id,
+            shape: HitShape::Segment { a, b, radius },
+        }
+    }
+
     fn contains(&self, world: [f32; 2]) -> bool {
         match self.shape {
             HitShape::Rect { center, half } => {
@@ -22933,14 +26917,28 @@ impl ViewportHit {
                 let dz = world[1] - center[1];
                 dx * dx + dz * dz <= radius * radius
             }
+            HitShape::Segment { a, b, radius } => {
+                point_segment_dist2_2d(world, a, b) <= radius * radius
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum HitShape {
-    Rect { center: [f32; 2], half: [f32; 2] },
-    Circle { center: [f32; 2], radius: f32 },
+    Rect {
+        center: [f32; 2],
+        half: [f32; 2],
+    },
+    Circle {
+        center: [f32; 2],
+        radius: f32,
+    },
+    Segment {
+        a: [f32; 2],
+        b: [f32; 2],
+        radius: f32,
+    },
 }
 
 fn draw_world_grid(painter: &egui::Painter, transform: ViewportTransform) {
@@ -22993,6 +26991,8 @@ fn draw_scene_viewport(
     selected_sectors: &HashSet<SectorSelection>,
     validation_issue_primitives: &[Selection],
     validation_issue_rooms: &HashSet<NodeId>,
+    show_portals: bool,
+    show_lights: bool,
 ) -> Vec<ViewportHit> {
     let scene = project.active_scene();
     let mut hits = Vec::new();
@@ -23012,6 +27012,7 @@ fn draw_scene_viewport(
                 selected_sectors,
                 validation_issue_primitives,
                 validation_issue_rooms,
+                show_portals,
                 &mut hits,
             );
         }
@@ -23045,6 +27046,18 @@ fn draw_scene_viewport(
                     &mut hits,
                 );
             }
+            NodeKind::BoxProp { .. } => {
+                draw_simple_marker(
+                    painter,
+                    transform,
+                    node,
+                    selected_nodes.contains(&node.id)
+                        || (selected_nodes.is_empty() && selected == node.id),
+                    "B",
+                    Color32::from_rgb(135, 180, 220),
+                    &mut hits,
+                );
+            }
             NodeKind::SpawnPoint { .. } => {
                 draw_spawn_marker(
                     painter,
@@ -23059,7 +27072,7 @@ fn draw_scene_viewport(
                 color,
                 intensity,
                 radius,
-            } => {
+            } if show_lights => {
                 draw_light_marker(
                     painter,
                     transform,
@@ -23096,15 +27109,23 @@ fn draw_scene_viewport(
                     &mut hits,
                 );
             }
-            NodeKind::Portal { .. } => {
-                draw_simple_marker(
+            NodeKind::Portal { .. } if show_portals => {
+                draw_portal_seam_2d(
                     painter,
                     transform,
+                    scene,
                     node,
                     selected_nodes.contains(&node.id)
                         || (selected_nodes.is_empty() && selected == node.id),
-                    "P",
-                    Color32::from_rgb(255, 188, 100),
+                    &mut hits,
+                );
+                draw_portal_marker(
+                    painter,
+                    transform,
+                    scene,
+                    node,
+                    selected_nodes.contains(&node.id)
+                        || (selected_nodes.is_empty() && selected == node.id),
                     &mut hits,
                 );
             }
@@ -23136,6 +27157,7 @@ fn draw_room(
     selected_sectors: &HashSet<SectorSelection>,
     validation_issue_primitives: &[Selection],
     validation_issue_rooms: &HashSet<NodeId>,
+    show_portals: bool,
     hits: &mut Vec<ViewportHit>,
 ) {
     let NodeKind::Room { grid } = &node.kind else {
@@ -23206,7 +27228,9 @@ fn draw_room(
         }
     }
 
-    draw_streaming_chunk_boundaries_2d(painter, transform, project, node.id, grid, node_center);
+    if show_portals {
+        draw_portal_room_boundaries_2d(painter, transform, project, node.id, grid, node_center);
+    }
     draw_validation_issue_primitives_2d(
         painter,
         transform,
@@ -23234,7 +27258,7 @@ fn draw_room(
     );
 }
 
-fn draw_streaming_chunk_boundaries_2d(
+fn draw_portal_room_boundaries_2d(
     painter: &egui::Painter,
     transform: ViewportTransform,
     project: &ProjectDocument,
@@ -23242,15 +27266,19 @@ fn draw_streaming_chunk_boundaries_2d(
     grid: &WorldGrid,
     node_center: [f32; 2],
 ) {
-    let config = playtest_streaming_chunk_config_for_room(project, room_id);
-    let plan = plan_generated_chunks(grid, config);
-    if plan.chunk_count() <= 1 {
+    let plan = plan_portal_rooms(
+        project.active_scene(),
+        room_id,
+        grid,
+        PortalRoomConfig::default(),
+    );
+    if plan.room_count() <= 1 {
         return;
     }
     let stroke = Stroke::new(2.0, Color32::from_rgb(96, 255, 196));
-    for chunk in plan.chunks {
+    for portal_room in plan.rooms {
         let (local_center, chunk_half) =
-            grid_rect_editor_center_half(grid, chunk.array_origin, chunk.size);
+            grid_rect_editor_center_half(grid, portal_room.array_origin, portal_room.size);
         let chunk_center = [
             node_center[0] + local_center[0],
             node_center[1] + local_center[1],
@@ -23691,6 +27719,186 @@ fn draw_light_bulb_marker(
     );
 }
 
+fn draw_portal_seam_2d(
+    painter: &egui::Painter,
+    transform: ViewportTransform,
+    scene: &psxed_project::Scene,
+    node: &psxed_project::SceneNode,
+    selected: bool,
+    hits: &mut Vec<ViewportHit>,
+) {
+    let Some(room_id) = enclosing_room_id(scene, node.id) else {
+        return;
+    };
+    let Some(room) = scene.node(room_id) else {
+        return;
+    };
+    let NodeKind::Room { grid } = &room.kind else {
+        return;
+    };
+    let seam = portal_seam_edges_for_node(grid, node);
+    if seam.is_empty() {
+        return;
+    }
+    let room_center = node_world(room);
+    let halo = Stroke::new(
+        if selected { 9.0 } else { 7.0 },
+        Color32::from_rgba_unmultiplied(PORTAL_PINK.r(), PORTAL_PINK.g(), PORTAL_PINK.b(), 54),
+    );
+    let stroke = Stroke::new(if selected { 4.0 } else { 3.0 }, PORTAL_PINK);
+    for edge in seam {
+        if let Some((local_a, local_b)) = portal_edge_editor_segment(grid, edge) {
+            let a = [room_center[0] + local_a[0], room_center[1] + local_a[1]];
+            let b = [room_center[0] + local_b[0], room_center[1] + local_b[1]];
+            hits.push(ViewportHit::segment(
+                node.id,
+                node.name.clone(),
+                a,
+                b,
+                0.12_f32.max(7.0 / transform.zoom),
+            ));
+        }
+        draw_portal_edge_segment_2d(painter, transform, grid, room_center, edge, halo, stroke);
+    }
+    if let Some(edge) = portal_edge_for_node(grid, node) {
+        if let Some((a, b)) = portal_edge_screen_segment(transform, grid, room_center, edge) {
+            let mid = Pos2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            painter.circle_filled(mid, 4.5, PORTAL_PINK);
+            painter.circle_stroke(mid, 5.5, Stroke::new(1.0, Color32::from_rgb(28, 8, 24)));
+        }
+    }
+}
+
+fn portal_edge_editor_segment(grid: &WorldGrid, edge: PortalEdge) -> Option<([f32; 2], [f32; 2])> {
+    portal_edge_editor_segment_for_array(grid, edge.x, edge.z, edge.direction)
+}
+
+fn draw_portal_edge_segment_2d(
+    painter: &egui::Painter,
+    transform: ViewportTransform,
+    grid: &WorldGrid,
+    room_center: [f32; 2],
+    edge: PortalEdge,
+    halo: Stroke,
+    stroke: Stroke,
+) {
+    let Some((a, b)) = portal_edge_screen_segment(transform, grid, room_center, edge) else {
+        return;
+    };
+    painter.line_segment([a, b], halo);
+    painter.line_segment([a, b], stroke);
+}
+
+fn portal_edge_screen_segment(
+    transform: ViewportTransform,
+    grid: &WorldGrid,
+    room_center: [f32; 2],
+    edge: PortalEdge,
+) -> Option<(Pos2, Pos2)> {
+    let (local_a, local_b) = portal_edge_editor_segment(grid, edge)?;
+    Some((
+        transform.world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]),
+        transform.world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]),
+    ))
+}
+
+fn portal_edge_editor_segment_for_array(
+    grid: &WorldGrid,
+    sx: u16,
+    sz: u16,
+    dir: GridDirection,
+) -> Option<([f32; 2], [f32; 2])> {
+    let wcx = grid.origin[0] + sx as i32;
+    let wcz = grid.origin[1] + sz as i32;
+    portal_edge_editor_segment_for_world_cell(grid, wcx, wcz, dir)
+}
+
+fn portal_edge_editor_segment_for_world_cell(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+) -> Option<([f32; 2], [f32; 2])> {
+    let world = match dir {
+        GridDirection::North => (
+            [wcx as f32, wcz as f32 + 1.0],
+            [wcx as f32 + 1.0, wcz as f32 + 1.0],
+        ),
+        GridDirection::East => (
+            [wcx as f32 + 1.0, wcz as f32],
+            [wcx as f32 + 1.0, wcz as f32 + 1.0],
+        ),
+        GridDirection::South => ([wcx as f32, wcz as f32], [wcx as f32 + 1.0, wcz as f32]),
+        GridDirection::West => ([wcx as f32, wcz as f32], [wcx as f32, wcz as f32 + 1.0]),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => return None,
+    };
+    Some((
+        grid.world_cells_to_editor(world.0),
+        grid.world_cells_to_editor(world.1),
+    ))
+}
+
+fn draw_portal_marker(
+    painter: &egui::Painter,
+    transform: ViewportTransform,
+    scene: &psxed_project::Scene,
+    node: &psxed_project::SceneNode,
+    selected: bool,
+    hits: &mut Vec<ViewportHit>,
+) {
+    let center = portal_marker_world_2d(scene, node);
+    let screen = transform.world_to_screen(center);
+    let radius = transform.screen_radius(0.2).max(9.0);
+    let points = vec![
+        screen + Vec2::new(0.0, -radius),
+        screen + Vec2::new(radius, 0.0),
+        screen + Vec2::new(0.0, radius),
+        screen + Vec2::new(-radius, 0.0),
+    ];
+    let fill =
+        Color32::from_rgba_unmultiplied(PORTAL_PINK.r(), PORTAL_PINK.g(), PORTAL_PINK.b(), 64);
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        fill,
+        Stroke::new(if selected { 3.0 } else { 1.5 }, PORTAL_PINK),
+    ));
+    painter.text(
+        screen,
+        Align2::CENTER_CENTER,
+        "P",
+        FontId::monospace(12.0),
+        Color32::WHITE,
+    );
+    painter.text(
+        screen + Vec2::new(0.0, radius + 5.0),
+        Align2::CENTER_TOP,
+        &node.name,
+        FontId::monospace(10.0),
+        PORTAL_PINK,
+    );
+    hits.push(ViewportHit::circle(
+        node.id,
+        node.name.clone(),
+        center,
+        0.2_f32.max(radius / transform.zoom),
+    ));
+}
+
+fn portal_marker_world_2d(
+    scene: &psxed_project::Scene,
+    node: &psxed_project::SceneNode,
+) -> [f32; 2] {
+    let local = node_world(node);
+    let Some(room_id) = enclosing_room_id(scene, node.id) else {
+        return local;
+    };
+    let Some(room) = scene.node(room_id) else {
+        return local;
+    };
+    let room_center = node_world(room);
+    [room_center[0] + local[0], room_center[1] + local[1]]
+}
+
 fn draw_simple_marker(
     painter: &egui::Painter,
     transform: ViewportTransform,
@@ -23813,6 +28021,7 @@ fn node_kind_uses_room_editor_position(kind: &NodeKind) -> bool {
         NodeKind::Entity
             | NodeKind::MeshInstance { .. }
             | NodeKind::ImageProp { .. }
+            | NodeKind::BoxProp { .. }
             | NodeKind::SpawnPoint { .. }
             | NodeKind::PointLight { .. }
             | NodeKind::Trigger { .. }
@@ -24012,11 +28221,29 @@ fn consume_command_shift_shortcut(ctx: &egui::Context, key: egui::Key) -> bool {
     ctx.input_mut(|input| input.consume_shortcut(&shortcut))
 }
 
+fn consume_command_cycle_shortcut(ctx: &egui::Context, key: egui::Key) -> Option<bool> {
+    if consume_command_shift_shortcut(ctx, key) {
+        Some(true)
+    } else if consume_command_shortcut(ctx, key) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn command_shortcut_text(key: &str) -> String {
     if cfg!(target_os = "macos") {
         format!("Cmd+{key}")
     } else {
         format!("Ctrl+{key}")
+    }
+}
+
+fn command_shift_shortcut_text(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("Shift+Cmd+{key}")
+    } else {
+        format!("Shift+Ctrl+{key}")
     }
 }
 
@@ -24026,6 +28253,21 @@ fn menu_label(label: &str, shortcut: &str) -> String {
 
 fn bare_shortcuts_available(focus_taken: bool, modifiers: egui::Modifiers) -> bool {
     !focus_taken && !modifiers.command && !modifiers.ctrl
+}
+
+fn cycle_value<T: Copy + PartialEq>(values: &[T], current: T, reverse: bool) -> T {
+    let Some(index) = values.iter().position(|value| *value == current) else {
+        return values.first().copied().unwrap_or(current);
+    };
+    if values.is_empty() {
+        return current;
+    }
+    let next = if reverse {
+        (index + values.len() - 1) % values.len()
+    } else {
+        (index + 1) % values.len()
+    };
+    values[next]
 }
 
 fn frame_radius_for_3d_bounds(half: [f32; 3]) -> i32 {
@@ -24162,6 +28404,21 @@ fn distance_to_segment_2d(point: Pos2, a: Pos2, b: Pos2) -> f32 {
     let t = ((point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
     let closest = a + ab * t;
     (point - closest).length()
+}
+
+fn point_segment_dist2_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let ap = [point[0] - a[0], point[1] - a[1]];
+    let len_sq = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if len_sq > f32::EPSILON {
+        ((ap[0] * ab[0] + ap[1] * ab[1]) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let closest = [a[0] + ab[0] * t, a[1] + ab[1] * t];
+    let dx = point[0] - closest[0];
+    let dz = point[1] - closest[1];
+    dx * dx + dz * dz
 }
 
 fn polygon_area_2d(points: &[Pos2]) -> f32 {
@@ -24856,6 +29113,99 @@ fn direction_label(dir: GridDirection) -> &'static str {
         GridDirection::West => "West",
         GridDirection::NorthWestSouthEast => "NW-SE",
         GridDirection::NorthEastSouthWest => "NE-SW",
+    }
+}
+
+const fn next_cardinal_direction(dir: GridDirection) -> GridDirection {
+    match dir {
+        GridDirection::North => GridDirection::East,
+        GridDirection::East => GridDirection::South,
+        GridDirection::South => GridDirection::West,
+        GridDirection::West
+        | GridDirection::NorthWestSouthEast
+        | GridDirection::NorthEastSouthWest => GridDirection::North,
+    }
+}
+
+fn portal_edge_midpoint_editor(grid: &WorldGrid, sx: u16, sz: u16, dir: GridDirection) -> [f32; 2] {
+    let wcx = grid.origin[0] + sx as i32;
+    let wcz = grid.origin[1] + sz as i32;
+    let world = match dir {
+        GridDirection::North => [wcx as f32 + 0.5, wcz as f32 + 1.0],
+        GridDirection::East => [wcx as f32 + 1.0, wcz as f32 + 0.5],
+        GridDirection::South => [wcx as f32 + 0.5, wcz as f32],
+        GridDirection::West => [wcx as f32, wcz as f32 + 0.5],
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => {
+            [wcx as f32 + 0.5, wcz as f32 + 0.5]
+        }
+    };
+    grid.world_cells_to_editor(world)
+}
+
+fn portal_edge_valid_for_world_cell(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+) -> bool {
+    let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+        return false;
+    };
+    portal_edge_valid_for_array_cell(grid, sx, sz, dir)
+}
+
+fn portal_edge_valid_for_array_cell(
+    grid: &WorldGrid,
+    sx: u16,
+    sz: u16,
+    dir: GridDirection,
+) -> bool {
+    let Some((nx, nz)) = portal_edge_neighbour(sx, sz, dir) else {
+        return false;
+    };
+    nx < grid.width
+        && nz < grid.depth
+        && grid.sector(sx, sz).is_some_and(GridSector::has_geometry)
+        && grid.sector(nx, nz).is_some_and(GridSector::has_geometry)
+}
+
+fn canonical_portal_edge_for_array_cell(
+    sx: u16,
+    sz: u16,
+    dir: GridDirection,
+) -> Option<PortalEdge> {
+    match dir {
+        GridDirection::North => Some(PortalEdge {
+            x: sx,
+            z: sz,
+            direction: GridDirection::North,
+        }),
+        GridDirection::East => Some(PortalEdge {
+            x: sx,
+            z: sz,
+            direction: GridDirection::East,
+        }),
+        GridDirection::South => Some(PortalEdge {
+            x: sx,
+            z: sz.checked_sub(1)?,
+            direction: GridDirection::North,
+        }),
+        GridDirection::West => Some(PortalEdge {
+            x: sx.checked_sub(1)?,
+            z: sz,
+            direction: GridDirection::East,
+        }),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+    }
+}
+
+fn portal_edge_neighbour(sx: u16, sz: u16, dir: GridDirection) -> Option<(u16, u16)> {
+    match dir {
+        GridDirection::North => Some((sx, sz.checked_add(1)?)),
+        GridDirection::East => Some((sx.checked_add(1)?, sz)),
+        GridDirection::South => Some((sx, sz.checked_sub(1)?)),
+        GridDirection::West => Some((sx.checked_sub(1)?, sz)),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
     }
 }
 
@@ -25649,6 +29999,8 @@ fn rotate_sector_cw(sector: &GridSector) -> GridSector {
     let mut rotated = GridSector::empty();
     rotated.floor = sector.floor.clone().map(rotate_horizontal_face_cw);
     rotated.ceiling = sector.ceiling.clone().map(rotate_horizontal_face_cw);
+    rotated.floor_above = sector.floor_above;
+    rotated.floor_below = sector.floor_below;
     for direction in GridDirection::ALL {
         let rotated_direction = rotate_direction_cw(direction);
         for wall in sector.walls.get(direction) {
@@ -25665,6 +30017,8 @@ fn flip_sector_x(sector: &GridSector) -> GridSector {
     let mut flipped = GridSector::empty();
     flipped.floor = sector.floor.clone().map(flip_horizontal_face_x);
     flipped.ceiling = sector.ceiling.clone().map(flip_horizontal_face_x);
+    flipped.floor_above = sector.floor_above;
+    flipped.floor_below = sector.floor_below;
     for direction in GridDirection::ALL {
         let flipped_direction = flip_direction_x(direction);
         for wall in sector.walls.get(direction) {
@@ -25681,6 +30035,8 @@ fn flip_sector_z(sector: &GridSector) -> GridSector {
     let mut flipped = GridSector::empty();
     flipped.floor = sector.floor.clone().map(flip_horizontal_face_z);
     flipped.ceiling = sector.ceiling.clone().map(flip_horizontal_face_z);
+    flipped.floor_above = sector.floor_above;
+    flipped.floor_below = sector.floor_below;
     for direction in GridDirection::ALL {
         let flipped_direction = flip_direction_z(direction);
         for wall in sector.walls.get(direction) {
@@ -25705,14 +30061,10 @@ fn rotate_horizontal_face_cw(mut face: GridHorizontalFace) -> GridHorizontalFace
     ];
     face.split = rotate_split_cw(old_split);
     face.dropped_corner = face.dropped_corner.map(rotate_corner_cw);
-    face.uv = rotate_uv_transform_cw(face.uv);
 
     for new_index in 0..2 {
         let old_index = rotated_horizontal_triangle_source_index(old_split, face.split, new_index);
         let mut triangle_override = *old_overrides.get(old_index);
-        if let Some(uv) = triangle_override.uv.as_mut() {
-            *uv = rotate_uv_transform_cw(*uv);
-        }
         if let Some(heights) = triangle_override.heights {
             triangle_override.heights = Some(rotate_triangle_heights_cw(
                 old_split, old_index, face.split, new_index, heights,
@@ -25870,7 +30222,6 @@ fn rotate_vertical_face_cw(
     wall.dropped_corner = wall
         .dropped_corner
         .map(|corner| rotate_wall_corner_cw(direction, corner));
-    wall.uv = rotate_uv_transform_cw(wall.uv);
     wall
 }
 
@@ -26037,11 +30388,6 @@ fn wall_corner_from_horizontal_endpoint(
     }
 }
 
-fn rotate_uv_transform_cw(mut uv: GridUvTransform) -> GridUvTransform {
-    uv.rotation = rotate_uv_rotation_cw(uv.rotation);
-    uv
-}
-
 fn flip_uv_transform_u(mut uv: GridUvTransform) -> GridUvTransform {
     uv.flip_u = !uv.flip_u;
     uv
@@ -26050,15 +30396,6 @@ fn flip_uv_transform_u(mut uv: GridUvTransform) -> GridUvTransform {
 fn flip_uv_transform_v(mut uv: GridUvTransform) -> GridUvTransform {
     uv.flip_v = !uv.flip_v;
     uv
-}
-
-const fn rotate_uv_rotation_cw(rotation: GridUvRotation) -> GridUvRotation {
-    match rotation {
-        GridUvRotation::Deg0 => GridUvRotation::Deg90,
-        GridUvRotation::Deg90 => GridUvRotation::Deg180,
-        GridUvRotation::Deg180 => GridUvRotation::Deg270,
-        GridUvRotation::Deg270 => GridUvRotation::Deg0,
-    }
 }
 
 fn horizontal_triangle_index_at_local(
@@ -26410,6 +30747,108 @@ fn node_enclosing_sector_size(scene: &psxed_project::Scene, node_id: NodeId) -> 
         .unwrap_or(DEFAULT_WORLD_SECTOR_SIZE)
 }
 
+fn portal_seam_bounds_3d(
+    grid: &WorldGrid,
+    node: &psxed_project::SceneNode,
+) -> Option<([f32; 3], [f32; 3])> {
+    if !matches!(node.kind, NodeKind::Portal { .. }) {
+        return None;
+    }
+
+    let mut bounds = None;
+    for edge in portal_seam_edges_for_node(grid, node) {
+        let Some((a, b)) = portal_edge_room_local_segment(grid, edge) else {
+            continue;
+        };
+        let (min_y, max_y) = portal_edge_pick_height_bounds(grid, edge);
+        for point in [
+            [a[0], min_y, a[2]],
+            [a[0], max_y, a[2]],
+            [b[0], min_y, b[2]],
+            [b[0], max_y, b[2]],
+        ] {
+            merge_bounds_3d(&mut bounds, point, [0.0, 0.0, 0.0]);
+        }
+    }
+
+    let (center, mut half) = bounds.map(bounds_3d_to_center_half)?;
+    let pick_pad = (grid.sector_size as f32 * 0.08).clamp(48.0, 128.0);
+    half[0] = half[0].max(pick_pad);
+    half[1] = half[1].max(pick_pad);
+    half[2] = half[2].max(pick_pad);
+    Some((center, half))
+}
+
+fn portal_edge_room_local_segment(
+    grid: &WorldGrid,
+    edge: PortalEdge,
+) -> Option<([f32; 3], [f32; 3])> {
+    let (a, b) = portal_edge_editor_segment(grid, edge)?;
+    Some((grid.editor_to_room_local(a), grid.editor_to_room_local(b)))
+}
+
+fn portal_edge_pick_height_bounds(grid: &WorldGrid, edge: PortalEdge) -> (f32, f32) {
+    let mut min_y: Option<i32> = None;
+    let mut max_y: Option<i32> = None;
+    include_portal_pick_sector_heights(grid.sector(edge.x, edge.z), &mut min_y, &mut max_y);
+    if let Some((nx, nz)) = portal_edge_neighbour(edge.x, edge.z, edge.direction)
+        .filter(|(nx, nz)| *nx < grid.width && *nz < grid.depth)
+    {
+        include_portal_pick_sector_heights(grid.sector(nx, nz), &mut min_y, &mut max_y);
+    }
+    if let Some(wall) = grid.floor_transition_wall_for_edge(edge.x, edge.z, edge.direction) {
+        for height in wall.heights {
+            include_min_i32(&mut min_y, height);
+            include_max_i32(&mut max_y, height);
+        }
+    }
+
+    let fallback_min = min_y.unwrap_or(0);
+    let mut fallback_max = max_y.unwrap_or(fallback_min + grid.sector_size.max(128));
+    if fallback_max <= fallback_min {
+        fallback_max = fallback_min + grid.sector_size.max(128);
+    }
+    (fallback_min as f32, fallback_max as f32)
+}
+
+fn include_portal_pick_sector_heights(
+    sector: Option<&GridSector>,
+    min_y: &mut Option<i32>,
+    max_y: &mut Option<i32>,
+) {
+    let Some(sector) = sector else {
+        return;
+    };
+    for heights in [
+        sector.floor.as_ref().map(|face| face.heights),
+        sector.ceiling.as_ref().map(|face| face.heights),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for height in heights {
+            include_min_i32(min_y, height);
+            include_max_i32(max_y, height);
+        }
+    }
+    for dir in GridDirection::CARDINAL {
+        for wall in sector.walls.get(dir) {
+            for height in wall.heights {
+                include_min_i32(min_y, height);
+                include_max_i32(max_y, height);
+            }
+        }
+    }
+}
+
+fn include_min_i32(target: &mut Option<i32>, value: i32) {
+    *target = Some(target.map_or(value, |current| current.min(value)));
+}
+
+fn include_max_i32(target: &mut Option<i32>, value: i32) {
+    *target = Some(target.map_or(value, |current| current.max(value)));
+}
+
 /// Per-kind half-extents in world units. Picked so:
 /// - bounds are big enough to click reliably at typical
 ///   editor zoom levels,
@@ -26471,6 +30910,25 @@ fn entity_bound_kind_and_size(
                 32.0,
             ],
         )),
+        NodeKind::BoxProp { vertices, .. } => {
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for vertex in vertices {
+                for axis in 0..3 {
+                    let value = vertex[axis] as f32;
+                    min[axis] = min[axis].min(value);
+                    max[axis] = max[axis].max(value);
+                }
+            }
+            Some((
+                EntityBoundKind::BoxProp,
+                [
+                    ((max[0] - min[0]).abs() * 0.5).max(32.0),
+                    ((max[1] - min[1]).abs() * 0.5).max(32.0),
+                    ((max[2] - min[2]).abs() * 0.5).max(32.0),
+                ],
+            ))
+        }
         NodeKind::SpawnPoint { .. } => Some((EntityBoundKind::SpawnPoint, [128.0, 256.0, 128.0])),
         NodeKind::PointLight { .. } => Some((EntityBoundKind::PointLight, [128.0, 128.0, 128.0])),
         NodeKind::Trigger { .. } => Some((EntityBoundKind::Trigger, [256.0, 256.0, 256.0])),
@@ -26482,7 +30940,10 @@ fn entity_bound_kind_and_size(
 fn node_is_floor_anchored(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::Entity | NodeKind::MeshInstance { .. } | NodeKind::SpawnPoint { .. }
+        NodeKind::Entity
+            | NodeKind::MeshInstance { .. }
+            | NodeKind::BoxProp { .. }
+            | NodeKind::SpawnPoint { .. }
     )
 }
 
@@ -27374,13 +31835,6 @@ fn collect_weapon_options(project: &ProjectDocument) -> Vec<(ResourceId, String)
         .collect()
 }
 
-fn playtest_streaming_chunk_config_for_room(
-    project: &ProjectDocument,
-    room_id: NodeId,
-) -> StreamingChunkConfig {
-    playtest_streaming_chunk_config(world_streaming_for_room(project, room_id))
-}
-
 fn world_streaming_for_room(project: &ProjectDocument, room_id: NodeId) -> WorldStreamingSettings {
     project
         .active_scene()
@@ -27388,7 +31842,7 @@ fn world_streaming_for_room(project: &ProjectDocument, room_id: NodeId) -> World
         .unwrap_or_default()
 }
 
-fn draw_streaming_budget(
+fn draw_portal_room_budget(
     ui: &mut egui::Ui,
     project: &ProjectDocument,
     project_root: &Path,
@@ -27396,91 +31850,96 @@ fn draw_streaming_budget(
     grid: &WorldGrid,
 ) {
     let streaming = world_streaming_for_room(project, room_id);
-    let config = playtest_streaming_chunk_config(streaming);
-    let plan = plan_generated_chunks(grid, config);
+    let plan = plan_portal_rooms(
+        project.active_scene(),
+        room_id,
+        grid,
+        PortalRoomConfig::default(),
+    );
     let resource_use = collect_scene_resource_use(project);
     let file_budget = resource_file_budget(project, project_root, &resource_use);
     let vram_budget = runtime_vram_budget(project, project_root, &resource_use);
     let model_budget = runtime_model_budget(project, project_root, &resource_use);
     let over = plan.over_budget_count() > 0;
     let header = if over {
-        icons::label(icons::TRASH, "Streaming Budget — over limit")
+        icons::label(icons::TRASH, "Manual Portal Rooms — over limit")
     } else {
-        icons::label(icons::SCAN, "Streaming Budget")
+        icons::label(icons::SCAN, "Manual Portal Rooms")
     };
 
     egui::CollapsingHeader::new(header)
         .default_open(true)
         .show(ui, |ui| {
+            draw_budget_row(ui, "Manual rooms", format!("{}", plan.room_count()), over);
             draw_budget_row(
                 ui,
-                "Generated chunks",
-                format!("{}", plan.chunk_count()),
-                over,
-            );
-            draw_budget_row(
-                ui,
-                "Target chunk",
-                format!("{}×{} sectors", config.target_width, config.target_depth),
+                "Hard cap",
+                format!(
+                    "{}×{} sectors",
+                    plan.config.max_width, plan.config.max_depth
+                ),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Resident budget",
-                format!("{} × 32 KiB", streaming.resident_chunk_limit),
+                "Resident rooms",
+                format!("{}", streaming.resident_chunk_limit),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Visible chunks",
+                "Visible rooms",
                 format!("{}", streaming.visible_chunk_limit),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Authored footprint",
-                format!(
-                    "{}×{} sectors (runtime cap {}×{} per generated chunk)",
-                    plan.source_size[0], plan.source_size[1], MAX_ROOM_WIDTH, MAX_ROOM_DEPTH
-                ),
+                "Portal markers",
+                format!("{}", plan.portal_count),
                 false,
             );
-            ui.weak("Embedded Play cooks this Room as generated chunks.");
-            if let Some(chunk) = plan.largest_room_asset_chunk() {
+            draw_budget_row(
+                ui,
+                "Authored footprint",
+                format!("{}×{} sectors", plan.source_size[0], plan.source_size[1]),
+                false,
+            );
+            ui.weak("Embedded Play cooks this world into manual portal-delimited runtime rooms.");
+            if let Some(room) = plan.largest_room_asset() {
                 draw_budget_row(
                     ui,
-                    "Largest chunk asset",
+                    "Largest room asset",
                     format!(
                         "#{} {}×{}, {} total",
-                        chunk.index,
-                        chunk.size[0],
-                        chunk.size[1],
-                        human_bytes_u64(chunk.budget.psxw_static_lit_bytes as u64)
+                        room.index,
+                        room.size[0],
+                        room.size[1],
+                        human_bytes_u64(room.budget.psxw_static_lit_bytes as u64)
                     ),
-                    chunk.over_budget,
+                    room.over_budget,
                 );
             }
-            if let Some(chunk) = plan.largest_psxw_chunk() {
+            if let Some(room) = plan.largest_geometry() {
                 draw_budget_row(
                     ui,
                     "Largest geometry",
                     format!(
                         "#{} {}",
-                        chunk.index,
-                        human_bytes_u64(chunk.budget.psxw_bytes as u64)
+                        room.index,
+                        human_bytes_u64(room.budget.psxw_bytes as u64)
                     ),
-                    chunk.budget.psxw_bytes > MAX_ROOM_BYTES,
+                    room.budget.psxw_bytes > MAX_ROOM_BYTES,
                 );
             }
-            if let Some(chunk) = plan.largest_triangle_chunk() {
+            if let Some(room) = plan.largest_triangle_room() {
                 draw_budget_row(
                     ui,
                     "Most triangles",
                     format!(
                         "#{} {} / {}",
-                        chunk.index, chunk.budget.triangles, MAX_ROOM_TRIANGLES
+                        room.index, room.budget.triangles, MAX_ROOM_TRIANGLES
                     ),
-                    chunk.budget.triangles > MAX_ROOM_TRIANGLES,
+                    room.budget.triangles > MAX_ROOM_TRIANGLES,
                 );
             }
 
@@ -27491,13 +31950,13 @@ fn draw_streaming_budget(
             ui.separator();
             draw_budget_row(
                 ui,
-                "Scene resources",
+                "World resources",
                 resource_count_summary(&resource_use),
                 false,
             );
             draw_budget_row(
                 ui,
-                "Scene components",
+                "World components",
                 component_count_summary(&resource_use),
                 false,
             );
@@ -27578,7 +32037,7 @@ fn draw_streaming_budget(
             }
 
             ui.add_space(4.0);
-            egui::Grid::new(format!("streaming_chunks_{}", room_id.raw()))
+            egui::Grid::new(format!("portal_rooms_{}", room_id.raw()))
                 .num_columns(7)
                 .striped(true)
                 .show(ui, |ui| {
@@ -27591,8 +32050,8 @@ fn draw_streaming_budget(
                     ui.label(RichText::new("Total").color(STUDIO_TEXT_WEAK));
                     ui.end_row();
 
-                    for chunk in plan.chunks.iter().take(8) {
-                        let color = chunk
+                    for room in plan.rooms.iter().take(8) {
+                        let color = room
                             .over_budget
                             .then_some(Color32::from_rgb(0xE0, 0x60, 0x60));
                         let text = |value: String| {
@@ -27603,25 +32062,25 @@ fn draw_streaming_budget(
                                 text
                             }
                         };
-                        ui.label(text(format!("{}", chunk.index)));
+                        ui.label(text(format!("{}", room.index)));
                         ui.label(text(format!(
                             "{},{}",
-                            chunk.world_origin[0], chunk.world_origin[1]
+                            room.world_origin[0], room.world_origin[1]
                         )));
-                        ui.label(text(format!("{}×{}", chunk.size[0], chunk.size[1])));
-                        ui.label(text(format!("{}", chunk.budget.triangles)));
-                        ui.label(text(human_bytes_u64(chunk.budget.psxw_bytes as u64)));
+                        ui.label(text(format!("{}×{}", room.size[0], room.size[1])));
+                        ui.label(text(format!("{}", room.budget.triangles)));
+                        ui.label(text(human_bytes_u64(room.budget.psxw_bytes as u64)));
                         ui.label(text(human_bytes_u64(
-                            chunk.budget.static_light_table_bytes as u64,
+                            room.budget.static_light_table_bytes as u64,
                         )));
                         ui.label(text(human_bytes_u64(
-                            chunk.budget.psxw_static_lit_bytes as u64,
+                            room.budget.psxw_static_lit_bytes as u64,
                         )));
                         ui.end_row();
                     }
                 });
-            if plan.chunks.len() > 8 {
-                ui.weak(format!("{} more chunks", plan.chunks.len() - 8));
+            if plan.rooms.len() > 8 {
+                ui.weak(format!("{} more rooms", plan.rooms.len() - 8));
             }
         });
 }
@@ -28149,9 +32608,13 @@ fn uv_transform_controls(uv: &mut GridUvTransform, ui: &mut egui::Ui) -> bool {
     ui.horizontal(|ui| {
         ui.label("Rotate");
         ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg0, "0");
+        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg45, "45");
         ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg90, "90");
+        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg135, "135");
         ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg180, "180");
+        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg225, "225");
         ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg270, "270");
+        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg315, "315");
     });
 
     ui.horizontal(|ui| {
@@ -28569,6 +33032,71 @@ mod tests {
     }
 
     #[test]
+    fn editor_camera_saves_with_project_and_restores_on_open() {
+        let project_dir = test_temp_dir("editor-camera");
+        let mut project = ProjectDocument::new("editor-camera");
+        project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: populated_grid(2, 2),
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(project_dir.clone(), project);
+        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
+        workspace.viewport_3d_yaw = 384;
+        workspace.viewport_3d_pitch = signed_to_q12(-128);
+        workspace.viewport_3d_radius = 12_288;
+        workspace.viewport_3d_target = [1024, 512, -2048];
+        workspace.viewport_3d_free_yaw = 1536;
+        workspace.viewport_3d_free_pitch = 128;
+        workspace.viewport_3d_free_position = [-300, 700, 900];
+        workspace.viewport_3d_free_initialized = true;
+
+        workspace.save().unwrap();
+
+        let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+        let camera = reopened.viewport_3d_camera();
+        assert_eq!(camera.mode, ViewportCameraMode::Free);
+        assert_eq!(camera.yaw_q12, 1536);
+        assert_eq!(camera.pitch_q12, 128);
+        assert_eq!(camera.radius, 12_288);
+        assert_eq!(camera.target, [1024, 512, -2048]);
+        assert_eq!(camera.position, [-300, 700, 900]);
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn editor_visibility_saves_with_project_and_restores_on_open() {
+        let project_dir = test_temp_dir("editor-visibility");
+        let mut workspace =
+            EditorWorkspace::with_project(project_dir.clone(), ProjectDocument::new("visibility"));
+        workspace.show_grid = false;
+        workspace.show_portals = false;
+        workspace.show_lights = false;
+        workspace.preview_fog = false;
+        workspace.preview_backface_wireframe = true;
+        workspace.preview_bounds = false;
+        workspace.show_play_debug_overlays = false;
+        workspace.show_play_debug_map = true;
+
+        workspace.save().unwrap();
+
+        let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+        assert!(!reopened.show_grid_enabled());
+        assert!(!reopened.show_portals_enabled());
+        assert!(!reopened.show_lights_enabled());
+        assert!(!reopened.preview_fog_enabled());
+        assert!(reopened.preview_backface_wireframe_enabled());
+        assert!(!reopened.preview_bounds_enabled());
+        assert!(!reopened.show_play_debug_overlays);
+        assert!(reopened.show_play_debug_map);
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
     fn texture_import_resolution_label_marks_presets_and_custom_sizes() {
         assert_eq!(texture_import_resolution_label(32, 32), "32 x 32");
         assert_eq!(texture_import_resolution_label(40, 24), "Custom 40 x 24");
@@ -28772,6 +33300,179 @@ mod tests {
         assert!(!bare_shortcuts_available(true, egui::Modifiers::NONE));
         assert!(!bare_shortcuts_available(false, egui::Modifiers::COMMAND));
         assert!(!bare_shortcuts_available(false, egui::Modifiers::CTRL));
+    }
+
+    #[test]
+    fn cycle_value_wraps_forward_and_backward() {
+        const VALUES: &[u8] = &[1, 2, 3];
+
+        assert_eq!(cycle_value(VALUES, 1, false), 2);
+        assert_eq!(cycle_value(VALUES, 3, false), 1);
+        assert_eq!(cycle_value(VALUES, 1, true), 3);
+        assert_eq!(cycle_value(VALUES, 9, false), 1);
+    }
+
+    #[test]
+    fn tool_group_cycle_includes_place_and_portal_slots() {
+        let (mut workspace, room) = workspace_with_populated_grid("tool-group-cycle", 1, 1);
+        workspace.replace_node_selection(room);
+        workspace.active_tool = ViewTool::Erase;
+        workspace.place_kind = PlaceKind::Character;
+
+        workspace.cycle_tool_group(false);
+        assert_eq!(workspace.active_tool, ViewTool::Place);
+        assert_eq!(workspace.place_kind, PlaceKind::PlayerSpawn);
+
+        workspace.cycle_tool_group(false);
+        assert_eq!(workspace.active_tool, ViewTool::Place);
+        assert_eq!(workspace.place_kind, PlaceKind::Portal);
+
+        workspace.cycle_tool_group(false);
+        assert_eq!(workspace.active_tool, ViewTool::Select);
+
+        workspace.cycle_tool_group(true);
+        assert_eq!(workspace.active_tool, ViewTool::Place);
+        assert_eq!(workspace.place_kind, PlaceKind::Portal);
+    }
+
+    #[test]
+    fn place_kind_selection_updates_toolbar_label() {
+        let mut workspace = EditorWorkspace::with_project(
+            test_temp_dir("place-kind-toolbar"),
+            ProjectDocument::new("place-kind-toolbar"),
+        );
+        workspace.active_tool = ViewTool::Place;
+
+        workspace.set_place_kind(PlaceKind::ImageProp);
+
+        assert_eq!(workspace.place_kind, PlaceKind::ImageProp);
+        assert_eq!(workspace.active_tool_group_label(), "Image Prop");
+        assert_eq!(workspace.active_tool_group_icon(), icons::PALETTE);
+        assert_eq!(workspace.status, "Place kind: Image Prop");
+    }
+
+    #[test]
+    fn visibility_cycle_only_changes_editor_view_items() {
+        let mut workspace = EditorWorkspace::with_project(
+            test_temp_dir("visibility-cycle"),
+            ProjectDocument::new("visibility"),
+        );
+        workspace.show_grid = true;
+        workspace.show_portals = true;
+        workspace.show_lights = true;
+        workspace.preview_fog = true;
+        workspace.preview_backface_wireframe = true;
+        workspace.preview_bounds = true;
+        workspace.show_play_debug_overlays = false;
+        workspace.show_play_debug_map = true;
+
+        workspace.cycle_visibility_group(false);
+
+        assert!(!workspace.show_grid);
+        assert!(!workspace.show_portals);
+        assert!(!workspace.show_lights);
+        assert!(!workspace.preview_fog);
+        assert!(!workspace.preview_backface_wireframe);
+        assert!(!workspace.preview_bounds);
+        assert!(!workspace.show_play_debug_overlays);
+        assert!(workspace.show_play_debug_map);
+    }
+
+    #[test]
+    fn debug_snapshot_writes_portal_runtime_log() {
+        let (mut workspace, room) = workspace_with_populated_grid("debug-snapshot", 2, 1);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let metrics = EditorPlaytestMetrics {
+            sample_serial: 0,
+            host_fps: 0.0,
+            host_ms: 0.0,
+            emu_hz: 0.0,
+            visual_hz: None,
+            draw_hz: 0.0,
+            visual_frames: 0,
+            visual_interval_vblanks: 0.0,
+            visual_deadline_misses: 0,
+            visual_lateness_vblanks: 0,
+            total_ms: 0.0,
+            frame_ms: 0.0,
+            emu_ms: 0.0,
+            hw_ms: 0.0,
+            ui_ms: 0.0,
+            step_budget_percent: 0.0,
+            chunk_visible: 1,
+            chunk_loaded: 1,
+            chunk_candidates: 0,
+            chunk_built: 0,
+            chunk_cache_skips: 0,
+            portal_visible_rooms: 1,
+            portal_frontier_rooms: 0,
+            portal_missing_resident: 0,
+            portal_build_failed: 0,
+            portal_tests: 1,
+            portal_accepts: 1,
+            portal_bounds_fallbacks: 0,
+            portal_rejects: [0, 0, 0],
+            portal_caps: [0, 0, 0],
+            stream_priorities: [0, 0, 0],
+            stream_requests: 0,
+            stream_misses: 0,
+            stream_prefetches: 0,
+            stream_evictions: 0,
+            stream_slot_limit: 0,
+            stream_pending: 0,
+            stream_failed: 0,
+            chunk_loaded_mask: 1,
+            chunk_loading_mask: 0,
+            chunk_active_mask: 1,
+            chunk_drawn_mask: 1,
+            portal_visible_mask: 1,
+            portal_frontier_mask: 0,
+            portal_missing_mask: 0,
+            portal_build_failed_mask: 0,
+            portal_tested_mask: 1,
+            portal_accepted_mask: 1,
+            portal_reject_frustum_mask: 0,
+            portal_bounds_fallback_mask: 0,
+            portal_tested_portal_mask: 1,
+            portal_accepted_portal_mask: 1,
+            portal_reject_frustum_portal_mask: 0,
+            portal_bounds_fallback_portal_mask: 0,
+            player_map_valid: true,
+            player_room_index: 0,
+            portal_current_room_index: 0,
+            player_local_x: 512,
+            player_local_z: 512,
+            player_view_yaw_q12: 1024,
+            camera_view_basis_valid: true,
+            camera_view_sin_yaw_q12: 4096,
+            camera_view_cos_yaw_q12: 0,
+            camera_view_sin_pitch_q12: 0,
+            camera_view_cos_pitch_q12: 4096,
+            camera_map_valid: true,
+            camera_global_valid: true,
+            camera_local_x: 520,
+            camera_local_y: 1024,
+            camera_local_z: 500,
+            camera_global_x: 520,
+            camera_global_y: 1024,
+            camera_global_z: 500,
+        };
+        let path = workspace.debug_log_path();
+
+        workspace
+            .write_debug_snapshot(&path, Some(metrics))
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("runtime_player: valid=true room_index=0"));
+        assert!(content.contains("connected_portals: count="));
+        assert!(content.contains("portal #0:"));
+
+        let _ = std::fs::remove_dir_all(workspace.project_dir);
     }
 
     #[test]
@@ -29313,17 +34014,46 @@ mod tests {
             ThumbnailEntry {
                 signature: "test.psxt".to_string(),
                 handle,
+                image: ColorImage {
+                    size: [1, 1],
+                    pixels: vec![Color32::WHITE],
+                },
                 stats: PsxtStats {
                     width: 1,
                     height: 1,
                     depth_bits: 4,
                     clut_entries: 16,
+                    index_zero_transparent: false,
                     pixel_bytes: 1,
                     clut_bytes: 32,
                     file_bytes: 45,
                 },
             },
         );
+        ws.psoxide_logo_texture = Some(ctx.load_texture(
+            "project-switch-logo",
+            ColorImage {
+                size: [1, 1],
+                pixels: vec![Color32::WHITE],
+            },
+            egui::TextureOptions::NEAREST,
+        ));
+        ws.model_resource_preview_texture = Some(ctx.load_texture(
+            "project-switch-model-preview",
+            ColorImage {
+                size: [1, 1],
+                pixels: vec![Color32::WHITE],
+            },
+            egui::TextureOptions::NEAREST,
+        ));
+        ws.animation_viewer_preview_texture = Some(ctx.load_texture(
+            "project-switch-animation-preview",
+            ColorImage {
+                size: [1, 1],
+                pixels: vec![Color32::WHITE],
+            },
+            egui::TextureOptions::NEAREST,
+        ));
 
         let name = format!(
             "texture-retire-test-{}-{}",
@@ -29339,8 +34069,11 @@ mod tests {
         ws.create_and_open_project(&name).unwrap();
 
         assert!(ws.texture_thumbs.is_empty());
-        assert_eq!(ws.import_retired_textures.len(), 1);
-        assert_eq!(ws.import_retired_textures[0].0, EGUI_TEXTURE_RETIRE_FRAMES);
+        assert_eq!(ws.import_retired_textures.len(), 4);
+        assert!(ws
+            .import_retired_textures
+            .iter()
+            .all(|(frames, _)| *frames == EGUI_TEXTURE_RETIRE_FRAMES));
         let _ = std::fs::remove_dir_all(target);
     }
 
@@ -29381,11 +34114,16 @@ mod tests {
             ThumbnailEntry {
                 signature: "test.psxt".to_string(),
                 handle,
+                image: ColorImage {
+                    size: [1, 1],
+                    pixels: vec![Color32::WHITE],
+                },
                 stats: PsxtStats {
                     width: 1,
                     height: 1,
                     depth_bits: 4,
                     clut_entries: 16,
+                    index_zero_transparent: false,
                     pixel_bytes: 1,
                     clut_bytes: 32,
                     file_bytes: 45,
@@ -29430,6 +34168,10 @@ mod tests {
         let circle = ViewportHit::circle(NodeId::ROOT, "Circle", [2.0, 2.0], 0.5);
         assert!(circle.contains([2.25, 2.25]));
         assert!(!circle.contains([2.6, 2.0]));
+
+        let segment = ViewportHit::segment(NodeId::ROOT, "Segment", [0.0, 0.0], [2.0, 0.0], 0.25);
+        assert!(segment.contains([1.0, 0.2]));
+        assert!(!segment.contains([1.0, 0.3]));
     }
 
     fn starter_player_entity(scene: &psxed_project::Scene) -> &psxed_project::SceneNode {
@@ -30652,6 +35394,47 @@ mod tests {
     }
 
     #[test]
+    fn rotate_sector_preserves_authored_uv_rotation() {
+        let mut sector = GridSector::empty();
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.uv.rotation = GridUvRotation::Deg45;
+        let mut floor_tri_a = GridUvTransform::IDENTITY;
+        floor_tri_a.rotation = GridUvRotation::Deg135;
+        floor.triangle_override_mut(0).uv = Some(floor_tri_a);
+        let mut floor_tri_b = GridUvTransform::IDENTITY;
+        floor_tri_b.rotation = GridUvRotation::Deg225;
+        floor.triangle_override_mut(1).uv = Some(floor_tri_b);
+        sector.floor = Some(floor);
+
+        let mut ceiling = GridHorizontalFace::flat(1024, None);
+        ceiling.uv.rotation = GridUvRotation::Deg315;
+        sector.ceiling = Some(ceiling);
+
+        let mut wall = GridVerticalFace::with_heights([0, 10, 110, 100], None);
+        wall.uv.rotation = GridUvRotation::Deg90;
+        sector.walls.get_mut(GridDirection::North).push(wall);
+
+        let rotated = rotate_sector_cw(&sector);
+        let floor = rotated.floor.as_ref().unwrap();
+        let floor_override_rotations = [
+            floor.triangle_override(0).uv.unwrap().rotation,
+            floor.triangle_override(1).uv.unwrap().rotation,
+        ];
+
+        assert_eq!(floor.uv.rotation, GridUvRotation::Deg45);
+        assert!(floor_override_rotations.contains(&GridUvRotation::Deg135));
+        assert!(floor_override_rotations.contains(&GridUvRotation::Deg225));
+        assert_eq!(
+            rotated.ceiling.as_ref().unwrap().uv.rotation,
+            GridUvRotation::Deg315
+        );
+        assert_eq!(
+            rotated.walls.get(GridDirection::East)[0].uv.rotation,
+            GridUvRotation::Deg90
+        );
+    }
+
+    #[test]
     fn rotate_sector_reverses_diagonal_wall_endpoint_order_when_needed() {
         let mut sector = GridSector::empty();
         sector
@@ -30922,7 +35705,7 @@ mod tests {
             viewport,
             y_axis.start
         ));
-        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 8.0);
+        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 4.0);
         workspace.end_primitive_gizmo_drag();
 
         let grid = workspace.room_grid_view(room).unwrap();
@@ -30970,7 +35753,7 @@ mod tests {
             viewport,
             y_axis.start
         ));
-        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 8.0);
+        workspace.update_primitive_gizmo_drag(y_axis.start + unit * 4.0);
         workspace.end_primitive_gizmo_drag();
 
         let grid = workspace.room_grid_view(room).unwrap();
@@ -31020,7 +35803,7 @@ mod tests {
             viewport,
             x_axis.start
         ));
-        workspace.update_primitive_gizmo_drag(x_axis.end);
+        workspace.update_primitive_gizmo_drag(x_axis.start + (x_axis.end - x_axis.start) * 0.5);
 
         let grid = workspace.room_grid_view(room).unwrap();
         assert!(grid.sector(0, 0).unwrap().floor.is_none());
@@ -31220,7 +36003,7 @@ mod tests {
         let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
         let unit = (x_axis.end - x_axis.start).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
-        workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+        workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 4.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(entity).unwrap();
@@ -31268,7 +36051,7 @@ mod tests {
         let y_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
         let unit = (y_axis.end - y_axis.start).normalized();
         assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, y_axis.start));
-        workspace.update_node_gizmo_drag(viewport, y_axis.start + unit * 8.0);
+        workspace.update_node_gizmo_drag(viewport, y_axis.start + unit * 4.0);
         workspace.end_node_gizmo_drag();
 
         let node = workspace.project.active_scene().node(light).unwrap();
@@ -31390,16 +36173,73 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_wall_cook_error_marks_both_authored_faces() {
-        let mut project = ProjectDocument::new("duplicate-wall");
+    fn node_gizmo_scales_box_prop_width() {
+        let mut project = ProjectDocument::new("box-prop-gizmo-scale");
         let room = project.active_scene_mut().add_node(
             NodeId::ROOT,
             "Room",
             NodeKind::Room {
-                grid: WorldGrid::empty(4, 2, 1024),
+                grid: WorldGrid::empty(1, 1, 1024),
             },
         );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("box-prop-gizmo-scale"), project);
+        set_gizmo_test_camera(&mut workspace);
+        workspace.replace_node_selection(prop);
+        workspace.transform_gizmo_mode = TransformGizmoMode::Scale;
+
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+        let unit = (x_axis.end - x_axis.start).normalized();
+        assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+        workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+        workspace.end_node_gizmo_drag();
+
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::BoxProp { vertices, .. } = &node.kind else {
+            panic!("expected box prop");
+        };
+        let min_x = vertices.iter().map(|v| v[0]).min().unwrap();
+        let max_x = vertices.iter().map(|v| v[0]).max().unwrap();
+        let min_y = vertices.iter().map(|v| v[1]).min().unwrap();
+        let max_y = vertices.iter().map(|v| v[1]).max().unwrap();
+        assert_eq!(min_x, -544);
+        assert_eq!(max_x, 544);
+        assert_eq!(min_y, 0);
+        assert_eq!(max_y, 1024);
+        assert!(workspace.is_dirty());
+
+        workspace.do_undo();
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::BoxProp { vertices, .. } = &node.kind else {
+            panic!("expected box prop");
+        };
+        assert_eq!(*vertices, psxed_project::box_prop_vertices_for_size(1024));
+    }
+
+    #[test]
+    fn duplicate_wall_cook_error_marks_both_authored_faces() {
+        let mut project = ProjectDocument::new("duplicate-wall");
+        let mut grid = WorldGrid::empty(4, 2, 1024);
+        grid.add_wall(3, 1, GridDirection::South, 0, 1024, None);
+        grid.add_wall(3, 0, GridDirection::North, 0, 1024, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.view_2d = false;
+        workspace.viewport_3d_target = [99_000, 99_000, 99_000];
 
         workspace.record_world_cook_error(
             room,
@@ -31435,6 +36275,19 @@ mod tests {
         assert!(workspace.validation_issue_primitives.contains(&south));
         assert!(workspace.validation_issue_primitives.contains(&north));
         assert!(workspace.validation_issue_rooms.is_empty());
+        assert_eq!(workspace.selected_primitive, Some(south));
+        assert_eq!(workspace.selected_primitives, vec![south, north]);
+        let (center, _) = workspace
+            .selected_frame_bounds_3d()
+            .expect("duplicate wall faces frame in 3D");
+        assert_eq!(
+            workspace.viewport_3d_target,
+            [
+                round_to_i32(center[0]),
+                round_to_i32(center[1]),
+                round_to_i32(center[2])
+            ]
+        );
     }
 
     #[test]
@@ -31554,6 +36407,138 @@ mod tests {
     }
 
     #[test]
+    fn material_click_assignment_updates_selected_box_prop_faces() {
+        let mut project = ProjectDocument::new("box-prop-materials");
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(prop);
+
+        let assignment = workspace
+            .assign_selected_box_props_resource(target)
+            .expect("material applies to selected box prop");
+        assert_eq!(assignment.updated, 1);
+        assert_eq!(assignment.targets, 1);
+
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::BoxProp { materials, .. } = &node.kind else {
+            panic!("expected box prop");
+        };
+        assert!(materials.iter().all(|material| *material == Some(target)));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn texture_click_assignment_creates_material_for_selected_box_prop() {
+        let mut project = ProjectDocument::new("box-prop-texture");
+        let texture = project.add_resource(
+            "Brick",
+            ResourceData::Texture {
+                psxt_path: "assets/textures/brick.psxt".to_string(),
+            },
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(prop);
+
+        let assignment = workspace
+            .assign_selected_box_props_resource(texture)
+            .expect("texture wraps into a material for selected box prop");
+        assert_eq!(assignment.updated, 1);
+        assert_ne!(assignment.material, texture);
+        let material = workspace.project.resource(assignment.material).unwrap();
+        assert!(matches!(
+            &material.data,
+            ResourceData::Material(material) if material.texture == Some(texture)
+        ));
+
+        let node = workspace.project.active_scene().node(prop).unwrap();
+        let NodeKind::BoxProp { materials, .. } = &node.kind else {
+            panic!("expected box prop");
+        };
+        assert!(materials
+            .iter()
+            .all(|material| *material == Some(assignment.material)));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn box_prop_resource_click_keeps_node_selection_active() {
+        let mut project = ProjectDocument::new("box-prop-click-selection");
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.replace_node_selection(prop);
+        workspace.replace_resource_selection(target);
+
+        assert!(
+            workspace.apply_selected_box_prop_resource_click(ResourceClick {
+                id: target,
+                modifiers: egui::Modifiers::NONE,
+            })
+        );
+
+        assert_eq!(workspace.selected_node, prop);
+        assert!(workspace.selected_nodes.contains(&prop));
+        assert_eq!(workspace.selected_resource, None);
+        assert!(workspace.selected_resources.is_empty());
+    }
+
+    #[test]
     fn selected_material_resource_paints_new_floor_ceiling_and_wall() {
         let mut project = ProjectDocument::new("paint-selected-material");
         project.add_resource(
@@ -31656,6 +36641,95 @@ mod tests {
     }
 
     #[test]
+    fn place_player_spawn_refuses_second_player_source() {
+        let (mut workspace, room) = workspace_with_populated_grid("single-player-spawn", 1, 1);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::PlayerSpawn;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        let first_spawn = workspace.selected_node_id();
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [768.0, 0.0, 768.0]);
+
+        let player_sources: Vec<_> = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| node_kind_is_player_source(&node.kind))
+            .collect();
+        assert_eq!(player_sources.len(), 1);
+        assert_eq!(player_sources[0].id, first_spawn);
+        assert_eq!(workspace.selected_node_id(), first_spawn);
+        assert!(workspace
+            .status
+            .contains("Only one player source is allowed per world"));
+    }
+
+    #[test]
+    fn place_prop_refuses_duplicate_resource_at_same_position() {
+        let (mut workspace, room) = workspace_with_populated_grid("duplicate-prop-place", 1, 1);
+        let model = workspace
+            .project
+            .add_resource("Crate", ResourceData::Model(test_model_resource("crate")));
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::ModelInstance;
+        workspace.place_resource = Some(model);
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        let first = workspace.selected_node_id();
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let scene = workspace.project.active_scene();
+        let props: Vec<_> = scene
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.parent == Some(room)
+                    && matches!(node.kind, NodeKind::Entity)
+                    && entity_model_resource_id(scene, node) == Some(model)
+                    && entity_character_component_resource_id(scene, node).is_none()
+                    && entity_weapon_resource_id(scene, node).is_none()
+            })
+            .collect();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].id, first);
+        assert_eq!(workspace.selected_node_id(), first);
+        assert_eq!(workspace.status, "Prop already exists at this position");
+    }
+
+    #[test]
+    fn place_spawn_marker_refuses_duplicate_at_same_position() {
+        let (mut workspace, room) = workspace_with_populated_grid("duplicate-spawn-place", 1, 1);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::SpawnMarker;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        let first = workspace.selected_node_id();
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let spawns: Vec<_> = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.parent == Some(room)
+                    && matches!(
+                        node.kind,
+                        NodeKind::SpawnPoint {
+                            player: false,
+                            character: None
+                        }
+                    )
+            })
+            .collect();
+        assert_eq!(spawns.len(), 1);
+        assert_eq!(spawns[0].id, first);
+        assert_eq!(workspace.selected_node_id(), first);
+        assert_eq!(workspace.status, "Spawn already exists at this position");
+    }
+
+    #[test]
     fn place_image_prop_defaults_to_room_sector_size() {
         let mut project = ProjectDocument::new("image-prop-sector-size-place");
         let material = project.add_resource(
@@ -31736,6 +36810,152 @@ mod tests {
     }
 
     #[test]
+    fn portal_icon_place_writes_edge_midpoint_marker() {
+        let mut project = ProjectDocument::new("portal-edge-place");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let scene = workspace.project.active_scene();
+        let node = scene
+            .node(workspace.selected_node_id())
+            .expect("placed portal is selected");
+        assert!(matches!(node.kind, NodeKind::Portal { .. }));
+        assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+        let grid = workspace.room_grid_view(room).unwrap();
+        let edge = portal_edge_for_node(grid, node).expect("portal snaps to edge");
+        assert_eq!(edge.x, 0);
+        assert_eq!(edge.z, 0);
+        assert_eq!(edge.direction, GridDirection::East);
+        assert_eq!(workspace.status, "Placed Portal on East edge at 0,0");
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn portal_icon_place_refuses_duplicate_edge_marker() {
+        let mut project = ProjectDocument::new("portal-edge-duplicate");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+        let first = workspace.selected_node_id();
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let portals: Vec<_> = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.parent == Some(room) && matches!(node.kind, NodeKind::Portal { .. })
+            })
+            .collect();
+        assert_eq!(portals.len(), 1);
+        assert_eq!(portals[0].id, first);
+        assert_eq!(workspace.selected_node_id(), first);
+        assert_eq!(
+            workspace.status,
+            "Portal already exists on East edge at 0,0"
+        );
+    }
+
+    #[test]
+    fn visible_portal_bounds_follow_the_authored_seam() {
+        let mut project = ProjectDocument::new("portal-seam-bounds");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let portal = workspace.selected_node_id();
+        let bounds = workspace
+            .collect_entity_bounds(Some(room))
+            .into_iter()
+            .find(|bounds| bounds.node == portal)
+            .expect("visible portal has seam bounds");
+        assert_eq!(bounds.kind, EntityBoundKind::Portal);
+        assert!((bounds.center[0] - 1024.0).abs() < 0.001);
+        assert!((bounds.center[2] - 512.0).abs() < 0.001);
+        assert!(bounds.half_extents[0] >= 48.0);
+        assert!(bounds.half_extents[2] >= 512.0);
+        let t = ray_intersects_aabb(
+            [
+                bounds.center[0] - 4096.0,
+                bounds.center[1],
+                bounds.center[2],
+            ],
+            [1.0, 0.0, 0.0],
+            bounds.center,
+            bounds.half_extents,
+        );
+        assert!(t.is_some(), "portal seam bound is pickable");
+
+        workspace.show_portals = false;
+        assert!(workspace
+            .collect_entity_bounds(Some(room))
+            .into_iter()
+            .all(|bounds| bounds.node != portal));
+    }
+
+    #[test]
+    fn portal_icon_place_rejects_edges_without_populated_neighbour() {
+        let mut project = ProjectDocument::new("portal-edge-invalid");
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.active_tool = ViewTool::Place;
+        workspace.place_kind = PlaceKind::Portal;
+        workspace.portal_place_direction = GridDirection::East;
+
+        workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+        let portal_count = workspace
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
+            .count();
+        assert_eq!(portal_count, 0);
+        assert_eq!(
+            workspace.status,
+            "Portal needs populated sectors on both sides of the East edge"
+        );
+        assert!(!workspace.is_dirty());
+    }
+
+    #[test]
     fn material_assignment_updates_selected_triangle_override() {
         let mut project = ProjectDocument::new("triangle-materials");
         let original = project.add_resource(
@@ -31770,6 +36990,94 @@ mod tests {
         assert_eq!(floor.material, Some(original));
         assert_eq!(floor.triangle_material(0), Some(target));
         assert_eq!(floor.triangle_material(1), Some(original));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn paint_floor_in_triangle_mode_targets_clicked_triangle_only() {
+        let mut project = ProjectDocument::new("triangle-floor-paint");
+        let original = project.add_resource(
+            "Original",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, Some(original));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.horizontal_edit_mode = HorizontalEditMode::Triangle;
+        workspace.brush_material = Some(target);
+
+        workspace.run_paint_action(ViewTool::PaintFloor, room, 0, 0, None, [800.0, 0.0, 300.0]);
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let floor = grid.sector(0, 0).unwrap().floor.as_ref().unwrap();
+        assert_eq!(floor.material, Some(original));
+        assert_eq!(floor.triangle_material(0), Some(target));
+        assert_eq!(floor.triangle_material(1), Some(original));
+        assert!(matches!(
+            workspace.selected_primitive,
+            Some(Selection::Triangle(HorizontalTriangleRef {
+                surface: HorizontalSurfaceKind::Floor,
+                index: HorizontalTriangleIndex::A,
+                ..
+            }))
+        ));
+        assert_eq!(workspace.selected_resource, Some(target));
+        assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn paint_ceiling_in_triangle_mode_targets_clicked_triangle_only() {
+        let mut project = ProjectDocument::new("triangle-ceiling-paint");
+        let original = project.add_resource(
+            "Original",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.ensure_sector(0, 0).unwrap().ceiling =
+            Some(GridHorizontalFace::flat(1024, Some(original)));
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+        workspace.horizontal_edit_mode = HorizontalEditMode::Triangle;
+        workspace.brush_material = Some(target);
+
+        workspace.run_paint_action(
+            ViewTool::PaintCeiling,
+            room,
+            0,
+            0,
+            None,
+            [200.0, 1024.0, 300.0],
+        );
+
+        let grid = workspace.room_grid_view(room).unwrap();
+        let ceiling = grid.sector(0, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.material, Some(original));
+        assert_eq!(ceiling.triangle_material(0), Some(original));
+        assert_eq!(ceiling.triangle_material(1), Some(target));
+        assert!(matches!(
+            workspace.selected_primitive,
+            Some(Selection::Triangle(HorizontalTriangleRef {
+                surface: HorizontalSurfaceKind::Ceiling,
+                index: HorizontalTriangleIndex::B,
+                ..
+            }))
+        ));
+        assert_eq!(workspace.selected_resource, Some(target));
         assert!(workspace.is_dirty());
     }
 
@@ -32743,18 +38051,62 @@ mod tests {
     }
 
     #[test]
+    fn pick_entity_bound_includes_box_prop_bounds() {
+        let mut project = ProjectDocument::new("box-prop-pick");
+        let room = project.active_scene_mut().add_node(
+            NodeId::ROOT,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let prop = project.active_scene_mut().add_node(
+            room,
+            "Crate",
+            NodeKind::BoxProp {
+                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+                vertices: psxed_project::box_prop_vertices_for_size(1024),
+                collision_enabled: true,
+                break_flags: 0,
+            },
+        );
+        let workspace = EditorWorkspace::with_project(test_temp_dir("box-prop-pick"), project);
+        let bounds = workspace.collect_entity_bounds(Some(room));
+        let target = bounds
+            .iter()
+            .find(|bound| bound.node == prop && bound.kind == EntityBoundKind::BoxProp)
+            .copied()
+            .expect("box prop produces a pickable entity bound");
+        let origin = [
+            target.center[0] - 4096.0,
+            target.center[1],
+            target.center[2],
+        ];
+        let dir = [1.0, 0.0, 0.0];
+        let t = ray_intersects_aabb(origin, dir, target.center, target.half_extents);
+        assert!(t.is_some(), "ray straight at box prop centre must hit");
+    }
+
+    #[test]
     fn project_filesystem_rows_are_generated_from_resources() {
         let project = ProjectDocument::starter();
         let rows = project_filesystem_rows(&project);
+        let texture_name = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Texture { .. }))
+            .map(resource_file_name)
+            .expect("starter project has a texture resource");
+        let material_name = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(resource_file_name)
+            .expect("starter project has a material resource");
 
         assert!(rows.iter().any(|row| row.name == "res://"));
-        assert!(rows.iter().any(|row| row.name == "main.room"));
-        assert!(rows
-            .iter()
-            .any(|row| row.name == "delven_01_slateflr1a_q2.psxt"));
-        assert!(rows
-            .iter()
-            .any(|row| row.name == "delven_38_ground4b_q0.psxt"));
+        assert!(rows.iter().any(|row| row.name == "main.map"));
+        assert!(rows.iter().any(|row| row.name == texture_name));
         assert!(rows.iter().any(|row| row.name == "characters"));
         assert!(
             rows.iter()
@@ -32763,7 +38115,27 @@ mod tests {
         );
         assert!(rows
             .iter()
-            .any(|row| row.name == "delven_slateflr1a_q2.mat" && row.resource.is_some()));
+            .any(|row| row.name == material_name && row.resource.is_some()));
+    }
+
+    #[test]
+    fn collapsed_project_filesystem_folder_hides_children() {
+        let project = ProjectDocument::starter();
+        let rows = project_filesystem_rows(&project);
+        let material_name = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(resource_file_name)
+            .expect("starter project has a material resource");
+        let mut collapsed = HashSet::new();
+        collapsed.insert("res://textures".to_string());
+
+        let display_rows = project_filesystem_display_rows(&rows, "", &collapsed);
+
+        assert!(display_rows.iter().any(|row| row.name == "textures"));
+        assert!(!display_rows.iter().any(|row| row.name.ends_with(".psxt")));
+        assert!(display_rows.iter().any(|row| row.name == material_name));
     }
 
     #[test]
@@ -32780,38 +38152,44 @@ mod tests {
     #[test]
     fn resource_filter_and_search_match_expected_resources() {
         let project = ProjectDocument::starter();
-        let delven_texture = project
+        let texture = project
             .resources
             .iter()
-            .find(|resource| {
-                resource.name == "Delven slateflr1a q2"
-                    && matches!(resource.data, ResourceData::Texture { .. })
-            })
+            .find(|resource| matches!(resource.data, ResourceData::Texture { .. }))
             .unwrap();
-        let delven_material = project
+        let material = project
             .resources
             .iter()
-            .find(|resource| {
-                resource.name == "Delven stonebrk1b q3"
-                    && matches!(resource.data, ResourceData::Material(_))
-            })
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
             .unwrap();
+        let texture_search = resource_search_token(texture);
+        let material_search = resource_search_token(material);
 
         assert!(resource_matches_filter(
-            delven_texture,
+            texture,
             ResourceFilter::Texture,
-            "slate"
+            &texture_search
         ));
         assert!(!resource_matches_filter(
-            delven_texture,
+            texture,
             ResourceFilter::Material,
-            "slate"
+            &texture_search
         ));
         assert!(resource_matches_filter(
-            delven_material,
+            material,
             ResourceFilter::Material,
-            "stonebrk"
+            &material_search
         ));
+    }
+
+    fn resource_search_token(resource: &Resource) -> String {
+        resource
+            .name
+            .to_ascii_lowercase()
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .find(|part| !part.is_empty())
+            .unwrap_or("")
+            .to_string()
     }
 
     fn cell_with_floor(material: Option<psxed_project::ResourceId>) -> psxed_project::GridSector {
@@ -32819,6 +38197,8 @@ mod tests {
             floor: Some(psxed_project::GridHorizontalFace::flat(0, material)),
             ceiling: None,
             walls: psxed_project::GridWalls::default(),
+            floor_above: None,
+            floor_below: None,
         }
     }
 
@@ -32851,6 +38231,22 @@ mod tests {
             EditorWorkspace::with_project(test_temp_dir(label), project),
             room,
         )
+    }
+
+    fn test_model_resource(name: &str) -> psxed_project::ModelResource {
+        psxed_project::ModelResource {
+            model_path: format!("assets/models/{name}.psxmdl"),
+            source_path: None,
+            texture_path: None,
+            skeleton: None,
+            clips: Vec::new(),
+            default_clip: None,
+            preview_clip: None,
+            world_height: 1024,
+            collision_radius: default_model_collision_radius_for_height(1024),
+            scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            attachments: Vec::new(),
+        }
     }
 
     #[test]
@@ -32989,5 +38385,23 @@ mod tests {
         assert_eq!(closest_edge_idx(&corners, [5.0, 0.0, 9.5]), 2);
         // (0.5, 0, 5) → near edge 3 (corners 3–0).
         assert_eq!(closest_edge_idx(&corners, [0.5, 0.0, 5.0]), 3);
+    }
+
+    #[test]
+    fn action_bar_height_expands_for_wrapped_status() {
+        assert_eq!(
+            action_bar_height_for_status("Ready"),
+            ACTION_BAR_COMPACT_HEIGHT
+        );
+        assert_eq!(
+            action_bar_height_for_status(
+                "Embedded Play failed while cooking assets: playtest validation failed: No player source. Place one Player Spawn, or select a Character Controller and enable Player controlled."
+            ),
+            ACTION_BAR_EXPANDED_HEIGHT
+        );
+        assert_eq!(
+            action_bar_height_for_status("First line\nSecond line"),
+            ACTION_BAR_EXPANDED_HEIGHT
+        );
     }
 }

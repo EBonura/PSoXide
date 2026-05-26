@@ -9,7 +9,8 @@
 //! boom without taking yaw control away from the player.
 
 use crate::{
-    Angle, CharacterCollisionRoom, RoomCollision, RoomPoint, WorldCamera, WorldProjection, Q12,
+    fixed::div_q12_i32, Angle, CharacterCollisionRoom, RoomCollision, RoomPoint, WorldCamera,
+    WorldProjection, Q12,
 };
 
 const RAY_STEPS_MAX: i32 = 8;
@@ -681,16 +682,9 @@ fn mul_sector(delta: i32, amount: i32, sector: i32) -> i32 {
     if sector <= 0 {
         0
     } else {
-        let num = (delta as i64).saturating_mul(amount as i64);
-        num.checked_div(sector as i64)
-            .and_then(|v| i32::try_from(v).ok())
-            .unwrap_or_else(|| {
-                if num.is_negative() {
-                    i32::MIN
-                } else {
-                    i32::MAX
-                }
-            })
+        let whole = (delta / sector).saturating_mul(amount);
+        let remainder = delta % sector;
+        whole.saturating_add(remainder.saturating_mul(amount) / sector)
     }
 }
 
@@ -1100,12 +1094,12 @@ fn intersect_segment_q12(
     let sz = bz.saturating_sub(az);
     let qx = ax.saturating_sub(from_x);
     let qz = az.saturating_sub(from_z);
-    let denom = cross_i64(dx, dz, sx, sz);
+    let denom = cross_i32(dx, dz, sx, sz);
     if denom == 0 {
         return None;
     }
-    let t_num = cross_i64(qx, qz, sx, sz);
-    let u_num = cross_i64(qx, qz, dx, dz);
+    let t_num = cross_i32(qx, qz, sx, sz);
+    let u_num = cross_i32(qx, qz, dx, dz);
     let t_q12 = div_q12_signed(t_num, denom)?;
     let u_q12 = div_q12_signed(u_num, denom)?;
     if !(0..=Q12::SCALE).contains(&t_q12) || !(0..=Q12::SCALE).contains(&u_q12) {
@@ -1114,19 +1108,16 @@ fn intersect_segment_q12(
     Some((t_q12, u_q12))
 }
 
-fn cross_i64(ax: i32, az: i32, bx: i32, bz: i32) -> i64 {
-    (ax as i64)
-        .saturating_mul(bz as i64)
-        .saturating_sub((az as i64).saturating_mul(bx as i64))
+fn cross_i32(ax: i32, az: i32, bx: i32, bz: i32) -> i32 {
+    ax.saturating_mul(bz).saturating_sub(az.saturating_mul(bx))
 }
 
-fn div_q12_signed(num: i64, denom: i64) -> Option<i32> {
+fn div_q12_signed(num: i32, denom: i32) -> Option<i32> {
     if denom == 0 {
-        return None;
+        None
+    } else {
+        Some(div_q12_i32(num, denom))
     }
-    num.saturating_mul(Q12::SCALE as i64)
-        .checked_div(denom)
-        .and_then(|v| i32::try_from(v).ok())
 }
 
 fn intersect_horizontal_q12(from_z: i32, dz: i32, wall_z: i32) -> Option<i32> {
