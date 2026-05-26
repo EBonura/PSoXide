@@ -19,7 +19,7 @@
 //! returned as host-drawn overlay lines so they can use fractional UI
 //! strokes without PSX integer-pixel limitations.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
 use emulator_core::gpu::GpuCmdLogEntry;
@@ -32,11 +32,13 @@ use psx_gpu::prim::TriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene as gte_scene;
 
-use psxed_project::playtest::playtest_streaming_chunk_config;
-use psxed_project::streaming::plan_generated_chunks;
+use psxed_project::portal_rooms::{
+    plan_portal_rooms, portal_seam_edges_for_edge, portal_seam_edges_for_node, PortalEdge,
+    PortalRoomConfig,
+};
 use psxed_project::{
-    spatial, Corner, GridDirection, GridSplit, GridUvTransform, NodeId, NodeKind, ProjectDocument,
-    ResourceData, ResourceId, Scene, SceneNode, Transform3, WallCorner, WorldGrid,
+    spatial, Corner, GridDirection, GridSector, GridSplit, GridUvTransform, NodeId, NodeKind,
+    ProjectDocument, ResourceData, ResourceId, Scene, SceneNode, Transform3, WallCorner, WorldGrid,
 };
 
 use crate::editor_textures::{EditorTextures, MaterialSlot};
@@ -47,6 +49,8 @@ use psxed_ui::{PaintCellPreviewKind, ViewportCameraState};
 /// 4096-cap caps the per-frame primitive count at a comfortable
 /// number for the host renderer.
 const TRI_CAP: usize = 4096;
+const EDITOR_PREVIEW_PORTAL_DEPTH: usize = 3;
+const EDITOR_PREVIEW_MAX_ROOMS: usize = 16;
 const SKY_QUAD_CAP: usize = psxed_project::SKY_CYCLORAMA_QUAD_MAX;
 const FAR_VISTA_QUAD_CAP: usize = 16;
 /// Model scratch mirrors editor-playtest's runtime model caps so the
@@ -109,6 +113,28 @@ const PREVIEW_WALL_UVS: [(u8, u8); 4] = [
     (GRID_TILE_UV, GRID_TILE_UV),
     (GRID_TILE_UV, 0),
     (0, 0),
+];
+const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psxed_project::BOX_PROP_FACE_COUNT] = [
+    [4, 5, 1, 0],
+    [5, 6, 2, 1],
+    [6, 7, 3, 2],
+    [7, 4, 0, 3],
+    [7, 6, 5, 4],
+    [0, 1, 2, 3],
+];
+const BOX_PROP_EDGE_VERTEX_INDICES: [(usize, usize); 12] = [
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
 ];
 const EDITOR_PREVIEW_HOVER_STROKE_WIDTH: f32 = 1.5;
 const EDITOR_PREVIEW_SELECTED_STROKE_WIDTH: f32 = 3.0;
@@ -187,6 +213,12 @@ static SCRATCH: Mutex<PreviewScratch> = Mutex::new(PreviewScratch {
     clear_packet: [0; 4],
 });
 
+impl PreviewScratch {
+    fn geometry_full(&self) -> bool {
+        self.used >= TRI_CAP || self.tex_used >= TRI_CAP
+    }
+}
+
 /// Render data for one editable 3D preview frame.
 pub struct EditorPreviewFrame {
     /// PSX-style command log for the scene itself.
@@ -195,8 +227,8 @@ pub struct EditorPreviewFrame {
     pub overlay_lines: Vec<psxed_ui::EditorViewportOverlayLine>,
 }
 
-/// Build a fresh preview frame rendering the project's first Room from
-/// `camera`'s orbit angles.
+/// Build a fresh preview frame rendering the active editor room window
+/// from `camera`'s orbit angles.
 ///
 /// Returns an empty frame if the project has no Rooms -- the editor
 /// renderer will then paint a black panel, which is the correct "no
@@ -209,7 +241,10 @@ pub fn build_phase1_frame(
     preview_backface_wireframe: bool,
     preview_bounds: bool,
     show_grid: bool,
+    show_portals: bool,
+    show_lights: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
+    active_room: Option<psxed_project::NodeId>,
     selected: psxed_project::NodeId,
     hovered_primitive: Option<psxed_ui::Selection>,
     selected_primitive: Option<psxed_ui::Selection>,
@@ -223,7 +258,16 @@ pub fn build_phase1_frame(
     textures: &EditorTextures,
     assets: &crate::editor_assets::EditorAssets,
 ) -> EditorPreviewFrame {
-    let Some((room_id, grid)) = first_visible_room_grid(project, hidden_scene_nodes) else {
+    let visible_rooms = preview_room_grids(
+        project,
+        hidden_scene_nodes,
+        active_room,
+        selected,
+        selected_primitive,
+        selected_primitives,
+        validation_issue_primitives,
+    );
+    let Some(&(first_room_id, first_grid)) = visible_rooms.first() else {
         return EditorPreviewFrame {
             cmd_log: Vec::new(),
             overlay_lines: Vec::new(),
@@ -241,16 +285,16 @@ pub fn build_phase1_frame(
     let world_camera = setup_gte_for_camera(camera);
     let resolved_sky = project
         .active_scene()
-        .world_sky_for_node(room_id)
+        .world_sky_for_node(first_room_id)
         .unwrap_or_default()
-        .resolved_for_room(grid.fog_enabled && preview_fog, grid.fog_color);
+        .resolved_for_room(first_grid.fog_enabled && preview_fog, first_grid.fog_color);
     push_clear(&mut scratch, resolved_sky.lower_color);
     push_cyclorama(&mut scratch, resolved_sky, world_camera);
     let resolved_far_vista = project
         .active_scene()
-        .world_far_vista_for_node(room_id)
+        .world_far_vista_for_node(first_room_id)
         .unwrap_or_default()
-        .resolved_for_room(grid.fog_enabled && preview_fog, grid.fog_color);
+        .resolved_for_room(first_grid.fog_enabled && preview_fog, first_grid.fog_color);
     push_far_vista_ring(
         &mut scratch,
         camera,
@@ -258,83 +302,136 @@ pub fn build_phase1_frame(
         resolved_far_vista,
         textures,
     );
-    let fog = PreviewFog::from_grid(grid, preview_fog);
-    walk_room(
-        project,
-        room_id,
-        grid,
-        textures,
-        world_camera,
-        fog,
-        preview_backface_wireframe,
-        hidden_scene_nodes,
-        &mut scratch,
-    );
-    walk_image_props(
-        project,
-        room_id,
-        grid,
-        textures,
-        world_camera,
-        hidden_scene_nodes,
-        selected,
-        hovered_entity_node,
-        preview_bounds,
-        &mut scratch,
-    );
-    if show_grid {
-        push_streaming_chunk_boundaries(project, room_id, grid, &mut scratch);
-    }
-    walk_entities(project, grid, hidden_scene_nodes, selected, &mut scratch);
-    walk_light_gizmos(
-        project,
-        grid,
-        hidden_scene_nodes,
-        selected,
-        hovered_entity_node,
-        &mut scratch,
-    );
+    let preview_tick = PREVIEW_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    for &(room_id, grid) in &visible_rooms {
+        if scratch.geometry_full() {
+            break;
+        }
+        let fog = PreviewFog::from_grid(grid, preview_fog);
+        walk_room(
+            project,
+            room_id,
+            grid,
+            textures,
+            world_camera,
+            fog,
+            preview_backface_wireframe,
+            hidden_scene_nodes,
+            &mut scratch,
+        );
+        walk_image_props(
+            project,
+            room_id,
+            grid,
+            textures,
+            world_camera,
+            hidden_scene_nodes,
+            selected,
+            hovered_entity_node,
+            preview_bounds,
+            &mut scratch,
+        );
+        walk_box_props(
+            project,
+            room_id,
+            grid,
+            textures,
+            world_camera,
+            fog,
+            hidden_scene_nodes,
+            selected,
+            hovered_entity_node,
+            preview_bounds,
+            &mut scratch,
+        );
+        if show_grid {
+            push_streaming_chunk_boundaries(project, room_id, grid, &mut scratch);
+        }
+        walk_entities(
+            project,
+            room_id,
+            grid,
+            hidden_scene_nodes,
+            selected,
+            &mut scratch,
+        );
+        if show_lights {
+            walk_light_gizmos(
+                project,
+                room_id,
+                grid,
+                hidden_scene_nodes,
+                selected,
+                hovered_entity_node,
+                &mut scratch,
+            );
+        }
+        if show_portals {
+            walk_portal_seams(
+                project,
+                room_id,
+                grid,
+                hidden_scene_nodes,
+                selected,
+                hovered_entity_node,
+                &mut scratch,
+            );
+        }
 
-    // Selection / hover / paint overlays drawn before models --
-    // they project through the camera GTE matrix that
-    // `setup_gte_for_camera` installed. Models render after,
-    // overwriting per-joint GTE state. We re-install the
-    // camera state below before drawing entity bounds so they
-    // pick up the same camera basis instead of the last
-    // model joint matrix.
-    if selected_primitives.is_empty() {
-        if let Some(selection) = selected_primitive {
-            push_selection_outline(grid, selection, OutlineRole::Selected, &mut scratch);
+        // Selection / hover / paint overlays drawn before models --
+        // they project through the camera GTE matrix that
+        // `setup_gte_for_camera` installed. Models render after,
+        // overwriting per-joint GTE state. We re-install the
+        // camera state after each room before drawing more editor
+        // geometry.
+        if selected_primitives.is_empty() {
+            if let Some(selection) =
+                selected_primitive.filter(|selection| selection.room() == room_id)
+            {
+                push_selection_outline(grid, selection, OutlineRole::Selected, &mut scratch);
+            }
+        } else {
+            for selection in selected_primitives {
+                if selection.room() == room_id {
+                    push_selection_outline(grid, *selection, OutlineRole::Selected, &mut scratch);
+                }
+            }
         }
-    } else {
-        for selection in selected_primitives {
-            push_selection_outline(grid, *selection, OutlineRole::Selected, &mut scratch);
+        for face in selected_sector_faces {
+            if face.room == room_id {
+                push_face_outline(grid, *face, FACE_OUTLINE_SELECTED, &mut scratch);
+            }
         }
-    }
-    for face in selected_sector_faces {
-        push_face_outline(grid, *face, FACE_OUTLINE_SELECTED, &mut scratch);
-    }
-    if let Some(selection) = hovered_primitive {
-        if Some(selection) != selected_primitive && !selected_primitives.contains(&selection) {
-            push_selection_outline(grid, selection, OutlineRole::Hover, &mut scratch);
+        if let Some(selection) = hovered_primitive {
+            if selection.room() == room_id
+                && Some(selection) != selected_primitive
+                && !selected_primitives.contains(&selection)
+            {
+                push_selection_outline(grid, selection, OutlineRole::Hover, &mut scratch);
+            }
         }
-    }
-    if let Some(preview) = paint_target_preview {
-        push_paint_preview(grid, preview, &mut scratch);
-    }
+        if room_id == first_room_id {
+            if let Some(preview) = paint_target_preview {
+                push_paint_preview(grid, preview, &mut scratch);
+            }
+        }
 
-    walk_model_instances(
-        project,
-        room_id,
-        grid,
-        textures,
-        assets,
-        selected,
-        &world_camera,
-        fog,
-        hidden_scene_nodes,
-        &mut scratch,
-    );
+        walk_model_instances(
+            project,
+            room_id,
+            grid,
+            textures,
+            assets,
+            selected,
+            &world_camera,
+            fog,
+            hidden_scene_nodes,
+            preview_tick,
+            &mut scratch,
+        );
+
+        let _ = setup_gte_for_camera(camera);
+    }
 
     // Re-prime the GTE with the camera matrix -- model
     // rendering left it set to the last joint's view, which
@@ -349,8 +446,11 @@ pub fn build_phase1_frame(
         }
     }
     for selection in validation_issue_primitives {
-        if selection.room() == room_id {
-            push_selection_outline(grid, *selection, OutlineRole::Error, &mut scratch);
+        for &(room_id, grid) in &visible_rooms {
+            if selection.room() == room_id {
+                push_selection_outline(grid, *selection, OutlineRole::Error, &mut scratch);
+                break;
+            }
         }
     }
 
@@ -364,20 +464,189 @@ pub fn build_phase1_frame(
     }
 }
 
-/// First Room that is not hidden by the editor Scene tree.
-fn first_visible_room_grid<'a>(
+/// Rooms that are not hidden by the editor Scene tree.
+fn visible_room_grids<'a>(
     project: &'a ProjectDocument,
     hidden_scene_nodes: &HashSet<NodeId>,
-) -> Option<(psxed_project::NodeId, &'a WorldGrid)> {
+) -> Vec<(psxed_project::NodeId, &'a WorldGrid)> {
     let scene = project.active_scene();
-    let room = scene.nodes().iter().find(|node| {
-        matches!(node.kind, NodeKind::Room { .. })
-            && !scene_node_hidden(scene, hidden_scene_nodes, node.id)
-    })?;
-    let NodeKind::Room { grid } = &room.kind else {
-        return None;
+    scene
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            if scene_node_hidden(scene, hidden_scene_nodes, node.id) {
+                return None;
+            }
+            let NodeKind::Room { grid } = &node.kind else {
+                return None;
+            };
+            Some((node.id, grid))
+        })
+        .collect()
+}
+
+/// Rooms considered by the editable 3D preview.
+///
+/// Coastal Ruins imports as a real TR room graph, not a toy single-map
+/// scene. Rendering every unhidden room every host frame turns the
+/// editor preview into a whole-level renderer. Instead, keep the 3D
+/// viewport TR-like: render the active room plus a bounded portal
+/// neighborhood. The scene tree and 2D map remain the whole-world
+/// inspection tools.
+fn preview_room_grids<'a>(
+    project: &'a ProjectDocument,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    active_room: Option<NodeId>,
+    selected: NodeId,
+    selected_primitive: Option<psxed_ui::Selection>,
+    selected_primitives: &[psxed_ui::Selection],
+    validation_issue_primitives: &[psxed_ui::Selection],
+) -> Vec<(NodeId, &'a WorldGrid)> {
+    let scene = project.active_scene();
+    let mut seeds = Vec::new();
+    push_preview_room_seed(scene, hidden_scene_nodes, active_room, &mut seeds);
+    if let Some(selection) = selected_primitive {
+        push_preview_room_seed(
+            scene,
+            hidden_scene_nodes,
+            Some(selection.room()),
+            &mut seeds,
+        );
+    }
+    for selection in selected_primitives {
+        push_preview_room_seed(
+            scene,
+            hidden_scene_nodes,
+            Some(selection.room()),
+            &mut seeds,
+        );
+    }
+    if let Some(room) = selected_room_ancestor(scene, hidden_scene_nodes, selected) {
+        push_preview_room_seed(scene, hidden_scene_nodes, Some(room), &mut seeds);
+    }
+    for selection in validation_issue_primitives {
+        push_preview_room_seed(
+            scene,
+            hidden_scene_nodes,
+            Some(selection.room()),
+            &mut seeds,
+        );
+    }
+    if seeds.is_empty() {
+        if let Some((first, _)) = visible_room_grids(project, hidden_scene_nodes).first() {
+            seeds.push(*first);
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    for seed in seeds {
+        queue.push_back((seed, 0usize));
+    }
+
+    while let Some((room, depth)) = queue.pop_front() {
+        if !seen.insert(room) {
+            continue;
+        }
+        if scene_node_hidden(scene, hidden_scene_nodes, room) {
+            continue;
+        }
+        let Some(grid) = scene.node(room).and_then(|node| match &node.kind {
+            NodeKind::Room { grid } => Some(grid),
+            _ => None,
+        }) else {
+            continue;
+        };
+        result.push((room, grid));
+        if result.len() >= EDITOR_PREVIEW_MAX_ROOMS || depth >= EDITOR_PREVIEW_PORTAL_DEPTH {
+            continue;
+        }
+        for connected in connected_portal_rooms(scene, room) {
+            if !seen.contains(&connected) {
+                queue.push_back((connected, depth + 1));
+            }
+        }
+    }
+
+    result
+}
+
+fn push_preview_room_seed(
+    scene: &Scene,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    room: Option<NodeId>,
+    seeds: &mut Vec<NodeId>,
+) {
+    let Some(room) = room else {
+        return;
     };
-    Some((room.id, grid))
+    if seeds.contains(&room) || scene_node_hidden(scene, hidden_scene_nodes, room) {
+        return;
+    }
+    if scene
+        .node(room)
+        .is_some_and(|node| matches!(node.kind, NodeKind::Room { .. }))
+    {
+        seeds.push(room);
+    }
+}
+
+fn selected_room_ancestor(
+    scene: &Scene,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+) -> Option<NodeId> {
+    let mut current = Some(selected);
+    while let Some(id) = current {
+        if scene_node_hidden(scene, hidden_scene_nodes, id) {
+            return None;
+        }
+        let node = scene.node(id)?;
+        if matches!(node.kind, NodeKind::Room { .. }) {
+            return Some(id);
+        }
+        current = node.parent;
+    }
+    None
+}
+
+fn room_ancestor(scene: &Scene, node_id: NodeId) -> Option<NodeId> {
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        let node = scene.node(id)?;
+        if matches!(node.kind, NodeKind::Room { .. }) {
+            return Some(id);
+        }
+        current = node.parent;
+    }
+    None
+}
+
+fn connected_portal_rooms(scene: &Scene, room: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    for node in scene.nodes() {
+        let NodeKind::Portal {
+            target_room: Some(target),
+            ..
+        } = &node.kind
+        else {
+            continue;
+        };
+        let target = *target;
+        if room_ancestor(scene, node.id) == Some(room) {
+            if target != room && !out.contains(&target) {
+                out.push(target);
+            }
+        } else if target == room {
+            if let Some(source) = room_ancestor(scene, node.id) {
+                if source != room && !out.contains(&source) {
+                    out.push(source);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Configure the host-side GTE so subsequent `project_vertex` /
@@ -673,6 +942,7 @@ enum FaceShade {
     Textured {
         slot: MaterialSlot,
         tint: (u8, u8, u8),
+        blend_mode: BlendMode,
         sidedness: psxed_project::MaterialFaceSidedness,
     },
 }
@@ -687,9 +957,15 @@ impl FaceShade {
     fn with_sidedness(self, sidedness: psxed_project::MaterialFaceSidedness) -> Self {
         match self {
             Self::Flat { rgb, .. } => Self::Flat { rgb, sidedness },
-            Self::Textured { slot, tint, .. } => Self::Textured {
+            Self::Textured {
                 slot,
                 tint,
+                blend_mode,
+                ..
+            } => Self::Textured {
+                slot,
+                tint,
+                blend_mode,
                 sidedness,
             },
         }
@@ -709,6 +985,7 @@ fn face_shade(
             return FaceShade::Textured {
                 slot,
                 tint: material_texture_tint(project, id),
+                blend_mode: material_blend_mode(project, Some(id)),
                 sidedness,
             };
         }
@@ -750,6 +1027,26 @@ fn material_texture_tint(project: &ProjectDocument, material: ResourceId) -> (u8
         .unwrap_or((0x80, 0x80, 0x80))
 }
 
+fn material_blend_mode(project: &ProjectDocument, material: Option<ResourceId>) -> BlendMode {
+    material
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Material(material) => Some(psx_blend_mode(material.blend_mode)),
+            _ => None,
+        })
+        .unwrap_or(BlendMode::Opaque)
+}
+
+fn psx_blend_mode(mode: psxed_project::PsxBlendMode) -> BlendMode {
+    match mode {
+        psxed_project::PsxBlendMode::Opaque => BlendMode::Opaque,
+        psxed_project::PsxBlendMode::Average => BlendMode::Average,
+        psxed_project::PsxBlendMode::Add => BlendMode::Add,
+        psxed_project::PsxBlendMode::Subtract => BlendMode::Subtract,
+        psxed_project::PsxBlendMode::AddQuarter => BlendMode::AddQuarter,
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct PreviewFog {
     enabled: bool,
@@ -777,10 +1074,12 @@ impl PreviewFog {
             FaceShade::Textured {
                 slot,
                 tint,
+                blend_mode,
                 sidedness,
             } => FaceShade::Textured {
                 slot,
                 tint: self.apply_rgb(tint, depth),
+                blend_mode,
                 sidedness,
             },
         }
@@ -1248,10 +1547,14 @@ fn light_face(
             sidedness,
         },
         FaceShade::Textured {
-            slot, sidedness, ..
+            slot,
+            blend_mode,
+            sidedness,
+            ..
         } => FaceShade::Textured {
             slot,
             tint: (r, g, b),
+            blend_mode,
             sidedness,
         },
     }
@@ -1624,6 +1927,7 @@ fn select_uv_wall_corners(uvs: [(u8, u8); 4], corners: [WallCorner; 3]) -> [(u8,
 /// with distance, the way Godot's editor sprites work.
 fn walk_entities(
     project: &ProjectDocument,
+    room_id: NodeId,
     grid: &WorldGrid,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
@@ -1631,7 +1935,9 @@ fn walk_entities(
 ) {
     let scene = project.active_scene();
     for node in scene.nodes() {
-        if scene_node_hidden(scene, hidden_scene_nodes, node.id) {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
+            || !is_descendant_of_room(scene, node.id, room_id)
+        {
             continue;
         }
         // Skip nodes that the model-preview pass renders as real
@@ -1755,8 +2061,11 @@ fn walk_image_props(
         let v_max = slot.texture_height.saturating_sub(1);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
         let lit_tint = preview_lit_image_prop_tint(tint, verts, &lights, grid.ambient_color);
-        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, lit_tint)
-            .with_texture_window(slot.texture_window);
+        let material = preview_texture_material(
+            slot,
+            lit_tint,
+            material_blend_mode(project, Some(material_id)),
+        );
         let _ = push_textured_material_tri(
             scratch,
             [p[0], p[1], p[2]],
@@ -1795,6 +2104,169 @@ fn walk_image_props(
                 );
             }
         }
+    }
+}
+
+fn walk_box_props(
+    project: &ProjectDocument,
+    room_id: psxed_project::NodeId,
+    grid: &WorldGrid,
+    textures: &EditorTextures,
+    camera: psx_engine::WorldCamera,
+    fog: PreviewFog,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+    hovered: Option<NodeId>,
+    preview_bounds: bool,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
+    for node in scene.nodes() {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
+            || !is_descendant_of_room(scene, node.id, room_id)
+        {
+            continue;
+        }
+        let NodeKind::BoxProp {
+            materials,
+            vertices,
+            collision_enabled: _,
+            break_flags: _,
+        } = &node.kind
+        else {
+            continue;
+        };
+        let origin = node_room_local_origin(grid, &node.transform);
+        let world_vertices = box_prop_vertices(origin, *vertices, node.transform.rotation_degrees);
+        for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+            let Some(material_id) = materials[face] else {
+                continue;
+            };
+            let face_vertices = box_prop_face_vertices(world_vertices, face);
+            let Some(projected) = camera.project_world_quad(face_vertices) else {
+                continue;
+            };
+            let p = projected.map(preview_projected_from_engine);
+            let shade = face_shade(
+                project,
+                Some(material_id),
+                box_prop_fallback_color(face),
+                textures,
+            )
+            // Box props are standalone closed primitives. The
+            // runtime renders them uncullled, and the editor
+            // preview should match that rather than inheriting
+            // one-sided room-face material semantics.
+            .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
+            let face_center = average_world_quad(face_vertices);
+            let depth = face_depth(camera, face_center);
+            let shade = fog.apply_shade(
+                light_face(shade, face_center, &lights, grid.ambient_color),
+                depth,
+            );
+            let uvs = match shade {
+                FaceShade::Textured { slot, .. } => {
+                    let u_max = slot.texture_width.saturating_sub(1);
+                    let v_max = slot.texture_height.saturating_sub(1);
+                    [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]
+                }
+                FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
+            };
+            emit_box_prop_face(scratch, p, uvs, shade);
+        }
+
+        let is_selected = node.id == selected;
+        let is_hovered = hovered == Some(node.id);
+        if preview_bounds || is_selected || is_hovered {
+            push_box_prop_wireframe(
+                scratch,
+                world_vertices,
+                entity_bound_style(psxed_ui::EntityBoundKind::BoxProp, is_selected, is_hovered),
+            );
+        }
+    }
+}
+
+fn emit_box_prop_face(
+    scratch: &mut PreviewScratch,
+    p: [psx_gte::scene::Projected; 4],
+    uvs: [(u8, u8); 4],
+    shade: FaceShade,
+) {
+    let _ = emit_face_tri(scratch, [p[0], p[1], p[2]], [uvs[0], uvs[1], uvs[2]], shade);
+    let _ = emit_face_tri(scratch, [p[0], p[2], p[3]], [uvs[0], uvs[2], uvs[3]], shade);
+}
+
+fn box_prop_vertices(
+    origin: psx_engine::WorldVertex,
+    vertices: [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    rotation_degrees: [f32; 3],
+) -> [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT] {
+    let rotation = [
+        yaw_to_q12(rotation_degrees[0]),
+        yaw_to_q12(rotation_degrees[1]),
+        yaw_to_q12(rotation_degrees[2]),
+    ];
+    let mut out = [psx_engine::WorldVertex::new(0, 0, 0); psxed_project::BOX_PROP_VERTEX_COUNT];
+    for (i, local) in vertices.iter().enumerate() {
+        let rotated = rotate_image_prop_local(
+            [local[0] as i32, local[1] as i32, local[2] as i32],
+            rotation,
+        );
+        out[i] = psx_engine::WorldVertex::new(
+            origin.x.saturating_add(rotated[0]),
+            origin.y.saturating_add(rotated[1]),
+            origin.z.saturating_add(rotated[2]),
+        );
+    }
+    out
+}
+
+fn box_prop_face_vertices(
+    vertices: [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT],
+    face: usize,
+) -> [psx_engine::WorldVertex; 4] {
+    let indices = BOX_PROP_FACE_VERTEX_INDICES[face];
+    [
+        vertices[indices[0]],
+        vertices[indices[1]],
+        vertices[indices[2]],
+        vertices[indices[3]],
+    ]
+}
+
+fn average_world_quad(verts: [psx_engine::WorldVertex; 4]) -> [i32; 3] {
+    [
+        average_i32_4(verts[0].x, verts[1].x, verts[2].x, verts[3].x),
+        average_i32_4(verts[0].y, verts[1].y, verts[2].y, verts[3].y),
+        average_i32_4(verts[0].z, verts[1].z, verts[2].z, verts[3].z),
+    ]
+}
+
+fn box_prop_fallback_color(face: usize) -> (u8, u8, u8) {
+    const COLORS: [(u8, u8, u8); psxed_project::BOX_PROP_FACE_COUNT] = [
+        (0x87, 0xB4, 0xDC),
+        (0x78, 0xC0, 0xA0),
+        (0xD0, 0xAA, 0x78),
+        (0xB0, 0x98, 0xD0),
+        (0xC0, 0xC8, 0xD0),
+        (0x90, 0x98, 0xA0),
+    ];
+    COLORS[face]
+}
+
+fn push_box_prop_wireframe(
+    scratch: &mut PreviewScratch,
+    vertices: [psx_engine::WorldVertex; psxed_project::BOX_PROP_VERTEX_COUNT],
+    style: FaceOutlineStyle,
+) {
+    let projected = vertices.map(|v| gte_scene::project_vertex(world_to_view([v.x, v.y, v.z])));
+    for (a, b) in BOX_PROP_EDGE_VERTEX_INDICES {
+        if projected[a].sz == 0 || projected[b].sz == 0 {
+            continue;
+        }
+        push_screen_line(scratch, projected[a], projected[b], style);
     }
 }
 
@@ -2057,13 +2529,9 @@ fn walk_model_instances(
     camera: &psx_engine::WorldCamera,
     fog: PreviewFog,
     hidden_scene_nodes: &HashSet<NodeId>,
+    tick: u32,
     scratch: &mut PreviewScratch,
 ) {
-    // Bump the global preview tick once per frame so the
-    // animation loops at a stable rate regardless of how many
-    // instances we render.
-    let tick = PREVIEW_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
     // The persistent `EditorAssets` cache owns mesh + animation
     // bytes. We only borrow into it here; nothing in this loop
     // touches the filesystem. Per-instance state (which clip is
@@ -2077,6 +2545,9 @@ fn walk_model_instances(
     for node in scene.nodes() {
         if instances_meta.len() >= MAX_PREVIEW_MODEL_INSTANCES {
             break;
+        }
+        if !is_descendant_of_room(scene, node.id, room_id) {
+            continue;
         }
         let Some(reference) = preview_static_model_reference(scene, node) else {
             continue;
@@ -2157,6 +2628,7 @@ fn walk_model_instances(
     // path -- no separate player renderer.
     walk_player_spawn_preview(
         project,
+        room_id,
         grid,
         textures,
         hidden_scene_nodes,
@@ -2235,6 +2707,7 @@ fn walk_model_instances(
 ///    will surface the missing character).
 fn walk_player_spawn_preview(
     project: &ProjectDocument,
+    room_id: psxed_project::NodeId,
     grid: &WorldGrid,
     textures: &EditorTextures,
     hidden_scene_nodes: &HashSet<NodeId>,
@@ -2245,6 +2718,9 @@ fn walk_player_spawn_preview(
     for node in scene.nodes() {
         if instances_meta.len() >= MAX_PREVIEW_MODEL_INSTANCES {
             break;
+        }
+        if !is_descendant_of_room(scene, node.id, room_id) {
+            continue;
         }
         let Some(reference) = preview_player_reference(scene, node) else {
             continue;
@@ -2803,6 +3279,7 @@ fn shade_model_tint(
 /// light gizmos rather than generic entities.
 fn walk_light_gizmos(
     project: &ProjectDocument,
+    room_id: NodeId,
     grid: &WorldGrid,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
@@ -2811,6 +3288,9 @@ fn walk_light_gizmos(
 ) {
     let scene = project.active_scene();
     for light in preview_lights(scene, hidden_scene_nodes) {
+        if !is_descendant_of_room(scene, light.host_id, room_id) {
+            continue;
+        }
         let center = node_room_local_origin(grid, &light.transform);
         let center_world = [center.x, center.y, center.z];
         let is_selected = preview_reference_selected(selected, light.host_id, None, None, None);
@@ -2879,7 +3359,10 @@ fn walk_entity_bounds(
     for b in bounds {
         if matches!(
             b.kind,
-            psxed_ui::EntityBoundKind::PointLight | psxed_ui::EntityBoundKind::ImageProp
+            psxed_ui::EntityBoundKind::PointLight
+                | psxed_ui::EntityBoundKind::ImageProp
+                | psxed_ui::EntityBoundKind::BoxProp
+                | psxed_ui::EntityBoundKind::Portal
         ) {
             continue;
         }
@@ -2922,10 +3405,11 @@ fn entity_bound_style(
         psxed_ui::EntityBoundKind::Model => (0xC0, 0xC8, 0xD0),
         psxed_ui::EntityBoundKind::MeshFallback => (0x90, 0x98, 0xA0),
         psxed_ui::EntityBoundKind::ImageProp => (0xD0, 0xAA, 0x78),
+        psxed_ui::EntityBoundKind::BoxProp => (0x87, 0xB4, 0xDC),
         psxed_ui::EntityBoundKind::SpawnPoint => (0x60, 0xE0, 0x80),
         psxed_ui::EntityBoundKind::PointLight => (0xFF, 0xD8, 0x70),
         psxed_ui::EntityBoundKind::Trigger => (0xC8, 0x80, 0xE0),
-        psxed_ui::EntityBoundKind::Portal => (0xFF, 0xB0, 0x60),
+        psxed_ui::EntityBoundKind::Portal => PORTAL_SEAM_STYLE.rgb,
         psxed_ui::EntityBoundKind::AudioSource => (0x70, 0xD8, 0xC0),
     };
     FaceOutlineStyle {
@@ -2998,10 +3482,12 @@ fn push_world_box_wireframe(
 }
 
 fn selected_node_is_image_prop(project: &ProjectDocument, selected: NodeId) -> bool {
-    project
-        .active_scene()
-        .node(selected)
-        .is_some_and(|node| matches!(node.kind, NodeKind::ImageProp { .. }))
+    project.active_scene().node(selected).is_some_and(|node| {
+        matches!(
+            node.kind,
+            NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. }
+        )
+    })
 }
 
 /// Draw a forward-pointing arrow from the bound centre out
@@ -3184,13 +3670,16 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         NodeKind::SpawnPoint { player: false, .. } => Some((0x60, 0xB8, 0xF0)),
         NodeKind::MeshInstance { .. } => Some((0xC0, 0xC8, 0xD0)),
         NodeKind::ImageProp { .. } => Some((0xD0, 0xAA, 0x78)),
+        // Box props render as real textured geometry in
+        // `walk_box_props`; don't cover them with a 2D marker.
+        NodeKind::BoxProp { .. } => None,
         NodeKind::Entity => Some((0xA0, 0xB0, 0xC0)),
         // Lights draw their own bulb icon + radius ring in
         // `walk_light_gizmos`; using the generic billboard square
         // makes them read like ordinary markers.
         NodeKind::PointLight { .. } => None,
         NodeKind::Trigger { .. } => Some((0xC8, 0x80, 0xE0)),
-        NodeKind::Portal { .. } => Some((0xFF, 0xB0, 0x60)),
+        NodeKind::Portal { .. } => None,
         NodeKind::AudioSource { .. } => Some((0x70, 0xD8, 0xC0)),
         NodeKind::ModelRenderer { .. }
         | NodeKind::Animator { .. }
@@ -3278,21 +3767,15 @@ fn material_sidedness(
 /// before clamp truncation kicks in -- comfortably the editor's
 /// budget cap.
 ///
-/// Debug builds assert; release silently saturates rather than
-/// crashing the editor mid-paint.
+/// Saturates out-of-range authoring coordinates rather than crashing
+/// the editor. Runtime room windows should keep PS1-visible geometry
+/// local, but the editor can inspect imported TR levels whose full
+/// world coordinates are much larger than a single GTE input range.
 fn world_to_view(world: [i32; 3]) -> Vec3I16 {
     let a = view_anchor();
     let lx = world[0] - a[0];
     let ly = world[1] - a[1];
     let lz = world[2] - a[2];
-    debug_assert!(
-        (i16::MIN as i32..=i16::MAX as i32).contains(&lx)
-            && (i16::MIN as i32..=i16::MAX as i32).contains(&ly)
-            && (i16::MIN as i32..=i16::MAX as i32).contains(&lz),
-        "vertex {:?} (anchor-relative {:?}) overflows i16 — room too big or camera anchor wrong",
-        world,
-        [lx, ly, lz]
-    );
     Vec3I16::new(clamp_i16(lx), clamp_i16(ly), clamp_i16(lz))
 }
 
@@ -3351,6 +3834,30 @@ fn push_paint_preview(
             } else {
                 push_face_outline(grid, face, FACE_OUTLINE_WALL_PAINT, scratch);
             }
+        }
+        psxed_ui::PaintTargetPreview::PortalEdge {
+            world_cell_x,
+            world_cell_z,
+            dir,
+            valid,
+        } => {
+            let style = if valid {
+                PORTAL_SEAM_STYLE
+            } else {
+                PORTAL_SEAM_INVALID_STYLE
+            };
+            if valid {
+                if let Some((sx, sz)) = grid.world_cell_to_array(world_cell_x, world_cell_z) {
+                    if let Some(edge) = canonical_portal_edge_for_array_cell(sx, sz, dir) {
+                        let seam = portal_seam_edges_for_edge(grid, edge);
+                        if !seam.is_empty() {
+                            push_portal_seam_edges(grid, seam, style, scratch);
+                            return;
+                        }
+                    }
+                }
+            }
+            push_portal_edge_wall_outline(grid, world_cell_x, world_cell_z, dir, style, scratch);
         }
     }
 }
@@ -3430,6 +3937,389 @@ fn push_ghost_wall_outline(
     }
 }
 
+fn walk_portal_seams(
+    project: &ProjectDocument,
+    room_id: NodeId,
+    grid: &WorldGrid,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+    hovered: Option<NodeId>,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    for node in scene.nodes() {
+        if !matches!(node.kind, NodeKind::Portal { .. })
+            || scene_node_hidden(scene, hidden_scene_nodes, node.id)
+            || !is_descendant_of_room(scene, node.id, room_id)
+        {
+            continue;
+        }
+        let mut style = PORTAL_SEAM_STYLE;
+        if node.id == selected || hovered == Some(node.id) {
+            style.thickness_px = 4.0;
+        }
+        push_portal_seam_edges(grid, portal_seam_edges_for_node(grid, node), style, scratch);
+    }
+}
+
+fn push_portal_seam_edges(
+    grid: &WorldGrid,
+    edges: Vec<PortalEdge>,
+    style: FaceOutlineStyle,
+    scratch: &mut PreviewScratch,
+) {
+    for run in portal_seam_runs(edges) {
+        push_portal_seam_run(grid, run, style, scratch);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PortalSeamRun {
+    start: PortalEdge,
+    len: u16,
+}
+
+fn portal_seam_runs(mut edges: Vec<PortalEdge>) -> Vec<PortalSeamRun> {
+    edges.retain(|edge| matches!(edge.direction, GridDirection::North | GridDirection::East));
+    edges.sort_by_key(|edge| match edge.direction {
+        GridDirection::North => (0, edge.z, edge.x),
+        GridDirection::East => (1, edge.x, edge.z),
+        _ => (2, edge.z, edge.x),
+    });
+    let mut runs = Vec::new();
+    for edge in edges {
+        if let Some(run) = runs.last_mut() {
+            if portal_edge_continues_run(run, edge) {
+                run.len = run.len.saturating_add(1);
+                continue;
+            }
+        }
+        runs.push(PortalSeamRun {
+            start: edge,
+            len: 1,
+        });
+    }
+    runs
+}
+
+fn portal_edge_continues_run(run: &PortalSeamRun, edge: PortalEdge) -> bool {
+    if edge.direction != run.start.direction {
+        return false;
+    }
+    match edge.direction {
+        GridDirection::North => {
+            edge.z == run.start.z && run.start.x.checked_add(run.len) == Some(edge.x)
+        }
+        GridDirection::East => {
+            edge.x == run.start.x && run.start.z.checked_add(run.len) == Some(edge.z)
+        }
+        _ => false,
+    }
+}
+
+fn push_portal_seam_run(
+    grid: &WorldGrid,
+    run: PortalSeamRun,
+    style: FaceOutlineStyle,
+    scratch: &mut PreviewScratch,
+) {
+    if run.len == 0 {
+        return;
+    }
+    let mut first: Option<[spatial::RoomPoint; 4]> = None;
+    let mut last: Option<[spatial::RoomPoint; 4]> = None;
+    for offset in 0..run.len {
+        let edge = match run.start.direction {
+            GridDirection::North => {
+                let Some(x) = run.start.x.checked_add(offset) else {
+                    return;
+                };
+                PortalEdge { x, ..run.start }
+            }
+            GridDirection::East => {
+                let Some(z) = run.start.z.checked_add(offset) else {
+                    return;
+                };
+                PortalEdge { z, ..run.start }
+            }
+            _ => return,
+        };
+        let Some(corners) = portal_edge_wall_corners(grid, edge) else {
+            continue;
+        };
+        push_portal_segment(scratch, corners[0], corners[1], style);
+        push_portal_segment(scratch, corners[3], corners[2], style);
+        if first.is_none() {
+            first = Some(corners);
+        }
+        last = Some(corners);
+    }
+
+    let Some(first) = first else {
+        return;
+    };
+    let Some(last) = last else {
+        return;
+    };
+    match run.start.direction {
+        GridDirection::North => {
+            push_portal_segment(scratch, first[0], first[3], style);
+            push_portal_segment(scratch, last[1], last[2], style);
+        }
+        GridDirection::East => {
+            push_portal_segment(scratch, first[1], first[2], style);
+            push_portal_segment(scratch, last[0], last[3], style);
+        }
+        _ => {}
+    }
+}
+
+fn push_portal_edge_wall_outline(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+    style: FaceOutlineStyle,
+    scratch: &mut PreviewScratch,
+) {
+    let Some(corners) = portal_edge_wall_corners_for_world_cell(grid, wcx, wcz, dir) else {
+        return;
+    };
+    push_portal_segment(scratch, corners[0], corners[1], style);
+    push_portal_segment(scratch, corners[1], corners[2], style);
+    push_portal_segment(scratch, corners[2], corners[3], style);
+    push_portal_segment(scratch, corners[3], corners[0], style);
+}
+
+fn portal_edge_wall_corners(grid: &WorldGrid, edge: PortalEdge) -> Option<[spatial::RoomPoint; 4]> {
+    portal_edge_wall_corners_for_world_cell(
+        grid,
+        grid.origin[0] + edge.x as i32,
+        grid.origin[1] + edge.z as i32,
+        edge.direction,
+    )
+}
+
+fn portal_edge_wall_corners_for_world_cell(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+) -> Option<[spatial::RoomPoint; 4]> {
+    const BOTTOM_LIFT: i32 = 24;
+    let bounds = spatial::cell_bounds_from_world_cell(wcx, wcz, grid.sector_size);
+    let heights = portal_edge_height_span_for_world_cell(grid, wcx, wcz, dir);
+    let mut corners = spatial::editor_wall_outline_corners(bounds, dir, heights, 0)?;
+    corners[0][1] = corners[0][1].saturating_add(BOTTOM_LIFT);
+    corners[1][1] = corners[1][1].saturating_add(BOTTOM_LIFT);
+    Some(corners)
+}
+
+fn portal_edge_height_span_for_world_cell(
+    grid: &WorldGrid,
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+) -> [i32; 4] {
+    let mut bottom: [Option<i32>; 2] = [None, None];
+    let mut top: [Option<i32>; 2] = [None, None];
+    let mut fallback_bottom: Option<i32> = None;
+    let mut fallback_top: Option<i32> = None;
+
+    if let Some(sector) = sector_for_world_cell(grid, wcx, wcz) {
+        sample_sector_edge_span(sector, dir, false, &mut bottom, &mut top);
+        sample_sector_vertical_bounds(sector, &mut fallback_bottom, &mut fallback_top);
+    }
+    if let Some((nwcx, nwcz, opposite)) = portal_neighbour_world_cell(wcx, wcz, dir) {
+        if let Some(sector) = sector_for_world_cell(grid, nwcx, nwcz) {
+            sample_sector_edge_span(sector, opposite, true, &mut bottom, &mut top);
+            sample_sector_vertical_bounds(sector, &mut fallback_bottom, &mut fallback_top);
+        }
+    }
+
+    let fallback_bottom = fallback_bottom.unwrap_or(0);
+    let bottom = [
+        bottom[0].unwrap_or(fallback_bottom).min(fallback_bottom),
+        bottom[1].unwrap_or(fallback_bottom).min(fallback_bottom),
+    ];
+    let fallback_top = fallback_top.unwrap_or_else(|| {
+        bottom[0]
+            .max(bottom[1])
+            .saturating_add(grid.sector_size.max(1))
+    });
+    let mut top = [
+        top[0].unwrap_or(fallback_top).max(fallback_top),
+        top[1].unwrap_or(fallback_top).max(fallback_top),
+    ];
+    for i in 0..2 {
+        if top[i] <= bottom[i] {
+            top[i] = bottom[i].saturating_add(grid.sector_size.max(1));
+        }
+    }
+    [bottom[0], bottom[1], top[1], top[0]]
+}
+
+fn sector_for_world_cell(grid: &WorldGrid, wcx: i32, wcz: i32) -> Option<&GridSector> {
+    let (sx, sz) = grid.world_cell_to_array(wcx, wcz)?;
+    grid.sector(sx, sz)
+}
+
+fn portal_neighbour_world_cell(
+    wcx: i32,
+    wcz: i32,
+    dir: GridDirection,
+) -> Option<(i32, i32, GridDirection)> {
+    let opposite = dir.opposite_cardinal()?;
+    match dir {
+        GridDirection::North => Some((wcx, wcz.checked_add(1)?, opposite)),
+        GridDirection::East => Some((wcx.checked_add(1)?, wcz, opposite)),
+        GridDirection::South => Some((wcx, wcz.checked_sub(1)?, opposite)),
+        GridDirection::West => Some((wcx.checked_sub(1)?, wcz, opposite)),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+    }
+}
+
+fn sample_sector_edge_span(
+    sector: &GridSector,
+    dir: GridDirection,
+    reverse: bool,
+    bottom: &mut [Option<i32>; 2],
+    top: &mut [Option<i32>; 2],
+) {
+    if let Some(edge) = sector
+        .floor
+        .as_ref()
+        .and_then(|floor| horizontal_edge_heights_for_portal(floor.heights, dir))
+    {
+        include_min_edge(bottom, maybe_reverse_edge(edge, reverse));
+    }
+    if let Some(edge) = sector
+        .ceiling
+        .as_ref()
+        .and_then(|ceiling| horizontal_edge_heights_for_portal(ceiling.heights, dir))
+    {
+        include_max_edge(top, maybe_reverse_edge(edge, reverse));
+    }
+    for wall in sector.walls.get(dir) {
+        let wall_bottom = [
+            wall.heights[WallCorner::BL.idx()],
+            wall.heights[WallCorner::BR.idx()],
+        ];
+        let wall_top = [
+            wall.heights[WallCorner::TL.idx()],
+            wall.heights[WallCorner::TR.idx()],
+        ];
+        include_min_edge(bottom, maybe_reverse_edge(wall_bottom, reverse));
+        include_max_edge(top, maybe_reverse_edge(wall_top, reverse));
+    }
+}
+
+fn sample_sector_vertical_bounds(
+    sector: &GridSector,
+    bottom: &mut Option<i32>,
+    top: &mut Option<i32>,
+) {
+    if let Some(floor) = &sector.floor {
+        for height in floor.heights {
+            include_min_value(bottom, height);
+        }
+    }
+    if let Some(ceiling) = &sector.ceiling {
+        for height in ceiling.heights {
+            include_max_value(top, height);
+        }
+    }
+    for dir in GridDirection::ALL {
+        for wall in sector.walls.get(dir) {
+            for height in wall.heights {
+                include_min_value(bottom, height);
+                include_max_value(top, height);
+            }
+        }
+    }
+}
+
+fn horizontal_edge_heights_for_portal(heights: [i32; 4], dir: GridDirection) -> Option<[i32; 2]> {
+    match dir {
+        GridDirection::North => Some([heights[Corner::NW.idx()], heights[Corner::NE.idx()]]),
+        GridDirection::East => Some([heights[Corner::NE.idx()], heights[Corner::SE.idx()]]),
+        GridDirection::South => Some([heights[Corner::SE.idx()], heights[Corner::SW.idx()]]),
+        GridDirection::West => Some([heights[Corner::SW.idx()], heights[Corner::NW.idx()]]),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+    }
+}
+
+fn maybe_reverse_edge(mut edge: [i32; 2], reverse: bool) -> [i32; 2] {
+    if reverse {
+        edge.swap(0, 1);
+    }
+    edge
+}
+
+fn include_min_edge(target: &mut [Option<i32>; 2], edge: [i32; 2]) {
+    for i in 0..2 {
+        include_min_value(&mut target[i], edge[i]);
+    }
+}
+
+fn include_max_edge(target: &mut [Option<i32>; 2], edge: [i32; 2]) {
+    for i in 0..2 {
+        include_max_value(&mut target[i], edge[i]);
+    }
+}
+
+fn include_min_value(target: &mut Option<i32>, value: i32) {
+    *target = Some(target.map_or(value, |current| current.min(value)));
+}
+
+fn include_max_value(target: &mut Option<i32>, value: i32) {
+    *target = Some(target.map_or(value, |current| current.max(value)));
+}
+
+fn push_portal_segment(
+    scratch: &mut PreviewScratch,
+    a: spatial::RoomPoint,
+    b: spatial::RoomPoint,
+    style: FaceOutlineStyle,
+) {
+    let pa = gte_scene::project_vertex(world_to_view(a));
+    let pb = gte_scene::project_vertex(world_to_view(b));
+    if pa.sz == 0 || pb.sz == 0 {
+        return;
+    }
+    push_screen_line(scratch, pa, pb, style);
+}
+
+fn canonical_portal_edge_for_array_cell(
+    sx: u16,
+    sz: u16,
+    dir: GridDirection,
+) -> Option<PortalEdge> {
+    match dir {
+        GridDirection::North => Some(PortalEdge {
+            x: sx,
+            z: sz,
+            direction: GridDirection::North,
+        }),
+        GridDirection::East => Some(PortalEdge {
+            x: sx,
+            z: sz,
+            direction: GridDirection::East,
+        }),
+        GridDirection::South => Some(PortalEdge {
+            x: sx,
+            z: sz.checked_sub(1)?,
+            direction: GridDirection::North,
+        }),
+        GridDirection::West => Some(PortalEdge {
+            x: sx.checked_sub(1)?,
+            z: sz,
+            direction: GridDirection::East,
+        }),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+    }
+}
+
 /// Hover and Selected outline styling. RGB plus screen-space line
 /// thickness in pixels. Keep these light: they are editor affordances,
 /// not scene geometry, and thick strokes obscure PS1-scale surfaces.
@@ -3478,6 +4368,14 @@ const FACE_OUTLINE_FLOOR_PAINT: FaceOutlineStyle = FaceOutlineStyle {
 const FACE_OUTLINE_CEILING_PAINT: FaceOutlineStyle = FaceOutlineStyle {
     rgb: (0x80, 0xC8, 0xFF),
     thickness_px: EDITOR_PREVIEW_PAINT_STROKE_WIDTH,
+};
+const PORTAL_SEAM_STYLE: FaceOutlineStyle = FaceOutlineStyle {
+    rgb: (0xFF, 0x48, 0xD6),
+    thickness_px: 3.0,
+};
+const PORTAL_SEAM_INVALID_STYLE: FaceOutlineStyle = FaceOutlineStyle {
+    rgb: (0xFF, 0x40, 0x60),
+    thickness_px: 2.0,
 };
 const STREAMING_CHUNK_BOUNDARY: FaceOutlineStyle = FaceOutlineStyle {
     rgb: (0x60, 0xFF, 0xC4),
@@ -3571,21 +4469,22 @@ fn push_streaming_chunk_boundaries(
     grid: &WorldGrid,
     scratch: &mut PreviewScratch,
 ) {
-    let streaming = project
-        .active_scene()
-        .world_streaming_for_node(room_id)
-        .unwrap_or_default();
-    let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config(streaming));
-    if plan.chunk_count() <= 1 {
+    let plan = plan_portal_rooms(
+        project.active_scene(),
+        room_id,
+        grid,
+        PortalRoomConfig::default(),
+    );
+    if plan.room_count() <= 1 {
         return;
     }
     let s = grid.sector_size;
     let y = 10;
-    for chunk in plan.chunks {
-        let x0 = chunk.world_origin[0] * s;
-        let z0 = chunk.world_origin[1] * s;
-        let x1 = x0 + chunk.size[0] as i32 * s;
-        let z1 = z0 + chunk.size[1] as i32 * s;
+    for room in plan.rooms {
+        let x0 = room.world_origin[0] * s;
+        let z0 = room.world_origin[1] * s;
+        let x1 = x0 + room.size[0] as i32 * s;
+        let z1 = z0 + room.size[1] as i32 * s;
         let projected: [psx_gte::scene::Projected; 4] = [
             gte_scene::project_vertex(world_to_view([x0, y, z1])),
             gte_scene::project_vertex(world_to_view([x1, y, z1])),
@@ -4133,9 +5032,7 @@ fn push_far_vista_textured_quad(
     texture_height: u8,
     tint: [u8; 3],
 ) {
-    let material =
-        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (tint[0], tint[1], tint[2]))
-            .with_texture_window(slot.texture_window);
+    let material = preview_texture_material(slot, (tint[0], tint[1], tint[2]), BlendMode::Opaque);
     let uvs = [
         (0, 0),
         (texture_width.saturating_sub(1), 0),
@@ -4189,7 +5086,12 @@ fn emit_face_tri(
     }
     match shade {
         FaceShade::Flat { rgb, .. } => push_tri(scratch, p, rgb),
-        FaceShade::Textured { slot, tint, .. } => push_tex_tri(scratch, p, uvs, slot, tint),
+        FaceShade::Textured {
+            slot,
+            tint,
+            blend_mode,
+            ..
+        } => push_tex_tri(scratch, p, uvs, slot, tint, blend_mode),
     }
 }
 
@@ -4345,16 +5247,29 @@ fn push_tex_tri(
     uvs: [(u8, u8); 3],
     slot: MaterialSlot,
     tint: (u8, u8, u8),
+    blend_mode: BlendMode,
 ) -> bool {
     let avg_sz = projected_avg_sz(p);
     push_textured_material_tri(
         scratch,
         p,
         uvs,
-        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
-            .with_texture_window(slot.texture_window),
+        preview_texture_material(slot, tint, blend_mode),
         room_depth_slot(avg_sz),
     )
+}
+
+fn preview_texture_material(
+    slot: MaterialSlot,
+    tint: (u8, u8, u8),
+    blend_mode: BlendMode,
+) -> TextureMaterial {
+    let material = if blend_mode.is_translucent() {
+        TextureMaterial::blended(slot.clut_word, slot.tpage_word, tint, blend_mode)
+    } else {
+        TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
+    };
+    material.with_texture_window(slot.texture_window)
 }
 
 fn push_shadow_tex_tri(
@@ -4512,10 +5427,12 @@ mod tests {
         PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
     };
     use psx_engine::{PointLightSample, WorldVertex};
+    use psx_gpu::material::BlendMode;
     use psx_gte::scene::Projected;
+    use psxed_project::portal_rooms::PortalEdge;
     use psxed_project::{
-        Corner, GridSplit, GridUvTransform, MaterialFaceSidedness, MaterialResource, NodeKind,
-        ProjectDocument, ResourceData, WorldGrid,
+        Corner, GridDirection, GridSplit, GridUvTransform, GridVerticalFace, MaterialFaceSidedness,
+        MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, WorldGrid,
     };
     use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
@@ -4611,6 +5528,197 @@ mod tests {
             horizontal_triangle_world_points([0, 1024, 0, 1024], corners, [64, 128, 192]),
             [[0, 64, 1024], [1024, 128, 1024], [1024, 192, 0]]
         );
+    }
+
+    #[test]
+    fn portal_seam_runs_coalesce_connected_edges() {
+        let runs = super::portal_seam_runs(vec![
+            PortalEdge {
+                x: 2,
+                z: 0,
+                direction: GridDirection::North,
+            },
+            PortalEdge {
+                x: 0,
+                z: 0,
+                direction: GridDirection::North,
+            },
+            PortalEdge {
+                x: 1,
+                z: 0,
+                direction: GridDirection::North,
+            },
+            PortalEdge {
+                x: 4,
+                z: 2,
+                direction: GridDirection::East,
+            },
+            PortalEdge {
+                x: 4,
+                z: 3,
+                direction: GridDirection::East,
+            },
+        ]);
+
+        assert_eq!(
+            runs,
+            vec![
+                super::PortalSeamRun {
+                    start: PortalEdge {
+                        x: 0,
+                        z: 0,
+                        direction: GridDirection::North,
+                    },
+                    len: 3,
+                },
+                super::PortalSeamRun {
+                    start: PortalEdge {
+                        x: 4,
+                        z: 2,
+                        direction: GridDirection::East,
+                    },
+                    len: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn portal_edge_height_span_uses_real_adjacent_geometry() {
+        let mut grid = WorldGrid::empty(2, 1, 2048);
+        grid.set_floor(0, 0, -128, None);
+        grid.set_floor(1, 0, 64, None);
+        grid.ensure_sector(1, 0)
+            .unwrap()
+            .walls
+            .east
+            .push(GridVerticalFace::flat(0, 3328, None));
+
+        let corners =
+            super::portal_edge_wall_corners_for_world_cell(&grid, 0, 0, GridDirection::East)
+                .expect("portal wall corners");
+
+        assert_eq!(corners[0][1], -104);
+        assert_eq!(corners[1][1], -104);
+        assert_eq!(corners[2][1], 3328);
+        assert_eq!(corners[3][1], 3328);
+    }
+
+    #[test]
+    fn visible_room_grids_keeps_all_non_hidden_rooms() {
+        let mut project = ProjectDocument::new("test");
+        let scene = project.active_scene_mut();
+        let room_a = scene.add_node(
+            scene.root,
+            "Room A",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_b = scene.add_node(
+            scene.root,
+            "Room B",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+
+        let mut hidden = std::collections::HashSet::new();
+        let visible = super::visible_room_grids(&project, &hidden)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![room_a, room_b]);
+
+        hidden.insert(room_a);
+        let visible = super::visible_room_grids(&project, &hidden)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![room_b]);
+    }
+
+    #[test]
+    fn preview_room_grids_walks_bounded_portal_neighborhood() {
+        let mut project = ProjectDocument::new("test");
+        let scene = project.active_scene_mut();
+        let room_a = scene.add_node(
+            scene.root,
+            "Room A",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_b = scene.add_node(
+            scene.root,
+            "Room B",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_c = scene.add_node(
+            scene.root,
+            "Room C",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_d = scene.add_node(
+            scene.root,
+            "Room D",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_e = scene.add_node(
+            scene.root,
+            "Room E",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        let room_far = scene.add_node(
+            scene.root,
+            "Room Far",
+            NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, 1024),
+            },
+        );
+        for (source, target) in [
+            (room_a, room_b),
+            (room_b, room_c),
+            (room_c, room_d),
+            (room_d, room_e),
+        ] {
+            scene.add_node(
+                source,
+                "Portal",
+                NodeKind::Portal {
+                    target_room: Some(target),
+                    target_entry: String::new(),
+                    entry_name: String::new(),
+                    geometry: None,
+                },
+            );
+        }
+
+        let hidden = std::collections::HashSet::new();
+        let visible = super::preview_room_grids(
+            &project,
+            &hidden,
+            Some(room_a),
+            NodeId::ROOT,
+            None,
+            &[],
+            &[],
+        )
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+
+        assert_eq!(visible, vec![room_a, room_b, room_c, room_d]);
+        assert!(!visible.contains(&room_e));
+        assert!(!visible.contains(&room_far));
     }
 
     #[test]
@@ -5055,6 +6163,7 @@ mod tests {
                     texture_height: 64,
                 },
                 tint: (128, 64, 32),
+                blend_mode: BlendMode::Opaque,
                 sidedness: psxed_project::MaterialFaceSidedness::Front,
             },
             128,
@@ -5075,6 +6184,7 @@ mod tests {
                 texture_height: 32,
             },
             tint: (128, 128, 128),
+            blend_mode: BlendMode::Opaque,
             sidedness: psxed_project::MaterialFaceSidedness::Both,
         };
         assert_eq!(
@@ -5094,6 +6204,7 @@ mod tests {
                 texture_height: 64,
             },
             tint: (128, 128, 128),
+            blend_mode: BlendMode::Opaque,
             sidedness: psxed_project::MaterialFaceSidedness::Both,
         };
         assert_eq!(

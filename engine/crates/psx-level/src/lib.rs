@@ -27,6 +27,9 @@
 #![no_std]
 #![warn(missing_docs)]
 
+/// Fixed-pool runtime traversal over cooked room portals.
+pub mod portal_visibility;
+
 /// Stable identifier assigned to every level asset by the editor
 /// compiler. `AssetId` values are deterministic across runs:
 /// rooms first (in scene-tree order), then textures (ordered by
@@ -143,6 +146,25 @@ pub mod equipment_flags {
 pub mod image_prop_flags {
     /// Prop rotates around Y to face the active camera while staying upright.
     pub const CYLINDRICAL_BILLBOARD: u16 = 1 << 0;
+}
+
+/// Face slots on an authored boxed prop.
+pub const BOX_PROP_FACE_COUNT: usize = 6;
+/// Editable vertex count on an authored boxed prop.
+pub const BOX_PROP_VERTEX_COUNT: usize = 8;
+
+/// Box prop record flags.
+pub mod box_prop_flags {
+    /// Prop emits a static collision blocker for the character motor.
+    pub const COLLISION_ENABLED: u16 = 1 << 0;
+    /// Prop breaks when the player body overlaps it while walking.
+    pub const BREAK_ON_WALK: u16 = 1 << 1;
+    /// Prop breaks when the player body overlaps it while running.
+    pub const BREAK_ON_RUN: u16 = 1 << 2;
+    /// Prop breaks when the player's attack volume overlaps it.
+    pub const BREAK_ON_ATTACK: u16 = 1 << 3;
+    /// All authored break trigger bits.
+    pub const BREAK_ON_MASK: u16 = BREAK_ON_WALK | BREAK_ON_RUN | BREAK_ON_ATTACK;
 }
 
 /// Model clip bounds/calibration flags.
@@ -465,13 +487,13 @@ pub struct LevelRoomRecord {
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
     pub draw_distance: i32,
-    /// Runtime active-chunk radius in world sectors.
+    /// Runtime room activation radius in world sectors.
     pub chunk_activation_radius_sectors: i32,
     /// Cooked PVS traversal radius in room cells.
     pub visibility_radius: u16,
-    /// Maximum generated chunks kept resident for this world.
+    /// Maximum cooked room payloads kept resident for this world.
     pub resident_chunk_limit: u8,
-    /// Maximum generated chunks selected for drawing/collision for this world.
+    /// Maximum cooked rooms selected for drawing/collision for this world.
     pub visible_chunk_limit: u8,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.
@@ -479,6 +501,18 @@ pub struct LevelRoomRecord {
     /// Number of `LevelMaterialRecord`s in this room's slice.
     /// Matches the cooked `.psxw`'s material count.
     pub material_count: u16,
+    /// First directed portal in `ROOM_PORTALS` whose source is this room.
+    pub portal_first: u16,
+    /// Number of directed portal records sourced from this room.
+    pub portal_count: u8,
+    /// First room index in `ROOM_NEAR_ROOMS`.
+    pub near_room_first: u16,
+    /// Number of near-room records.
+    pub near_room_count: u8,
+    /// First room index in `ROOM_OVERLAPPED_ROOMS`.
+    pub overlapped_room_first: u16,
+    /// Number of overlapped-room records.
+    pub overlapped_room_count: u8,
     /// Fog/depth-cue far colour.
     pub fog_rgb: [u8; 3],
     /// Fog start distance in engine units.
@@ -503,19 +537,46 @@ pub struct LevelRoomRecord {
     pub flags: u16,
 }
 
-/// Cardinal neighbours for one cooked room chunk.
+/// One directed portal between two cooked runtime rooms.
+///
+/// `normal_*` points back toward `source_room`, away from
+/// `destination_room`, and the vertex arrays encode the portal
+/// rectangle as `[BL, BR, TR, TL]` in world-space engine units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelRoomPortalRecord {
+    /// Source room in the generated `ROOMS` table.
+    pub source_room: RoomIndex,
+    /// Destination room in the generated `ROOMS` table.
+    pub destination_room: RoomIndex,
+    /// Portal kind: `0` wall, `1` vertical placeholder.
+    pub kind: u8,
+    /// Source-facing normal X.
+    pub normal_x: i16,
+    /// Source-facing normal Y.
+    pub normal_y: i16,
+    /// Source-facing normal Z.
+    pub normal_z: i16,
+    /// X coordinate for each portal vertex.
+    pub vertex_x: [i32; 4],
+    /// Y coordinate for each portal vertex.
+    pub vertex_y: [i32; 4],
+    /// Z coordinate for each portal vertex.
+    pub vertex_z: [i32; 4],
+}
+
+/// Cardinal open-portal neighbours for one cooked room.
 ///
 /// Missing neighbours are encoded as `RoomIndex(u16::MAX)` so the
 /// record stays plain data in generated manifests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelChunkNeighbours {
-    /// Chunk touching the north edge, if any.
+    /// Room reachable through the north edge, if any.
     pub north: RoomIndex,
-    /// Chunk touching the east edge, if any.
+    /// Room reachable through the east edge, if any.
     pub east: RoomIndex,
-    /// Chunk touching the south edge, if any.
+    /// Room reachable through the south edge, if any.
     pub south: RoomIndex,
-    /// Chunk touching the west edge, if any.
+    /// Room reachable through the west edge, if any.
     pub west: RoomIndex,
 }
 
@@ -532,12 +593,12 @@ impl LevelChunkNeighbours {
     };
 }
 
-/// Runtime chunk metadata emitted by the playtest cooker.
+/// Runtime room metadata emitted by the playtest cooker.
 ///
-/// Authored editor Rooms may be arbitrarily large; the cooker splits
-/// them into these runtime chunks. This table lets the engine stream
-/// and render by cooked chunk identity instead of deriving active
-/// neighbours from broad room bounds.
+/// Authored editor Rooms may be contiguous worlds; the cooker derives
+/// manual portal-delimited runtime rooms from them. This table lets
+/// the engine stream and render by explicit portal connectivity instead
+/// of deriving active neighbours from broad room bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelChunkRecord {
     /// Owning room/chunk index in the generated `ROOMS` table.
@@ -545,17 +606,17 @@ pub struct LevelChunkRecord {
     /// Stable authored Room node id, truncated to 32 bits for a
     /// compact runtime diagnostic key.
     pub authored_room: u32,
-    /// Stable chunk order inside the authored Room's cook plan.
+    /// Stable runtime-room order inside the authored Room's cook plan.
     pub chunk_index: u16,
-    /// Chunk origin X in authored grid sectors.
+    /// Runtime room origin X in authored grid sectors.
     pub origin_x: i32,
-    /// Chunk origin Z in authored grid sectors.
+    /// Runtime room origin Z in authored grid sectors.
     pub origin_z: i32,
-    /// Chunk width in sectors.
+    /// Runtime room width in sectors.
     pub width: u16,
-    /// Chunk depth in sectors.
+    /// Runtime room depth in sectors.
     pub depth: u16,
-    /// Cardinal chunk links inside the same authored Room.
+    /// Cardinal portal links inside the same authored Room.
     pub neighbours: LevelChunkNeighbours,
     /// Reserved.
     pub flags: u16,
@@ -637,13 +698,16 @@ pub const STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT: u32 = 1 << 0;
 pub const COMPACT_COLLISION_MAGIC: [u8; 8] = *b"PSXCOLL\0";
 
 /// Version of the compact collision-only room payload.
-pub const COMPACT_COLLISION_VERSION: u32 = 1;
+pub const COMPACT_COLLISION_VERSION: u32 = 2;
 
 /// Byte length of the compact collision header.
 pub const COMPACT_COLLISION_HEADER_BYTES: usize = 36;
 
 /// Byte length of one compact collision sector record.
-pub const COMPACT_COLLISION_SECTOR_BYTES: usize = 44;
+pub const COMPACT_COLLISION_SECTOR_BYTES: usize = 48;
+
+/// Sentinel stored in compact collision sector floor links when no room exists.
+pub const COMPACT_COLLISION_NO_ROOM: u16 = u16::MAX;
 
 /// Byte length of one compact collision wall record.
 pub const COMPACT_COLLISION_WALL_BYTES: usize = 20;
@@ -685,6 +749,10 @@ pub mod compact_collision_sector_flags {
     pub const FLOOR_WALKABLE: u8 = 1 << 2;
     /// Ceiling has at least one walkable triangle.
     pub const CEILING_WALKABLE: u8 = 1 << 3;
+    /// Sector can move upward into another runtime room.
+    pub const HAS_FLOOR_ABOVE: u8 = 1 << 4;
+    /// Sector can move downward into another runtime room.
+    pub const HAS_FLOOR_BELOW: u8 = 1 << 5;
 }
 
 /// Triangle bits stored in compact collision sector records.
@@ -1202,6 +1270,37 @@ pub struct LevelImagePropRecord {
     pub tint_rgb: [u8; 3],
     /// Baked static light base per quad vertex, in perimeter order.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Runtime flags.
+    pub flags: u16,
+}
+
+/// One placed editable box prop. Coordinates are room-local engine
+/// units and `x/y/z` names the bottom-center anchor. Vertices are
+/// local to that anchor, in bottom-ring then top-ring order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelBoxPropRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Per-face texture asset. `None` means the face is not drawn.
+    pub texture_assets: [Option<AssetId>; BOX_PROP_FACE_COUNT],
+    /// Bottom-center room-local X.
+    pub x: i32,
+    /// Bottom Y.
+    pub y: i32,
+    /// Bottom-center room-local Z.
+    pub z: i32,
+    /// Static pitch in PSX angle units.
+    pub pitch: i16,
+    /// Static yaw in PSX angle units.
+    pub yaw: i16,
+    /// Static roll in PSX angle units.
+    pub roll: i16,
+    /// Editable local vertices, bottom ring then top ring.
+    pub vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
+    /// Per-face modulation tint.
+    pub tint_rgb: [[u8; 3]; BOX_PROP_FACE_COUNT],
+    /// Baked static light base per face vertex.
+    pub baked_vertex_rgb: [[(u8, u8, u8); 4]; BOX_PROP_FACE_COUNT],
     /// Runtime flags.
     pub flags: u16,
 }
@@ -1774,9 +1873,10 @@ mod tests {
         assert_eq!(streamed_room_chunk_header::FLAGS, 60);
         assert_eq!(STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT, 1);
         assert_eq!(COMPACT_COLLISION_MAGIC, *b"PSXCOLL\0");
-        assert_eq!(COMPACT_COLLISION_VERSION, 1);
+        assert_eq!(COMPACT_COLLISION_VERSION, 2);
         assert_eq!(COMPACT_COLLISION_HEADER_BYTES, 36);
-        assert_eq!(COMPACT_COLLISION_SECTOR_BYTES, 44);
+        assert_eq!(COMPACT_COLLISION_SECTOR_BYTES, 48);
+        assert_eq!(COMPACT_COLLISION_NO_ROOM, u16::MAX);
         assert_eq!(COMPACT_COLLISION_WALL_BYTES, 20);
         assert_eq!(COMPACT_COLLISION_HEIGHT_OVERRIDE_BYTES, 28);
         assert_eq!(core::mem::size_of::<LevelCachedRoomCellRecord>(), 36);

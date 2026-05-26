@@ -1,6 +1,9 @@
 //! Host-side package schema for embedded editor play mode.
 
-use crate::{MaterialFaceSidedness, ResourceId, SkyCycloramaQuad};
+use crate::{
+    MaterialFaceSidedness, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
+    RuntimeTextureSplitMode, SkyCycloramaQuad,
+};
 
 /// Number of cooked character animation action slots.
 pub const PLAYTEST_CHARACTER_ACTION_COUNT: usize = psx_level::CHARACTER_ANIMATION_ACTION_COUNT;
@@ -92,13 +95,13 @@ pub struct PlaytestRoom {
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
     pub draw_distance: i32,
-    /// Runtime active-chunk radius in world sectors.
+    /// Runtime room activation radius in world sectors.
     pub chunk_activation_radius_sectors: i32,
     /// Cooked PVS traversal radius in room cells.
     pub visibility_radius: u16,
-    /// Runtime generated-chunk residency budget inherited from the World node.
+    /// Runtime room residency budget inherited from the World node.
     pub resident_chunk_limit: u8,
-    /// Runtime generated-chunk visible/drawable budget inherited from the World node.
+    /// Runtime room visible/drawable budget inherited from the World node.
     pub visible_chunk_limit: u8,
     /// First index into [`PlaytestPackage::materials`] for this
     /// room's slice.
@@ -106,6 +109,18 @@ pub struct PlaytestRoom {
     /// Number of material records in the slice. Matches the
     /// cooked `.psxw`'s material count exactly.
     pub material_count: u16,
+    /// First directed portal sourced from this room.
+    pub portal_first: u16,
+    /// Number of directed portals sourced from this room.
+    pub portal_count: u8,
+    /// First nearby room index. Reserved for portal streaming coherence.
+    pub near_room_first: u16,
+    /// Number of nearby room indices.
+    pub near_room_count: u8,
+    /// First overlapped room index. Reserved for stacked-room coherence.
+    pub overlapped_room_first: u16,
+    /// Number of overlapped room indices.
+    pub overlapped_room_count: u8,
     /// Fog/depth-cue far colour.
     pub fog_rgb: [u8; 3],
     /// Fog start distance in engine units.
@@ -130,36 +145,66 @@ pub struct PlaytestRoom {
     pub flags: u16,
 }
 
-/// One cooked runtime chunk emitted from an authored Room.
+/// One cooked runtime room emitted from an authored map or manual portal split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestChunk {
-    /// Owning room/chunk index in [`PlaytestPackage::rooms`].
+    /// Owning runtime room index in [`PlaytestPackage::rooms`].
     pub room: u16,
     /// Stable editor Room node id, truncated for compact runtime
     /// diagnostics.
     pub authored_room: u32,
-    /// Stable order inside the authored Room's generated chunk plan.
+    /// Stable order inside the authored Room's manual portal-room plan.
     pub chunk_index: u16,
-    /// Chunk origin X in authored grid sectors.
+    /// Runtime room origin X in authored grid sectors.
     pub origin_x: i32,
-    /// Chunk origin Z in authored grid sectors.
+    /// Runtime room origin Z in authored grid sectors.
     pub origin_z: i32,
-    /// Chunk width in sectors.
+    /// Runtime room width in sectors.
     pub width: u16,
-    /// Chunk depth in sectors.
+    /// Runtime room depth in sectors.
     pub depth: u16,
-    /// Cardinal neighbour chunk rooms. `None` means no link.
+    /// Cardinal manual portal-neighbour rooms. `None` means no link.
     pub neighbours: [Option<u16>; 4],
-    /// Estimated triangle count from the chunk budget.
+    /// Estimated triangle count from the runtime room budget.
     pub triangles: usize,
     /// Estimated base `.psxw` byte count.
     pub psxw_bytes: usize,
     /// Estimated static-lit `.psxw` byte count.
     pub static_lit_bytes: usize,
-    /// Number of populated cells in the cooked chunk.
+    /// Number of populated cells in the cooked runtime room.
     pub populated_cells: u16,
     /// Runtime flags.
     pub flags: u16,
+}
+
+/// One directed portal between cooked runtime rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestRoomPortal {
+    /// Source room in [`PlaytestPackage::rooms`].
+    pub source_room: u16,
+    /// Destination room in [`PlaytestPackage::rooms`].
+    pub destination_room: u16,
+    /// Wall/floor/ceiling kind. Demo7 emits wall portals (`0`).
+    pub kind: u8,
+    /// Source-facing portal normal.
+    pub normal: [i16; 3],
+    /// World-space portal rectangle vertices `[BL, BR, TR, TL]`.
+    pub vertices: [[i32; 3]; 4],
+}
+
+/// Runtime floor-link metadata copied into compact collision sector records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestRoomFloorLink {
+    /// Owning runtime room in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Sector X inside the cooked runtime room.
+    pub x: u16,
+    /// Sector Z inside the cooked runtime room.
+    pub z: u16,
+    /// Runtime room reached by moving upward through this sector.
+    pub above_room: Option<u16>,
+    /// Runtime room reached by moving downward through this sector.
+    pub below_room: Option<u16>,
 }
 
 /// Resolved sky values written into one runtime room record.
@@ -570,6 +615,35 @@ pub struct PlaytestImageProp {
     pub flags: u16,
 }
 
+/// One material-backed editable box prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestBoxProp {
+    /// Owning room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Per-face texture asset indices. `None` skips that face.
+    pub texture_asset_indices: [Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
+    /// Bottom-center room-local X.
+    pub x: i32,
+    /// Bottom Y.
+    pub y: i32,
+    /// Bottom-center room-local Z.
+    pub z: i32,
+    /// Static pitch, PSX angle units.
+    pub pitch: i16,
+    /// Static yaw, PSX angle units.
+    pub yaw: i16,
+    /// Static roll, PSX angle units.
+    pub roll: i16,
+    /// Editable local vertices, bottom ring then top ring.
+    pub vertices: [[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT],
+    /// Material modulation tint per face.
+    pub tint_rgb: [[u8; 3]; psx_level::BOX_PROP_FACE_COUNT],
+    /// Baked static light base per face vertex.
+    pub baked_vertex_rgb: [[(u8, u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
+    /// Runtime flags.
+    pub flags: u16,
+}
+
 /// Weapon-local hit shape, ready for manifest emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestWeaponHitShape {
@@ -811,6 +885,14 @@ pub struct PlaytestEntity {
 /// instances, and residency.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlaytestPackage {
+    /// Cached-room depth sorting mode selected by the project.
+    pub runtime_depth_sort_mode: RuntimeDepthSortMode,
+    /// Runtime room triangle subdivision scope.
+    pub runtime_texture_split_mode: RuntimeTextureSplitMode,
+    /// Runtime active-room draw ordering policy.
+    pub runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode,
+    /// Projected edge threshold for runtime room surface subdivision.
+    pub runtime_texture_split_max_edge: u16,
     /// Master asset table -- rooms first, then room textures,
     /// then per-model assets (mesh + atlas + clips), in
     /// deterministic order.
@@ -819,6 +901,14 @@ pub struct PlaytestPackage {
     pub rooms: Vec<PlaytestRoom>,
     /// Runtime chunk metadata, one record per cooked room.
     pub chunks: Vec<PlaytestChunk>,
+    /// Directed runtime room portal graph.
+    pub room_portals: Vec<PlaytestRoomPortal>,
+    /// Runtime floor links, indexed by `(room, x, z)` and copied into streamed collision chunks.
+    pub room_floor_links: Vec<PlaytestRoomFloorLink>,
+    /// Reserved near-room index table for room coherence / streaming.
+    pub room_near_rooms: Vec<u16>,
+    /// Reserved overlapped-room index table for stacked-room coherence.
+    pub room_overlapped_rooms: Vec<u16>,
     /// Material records ordered as `(room, local_slot)`.
     pub materials: Vec<PlaytestMaterial>,
     /// Per-room visibility slices.
@@ -853,6 +943,8 @@ pub struct PlaytestPackage {
     pub model_instances: Vec<PlaytestModelInstance>,
     /// Placed flat image props, room-local coordinates.
     pub image_props: Vec<PlaytestImageProp>,
+    /// Placed editable box props, room-local coordinates.
+    pub box_props: Vec<PlaytestBoxProp>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.

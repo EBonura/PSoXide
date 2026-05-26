@@ -91,7 +91,13 @@ a rolling one-line average roughly once per second. Use
 `PSOXIDE_PROFILE=trace` to print every frame. In those lines, host timings
 remain in milliseconds, while `emu_hz`, `draw_hz`, `cyc_f`, `budget_f`,
 `instr_f`, `gte_f`, and `gtecy_f` describe the emulated PS1 workload and
-cadence.
+cadence. Guest-stage fields ending in `_v` are normalized per rendered visual
+frame; fields ending in `_hit` are normalized per telemetry span.
+
+For a repeatable playtest render benchmark, `make profile-demo7-camera-sweep`
+cooks demo7, builds the playtest with a deterministic slow orbit camera, and
+prints the headless guest profile including room, model, GTE, and room-surface
+micro-profiler counters.
 
 ## Menu mechanics
 
