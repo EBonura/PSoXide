@@ -2,6 +2,7 @@
 
 use super::*;
 use psx_gpu::draw_quad_flat;
+use psx_level::{LevelUiNodeKind, LevelUiNodeRecord, LevelUiValueBinding};
 
 const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
 const HUD_X: i16 = 18;
@@ -12,7 +13,54 @@ const STAMINA_BAR_W: i16 = 96;
 const STAMINA_BAR_H: i16 = 5;
 const HUD_BAR_GAP: i16 = 5;
 
-pub(crate) fn draw_player_hud(stamina_q12: i32, stamina_max_q12: i32) {
+pub(crate) fn draw_player_hud(
+    nodes: &[LevelUiNodeRecord],
+    font: Option<&FontAtlas>,
+    stamina_q12: i32,
+    stamina_max_q12: i32,
+) {
+    if nodes.is_empty() {
+        draw_legacy_player_hud(stamina_q12, stamina_max_q12);
+        return;
+    }
+
+    for node in nodes {
+        match node.kind {
+            LevelUiNodeKind::Canvas | LevelUiNodeKind::Group => {}
+            LevelUiNodeKind::Rect => {
+                draw_rect(
+                    node.x,
+                    node.y,
+                    node.width as i16,
+                    node.height as i16,
+                    rgb(node.color),
+                );
+            }
+            LevelUiNodeKind::Label => {
+                if let Some(font) = font {
+                    font.draw_text(node.x, node.y, node.text, rgb(node.color));
+                }
+            }
+            LevelUiNodeKind::Bar => {
+                let max_q12 = ui_binding_value(node.max, stamina_q12, stamina_max_q12).max(1);
+                let value_q12 =
+                    ui_binding_value(node.value, stamina_q12, stamina_max_q12).clamp(0, max_q12);
+                draw_status_bar(
+                    node.x,
+                    node.y,
+                    node.width as i16,
+                    node.height as i16,
+                    value_q12,
+                    max_q12,
+                    rgb(node.color),
+                    rgb(node.background),
+                );
+            }
+        }
+    }
+}
+
+fn draw_legacy_player_hud(stamina_q12: i32, stamina_max_q12: i32) {
     draw_status_bar(
         HUD_X,
         HUD_Y,
@@ -21,6 +69,7 @@ pub(crate) fn draw_player_hud(stamina_q12: i32, stamina_max_q12: i32) {
         PLAYER_HEALTH_MAX_Q12,
         PLAYER_HEALTH_MAX_Q12,
         (94, 16, 24),
+        (30, 26, 28),
     );
     draw_status_bar(
         HUD_X,
@@ -30,7 +79,22 @@ pub(crate) fn draw_player_hud(stamina_q12: i32, stamina_max_q12: i32) {
         stamina_q12,
         stamina_max_q12,
         (44, 98, 48),
+        (30, 26, 28),
     );
+}
+
+fn ui_binding_value(binding: LevelUiValueBinding, stamina_q12: i32, stamina_max_q12: i32) -> i32 {
+    match binding {
+        LevelUiValueBinding::ConstantQ12(value) => value,
+        LevelUiValueBinding::PlayerHealth => PLAYER_HEALTH_MAX_Q12,
+        LevelUiValueBinding::PlayerHealthMax => PLAYER_HEALTH_MAX_Q12,
+        LevelUiValueBinding::PlayerStamina => stamina_q12,
+        LevelUiValueBinding::PlayerStaminaMax => stamina_max_q12,
+    }
+}
+
+fn rgb(color: [u8; 3]) -> (u8, u8, u8) {
+    (color[0], color[1], color[2])
 }
 
 pub(crate) fn draw_analog_required_prompt(font: &FontAtlas) {
@@ -79,9 +143,10 @@ fn draw_status_bar(
     value: i32,
     max_value: i32,
     fill: (u8, u8, u8),
+    background: (u8, u8, u8),
 ) {
     draw_rect(x - 1, y - 1, width + 2, height + 2, (12, 14, 18));
-    draw_rect(x, y, width, height, (30, 26, 28));
+    draw_rect(x, y, width, height, background);
 
     let fill_width = status_fill_width(width, value, max_value);
     if fill_width > 0 {
