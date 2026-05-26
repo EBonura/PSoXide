@@ -6,8 +6,8 @@
 //!
 //! - a [`Scene`] trait and an [`App::run`] entry point so games
 //!   don't each reinvent the main loop;
-//! - a [`Ctx`] carrying per-frame state (pad, frame counter,
-//!   engine time, framebuffer) to the scene;
+//! - a [`Ctx`] carrying per-frame state (pad, simulation tick,
+//!   visual frame counter, framebuffer) to the scene;
 //! - a canonical [`Angle`] unit so we stop hitting the recurring
 //!   "256-per-revolution vs 4096-per-revolution" angle-mismatch bug
 //!   that cost an afternoon on showcase-fog's light orbit;
@@ -78,7 +78,7 @@ pub use character_motor::{
     CharacterMotorInput, CharacterMotorState,
 };
 pub use fixed::{Q12, Q8};
-pub use frames::{Frames, Ticks};
+pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};
 pub use lighting::{
     accumulate_point_lights, accumulate_point_lights_rgb, modulate_material_tint, modulate_tint,
     shade_material_tint_with_lights, shade_tint_with_lights, LightingRgb, MaterialTint,

@@ -34,7 +34,8 @@ extern crate psx_rt;
 use psx_asset::Mesh;
 use psx_engine::{
     ActorTransform, App, Config, Ctx, DepthBand, DepthPolicy, DepthRange, GouraudMeshOptions,
-    GouraudRenderPass, GouraudTriCommand, OtDepth, OtFrame, PrimitiveArena, Scene, Vec3World,
+    GouraudRenderPass, GouraudTriCommand, OtDepth, OtFrame, PrimitiveArena, Scene, SimTick,
+    Vec3World,
 };
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
@@ -270,7 +271,7 @@ impl Scene for Showcase3D {
         // read `ctx.sim_tick` without duplicating the spawn logic in
         // update -- keeps the scene code compact and the frame-
         // counter-driven cadence explicit.
-        if ctx.sim_tick % 12 == 0 {
+        if ctx.sim_tick.every(12) {
             let x = SCREEN_W / 2 + self.rng.signed(SCREEN_W / 2 - 20);
             let y = SCREEN_H / 2 + self.rng.signed(SCREEN_H / 2 - 30);
             let color = (
@@ -314,7 +315,8 @@ impl Showcase3D {
         }
     }
 
-    fn build_frame_ot(&mut self, frame: u32) {
+    fn build_frame_ot(&mut self, tick: SimTick) {
+        let frame = tick.as_u32();
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut rects = unsafe { PrimitiveArena::new(&mut SCENE_RECTS) };
         let mut gouraud = unsafe { PrimitiveArena::new(&mut GOURAUD_TRIS) };
@@ -434,7 +436,7 @@ impl Showcase3D {
         ot.submit();
     }
 
-    fn draw_hud(&self, font: &FontAtlas, frame: u32) {
+    fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {
         font.draw_text(4, 4, "SHOWCASE-3D", (220, 220, 250));
         // Right side lists the two hero models on two lines -- clean
         // attribution without crowding the top bar.
@@ -442,7 +444,7 @@ impl Showcase3D {
         font.draw_text(SCREEN_W - 64, 20, "teapot", (120, 200, 240));
 
         font.draw_text(4, SCREEN_H - 20, "frame", (160, 160, 200));
-        let frame_hex = u16_hex((frame & 0xFFFF) as u16);
+        let frame_hex = u16_hex((tick.as_u32() & 0xFFFF) as u16);
         font.draw_text(
             4 + 8 * 6,
             SCREEN_H - 20,
