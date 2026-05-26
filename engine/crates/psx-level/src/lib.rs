@@ -71,6 +71,131 @@ typed_index! {
     pub struct RoomIndex;
 }
 
+/// Small fixed-width debug bitset for runtime room/portal telemetry.
+///
+/// This deliberately stores two 32-bit words instead of a `u64`: it preserves
+/// the old 64-bit mask surface for host tooling while keeping PS1 runtime code
+/// on native-width integer operations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeDebugMask {
+    lo: u32,
+    hi: u32,
+}
+
+impl RuntimeDebugMask {
+    /// Empty mask.
+    pub const EMPTY: Self = Self { lo: 0, hi: 0 };
+
+    /// Build from low/high 32-bit words.
+    pub const fn from_words(lo: u32, hi: u32) -> Self {
+        Self { lo, hi }
+    }
+
+    /// Build a mask with `index` set when it fits inside 64 debug bits.
+    pub const fn from_index(index: usize) -> Self {
+        if index < 32 {
+            Self {
+                lo: 1u32 << index,
+                hi: 0,
+            }
+        } else if index < 64 {
+            Self {
+                lo: 0,
+                hi: 1u32 << (index - 32),
+            }
+        } else {
+            Self::EMPTY
+        }
+    }
+
+    /// Build a room-index mask.
+    pub const fn from_room(room: RoomIndex) -> Self {
+        Self::from_index(room.to_usize())
+    }
+
+    /// Low 32 mask bits.
+    pub const fn lo(self) -> u32 {
+        self.lo
+    }
+
+    /// High 32 mask bits.
+    pub const fn hi(self) -> u32 {
+        self.hi
+    }
+
+    /// True when no bits are set.
+    pub const fn is_empty(self) -> bool {
+        self.lo == 0 && self.hi == 0
+    }
+
+    /// Return a copy with `index` set when it fits inside 64 debug bits.
+    pub const fn with_index(self, index: usize) -> Self {
+        let bit = Self::from_index(index);
+        Self {
+            lo: self.lo | bit.lo,
+            hi: self.hi | bit.hi,
+        }
+    }
+
+    /// Return a copy with `room` set.
+    pub const fn with_room(self, room: RoomIndex) -> Self {
+        self.with_index(room.to_usize())
+    }
+
+    /// Set `index` when it fits inside 64 debug bits.
+    pub fn insert_index(&mut self, index: usize) {
+        *self = self.with_index(index);
+    }
+
+    /// Set `room`.
+    pub fn insert_room(&mut self, room: RoomIndex) {
+        *self = self.with_room(room);
+    }
+
+    /// Test `index`.
+    pub const fn contains_index(self, index: usize) -> bool {
+        if index < 32 {
+            (self.lo & (1u32 << index)) != 0
+        } else if index < 64 {
+            (self.hi & (1u32 << (index - 32))) != 0
+        } else {
+            false
+        }
+    }
+}
+
+impl core::ops::BitOr for RuntimeDebugMask {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            lo: self.lo | rhs.lo,
+            hi: self.hi | rhs.hi,
+        }
+    }
+}
+
+impl core::ops::BitOrAssign for RuntimeDebugMask {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.lo |= rhs.lo;
+        self.hi |= rhs.hi;
+    }
+}
+
+impl core::ops::BitAnd<u32> for RuntimeDebugMask {
+    type Output = u32;
+
+    fn bitand(self, rhs: u32) -> Self::Output {
+        self.lo & rhs
+    }
+}
+
+impl PartialEq<u32> for RuntimeDebugMask {
+    fn eq(&self, other: &u32) -> bool {
+        self.lo == *other && self.hi == 0
+    }
+}
+
 typed_index! {
     /// Index into the generated `MATERIALS` table.
     pub struct MaterialIndex;
