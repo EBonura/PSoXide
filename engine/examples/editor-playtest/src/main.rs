@@ -1758,7 +1758,7 @@ impl RuntimeStreamingJobs {
     }
 
     fn background_tick(self, ctx: &Ctx) -> bool {
-        (ctx.simulation_tick & ROOM_WINDOW_BACKGROUND_TICK_MASK) != 0
+        (ctx.sim_tick & ROOM_WINDOW_BACKGROUND_TICK_MASK) != 0
     }
 
     fn step_vram_uploads(self) -> bool {
@@ -3449,7 +3449,7 @@ impl Scene for Playtest {
         if ctx.just_pressed(button::SELECT) {
             self.free_orbit = !self.free_orbit;
         }
-        let delta_vblanks = ctx.time.delta_vblanks();
+        let delta_vblanks = 1u16;
         self.advance_box_prop_break_events(delta_vblanks);
         if CAMERA_SWEEP_ENABLED {
             self.update_camera_sweep(delta_vblanks);
@@ -3493,7 +3493,7 @@ impl Scene for Playtest {
             return;
         }
 
-        let now = ctx.time.elapsed_vblanks();
+        let now = ctx.sim_tick;
         let action_locked = self.anim_lock_until_tick > now;
         let circle = self.update_evade_run_button(ctx, delta_vblanks);
         let mut input = if action_locked {
@@ -3503,9 +3503,9 @@ impl Scene for Playtest {
         };
         if !action_locked && self.motor.action().is_idle() {
             let started = if ctx.just_pressed(LIGHT_ATTACK_BUTTON) {
-                self.start_player_anim_action(PlayerAnim::LightAttack, now, ctx.time.video_hz())
+                self.start_player_anim_action(PlayerAnim::LightAttack, now, ctx.video_hz)
             } else if ctx.just_pressed(HEAVY_ATTACK_BUTTON) {
-                self.start_player_anim_action(PlayerAnim::HeavyAttack, now, ctx.time.video_hz())
+                self.start_player_anim_action(PlayerAnim::HeavyAttack, now, ctx.video_hz)
             } else {
                 false
             };
@@ -3579,7 +3579,7 @@ impl Scene for Playtest {
             self.anim_start_tick = now;
             if new_state.is_motor_fixed_action() {
                 if let Some(character) = self.character {
-                    self.lock_player_anim_action(character, new_state, now, ctx.time.video_hz());
+                    self.lock_player_anim_action(character, new_state, now, ctx.video_hz);
                 }
             }
         }
@@ -4071,8 +4071,8 @@ impl Scene for Playtest {
                 }
                 let instance_stats = draw_model_instances(
                     active.index,
-                    ctx.time.elapsed_vblanks(),
-                    ctx.time.video_hz(),
+                    ctx.sim_tick,
+                    ctx.video_hz,
                     &room_camera,
                     actor_options,
                     &lighting,
@@ -4125,8 +4125,8 @@ impl Scene for Playtest {
                             self.anim_state.action(),
                             character.clip_for(self.anim_state),
                             self.anim_start_tick,
-                            ctx.time.elapsed_vblanks(),
-                            ctx.time.video_hz(),
+                            ctx.sim_tick,
+                            ctx.video_hz,
                             &camera,
                             actor_options,
                             &lighting,
@@ -4170,8 +4170,8 @@ impl Scene for Playtest {
                             self.anim_state.action(),
                             character.clip_for(self.anim_state),
                             self.anim_start_tick,
-                            ctx.time.elapsed_vblanks(),
-                            ctx.time.video_hz(),
+                            ctx.sim_tick,
+                            ctx.video_hz,
                             &camera,
                             actor_options,
                             &lighting,
@@ -4240,8 +4240,8 @@ impl Scene for Playtest {
                     telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                     let instance_stats = draw_model_instances(
                         active.index,
-                        ctx.time.elapsed_vblanks(),
-                        ctx.time.video_hz(),
+                        ctx.sim_tick,
+                        ctx.video_hz,
                         &room_camera,
                         actor_options,
                         &lighting,
@@ -4399,12 +4399,7 @@ impl Scene for Playtest {
         telemetry::stage_begin(telemetry::stage::WORLD_FLUSH);
         world.flush();
         telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
-        let _ = self.draw_particle_emitters(
-            camera,
-            ctx.time.elapsed_vblanks(),
-            &mut ot,
-            &mut primitive_packets,
-        );
+        let _ = self.draw_particle_emitters(camera, ctx.sim_tick, &mut ot, &mut primitive_packets);
         telemetry::counter(
             telemetry::counter::TRI_PRIMITIVES,
             primitive_packets.len() as u32,
@@ -4419,7 +4414,7 @@ impl Scene for Playtest {
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            draw_room_atmosphere_overlay(room_record, ctx.time.elapsed_vblanks());
+            draw_room_atmosphere_overlay(room_record, ctx.sim_tick);
         }
 
         if self.show_collision_debug {
@@ -4427,7 +4422,7 @@ impl Scene for Playtest {
         }
 
         if let Some(target) = self.lock_target_indicator_position() {
-            draw_lock_target_indicator(target, camera, ctx.time.elapsed_vblanks());
+            draw_lock_target_indicator(target, camera, ctx.sim_tick);
         }
 
         if self.character.is_some() {
@@ -5077,7 +5072,7 @@ impl Playtest {
                     target,
                     input,
                     config,
-                    ctx.time.delta_vblanks(),
+                    1u16,
                 )
                 .camera;
         }
@@ -5089,14 +5084,7 @@ impl Playtest {
             None
         };
         self.camera
-            .update_vblanks(
-                PROJECTION,
-                collision,
-                target,
-                input,
-                config,
-                ctx.time.delta_vblanks(),
-            )
+            .update_vblanks(PROJECTION, collision, target, input, config, 1u16)
             .camera
     }
 
