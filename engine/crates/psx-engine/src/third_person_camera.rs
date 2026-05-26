@@ -253,7 +253,7 @@ impl ThirdPersonCameraState {
         config: ThirdPersonCameraConfig,
         delta_vblanks: u16,
     ) -> ThirdPersonCameraFrame {
-        let steps = delta_vblanks.max(1).min(MAX_CAMERA_CATCHUP_VBLANKS);
+        let steps = delta_vblanks.clamp(1, MAX_CAMERA_CATCHUP_VBLANKS);
         let config = normalize_config(config);
         let mut i = 0;
         while i < steps {
@@ -279,7 +279,7 @@ impl ThirdPersonCameraState {
         config: ThirdPersonCameraConfig,
         delta_vblanks: u16,
     ) -> ThirdPersonCameraFrame {
-        let steps = delta_vblanks.max(1).min(MAX_CAMERA_CATCHUP_VBLANKS);
+        let steps = delta_vblanks.clamp(1, MAX_CAMERA_CATCHUP_VBLANKS);
         let config = normalize_config(config);
         let mut i = 0;
         while i < steps {
@@ -496,9 +496,7 @@ fn normalize_config(mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraCon
     config.collision_margin = config.collision_margin.max(0);
     config.min_floor_clearance = config.min_floor_clearance.max(0);
     if config.pitch_min_q12 > config.pitch_max_q12 {
-        let pitch = config.pitch_min_q12;
-        config.pitch_min_q12 = config.pitch_max_q12;
-        config.pitch_max_q12 = pitch;
+        core::mem::swap(&mut config.pitch_min_q12, &mut config.pitch_max_q12);
     }
     if config.auto_align_step == Angle::ZERO {
         config.auto_align_step = Angle::from_q12(1);

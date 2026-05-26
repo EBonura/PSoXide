@@ -461,7 +461,7 @@ impl CharacterMotorState {
         delta_vblanks: u16,
     ) -> CharacterMotorFrame {
         let config = normalize_config(config);
-        let steps = delta_vblanks.max(1).min(MAX_MOTOR_CATCHUP_VBLANKS);
+        let steps = delta_vblanks.clamp(1, MAX_MOTOR_CATCHUP_VBLANKS);
         let mut final_frame: Option<CharacterMotorFrame> = None;
 
         for step in 0..steps {

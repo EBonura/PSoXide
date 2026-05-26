@@ -24,9 +24,8 @@
 //! Ported to `psx-engine` Phase 3e: the per-frame clear, vsync,
 //! draw-sync, and swap all live in [`App::run`] now. The scene
 //! owns the two `FontAtlas` handles and uploads them once in
-//! [`Scene::init`]. The raw `u32` frame counter from `Ctx` still
-//! feeds the rotation demo directly -- no newtype ceremony for
-//! what's ultimately `frame % N` arithmetic.
+//! [`Scene::init`]. The rotation demo uses [`Ctx::sim_tick`], keeping
+//! animation speed tied to the fixed simulation cadence.
 
 #![no_std]
 #![no_main]
@@ -34,7 +33,7 @@
 
 extern crate psx_rt;
 
-use psx_engine::{App, Config, Ctx, Scene};
+use psx_engine::{App, Config, Ctx, Scene, SimTick};
 use psx_font::{
     fonts::{BASIC, BASIC_8X16},
     FontAtlas,
@@ -222,10 +221,11 @@ fn gradient_varieties(font: &FontAtlas) {
 /// 8×16 font. `frame_idx` drives the angle at ~1 revolution every
 /// 2.5 s (4096 / 96 ≈ 42 frames at 60 fps). Demonstrates the
 /// transform path works with any font size, not just 8×8.
-fn rotation_demo(font16: &FontAtlas, frame_idx: u32) {
+fn rotation_demo(font16: &FontAtlas, tick: SimTick) {
     // 96 Q0.12 units per frame = 4096/96 ≈ 42.7 frames per rev.
     // u16 wraps automatically at 0x10000 so modulo 4096 handled
     // implicitly via the table lookup.
+    let frame_idx = tick.as_u32();
     let angle = (frame_idx.wrapping_mul(96) & 0xFFF) as u16;
     font16.draw_text_rotated(78, 170, "SPIN!", angle, (255, 255, 140));
 }
@@ -246,12 +246,12 @@ fn affine_skew_demo(font16: &FontAtlas) {
 
 /// Footer -- frame counter at bottom-left so we can see the demo
 /// is live, plus the word "psx-font" as a credit.
-fn footer(font: &FontAtlas, frame_idx: u32) {
+fn footer(font: &FontAtlas, tick: SimTick) {
     font.draw_text(8, 200, "rotated         affine", (140, 140, 140));
     font.draw_text(8, 228, "psx-font showcase", (180, 180, 180));
     // Frame counter: show the low 4 hex digits (enough for ~18
     // minutes at 60 fps before wrapping, plenty for a demo).
-    let hex = hex_u16((frame_idx & 0xFFFF) as u16);
+    let hex = hex_u16((tick.as_u32() & 0xFFFF) as u16);
     font.draw_text(320 - 8 * 6 - 4, 228, &hex, (100, 140, 100));
 }
 
