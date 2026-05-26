@@ -47,6 +47,7 @@ pub struct PortalVisibilityCamera {
 
 impl PortalVisibilityCamera {
     /// Build portal traversal camera inputs.
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         x: i32,
         y: i32,

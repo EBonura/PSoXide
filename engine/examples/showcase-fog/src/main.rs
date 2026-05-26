@@ -55,7 +55,7 @@ extern crate psx_rt;
 
 use psx_asset::Texture;
 use psx_engine::{
-    App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, PrimitiveArena, Scene,
+    App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, PrimitiveArena, Scene, SimTick,
 };
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_gpu::ot::OrderingTable;
@@ -418,7 +418,8 @@ impl Scene for Corridor {
     }
 }
 
-fn update_ring_z(frame: u32) {
+fn update_ring_z(tick: SimTick) {
+    let frame = tick.as_u32();
     let spacing = RING_SPACING as u32;
     let phase = (((frame % spacing) * (SCROLL_SPEED as u32)) % spacing) as i32;
     let rings = unsafe { &mut RING_Z };
@@ -532,12 +533,12 @@ impl Corridor {
         ot.submit();
     }
 
-    fn draw_hud(&self, font: &FontAtlas, frame: u32) {
+    fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {
         font.draw_text(4, 4, "SHOWCASE-FOG", (220, 220, 250));
         font.draw_text(SCREEN_W - 168, 4, "RTPS NCDS NCLIP AVSZ3", (160, 200, 240));
 
         font.draw_text(4, SCREEN_H - 20, "frame", (160, 160, 200));
-        let frame_hex = u16_hex((frame & 0xFFFF) as u16);
+        let frame_hex = u16_hex((tick.as_u32() & 0xFFFF) as u16);
         font.draw_text(
             4 + 8 * 6,
             SCREEN_H - 20,

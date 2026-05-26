@@ -53,9 +53,9 @@ use psx_engine::{
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame, PointLightSample,
     PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
-    RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelGeometry,
+    RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SimTick, TexturedModelGeometry,
     TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing,
+    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing,
     WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
     WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
@@ -1758,7 +1758,7 @@ impl RuntimeStreamingJobs {
     }
 
     fn background_tick(self, ctx: &Ctx) -> bool {
-        (ctx.sim_tick & ROOM_WINDOW_BACKGROUND_TICK_MASK) != 0
+        (ctx.sim_tick.as_u32() & ROOM_WINDOW_BACKGROUND_TICK_MASK) != 0
     }
 
     fn step_vram_uploads(self) -> bool {
@@ -3158,11 +3158,11 @@ struct Playtest {
     /// Tick the current animation started at -- used to phase
     /// the loop relative to clip switches so transitions don't
     /// pop into the middle of the new clip.
-    anim_start_tick: u32,
+    anim_start_tick: SimTick,
     /// Non-looping gameplay animation lock. While active,
     /// locomotion input is ignored and the current action clip
     /// plays from start to finish.
-    anim_lock_until_tick: u32,
+    anim_lock_until_tick: SimTick,
     /// Persistent runtime state for authored breakable box props.
     box_prop_broken: [u32; BOX_PROP_BROKEN_WORDS],
     /// Short-lived baked face-burst events for newly broken box props.
@@ -3278,8 +3278,8 @@ impl Playtest {
             motor: CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO),
             character: None,
             anim_state: PlayerAnim::Idle,
-            anim_start_tick: 0,
-            anim_lock_until_tick: 0,
+            anim_start_tick: SimTick::ZERO,
+            anim_lock_until_tick: SimTick::ZERO,
             box_prop_broken: [0; BOX_PROP_BROKEN_WORDS],
             box_prop_break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
             evade_run_hold_ticks: 0,
@@ -3388,8 +3388,8 @@ impl Scene for Playtest {
             .snap_to(self.spawn, Angle::from_q12(spawn.yaw as u16));
         self.room_index = spawn.room;
         self.anim_state = PlayerAnim::Idle;
-        self.anim_start_tick = 0;
-        self.anim_lock_until_tick = 0;
+        self.anim_start_tick = SimTick::ZERO;
+        self.anim_lock_until_tick = SimTick::ZERO;
         self.box_prop_broken = [0; BOX_PROP_BROKEN_WORDS];
         self.box_prop_break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
         self.camera.snap_to_player_with_yaw(
@@ -4485,7 +4485,12 @@ fn begin_world_render_pass<'a, 'ot>(
 }
 
 impl Playtest {
-    fn start_player_anim_action(&mut self, anim: PlayerAnim, now: u32, video_hz: u16) -> bool {
+    fn start_player_anim_action(
+        &mut self,
+        anim: PlayerAnim,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> bool {
         let Some(character) = self.character else {
             return false;
         };
@@ -4501,8 +4506,8 @@ impl Playtest {
         &mut self,
         character: RuntimeCharacter,
         anim: PlayerAnim,
-        now: u32,
-        video_hz: u16,
+        now: SimTick,
+        video_hz: VideoHz,
     ) -> bool {
         if character.action_clip(anim.action()).is_none() {
             return false;
@@ -4520,7 +4525,7 @@ impl Playtest {
         &self,
         character: RuntimeCharacter,
         clip: ModelClipIndex,
-        video_hz: u16,
+        video_hz: VideoHz,
     ) -> Option<u32> {
         let runtime_model = self
             .models
@@ -4532,7 +4537,7 @@ impl Playtest {
         let frames = animation.frame_count().max(1) as u32;
         Some(
             frames
-                .saturating_mul(video_hz.max(1) as u32)
+                .saturating_mul(video_hz.as_nonzero_u32())
                 .div_ceil(sample_rate),
         )
     }
@@ -4939,7 +4944,7 @@ impl Playtest {
     fn draw_particle_emitters(
         &self,
         camera: WorldCamera,
-        elapsed_vblanks: u32,
+        elapsed_tick: SimTick,
         ot: &mut OtFrame<'_, OT_DEPTH>,
         primitive_packets: &mut PrimitivePacketArena<'_>,
     ) -> usize {
@@ -4965,7 +4970,7 @@ impl Playtest {
                     room_camera,
                     depth_range,
                     particle_material,
-                    elapsed_vblanks,
+                    elapsed_tick,
                     ot,
                     primitive_packets,
                 );
@@ -6671,9 +6676,9 @@ fn draw_player(
     yaw: Angle,
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
-    anim_start_tick: u32,
-    elapsed_vblanks: u32,
-    video_hz: u16,
+    anim_start_tick: SimTick,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -6689,7 +6694,7 @@ fn draw_player(
     };
     // Phase the animation relative to the clip-start tick so
     // state changes don't pop into the middle of a new clip.
-    let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
+    let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
     let phase = animation_phase_at_tick_q12(
         anim,
         local_tick,
@@ -6903,9 +6908,9 @@ fn draw_player_equipment(
     yaw: Angle,
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
-    anim_start_tick: u32,
-    elapsed_vblanks: u32,
-    video_hz: u16,
+    anim_start_tick: SimTick,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -6919,7 +6924,7 @@ fn draw_player_equipment(
     let Some(character_anim) = character_model.clip(clips, clip_local) else {
         return out;
     };
-    let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
+    let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
     let character_phase = animation_phase_at_tick_q12(
         character_anim,
         local_tick,
@@ -6995,7 +7000,7 @@ fn draw_player_equipment(
                     socket_pose.origin.z.saturating_sub(grip_world[2]),
                 );
                 if let Some(anim) = weapon_model.clip(clips, weapon_model.default_clip) {
-                    let phase = anim.phase_at_tick_q12(elapsed_vblanks, video_hz);
+                    let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
                     let material = lighting.shade_model_material(origin, weapon_model.material);
                     let model_options = options
                         .with_depth_policy(DepthPolicy::Average)
@@ -10684,8 +10689,8 @@ fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color:
 
 fn draw_model_instances(
     current_room: RoomIndex,
-    elapsed_vblanks: u32,
-    video_hz: u16,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -10715,7 +10720,7 @@ fn draw_model_instances(
         let Some(anim) = runtime_model.clip(clips, clip_local) else {
             continue;
         };
-        let phase = anim.phase_at_tick_q12(elapsed_vblanks, video_hz);
+        let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
         let bounds = model_frame_bounds(runtime_model, clip_local, phase);
         let clip_anchor = model_clip_anchor(runtime_model, clip_local);
         let reference_anchor = model_clip_anchor(runtime_model, runtime_model.default_clip);
@@ -10872,10 +10877,10 @@ fn visual_model_origin(
 fn animation_phase_at_tick_q12(
     animation: Animation<'static>,
     local_tick: u32,
-    video_hz: u16,
+    video_hz: VideoHz,
     looping: bool,
 ) -> u32 {
-    let phase = animation.phase_at_tick_q12(local_tick, video_hz);
+    let phase = animation.phase_at_tick_q12(local_tick, video_hz.as_u16());
     if looping {
         return phase;
     }
@@ -12722,7 +12727,7 @@ fn draw_entity_markers(
     }
 }
 
-fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_vblanks: u32) {
+fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_tick: SimTick) {
     let Some(center) = camera.project_world(target.to_world_vertex()) else {
         return;
     };
@@ -12730,7 +12735,7 @@ fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_vb
     let outer = TARGET_LOCK_OUTER;
     let inner = TARGET_LOCK_INNER;
     let half_width = TARGET_LOCK_TRI_HALF_WIDTH;
-    let angle = Angle::per_frames(TARGET_LOCK_ROTATION_FRAMES).mul_frame(elapsed_vblanks);
+    let angle = Angle::per_frames(TARGET_LOCK_ROTATION_FRAMES).mul_tick(elapsed_tick);
     let triangles = [
         [
             target_screen_vertex(center, 0, -inner, angle),
@@ -12781,7 +12786,7 @@ fn draw_particle_emitter(
     camera: WorldCamera,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
-    elapsed_vblanks: u32,
+    elapsed_tick: SimTick,
     ot: &mut OtFrame<'_, OT_DEPTH>,
     primitive_packets: &mut PrimitivePacketArena<'_>,
 ) -> usize {
@@ -12814,7 +12819,7 @@ fn draw_particle_emitter(
             emitter.z as u32,
             i,
         );
-        let age = (elapsed_vblanks + (i * lifetime / count)) % lifetime;
+        let age = (elapsed_tick.as_u32() + (i * lifetime / count)) % lifetime;
         submitted += draw_particle_sample(
             emitter,
             camera,
@@ -13004,7 +13009,7 @@ const fn particle_blend_mode(mode: u8) -> BlendMode {
     }
 }
 
-fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_vblanks: u32) {
+fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_tick: SimTick) {
     if room.flags & room_flags::ATMOSPHERE_ENABLED == 0 {
         return;
     }
@@ -13014,6 +13019,7 @@ fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_vblanks: u32) {
     }
     let base_fall_q4 = room.atmosphere_fall_speed_q4.max(0) as i32;
     let base_wind_q4 = room.atmosphere_wind_speed_q4 as i32;
+    let elapsed_vblanks = elapsed_tick.as_u32();
     let elapsed = elapsed_vblanks as i32;
     let mut i = 0u32;
     while i < count {
