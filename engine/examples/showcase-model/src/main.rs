@@ -204,7 +204,7 @@ impl Scene for ModelShowcase {
     fn update(&mut self, ctx: &mut Ctx) {
         if ctx.just_pressed(button::SELECT) {
             let next = (self.current_model + 1) % MODELS.len();
-            self.activate_model(next, ctx.time.elapsed_vblanks());
+            self.activate_model(next, ctx.sim_tick);
         }
 
         let entry = &MODELS[self.current_model];
@@ -215,7 +215,7 @@ impl Scene for ModelShowcase {
             self.advance_clip(ctx, entry.clips.len().saturating_sub(1));
         }
 
-        let dt = ctx.time.delta_vblanks();
+        let dt = 1u16;
         if ctx.is_held(button::LEFT) {
             self.camera_yaw = self
                 .camera_yaw
@@ -263,11 +263,8 @@ impl Scene for ModelShowcase {
                 self.camera_pitch,
             );
 
-            let clip_tick = ctx
-                .time
-                .elapsed_vblanks()
-                .wrapping_sub(self.clip_origin_vblanks);
-            let frame_q12 = animation.phase_at_tick_q12(clip_tick, ctx.time.video_hz());
+            let clip_tick = ctx.sim_tick.wrapping_sub(self.clip_origin_vblanks);
+            let frame_q12 = animation.phase_at_tick_q12(clip_tick, ctx.video_hz);
             let mut ot = unsafe { OtFrame::begin(&mut OT) };
             let mut triangles = unsafe { PrimitiveArena::new(&mut TEXTURED_TRIS) };
             let mut world = unsafe { WorldRenderPass::new(&mut ot, &mut WORLD_COMMANDS) };
@@ -340,7 +337,7 @@ impl ModelShowcase {
     fn advance_clip(&mut self, ctx: &Ctx, step: usize) {
         let count = MODELS[self.current_model].clips.len().max(1);
         self.current_clip = (self.current_clip + step) % count;
-        self.clip_origin_vblanks = ctx.time.elapsed_vblanks();
+        self.clip_origin_vblanks = ctx.sim_tick;
     }
 }
 
