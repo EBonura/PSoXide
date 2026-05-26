@@ -45,6 +45,21 @@ impl<const N: usize> OrderingTable<N> {
     /// to the slot below. Submission starts at `[N-1]` so the
     /// DMA walker visits `[N-1] → [N-2] → … → [0] → end`.
     pub fn clear(&mut self) {
+        #[cfg(target_arch = "mips")]
+        {
+            if N <= u16::MAX as usize {
+                psx_io::dma::clear_ordering_table(self.entries.as_mut_ptr(), N as u16);
+            } else {
+                self.clear_software();
+            }
+        }
+        #[cfg(not(target_arch = "mips"))]
+        {
+            self.clear_software();
+        }
+    }
+
+    fn clear_software(&mut self) {
         // Slot 0 is the sentinel; chain walks stop here.
         self.entries[0] = 0x00FF_FFFF;
         for i in 1..N {
@@ -64,6 +79,17 @@ impl<const N: usize> OrderingTable<N> {
     /// [`crate::prim`] satisfy this.
     pub unsafe fn insert(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
         let z = z.min(N - 1);
+        unsafe { self.insert_unchecked(z, packet_ptr, words) };
+    }
+
+    /// Prepend a primitive packet into an already-clamped depth slot.
+    ///
+    /// # Safety
+    /// Same packet lifetime/alignment requirements as [`insert`](Self::insert).
+    /// In addition, `z` must be less than `N`.
+    #[inline(always)]
+    pub unsafe fn insert_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
+        debug_assert!(z < N);
         let old_head = self.entries[z] & 0x00FF_FFFF;
         let tag = ((words as u32) << 24) | old_head;
         unsafe { ptr::write_volatile(packet_ptr, tag) };

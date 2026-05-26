@@ -44,8 +44,6 @@ use crate::app::{
 use crate::playtest_input::read_input_tape;
 
 const NTSC_CPU_CYCLES_PER_VBLANK: u64 = 33_868_800 / 60;
-const PACED20_INTERVAL_VBLANKS: u64 = 3;
-const PACED20_VISUAL_BUDGET_CYCLES: u64 = NTSC_CPU_CYCLES_PER_VBLANK * PACED20_INTERVAL_VBLANKS;
 const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (telemetry::stage::SKY, "sky"),
     (telemetry::stage::FAR_VISTA, "far vista"),
@@ -666,11 +664,13 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
     if args.dump_guest_profile {
         let counter_totals = bus.telemetry.counter_totals();
         let counter_max_values = bus.telemetry.counter_max_values();
+        let counter_latest_values = bus.telemetry.counter_latest_values();
         let mut summary = profile_summary.unwrap_or_default();
         let events = bus.telemetry.drain_events();
         summary.add_events(&events);
         summary.counters = counter_totals;
         summary.counter_max_values = counter_max_values;
+        summary.counter_latest_values = counter_latest_values;
         print_guest_profile(&summary);
         print_gte_profile(
             &gte_profile_before,
@@ -817,7 +817,10 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         true,
         true,
         !args.no_grid,
+        true,
+        true,
         &empty_hidden,
+        None,
         NodeId::ROOT,
         None,
         None,
@@ -946,10 +949,11 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
             continue;
         }
         println!(
-            "  {:<18} total={:<10} per_frame={:.0}",
+            "  {:<18} total={:<10} per_frame={:.0} latest={}",
             telemetry::counter_name(id as u16),
             value,
             value as f32 / frames,
+            summary.counter_latest_values[id],
         );
     }
 }
@@ -1031,6 +1035,7 @@ fn print_guest_pacing_profile(summary: &telemetry::GuestTelemetrySummary) {
         summary.stage_cycles[telemetry::stage::RENDER as usize],
         visual_frames,
     );
+    let visual_budget = interval.map(|vblanks| vblanks * NTSC_CPU_CYCLES_PER_VBLANK as f64);
 
     println!("guest_profile_pacing:");
     println!("  sim_ticks={}", fmt_known_u64(sim_ticks));
@@ -1048,12 +1053,14 @@ fn print_guest_pacing_profile(summary: &telemetry::GuestTelemetrySummary) {
         fmt_optional_f64(render_per_visual)
     );
     println!(
-        "  paced20_budget_cycles={}  vblanks={}  cycles_per_vblank={}",
-        PACED20_VISUAL_BUDGET_CYCLES, PACED20_INTERVAL_VBLANKS, NTSC_CPU_CYCLES_PER_VBLANK
+        "  visual_budget_cycles={}  vblanks={}  cycles_per_vblank={}",
+        fmt_optional_f64(visual_budget),
+        fmt_optional_f64_2(interval),
+        NTSC_CPU_CYCLES_PER_VBLANK
     );
     println!(
-        "  paced20_budget_status={}",
-        paced20_budget_status(render_per_visual)
+        "  visual_budget_status={}",
+        visual_budget_status(render_per_visual, visual_budget)
     );
     println!(
         "  cadence_status={}",
@@ -1096,24 +1103,28 @@ fn fmt_optional_f64(value: Option<f64>) -> String {
     }
 }
 
-fn paced20_budget_status(render_per_visual: Option<f64>) -> &'static str {
-    match render_per_visual {
-        Some(cycles) if cycles <= PACED20_VISUAL_BUDGET_CYCLES as f64 => "pass",
-        Some(_) => "fail",
-        None => "unknown",
+fn fmt_optional_f64_2(value: Option<f64>) -> String {
+    match value {
+        Some(value) => format!("{value:.2}"),
+        None => "unknown".to_string(),
+    }
+}
+
+fn visual_budget_status(
+    render_per_visual: Option<f64>,
+    visual_budget: Option<f64>,
+) -> &'static str {
+    match (render_per_visual, visual_budget) {
+        (Some(cycles), Some(budget)) if cycles <= budget => "pass",
+        (Some(_), Some(_)) => "fail",
+        _ => "unknown",
     }
 }
 
 fn cadence_status(interval: Option<f64>, misses: u64, max_lateness: u32) -> &'static str {
     match interval {
-        Some(interval)
-            if (interval - PACED20_INTERVAL_VBLANKS as f64).abs() <= 0.01
-                && misses == 0
-                && max_lateness == 0 =>
-        {
-            "steady"
-        }
-        Some(_) => "missed_or_non_20hz",
+        Some(_) if misses == 0 && max_lateness == 0 => "steady",
+        Some(_) => "missed_or_late",
         None => "unknown",
     }
 }
