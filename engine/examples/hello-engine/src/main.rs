@@ -23,7 +23,7 @@
 
 extern crate psx_rt;
 
-use psx_engine::{Angle, App, Config, Ctx, OtFrame, PrimitiveArena, Scene, button};
+use psx_engine::{button, Angle, App, Config, Ctx, OtFrame, PrimitiveArena, Scene};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
 use psx_math::sincos;
@@ -108,7 +108,7 @@ impl Scene for Game {
         // via `Angle`. `per_frames(N).mul_frame(frame)` is the
         // canonical way to drive a periodic motion -- no modulo
         // snap-back, no unit mismatch.
-        let phase = Angle::per_frames(OSCILLATION_FRAMES).mul_frame(ctx.frame);
+        let phase = Angle::per_frames(OSCILLATION_FRAMES).mul_frame(ctx.sim_tick);
         let dx = (sincos::sin_q12(phase.sin_q12_arg()) * AMPLITUDE_PX as i32) >> 12;
         let cx = 160 - 12 + dx as i16;
         let cy = 120 - 12 + self.y_offset;

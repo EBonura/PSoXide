@@ -54,7 +54,9 @@
 extern crate psx_rt;
 
 use psx_asset::Texture;
-use psx_engine::{App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, PrimitiveArena, Scene};
+use psx_engine::{
+    App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, PrimitiveArena, Scene,
+};
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, TriTexturedGouraud};
@@ -401,7 +403,7 @@ impl Scene for Corridor {
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
-        update_ring_z(ctx.frame);
+        update_ring_z(ctx.sim_tick);
 
         // Reset per-frame counters. `build_frame_ot` will repopulate
         // them during render.
@@ -412,7 +414,7 @@ impl Scene for Corridor {
     fn render(&mut self, ctx: &mut Ctx) {
         self.build_frame_ot();
         let font = self.font.as_ref().expect("font uploaded in init");
-        self.draw_hud(font, ctx.frame);
+        self.draw_hud(font, ctx.sim_tick);
     }
 }
 
