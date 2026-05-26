@@ -76,7 +76,7 @@ use psx_gpu::{
     draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
-    prim::{TriTextured, TriTexturedGouraud},
+    prim::{QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
     VideoMode,
 };
 use psx_level::portal_visibility::{
@@ -246,6 +246,14 @@ const SHADOW_TEXEL_U: u8 = 64;
 const SHADOW_TEXTURE_X: u16 = SHADOW_TPAGE.x() + ((SHADOW_TEXEL_U as u16) / 4);
 const SHADOW_CLUT: Clut = Clut::new(336, 481);
 const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
+const PARTICLE_TPAGE: Tpage = SHADOW_TPAGE;
+const PARTICLE_TEXEL_U: u8 = 0;
+const PARTICLE_TEXEL_V: u8 = 0;
+const PARTICLE_TEXTURE_SIZE: u16 = 16;
+const PARTICLE_UV_MAX: u8 = PARTICLE_TEXEL_U + PARTICLE_TEXTURE_SIZE as u8 - 1;
+const PARTICLE_TEXTURE_X: u16 = PARTICLE_TPAGE.x() + ((PARTICLE_TEXEL_U as u16) / 4);
+const PARTICLE_TEXTURE_HALFWORDS_PER_ROW: u16 = PARTICLE_TEXTURE_SIZE / 4;
+const PARTICLE_CLUT: Clut = Clut::new(352, 481);
 
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
@@ -3208,6 +3216,8 @@ struct Playtest {
     clips: [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     /// VRAM-bound subtract-blended circular floor shadow.
     shadow_material: Option<TextureMaterial>,
+    /// VRAM-bound 16x16 white circular sprite used by particle emitters.
+    particle_material: Option<TextureMaterial>,
     /// Immediate-mode cylinder overlay for tuning actor blockers.
     show_collision_debug: bool,
     /// Cooperative background policy for room-window and VRAM upload work.
@@ -3303,6 +3313,7 @@ impl Playtest {
             model_vertex_count: 0,
             clips: [const { None }; MAX_RUNTIME_MODEL_CLIPS],
             shadow_material: None,
+            particle_material: None,
             show_collision_debug: false,
             streaming_jobs: RuntimeStreamingJobs::new(),
             post_cross_debug_frames: 0,
@@ -3347,6 +3358,7 @@ impl Scene for Playtest {
     fn init(&mut self, _ctx: &mut Ctx) {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
         self.shadow_material = upload_shadow_texture();
+        self.particle_material = Some(upload_particle_texture());
 
         // Empty manifest? Boot to a clear-coloured screen.
         if ROOMS.is_empty() {
@@ -4383,6 +4395,16 @@ impl Scene for Playtest {
             self.post_cross_debug_frames = self.post_cross_debug_frames.saturating_sub(1);
         }
 
+        let world_command_len = world.command_len();
+        telemetry::stage_begin(telemetry::stage::WORLD_FLUSH);
+        world.flush();
+        telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
+        let _ = self.draw_particle_emitters(
+            camera,
+            ctx.time.elapsed_vblanks(),
+            &mut ot,
+            &mut primitive_packets,
+        );
         telemetry::counter(
             telemetry::counter::TRI_PRIMITIVES,
             primitive_packets.len() as u32,
@@ -4391,18 +4413,10 @@ impl Scene for Playtest {
             telemetry::counter::TRI_PRIMITIVE_REMAINING,
             primitive_packets.remaining() as u32,
         );
-        telemetry::counter(
-            telemetry::counter::WORLD_COMMANDS,
-            world.command_len() as u32,
-        );
-        telemetry::stage_begin(telemetry::stage::WORLD_FLUSH);
-        world.flush();
-        telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
+        telemetry::counter(telemetry::counter::WORLD_COMMANDS, world_command_len as u32);
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         ot.submit();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
-
-        self.draw_particle_emitters(camera, ctx.time.elapsed_vblanks());
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
             draw_room_atmosphere_overlay(room_record, ctx.time.elapsed_vblanks());
@@ -4927,19 +4941,42 @@ impl Playtest {
         }
     }
 
-    fn draw_particle_emitters(&self, camera: WorldCamera, elapsed_vblanks: u32) {
+    fn draw_particle_emitters(
+        &self,
+        camera: WorldCamera,
+        elapsed_vblanks: u32,
+        ot: &mut OtFrame<'_, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'_>,
+    ) -> usize {
+        let Some(particle_material) = self.particle_material else {
+            return 0;
+        };
+        let mut submitted = 0usize;
         for active in self.active_rooms.iter().flatten().copied() {
             if !self.portal_visibility_draws_room(active.index) {
                 continue;
             }
             let room_camera = camera_for_room(camera, active);
+            let depth_range = ROOMS
+                .get(active.index.to_usize())
+                .map(room_depth_range)
+                .unwrap_or(WORLD_DEPTH_RANGE);
             for emitter in PARTICLE_EMITTERS {
                 if emitter.room != active.index {
                     continue;
                 }
-                draw_particle_emitter(*emitter, room_camera, elapsed_vblanks);
+                submitted += draw_particle_emitter(
+                    *emitter,
+                    room_camera,
+                    depth_range,
+                    particle_material,
+                    elapsed_vblanks,
+                    ot,
+                    primitive_packets,
+                );
             }
         }
+        submitted
     }
 
     fn camera_config(&self) -> ThirdPersonCameraConfig {
@@ -10001,6 +10038,57 @@ fn upload_shadow_texture() -> Option<TextureMaterial> {
     )
 }
 
+fn upload_particle_texture() -> TextureMaterial {
+    let mut pixels =
+        [0u8; (PARTICLE_TEXTURE_HALFWORDS_PER_ROW as usize) * (PARTICLE_TEXTURE_SIZE as usize) * 2];
+    let mut row = 0usize;
+    while row < PARTICLE_TEXTURE_SIZE as usize {
+        let mut col = 0usize;
+        while col < PARTICLE_TEXTURE_SIZE as usize {
+            let dx = (col as i32 * 2 + 1) - PARTICLE_TEXTURE_SIZE as i32;
+            let dy = (row as i32 * 2 + 1) - PARTICLE_TEXTURE_SIZE as i32;
+            let inside = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)) <= 225;
+            if inside {
+                let halfword = row * PARTICLE_TEXTURE_HALFWORDS_PER_ROW as usize + (col / 4);
+                let shift = (col & 3) * 4;
+                let raw = u16::from_le_bytes([pixels[halfword * 2], pixels[halfword * 2 + 1]])
+                    | (1u16 << shift);
+                let packed = raw.to_le_bytes();
+                pixels[halfword * 2] = packed[0];
+                pixels[halfword * 2 + 1] = packed[1];
+            }
+            col += 1;
+        }
+        row += 1;
+    }
+
+    let mut clut = [0u8; 32];
+    let white = 0x7FFFu16.to_le_bytes();
+    clut[2] = white[0];
+    clut[3] = white[1];
+
+    upload_bytes(
+        VramRect::new(
+            PARTICLE_TEXTURE_X,
+            PARTICLE_TPAGE.y(),
+            PARTICLE_TEXTURE_HALFWORDS_PER_ROW,
+            PARTICLE_TEXTURE_SIZE,
+        ),
+        &pixels,
+    );
+    upload_clut(
+        VramRect::new(PARTICLE_CLUT.x(), PARTICLE_CLUT.y(), 16, 1),
+        &clut,
+    );
+
+    TextureMaterial::blended(
+        PARTICLE_CLUT.uv_clut_word(),
+        PARTICLE_TPAGE.uv_tpage_word(0),
+        (0x80, 0x80, 0x80),
+        BlendMode::Average,
+    )
+}
+
 /// Upload `asset_bytes` to VRAM if not already resident; return
 /// the slot record so the caller can build a TextureMaterial.
 /// Returns `None` if the texture parse fails or the VRAM table
@@ -12703,14 +12791,18 @@ fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle)
 fn draw_particle_emitter(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
     elapsed_vblanks: u32,
-) {
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
     if emitter.flags & particle_emitter_flags::ENABLED == 0
         || emitter.max_particles == 0
         || emitter.lifetime_frames == 0
         || emitter.spawn_rate_q8 == 0
     {
-        return;
+        return 0;
     }
 
     let lifetime = emitter.lifetime_frames as u32;
@@ -12722,9 +12814,10 @@ fn draw_particle_emitter(
         .min(PARTICLE_EMITTER_DRAW_CAP as u32)
         .min(steady_count.max(1));
     if count == 0 {
-        return;
+        return 0;
     }
 
+    let mut submitted = 0usize;
     let mut i = 0u32;
     while i < count {
         let seed = particle_seed(
@@ -12734,18 +12827,33 @@ fn draw_particle_emitter(
             i,
         );
         let age = (elapsed_vblanks + (i * lifetime / count)) % lifetime;
-        draw_particle_sample(emitter, camera, seed, age as i32, lifetime as i32);
+        submitted += draw_particle_sample(
+            emitter,
+            camera,
+            depth_range,
+            particle_material,
+            seed,
+            age as i32,
+            lifetime as i32,
+            ot,
+            primitive_packets,
+        );
         i += 1;
     }
+    submitted
 }
 
 fn draw_particle_sample(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
     seed: u32,
     age: i32,
     lifetime: i32,
-) {
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
     let spawn_radius = emitter.spawn_radius as i32;
     let origin_x = emitter
         .x
@@ -12782,7 +12890,7 @@ fn draw_particle_sample(
         seed.rotate_left(21),
     );
     let Some(center) = camera.project_world(WorldVertex::new(x, y, z)) else {
-        return;
+        return 0;
     };
 
     let t_q8 = if lifetime <= 1 {
@@ -12797,22 +12905,47 @@ fn draw_particle_sample(
     ) as i16;
     let tint = particle_lerp_rgb(emitter.start_color, emitter.end_color, t_q8);
     let blend = particle_blend_mode(emitter.blend_mode);
-    let sx = center.sx;
-    let sy = center.sy;
-    draw_tri_flat_blended(
-        [(sx, sy - half), (sx + half, sy), (sx, sy + half)],
-        tint.0,
-        tint.1,
-        tint.2,
-        blend,
+    let slot = depth_range.slot::<OT_DEPTH>(center.sz);
+    draw_particle_quad(
+        center,
+        half,
+        particle_material.with_tint(tint).with_blend_mode(blend),
+        slot,
+        ot,
+        primitive_packets,
+    )
+}
+
+fn draw_particle_quad(
+    center: ProjectedVertex,
+    half: i16,
+    material: TextureMaterial,
+    slot: psx_engine::DepthSlot,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let left = clamp_i16(i32::from(center.sx).saturating_sub(i32::from(half)));
+    let right = clamp_i16(i32::from(center.sx).saturating_add(i32::from(half)));
+    let top = clamp_i16(i32::from(center.sy).saturating_sub(i32::from(half)));
+    let bottom = clamp_i16(i32::from(center.sy).saturating_add(i32::from(half)));
+    if left == right || top == bottom {
+        return 0;
+    }
+    let quad = QuadTexturedMaterial::with_material(
+        [(left, top), (right, top), (left, bottom), (right, bottom)],
+        [
+            (PARTICLE_TEXEL_U, PARTICLE_TEXEL_V),
+            (PARTICLE_UV_MAX, PARTICLE_TEXEL_V),
+            (PARTICLE_TEXEL_U, PARTICLE_UV_MAX),
+            (PARTICLE_UV_MAX, PARTICLE_UV_MAX),
+        ],
+        material,
     );
-    draw_tri_flat_blended(
-        [(sx, sy - half), (sx, sy + half), (sx - half, sy)],
-        tint.0,
-        tint.1,
-        tint.2,
-        blend,
-    );
+    let Some(packet) = primitive_packets.push(quad) else {
+        return 0;
+    };
+    ot.add_packet_slot(slot, packet);
+    1
 }
 
 fn particle_axis_position(
