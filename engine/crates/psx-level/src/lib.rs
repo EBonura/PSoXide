@@ -1487,6 +1487,54 @@ pub struct PointLightRecord {
     pub flags: u16,
 }
 
+/// Runtime flags for [`ParticleEmitterRecord`].
+pub mod particle_emitter_flags {
+    /// Emitter is enabled in playtest/runtime.
+    pub const ENABLED: u16 = 1 << 0;
+}
+
+/// One cheap world-space particle emitter. Coordinates are
+/// room-local engine units. Runtime projection is intentionally
+/// point-based: particles advance in 3D, project one centre point,
+/// then draw a small screen-aligned sprite/marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParticleEmitterRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Hard live-particle cap.
+    pub max_particles: u16,
+    /// Spawn rate in particles/second, Q8 fixed point.
+    pub spawn_rate_q8: u16,
+    /// Particle lifetime in 60 Hz frames.
+    pub lifetime_frames: u8,
+    /// Particle size at birth, in engine units before projection.
+    pub start_size: u16,
+    /// Particle size at death, in engine units before projection.
+    pub end_size: u16,
+    /// 8-bit RGB tint at birth.
+    pub start_color: [u8; 3],
+    /// 8-bit RGB tint at death.
+    pub end_color: [u8; 3],
+    /// PS1 semi-transparency mode code: 0 average, 1 add, 2 subtract, 3 add-quarter.
+    pub blend_mode: u8,
+    /// Base velocity in Q4.4 engine units per 60 Hz frame.
+    pub base_velocity_q4: [i16; 3],
+    /// Random velocity spread in Q4.4 engine units per 60 Hz frame.
+    pub random_velocity_q4: [u16; 3],
+    /// Constant acceleration in Q4.4 engine units per 60 Hz frame.
+    pub acceleration_q4: [i16; 3],
+    /// Random spawn offset radius, in engine units.
+    pub spawn_radius: u16,
+    /// Runtime flags.
+    pub flags: u16,
+}
+
 /// Sentinel for optional [`LevelCharacterRecord`] clip slots
 /// (`run_clip` / `turn_clip`). The runtime treats this as
 /// "no clip authored for this role" and falls back to walk /

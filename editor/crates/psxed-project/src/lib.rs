@@ -7192,6 +7192,145 @@ impl Default for CharacterControllerSettings {
     }
 }
 
+pub const DEFAULT_PARTICLE_EMITTER_MAX_PARTICLES: u16 = 32;
+pub const DEFAULT_PARTICLE_EMITTER_SPAWN_RATE_Q8: u16 = 8 * 256;
+pub const DEFAULT_PARTICLE_EMITTER_LIFETIME_FRAMES: u8 = 60;
+pub const DEFAULT_PARTICLE_EMITTER_START_SIZE: u16 = 128;
+pub const DEFAULT_PARTICLE_EMITTER_END_SIZE: u16 = 512;
+
+const fn default_particle_emitter_enabled() -> bool {
+    true
+}
+
+const fn default_particle_emitter_max_particles() -> u16 {
+    DEFAULT_PARTICLE_EMITTER_MAX_PARTICLES
+}
+
+const fn default_particle_emitter_spawn_rate_q8() -> u16 {
+    DEFAULT_PARTICLE_EMITTER_SPAWN_RATE_Q8
+}
+
+const fn default_particle_emitter_lifetime_frames() -> u8 {
+    DEFAULT_PARTICLE_EMITTER_LIFETIME_FRAMES
+}
+
+const fn default_particle_emitter_start_size() -> u16 {
+    DEFAULT_PARTICLE_EMITTER_START_SIZE
+}
+
+const fn default_particle_emitter_end_size() -> u16 {
+    DEFAULT_PARTICLE_EMITTER_END_SIZE
+}
+
+const fn default_particle_emitter_start_color() -> [u8; 3] {
+    [255, 255, 255]
+}
+
+const fn default_particle_emitter_end_color() -> [u8; 3] {
+    [96, 96, 96]
+}
+
+const fn default_particle_emitter_blend_mode() -> PsxBlendMode {
+    PsxBlendMode::Average
+}
+
+const fn default_particle_emitter_base_velocity_q4() -> [i16; 3] {
+    [0, 24, 0]
+}
+
+const fn default_particle_emitter_random_velocity_q4() -> [u16; 3] {
+    [16, 8, 16]
+}
+
+const fn default_particle_emitter_acceleration_q4() -> [i16; 3] {
+    [0, 0, 0]
+}
+
+const fn default_particle_emitter_spawn_radius() -> u16 {
+    0
+}
+
+/// Authoring settings for a cheap world-space particle emitter.
+///
+/// The intended runtime path is point-projected sprites: each live
+/// particle owns a 3D position, projects one centre point, then draws a
+/// screen-aligned textured sprite. Textures are authored or generated at
+/// build time; this node never implies runtime texture generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParticleEmitterSettings {
+    /// Whether the emitter should run in playtest/runtime.
+    #[serde(default = "default_particle_emitter_enabled")]
+    pub enabled: bool,
+    /// Optional 16x16 greyscale/white mask texture used for the sprite.
+    #[serde(default)]
+    pub texture: Option<ResourceId>,
+    /// Hard live-particle cap owned by this emitter.
+    #[serde(default = "default_particle_emitter_max_particles")]
+    pub max_particles: u16,
+    /// Spawn rate in particles/second, Q8 fixed point.
+    #[serde(default = "default_particle_emitter_spawn_rate_q8")]
+    pub spawn_rate_q8: u16,
+    /// Particle lifetime in 60 Hz simulation frames.
+    #[serde(default = "default_particle_emitter_lifetime_frames")]
+    pub lifetime_frames: u8,
+    /// Particle size at birth, in engine units before projection.
+    #[serde(default = "default_particle_emitter_start_size")]
+    pub start_size: u16,
+    /// Particle size at death, in engine units before projection.
+    #[serde(default = "default_particle_emitter_end_size")]
+    pub end_size: u16,
+    /// Tint at birth. Multiplies the greyscale texture.
+    #[serde(default = "default_particle_emitter_start_color")]
+    pub start_color: [u8; 3],
+    /// Tint at death. Runtime fades between start/end tint.
+    #[serde(default = "default_particle_emitter_end_color")]
+    pub end_color: [u8; 3],
+    /// PS1 semi-transparency mode used by the sprite packet.
+    #[serde(default = "default_particle_emitter_blend_mode")]
+    pub blend_mode: PsxBlendMode,
+    /// Base velocity in Q4.4 engine units per 60 Hz frame.
+    #[serde(default = "default_particle_emitter_base_velocity_q4")]
+    pub base_velocity_q4: [i16; 3],
+    /// Random velocity spread in Q4.4 engine units per 60 Hz frame.
+    ///
+    /// Runtime samples each component in `[-spread, +spread]`.
+    #[serde(default = "default_particle_emitter_random_velocity_q4")]
+    pub random_velocity_q4: [u16; 3],
+    /// Constant acceleration in Q4.4 engine units per 60 Hz frame.
+    #[serde(default = "default_particle_emitter_acceleration_q4")]
+    pub acceleration_q4: [i16; 3],
+    /// Random spawn offset radius around the emitter origin, in engine units.
+    #[serde(default = "default_particle_emitter_spawn_radius")]
+    pub spawn_radius: u16,
+}
+
+impl ParticleEmitterSettings {
+    pub const fn defaults() -> Self {
+        Self {
+            enabled: default_particle_emitter_enabled(),
+            texture: None,
+            max_particles: default_particle_emitter_max_particles(),
+            spawn_rate_q8: default_particle_emitter_spawn_rate_q8(),
+            lifetime_frames: default_particle_emitter_lifetime_frames(),
+            start_size: default_particle_emitter_start_size(),
+            end_size: default_particle_emitter_end_size(),
+            start_color: default_particle_emitter_start_color(),
+            end_color: default_particle_emitter_end_color(),
+            blend_mode: default_particle_emitter_blend_mode(),
+            base_velocity_q4: default_particle_emitter_base_velocity_q4(),
+            random_velocity_q4: default_particle_emitter_random_velocity_q4(),
+            acceleration_q4: default_particle_emitter_acceleration_q4(),
+            spawn_radius: default_particle_emitter_spawn_radius(),
+        }
+    }
+}
+
+impl Default for ParticleEmitterSettings {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
 /// Resource payloads available to editor scenes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceData {
@@ -7655,6 +7794,12 @@ pub enum NodeKind {
         /// Approximate editor/runtime radius in sectors.
         radius: f32,
     },
+    /// Cheap point-projected world particle emitter.
+    ParticleEmitter {
+        /// Fixed-budget emitter tuning.
+        #[serde(default)]
+        settings: ParticleEmitterSettings,
+    },
     /// Spawn marker.
     SpawnPoint {
         /// Whether this is the player spawn.
@@ -7729,6 +7874,7 @@ impl NodeKind {
             Self::Combat { .. } => "Combat",
             Self::Equipment { .. } => "Equipment",
             Self::PointLight { .. } => "Point Light",
+            Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
             Self::Trigger { .. } => "Trigger",
             Self::AudioSource { .. } => "Audio Source",
@@ -9129,6 +9275,9 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
             option_resource_reference_count(*character, id)
         }
         NodeKind::Equipment { weapon, .. } => option_resource_reference_count(*weapon, id),
+        NodeKind::ParticleEmitter { settings } => {
+            option_resource_reference_count(settings.texture, id)
+        }
         NodeKind::SpawnPoint { character, .. } => option_resource_reference_count(*character, id),
         NodeKind::AudioSource { sound, .. } => option_resource_reference_count(*sound, id),
         NodeKind::World { far_vista, .. } => far_vista_resource_reference_count(far_vista, id),
@@ -9182,6 +9331,7 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
         } => clear_option_resource(model, id) + clear_option_resource(material, id),
         NodeKind::CharacterController { character, .. } => clear_option_resource(character, id),
         NodeKind::Equipment { weapon, .. } => clear_option_resource(weapon, id),
+        NodeKind::ParticleEmitter { settings } => clear_option_resource(&mut settings.texture, id),
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
         NodeKind::AudioSource { sound, .. } => clear_option_resource(sound, id),
         NodeKind::World { far_vista, .. } => clear_far_vista_resource_references(far_vista, id),
