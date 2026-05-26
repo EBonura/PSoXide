@@ -333,6 +333,17 @@ impl AppState {
 }
 
 impl AppState {
+    /// Append guest-runtime debug output captured from the telemetry port.
+    pub fn append_guest_debug_logs(
+        &mut self,
+        logs: Vec<emulator_core::telemetry::GuestDebugLogLine>,
+    ) {
+        self.editor.append_play_debug_terminal_lines(
+            logs.into_iter()
+                .map(|line| format!("[f{} c{}] {}", line.frame, line.cycles, line.text)),
+        );
+    }
+
     /// Rebuild the emulator state around `entry`. Same flow the
     /// headless `launch` CLI runs: mount the disc or side-load the
     /// EXE, plug a pad into port 1, and use a real BIOS only for
@@ -1318,6 +1329,50 @@ impl AppState {
         self.status_message_set(message);
     }
 
+    fn embedded_playtest_profiler_history_path(&self) -> PathBuf {
+        self.editor
+            .project_dir()
+            .join("logs")
+            .join("play_profiler_history.csv")
+    }
+
+    fn dump_embedded_playtest_profiler_history(&mut self) {
+        let sample_count = self.profiler.history_len();
+        if sample_count == 0 {
+            let message = "Profiler history is empty";
+            self.editor.set_status(message);
+            self.status_message_set(message);
+            return;
+        }
+
+        let path = self.embedded_playtest_profiler_history_path();
+        let write_result = (|| -> Result<(), String> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("{}: {error}", parent.display()))?;
+            }
+            std::fs::write(&path, self.profiler.history_csv())
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            Ok(())
+        })();
+
+        match write_result {
+            Ok(()) => {
+                let message = format!(
+                    "Profiler history saved: {sample_count} frames -> {}",
+                    path.display()
+                );
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+            Err(error) => {
+                let message = format!("Profiler history save failed: {error}");
+                self.editor.set_status(message.clone());
+                self.status_message_set(message);
+            }
+        }
+    }
+
     /// Handle one request emitted by the editor UI.
     pub fn handle_editor_playtest_request(&mut self, request: psxed_ui::EditorPlaytestRequest) {
         match request {
@@ -1346,6 +1401,9 @@ impl AppState {
             }
             psxed_ui::EditorPlaytestRequest::StopInputReplay => {
                 self.stop_embedded_playtest_input_replay();
+            }
+            psxed_ui::EditorPlaytestRequest::DumpProfilerHistory => {
+                self.dump_embedded_playtest_profiler_history();
             }
         }
     }

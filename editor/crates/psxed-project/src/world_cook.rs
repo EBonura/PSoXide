@@ -671,7 +671,7 @@ fn cook_sector(
     // structs by `cook_horizontal_face` / `cook_walls` already
     // -- listed here only so the future v2 split has an obvious
     // landing spot for any extra collision-only data
-    // (sector logic offset, traversal portal slots, …).
+    // (sector logic offset, vertical floor links, traversal portal slots, …).
 
     Ok(Some(CookedGridSector {
         floor,
@@ -831,13 +831,8 @@ fn cook_walls(
                 material_slots,
             )?;
             let runtime_direction = runtime_wall_direction(direction);
-            for mut segment in wall.split_into_autotile_segments(sector_size) {
+            for segment in wall.split_into_autotile_segments(sector_size) {
                 validate_wall_heights(&segment, x, z, direction)?;
-                if segment.uv.span[1] == 0 {
-                    segment.autotile_uv(sector_size);
-                    segment.uv.offset[1] =
-                        crate::wrap_tiled_uv_offset_i16(i64::from(segment.uv.offset[1]));
-                }
                 cooked
                     .get_mut(runtime_direction)
                     .push(CookedGridVerticalFace {
@@ -873,7 +868,7 @@ mod tests {
     };
 
     fn starter_grid(project: &ProjectDocument) -> WorldGrid {
-        project
+        let template = project
             .active_scene()
             .nodes()
             .iter()
@@ -881,7 +876,26 @@ mod tests {
                 NodeKind::Room { grid } => Some(grid.clone()),
                 _ => None,
             })
-            .expect("starter project should contain a room")
+            .expect("starter project should contain a room");
+        let material = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::Material(_) => Some(resource.id),
+                _ => None,
+            });
+        let mut grid = WorldGrid::stone_room(2, 3, template.sector_size, material, material);
+        grid.ambient_color = template.ambient_color;
+        grid.fog_enabled = template.fog_enabled;
+        grid.fog_color = template.fog_color;
+        grid.fog_near = template.fog_near;
+        grid.fog_far = template.fog_far;
+        grid.atmosphere_enabled = template.atmosphere_enabled;
+        grid.atmosphere_color = template.atmosphere_color;
+        grid.atmosphere_density = template.atmosphere_density;
+        grid.atmosphere_fall_speed_q4 = template.atmosphere_fall_speed_q4;
+        grid.atmosphere_wind_speed_q4 = template.atmosphere_wind_speed_q4;
+        grid
     }
 
     fn first_floor_material(grid: &WorldGrid) -> ResourceId {
@@ -1109,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn cook_autotiles_implicit_tall_wall_without_splitting_when_uv_fits_packet() {
+    fn cook_keeps_default_tall_wall_uvs_matching_editor_preview() {
         let project = ProjectDocument::starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
@@ -1133,16 +1147,13 @@ mod tests {
         assert_eq!(parsed_sector.wall_count(), 1);
         assert_eq!(
             max_uv_v_span(cooked_sector.walls.south[0].uvs),
-            world::TILE_UV * 2
+            world::TILE_UV
         );
-        assert_eq!(
-            max_uv_v_span(parsed_wall.uvs().corners()),
-            world::TILE_UV * 2
-        );
+        assert_eq!(max_uv_v_span(parsed_wall.uvs().corners()), world::TILE_UV);
     }
 
     #[test]
-    fn cook_splits_autotiled_wall_only_when_uv_exceeds_packet_range() {
+    fn cook_splits_explicit_autotiled_wall_only_when_uv_exceeds_packet_range() {
         let project = ProjectDocument::starter();
         let material = first_floor_material(&starter_grid(&project));
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
@@ -1154,6 +1165,10 @@ mod tests {
             world::SECTOR_SIZE * 5,
             Some(material),
         );
+        grid.sector_mut(0, 0)
+            .and_then(|sector| sector.walls.get_mut(GridDirection::North).first_mut())
+            .expect("north wall exists")
+            .autotile_uv(world::SECTOR_SIZE);
 
         let cooked = cook_world_grid(&project, &grid).unwrap();
         let cooked_sector = cooked.sectors[0].as_ref().unwrap();
@@ -1268,8 +1283,8 @@ mod tests {
         // cooker reported. Regresses the v1 byte layout against
         // both producer and consumer in one assertion.
         let mut project = ProjectDocument::starter();
-        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
-        let wall_texture = texture_named(&project, "delven_06_stonebrk1b_q3.psxt");
+        let floor_texture = texture_named(&project, "block_1a.psxt");
+        let wall_texture = texture_named(&project, "brick_1a.psxt");
         let floor = material_for_texture(&mut project, "Floor Slot", floor_texture);
         let wall = material_for_texture(&mut project, "Wall Slot", wall_texture);
         let grid = WorldGrid::stone_room(2, 2, 1024, Some(floor), Some(wall));
@@ -1310,8 +1325,8 @@ mod tests {
         // sectors `[x * depth + z]`. If a future reshape flips that
         // order, the runtime package contract changes.
         let mut project = ProjectDocument::starter();
-        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
-        let wall_texture = texture_named(&project, "delven_06_stonebrk1b_q3.psxt");
+        let floor_texture = texture_named(&project, "block_1a.psxt");
+        let wall_texture = texture_named(&project, "brick_1a.psxt");
         let floor = material_for_texture(&mut project, "Floor Slot", floor_texture);
         let wall = material_for_texture(&mut project, "Wall Slot", wall_texture);
         let grid = WorldGrid::stone_room(2, 2, 1024, Some(floor), Some(wall));
@@ -1330,8 +1345,8 @@ mod tests {
             }
         };
 
-        assert!(psxt_path_for_slot(0).ends_with("delven_01_slateflr1a_q2.psxt"));
-        assert!(psxt_path_for_slot(1).ends_with("delven_06_stonebrk1b_q3.psxt"));
+        assert!(psxt_path_for_slot(0).ends_with("block_1a.psxt"));
+        assert!(psxt_path_for_slot(1).ends_with("brick_1a.psxt"));
     }
 
     #[test]
@@ -1499,7 +1514,7 @@ mod tests {
     fn cooks_horizontal_triangle_material_uv_and_walkable_overrides() {
         let mut project = ProjectDocument::starter();
         let base = first_floor_material(&starter_grid(&project));
-        let floor_texture = texture_named(&project, "delven_01_slateflr1a_q2.psxt");
+        let floor_texture = texture_named(&project, "block_1a.psxt");
         let override_material = material_for_texture(&mut project, "Triangle Slot", floor_texture);
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
         grid.set_floor(0, 0, 0, Some(base));

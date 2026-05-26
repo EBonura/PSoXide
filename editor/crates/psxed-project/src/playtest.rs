@@ -36,18 +36,18 @@ use psx_engine::{
     WorldRenderMaterial, WorldVertex,
 };
 use psx_level::{
-    character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags, model_clip_flags,
-    room_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
+    box_prop_flags, character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags,
+    model_clip_flags, room_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
-use crate::streaming::{plan_generated_chunks, StreamingChunkConfig};
+use crate::portal_rooms::{extract_portal_room_grid, plan_portal_rooms, PortalRoomConfig};
 use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
 use crate::{
-    spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, GridDirection,
-    NodeId, NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
+    spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
+    NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
     WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
@@ -95,7 +95,7 @@ fn clamp_atmosphere_wind_speed_q4(value: i32) -> i16 {
     value.clamp(ATMOSPHERE_WIND_SPEED_MIN_Q4, ATMOSPHERE_WIND_SPEED_MAX_Q4) as i16
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct AuthoredRoomChunk {
     room_index: u16,
     authored_room: u32,
@@ -103,10 +103,22 @@ struct AuthoredRoomChunk {
     array_origin: [u16; 2],
     world_origin: [i32; 2],
     size: [u16; 2],
+    cells: Vec<[u16; 2]>,
+    neighbours: [Option<u16>; 4],
     triangles: usize,
     psxw_bytes: usize,
     static_lit_bytes: usize,
     populated_cells: u16,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRoomFloorLink {
+    room: u16,
+    x: u16,
+    z: u16,
+    world_cell: [i32; 2],
+    above_room: Option<NodeId>,
+    below_room: Option<NodeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,19 +127,6 @@ struct CookedRoomBakeInput {
     world_asset_index: usize,
     world_origin: [i32; 2],
     cooked: CookedWorldGrid,
-}
-
-/// Chunking policy used by Embedded Play. Authored Rooms may grow
-/// beyond the runtime room cap, but generated `.psxw` chunks should be
-/// sized for render cost before the hard runtime limits are reached.
-/// `PSXED_PLAYTEST_CHUNK_TARGET=8` or `8x6` overrides the target size
-/// for cook-time benchmark sweeps.
-pub fn playtest_streaming_chunk_config(streaming: WorldStreamingSettings) -> StreamingChunkConfig {
-    let default = streaming.chunk_config();
-    std::env::var("PSXED_PLAYTEST_CHUNK_TARGET")
-        .ok()
-        .and_then(|raw| streaming_chunk_config_with_target(default, &raw))
-        .unwrap_or(default)
 }
 
 fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) -> u8 {
@@ -141,31 +140,6 @@ fn playtest_streaming_resident_chunk_limit(streaming: WorldStreamingSettings) ->
             )
         })
         .unwrap_or(streaming.resident_chunk_limit)
-}
-
-fn streaming_chunk_config_with_target(
-    mut config: StreamingChunkConfig,
-    raw: &str,
-) -> Option<StreamingChunkConfig> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut parts = trimmed.split(['x', 'X', ',', ':']);
-    let width = parts.next()?.trim().parse::<u16>().ok()?.max(1);
-    let depth = parts
-        .next()
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .and_then(|part| part.parse::<u16>().ok())
-        .unwrap_or(width)
-        .max(1);
-    if parts.next().is_some() {
-        return None;
-    }
-    config.target_width = width;
-    config.target_depth = depth;
-    Some(config)
 }
 
 /// Build a playtest package from `project`. Validates the scene
@@ -220,6 +194,10 @@ pub fn build_package(
     let mut room_cache_cell_vertices: Vec<u16> = Vec::new();
     let mut room_cache_vertices: Vec<PlaytestCachedRoomVertex> = Vec::new();
     let mut room_cache_surfaces: Vec<PlaytestCachedRoomSurface> = Vec::new();
+    let mut room_portals: Vec<PlaytestRoomPortal> = Vec::new();
+    let mut pending_floor_links: Vec<PendingRoomFloorLink> = Vec::new();
+    let room_near_rooms: Vec<u16> = Vec::new();
+    let room_overlapped_rooms: Vec<u16> = Vec::new();
 
     for room_node in &room_nodes {
         let NodeKind::Room { grid } = &room_node.kind else {
@@ -236,12 +214,30 @@ pub fn build_package(
             .world_streaming_for_node(room_node.id)
             .unwrap_or_default()
             .normalized();
-        let plan = plan_generated_chunks(grid, playtest_streaming_chunk_config(streaming));
-        let chunk_count = plan.chunk_count();
-        for chunk in plan.chunks {
-            let Some(chunk_grid) = grid_rect(grid, chunk.array_origin, chunk.size) else {
-                continue;
-            };
+        let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
+        if plan.over_budget_count() > 0 {
+            report.warn(format!(
+                "Room '{}' produced {} manual portal room(s) still over budget",
+                room_node.name,
+                plan.over_budget_count()
+            ));
+        }
+        let portal_room_count = plan.room_count();
+        let room_index_base = rooms.len();
+        let room_portal_base = room_portals.len();
+        for portal in &plan.portals {
+            let source_room = room_index_base.saturating_add(portal.source_room);
+            let destination_room = room_index_base.saturating_add(portal.destination_room);
+            room_portals.push(PlaytestRoomPortal {
+                source_room: u16::try_from(source_room).unwrap_or(u16::MAX),
+                destination_room: u16::try_from(destination_room).unwrap_or(u16::MAX),
+                kind: if portal.vertical { 1 } else { 0 },
+                normal: portal.normal_world,
+                vertices: portal.vertices_world,
+            });
+        }
+        for portal_room in plan.rooms {
+            let chunk_grid = extract_portal_room_grid(grid, &portal_room);
             if chunk_grid.populated_sector_count() == 0 {
                 continue;
             }
@@ -259,16 +255,23 @@ pub fn build_package(
                 .push(AuthoredRoomChunk {
                     room_index,
                     authored_room: room_node.id.raw() as u32,
-                    chunk_index: u16::try_from(chunk.index).unwrap_or(u16::MAX),
-                    array_origin: chunk.array_origin,
-                    world_origin: chunk.world_origin,
-                    size: chunk.size,
-                    triangles: chunk.budget.triangles,
-                    psxw_bytes: chunk.budget.psxw_bytes,
-                    static_lit_bytes: chunk.budget.psxw_static_lit_bytes,
+                    chunk_index: u16::try_from(portal_room.index).unwrap_or(u16::MAX),
+                    array_origin: portal_room.array_origin,
+                    world_origin: portal_room.world_origin,
+                    size: portal_room.size,
+                    cells: portal_room.cells.clone(),
+                    neighbours: portal_room.neighbours.map(|neighbour| {
+                        neighbour.and_then(|index| {
+                            u16::try_from(room_index_base.saturating_add(index)).ok()
+                        })
+                    }),
+                    triangles: portal_room.budget.triangles,
+                    psxw_bytes: portal_room.budget.psxw_bytes,
+                    static_lit_bytes: portal_room.budget.psxw_static_lit_bytes,
                     populated_cells: u16::try_from(chunk_grid.populated_sector_count())
                         .unwrap_or(u16::MAX),
                 });
+            collect_pending_floor_links(room_index, &chunk_grid, &mut pending_floor_links);
 
             // Room asset goes into the master table first (ahead of
             // any material textures discovered while walking it).
@@ -277,7 +280,11 @@ pub fn build_package(
                 kind: PlaytestAssetKind::RoomWorld,
                 bytes: Vec::new(),
                 filename: format!("room_{:03}.psxw", room_index),
-                source_label: chunk_room_name(&room_node.name, chunk_count, chunk.index),
+                source_label: runtime_room_name(
+                    &room_node.name,
+                    portal_room_count,
+                    portal_room.index,
+                ),
             });
 
             // Walk material slots in slot order. The cooker emits
@@ -454,7 +461,7 @@ pub fn build_package(
             let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
 
             rooms.push(PlaytestRoom {
-                name: chunk_room_name(&room_node.name, chunk_count, chunk.index),
+                name: runtime_room_name(&room_node.name, portal_room_count, portal_room.index),
                 world_asset_index,
                 origin_x: chunk_grid.origin[0],
                 origin_z: chunk_grid.origin[1],
@@ -466,6 +473,17 @@ pub fn build_package(
                 visible_chunk_limit: streaming.visible_chunk_limit,
                 material_first,
                 material_count,
+                portal_first: if portal_room.portal_count == 0 {
+                    0
+                } else {
+                    u16::try_from(room_portal_base.saturating_add(portal_room.portal_first))
+                        .unwrap_or(u16::MAX)
+                },
+                portal_count: u8::try_from(portal_room.portal_count).unwrap_or(u8::MAX),
+                near_room_first: 0,
+                near_room_count: 0,
+                overlapped_room_first: 0,
+                overlapped_room_count: 0,
                 fog_rgb: chunk_grid.fog_color,
                 fog_near: chunk_grid.fog_near,
                 fog_far: chunk_grid.fog_far,
@@ -541,7 +559,7 @@ pub fn build_package(
             room_bake_inputs.push(CookedRoomBakeInput {
                 room_index,
                 world_asset_index,
-                world_origin: chunk.world_origin,
+                world_origin: portal_room.world_origin,
                 cooked,
             });
         }
@@ -563,6 +581,7 @@ pub fn build_package(
     let mut model_sockets: Vec<PlaytestModelSocket> = Vec::new();
     let mut model_instances: Vec<PlaytestModelInstance> = Vec::new();
     let mut image_props: Vec<PlaytestImageProp> = Vec::new();
+    let mut box_props: Vec<PlaytestBoxProp> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
@@ -896,6 +915,33 @@ pub fn build_package(
                     return (None, report);
                 }
             }
+            NodeKind::BoxProp {
+                materials,
+                vertices,
+                collision_enabled,
+                break_flags,
+            } => {
+                if !push_box_prop(
+                    project,
+                    project_root,
+                    node.name.as_str(),
+                    room_index,
+                    floor_pos,
+                    pitch,
+                    yaw,
+                    roll,
+                    materials,
+                    *vertices,
+                    *collision_enabled,
+                    *break_flags,
+                    &mut texture_asset_for_resource,
+                    &mut assets,
+                    &mut box_props,
+                    &mut report,
+                ) {
+                    return (None, report);
+                }
+            }
             NodeKind::Trigger { .. } => {
                 if warned_unsupported.insert("Trigger") {
                     report.warn("Trigger volumes are skipped in this pass");
@@ -908,7 +954,8 @@ pub fn build_package(
             }
             NodeKind::Portal { .. } => {
                 if warned_unsupported.insert("Portal") {
-                    report.warn("Portal nodes are skipped (no streaming yet)");
+                    report
+                        .warn("Portal markers define runtime-room seams; not emitted as entities");
                 }
             }
             NodeKind::Node
@@ -929,7 +976,7 @@ pub fn build_package(
     let spawn = match player_spawns.len() {
         0 => {
             report.error(
-                "playtest needs exactly one player source — mark a SpawnPoint as player or enable Player controlled on a Character Controller",
+                "No player source. Place one Player Spawn, or select a Character Controller and enable Player controlled.",
             );
             None
         }
@@ -949,7 +996,7 @@ pub fn build_package(
         }
         n => {
             report.error(format!(
-                "playtest needs exactly one player source, found {n}"
+                "Expected exactly one player source, found {n}. Keep one Player Spawn or one Player controlled Character Controller enabled."
             ));
             None
         }
@@ -1070,6 +1117,7 @@ pub fn build_package(
     let lights = expand_lights_across_chunks(&room_bake_inputs, &lights);
     bake_static_surface_lights(&mut room_bake_inputs, &lights);
     bake_static_image_prop_lights(&mut image_props, &room_bake_inputs, &lights);
+    bake_static_box_prop_lights(&mut box_props, &room_bake_inputs, &lights);
     for room in &room_bake_inputs {
         let bytes = match room.cooked.to_psxw_bytes() {
             Ok(b) => b,
@@ -1128,11 +1176,21 @@ pub fn build_package(
         }
     }
 
+    let room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
+
     (
         Some(PlaytestPackage {
+            runtime_depth_sort_mode: project.runtime_depth_sort_mode,
+            runtime_texture_split_mode: project.runtime_texture_split_mode,
+            runtime_room_draw_order_mode: project.runtime_room_draw_order_mode,
+            runtime_texture_split_max_edge: project.runtime_texture_split_max_edge,
             assets,
             rooms,
             chunks,
+            room_portals,
+            room_floor_links,
+            room_near_rooms,
+            room_overlapped_rooms,
             materials,
             room_visibility,
             visibility_cells,
@@ -1150,6 +1208,7 @@ pub fn build_package(
             model_sockets,
             model_instances,
             image_props,
+            box_props,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -2869,6 +2928,73 @@ fn component_children<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn resolve_material_texture_asset(
+    project: &ProjectDocument,
+    project_root: &Path,
+    label: &str,
+    material_id: ResourceId,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<(usize, [u8; 3])> {
+    let Some(material_resource) = project.resource(material_id) else {
+        report.warn(format!(
+            "{label} references missing Material #{} — skipped",
+            material_id.raw()
+        ));
+        return None;
+    };
+    let ResourceData::Material(material) = &material_resource.data else {
+        report.warn(format!(
+            "{label} references '{}' but it is not a Material — skipped",
+            material_resource.name
+        ));
+        return None;
+    };
+    let Some(texture_id) = material.texture else {
+        report.warn(format!(
+            "{label} material '{}' has no Texture — skipped",
+            material_resource.name
+        ));
+        return None;
+    };
+    let Some(texture_resource) = find_resource(project, texture_id) else {
+        report.warn(format!(
+            "{label} material '{}' references missing Texture #{} — skipped",
+            material_resource.name,
+            texture_id.raw()
+        ));
+        return None;
+    };
+    let texture_asset_index = if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
+        existing
+    } else {
+        let bytes = match load_texture_bytes(texture_resource, project_root) {
+            Ok(bytes) => bytes,
+            Err(msg) => {
+                report.warn(format!("{label}: {msg} — skipped"));
+                return None;
+            }
+        };
+        if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
+            report.warn(format!("{label}: {msg} — skipped"));
+            return None;
+        }
+        let texture_index = texture_asset_for_resource.len();
+        let new_index = assets.len();
+        assets.push(PlaytestAsset {
+            kind: PlaytestAssetKind::Texture,
+            bytes,
+            filename: format!("texture_{texture_index:03}.psxt"),
+            source_label: texture_resource.name.clone(),
+        });
+        texture_asset_for_resource.insert(texture_id, new_index);
+        new_index
+    };
+    Some((texture_asset_index, material.tint))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn push_image_prop(
     project: &ProjectDocument,
     project_root: &Path,
@@ -2893,59 +3019,17 @@ fn push_image_prop(
         ));
         return true;
     };
-    let Some(material_resource) = project.resource(material_id) else {
-        report.warn(format!(
-            "Image Prop '{node_name}' references missing Material #{} — skipped",
-            material_id.raw()
-        ));
+    let label = format!("Image Prop '{node_name}'");
+    let Some((texture_asset_index, tint_rgb)) = resolve_material_texture_asset(
+        project,
+        project_root,
+        &label,
+        material_id,
+        texture_asset_for_resource,
+        assets,
+        report,
+    ) else {
         return true;
-    };
-    let ResourceData::Material(material) = &material_resource.data else {
-        report.warn(format!(
-            "Image Prop '{node_name}' references '{}' but it is not a Material — skipped",
-            material_resource.name
-        ));
-        return true;
-    };
-    let Some(texture_id) = material.texture else {
-        report.warn(format!(
-            "Image Prop '{node_name}' material '{}' has no Texture — skipped",
-            material_resource.name
-        ));
-        return true;
-    };
-    let Some(texture_resource) = find_resource(project, texture_id) else {
-        report.warn(format!(
-            "Image Prop '{node_name}' material '{}' references missing Texture #{} — skipped",
-            material_resource.name,
-            texture_id.raw()
-        ));
-        return true;
-    };
-    let texture_asset_index = if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
-        existing
-    } else {
-        let bytes = match load_texture_bytes(texture_resource, project_root) {
-            Ok(bytes) => bytes,
-            Err(msg) => {
-                report.warn(format!("Image Prop '{node_name}': {msg} — skipped"));
-                return true;
-            }
-        };
-        if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
-            report.warn(format!("Image Prop '{node_name}': {msg} — skipped"));
-            return true;
-        }
-        let texture_index = texture_asset_for_resource.len();
-        let new_index = assets.len();
-        assets.push(PlaytestAsset {
-            kind: PlaytestAssetKind::Texture,
-            bytes,
-            filename: format!("texture_{texture_index:03}.psxt"),
-            source_label: texture_resource.name.clone(),
-        });
-        texture_asset_for_resource.insert(texture_id, new_index);
-        new_index
     };
     image_props.push(PlaytestImageProp {
         room: room_index,
@@ -2958,13 +3042,102 @@ fn push_image_prop(
         roll,
         width: width.max(1),
         height: height.max(1),
-        tint_rgb: material.tint,
-        baked_vertex_rgb: [rgb_tuple(material.tint); 4],
+        tint_rgb,
+        baked_vertex_rgb: [rgb_tuple(tint_rgb); 4],
         flags: if cylindrical_billboard {
             image_prop_flags::CYLINDRICAL_BILLBOARD
         } else {
             0
         },
+    });
+    true
+}
+
+const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT] = [
+    [4, 5, 1, 0],
+    [5, 6, 2, 1],
+    [6, 7, 3, 2],
+    [7, 4, 0, 3],
+    [7, 6, 5, 4],
+    [0, 1, 2, 3],
+];
+
+#[allow(clippy::too_many_arguments)]
+fn push_box_prop(
+    project: &ProjectDocument,
+    project_root: &Path,
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    pitch: i16,
+    yaw: i16,
+    roll: i16,
+    materials: &[Option<ResourceId>; crate::BOX_PROP_FACE_COUNT],
+    vertices: [[i16; 3]; crate::BOX_PROP_VERTEX_COUNT],
+    collision_enabled: bool,
+    break_flags: u16,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    box_props: &mut Vec<PlaytestBoxProp>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut texture_asset_indices = [None; psx_level::BOX_PROP_FACE_COUNT];
+    let mut tint_rgb = [[128, 128, 128]; psx_level::BOX_PROP_FACE_COUNT];
+    let mut valid_faces = 0usize;
+    for (face, material) in materials.iter().enumerate() {
+        let Some(material_id) = *material else {
+            continue;
+        };
+        let label = format!(
+            "Box Prop '{node_name}' {} face",
+            crate::BOX_PROP_FACE_NAMES[face]
+        );
+        let Some((texture_asset_index, tint)) = resolve_material_texture_asset(
+            project,
+            project_root,
+            &label,
+            material_id,
+            texture_asset_for_resource,
+            assets,
+            report,
+        ) else {
+            continue;
+        };
+        texture_asset_indices[face] = Some(texture_asset_index);
+        tint_rgb[face] = tint;
+        valid_faces += 1;
+    }
+
+    if valid_faces == 0 {
+        report.warn(format!(
+            "Box Prop '{node_name}' has no drawable Material faces — skipped"
+        ));
+        return true;
+    }
+
+    let mut baked_vertex_rgb = [[rgb_tuple([128, 128, 128]); 4]; psx_level::BOX_PROP_FACE_COUNT];
+    for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        baked_vertex_rgb[face] = [rgb_tuple(tint_rgb[face]); 4];
+    }
+
+    let mut flags = break_flags & box_prop_flags::BREAK_ON_MASK;
+    if collision_enabled {
+        flags |= box_prop_flags::COLLISION_ENABLED;
+    }
+
+    box_props.push(PlaytestBoxProp {
+        room: room_index,
+        texture_asset_indices,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        pitch,
+        yaw,
+        roll,
+        vertices,
+        tint_rgb,
+        baked_vertex_rgb,
+        flags,
     });
     true
 }
@@ -3202,6 +3375,53 @@ fn bake_static_image_prop_lights(
     }
 }
 
+fn bake_static_box_prop_lights(
+    box_props: &mut [PlaytestBoxProp],
+    rooms: &[CookedRoomBakeInput],
+    lights: &[PlaytestLight],
+) {
+    for prop in box_props {
+        let Some(room) = rooms.iter().find(|room| room.room_index == prop.room) else {
+            continue;
+        };
+        let room_lights: Vec<&PlaytestLight> = lights
+            .iter()
+            .filter(|light| light.room == prop.room)
+            .collect();
+        let ambient = room.cooked.ambient_color;
+        let face_vertices = box_prop_static_face_vertices(prop);
+        for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+            let base = prop.tint_rgb[face];
+            prop.baked_vertex_rgb[face] = [
+                rgb_tuple(bake_static_vertex_rgb(
+                    face_vertices[face][0],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    face_vertices[face][1],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    face_vertices[face][2],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+                rgb_tuple(bake_static_vertex_rgb(
+                    face_vertices[face][3],
+                    base,
+                    ambient,
+                    &room_lights,
+                )),
+            ];
+        }
+    }
+}
+
 fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
     let half_width = (prop.width as i32) / 2;
     let height = prop.height as i32;
@@ -3222,6 +3442,33 @@ fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
         ];
     }
     out
+}
+
+fn box_prop_static_face_vertices(
+    prop: &PlaytestBoxProp,
+) -> [[[i32; 3]; 4]; psx_level::BOX_PROP_FACE_COUNT] {
+    let mut vertices = [[0, 0, 0]; psx_level::BOX_PROP_VERTEX_COUNT];
+    for (idx, local) in prop.vertices.iter().enumerate() {
+        let rotated = rotate_image_prop_local(
+            [local[0] as i32, local[1] as i32, local[2] as i32],
+            prop.pitch as u16,
+            prop.yaw as u16,
+            prop.roll as u16,
+        );
+        vertices[idx] = [
+            prop.x.saturating_add(rotated[0]),
+            prop.y.saturating_add(rotated[1]),
+            prop.z.saturating_add(rotated[2]),
+        ];
+    }
+
+    let mut faces = [[[0, 0, 0]; 4]; psx_level::BOX_PROP_FACE_COUNT];
+    for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        for corner in 0..4 {
+            faces[face][corner] = vertices[BOX_PROP_FACE_VERTEX_INDICES[face][corner]];
+        }
+    }
+    faces
 }
 
 fn rotate_image_prop_local(v: [i32; 3], pitch: u16, yaw: u16, roll: u16) -> [i32; 3] {
@@ -4131,90 +4378,92 @@ fn has_full_height_solid_wall(
     })
 }
 
-fn grid_rect(grid: &WorldGrid, origin: [u16; 2], size: [u16; 2]) -> Option<WorldGrid> {
-    if size[0] == 0 || size[1] == 0 {
-        return None;
-    }
-    let end_x = origin[0].checked_add(size[0])?;
-    let end_z = origin[1].checked_add(size[1])?;
-    if end_x > grid.width || end_z > grid.depth {
-        return None;
-    }
-
-    let mut out = WorldGrid::empty(size[0], size[1], grid.sector_size);
-    out.origin = [
-        grid.origin[0] + origin[0] as i32,
-        grid.origin[1] + origin[1] as i32,
-    ];
-    out.ambient_color = grid.ambient_color;
-    out.fog_enabled = grid.fog_enabled;
-    out.fog_color = grid.fog_color;
-    out.fog_near = grid.fog_near;
-    out.fog_far = grid.fog_far;
-
-    for x in 0..size[0] {
-        for z in 0..size[1] {
-            let src = grid.sector_index(origin[0] + x, origin[1] + z)?;
-            let dst = out.sector_index(x, z)?;
-            out.sectors[dst] = grid.sectors[src].clone();
+fn collect_pending_floor_links(room: u16, grid: &WorldGrid, out: &mut Vec<PendingRoomFloorLink>) {
+    let mut x = 0u16;
+    while x < grid.width {
+        let mut z = 0u16;
+        while z < grid.depth {
+            if let Some(sector) = grid.sector(x, z) {
+                let above_room = sector.floor_above.and_then(|link| link.target_room);
+                let below_room = sector.floor_below.and_then(|link| link.target_room);
+                if above_room.is_some() || below_room.is_some() {
+                    out.push(PendingRoomFloorLink {
+                        room,
+                        x,
+                        z,
+                        world_cell: [
+                            grid.origin[0].saturating_add(x as i32),
+                            grid.origin[1].saturating_add(z as i32),
+                        ],
+                        above_room,
+                        below_room,
+                    });
+                }
+            }
+            z = z.saturating_add(1);
         }
-    }
-    append_chunk_boundary_floor_transition_walls(grid, &mut out, origin, size);
-    Some(out)
-}
-
-fn append_chunk_boundary_floor_transition_walls(
-    source: &WorldGrid,
-    chunk: &mut WorldGrid,
-    origin: [u16; 2],
-    size: [u16; 2],
-) {
-    for x in 0..size[0] {
-        append_boundary_floor_transition_wall(
-            source,
-            chunk,
-            origin,
-            x,
-            size[1] - 1,
-            GridDirection::North,
-        );
-    }
-    for z in 0..size[1] {
-        append_boundary_floor_transition_wall(
-            source,
-            chunk,
-            origin,
-            size[0] - 1,
-            z,
-            GridDirection::East,
-        );
+        x = x.saturating_add(1);
     }
 }
 
-fn append_boundary_floor_transition_wall(
-    source: &WorldGrid,
-    chunk: &mut WorldGrid,
-    origin: [u16; 2],
-    local_x: u16,
-    local_z: u16,
-    direction: GridDirection,
-) {
-    let source_x = origin[0].saturating_add(local_x);
-    let source_z = origin[1].saturating_add(local_z);
-    let Some(wall) = source.floor_transition_wall_for_edge(source_x, source_z, direction) else {
-        return;
-    };
-    let Some(sector) = chunk.ensure_sector(local_x, local_z) else {
-        return;
-    };
-    sector.walls.get_mut(direction).push(wall);
+fn resolve_room_floor_links(
+    pending: &[PendingRoomFloorLink],
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Vec<PlaytestRoomFloorLink> {
+    let mut out = Vec::new();
+    for link in pending {
+        let above_room =
+            resolve_floor_link_target(link.above_room, link.world_cell, chunks_by_node);
+        let below_room =
+            resolve_floor_link_target(link.below_room, link.world_cell, chunks_by_node);
+        if above_room.is_none() && below_room.is_none() {
+            continue;
+        }
+        out.push(PlaytestRoomFloorLink {
+            room: link.room,
+            x: link.x,
+            z: link.z,
+            above_room,
+            below_room,
+        });
+    }
+    out
 }
 
-fn chunk_room_name(room_name: &str, chunk_count: usize, chunk_index: usize) -> String {
-    if chunk_count <= 1 {
+fn resolve_floor_link_target(
+    target_room: Option<NodeId>,
+    world_cell: [i32; 2],
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Option<u16> {
+    let chunks = chunks_by_node.get(&target_room?)?;
+    chunks
+        .iter()
+        .find(|chunk| chunk_contains_world_cell(chunk, world_cell))
+        .or_else(|| chunks.first())
+        .map(|chunk| chunk.room_index)
+}
+
+fn chunk_contains_world_cell(chunk: &AuthoredRoomChunk, world_cell: [i32; 2]) -> bool {
+    chunk
+        .cells
+        .iter()
+        .any(|cell| chunk_cell_world_cell(chunk, *cell) == world_cell)
+}
+
+fn chunk_cell_world_cell(chunk: &AuthoredRoomChunk, cell: [u16; 2]) -> [i32; 2] {
+    [
+        chunk.world_origin[0]
+            .saturating_add((cell[0] as i32).saturating_sub(chunk.array_origin[0] as i32)),
+        chunk.world_origin[1]
+            .saturating_add((cell[1] as i32).saturating_sub(chunk.array_origin[1] as i32)),
+    ]
+}
+
+fn runtime_room_name(room_name: &str, room_count: usize, room_index: usize) -> String {
+    if room_count <= 1 {
         room_name.to_string()
     } else {
-        format!("{room_name} / Chunk {chunk_index}")
+        format!("{room_name} / Portal Room {room_index}")
     }
 }
 
@@ -4241,11 +4490,10 @@ fn chunk_for_node<'a>(
     let wcz = world_cells[1].floor() as i32;
     let (sx, sz) = grid.world_cell_to_array(wcx, wcz)?;
     chunks.iter().find(|chunk| {
-        let x0 = chunk.array_origin[0];
-        let z0 = chunk.array_origin[1];
-        let x1 = x0.saturating_add(chunk.size[0]);
-        let z1 = z0.saturating_add(chunk.size[1]);
-        sx >= x0 && sx < x1 && sz >= z0 && sz < z1
+        chunk
+            .cells
+            .iter()
+            .any(|cell| cell[0] == sx && cell[1] == sz)
     })
 }
 
@@ -4285,7 +4533,7 @@ fn build_playtest_chunks(
                 origin_z: chunk.world_origin[1],
                 width: chunk.size[0],
                 depth: chunk.size[1],
-                neighbours: chunk_neighbours(chunk, node_chunks),
+                neighbours: chunk.neighbours,
                 triangles: chunk.triangles,
                 psxw_bytes: chunk.psxw_bytes,
                 static_lit_bytes: chunk.static_lit_bytes,
@@ -4296,57 +4544,6 @@ fn build_playtest_chunks(
     }
 
     chunks
-}
-
-fn chunk_neighbours(chunk: &AuthoredRoomChunk, chunks: &[AuthoredRoomChunk]) -> [Option<u16>; 4] {
-    let mut neighbours = [None; 4];
-    let mut scores = [0u16; 4];
-    for candidate in chunks {
-        if candidate.room_index == chunk.room_index {
-            continue;
-        }
-        if let Some((direction, score)) = chunk_cardinal_touch_score(chunk, candidate) {
-            if score > scores[direction] {
-                neighbours[direction] = Some(candidate.room_index);
-                scores[direction] = score;
-            }
-        }
-    }
-    neighbours
-}
-
-fn chunk_cardinal_touch_score(
-    a: &AuthoredRoomChunk,
-    b: &AuthoredRoomChunk,
-) -> Option<(usize, u16)> {
-    let ax0 = a.array_origin[0];
-    let az0 = a.array_origin[1];
-    let ax1 = ax0.saturating_add(a.size[0]);
-    let az1 = az0.saturating_add(a.size[1]);
-    let bx0 = b.array_origin[0];
-    let bz0 = b.array_origin[1];
-    let bx1 = bx0.saturating_add(b.size[0]);
-    let bz1 = bz0.saturating_add(b.size[1]);
-    let x_overlap = overlap_len(ax0, ax1, bx0, bx1);
-    let z_overlap = overlap_len(az0, az1, bz0, bz1);
-
-    if x_overlap > 0 && az0 == bz1 {
-        return Some((0, x_overlap));
-    }
-    if z_overlap > 0 && ax1 == bx0 {
-        return Some((1, z_overlap));
-    }
-    if x_overlap > 0 && az1 == bz0 {
-        return Some((2, x_overlap));
-    }
-    if z_overlap > 0 && ax0 == bx1 {
-        return Some((3, z_overlap));
-    }
-    None
-}
-
-fn overlap_len(a0: u16, a1: u16, b0: u16, b1: u16) -> u16 {
-    a1.min(b1).saturating_sub(a0.max(b0))
 }
 
 /// Convert a node's editor-space transform to its generated
@@ -4405,13 +4602,1761 @@ fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        NodeKind, ProjectDocument, DEFAULT_WORLD_CAMERA_DISTANCE, DEFAULT_WORLD_CAMERA_HEIGHT,
-        DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, DEFAULT_WORLD_CAMERA_TARGET_HEIGHT,
-    };
+    use crate::{NodeKind, ProjectDocument};
 
     fn starter_project_root() -> PathBuf {
         crate::default_project_dir()
+    }
+
+    const PORTAL_SWEEP_MAX_ROOMS: usize = 32;
+    const PORTAL_SWEEP_MAX_FRUSTUMS: usize = 64;
+    const PORTAL_SWEEP_MAX_FRONTIER: usize = 32;
+    const PORTAL_SWEEP_MAX_DEPTH: u8 = 8;
+    const PORTAL_SWEEP_HALF_FOV_X_Q12: i32 = 2048;
+    const PORTAL_SWEEP_HALF_FOV_Y_Q12: i32 = 1536;
+    const PORTAL_SWEEP_MIN_WIDTH_Q12: i32 = 4;
+    const PORTAL_SWEEP_NEAR_Z: i32 = 64;
+    const PORTAL_SWEEP_YAW_STEPS: usize = 32;
+    const PORTAL_AUDIT_YAW_STEPS: usize = 16;
+    const PORTAL_AUDIT_SURFACE_STEPS: usize = 8;
+    const PORTAL_AUDIT_MAX_ARTIFACTS: usize = 12;
+    const PORTAL_AUDIT_CELL_SUBSAMPLES: [i32; 3] = [1, 2, 3];
+    const PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM: i32 = 4;
+    const PORTAL_SWEEP_ROOM_BOUNDS_MIN_Y: i32 = -4096;
+    const PORTAL_SWEEP_ROOM_BOUNDS_MAX_Y: i32 = 8192;
+    const DEMO7_CAMERA_DISTANCE: i32 = 3700;
+    const DEMO7_CAMERA_HEIGHT: i32 = 2950;
+    const DEMO7_CAMERA_TARGET_HEIGHT: i32 = 1050;
+    const DEMO7_CAMERA_DISTANCE_SAMPLES: [i32; 6] = [384, 768, 1200, 1800, 2600, 3700];
+
+    type PortalSweepResult = psx_level::portal_visibility::PortalVisibilityResult<
+        PORTAL_SWEEP_MAX_ROOMS,
+        PORTAL_SWEEP_MAX_FRUSTUMS,
+        PORTAL_SWEEP_MAX_FRONTIER,
+    >;
+
+    fn demo7_project_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/demo7/project.ron")
+    }
+
+    fn load_demo7_project() -> (ProjectDocument, PathBuf) {
+        let path = demo7_project_path();
+        let source = std::fs::read_to_string(&path).expect("read demo7 project.ron");
+        let project = ProjectDocument::from_ron_str(&source).expect("demo7 project parses");
+        let project_root = path.parent().expect("demo7 has parent dir");
+        (project, project_root.to_path_buf())
+    }
+
+    fn load_demo7_package() -> PlaytestPackage {
+        let (project, project_root) = load_demo7_project();
+        let (package, report) = build_package(&project, &project_root);
+        assert!(
+            report.errors.is_empty(),
+            "demo7 playtest validation errors: {:?}",
+            report.errors
+        );
+        package.expect("demo7 package cooks")
+    }
+
+    fn level_room_records_for_sweep(package: &PlaytestPackage) -> Vec<psx_level::LevelRoomRecord> {
+        package
+            .rooms
+            .iter()
+            .map(|room| {
+                let name: &'static str = Box::leak(room.name.clone().into_boxed_str());
+                psx_level::LevelRoomRecord {
+                    name,
+                    world_asset: psx_level::AssetId(room.world_asset_index as u16),
+                    origin_x: room.origin_x,
+                    origin_z: room.origin_z,
+                    sector_size: room.sector_size,
+                    draw_distance: room.draw_distance,
+                    chunk_activation_radius_sectors: room.chunk_activation_radius_sectors,
+                    visibility_radius: room.visibility_radius,
+                    resident_chunk_limit: room.resident_chunk_limit,
+                    visible_chunk_limit: room.visible_chunk_limit,
+                    material_first: psx_level::MaterialIndex(room.material_first),
+                    material_count: room.material_count,
+                    portal_first: room.portal_first,
+                    portal_count: room.portal_count,
+                    near_room_first: room.near_room_first,
+                    near_room_count: room.near_room_count,
+                    overlapped_room_first: room.overlapped_room_first,
+                    overlapped_room_count: room.overlapped_room_count,
+                    fog_rgb: room.fog_rgb,
+                    fog_near: room.fog_near,
+                    fog_far: room.fog_far,
+                    atmosphere_rgb: room.atmosphere_rgb,
+                    atmosphere_density: room.atmosphere_density,
+                    atmosphere_fall_speed_q4: room.atmosphere_fall_speed_q4,
+                    atmosphere_wind_speed_q4: room.atmosphere_wind_speed_q4,
+                    sky: psx_level::LevelSkyRecord::DEFAULT,
+                    far_vista: psx_level::LevelFarVistaRecord::DEFAULT,
+                    camera: psx_level::LevelCameraRecord::DEFAULT,
+                    flags: room.flags,
+                }
+            })
+            .collect()
+    }
+
+    fn level_portal_records_for_sweep(
+        package: &PlaytestPackage,
+    ) -> Vec<psx_level::LevelRoomPortalRecord> {
+        package
+            .room_portals
+            .iter()
+            .map(|portal| psx_level::LevelRoomPortalRecord {
+                source_room: psx_level::RoomIndex(portal.source_room),
+                destination_room: psx_level::RoomIndex(portal.destination_room),
+                kind: portal.kind,
+                normal_x: portal.normal[0],
+                normal_y: portal.normal[1],
+                normal_z: portal.normal[2],
+                vertex_x: [
+                    portal.vertices[0][0],
+                    portal.vertices[1][0],
+                    portal.vertices[2][0],
+                    portal.vertices[3][0],
+                ],
+                vertex_y: [
+                    portal.vertices[0][1],
+                    portal.vertices[1][1],
+                    portal.vertices[2][1],
+                    portal.vertices[3][1],
+                ],
+                vertex_z: [
+                    portal.vertices[0][2],
+                    portal.vertices[1][2],
+                    portal.vertices[2][2],
+                    portal.vertices[3][2],
+                ],
+            })
+            .collect()
+    }
+
+    fn portal_room_bounds_for_sweep(
+        package: &PlaytestPackage,
+    ) -> Vec<psx_level::portal_visibility::PortalRoomBounds> {
+        package
+            .chunks
+            .iter()
+            .filter_map(|chunk| {
+                let room = package.rooms.get(chunk.room as usize)?;
+                let sector = room.sector_size.max(1);
+                let min_x = room.origin_x.saturating_mul(sector);
+                let min_z = room.origin_z.saturating_mul(sector);
+                let max_x = min_x.saturating_add((chunk.width as i32).saturating_mul(sector));
+                let max_z = min_z.saturating_add((chunk.depth as i32).saturating_mul(sector));
+                (min_x < max_x && min_z < max_z).then_some(
+                    psx_level::portal_visibility::PortalRoomBounds {
+                        room: psx_level::RoomIndex(chunk.room),
+                        min_x,
+                        max_x,
+                        min_y: PORTAL_SWEEP_ROOM_BOUNDS_MIN_Y,
+                        max_y: PORTAL_SWEEP_ROOM_BOUNDS_MAX_Y,
+                        min_z,
+                        max_z,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn portal_sweep_yaws() -> impl Iterator<Item = (i32, i32, String)> {
+        (0..PORTAL_SWEEP_YAW_STEPS).map(|step| {
+            let radians = (step as f64) * std::f64::consts::TAU / (PORTAL_SWEEP_YAW_STEPS as f64);
+            let sin_yaw = (-(radians.sin()) * 4096.0).round() as i32;
+            let cos_yaw = (-(radians.cos()) * 4096.0).round() as i32;
+            let degrees = step * 360 / PORTAL_SWEEP_YAW_STEPS;
+            (sin_yaw, cos_yaw, format!("{degrees}deg"))
+        })
+    }
+
+    fn portal_audit_yaws() -> impl Iterator<Item = (usize, i32, i32, String)> {
+        (0..PORTAL_AUDIT_YAW_STEPS).map(|step| {
+            let radians = (step as f64) * std::f64::consts::TAU / (PORTAL_AUDIT_YAW_STEPS as f64);
+            let sin_yaw = (-(radians.sin()) * 4096.0).round() as i32;
+            let cos_yaw = (-(radians.cos()) * 4096.0).round() as i32;
+            let degrees = step * 360 / PORTAL_AUDIT_YAW_STEPS;
+            (step, sin_yaw, cos_yaw, format!("{degrees}deg"))
+        })
+    }
+
+    fn cell_global_center(
+        package: &PlaytestPackage,
+        cell: PlaytestVisibilityCell,
+    ) -> Option<(i32, i32, i32)> {
+        cell_global_sample(
+            package,
+            cell,
+            PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM / 2,
+            PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM / 2,
+        )
+    }
+
+    fn cell_global_sample(
+        package: &PlaytestPackage,
+        cell: PlaytestVisibilityCell,
+        sample_x: i32,
+        sample_z: i32,
+    ) -> Option<(i32, i32, i32)> {
+        let room = package.rooms.get(cell.room as usize)?;
+        let sector = room.sector_size.max(1);
+        let x = room
+            .origin_x
+            .saturating_add(cell.x as i32)
+            .saturating_mul(sector)
+            .saturating_add(
+                sector.saturating_mul(sample_x) / PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM.max(1),
+            );
+        let z = room
+            .origin_z
+            .saturating_add(cell.z as i32)
+            .saturating_mul(sector)
+            .saturating_add(
+                sector.saturating_mul(sample_z) / PORTAL_AUDIT_CELL_SUBSAMPLE_DENOM.max(1),
+            );
+        let y = cell
+            .min_y
+            .saturating_add(cell.max_y.saturating_sub(cell.min_y) / 2)
+            .max(1024);
+        Some((x, y, z))
+    }
+
+    fn portal_visibility_at(
+        rooms: &[psx_level::LevelRoomRecord],
+        portals: &[psx_level::LevelRoomPortalRecord],
+        room_bounds: &[psx_level::portal_visibility::PortalRoomBounds],
+        room: u16,
+        x: i32,
+        y: i32,
+        z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+    ) -> PortalSweepResult {
+        let Some(record) = rooms.get(room as usize) else {
+            return PortalSweepResult::EMPTY;
+        };
+        let camera = psx_level::portal_visibility::PortalVisibilityCamera::new(
+            x,
+            y,
+            z,
+            sin_yaw_q12,
+            cos_yaw_q12,
+            sin_pitch_q12,
+            cos_pitch_q12,
+            PORTAL_SWEEP_NEAR_Z,
+            record.draw_distance.max(PORTAL_SWEEP_NEAR_Z + 1),
+            PORTAL_SWEEP_HALF_FOV_X_Q12,
+            PORTAL_SWEEP_HALF_FOV_Y_Q12,
+            PORTAL_SWEEP_MIN_WIDTH_Q12,
+        );
+        let mut out = PortalSweepResult::EMPTY;
+        psx_level::portal_visibility::build_portal_visibility_with_room_bounds(
+            rooms,
+            portals,
+            room_bounds,
+            psx_level::RoomIndex(room),
+            camera,
+            PORTAL_SWEEP_MAX_DEPTH,
+            &mut out,
+        );
+        out
+    }
+
+    fn visible_room_ids(result: &PortalSweepResult) -> Vec<u16> {
+        result
+            .rooms
+            .iter()
+            .take(result.room_count)
+            .map(|room| room.room.raw())
+            .collect()
+    }
+
+    fn frontier_room_ids(result: &PortalSweepResult) -> Vec<u16> {
+        result
+            .frontier_rooms
+            .iter()
+            .take(result.frontier_count)
+            .map(|room| room.room.raw())
+            .collect()
+    }
+
+    fn push_unique_room(out: &mut Vec<u16>, room: u16, limit: usize) {
+        if out.len() < limit && !out.contains(&room) {
+            out.push(room);
+        }
+    }
+
+    fn current_room_portal_destinations(package: &PlaytestPackage, source_room: u16) -> Vec<u16> {
+        package
+            .room_portals
+            .iter()
+            .filter(|portal| portal.source_room == source_room)
+            .map(|portal| portal.destination_room)
+            .collect()
+    }
+
+    fn current_room_floor_link_destinations(
+        package: &PlaytestPackage,
+        source_room: u16,
+    ) -> Vec<u16> {
+        let mut out = Vec::new();
+        for link in package
+            .room_floor_links
+            .iter()
+            .filter(|link| link.room == source_room)
+        {
+            if let Some(room) = link.above_room {
+                push_unique_room(&mut out, room, usize::MAX);
+            }
+            if let Some(room) = link.below_room {
+                push_unique_room(&mut out, room, usize::MAX);
+            }
+        }
+        out
+    }
+
+    fn sweep_stream_requests(
+        package: &PlaytestPackage,
+        current_room: u16,
+        result: &PortalSweepResult,
+    ) -> Vec<u16> {
+        let Some(record) = package.rooms.get(current_room as usize) else {
+            return Vec::new();
+        };
+        let request_limit = (record.resident_chunk_limit as usize)
+            .max(1)
+            .min(PORTAL_SWEEP_MAX_ROOMS);
+        let mut out = Vec::new();
+        push_unique_room(&mut out, current_room, request_limit);
+        let visible_limit = result
+            .room_count
+            .min(request_limit)
+            .min(PORTAL_SWEEP_MAX_ROOMS);
+        for room in result.rooms.iter().take(visible_limit) {
+            push_unique_room(&mut out, room.room.raw(), request_limit);
+        }
+        for destination in current_room_portal_destinations(package, current_room) {
+            push_unique_room(&mut out, destination, request_limit);
+        }
+        for destination in current_room_floor_link_destinations(package, current_room) {
+            push_unique_room(&mut out, destination, request_limit);
+        }
+        for room in result.frontier_rooms.iter().take(result.frontier_count) {
+            push_unique_room(&mut out, room.room.raw(), request_limit);
+        }
+        out
+    }
+
+    fn chunk_for_room(package: &PlaytestPackage, room: u16) -> Option<&PlaytestChunk> {
+        package.chunks.iter().find(|chunk| chunk.room == room)
+    }
+
+    fn chunks_share_authored_room(package: &PlaytestPackage, a: u16, b: u16) -> bool {
+        chunk_for_room(package, a)
+            .zip(chunk_for_room(package, b))
+            .is_some_and(|(a, b)| a.authored_room == b.authored_room)
+    }
+
+    fn chunk_bounds(
+        package: &PlaytestPackage,
+        chunk: PlaytestChunk,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let room = package.rooms.get(chunk.room as usize)?;
+        let sector = room.sector_size.max(1);
+        let x0 = room.origin_x.saturating_mul(sector);
+        let z0 = room.origin_z.saturating_mul(sector);
+        let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector));
+        let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector));
+        Some((x0, x1, z0, z1))
+    }
+
+    fn chunk_contains_point(
+        package: &PlaytestPackage,
+        chunk: PlaytestChunk,
+        x: i32,
+        z: i32,
+    ) -> bool {
+        chunk_cell_for_point(package, chunk, x, z).is_some_and(|(cell_x, cell_z)| {
+            chunk_has_visibility_cell(package, chunk.room, cell_x, cell_z)
+        })
+    }
+
+    fn chunk_cell_for_point(
+        package: &PlaytestPackage,
+        chunk: PlaytestChunk,
+        x: i32,
+        z: i32,
+    ) -> Option<(u16, u16)> {
+        let room = package.rooms.get(chunk.room as usize)?;
+        let sector = room.sector_size.max(1);
+        let (x0, x1, z0, z1) = chunk_bounds(package, chunk)?;
+        if x < x0 || x >= x1 || z < z0 || z >= z1 {
+            return None;
+        }
+        let cell_x = u16::try_from((x - x0) / sector).ok()?;
+        let cell_z = u16::try_from((z - z0) / sector).ok()?;
+        Some((cell_x, cell_z))
+    }
+
+    fn chunk_has_visibility_cell(
+        package: &PlaytestPackage,
+        room: u16,
+        cell_x: u16,
+        cell_z: u16,
+    ) -> bool {
+        let Some(visibility) = package
+            .room_visibility
+            .iter()
+            .find(|visibility| visibility.room == room)
+        else {
+            return true;
+        };
+        let first = visibility.cell_first as usize;
+        let end = first.saturating_add(visibility.cell_count as usize);
+        package
+            .visibility_cells
+            .get(first..end)
+            .is_some_and(|cells| {
+                cells.iter().any(|cell| {
+                    cell.room == room
+                        && cell.x == cell_x
+                        && cell.z == cell_z
+                        && cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0
+                })
+            })
+    }
+
+    fn chunk_containing_global(package: &PlaytestPackage, x: i32, z: i32) -> Option<u16> {
+        package
+            .chunks
+            .iter()
+            .copied()
+            .find(|chunk| chunk_contains_point(package, *chunk, x, z))
+            .map(|chunk| chunk.room)
+    }
+
+    fn chunk_containing_global_by_neighbours(
+        package: &PlaytestPackage,
+        current: u16,
+        x: i32,
+        z: i32,
+    ) -> Option<u16> {
+        let mut queue = vec![current];
+        let mut visited = Vec::new();
+        while let Some(current) = queue.pop() {
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.push(current);
+            let chunk = *chunk_for_room(package, current)?;
+            if chunk_contains_point(package, chunk, x, z) {
+                return Some(current);
+            }
+            for neighbour in chunk.neighbours.into_iter().flatten() {
+                if chunks_share_authored_room(package, current, neighbour) {
+                    queue.push(neighbour);
+                }
+            }
+        }
+        None
+    }
+
+    fn chunk_containing_global_from(
+        package: &PlaytestPackage,
+        current: u16,
+        x: i32,
+        z: i32,
+    ) -> Option<u16> {
+        chunk_containing_global_by_neighbours(package, current, x, z).or_else(|| {
+            let candidate = chunk_containing_global(package, x, z)?;
+            chunks_share_authored_room(package, current, candidate).then_some(candidate)
+        })
+    }
+
+    fn portal_center(portal: &PlaytestRoomPortal) -> [i32; 3] {
+        let mut out = [0i32; 3];
+        for vertex in portal.vertices {
+            out[0] = out[0].saturating_add(vertex[0] / 4);
+            out[1] = out[1].saturating_add(vertex[1] / 4);
+            out[2] = out[2].saturating_add(vertex[2] / 4);
+        }
+        out
+    }
+
+    fn portal_front_faces_camera_point(
+        portal: &PlaytestRoomPortal,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> bool {
+        let dx = (x as i64).saturating_sub(portal.vertices[0][0] as i64);
+        let dy = (y as i64).saturating_sub(portal.vertices[0][1] as i64);
+        let dz = (z as i64).saturating_sub(portal.vertices[0][2] as i64);
+        dx.saturating_mul(portal.normal[0] as i64)
+            .saturating_add(dy.saturating_mul(portal.normal[1] as i64))
+            .saturating_add(dz.saturating_mul(portal.normal[2] as i64))
+            >= 0
+    }
+
+    fn point_in_audit_camera_view(
+        point: [i32; 3],
+        x: i32,
+        y: i32,
+        z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+    ) -> bool {
+        let dx = (point[0] as i64).saturating_sub(x as i64);
+        let dy = (point[1] as i64).saturating_sub(y as i64);
+        let dz = (point[2] as i64).saturating_sub(z as i64);
+        let sin_yaw = sin_yaw_q12 as i64;
+        let cos_yaw = cos_yaw_q12 as i64;
+        let view_x = dx
+            .saturating_mul(cos_yaw)
+            .saturating_sub(dz.saturating_mul(sin_yaw))
+            >> 12;
+        let view_z = dx
+            .saturating_mul(-sin_yaw)
+            .saturating_sub(dz.saturating_mul(cos_yaw))
+            >> 12;
+        let pitch_sin = sin_pitch_q12 as i64;
+        let pitch_cos = cos_pitch_q12 as i64;
+        let view_y = dy
+            .saturating_mul(pitch_cos)
+            .saturating_sub(view_z.saturating_mul(pitch_sin))
+            >> 12;
+        let view_z = dy
+            .saturating_mul(pitch_sin)
+            .saturating_add(view_z.saturating_mul(pitch_cos))
+            >> 12;
+        if view_z <= PORTAL_SWEEP_NEAR_Z as i64 {
+            return false;
+        }
+        let x_slope = view_x.saturating_mul(4096) / view_z;
+        let y_slope = view_y.saturating_mul(4096) / view_z;
+        x_slope.unsigned_abs() <= PORTAL_SWEEP_HALF_FOV_X_Q12 as u64
+            && y_slope.unsigned_abs() <= PORTAL_SWEEP_HALF_FOV_Y_Q12 as u64
+    }
+
+    fn portal_surface_intersects_audit_view(
+        portal: &PlaytestRoomPortal,
+        x: i32,
+        y: i32,
+        z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+    ) -> bool {
+        let steps = PORTAL_AUDIT_SURFACE_STEPS as i64;
+        for u in 0..=PORTAL_AUDIT_SURFACE_STEPS {
+            for v in 0..=PORTAL_AUDIT_SURFACE_STEPS {
+                let u = u as i64;
+                let v = v as i64;
+                let mut point = [0i32; 3];
+                for axis in 0..3 {
+                    let bottom = (portal.vertices[0][axis] as i64)
+                        .saturating_mul(steps - u)
+                        .saturating_add((portal.vertices[1][axis] as i64).saturating_mul(u))
+                        / steps;
+                    let top = (portal.vertices[3][axis] as i64)
+                        .saturating_mul(steps - u)
+                        .saturating_add((portal.vertices[2][axis] as i64).saturating_mul(u))
+                        / steps;
+                    point[axis] =
+                        ((bottom.saturating_mul(steps - v) + top.saturating_mul(v)) / steps) as i32;
+                }
+                if point_in_audit_camera_view(
+                    point,
+                    x,
+                    y,
+                    z,
+                    sin_yaw_q12,
+                    cos_yaw_q12,
+                    sin_pitch_q12,
+                    cos_pitch_q12,
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn demo7_third_person_camera_for_player(
+        package: &PlaytestPackage,
+        player_room: u16,
+        player: [i32; 3],
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+    ) -> (u16, [i32; 3], i32, i32) {
+        demo7_third_person_camera_for_player_distance(
+            package,
+            player_room,
+            player,
+            sin_yaw_q12,
+            cos_yaw_q12,
+            DEMO7_CAMERA_DISTANCE,
+        )
+    }
+
+    fn demo7_third_person_camera_for_player_distance(
+        package: &PlaytestPackage,
+        player_room: u16,
+        player: [i32; 3],
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        distance: i32,
+    ) -> (u16, [i32; 3], i32, i32) {
+        let vertical = DEMO7_CAMERA_HEIGHT.saturating_sub(DEMO7_CAMERA_TARGET_HEIGHT);
+        let distance_sq = DEMO7_CAMERA_DISTANCE.saturating_mul(DEMO7_CAMERA_DISTANCE);
+        let vertical_sq = vertical.saturating_mul(vertical);
+        let horizontal = ((distance_sq.saturating_sub(vertical_sq)) as f64)
+            .sqrt()
+            .round() as i32;
+        let horizontal = horizontal.max(1);
+        let sin_pitch =
+            -((vertical as i64).saturating_mul(4096) / DEMO7_CAMERA_DISTANCE as i64) as i32;
+        let cos_pitch =
+            ((horizontal as i64).saturating_mul(4096) / DEMO7_CAMERA_DISTANCE as i64) as i32;
+        let distance = distance.clamp(384, DEMO7_CAMERA_DISTANCE);
+        let sample_horizontal = ((cos_pitch as i64).saturating_mul(distance as i64) >> 12) as i32;
+        let sample_vertical = ((-sin_pitch as i64).saturating_mul(distance as i64) >> 12) as i32;
+        let focus_y = player[1].saturating_add(DEMO7_CAMERA_TARGET_HEIGHT);
+        let camera = [
+            player[0].saturating_add(
+                ((sin_yaw_q12 as i64).saturating_mul(sample_horizontal as i64) >> 12) as i32,
+            ),
+            focus_y.saturating_add(sample_vertical),
+            player[2].saturating_add(
+                ((cos_yaw_q12 as i64).saturating_mul(sample_horizontal as i64) >> 12) as i32,
+            ),
+        ];
+        let camera_room = chunk_containing_global_from(package, player_room, camera[0], camera[2])
+            .unwrap_or(player_room);
+        (camera_room, camera, sin_pitch, cos_pitch)
+    }
+
+    fn pvs_selected_cell_count_for_audit_camera(
+        package: &PlaytestPackage,
+        room: u16,
+        player_global: [i32; 3],
+        camera: [i32; 3],
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+    ) -> usize {
+        let Some(record) = package.rooms.get(room as usize) else {
+            return 0;
+        };
+        let Some(visibility) = package
+            .room_visibility
+            .iter()
+            .find(|visibility| visibility.room == room)
+        else {
+            return 0;
+        };
+        let first = visibility.cell_first as usize;
+        let count = visibility.cell_count as usize;
+        let Some(cells) = package
+            .visibility_cells
+            .get(first..first.saturating_add(count))
+        else {
+            return 0;
+        };
+        if cells.is_empty() {
+            return 0;
+        }
+        let sector = record.sector_size.max(1);
+        let room_origin_x = record.origin_x.saturating_mul(sector);
+        let room_origin_z = record.origin_z.saturating_mul(sector);
+        let width = chunk_for_room(package, room)
+            .map(|chunk| chunk.width)
+            .unwrap_or(1);
+        let depth = chunk_for_room(package, room)
+            .map(|chunk| chunk.depth)
+            .unwrap_or(1);
+        let anchor_x = grid_cell_for_audit(player_global[0].saturating_sub(room_origin_x), sector)
+            .clamp(0, width as i32 - 1);
+        let anchor_z = grid_cell_for_audit(player_global[2].saturating_sub(room_origin_z), sector)
+            .clamp(0, depth as i32 - 1);
+        let Some(anchor_index) = visibility_cell_index_for_audit_anchor(cells, anchor_x, anchor_z)
+            .or_else(|| nearest_visibility_cell_for_audit(cells, anchor_x, anchor_z))
+        else {
+            return 0;
+        };
+        if anchor_index >= visibility.pvs_count as usize {
+            return 0;
+        }
+        let pvs_index = (visibility.pvs_first as usize).saturating_add(anchor_index);
+        let Some(pvs) = package.visibility_pvs.get(pvs_index) else {
+            return 0;
+        };
+        let bit_first = pvs.byte_first as usize;
+        let bit_end = bit_first.saturating_add(pvs.byte_count as usize);
+        let Some(bits) = package.visibility_pvs_bits.get(bit_first..bit_end) else {
+            return 0;
+        };
+
+        let mut selected = 0usize;
+        for (index, cell) in cells.iter().copied().enumerate() {
+            if !audit_pvs_bit(bits, index) {
+                continue;
+            }
+            if audit_cell_safety_ring(cell, anchor_x, anchor_z)
+                || (audit_cell_in_global_range(
+                    cell,
+                    sector,
+                    room_origin_x,
+                    room_origin_z,
+                    player_global,
+                    record.chunk_activation_radius_sectors,
+                ) && audit_cell_in_view_wedge(
+                    cell,
+                    sector,
+                    anchor_x,
+                    anchor_z,
+                    sin_yaw_q12,
+                    cos_yaw_q12,
+                ) && audit_cell_aabb_intersects_camera(
+                    cell,
+                    sector,
+                    room_origin_x,
+                    room_origin_z,
+                    camera,
+                    sin_yaw_q12,
+                    cos_yaw_q12,
+                    sin_pitch_q12,
+                    cos_pitch_q12,
+                    record.draw_distance,
+                ))
+            {
+                selected += 1;
+            }
+        }
+        selected
+    }
+
+    fn grid_cell_for_audit(value: i32, sector_size: i32) -> i32 {
+        if value >= 0 {
+            value / sector_size
+        } else {
+            (value - sector_size + 1) / sector_size
+        }
+    }
+
+    fn visibility_cell_index_for_audit_anchor(
+        cells: &[PlaytestVisibilityCell],
+        x: i32,
+        z: i32,
+    ) -> Option<usize> {
+        cells
+            .iter()
+            .position(|cell| cell.x as i32 == x && cell.z as i32 == z)
+    }
+
+    fn nearest_visibility_cell_for_audit(
+        cells: &[PlaytestVisibilityCell],
+        x: i32,
+        z: i32,
+    ) -> Option<usize> {
+        cells
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, cell)| {
+                let dx = (cell.x as i64).saturating_sub(x as i64).unsigned_abs();
+                let dz = (cell.z as i64).saturating_sub(z as i64).unsigned_abs();
+                dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz))
+            })
+            .map(|(index, _)| index)
+    }
+
+    fn audit_pvs_bit(bits: &[u8], index: usize) -> bool {
+        bits.get(index / 8)
+            .map(|byte| byte & (1 << (index % 8)) != 0)
+            .unwrap_or(false)
+    }
+
+    fn audit_cell_safety_ring(cell: PlaytestVisibilityCell, anchor_x: i32, anchor_z: i32) -> bool {
+        (cell.x as i32)
+            .saturating_sub(anchor_x)
+            .abs()
+            .max((cell.z as i32).saturating_sub(anchor_z).abs())
+            <= 1
+    }
+
+    fn audit_cell_in_global_range(
+        cell: PlaytestVisibilityCell,
+        sector: i32,
+        room_origin_x: i32,
+        room_origin_z: i32,
+        player_global: [i32; 3],
+        radius_sectors: i32,
+    ) -> bool {
+        let radius = radius_sectors.max(1).saturating_mul(sector);
+        let x0 = room_origin_x.saturating_add((cell.x as i32).saturating_mul(sector));
+        let x1 = x0.saturating_add(sector);
+        let z0 = room_origin_z.saturating_add((cell.z as i32).saturating_mul(sector));
+        let z1 = z0.saturating_add(sector);
+        rect_distance_sq_i32(player_global[0], player_global[2], x0, x1, z0, z1)
+            <= (radius as u64).saturating_mul(radius as u64)
+    }
+
+    fn rect_distance_sq_i32(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u64 {
+        let dx = if x < x0 {
+            x0 - x
+        } else if x > x1 {
+            x - x1
+        } else {
+            0
+        };
+        let dz = if z < z0 {
+            z0 - z
+        } else if z > z1 {
+            z - z1
+        } else {
+            0
+        };
+        (dx as u64)
+            .saturating_mul(dx as u64)
+            .saturating_add((dz as u64).saturating_mul(dz as u64))
+    }
+
+    fn audit_cell_in_view_wedge(
+        cell: PlaytestVisibilityCell,
+        sector: i32,
+        anchor_x: i32,
+        anchor_z: i32,
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+    ) -> bool {
+        let anchor_distance = (cell.x as i32)
+            .saturating_sub(anchor_x)
+            .abs()
+            .max((cell.z as i32).saturating_sub(anchor_z).abs());
+        if anchor_distance <= 4 || cell.blocker_mask != 0 || cell.portal_mask != 0x0f {
+            return true;
+        }
+        let half = sector / 2;
+        let center_x = (cell.x as i32).saturating_mul(sector).saturating_add(half);
+        let center_z = (cell.z as i32).saturating_mul(sector).saturating_add(half);
+        let anchor_x = anchor_x.saturating_mul(sector).saturating_add(half);
+        let anchor_z = anchor_z.saturating_mul(sector).saturating_add(half);
+        let dx = center_x.saturating_sub(anchor_x) as i64;
+        let dz = center_z.saturating_sub(anchor_z) as i64;
+        let sin_yaw = sin_yaw_q12 as i64;
+        let cos_yaw = cos_yaw_q12 as i64;
+        let depth = dx
+            .saturating_mul(-sin_yaw)
+            .saturating_add(dz.saturating_mul(-cos_yaw))
+            >> 12;
+        if depth < 0 {
+            return anchor_distance <= 6;
+        }
+        let lateral = (dx
+            .saturating_mul(cos_yaw)
+            .saturating_sub(dz.saturating_mul(sin_yaw))
+            >> 12)
+            .unsigned_abs();
+        let lateral_limit = (depth as u64)
+            .saturating_mul(3)
+            .checked_div(4)
+            .unwrap_or(u64::MAX)
+            .saturating_add((sector as u64).saturating_mul(3));
+        lateral <= lateral_limit
+    }
+
+    fn audit_cell_aabb_intersects_camera(
+        cell: PlaytestVisibilityCell,
+        sector: i32,
+        room_origin_x: i32,
+        room_origin_z: i32,
+        camera: [i32; 3],
+        sin_yaw_q12: i32,
+        cos_yaw_q12: i32,
+        sin_pitch_q12: i32,
+        cos_pitch_q12: i32,
+        far_z: i32,
+    ) -> bool {
+        let margin = 96.max(sector / 4);
+        let x0 = room_origin_x
+            .saturating_add((cell.x as i32).saturating_mul(sector))
+            .saturating_sub(margin);
+        let x1 = room_origin_x
+            .saturating_add((cell.x as i32).saturating_add(1).saturating_mul(sector))
+            .saturating_add(margin);
+        let z0 = room_origin_z
+            .saturating_add((cell.z as i32).saturating_mul(sector))
+            .saturating_sub(margin);
+        let z1 = room_origin_z
+            .saturating_add((cell.z as i32).saturating_add(1).saturating_mul(sector))
+            .saturating_add(margin);
+        let y0 = cell.min_y.saturating_sub(margin);
+        let y1 = cell.max_y.saturating_add(margin);
+        for x in [x0, x1] {
+            for y in [y0, y1] {
+                for z in [z0, z1] {
+                    if point_in_audit_camera_view(
+                        [x, y, z],
+                        camera[0],
+                        camera[1],
+                        camera[2],
+                        sin_yaw_q12,
+                        cos_yaw_q12,
+                        sin_pitch_q12,
+                        cos_pitch_q12,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        let _ = far_z;
+        false
+    }
+
+    fn nearest_source_cell_for_portal(
+        package: &PlaytestPackage,
+        portal: &PlaytestRoomPortal,
+    ) -> Option<PlaytestVisibilityCell> {
+        let center = portal_center(portal);
+        let mut best = None;
+        let mut best_score = i64::MAX;
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.room == portal.source_room)
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            let Some((x, _, z)) = cell_global_center(package, cell) else {
+                continue;
+            };
+            let dot = (x as i64 - portal.vertices[0][0] as i64)
+                .saturating_mul(portal.normal[0] as i64)
+                .saturating_add(
+                    (z as i64 - portal.vertices[0][2] as i64)
+                        .saturating_mul(portal.normal[2] as i64),
+                );
+            if dot < 0 {
+                continue;
+            }
+            let dx = x as i64 - center[0] as i64;
+            let dz = z as i64 - center[2] as i64;
+            let score = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
+            if best.is_none() || score < best_score {
+                best = Some(cell);
+                best_score = score;
+            }
+        }
+        best
+    }
+
+    fn portal_forward_yaw(portal: &PlaytestRoomPortal) -> (i32, i32) {
+        (
+            (portal.normal[0] as i32).saturating_mul(4096),
+            (portal.normal[2] as i32).saturating_mul(4096),
+        )
+    }
+
+    fn assert_portal_slices_match_package(package: &PlaytestPackage) {
+        for (room_index, room) in package.rooms.iter().enumerate() {
+            let first = room.portal_first as usize;
+            let end = first.saturating_add(room.portal_count as usize);
+            assert!(
+                end <= package.room_portals.len(),
+                "room {room_index} portal slice {first}..{end} exceeds {} portals",
+                package.room_portals.len()
+            );
+            for portal in &package.room_portals[first..end] {
+                assert_eq!(
+                    portal.source_room, room_index as u16,
+                    "room {room_index} portal slice contains source room {}",
+                    portal.source_room
+                );
+            }
+        }
+    }
+
+    fn assert_chunk_neighbours_have_portals(package: &PlaytestPackage) {
+        for chunk in &package.chunks {
+            for destination in chunk.neighbours.into_iter().flatten() {
+                assert!(
+                    package.room_portals.iter().any(|portal| {
+                        portal.source_room == chunk.room && portal.destination_room == destination
+                    }),
+                    "chunk room {} has neighbour {} without a directed portal",
+                    chunk.room,
+                    destination
+                );
+            }
+        }
+    }
+
+    fn assert_portals_are_reciprocal(package: &PlaytestPackage) {
+        for portal in &package.room_portals {
+            assert!(
+                package.room_portals.iter().any(|other| {
+                    other.source_room == portal.destination_room
+                        && other.destination_room == portal.source_room
+                }),
+                "portal {}->{} has no reciprocal portal",
+                portal.source_room,
+                portal.destination_room
+            );
+        }
+    }
+
+    fn write_demo7_portal_audit_artifact(
+        package: &PlaytestPackage,
+        artifact_index: usize,
+        cell: PlaytestVisibilityCell,
+        camera: [i32; 3],
+        yaw_step: usize,
+        yaw: (i32, i32),
+        result: &PortalSweepResult,
+        missed_portal: &PlaytestRoomPortal,
+    ) -> Option<std::path::PathBuf> {
+        const WIDTH: usize = 640;
+        const HEIGHT: usize = 480;
+        let dir = std::env::temp_dir().join("psoxide_demo7_portal_audit");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(format!(
+            "failure_{artifact_index:03}_room{}_cell{}_{}_yaw{yaw_step}.ppm",
+            cell.room, cell.x, cell.z
+        ));
+
+        let mut bounds = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
+        for chunk in &package.chunks {
+            let Some((x0, x1, z0, z1)) = chunk_bounds(package, *chunk) else {
+                continue;
+            };
+            bounds.0 = bounds.0.min(x0);
+            bounds.1 = bounds.1.max(x1);
+            bounds.2 = bounds.2.min(z0);
+            bounds.3 = bounds.3.max(z1);
+        }
+        for vertex in missed_portal.vertices {
+            bounds.0 = bounds.0.min(vertex[0]);
+            bounds.1 = bounds.1.max(vertex[0]);
+            bounds.2 = bounds.2.min(vertex[2]);
+            bounds.3 = bounds.3.max(vertex[2]);
+        }
+        bounds.0 = bounds.0.min(camera[0]).saturating_sub(2048);
+        bounds.1 = bounds.1.max(camera[0]).saturating_add(2048);
+        bounds.2 = bounds.2.min(camera[2]).saturating_sub(2048);
+        bounds.3 = bounds.3.max(camera[2]).saturating_add(2048);
+        if bounds.0 >= bounds.1 || bounds.2 >= bounds.3 {
+            return None;
+        }
+
+        let mut pixels = vec![[18u8, 20u8, 24u8]; WIDTH * HEIGHT];
+        for chunk in &package.chunks {
+            let Some((x0, x1, z0, z1)) = chunk_bounds(package, *chunk) else {
+                continue;
+            };
+            let visible = result
+                .rooms
+                .iter()
+                .take(result.room_count)
+                .any(|room| room.room.raw() == chunk.room);
+            let color = if chunk.room == cell.room {
+                [30, 205, 112]
+            } else if chunk.room == missed_portal.source_room {
+                [238, 166, 38]
+            } else if chunk.room == missed_portal.destination_room {
+                [238, 72, 92]
+            } else if visible {
+                [55, 150, 95]
+            } else {
+                [74, 83, 92]
+            };
+            fill_world_rect(&mut pixels, WIDTH, HEIGHT, bounds, x0, x1, z0, z1, color);
+            draw_world_rect(
+                &mut pixels,
+                WIDTH,
+                HEIGHT,
+                bounds,
+                x0,
+                x1,
+                z0,
+                z1,
+                [172, 184, 198],
+            );
+        }
+
+        for portal in &package.room_portals {
+            let color = if portal.source_room == missed_portal.source_room
+                && portal.destination_room == missed_portal.destination_room
+            {
+                [255, 120, 44]
+            } else {
+                [190, 198, 210]
+            };
+            draw_world_line(
+                &mut pixels,
+                WIDTH,
+                HEIGHT,
+                bounds,
+                portal.vertices[0][0],
+                portal.vertices[0][2],
+                portal.vertices[1][0],
+                portal.vertices[1][2],
+                color,
+            );
+        }
+
+        draw_audit_camera_cone(&mut pixels, WIDTH, HEIGHT, bounds, camera, yaw);
+        write_ppm(&path, WIDTH, HEIGHT, &pixels).ok()?;
+        Some(path)
+    }
+
+    fn fill_world_rect(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        bounds: (i32, i32, i32, i32),
+        x0: i32,
+        x1: i32,
+        z0: i32,
+        z1: i32,
+        color: [u8; 3],
+    ) {
+        let (sx0, sy0) = world_to_audit_pixel(bounds, width, height, x0, z0);
+        let (sx1, sy1) = world_to_audit_pixel(bounds, width, height, x1, z1);
+        let min_x = sx0.min(sx1).clamp(0, width.saturating_sub(1) as i32) as usize;
+        let max_x = sx0.max(sx1).clamp(0, width.saturating_sub(1) as i32) as usize;
+        let min_y = sy0.min(sy1).clamp(0, height.saturating_sub(1) as i32) as usize;
+        let max_y = sy0.max(sy1).clamp(0, height.saturating_sub(1) as i32) as usize;
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                pixels[y * width + x] = color;
+            }
+        }
+    }
+
+    fn draw_world_rect(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        bounds: (i32, i32, i32, i32),
+        x0: i32,
+        x1: i32,
+        z0: i32,
+        z1: i32,
+        color: [u8; 3],
+    ) {
+        draw_world_line(pixels, width, height, bounds, x0, z0, x1, z0, color);
+        draw_world_line(pixels, width, height, bounds, x1, z0, x1, z1, color);
+        draw_world_line(pixels, width, height, bounds, x1, z1, x0, z1, color);
+        draw_world_line(pixels, width, height, bounds, x0, z1, x0, z0, color);
+    }
+
+    fn draw_world_line(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        bounds: (i32, i32, i32, i32),
+        x0: i32,
+        z0: i32,
+        x1: i32,
+        z1: i32,
+        color: [u8; 3],
+    ) {
+        let (x0, y0) = world_to_audit_pixel(bounds, width, height, x0, z0);
+        let (x1, y1) = world_to_audit_pixel(bounds, width, height, x1, z1);
+        draw_pixel_line(pixels, width, height, x0, y0, x1, y1, color);
+    }
+
+    fn draw_audit_camera_cone(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        bounds: (i32, i32, i32, i32),
+        camera: [i32; 3],
+        yaw: (i32, i32),
+    ) {
+        let far = 24_000i64;
+        for slope in [-PORTAL_SWEEP_HALF_FOV_X_Q12, PORTAL_SWEEP_HALF_FOV_X_Q12] {
+            let view_x = (slope as i64).saturating_mul(far) / 4096;
+            let dx = view_x
+                .saturating_mul(yaw.1 as i64)
+                .saturating_sub(far.saturating_mul(yaw.0 as i64))
+                >> 12;
+            let dz = (-view_x.saturating_mul(yaw.0 as i64))
+                .saturating_sub(far.saturating_mul(yaw.1 as i64))
+                >> 12;
+            draw_world_line(
+                pixels,
+                width,
+                height,
+                bounds,
+                camera[0],
+                camera[2],
+                camera[0].saturating_add(dx as i32),
+                camera[2].saturating_add(dz as i32),
+                [242, 246, 255],
+            );
+        }
+        let (cx, cy) = world_to_audit_pixel(bounds, width, height, camera[0], camera[2]);
+        for oy in -3..=3 {
+            for ox in -3..=3 {
+                set_audit_pixel(pixels, width, height, cx + ox, cy + oy, [255, 255, 255]);
+            }
+        }
+    }
+
+    fn world_to_audit_pixel(
+        bounds: (i32, i32, i32, i32),
+        width: usize,
+        height: usize,
+        x: i32,
+        z: i32,
+    ) -> (i32, i32) {
+        let span_x = i64::from(bounds.1.saturating_sub(bounds.0)).max(1);
+        let span_z = i64::from(bounds.3.saturating_sub(bounds.2)).max(1);
+        let sx = i64::from(x.saturating_sub(bounds.0))
+            .saturating_mul(width.saturating_sub(1) as i64)
+            / span_x;
+        let sy = i64::from(bounds.3.saturating_sub(z))
+            .saturating_mul(height.saturating_sub(1) as i64)
+            / span_z;
+        (sx as i32, sy as i32)
+    }
+
+    fn draw_pixel_line(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        mut x0: i32,
+        mut y0: i32,
+        x1: i32,
+        y1: i32,
+        color: [u8; 3],
+    ) {
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            set_audit_pixel(pixels, width, height, x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = err.saturating_mul(2);
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    fn set_audit_pixel(
+        pixels: &mut [[u8; 3]],
+        width: usize,
+        height: usize,
+        x: i32,
+        y: i32,
+        color: [u8; 3],
+    ) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        if x < width && y < height {
+            pixels[y * width + x] = color;
+        }
+    }
+
+    fn write_ppm(
+        path: &std::path::Path,
+        width: usize,
+        height: usize,
+        pixels: &[[u8; 3]],
+    ) -> std::io::Result<()> {
+        let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for pixel in pixels {
+            bytes.extend_from_slice(pixel);
+        }
+        std::fs::write(path, bytes)
+    }
+
+    #[test]
+    fn demo7_portal_visibility_audit_every_cell_center_16_dirs() {
+        let package = load_demo7_package();
+        let rooms = level_room_records_for_sweep(&package);
+        let portals = level_portal_records_for_sweep(&package);
+        let room_bounds = portal_room_bounds_for_sweep(&package);
+        let mut failures = Vec::new();
+        let mut samples = 0usize;
+
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            let Some((x, y, z)) = cell_global_center(&package, cell) else {
+                continue;
+            };
+            for (_yaw_step, sin_yaw, cos_yaw, yaw_label) in portal_audit_yaws() {
+                samples += 1;
+                let result = portal_visibility_at(
+                    &rooms,
+                    &portals,
+                    &room_bounds,
+                    cell.room,
+                    x,
+                    y,
+                    z,
+                    sin_yaw,
+                    cos_yaw,
+                    0,
+                    4096,
+                );
+                let visible = visible_room_ids(&result);
+                if !visible.contains(&cell.room) {
+                    failures.push(format!(
+                        "current room missing: room={} cell=({},{}) yaw={} visible={visible:?} stats={:?}",
+                        cell.room, cell.x, cell.z, yaw_label, result.stats
+                    ));
+                }
+                if result.stats.cap_room != 0
+                    || result.stats.cap_frustum != 0
+                    || result.stats.cap_depth != 0
+                {
+                    failures.push(format!(
+                        "portal traversal cap hit: room={} cell=({},{}) yaw={} visible={visible:?} stats={:?}",
+                        cell.room, cell.x, cell.z, yaw_label, result.stats
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "demo7 portal visibility audit found {} failures across {samples} cell/yaw samples:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn demo7_portal_visibility_audit_third_person_camera_distance_sweep_16_dirs() {
+        let package = load_demo7_package();
+        let rooms = level_room_records_for_sweep(&package);
+        let portals = level_portal_records_for_sweep(&package);
+        let room_bounds = portal_room_bounds_for_sweep(&package);
+        let mut failures = Vec::new();
+        let mut artifact_count = 0usize;
+        let mut samples = 0usize;
+
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            for sample_x in PORTAL_AUDIT_CELL_SUBSAMPLES {
+                for sample_z in PORTAL_AUDIT_CELL_SUBSAMPLES {
+                    let Some((player_x, player_y, player_z)) =
+                        cell_global_sample(&package, cell, sample_x, sample_z)
+                    else {
+                        continue;
+                    };
+                    for (yaw_step, sin_yaw, cos_yaw, yaw_label) in portal_audit_yaws() {
+                        for distance in DEMO7_CAMERA_DISTANCE_SAMPLES {
+                            samples += 1;
+                            let (camera_room, camera, sin_pitch, cos_pitch) =
+                                demo7_third_person_camera_for_player_distance(
+                                    &package,
+                                    cell.room,
+                                    [player_x, player_y, player_z],
+                                    sin_yaw,
+                                    cos_yaw,
+                                    distance,
+                                );
+                            let result = portal_visibility_at(
+                                &rooms,
+                                &portals,
+                                &room_bounds,
+                                camera_room,
+                                camera[0],
+                                camera[1],
+                                camera[2],
+                                sin_yaw,
+                                cos_yaw,
+                                sin_pitch,
+                                cos_pitch,
+                            );
+                            let visible = visible_room_ids(&result);
+                            for portal in &package.room_portals {
+                                let portal_front = portal_front_faces_camera_point(
+                                    portal, camera[0], camera[1], camera[2],
+                                );
+                                let portal_in_view = portal_surface_intersects_audit_view(
+                                    portal, camera[0], camera[1], camera[2], sin_yaw, cos_yaw,
+                                    sin_pitch, cos_pitch,
+                                );
+                                if visible.contains(&portal.source_room)
+                                    && visible.contains(&portal.destination_room)
+                                    && portal.destination_room != camera_room
+                                    && portal_front
+                                    && portal_in_view
+                                {
+                                    let draw_cells = pvs_selected_cell_count_for_audit_camera(
+                                        &package,
+                                        portal.destination_room,
+                                        [player_x, player_y, player_z],
+                                        camera,
+                                        sin_yaw,
+                                        cos_yaw,
+                                        sin_pitch,
+                                        cos_pitch,
+                                    );
+                                    if draw_cells == 0 {
+                                        let artifact =
+                                            if artifact_count < PORTAL_AUDIT_MAX_ARTIFACTS {
+                                                let path = write_demo7_portal_audit_artifact(
+                                                    &package,
+                                                    artifact_count,
+                                                    cell,
+                                                    camera,
+                                                    yaw_step,
+                                                    (sin_yaw, cos_yaw),
+                                                    &result,
+                                                    portal,
+                                                );
+                                                artifact_count += 1;
+                                                path
+                                            } else {
+                                                None
+                                            };
+                                        failures.push(format!(
+                                            "portal-visible destination selected no draw cells: player_room={} camera_room={} cell=({},{}) sample=({sample_x},{sample_z}) yaw={} distance={} portal={}->{} player=({player_x},{player_y},{player_z}) camera=({},{},{}) visible={visible:?} stats={:?} artifact={}",
+                                            cell.room,
+                                            camera_room,
+                                            cell.x,
+                                            cell.z,
+                                            yaw_label,
+                                            distance,
+                                            portal.source_room,
+                                            portal.destination_room,
+                                            camera[0],
+                                            camera[1],
+                                            camera[2],
+                                            result.stats,
+                                            artifact
+                                                .as_ref()
+                                                .map(|path| path.display().to_string())
+                                                .unwrap_or_else(|| "none".to_owned())
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "demo7 third-person portal visibility audit found {} failures across {samples} cell/yaw/distance samples:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn demo7_portal_visibility_audit_third_person_camera_16_dirs() {
+        let package = load_demo7_package();
+        let rooms = level_room_records_for_sweep(&package);
+        let portals = level_portal_records_for_sweep(&package);
+        let room_bounds = portal_room_bounds_for_sweep(&package);
+        let mut failures = Vec::new();
+        let mut samples = 0usize;
+
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            let Some((player_x, player_y, player_z)) = cell_global_center(&package, cell) else {
+                continue;
+            };
+            for (yaw_step, sin_yaw, cos_yaw, yaw_label) in portal_audit_yaws() {
+                samples += 1;
+                let (camera_room, camera, sin_pitch, cos_pitch) =
+                    demo7_third_person_camera_for_player(
+                        &package,
+                        cell.room,
+                        [player_x, player_y, player_z],
+                        sin_yaw,
+                        cos_yaw,
+                    );
+                let result = portal_visibility_at(
+                    &rooms,
+                    &portals,
+                    &room_bounds,
+                    camera_room,
+                    camera[0],
+                    camera[1],
+                    camera[2],
+                    sin_yaw,
+                    cos_yaw,
+                    sin_pitch,
+                    cos_pitch,
+                );
+                let visible = visible_room_ids(&result);
+                if !visible.contains(&camera_room) {
+                    failures.push(format!(
+                        "camera room missing: player_room={} camera_room={} cell=({},{}) yaw={} player=({player_x},{player_y},{player_z}) camera=({},{},{}) visible={visible:?} stats={:?}",
+                        cell.room,
+                        camera_room,
+                        cell.x,
+                        cell.z,
+                        yaw_label,
+                        camera[0],
+                        camera[1],
+                        camera[2],
+                        result.stats
+                    ));
+                }
+                if result.stats.cap_room != 0
+                    || result.stats.cap_frustum != 0
+                    || result.stats.cap_depth != 0
+                {
+                    failures.push(format!(
+                        "portal traversal cap hit: player_room={} camera_room={} cell=({},{}) yaw={} visible={visible:?} stats={:?}",
+                        cell.room, camera_room, cell.x, cell.z, yaw_label, result.stats
+                    ));
+                }
+                let _ = yaw_step;
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "demo7 third-person portal visibility audit found {} failures across {samples} cell/yaw samples:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn demo7_portal_visibility_sweep_covers_every_cell_center() {
+        let package = load_demo7_package();
+        assert_portal_slices_match_package(&package);
+        assert_chunk_neighbours_have_portals(&package);
+        assert_portals_are_reciprocal(&package);
+
+        let rooms = level_room_records_for_sweep(&package);
+        let portals = level_portal_records_for_sweep(&package);
+        let room_bounds = portal_room_bounds_for_sweep(&package);
+        let mut failures = Vec::new();
+        let mut swept_samples = 0usize;
+
+        for cell in package
+            .visibility_cells
+            .iter()
+            .copied()
+            .filter(|cell| cell.flags & visibility_cell_flags::HAS_GEOMETRY != 0)
+        {
+            let Some((x, y, z)) = cell_global_center(&package, cell) else {
+                failures.push(format!(
+                    "cell room={} ({},{}) has no room record",
+                    cell.room, cell.x, cell.z
+                ));
+                continue;
+            };
+            for source in &package.chunks {
+                if chunks_share_authored_room(&package, source.room, cell.room) {
+                    let located = chunk_containing_global_from(&package, source.room, x, z);
+                    if located != Some(cell.room) {
+                        failures.push(format!(
+                            "room lookup mismatch: start_room={} target_room={} cell=({},{}) pos=({x},{z}) located={located:?}",
+                            source.room, cell.room, cell.x, cell.z
+                        ));
+                    }
+                }
+            }
+            for (sin_yaw, cos_yaw, yaw_label) in portal_sweep_yaws() {
+                let result = portal_visibility_at(
+                    &rooms,
+                    &portals,
+                    &room_bounds,
+                    cell.room,
+                    x,
+                    y,
+                    z,
+                    sin_yaw,
+                    cos_yaw,
+                    0,
+                    4096,
+                );
+                let visible = visible_room_ids(&result);
+                let frontier = frontier_room_ids(&result);
+                let stream = sweep_stream_requests(&package, cell.room, &result);
+                if !visible.contains(&cell.room) {
+                    failures.push(format!(
+                        "current room missing: room={} cell=({},{}) yaw={} visible={visible:?} frontier={frontier:?} loaded={stream:?}",
+                        cell.room, cell.x, cell.z, yaw_label
+                    ));
+                }
+                if result.room_count
+                    > package.rooms[cell.room as usize].resident_chunk_limit as usize
+                {
+                    failures.push(format!(
+                        "resident budget exceeded: room={} cell=({},{}) yaw={} visible={visible:?} limit={}",
+                        cell.room,
+                        cell.x,
+                        cell.z,
+                        yaw_label,
+                        package.rooms[cell.room as usize].resident_chunk_limit
+                    ));
+                }
+                for room in &visible {
+                    if !stream.contains(room) {
+                        failures.push(format!(
+                            "visible room not loaded: room={} cell=({},{}) yaw={} missing={} visible={visible:?} frontier={frontier:?} loaded={stream:?}",
+                            cell.room, cell.x, cell.z, yaw_label, room
+                        ));
+                    }
+                }
+                for destination in current_room_portal_destinations(&package, cell.room) {
+                    if !stream.contains(&destination) {
+                        failures.push(format!(
+                            "portal neighbour not loaded/protected: room={} cell=({},{}) yaw={} destination={} visible={visible:?} frontier={frontier:?} loaded={stream:?}",
+                            cell.room, cell.x, cell.z, yaw_label, destination
+                        ));
+                    }
+                }
+                for destination in current_room_floor_link_destinations(&package, cell.room) {
+                    if !stream.contains(&destination) {
+                        failures.push(format!(
+                            "floor-link neighbour not loaded/protected: room={} cell=({},{}) yaw={} destination={} visible={visible:?} frontier={frontier:?} loaded={stream:?}",
+                            cell.room, cell.x, cell.z, yaw_label, destination
+                        ));
+                    }
+                }
+                if result.stats.cap_room != 0
+                    || result.stats.cap_frustum != 0
+                    || result.stats.cap_depth != 0
+                {
+                    failures.push(format!(
+                        "portal traversal cap hit: room={} cell=({},{}) yaw={} visible={visible:?} frontier={frontier:?} stats={:?}",
+                        cell.room, cell.x, cell.z, yaw_label, result.stats
+                    ));
+                }
+                swept_samples += 1;
+            }
+        }
+
+        let mut portal_samples = 0usize;
+        for portal in &package.room_portals {
+            let Some(cell) = nearest_source_cell_for_portal(&package, portal) else {
+                failures.push(format!(
+                    "portal {}->{} has no source-side visibility cell",
+                    portal.source_room, portal.destination_room
+                ));
+                continue;
+            };
+            let Some((x, _, z)) = cell_global_center(&package, cell) else {
+                failures.push(format!(
+                    "portal {}->{} source cell has no center",
+                    portal.source_room, portal.destination_room
+                ));
+                continue;
+            };
+            let center = portal_center(portal);
+            let (sin_yaw, cos_yaw) = portal_forward_yaw(portal);
+            let result = portal_visibility_at(
+                &rooms,
+                &portals,
+                &room_bounds,
+                portal.source_room,
+                x,
+                center[1],
+                z,
+                sin_yaw,
+                cos_yaw,
+                0,
+                4096,
+            );
+            let visible = visible_room_ids(&result);
+            if !visible.contains(&portal.destination_room) {
+                failures.push(format!(
+                    "facing portal did not reveal destination: {}->{} source_cell=({},{}) pos=({x},{z}) visible={visible:?} frontier={:?} stats={:?}",
+                    portal.source_room,
+                    portal.destination_room,
+                    cell.x,
+                    cell.z,
+                    frontier_room_ids(&result),
+                    result.stats
+                ));
+            }
+            portal_samples += 1;
+        }
+
+        assert_eq!(
+            portal_samples,
+            package.room_portals.len(),
+            "not every directed portal was sampled"
+        );
+        assert!(
+            swept_samples > 0,
+            "demo7 portal sweep did not visit any cells"
+        );
+        assert!(
+            failures.is_empty(),
+            "demo7 portal sweep found {} failures across {swept_samples} cell-yaw samples and {portal_samples} portal-facing samples:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn demo7_without_authored_portals_has_no_generated_room_splits() {
+        let (mut project, project_root) = load_demo7_project();
+        let portal_ids: Vec<NodeId> = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Portal { .. }))
+            .map(|node| node.id)
+            .collect();
+        for id in portal_ids {
+            assert!(project.active_scene_mut().remove_node(id));
+        }
+
+        let (package, report) = build_package(&project, &project_root);
+        assert!(
+            package.is_none(),
+            "demo7 without portals is too large to cook as one runtime room"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("runtime cap")),
+            "errors: {:?}",
+            report.errors
+        );
     }
 
     fn visibility_test_cell(x: u16, z: u16, blocker_mask: u8) -> PlaytestVisibilityCell {
@@ -4429,7 +6374,94 @@ mod tests {
     }
 
     fn project_with_one_room() -> ProjectDocument {
-        let project = ProjectDocument::starter();
+        let mut project = ProjectDocument::starter();
+        let room_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(|resource| resource.id);
+        let (world_kind, room_grid, player_name, player_kind, player_children, light_template) = {
+            let scene = project.active_scene();
+            let world = scene
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::World { .. }))
+                .expect("starter must contain a World");
+            let room = scene
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+                .expect("starter must contain a Room");
+            let NodeKind::Room { grid } = &room.kind else {
+                unreachable!();
+            };
+            let player = scene
+                .nodes()
+                .iter()
+                .find(|node| is_player_spawn_node(scene, node))
+                .expect("starter must contain a player spawn entity");
+            let children: Vec<_> = player
+                .children
+                .iter()
+                .filter_map(|id| {
+                    let child = scene.node(*id)?;
+                    Some((child.name.clone(), child.kind.clone(), child.transform))
+                })
+                .collect();
+            let light = scene
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::PointLight { .. }))
+                .map(|node| (node.name.clone(), node.kind.clone()));
+            (
+                world.kind.clone(),
+                grid.clone(),
+                player.name.clone(),
+                player.kind.clone(),
+                children,
+                light,
+            )
+        };
+
+        let mut grid =
+            WorldGrid::stone_room(1, 1, room_grid.sector_size, room_material, room_material);
+        grid.ambient_color = room_grid.ambient_color;
+        grid.fog_enabled = room_grid.fog_enabled;
+        grid.fog_color = room_grid.fog_color;
+        grid.fog_near = room_grid.fog_near;
+        grid.fog_far = room_grid.fog_far;
+        grid.atmosphere_enabled = room_grid.atmosphere_enabled;
+        grid.atmosphere_color = room_grid.atmosphere_color;
+        grid.atmosphere_density = room_grid.atmosphere_density;
+        grid.atmosphere_fall_speed_q4 = room_grid.atmosphere_fall_speed_q4;
+        grid.atmosphere_wind_speed_q4 = room_grid.atmosphere_wind_speed_q4;
+
+        let mut scene = crate::Scene::new("Main");
+        let world_id = scene.root;
+        if let Some(world) = scene.node_mut(world_id) {
+            world.name = "World".to_string();
+            world.kind = world_kind;
+        }
+        let room_id = scene.add_node(world_id, "Room", NodeKind::Room { grid });
+        if let Some((name, kind)) = light_template {
+            let light_id = scene.add_node(room_id, name, kind);
+            if let Some(light) = scene.node_mut(light_id) {
+                light.transform.translation = [0.0, 1.5, 0.0];
+            }
+        }
+        let player_id = scene.add_node(room_id, player_name, player_kind);
+        if let Some(player) = scene.node_mut(player_id) {
+            player.transform.translation = [0.0, 0.0, 0.0];
+            player.transform.rotation_degrees = [0.0, 0.0, 0.0];
+        }
+        for (name, kind, transform) in player_children {
+            let child_id = scene.add_node(player_id, name, kind);
+            if let Some(child) = scene.node_mut(child_id) {
+                child.transform = transform;
+            }
+        }
+        project.scenes[0] = scene;
+
         let scene = project.active_scene();
         let has_room = scene
             .nodes()
@@ -4442,22 +6474,6 @@ mod tests {
             "starter must contain a player spawn entity"
         );
         project
-    }
-
-    #[test]
-    fn streaming_chunk_target_override_accepts_square_and_rect_values() {
-        let default = WorldStreamingSettings::default().chunk_config();
-
-        let square = streaming_chunk_config_with_target(default, "8").expect("square target");
-        assert_eq!(square.target_width, 8);
-        assert_eq!(square.target_depth, 8);
-
-        let rect = streaming_chunk_config_with_target(default, "12x6").expect("rect target");
-        assert_eq!(rect.target_width, 12);
-        assert_eq!(rect.target_depth, 6);
-
-        assert!(streaming_chunk_config_with_target(default, "").is_none());
-        assert!(streaming_chunk_config_with_target(default, "8x8x8").is_none());
     }
 
     fn is_player_spawn_node(scene: &crate::Scene, node: &SceneNode) -> bool {
@@ -4601,7 +6617,12 @@ mod tests {
         let ids: Vec<NodeId> = scene
             .nodes()
             .iter()
-            .filter(|node| matches!(node.kind, NodeKind::ModelRenderer { model: Some(_), .. }))
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    NodeKind::ModelRenderer { model: Some(_), .. } | NodeKind::Animator { .. }
+                )
+            })
             .map(|node| node.id)
             .collect();
         for id in ids {
@@ -4655,6 +6676,13 @@ mod tests {
         assert!(manifest.contains("pub static ASSETS: &[LevelAssetRecord] = &[];"));
         assert!(manifest.contains("pub static ROOMS: &[LevelRoomRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
+        assert!(manifest.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];"));
+        assert!(manifest.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 0;"));
+        assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;"));
+        assert!(manifest.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;"));
+        assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;"));
+        assert!(manifest.contains("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[];"));
+        assert!(manifest.contains("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[];"));
         assert!(manifest.contains("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[];"));
         assert!(manifest.contains("pub static VISIBILITY_PVS_BITS: &[u8] = &[];"));
         assert!(manifest
@@ -4675,6 +6703,15 @@ mod tests {
     #[test]
     fn starter_project_validates_and_cooks() {
         let project = project_with_one_room();
+        let expected_camera = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::World { camera, .. } => Some(*camera),
+                _ => None,
+            })
+            .expect("starter world has camera settings");
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("package returned on ok report");
@@ -4695,18 +6732,15 @@ mod tests {
         );
         assert_eq!(package.rooms[0].far_vista.segments, 12);
         assert!(package.rooms[0].far_vista.texture_asset_indices.is_empty());
-        assert_eq!(
-            package.rooms[0].camera.distance,
-            DEFAULT_WORLD_CAMERA_DISTANCE
-        );
-        assert_eq!(package.rooms[0].camera.height, DEFAULT_WORLD_CAMERA_HEIGHT);
+        assert_eq!(package.rooms[0].camera.distance, expected_camera.distance);
+        assert_eq!(package.rooms[0].camera.height, expected_camera.height);
         assert_eq!(
             package.rooms[0].camera.target_height,
-            DEFAULT_WORLD_CAMERA_TARGET_HEIGHT
+            expected_camera.target_height
         );
         assert_eq!(
             package.rooms[0].camera.min_floor_clearance,
-            DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE
+            expected_camera.min_floor_clearance
         );
         assert_eq!(package.room_visibility.len(), 1);
         assert!(!package.visibility_cells.is_empty());
@@ -4776,6 +6810,47 @@ mod tests {
             package.room_cache_surfaces[cache.surface_first as usize],
             playtest_cached_room_surface(surfaces[0])
         );
+    }
+
+    #[test]
+    fn package_resolves_vertical_floor_links_to_runtime_rooms() {
+        let mut project = project_with_one_room();
+        let room_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(|resource| resource.id);
+        let scene = project.active_scene_mut();
+        let world_id = scene.root;
+        let source_id = scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == "Room" && matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .expect("source room");
+        let target_grid = WorldGrid::stone_room(
+            1,
+            1,
+            crate::DEFAULT_WORLD_SECTOR_SIZE,
+            room_material,
+            room_material,
+        );
+        let target_id = scene.add_node(world_id, "Below", NodeKind::Room { grid: target_grid });
+        let source = scene.node_mut(source_id).expect("source node");
+        let NodeKind::Room { grid } = &mut source.kind else {
+            panic!("source should be room");
+        };
+        grid.set_floor_below(0, 0, Some(crate::GridFloorLink::room(target_id)));
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let package = package.expect("package");
+        assert_eq!(package.room_floor_links.len(), 1);
+        assert_eq!(package.room_floor_links[0].room, 0);
+        assert_eq!(package.room_floor_links[0].x, 0);
+        assert_eq!(package.room_floor_links[0].z, 0);
+        assert_eq!(package.room_floor_links[0].above_room, None);
+        assert_eq!(package.room_floor_links[0].below_room, Some(1));
     }
 
     #[test]
@@ -4849,7 +6924,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_authored_room_cooks_into_runtime_chunks() {
+    fn oversized_authored_room_fails_without_manual_split() {
         let mut project = project_with_one_room();
         let floor_material = project
             .resources
@@ -4885,17 +6960,84 @@ mod tests {
         }
 
         let (package, report) = build_package(&project, &starter_project_root());
-        assert!(report.is_ok(), "errors: {:?}", report.errors);
-        let package = package.expect("package returned on ok report");
-        assert_eq!(package.rooms.len(), 8);
-        assert_eq!(package.room_asset_count(), 8);
-        assert!(package
-            .spawn
-            .is_some_and(|spawn| (spawn.room as usize) < package.rooms.len()));
+        assert!(package.is_none());
+        assert!(!report.is_ok());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("runtime cap")),
+            "errors: {:?}",
+            report.errors
+        );
     }
 
     #[test]
-    fn chunked_rooms_emit_warm_residency_hints() {
+    fn portal_room_cook_emits_directed_room_portals() {
+        let mut project = project_with_one_room();
+        let floor_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a room material")
+            .id;
+        let room_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .expect("starter has a room")
+            .id;
+        if let Some(room) = project.active_scene_mut().node_mut(room_id) {
+            let NodeKind::Room { grid } = &mut room.kind else {
+                panic!("starter room is a room");
+            };
+            *grid = crate::WorldGrid::stone_room(
+                2,
+                1,
+                crate::DEFAULT_WORLD_SECTOR_SIZE,
+                Some(floor_material),
+                Some(floor_material),
+            );
+        }
+        let portal_id = project.active_scene_mut().add_node(
+            room_id,
+            "Portal",
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name: String::new(),
+                geometry: None,
+            },
+        );
+        if let Some(portal) = project.active_scene_mut().node_mut(portal_id) {
+            portal.transform.translation = [0.0, 0.0, 0.0];
+        }
+        let spawn_id = player_spawn_node_id(&project);
+        if let Some(spawn) = project.active_scene_mut().node_mut(spawn_id) {
+            spawn.transform.translation = [-0.25, 0.0, 0.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("package returned on ok report");
+        assert_eq!(package.rooms.len(), 2);
+        assert_eq!(package.room_portals.len(), 2);
+        assert_eq!(package.rooms[0].portal_first, 0);
+        assert_eq!(package.rooms[0].portal_count, 1);
+        assert_eq!(package.rooms[1].portal_first, 1);
+        assert_eq!(package.rooms[1].portal_count, 1);
+        assert_eq!(package.room_portals[0].source_room, 0);
+        assert_eq!(package.room_portals[0].destination_room, 1);
+        assert_eq!(package.room_portals[0].normal, [-1, 0, 0]);
+        let src = render_manifest_source(&package);
+        assert!(src.contains(
+            "pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[\n    LevelRoomPortalRecord"
+        ));
+    }
+
+    #[test]
+    fn manual_portal_rooms_emit_warm_residency_hints() {
         let mut project = project_with_one_room();
         let floor_material = project
             .resources
@@ -4916,14 +7058,30 @@ mod tests {
             let NodeKind::Room { grid } = &mut room.kind else {
                 panic!("starter room is a room");
             };
-            *grid = crate::WorldGrid::empty(1, 40, crate::DEFAULT_WORLD_SECTOR_SIZE);
-            for z in 0..grid.depth {
-                grid.set_floor(0, z, 0, Some(floor_material));
-            }
+            *grid = crate::WorldGrid::stone_room(
+                2,
+                1,
+                crate::DEFAULT_WORLD_SECTOR_SIZE,
+                Some(floor_material),
+                Some(floor_material),
+            );
+        }
+        let portal_id = project.active_scene_mut().add_node(
+            room_id,
+            "Portal",
+            NodeKind::Portal {
+                target_room: None,
+                target_entry: String::new(),
+                entry_name: String::new(),
+                geometry: None,
+            },
+        );
+        if let Some(portal) = project.active_scene_mut().node_mut(portal_id) {
+            portal.transform.translation = [0.0, 0.0, 0.0];
         }
         let spawn_id = player_spawn_node_id(&project);
         if let Some(spawn) = project.active_scene_mut().node_mut(spawn_id) {
-            spawn.transform.translation = [0.0, 0.0, -19.0];
+            spawn.transform.translation = [-0.25, 0.0, 0.0];
         }
 
         let (package, report) = build_package(&project, &starter_project_root());
@@ -4960,20 +7118,20 @@ mod tests {
         assert_eq!(pc.character, 0);
         assert_eq!(pc.spawn, package.spawn.unwrap());
         let character = &package.characters[0];
-        // Starter characters use the shared standalone FBX
-        // library rather than model-local Meshy clips.
-        assert_eq!(
-            character.action_clips[CharacterAnimationAction::Idle.to_index()],
-            0
-        );
-        assert_eq!(
-            character.action_clips[CharacterAnimationAction::Walk.to_index()],
-            1
-        );
-        assert_eq!(
-            character.action_clips[CharacterAnimationAction::Run.to_index()],
-            1
-        );
+        for action in [
+            CharacterAnimationAction::Idle,
+            CharacterAnimationAction::Walk,
+            CharacterAnimationAction::Run,
+            CharacterAnimationAction::Roll,
+            CharacterAnimationAction::LightAttack,
+            CharacterAnimationAction::HeavyAttack,
+        ] {
+            assert_ne!(
+                character.action_clips[action.to_index()],
+                CHARACTER_CLIP_NONE,
+                "{action:?} should be mapped for the starter player"
+            );
+        }
         assert_eq!(
             character.action_clips[CharacterAnimationAction::Turn.to_index()],
             CHARACTER_CLIP_NONE
@@ -5273,24 +7431,25 @@ mod tests {
     #[test]
     fn player_spawn_with_invalid_idle_clip_fails_validation() {
         let mut project = project_with_one_room();
-        let scene = project.active_scene();
-        let character_id = scene
-            .nodes()
-            .iter()
-            .find_map(|_| {
-                project.resources.iter().find_map(|r| match &r.data {
-                    crate::ResourceData::Character(_) => Some(r.id),
-                    _ => None,
-                })
-            })
-            .expect("starter has a Character");
+        let character_id = player_character_resource_id(&project);
         // Bump idle clip past the model's clip count so cook
         // validation must reject.
         if let Some(resource) = project.resource_mut(character_id) {
             if let crate::ResourceData::Character(c) = &mut resource.data {
                 c.animation_set = None;
+                c.action_clips.clear();
                 c.idle_clip = Some(99);
             }
+        }
+        let animator_ids: Vec<NodeId> = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Animator { .. }))
+            .map(|node| node.id)
+            .collect();
+        for id in animator_ids {
+            project.active_scene_mut().remove_node(id);
         }
         let (package, report) = build_package(&project, &starter_project_root());
         assert!(package.is_none());
@@ -5656,6 +7815,9 @@ mod tests {
         assert!(src.contains("pub static MATERIALS"));
         assert!(src.contains("pub static ROOMS"));
         assert!(src.contains("pub static ROOM_CHUNKS"));
+        assert!(src.contains("pub static ROOM_PORTALS"));
+        assert!(src.contains("pub static ROOM_NEAR_ROOMS"));
+        assert!(src.contains("pub static ROOM_OVERLAPPED_ROOMS"));
         assert!(src.contains("LevelSkyRecord"));
         assert!(src.contains("sky: LevelSkyRecord"));
         assert!(src.contains("LevelFarVistaRecord"));
@@ -5777,10 +7939,10 @@ mod tests {
 
     #[test]
     fn texture_shared_across_materials_emits_single_asset() {
-        // Two materials in the starter both use the first Delven texture.
+        // Two materials in the starter both use the same room texture.
         // After cook + package the texture should appear once in
         // ASSETS even though both materials reference it.
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         // Find the starter room texture id and an existing material to
         // clone-and-retint as a second material referencing the
         // same texture.
@@ -5788,14 +7950,12 @@ mod tests {
             .resources
             .iter()
             .find_map(|r| match &r.data {
-                ResourceData::Texture { psxt_path }
-                    if psxt_path.ends_with("delven_01_slateflr1a_q2.psxt") =>
-                {
+                ResourceData::Texture { psxt_path } if psxt_path.ends_with("bigdoor_1a.psxt") => {
                     Some(r.id)
                 }
                 _ => None,
             })
-            .expect("starter has first Delven texture");
+            .expect("starter has first demo7 texture");
 
         // Reassign every wall material in the room to a new
         // material that *also* points at the same room texture. After
@@ -5803,7 +7963,7 @@ mod tests {
         // new wall material) but both resolve to the same texture,
         // so playtest should emit 1 texture asset.
         let new_material_id = project.add_resource(
-            "DelvenOnWalls",
+            "BigdoorOnWalls",
             ResourceData::Material(crate::MaterialResource::opaque(Some(room_texture_id))),
         );
         let scene = project.active_scene_mut();
@@ -5819,10 +7979,10 @@ mod tests {
                 // no walls. Grow to a 2x1 grid and add a north wall
                 // on the new cell so the test has a wall material
                 // alongside the floor. The original cell keeps its
-                // starter Delven material; the new cell's floor and
+                // starter demo7 material; the new cell's floor and
                 // wall both use new_material_id, giving the cooker
                 // two distinct material slots that both share the
-                // same Delven texture.
+                // same demo7 texture.
                 let sector_size = grid.sector_size;
                 let (sx, sz) =
                     grid.extend_to_include(grid.origin[0] + grid.width as i32, grid.origin[1]);
@@ -5856,7 +8016,7 @@ mod tests {
             .collect();
         assert!(
             room_texture_slots.len() >= 2,
-            "expected at least two cooked material slots to share the first Delven texture"
+            "expected at least two cooked material slots to share the first demo7 texture"
         );
         let first_room_asset = room_texture_slots[0].texture_asset_index;
         assert!(room_texture_slots
@@ -5866,7 +8026,7 @@ mod tests {
 
     #[test]
     fn material_sidedness_reaches_playtest_manifest_flags() {
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         let material = project
             .resources
             .iter_mut()
@@ -5897,7 +8057,7 @@ mod tests {
     fn missing_texture_path_fails_with_clear_error() {
         // Point a texture resource at a bogus path; cook should
         // refuse and the error should mention the file.
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         let target = project
             .resources
             .iter_mut()
@@ -6023,7 +8183,7 @@ mod tests {
         // It should now appear in `package.lights` with a
         // sensible intensity_q8 derived from the editor's
         // authored intensity float.
-        let project = ProjectDocument::starter();
+        let project = project_with_one_room();
         let expected_color = starter_light_color(&project);
         let expected_intensity_q8 = starter_light_intensity_q8(&project);
         let (package, report) = build_package(&project, &starter_project_root());
@@ -6038,7 +8198,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_boundary_light_is_emitted_for_each_overlapped_chunk() {
+    fn room_light_is_emitted_once_without_generated_splits() {
         let mut project = project_with_one_room();
         let floor_material = project
             .resources
@@ -6059,7 +8219,7 @@ mod tests {
             let NodeKind::Room { grid } = &mut room.kind else {
                 panic!("starter room is a room");
             };
-            *grid = crate::WorldGrid::empty(1, 40, crate::DEFAULT_WORLD_SECTOR_SIZE);
+            *grid = crate::WorldGrid::empty(1, 16, crate::DEFAULT_WORLD_SECTOR_SIZE);
             for z in 0..grid.depth {
                 grid.set_floor(0, z, 0, Some(floor_material));
             }
@@ -6068,7 +8228,7 @@ mod tests {
             let Some(light) = project.active_scene_mut().node_mut(id) else {
                 continue;
             };
-            light.transform.translation = [0.0, 0.0, -10.5];
+            light.transform.translation = [0.0, 0.0, 0.0];
             let NodeKind::PointLight { radius, .. } = &mut light.kind else {
                 continue;
             };
@@ -6085,21 +8245,20 @@ mod tests {
             },
         );
         if let Some(spawn) = project.active_scene_mut().node_mut(spawn_id) {
-            spawn.transform.translation = [0.0, 0.0, -19.0];
+            spawn.transform.translation = [0.0, 0.0, 0.0];
         }
 
         let (package, report) = build_package(&project, &starter_project_root());
 
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
-        assert_eq!(package.rooms.len(), 8);
-        assert_eq!(package.lights.len(), 2);
-        let light_rooms: BTreeSet<u16> = package.lights.iter().map(|light| light.room).collect();
-        assert_eq!(light_rooms.len(), 2);
+        assert_eq!(package.rooms.len(), 1);
+        assert_eq!(package.lights.len(), 1);
+        assert_eq!(package.lights[0].room, 0);
     }
 
     #[test]
-    fn chunk_boundary_floor_transition_wall_stays_with_canonical_chunk() {
+    fn floor_transition_wall_stays_in_single_manual_room() {
         let mut project = project_with_one_room();
         let floor_material = project
             .resources
@@ -6133,7 +8292,7 @@ mod tests {
 
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         let package = package.expect("cooks");
-        assert_eq!(package.rooms.len(), 4);
+        assert_eq!(package.rooms.len(), 1);
         let mut transition_walls = 0usize;
         for room in &package.rooms {
             let world = psx_asset::World::from_bytes(&package.assets[room.world_asset_index].bytes)
@@ -6628,7 +8787,7 @@ mod tests {
         // Swap the starter's brick material to point at the
         // model's 8bpp atlas, which lives at the same project.
         // Cook should refuse the room material 8bpp depth.
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         // Rewire the actually-used starter room texture to the
         // wraith atlas path so it parses but with the wrong CLUT
         // entry count.
@@ -6851,8 +9010,57 @@ mod tests {
     }
 
     #[test]
-    fn non_player_character_controller_cooks_idle_model_instance_with_yaw() {
+    fn box_prop_cooks_faces_vertices_and_collision() {
         let mut project = ProjectDocument::starter();
+        let material_id = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a material")
+            .id;
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        let vertices = crate::box_prop_vertices_for_size(512);
+        let prop_id = scene.add_node(
+            room_id,
+            "Cooked Box Prop",
+            NodeKind::BoxProp {
+                materials: [Some(material_id); crate::BOX_PROP_FACE_COUNT],
+                vertices,
+                collision_enabled: true,
+                break_flags: psx_level::box_prop_flags::BREAK_ON_WALK
+                    | psx_level::box_prop_flags::BREAK_ON_ATTACK,
+            },
+        );
+        if let Some(node) = scene.node_mut(prop_id) {
+            node.transform.rotation_degrees = [45.0, 90.0, 270.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        let prop = package
+            .box_props
+            .iter()
+            .find(|prop| prop.vertices == vertices)
+            .expect("box prop cooks");
+        assert!(prop.texture_asset_indices.iter().all(Option::is_some));
+        assert_eq!(prop.pitch, 512);
+        assert_eq!(prop.yaw, 1024);
+        assert_eq!(prop.roll, 3072);
+        assert_eq!(prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED, 1);
+        assert_ne!(prop.flags & psx_level::box_prop_flags::BREAK_ON_WALK, 0);
+        assert_ne!(prop.flags & psx_level::box_prop_flags::BREAK_ON_ATTACK, 0);
+    }
+
+    #[test]
+    fn non_player_character_controller_cooks_idle_model_instance_with_yaw() {
+        let mut project = project_with_one_room();
         let character_id = player_character_resource_id(&project);
         let scene = project.active_scene_mut();
         let room_id = scene
@@ -6891,10 +9099,7 @@ mod tests {
         let instance = package.model_instances[0];
         assert_eq!(instance.yaw, 2048);
         assert_eq!(instance.model, package.characters[0].model);
-        assert_eq!(
-            instance.clip,
-            package.characters[0].action_clips[CharacterAnimationAction::Idle.to_index()]
-        );
+        assert!(instance.clip < package.models[instance.model as usize].clip_count);
     }
 
     #[test]
@@ -6967,7 +9172,7 @@ mod tests {
     /// Helper: starter project with the player spawn moved to
     /// editor coord `(ex, ez)`.
     fn project_with_spawn_at(ex: f32, ez: f32) -> (ProjectDocument, NodeId, NodeId) {
-        let mut project = ProjectDocument::starter();
+        let mut project = project_with_one_room();
         let (room_id, spawn_id) = {
             let scene = project.active_scene();
             let room = scene
@@ -7121,8 +9326,15 @@ mod tests {
         let src = render_manifest_source(&package);
         assert!(src.contains("pub static ASSETS: &[LevelAssetRecord] = &[\n];"));
         assert!(src.contains("pub static MATERIALS: &[LevelMaterialRecord] = &[\n];"));
+        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 0;"));
+        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;"));
+        assert!(src.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;"));
+        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;"));
         assert!(src.contains("pub static ROOMS: &[LevelRoomRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n];"));
+        assert!(src.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[\n];"));
+        assert!(src.contains("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[\n];"));
+        assert!(src.contains("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[\n];"));
         assert!(src.contains("pub static VISIBILITY_PVS: &[LevelVisibilityPvsRecord] = &[\n];"));
         assert!(src.contains("pub static VISIBILITY_PVS_BITS: &[u8] = &[\n];"));
         assert!(
