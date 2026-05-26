@@ -2,7 +2,7 @@
 
 use crate::{
     MaterialFaceSidedness, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
-    RuntimeTextureSplitMode, SkyCycloramaQuad,
+    RuntimeTextureSplitMode, SkyCycloramaQuad, UiNodeKind, UiValueBinding,
 };
 
 /// Number of cooked character animation action slots.
@@ -644,6 +644,35 @@ pub struct PlaytestBoxProp {
     pub flags: u16,
 }
 
+/// One cooked screen-space UI node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiNode {
+    /// Parent index in [`PlaytestPackage::ui_nodes`], or `None` for the root canvas.
+    pub parent: Option<u16>,
+    /// Node kind.
+    pub kind: UiNodeKind,
+    /// Left edge in canvas pixels.
+    pub x: i16,
+    /// Top edge in canvas pixels.
+    pub y: i16,
+    /// Width in canvas pixels.
+    pub width: u16,
+    /// Height in canvas pixels.
+    pub height: u16,
+    /// Primary colour: fill for `Rect`/`Bar`, text tint for `Label`.
+    pub color: [u8; 3],
+    /// Secondary colour, currently the `Bar` background.
+    pub background: [u8; 3],
+    /// Current value binding for `Bar`.
+    pub value: UiValueBinding,
+    /// Maximum value binding for `Bar`.
+    pub max: UiValueBinding,
+    /// Text for `Label`.
+    pub text: String,
+    /// Runtime flags.
+    pub flags: u16,
+}
+
 /// Weapon-local hit shape, ready for manifest emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestWeaponHitShape {
@@ -945,6 +974,8 @@ pub struct PlaytestPackage {
     pub image_props: Vec<PlaytestImageProp>,
     /// Placed editable box props, room-local coordinates.
     pub box_props: Vec<PlaytestBoxProp>,
+    /// Cooked screen-space UI nodes.
+    pub ui_nodes: Vec<PlaytestUiNode>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.

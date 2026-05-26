@@ -206,6 +206,11 @@ typed_index! {
 }
 
 typed_index! {
+    /// Index into the generated `UI_NODES` table.
+    pub struct UiNodeIndex;
+}
+
+typed_index! {
     /// Runtime resource slot for entity records.
     pub struct ResourceSlot;
 }
@@ -1301,6 +1306,65 @@ pub struct LevelBoxPropRecord {
     pub tint_rgb: [[u8; 3]; BOX_PROP_FACE_COUNT],
     /// Baked static light base per face vertex.
     pub baked_vertex_rgb: [[(u8, u8, u8); 4]; BOX_PROP_FACE_COUNT],
+    /// Runtime flags.
+    pub flags: u16,
+}
+
+/// Screen-space UI node kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiNodeKind {
+    /// Fixed-resolution root canvas.
+    Canvas,
+    /// Organizational group.
+    Group,
+    /// Solid rectangle.
+    Rect,
+    /// Text label.
+    Label,
+    /// Horizontal value bar.
+    Bar,
+}
+
+/// Runtime value source for data-bound UI elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiValueBinding {
+    /// Literal Q12 fixed-point value.
+    ConstantQ12(i32),
+    /// Player health value.
+    PlayerHealth,
+    /// Player health maximum.
+    PlayerHealthMax,
+    /// Player stamina value.
+    PlayerStamina,
+    /// Player stamina maximum.
+    PlayerStaminaMax,
+}
+
+/// One cooked screen-space UI node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiNodeRecord {
+    /// Parent UI node index, or `None` for the root canvas.
+    pub parent: Option<UiNodeIndex>,
+    /// Node kind.
+    pub kind: LevelUiNodeKind,
+    /// Left edge in canvas pixels.
+    pub x: i16,
+    /// Top edge in canvas pixels.
+    pub y: i16,
+    /// Width in canvas pixels.
+    pub width: u16,
+    /// Height in canvas pixels.
+    pub height: u16,
+    /// Primary colour: fill for `Rect`/`Bar`, text tint for `Label`.
+    pub color: [u8; 3],
+    /// Secondary colour, currently the `Bar` background.
+    pub background: [u8; 3],
+    /// Current value binding for `Bar`.
+    pub value: LevelUiValueBinding,
+    /// Maximum value binding for `Bar`.
+    pub max: LevelUiValueBinding,
+    /// Text for `Label`.
+    pub text: &'static str,
     /// Runtime flags.
     pub flags: u16,
 }
