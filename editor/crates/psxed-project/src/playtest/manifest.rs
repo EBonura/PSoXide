@@ -92,6 +92,26 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         out,
         "pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = {world_pack_max_chunk_bytes};\n",
     );
+    let runtime_depth_sort_mode = package.runtime_depth_sort_mode.manifest_value();
+    let _ = writeln!(
+        out,
+        "pub const CACHED_ROOM_DEPTH_MODE: u8 = {runtime_depth_sort_mode};\n",
+    );
+    let runtime_texture_split_mode = package.runtime_texture_split_mode.manifest_value();
+    let _ = writeln!(
+        out,
+        "pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = {runtime_texture_split_mode};\n",
+    );
+    let runtime_room_draw_order_mode = package.runtime_room_draw_order_mode.manifest_value();
+    let _ = writeln!(
+        out,
+        "pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = {runtime_room_draw_order_mode};\n",
+    );
+    let runtime_texture_split_max_edge = package.runtime_texture_split_max_edge;
+    let _ = writeln!(
+        out,
+        "pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = {runtime_texture_split_max_edge};\n",
+    );
 
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
@@ -266,7 +286,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -279,6 +299,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.visible_chunk_limit,
             room.material_first,
             room.material_count,
+            room.portal_first,
+            room.portal_count,
+            room.near_room_first,
+            room.near_room_count,
+            room.overlapped_room_first,
+            room.overlapped_room_count,
             room.fog_rgb[0],
             room.fog_rgb[1],
             room.fog_rgb[2],
@@ -360,6 +386,48 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room_index_or_none(west),
             chunk.flags,
         );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Directed runtime room portal graph.\n");
+    out.push_str("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[\n");
+    for portal in &package.room_portals {
+        let _ = writeln!(
+            out,
+            "    LevelRoomPortalRecord {{ source_room: RoomIndex({}), destination_room: RoomIndex({}), kind: {}, normal_x: {}, normal_y: {}, normal_z: {}, vertex_x: [{}, {}, {}, {}], vertex_y: [{}, {}, {}, {}], vertex_z: [{}, {}, {}, {}] }},",
+            portal.source_room,
+            portal.destination_room,
+            portal.kind,
+            portal.normal[0],
+            portal.normal[1],
+            portal.normal[2],
+            portal.vertices[0][0],
+            portal.vertices[1][0],
+            portal.vertices[2][0],
+            portal.vertices[3][0],
+            portal.vertices[0][1],
+            portal.vertices[1][1],
+            portal.vertices[2][1],
+            portal.vertices[3][1],
+            portal.vertices[0][2],
+            portal.vertices[1][2],
+            portal.vertices[2][2],
+            portal.vertices[3][2],
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Room indices near each runtime room, reserved for portal streaming.\n");
+    out.push_str("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[\n");
+    for room in &package.room_near_rooms {
+        let _ = writeln!(out, "    RoomIndex({room}),");
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Room indices overlapping each runtime room, reserved for stacked rooms.\n");
+    out.push_str("pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[\n");
+    for room in &package.room_overlapped_rooms {
+        let _ = writeln!(out, "    RoomIndex({room}),");
     }
     out.push_str("];\n\n");
 
@@ -800,6 +868,28 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Placed editable box props, room-local coordinates.\n");
+    out.push_str("pub static BOX_PROPS: &[LevelBoxPropRecord] = &[\n");
+    for prop in &package.box_props {
+        let texture_assets = render_box_prop_texture_assets(&prop.texture_asset_indices);
+        let vertices = render_box_prop_vertices(&prop.vertices);
+        let tint_rgb = render_box_prop_tint_rgb(&prop.tint_rgb);
+        let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
+        let _ = writeln!(
+            out,
+            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
+            prop.room,
+            prop.x,
+            prop.y,
+            prop.z,
+            prop.pitch,
+            prop.yaw,
+            prop.roll,
+            prop.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Weapon hitboxes, local to weapon grips.\n");
     out.push_str("pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[\n");
     for hitbox in &package.weapon_hitboxes {
@@ -1144,7 +1234,8 @@ fn streamed_room_chunk_layout(
         })
         .unwrap_or(&[]);
 
-    let collision_payload = compact_collision_payload(&asset.bytes)?;
+    let collision_payload =
+        compact_collision_payload(&asset.bytes, room, &package.room_floor_links)?;
     let include_cell_vertices = !cell_vertex_slice.is_empty()
         && streamed_room_chunk_payload_len(
             collision_payload.len(),
@@ -1323,7 +1414,11 @@ fn align_usize(value: usize, align: usize) -> usize {
     }
 }
 
-fn compact_collision_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn compact_collision_payload(
+    bytes: &[u8],
+    room_index: u16,
+    floor_links: &[PlaytestRoomFloorLink],
+) -> Result<Vec<u8>, String> {
     let room = psx_engine::RuntimeRoom::from_bytes(bytes)
         .map_err(|e| format!("room collision source did not parse: {e:?}"))?;
     let width = room.width();
@@ -1352,6 +1447,7 @@ fn compact_collision_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 depth,
                 render_sector,
                 collision_sector,
+                compact_floor_link_targets(floor_links, room_index, sx, sz),
             )?;
             sz += 1;
         }
@@ -1422,6 +1518,7 @@ fn append_compact_collision_sector(
     depth: u16,
     render_sector: Option<psx_engine::SectorRender>,
     collision_sector: Option<psx_engine::SectorCollision>,
+    floor_links: (Option<u16>, Option<u16>),
 ) -> Result<(), String> {
     let mut flags = 0u8;
     let mut floor_triangle_flags = 0u8;
@@ -1485,6 +1582,12 @@ fn append_compact_collision_sector(
             ceiling_triangle_flags,
         )?;
     }
+    if floor_links.0.is_some() {
+        flags |= psx_level::compact_collision_sector_flags::HAS_FLOOR_ABOVE;
+    }
+    if floor_links.1.is_some() {
+        flags |= psx_level::compact_collision_sector_flags::HAS_FLOOR_BELOW;
+    }
 
     out.push(flags);
     out.push(floor_split);
@@ -1501,7 +1604,32 @@ fn append_compact_collision_sector(
     for value in ceiling_heights {
         append_i32_le(out, value);
     }
+    append_u16_le(
+        out,
+        floor_links
+            .0
+            .unwrap_or(psx_level::COMPACT_COLLISION_NO_ROOM),
+    );
+    append_u16_le(
+        out,
+        floor_links
+            .1
+            .unwrap_or(psx_level::COMPACT_COLLISION_NO_ROOM),
+    );
     Ok(())
+}
+
+fn compact_floor_link_targets(
+    floor_links: &[PlaytestRoomFloorLink],
+    room: u16,
+    x: u16,
+    z: u16,
+) -> (Option<u16>, Option<u16>) {
+    floor_links
+        .iter()
+        .find(|link| link.room == room && link.x == x && link.z == z)
+        .map(|link| (link.above_room, link.below_room))
+        .unwrap_or((None, None))
 }
 
 fn compact_floor_triangle_flags(
@@ -1903,6 +2031,70 @@ fn render_weapon_hit_shape(shape: PlaytestWeaponHitShape) -> String {
     }
 }
 
+fn render_box_prop_texture_assets(
+    texture_assets: &[Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
+) -> String {
+    let mut out = String::from("[");
+    for (index, texture_asset) in texture_assets.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        match texture_asset {
+            Some(asset) => {
+                let _ = write!(out, "Some(AssetId({asset}))");
+            }
+            None => out.push_str("None"),
+        }
+    }
+    out.push(']');
+    out
+}
+
+fn render_box_prop_vertices(vertices: &[[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT]) -> String {
+    let mut out = String::from("[");
+    for (index, vertex) in vertices.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "[{}, {}, {}]", vertex[0], vertex[1], vertex[2]);
+    }
+    out.push(']');
+    out
+}
+
+fn render_box_prop_tint_rgb(tint_rgb: &[[u8; 3]; psx_level::BOX_PROP_FACE_COUNT]) -> String {
+    let mut out = String::from("[");
+    for (index, tint) in tint_rgb.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "[{}, {}, {}]", tint[0], tint[1], tint[2]);
+    }
+    out.push(']');
+    out
+}
+
+fn render_box_prop_baked_vertex_rgb(
+    baked: &[[(u8, u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
+) -> String {
+    let mut out = String::from("[");
+    for (face_index, face) in baked.iter().enumerate() {
+        if face_index > 0 {
+            out.push_str(", ");
+        }
+        out.push('[');
+        for (vertex_index, rgb) in face.iter().enumerate() {
+            if vertex_index > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "({}, {}, {})", rgb.0, rgb.1, rgb.2);
+        }
+        out.push(']');
+    }
+    out.push(']');
+    out
+}
+
 const fn material_flags_for_sidedness(sidedness: crate::MaterialFaceSidedness) -> u16 {
     match sidedness {
         crate::MaterialFaceSidedness::Front => 0,
@@ -2298,12 +2490,16 @@ mod tests {
         assert!(manifest.contains("pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 10;"));
         assert!(manifest.contains("pub const WORLD_PACK_START_LBA: u32 = 54;"));
         assert!(manifest.contains("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord]"));
-        assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 1, byte_size: 144"));
+        assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 1, byte_size: 148"));
     }
 
     #[test]
     fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
         let mut package = PlaytestPackage::default();
+        package.runtime_depth_sort_mode = crate::RuntimeDepthSortMode::PerTriangle;
+        package.runtime_texture_split_mode = crate::RuntimeTextureSplitMode::DepthSorted;
+        package.runtime_room_draw_order_mode = crate::RuntimeRoomDrawOrderMode::Portal;
+        package.runtime_texture_split_max_edge = 96;
         package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
         package.rooms = vec![test_room(0)];
         package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
@@ -2319,6 +2515,10 @@ mod tests {
         }];
 
         let src = render_manifest_source(&package);
+        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 3;"));
+        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 1;"));
+        assert!(src.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 1;"));
+        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 96;"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = &[];"));
         assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = include_bytes!(\"rooms/room_000.psxw\");"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read room-surface cache slices from `.psxc` chunks.\npub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
@@ -2385,14 +2585,14 @@ mod tests {
         assert_eq!(u32_at(&payload, 12), 0);
         assert_eq!(u32_at(&payload, 16), payload.len() as u32);
         assert_eq!(u32_at(&payload, 20), 64);
-        assert_eq!(u32_at(&payload, 24), 80);
-        assert_eq!(u32_at(&payload, 28), 144);
+        assert_eq!(u32_at(&payload, 24), 84);
+        assert_eq!(u32_at(&payload, 28), 148);
         assert_eq!(u32_at(&payload, 32), 1);
-        assert_eq!(u32_at(&payload, 36), 188);
+        assert_eq!(u32_at(&payload, 36), 192);
         assert_eq!(u32_at(&payload, 40), 1);
-        assert_eq!(u32_at(&payload, 44), 200);
+        assert_eq!(u32_at(&payload, 44), 204);
         assert_eq!(u32_at(&payload, 48), 1);
-        assert_eq!(u32_at(&payload, 52), 180);
+        assert_eq!(u32_at(&payload, 52), 184);
         assert_eq!(u32_at(&payload, 56), 4);
         assert_eq!(
             u32_at(&payload, 60),
@@ -2402,14 +2602,14 @@ mod tests {
             &payload[64..72],
             psx_level::COMPACT_COLLISION_MAGIC.as_slice()
         );
-        assert_eq!(u16_at(&payload, 144), 2);
-        assert_eq!(i32_at(&payload, 148), -4);
-        assert_eq!(u16_at(&payload, 176), 0);
+        assert_eq!(u16_at(&payload, 148), 2);
+        assert_eq!(i32_at(&payload, 152), -4);
         assert_eq!(u16_at(&payload, 180), 0);
-        assert_eq!(u16_at(&payload, 186), 3);
-        assert_eq!(i32_at(&payload, 188), 12);
-        assert_eq!(u16_at(&payload, 200), 15);
-        assert_eq!(payload[239], 42);
+        assert_eq!(u16_at(&payload, 184), 0);
+        assert_eq!(u16_at(&payload, 190), 3);
+        assert_eq!(i32_at(&payload, 192), 12);
+        assert_eq!(u16_at(&payload, 204), 15);
+        assert_eq!(payload[243], 42);
     }
 
     #[test]
@@ -2468,7 +2668,7 @@ mod tests {
             chunk.payload_bytes,
             streamed_room_chunk_payload(&package, 0).unwrap().len()
         );
-        assert_eq!(chunk.collision_bytes, 80);
+        assert_eq!(chunk.collision_bytes, 84);
         assert_eq!(chunk.render_cell_bytes, 36);
         assert_eq!(chunk.render_cell_vertex_bytes, 8);
         assert_eq!(chunk.render_vertex_bytes, 12);
@@ -2503,7 +2703,7 @@ mod tests {
     #[test]
     fn compact_collision_payload_matches_runtime_room_collision() {
         let bytes = static_lit_test_room_bytes();
-        let payload = compact_collision_payload(&bytes).unwrap();
+        let payload = compact_collision_payload(&bytes, 0, &[]).unwrap();
         assert_eq!(
             payload.len(),
             psx_level::COMPACT_COLLISION_HEADER_BYTES + psx_level::COMPACT_COLLISION_SECTOR_BYTES
@@ -2544,6 +2744,29 @@ mod tests {
         assert_eq!(sector.floor_heights(), [0; 4]);
     }
 
+    #[test]
+    fn compact_collision_payload_preserves_floor_links() {
+        let bytes = static_lit_test_room_bytes();
+        let floor_links = [PlaytestRoomFloorLink {
+            room: 0,
+            x: 0,
+            z: 0,
+            above_room: Some(2),
+            below_room: Some(3),
+        }];
+        let payload = compact_collision_payload(&bytes, 0, &floor_links).unwrap();
+        let room = psx_engine::CompactCollisionRoom::from_bytes(&payload).unwrap();
+        let sector = room.collision().sector(0, 0).unwrap();
+        assert_eq!(
+            sector.floor_above_room(),
+            Some(psx_level::RoomIndex::new(2))
+        );
+        assert_eq!(
+            sector.floor_below_room(),
+            Some(psx_level::RoomIndex::new(3))
+        );
+    }
+
     fn test_room_asset(bytes: Vec<u8>, index: usize) -> PlaytestAsset {
         PlaytestAsset {
             kind: PlaytestAssetKind::RoomWorld,
@@ -2567,6 +2790,12 @@ mod tests {
             visible_chunk_limit: 10,
             material_first: 0,
             material_count: 0,
+            portal_first: 0,
+            portal_count: 0,
+            near_room_first: 0,
+            near_room_count: 0,
+            overlapped_room_first: 0,
+            overlapped_room_count: 0,
             fog_rgb: [0, 0, 0],
             fog_near: 0,
             fog_far: 0,
@@ -2711,6 +2940,7 @@ use psx_level::{
     LevelCachedRoomSurfaceRecord,
     LevelCachedRoomVertexRecord,
     LevelAssetRecord,
+    LevelBoxPropRecord,
     LevelCameraRecord,
     LevelCloudLayerRecord,
     LevelCharacterRecord,
@@ -2726,6 +2956,7 @@ use psx_level::{
     LevelModelInstanceRecord,
     LevelModelRecord,
     LevelModelSocketRecord,
+    LevelRoomPortalRecord,
     LevelRoomRecord,
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,

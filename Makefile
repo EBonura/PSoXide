@@ -32,7 +32,7 @@
         showcase-room run-showcase-room \
         cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
         profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
-        profile-demo3-disc-stream-forward
+        profile-demo3-disc-stream-forward profile-demo7-camera-sweep
 
 help:
 	@echo "PSoXide targets:"
@@ -61,6 +61,7 @@ help:
 	@echo "    make profile-demo3-paced20-forward - streamed paced20 profile while holding forward"
 	@echo "    make profile-demo3-disc-stream - build/play demo3 from BIN and measure CD streaming"
 	@echo "    make profile-demo3-disc-stream-forward - same, while holding forward"
+	@echo "    make profile-demo7-camera-sweep - streamed demo7 deterministic camera sweep profile"
 	@echo ""
 	@echo "  SDK examples (build mipsel-sony-psx binaries):"
 	@echo "    make examples     - build every example"
@@ -230,6 +231,11 @@ PROFILE_DEMO3_DISC_STREAM_FORWARD_VISUAL_FRAMES ?= 80
 PROFILE_DEMO3_DISC_STREAM_FORWARD_GUEST_FRAMES ?= 1200
 PROFILE_DEMO3_DISC_STREAM_FORWARD_STEPS ?= 600000000
 PROFILE_DEMO3_DISC_STREAM_FORWARD_HW ?= /tmp/psoxide-demo3-disc-stream-forward-hw.ppm
+PROFILE_DEMO7_CAMERA_SWEEP_VISUAL_FRAMES ?= 240
+PROFILE_DEMO7_CAMERA_SWEEP_GUEST_FRAMES ?= 1600
+PROFILE_DEMO7_CAMERA_SWEEP_STEPS ?= 600000000
+PROFILE_DEMO7_CAMERA_SWEEP_HW ?= /tmp/psoxide-demo7-camera-sweep-hw.ppm
+PROFILE_DEMO7_CAMERA_SWEEP_HASH_LOG ?= /tmp/psoxide-demo7-camera-sweep-visual.csv
 
 hello-tri:
 	cd sdk/examples/hello-tri && cargo build --release
@@ -357,6 +363,27 @@ profile-demo3-disc-stream-forward:
 		--steps $(PROFILE_DEMO3_DISC_STREAM_FORWARD_STEPS) \
 		--hold-forward \
 		--dump-hw $(PROFILE_DEMO3_DISC_STREAM_FORWARD_HW) \
+		--dump-hash \
+		--dump-guest-profile
+
+profile-demo7-camera-sweep:
+	$(MAKE) cook-playtest PROJECT=projects/demo7/project.ron
+	PSXO_CAMERA_SWEEP=1 PSXO_PROFILE_MODELS=1 $(MAKE) build-editor-playtest EDITOR_PLAYTEST_FEATURES="cd-stream-bench room-surface-profile"
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
+		--out ../../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--volume PSOXIDE \
+		--cdtest-sectors 32 \
+		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
+		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--guest-visual-frames $(PROFILE_DEMO7_CAMERA_SWEEP_VISUAL_FRAMES) \
+		--guest-frames $(PROFILE_DEMO7_CAMERA_SWEEP_GUEST_FRAMES) \
+		--steps $(PROFILE_DEMO7_CAMERA_SWEEP_STEPS) \
+		--dump-hw $(PROFILE_DEMO7_CAMERA_SWEEP_HW) \
+		--visual-hash-log $(PROFILE_DEMO7_CAMERA_SWEEP_HASH_LOG) \
+		--visual-hash-interval 30 \
 		--dump-hash \
 		--dump-guest-profile
 

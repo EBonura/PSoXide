@@ -230,6 +230,46 @@ pub struct GridVisibilityStats {
     pub surfaces_considered: u16,
 }
 
+/// Depth-key policy for indexed cached room drawing.
+///
+/// The PS1 has no z-buffer, so these modes trade stability, speed, and
+/// overlap correctness for room geometry emitted from the cached
+/// cell/surface path.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum CachedRoomDepthMode {
+    /// Current fast path: each accepted cell provides one fixed depth key.
+    #[default]
+    FixedCell,
+    /// Every cached surface computes its ordering-table key from its
+    /// projected triangle vertices.
+    PerTriangle,
+    /// Keep fixed-cell depth for stable flat geometry, but use
+    /// per-triangle depth for sloped or high-depth-span horizontal
+    /// surfaces such as stair ramps.
+    Hybrid,
+    /// Like [`Self::Hybrid`], but also depth-sorts vertical surfaces
+    /// with a large projected depth span. This is meant for testing
+    /// ramp-vs-wall conflicts without paying full per-triangle cost.
+    HybridWalls,
+}
+
+/// Runtime subdivision scope for cached room geometry.
+///
+/// The projected edge threshold still comes from
+/// [`WorldSurfaceOptions::textured_split_max_edge`]. This enum decides
+/// which cached room surfaces are allowed to spend that budget.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum CachedRoomSubdivisionMode {
+    /// Current behavior: every submitted cached surface can subdivide
+    /// when it exceeds the projected edge threshold.
+    #[default]
+    All,
+    /// Only surfaces using per-triangle depth get visual subdivision.
+    DepthSorted,
+    /// Only slope/depth-risky surfaces get visual subdivision.
+    Risky,
+}
+
 #[cfg(feature = "room-surface-profile")]
 #[derive(Copy, Clone, Debug, Default)]
 struct RoomSurfaceMicroProfile {
@@ -1052,6 +1092,7 @@ const fn horizontal_depth_policy() -> DepthPolicy {
 }
 
 const HORIZONTAL_DEPTH_BIAS: i32 = 512;
+const HYBRID_HORIZONTAL_DEPTH_SPAN: i32 = 768;
 
 const fn horizontal_depth_options(options: WorldSurfaceOptions) -> WorldSurfaceOptions {
     let options = match options.depth_policy {
@@ -1077,6 +1118,11 @@ fn tile_depth_options(
 #[inline(always)]
 fn tile_depth_options_from_depth(options: WorldSurfaceOptions, depth: i32) -> WorldSurfaceOptions {
     options.with_depth_policy(DepthPolicy::Fixed(depth))
+}
+
+#[inline(always)]
+fn triangle_depth_options(options: WorldSurfaceOptions) -> WorldSurfaceOptions {
+    options.with_depth_policy(DepthPolicy::Average)
 }
 
 fn tile_camera_depth(camera: &WorldCamera, cell: GridVisibleCell, sector_size: i32) -> i32 {
@@ -1886,6 +1932,8 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
+    depth_mode: CachedRoomDepthMode,
+    subdivision_mode: CachedRoomSubdivisionMode,
     visible_cells: &[GridVisibleCell],
     screen_margin: i32,
     triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
@@ -2027,6 +2075,8 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         lighting,
                         cell_options,
                         submit_depths,
+                        depth_mode,
+                        subdivision_mode,
                         triangles,
                         world,
                         &mut surface_profile,
@@ -2066,6 +2116,8 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     lighting: &L,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
+    depth_mode: CachedRoomDepthMode,
+    subdivision_mode: CachedRoomSubdivisionMode,
     screen_margin: i32,
     triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
@@ -2180,6 +2232,8 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                         lighting,
                         cell_options,
                         submit_depths,
+                        depth_mode,
+                        subdivision_mode,
                         triangles,
                         world,
                         &mut surface_profile,
@@ -2476,6 +2530,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     lighting: &L,
     options: WorldSurfaceOptions,
     submit_depths: CachedRoomSubmitDepths,
+    depth_mode: CachedRoomDepthMode,
+    subdivision_mode: CachedRoomSubdivisionMode,
     triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
     world: &mut WorldRenderPass<'_, '_, OT>,
     profile: &mut RoomSurfaceMicroProfile,
@@ -2512,6 +2568,29 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     match kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
             let is_ceiling = matches!(kind, WorldSurfaceKind::Ceiling);
+            let use_triangle_depth = cached_surface_uses_triangle_depth(
+                depth_mode,
+                kind,
+                surface,
+                cached_vertices,
+                ids,
+                projected,
+            );
+            let (surface_options, prepared_depth) = if use_triangle_depth {
+                (triangle_depth_options(options), None)
+            } else {
+                (horizontal_depth_options(options), submit_depths.horizontal)
+            };
+            let surface_options = cached_surface_subdivision_options(
+                surface_options,
+                subdivision_mode,
+                use_triangle_depth,
+                kind,
+                surface,
+                cached_vertices,
+                ids,
+                projected,
+            );
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_split_triangle_backface_culled(
@@ -2549,8 +2628,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface.uv_words,
                     colors,
                     material,
-                    horizontal_depth_options(options),
-                    submit_depths.horizontal,
+                    surface_options,
+                    prepared_depth,
                     CullMode::Back,
                     surface.split,
                     surface.triangle_index as usize,
@@ -2611,8 +2690,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     uv_words,
                     colors,
                     material,
-                    horizontal_depth_options(options),
-                    submit_depths.horizontal,
+                    surface_options,
+                    prepared_depth,
                     CullMode::Back,
                     split_triangles_runtime(surface.split),
                     profile,
@@ -2622,6 +2701,29 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
         }
         WorldSurfaceKind::Wall { direction } => {
             let wall_material = wall_material_for_direction(material, direction);
+            let use_triangle_depth = cached_surface_uses_triangle_depth(
+                depth_mode,
+                kind,
+                surface,
+                cached_vertices,
+                ids,
+                projected,
+            );
+            let (surface_options, prepared_depth) = if use_triangle_depth {
+                (triangle_depth_options(options), None)
+            } else {
+                (options, submit_depths.vertical)
+            };
+            let surface_options = cached_surface_subdivision_options(
+                surface_options,
+                subdivision_mode,
+                use_triangle_depth,
+                kind,
+                surface,
+                cached_vertices,
+                ids,
+                projected,
+            );
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_split_triangle_backface_culled(
@@ -2659,8 +2761,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface.uv_words,
                     colors,
                     wall_material,
-                    options,
-                    submit_depths.vertical,
+                    surface_options,
+                    prepared_depth,
                     CullMode::Back,
                     surface.split,
                     surface.triangle_index as usize,
@@ -2707,8 +2809,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface.uv_words,
                     colors,
                     wall_material,
-                    options,
-                    submit_depths.vertical,
+                    surface_options,
+                    prepared_depth,
                     CullMode::Back,
                     SPLIT_NW_SE_TRIANGLES,
                     profile,
@@ -2739,6 +2841,110 @@ fn indexed_world_quad(vertices: &[WorldVertex], ids: [u16; 4]) -> Option<[WorldV
             *vertices.get_unchecked(d),
         ])
     }
+}
+
+fn cached_surface_uses_triangle_depth(
+    mode: CachedRoomDepthMode,
+    kind: WorldSurfaceKind,
+    surface: CachedRoomSurface,
+    vertices: &[WorldVertex],
+    ids: [u16; 4],
+    projected: [ProjectedVertex; 4],
+) -> bool {
+    match mode {
+        CachedRoomDepthMode::FixedCell => false,
+        CachedRoomDepthMode::PerTriangle => true,
+        CachedRoomDepthMode::Hybrid => match kind {
+            WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
+                cached_horizontal_surface_is_risky(surface, vertices, ids, projected)
+            }
+            WorldSurfaceKind::Wall { .. } => false,
+        },
+        CachedRoomDepthMode::HybridWalls => {
+            cached_surface_is_risky(kind, surface, vertices, ids, projected)
+        }
+    }
+}
+
+fn cached_surface_subdivision_options(
+    options: WorldSurfaceOptions,
+    mode: CachedRoomSubdivisionMode,
+    use_triangle_depth: bool,
+    kind: WorldSurfaceKind,
+    surface: CachedRoomSurface,
+    vertices: &[WorldVertex],
+    ids: [u16; 4],
+    projected: [ProjectedVertex; 4],
+) -> WorldSurfaceOptions {
+    let allow_visual_subdivision = match mode {
+        CachedRoomSubdivisionMode::All => true,
+        CachedRoomSubdivisionMode::DepthSorted => use_triangle_depth,
+        CachedRoomSubdivisionMode::Risky => {
+            cached_surface_is_risky(kind, surface, vertices, ids, projected)
+        }
+    };
+    if allow_visual_subdivision {
+        options
+    } else {
+        options.with_textured_triangle_max_edge(0)
+    }
+}
+
+fn cached_surface_is_risky(
+    kind: WorldSurfaceKind,
+    surface: CachedRoomSurface,
+    vertices: &[WorldVertex],
+    ids: [u16; 4],
+    projected: [ProjectedVertex; 4],
+) -> bool {
+    match kind {
+        WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
+            cached_horizontal_surface_is_risky(surface, vertices, ids, projected)
+        }
+        WorldSurfaceKind::Wall { .. } => {
+            cached_surface_projected_depth_span(surface, projected) >= HYBRID_HORIZONTAL_DEPTH_SPAN
+        }
+    }
+}
+
+fn cached_horizontal_surface_is_risky(
+    surface: CachedRoomSurface,
+    vertices: &[WorldVertex],
+    ids: [u16; 4],
+    projected: [ProjectedVertex; 4],
+) -> bool {
+    let Some(world) = indexed_world_quad(vertices, ids) else {
+        return true;
+    };
+    let min_y = world[0].y.min(world[1].y).min(world[2].y).min(world[3].y);
+    let max_y = world[0].y.max(world[1].y).max(world[2].y).max(world[3].y);
+    if max_y != min_y {
+        return true;
+    }
+    cached_surface_projected_depth_span(surface, projected) >= HYBRID_HORIZONTAL_DEPTH_SPAN
+}
+
+fn cached_surface_projected_depth_span(
+    surface: CachedRoomSurface,
+    projected: [ProjectedVertex; 4],
+) -> i32 {
+    if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+        let (a, b, c) = split_triangles_runtime(surface.split)[surface.triangle_index as usize];
+        let min_z = projected[a].sz.min(projected[b].sz).min(projected[c].sz);
+        let max_z = projected[a].sz.max(projected[b].sz).max(projected[c].sz);
+        return max_z.saturating_sub(min_z);
+    }
+    let min_z = projected[0]
+        .sz
+        .min(projected[1].sz)
+        .min(projected[2].sz)
+        .min(projected[3].sz);
+    let max_z = projected[0]
+        .sz
+        .max(projected[1].sz)
+        .max(projected[2].sz)
+        .max(projected[3].sz);
+    max_z.saturating_sub(min_z)
 }
 
 fn cached_surface_center(vertices: [WorldVertex; 4], split: u8, triangle_index: u8) -> RoomPoint {
@@ -5208,6 +5414,8 @@ mod tests {
             &NoWorldSurfaceLighting,
             &camera,
             options,
+            CachedRoomDepthMode::FixedCell,
+            CachedRoomSubdivisionMode::All,
             &visible_cells,
             0,
             &mut triangles,
@@ -5222,6 +5430,100 @@ mod tests {
             tile_camera_depth(&camera, visible_cells[0], 1024) + HORIZONTAL_DEPTH_BIAS;
         assert_eq!(commands[0].depth_raw(), expected_depth);
         assert_eq!(commands[1].depth_raw(), expected_depth);
+    }
+
+    #[test]
+    fn hybrid_depth_uses_triangle_depth_for_sloped_horizontal_surfaces() {
+        let flat_vertices = [
+            WorldVertex::new(0, 0, 0),
+            WorldVertex::new(1024, 0, 0),
+            WorldVertex::new(1024, 0, 1024),
+            WorldVertex::new(0, 0, 1024),
+        ];
+        let sloped_vertices = [
+            WorldVertex::new(0, 0, 0),
+            WorldVertex::new(1024, 0, 0),
+            WorldVertex::new(1024, 512, 1024),
+            WorldVertex::new(0, 512, 1024),
+        ];
+        let projected = [
+            ProjectedVertex::new(0, 0, 1024),
+            ProjectedVertex::new(64, 0, 1056),
+            ProjectedVertex::new(64, 64, 1088),
+            ProjectedVertex::new(0, 64, 1040),
+        ];
+        let surface = CachedRoomSurface::new(
+            0,
+            [0, 1, 2, 3],
+            [(0, 0), (64, 0), (64, 64), (0, 64)],
+            WorldSurfaceSample {
+                kind: WorldSurfaceKind::Floor,
+                sx: 0,
+                sz: 0,
+                center: RoomPoint::ZERO,
+                baked_vertex_rgb: None,
+                ordinal: 0,
+            },
+            SPLIT_NW_SE,
+            WHOLE_QUAD_TRIANGLE_INDEX,
+        );
+
+        assert!(!cached_surface_uses_triangle_depth(
+            CachedRoomDepthMode::Hybrid,
+            WorldSurfaceKind::Floor,
+            surface,
+            &flat_vertices,
+            surface.vertex_indices,
+            projected,
+        ));
+        assert!(cached_surface_uses_triangle_depth(
+            CachedRoomDepthMode::Hybrid,
+            WorldSurfaceKind::Floor,
+            surface,
+            &sloped_vertices,
+            surface.vertex_indices,
+            projected,
+        ));
+        assert!(cached_surface_uses_triangle_depth(
+            CachedRoomDepthMode::PerTriangle,
+            WorldSurfaceKind::Wall {
+                direction: DIR_EAST,
+            },
+            surface,
+            &flat_vertices,
+            surface.vertex_indices,
+            projected,
+        ));
+        assert!(!cached_surface_uses_triangle_depth(
+            CachedRoomDepthMode::Hybrid,
+            WorldSurfaceKind::Wall {
+                direction: DIR_EAST,
+            },
+            surface,
+            &flat_vertices,
+            surface.vertex_indices,
+            [
+                ProjectedVertex::new(0, 0, 1024),
+                ProjectedVertex::new(64, 0, 2048),
+                ProjectedVertex::new(64, 64, 2112),
+                ProjectedVertex::new(0, 64, 1088),
+            ],
+        ));
+        assert!(cached_surface_uses_triangle_depth(
+            CachedRoomDepthMode::HybridWalls,
+            WorldSurfaceKind::Wall {
+                direction: DIR_EAST,
+            },
+            surface,
+            &flat_vertices,
+            surface.vertex_indices,
+            [
+                ProjectedVertex::new(0, 0, 1024),
+                ProjectedVertex::new(64, 0, 2048),
+                ProjectedVertex::new(64, 64, 2112),
+                ProjectedVertex::new(0, 64, 1088),
+            ],
+        ));
     }
 
     #[test]

@@ -14,6 +14,7 @@ const STATUS_RESPONSE_FIFO_NOT_EMPTY: u8 = 1 << 5;
 const IRQ_DATA_READY: u8 = 1;
 const IRQ_COMPLETE: u8 = 2;
 const IRQ_ACK: u8 = 3;
+const IRQ_DATA_END: u8 = 4;
 const IRQ_ERROR: u8 = 5;
 
 const CMD_GETSTAT: u8 = 0x01;
@@ -63,7 +64,7 @@ const COMMAND_ACK_POLL_LIMIT: u32 = 16_384;
 #[cfg(feature = "cd-stream-benchmark")]
 const DATA_READY_POLL_LIMIT: u32 = 1_000_000;
 #[cfg(target_arch = "mips")]
-const DATA_READY_STALL_POLL_LIMIT: u32 = 360;
+const DATA_READY_STALL_POLL_LIMIT: u32 = 4096;
 const DMA_POLL_LIMIT: u32 = 65_536;
 const CLEANUP_POLL_LIMIT: u32 = 16_384;
 
@@ -244,7 +245,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
                 i += 1;
             }
 
-            if self.valid_count == 0 || self.result.status != STATUS_OK {
+            if self.valid_count == 0 {
                 self.state = WorldRoomSlotsReadState::Done;
                 telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_STATUS, self.result.status);
             } else {
@@ -359,6 +360,17 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             self.state,
             WorldRoomSlotsReadState::Ready | WorldRoomSlotsReadState::Reading
         )
+    }
+
+    pub fn abort(&mut self) {
+        if self.is_active() {
+            #[cfg(target_arch = "mips")]
+            unsafe {
+                let mut polls = 0;
+                cleanup_read_stream(&mut polls);
+            }
+        }
+        *self = Self::new();
     }
 
     pub fn is_done(&self) -> bool {
@@ -878,10 +890,33 @@ unsafe fn wait_irq(expected: u8, poll_limit: u32, polls: &mut u32) -> WaitOutcom
         if flag == IRQ_ERROR {
             return WaitOutcome::CdError;
         }
+        if flag != 0 {
+            ack_unexpected_irq(flag, polls);
+        }
         *polls = (*polls).saturating_add(1);
         i += 1;
     }
     WaitOutcome::Timeout
+}
+
+#[cfg(target_arch = "mips")]
+unsafe fn ack_unexpected_irq(flag: u8, polls: &mut u32) {
+    match flag {
+        IRQ_DATA_READY => {
+            let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
+            dma_read_sector(buffer, polls);
+            drain_responses();
+            cd_ack(IRQ_DATA_READY);
+        }
+        IRQ_COMPLETE | IRQ_ACK | IRQ_DATA_END => {
+            drain_responses();
+            cd_ack(flag);
+        }
+        _ => {
+            drain_responses();
+            cd_ack_all();
+        }
+    }
 }
 
 #[cfg(all(feature = "cd-stream-benchmark", target_arch = "mips"))]
