@@ -13,10 +13,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod model_import;
 pub mod playtest;
+pub mod portal_rooms;
 pub mod resolve;
+pub mod room_connections;
 pub mod spatial;
 pub mod streaming;
 pub mod texture_import;
+pub mod tr_level;
 pub mod world_cook;
 
 /// Embedded copy of the default project's RON, baked at compile
@@ -320,6 +323,41 @@ const fn default_image_prop_collision_size() -> [u16; 3] {
     ]
 }
 
+/// Face slots on an authored boxed prop.
+pub const BOX_PROP_FACE_COUNT: usize = 6;
+/// Editable vertex count on an authored boxed prop.
+pub const BOX_PROP_VERTEX_COUNT: usize = 8;
+/// Default authored cube size for boxed props, in engine/editor units.
+pub const DEFAULT_BOX_PROP_SIZE: u16 = DEFAULT_WORLD_SECTOR_SIZE as u16;
+
+/// User-facing face order for boxed prop material slots.
+pub const BOX_PROP_FACE_NAMES: [&str; BOX_PROP_FACE_COUNT] =
+    ["Front", "Right", "Back", "Left", "Top", "Bottom"];
+
+const fn default_box_prop_materials() -> [Option<ResourceId>; BOX_PROP_FACE_COUNT] {
+    [None; BOX_PROP_FACE_COUNT]
+}
+
+const fn default_box_prop_vertices() -> [[i16; 3]; BOX_PROP_VERTEX_COUNT] {
+    box_prop_vertices_for_size(DEFAULT_BOX_PROP_SIZE)
+}
+
+/// Build the default bottom-anchored cube vertices for a boxed prop.
+pub const fn box_prop_vertices_for_size(size: u16) -> [[i16; 3]; BOX_PROP_VERTEX_COUNT] {
+    let half = (size / 2) as i16;
+    let height = size as i16;
+    [
+        [-half, 0, -half],
+        [half, 0, -half],
+        [half, 0, half],
+        [-half, 0, half],
+        [-half, height, -half],
+        [half, height, -half],
+        [half, height, half],
+        [-half, height, half],
+    ]
+}
+
 impl MaterialResource {
     /// Build an opaque neutral material.
     pub const fn opaque(texture: Option<ResourceId>) -> Self {
@@ -381,7 +419,7 @@ impl GridSplit {
     }
 }
 
-/// Quarter-turn texture rotation for authored grid faces.
+/// Texture rotation preset for authored grid faces.
 ///
 /// PS1 textured polygons carry per-corner 8-bit UVs, not a texture
 /// matrix, so these rotations are represented by rewriting the UVs
@@ -391,12 +429,20 @@ pub enum GridUvRotation {
     /// No texture rotation.
     #[default]
     Deg0,
+    /// Rotate texture coordinates 45 degrees clockwise on the face.
+    Deg45,
     /// Rotate texture coordinates 90 degrees clockwise on the face.
     Deg90,
+    /// Rotate texture coordinates 135 degrees clockwise on the face.
+    Deg135,
     /// Rotate texture coordinates 180 degrees.
     Deg180,
+    /// Rotate texture coordinates 225 degrees clockwise on the face.
+    Deg225,
     /// Rotate texture coordinates 270 degrees clockwise on the face.
     Deg270,
+    /// Rotate texture coordinates 315 degrees clockwise on the face.
+    Deg315,
 }
 
 /// Non-destructive texture-coordinate transform for one grid face.
@@ -414,7 +460,7 @@ pub struct GridUvTransform {
     /// source quad's native span" for that axis.
     #[serde(default, skip_serializing_if = "is_default_uv_span")]
     pub span: [u16; 2],
-    /// Quarter-turn rotation.
+    /// Texture rotation preset.
     #[serde(default)]
     pub rotation: GridUvRotation,
     /// Mirror horizontally before rotation.
@@ -485,15 +531,19 @@ impl GridUvTransform {
 
         let (u, v) = match self.rotation {
             GridUvRotation::Deg0 => (u, v),
+            GridUvRotation::Deg45 => rotate_uv_diagonal_fit(u, v, width, height, 1),
             GridUvRotation::Deg90 => (
                 width - scale_rounded(v, width, height),
                 scale_rounded(u, height, width),
             ),
+            GridUvRotation::Deg135 => rotate_uv_diagonal_fit(u, v, width, height, 3),
             GridUvRotation::Deg180 => (width - u, height - v),
+            GridUvRotation::Deg225 => rotate_uv_diagonal_fit(u, v, width, height, 5),
             GridUvRotation::Deg270 => (
                 scale_rounded(v, width, height),
                 height - scale_rounded(u, height, width),
             ),
+            GridUvRotation::Deg315 => rotate_uv_diagonal_fit(u, v, width, height, 7),
         };
         let span_u = self.effective_span_axis(0, width);
         let span_v = self.effective_span_axis(1, height);
@@ -557,6 +607,54 @@ fn scale_rounded(value: i32, numerator: i32, denominator: i32) -> i32 {
     } else {
         (value.saturating_mul(numerator) + denominator / 2) / denominator
     }
+}
+
+fn signed_div_round(value: i32, denominator: i32) -> i32 {
+    if denominator == 0 {
+        0
+    } else if value >= 0 {
+        (value + denominator / 2) / denominator
+    } else {
+        (value - denominator / 2) / denominator
+    }
+}
+
+fn rotate_uv_diagonal_fit(
+    u: i32,
+    v: i32,
+    width: i32,
+    height: i32,
+    clockwise_steps: u8,
+) -> (i32, i32) {
+    const Q: i32 = 4096;
+    const HALF_Q: i32 = Q / 2;
+
+    let du = signed_div_round((u.saturating_mul(2) - width).saturating_mul(Q), width);
+    let dv = signed_div_round((v.saturating_mul(2) - height).saturating_mul(Q), height);
+    let (cos_q, sin_q) = match clockwise_steps & 7 {
+        1 => (HALF_Q, HALF_Q),
+        3 => (-HALF_Q, HALF_Q),
+        5 => (-HALF_Q, -HALF_Q),
+        7 => (HALF_Q, -HALF_Q),
+        _ => (Q, 0),
+    };
+    let rotated_u = signed_div_round(
+        cos_q
+            .saturating_mul(du)
+            .saturating_sub(sin_q.saturating_mul(dv)),
+        Q,
+    );
+    let rotated_v = signed_div_round(
+        sin_q
+            .saturating_mul(du)
+            .saturating_add(cos_q.saturating_mul(dv)),
+        Q,
+    );
+
+    (
+        signed_div_round((rotated_u + Q).saturating_mul(width), Q * 2),
+        signed_div_round((rotated_v + Q).saturating_mul(height), Q * 2),
+    )
 }
 
 fn wrap_uv(value: i32) -> u8 {
@@ -1346,7 +1444,7 @@ impl GridVerticalFace {
         }
         let max_span = self.max_vertical_span();
         let (expected_span, clamped) = uv_span_for_world_span(max_span, sector_size);
-        clamped && (self.uv.span[1] == 0 || self.uv.span[1] == stored_uv_span(expected_span))
+        clamped && self.uv.span[1] == stored_uv_span(expected_span)
     }
 
     fn segment_heights(&self, start: i32, end: i32, max_span: i32) -> [i32; 4] {
@@ -1517,6 +1615,12 @@ pub struct GridSector {
     pub ceiling: Option<GridHorizontalFace>,
     /// Sector edge walls.
     pub walls: GridWalls,
+    /// Room/floor reached by moving upward through this sector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_above: Option<GridFloorLink>,
+    /// Room/floor reached by moving downward through this sector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor_below: Option<GridFloorLink>,
 }
 
 impl GridSector {
@@ -1543,6 +1647,35 @@ impl GridSector {
             || !self.walls.west.is_empty()
             || !self.walls.north_west_south_east.is_empty()
             || !self.walls.north_east_south_west.is_empty()
+    }
+
+    /// True when this sector carries vertical room/floor traversal metadata.
+    pub fn has_floor_links(&self) -> bool {
+        self.floor_above.is_some() || self.floor_below.is_some()
+    }
+}
+
+/// Link from one room sector to a vertically adjacent room floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridFloorLink {
+    /// Target room node. `None` keeps imported or partially-authored
+    /// floor links visible until the room can be repaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_room: Option<NodeId>,
+    /// Target floor within that room. PSoXide currently cooks floor
+    /// zero only; the field is present so TR-style vertical stacking
+    /// has a stable authored address before runtime traversal uses it.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub target_floor: u16,
+}
+
+impl GridFloorLink {
+    /// Link to floor zero of a target room.
+    pub const fn room(target_room: NodeId) -> Self {
+        Self {
+            target_room: Some(target_room),
+            target_floor: 0,
+        }
     }
 }
 
@@ -1693,14 +1826,6 @@ pub const MIN_WORLD_SECTOR_SIZE: i32 = WORLD_SECTOR_SIZE_QUANTUM;
 /// Maximum authored sector size. This is an authoring sanity cap,
 /// not a PSX wire-format limit.
 pub const MAX_WORLD_SECTOR_SIZE: i32 = 8192;
-/// Curated dropdown choices for the World inspector's Sector Size
-/// editor. Covers every value used by shipped demo projects
-/// (`512, 640, 768, 896, 1024`) plus smaller and larger options.
-/// Trades the full `WORLD_SECTOR_SIZE_QUANTUM` granularity for a
-/// shorter pick list. Loading a project whose sector_size isn't in
-/// this list still works -- the existing value displays, and the
-/// dropdown only replaces it when the user picks an entry.
-pub const WORLD_SECTOR_SIZE_PRESETS: &[i32] = &[256, 512, 640, 768, 896, 1024, 1536, 2048, 4096];
 /// Fixed-point one for authored model resource scale.
 pub const MODEL_SCALE_ONE_Q8: u16 = 256;
 
@@ -1729,6 +1854,10 @@ pub fn snap_world_sector_size(size: i32) -> i32 {
 
 fn default_world_sector_size() -> i32 {
     DEFAULT_WORLD_SECTOR_SIZE
+}
+
+const fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
 }
 
 fn default_world_camera_distance() -> i32 {
@@ -4072,23 +4201,18 @@ pub const MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS: i32 = 256;
 pub const MIN_WORLD_VISIBILITY_RADIUS: u16 = 4;
 /// Maximum precomputed cell-visibility traversal radius.
 pub const MAX_WORLD_VISIBILITY_RADIUS: u16 = 96;
-/// Smallest generated streaming chunk target accepted by the cooker.
-pub const MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = 1;
-/// Default generated streaming chunk target in sectors.
-pub const DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = 6;
-/// Largest generated streaming chunk target accepted by the cooker.
-pub const MAX_WORLD_STREAMING_CHUNK_TARGET_SECTORS: u16 = MAX_ROOM_WIDTH;
-/// Smallest resident generated-chunk budget accepted by the runtime.
-pub const MIN_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 1;
-/// Default generated-chunk residency budget used by the playtest runtime.
+/// Smallest resident portal-room budget accepted by the runtime.
+/// One portal needs at least current + adjacent room residency.
+pub const MIN_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 2;
+/// Default portal-room residency budget used by the playtest runtime.
 pub const DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 10;
-/// Largest generated-chunk residency budget supported by the current runtime.
+/// Largest portal-room residency budget supported by the current runtime.
 pub const MAX_WORLD_STREAMING_RESIDENT_CHUNKS: u8 = 32;
-/// Smallest generated-chunk visible-window budget accepted by the runtime.
-pub const MIN_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 1;
-/// Default generated-chunk visible-window budget used by the playtest runtime.
+/// Smallest portal-room visible-window budget accepted by the runtime.
+pub const MIN_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 2;
+/// Default portal-room visible-window budget used by the playtest runtime.
 pub const DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS;
-/// Largest generated-chunk visible-window budget supported by the current runtime.
+/// Largest portal-room visible-window budget supported by the current runtime.
 pub const MAX_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 32;
 
 const fn default_world_draw_distance() -> i32 {
@@ -4101,10 +4225,6 @@ const fn default_world_chunk_activation_radius_sectors() -> i32 {
 
 const fn default_world_visibility_radius() -> u16 {
     32
-}
-
-const fn default_world_streaming_chunk_target_sectors() -> u16 {
-    DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS
 }
 
 const fn default_world_streaming_resident_chunks() -> u8 {
@@ -4159,22 +4279,16 @@ impl Default for WorldCullingSettings {
     }
 }
 
-/// Cook-time streaming chunk controls inherited by descendant Rooms from
-/// their nearest World node.
+/// Portal-room streaming controls inherited by descendant Rooms from their
+/// nearest World node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldStreamingSettings {
-    /// Preferred generated chunk width in grid sectors.
-    #[serde(default = "default_world_streaming_chunk_target_sectors")]
-    pub chunk_target_width: u16,
-    /// Preferred generated chunk depth in grid sectors.
-    #[serde(default = "default_world_streaming_chunk_target_sectors")]
-    pub chunk_target_depth: u16,
-    /// Resident streaming budget, measured in worst-case generated chunk units.
+    /// Resident streaming budget, measured in runtime portal-room units.
     /// The playtest runtime converts this to more resident slots when the cooked
-    /// chunks are smaller than the maximum stream slot size.
+    /// rooms are smaller than the maximum stream slot size.
     #[serde(default = "default_world_streaming_resident_chunks")]
     pub resident_chunk_limit: u8,
-    /// Maximum generated chunks selected for drawing/collision by the runtime.
+    /// Maximum portal rooms selected for drawing/collision by the runtime.
     ///
     /// A serialized zero is treated as a legacy project value and inherits the
     /// resident chunk limit during normalization.
@@ -4200,32 +4314,15 @@ impl WorldStreamingSettings {
         )
         .min(resident_chunk_limit);
         Self {
-            chunk_target_width: self
-                .chunk_target_width
-                .clamp(MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_WIDTH),
-            chunk_target_depth: self
-                .chunk_target_depth
-                .clamp(MIN_WORLD_STREAMING_CHUNK_TARGET_SECTORS, MAX_ROOM_DEPTH),
             resident_chunk_limit,
             visible_chunk_limit,
         }
-    }
-
-    /// Convert authored world settings into the chunk planner config.
-    pub fn chunk_config(self) -> crate::streaming::StreamingChunkConfig {
-        let mut config = crate::streaming::StreamingChunkConfig::default();
-        let normalized = self.normalized();
-        config.target_width = normalized.chunk_target_width;
-        config.target_depth = normalized.chunk_target_depth;
-        config
     }
 }
 
 impl Default for WorldStreamingSettings {
     fn default() -> Self {
         Self {
-            chunk_target_width: default_world_streaming_chunk_target_sectors(),
-            chunk_target_depth: default_world_streaming_chunk_target_sectors(),
             resident_chunk_limit: default_world_streaming_resident_chunks(),
             visible_chunk_limit: default_world_streaming_visible_chunks(),
         }
@@ -4383,6 +4480,32 @@ impl WorldGrid {
         if let Some(sector) = self.ensure_sector(x, z) {
             sector.floor = Some(GridHorizontalFace::flat(height, material));
         }
+    }
+
+    /// Set or clear the floor link above one sector.
+    pub fn set_floor_above(&mut self, x: u16, z: u16, link: Option<GridFloorLink>) {
+        if let Some(sector) = self.ensure_sector(x, z) {
+            sector.floor_above = link;
+        }
+    }
+
+    /// Set or clear the floor link below one sector.
+    pub fn set_floor_below(&mut self, x: u16, z: u16, link: Option<GridFloorLink>) {
+        if let Some(sector) = self.ensure_sector(x, z) {
+            sector.floor_below = link;
+        }
+    }
+
+    /// Number of authored vertical floor links in this grid.
+    pub fn floor_link_count(&self) -> usize {
+        self.sectors
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(|sector| {
+                usize::from(sector.floor_above.is_some())
+                    + usize::from(sector.floor_below.is_some())
+            })
+            .sum()
     }
 
     /// Set or replace a floor, inheriting edge heights from touching
@@ -6723,9 +6846,9 @@ pub enum ResourceData {
         /// Project-relative source path.
         source_path: String,
     },
-    /// Nested scene/prefab reference.
+    /// Nested room/prefab reference.
     Scene {
-        /// Project-relative scene path.
+        /// Project-relative room/prefab path.
         source_path: String,
     },
     /// Script resource.
@@ -6760,7 +6883,7 @@ impl ResourceData {
             Self::AnimationClip(_) => "Animation Clip",
             Self::AnimationSet(_) => "Clip Role Map",
             Self::Mesh { .. } => "Mesh",
-            Self::Scene { .. } => "Scene",
+            Self::Scene { .. } => "Room",
             Self::Script { .. } => "Script",
             Self::Audio { .. } => "Audio",
             Self::Character(_) => "Character Profile",
@@ -6916,7 +7039,7 @@ impl std::error::Error for ResourceDeleteError {}
 /// Node type used by the editor scene tree.
 ///
 /// Hierarchy convention for level authoring:
-/// `Scene root → World (macro) → Room (sector grid) → entity nodes`.
+/// `World (scene root) -> Room (sector grid) -> portal/entity nodes`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     /// Plain organisational node.
@@ -6929,9 +7052,8 @@ pub enum NodeKind {
     /// [`Animator`](Self::Animator), and
     /// [`Collider`](Self::Collider).
     Entity,
-    /// Macro-node grouping every Room that belongs to one streamed
-    /// region. Owns the global sector size inherited by descendant
-    /// Room grids.
+    /// World-root node for one authored world. Owns global settings
+    /// inherited by descendant room grids.
     World {
         /// Shared sector size in engine units, snapped to
         /// [`WORLD_SECTOR_SIZE_QUANTUM`].
@@ -6943,19 +7065,19 @@ pub enum NodeKind {
         /// Distant scenery ring drawn between sky and room geometry.
         #[serde(default)]
         far_vista: FarVistaSettings,
-        /// Third-person camera defaults inherited by descendant Rooms.
+        /// Third-person camera defaults inherited by descendant rooms.
         #[serde(default)]
         camera: WorldCameraSettings,
-        /// Runtime culling controls inherited by descendant Rooms.
+        /// Runtime culling controls inherited by descendant rooms.
         #[serde(default)]
         culling: WorldCullingSettings,
-        /// Cook-time streaming chunk controls inherited by descendant Rooms.
+        /// Cook-time streaming controls inherited by descendant rooms.
         #[serde(default)]
         streaming: WorldStreamingSettings,
     },
-    /// One streamed level chunk: a sector grid plus its child
-    /// entities. Cooks to a single `.psxw` blob the runtime loads
-    /// in isolation.
+    /// One authored Tomb Raider-style room: a sector grid plus its
+    /// child entities and portal links.
+    #[serde(rename = "Room", alias = "Map")]
     Room {
         /// Authored grid-world payload.
         grid: WorldGrid,
@@ -7008,6 +7130,23 @@ pub enum NodeKind {
         /// the user's last size instead of snapping to a default.
         #[serde(default = "default_image_prop_collision_size")]
         collision_size: [u16; 3],
+    },
+    /// Material-backed editable hexahedron. The transform is a
+    /// bottom-center anchor, `vertices` are local engine units from
+    /// that anchor, and each face can bind its own material.
+    BoxProp {
+        /// Per-face material slots in [`BOX_PROP_FACE_NAMES`] order.
+        #[serde(default = "default_box_prop_materials")]
+        materials: [Option<ResourceId>; BOX_PROP_FACE_COUNT],
+        /// Editable local vertices, bottom ring then top ring.
+        #[serde(default = "default_box_prop_vertices")]
+        vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
+        /// Whether this prop blocks the character motor.
+        #[serde(default = "default_true")]
+        collision_enabled: bool,
+        /// Authored break trigger bits from [`psx_level::box_prop_flags`].
+        #[serde(default)]
+        break_flags: u16,
     },
     /// Render a cooked [`ResourceData::Model`] from the transform
     /// on the nearest entity ancestor. This is the component form of
@@ -7151,24 +7290,35 @@ pub enum NodeKind {
         /// Playback radius.
         radius: f32,
     },
-    /// Streaming-graph edge: when the player crosses this volume, the
-    /// runtime streams the named entry point of `target_room` into
-    /// the World's residency set.
+    /// Manual streaming/visibility graph edge: the cooker snaps the marker
+    /// to a grid edge and treats that edge as a room-to-room portal.
     Portal {
-        /// Target Room node by id, or `None` when not yet wired.
+        /// Target room node by id, or `None` when not wired.
         target_room: Option<NodeId>,
-        /// Entry-portal label on the target room. The runtime matches
-        /// this against a same-named Portal in the destination so the
-        /// player spawns at the right side of the door.
+        /// Entry-portal label on the target room.
         target_entry: String,
-        /// Identifier this Portal is known by in its own Room. The
-        /// matching Portal in another Room sets `target_entry` to
-        /// this string.
+        /// Identifier this portal marker is known by in its source room.
         entry_name: String,
+        /// Optional exact 3D portal plane imported from a Tomb
+        /// Raider-style level file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        geometry: Option<PortalGeometry>,
     },
 }
 
 impl NodeKind {
+    /// Default scene-root World node.
+    pub fn default_world() -> Self {
+        Self::World {
+            sector_size: DEFAULT_WORLD_SECTOR_SIZE,
+            sky: SkySettings::default(),
+            far_vista: FarVistaSettings::default(),
+            camera: WorldCameraSettings::default(),
+            culling: WorldCullingSettings::default(),
+            streaming: WorldStreamingSettings::default(),
+        }
+    }
+
     /// User-facing label.
     pub const fn label(&self) -> &'static str {
         match self {
@@ -7179,6 +7329,7 @@ impl NodeKind {
             Self::Room { .. } => "Room",
             Self::MeshInstance { .. } => "Mesh Instance",
             Self::ImageProp { .. } => "Image Prop",
+            Self::BoxProp { .. } => "Box Prop",
             Self::ModelRenderer { .. } => "Model Renderer",
             Self::Animator { .. } => "Animator",
             Self::Collider { .. } => "Collider",
@@ -7251,6 +7402,20 @@ const fn default_combat_health() -> u16 {
     1
 }
 
+/// Explicit Tomb Raider-style portal rectangle.
+///
+/// Authored seam portals still use the marker transform and snap to
+/// sector edges. Imported TR levels already carry the exact 3D
+/// rectangle that connects two rooms, so keep that information on
+/// the portal node instead of trying to rediscover it from a 2D grid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortalGeometry {
+    /// Portal normal in editor/world coordinates.
+    pub normal: [i32; 3],
+    /// Portal corners in editor/world coordinates.
+    pub vertices: [[i32; 3]; 4],
+}
+
 /// A scene-tree node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneNode {
@@ -7307,21 +7472,92 @@ pub struct NodeRow {
 pub struct Scene {
     /// Display name.
     pub name: String,
-    /// Root node id.
+    /// World root node id.
     pub root: NodeId,
     next_node_id: u64,
     nodes: Vec<SceneNode>,
 }
 
 impl Scene {
-    /// Create a scene with one root `Node3D`.
+    /// Create a scene with one root `World`.
     pub fn new(name: impl Into<String>) -> Self {
-        let root = SceneNode::new(NodeId::ROOT, None, "Root", NodeKind::Node3D);
+        let root = SceneNode::new(NodeId::ROOT, None, "World", NodeKind::default_world());
         Self {
             name: name.into(),
             root: NodeId::ROOT,
             next_node_id: NodeId::ROOT.raw() + 1,
             nodes: vec![root],
+        }
+    }
+
+    /// Normalize legacy `Root -> World -> Room` scenes into the
+    /// Tomb Raider-style `World(root) -> Room` hierarchy.
+    pub fn normalize_world_root(&mut self) {
+        let root_id = self.root;
+        if self.node(root_id).is_none() {
+            self.nodes.insert(
+                0,
+                SceneNode::new(root_id, None, "World", NodeKind::default_world()),
+            );
+        }
+
+        let child_world = self.node(root_id).and_then(|root| {
+            root.children.iter().copied().find(|id| {
+                self.node(*id)
+                    .is_some_and(|node| matches!(&node.kind, NodeKind::World { .. }))
+            })
+        });
+
+        if self
+            .node(root_id)
+            .is_some_and(|root| matches!(&root.kind, NodeKind::World { .. }))
+        {
+            if let Some(root) = self.node_mut(root_id) {
+                root.parent = None;
+                if root.name == "Root" || root.name.is_empty() {
+                    root.name = "World".to_string();
+                }
+            }
+            return;
+        }
+
+        if let Some(world_id) = child_world {
+            let Some(world_node) = self.node(world_id).cloned() else {
+                return;
+            };
+            let mut merged_children = self
+                .node(root_id)
+                .map(|root| root.children.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| *id != world_id)
+                .collect::<Vec<_>>();
+            for child in world_node.children {
+                if child != root_id && !merged_children.contains(&child) {
+                    merged_children.push(child);
+                }
+            }
+            for node in &mut self.nodes {
+                if node.parent == Some(world_id) {
+                    node.parent = Some(root_id);
+                }
+                node.children.retain(|child| *child != world_id);
+            }
+            if let Some(root) = self.node_mut(root_id) {
+                root.name = if world_node.name.is_empty() || world_node.name == "Root" {
+                    "World".to_string()
+                } else {
+                    world_node.name
+                };
+                root.kind = world_node.kind;
+                root.parent = None;
+                root.children = merged_children;
+            }
+            self.nodes.retain(|node| node.id != world_id);
+        } else if let Some(root) = self.node_mut(root_id) {
+            root.name = "World".to_string();
+            root.kind = NodeKind::default_world();
+            root.parent = None;
         }
     }
 
@@ -7394,7 +7630,7 @@ impl Scene {
     /// Move `id` under `new_parent` at `position` in its child list.
     ///
     /// Refuses (returns `false`) when:
-    /// * `id` is the scene root,
+    /// * `id` is the world root,
     /// * `id` or `new_parent` is missing,
     /// * `new_parent` is `id` or any of its descendants -- that would
     ///   form a cycle.
@@ -7547,11 +7783,321 @@ impl Scene {
     }
 }
 
+/// Saved editor 3D camera mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EditorCameraMode {
+    /// Target/radius orbit camera.
+    #[default]
+    Orbit,
+    /// Explicit-position fly camera.
+    Free,
+}
+
+fn default_editor_camera_orbit_yaw_q12() -> u16 {
+    256
+}
+
+fn default_editor_camera_orbit_pitch_q12() -> u16 {
+    256
+}
+
+fn default_editor_camera_orbit_radius() -> i32 {
+    6144
+}
+
+fn default_editor_camera_orbit_target() -> [i32; 3] {
+    [0, 512, 0]
+}
+
+fn default_editor_camera_free_yaw_q12() -> u16 {
+    default_editor_camera_orbit_yaw_q12()
+}
+
+fn default_editor_camera_free_pitch_q12() -> u16 {
+    default_editor_camera_orbit_pitch_q12()
+}
+
+/// Editor-only 3D viewport camera state persisted with a project.
+///
+/// This is intentionally authoring metadata: cook/playtest paths
+/// should not use it for runtime camera behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorCameraState {
+    #[serde(default)]
+    pub mode: EditorCameraMode,
+    #[serde(default = "default_editor_camera_orbit_yaw_q12")]
+    pub orbit_yaw_q12: u16,
+    #[serde(default = "default_editor_camera_orbit_pitch_q12")]
+    pub orbit_pitch_q12: u16,
+    #[serde(default = "default_editor_camera_orbit_radius")]
+    pub orbit_radius: i32,
+    #[serde(default = "default_editor_camera_orbit_target")]
+    pub orbit_target: [i32; 3],
+    #[serde(default = "default_editor_camera_free_yaw_q12")]
+    pub free_yaw_q12: u16,
+    #[serde(default = "default_editor_camera_free_pitch_q12")]
+    pub free_pitch_q12: u16,
+    #[serde(default)]
+    pub free_position: [i32; 3],
+    #[serde(default)]
+    pub free_initialized: bool,
+}
+
+impl Default for EditorCameraState {
+    fn default() -> Self {
+        Self {
+            mode: EditorCameraMode::Orbit,
+            orbit_yaw_q12: default_editor_camera_orbit_yaw_q12(),
+            orbit_pitch_q12: default_editor_camera_orbit_pitch_q12(),
+            orbit_radius: default_editor_camera_orbit_radius(),
+            orbit_target: default_editor_camera_orbit_target(),
+            free_yaw_q12: default_editor_camera_free_yaw_q12(),
+            free_pitch_q12: default_editor_camera_free_pitch_q12(),
+            free_position: [0, 0, 0],
+            free_initialized: false,
+        }
+    }
+}
+
+impl EditorCameraState {
+    pub fn normalize(&mut self) {
+        self.orbit_pitch_q12 = clamp_q12_pitch(self.orbit_pitch_q12);
+        self.free_pitch_q12 = clamp_q12_pitch(self.free_pitch_q12);
+        self.orbit_radius = self.orbit_radius.clamp(512, 262_144);
+    }
+}
+
+fn clamp_q12_pitch(value: u16) -> u16 {
+    let raw = (value & 0x0fff) as i32;
+    let signed = if raw >= 2048 { raw - 4096 } else { raw };
+    signed.clamp(-960, 960).rem_euclid(4096) as u16
+}
+
+/// Editor-only visibility preferences persisted with a project.
+///
+/// These fields affect authoring and debug overlays only; cooked
+/// runtime output must not depend on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorVisibilityState {
+    #[serde(default = "default_true")]
+    pub show_grid: bool,
+    #[serde(default = "default_true")]
+    pub show_portals: bool,
+    #[serde(default = "default_true")]
+    pub show_lights: bool,
+    #[serde(default = "default_true")]
+    pub preview_fog: bool,
+    #[serde(default = "default_true")]
+    pub preview_backface_wireframe: bool,
+    #[serde(default = "default_true")]
+    pub preview_bounds: bool,
+    #[serde(default = "default_true")]
+    pub show_play_debug_overlays: bool,
+    #[serde(default = "default_true")]
+    pub show_play_debug_map: bool,
+}
+
+impl Default for EditorVisibilityState {
+    fn default() -> Self {
+        Self {
+            show_grid: true,
+            show_portals: true,
+            show_lights: true,
+            preview_fog: true,
+            preview_backface_wireframe: true,
+            preview_bounds: true,
+            show_play_debug_overlays: true,
+            show_play_debug_map: true,
+        }
+    }
+}
+
+/// Runtime depth sorting policy for cooked cached room geometry.
+///
+/// This affects embedded play and generated runtime manifests. The editor
+/// preview remains the reference view, but the PS1 path needs explicit
+/// tradeoffs between stable ordering and per-triangle work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeDepthSortMode {
+    /// Use the legacy fixed cell depth key for every cached surface.
+    FixedCell,
+    /// Use per-triangle depth for sloped/high-span horizontal surfaces.
+    Hybrid,
+    /// Like hybrid, but also sorts high-depth-span walls per triangle.
+    HybridWalls,
+    /// Use per-triangle projected depth for every cached surface.
+    PerTriangle,
+}
+
+impl RuntimeDepthSortMode {
+    pub const ALL: [Self; 4] = [
+        Self::Hybrid,
+        Self::HybridWalls,
+        Self::PerTriangle,
+        Self::FixedCell,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FixedCell => "Fixed cell",
+            Self::Hybrid => "Hybrid",
+            Self::HybridWalls => "Hybrid + walls",
+            Self::PerTriangle => "Per triangle",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::FixedCell => "Fast legacy ordering. Can show overlap errors on ramps.",
+            Self::Hybrid => "Uses per-triangle depth only where sloped floors need it.",
+            Self::HybridWalls => {
+                "Also sorts high-depth-span walls per triangle for ramp/wall conflicts."
+            }
+            Self::PerTriangle => "Most precise cached-room ordering. Costs more sort work.",
+        }
+    }
+
+    pub const fn manifest_value(self) -> u8 {
+        match self {
+            Self::FixedCell => 0,
+            Self::Hybrid => 1,
+            Self::HybridWalls => 2,
+            Self::PerTriangle => 3,
+        }
+    }
+}
+
+impl Default for RuntimeDepthSortMode {
+    fn default() -> Self {
+        Self::FixedCell
+    }
+}
+
+/// Default projected edge threshold for runtime room subdivision.
+///
+/// `0` disables visual subdivision and keeps splitting limited to PS1
+/// hardware packet bounds. Lower positive values split more aggressively.
+pub const DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
+
+const fn default_runtime_texture_split_max_edge() -> u16 {
+    DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE
+}
+
+/// Scope for runtime room triangle subdivision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeTextureSplitMode {
+    /// Apply the edge threshold to every cached room surface.
+    All,
+    /// Apply the edge threshold only to surfaces using per-triangle depth.
+    DepthSorted,
+    /// Apply the edge threshold only to sloped/high-depth-span surfaces.
+    Risky,
+}
+
+impl RuntimeTextureSplitMode {
+    pub const ALL: [Self; 3] = [Self::All, Self::DepthSorted, Self::Risky];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All surfaces",
+            Self::DepthSorted => "Depth sorted",
+            Self::Risky => "Risky only",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::All => "Current behavior. Every cached room surface may subdivide.",
+            Self::DepthSorted => "Only per-triangle depth surfaces subdivide.",
+            Self::Risky => "Only sloped or high-depth-span surfaces subdivide.",
+        }
+    }
+
+    pub const fn manifest_value(self) -> u8 {
+        match self {
+            Self::All => 0,
+            Self::DepthSorted => 1,
+            Self::Risky => 2,
+        }
+    }
+}
+
+impl Default for RuntimeTextureSplitMode {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+/// Runtime draw ordering for active room chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeRoomDrawOrderMode {
+    /// Sort active visible rooms by their camera-space center depth.
+    Distance,
+    /// Draw rooms in portal traversal order.
+    Portal,
+    /// Draw active slots in runtime slot order.
+    Slot,
+}
+
+impl RuntimeRoomDrawOrderMode {
+    pub const ALL: [Self; 3] = [Self::Distance, Self::Portal, Self::Slot];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Distance => "Distance",
+            Self::Portal => "Portal order",
+            Self::Slot => "Slot order",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Distance => "Current behavior. Sort active rooms by camera-space center depth.",
+            Self::Portal => {
+                "Draw rooms in portal traversal order, closer to Tomb Raider-style visibility."
+            }
+            Self::Slot => "Stable runtime slot order for debugging streaming/order interactions.",
+        }
+    }
+
+    pub const fn manifest_value(self) -> u8 {
+        match self {
+            Self::Distance => 0,
+            Self::Portal => 1,
+            Self::Slot => 2,
+        }
+    }
+}
+
+impl Default for RuntimeRoomDrawOrderMode {
+    fn default() -> Self {
+        Self::Distance
+    }
+}
+
 /// One editor project document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDocument {
     /// Display name.
     pub name: String,
+    /// Editor-only viewport camera state.
+    #[serde(default)]
+    pub editor_camera: EditorCameraState,
+    /// Editor-only overlay visibility preferences.
+    #[serde(default)]
+    pub editor_visibility: EditorVisibilityState,
+    /// Cooked playtest cached-room depth sorting mode.
+    #[serde(default)]
+    pub runtime_depth_sort_mode: RuntimeDepthSortMode,
+    /// Runtime room triangle subdivision scope.
+    #[serde(default)]
+    pub runtime_texture_split_mode: RuntimeTextureSplitMode,
+    /// Runtime active-room draw ordering policy.
+    #[serde(default)]
+    pub runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode,
+    /// Projected edge threshold used to subdivide textured runtime room surfaces.
+    #[serde(default = "default_runtime_texture_split_max_edge")]
+    pub runtime_texture_split_max_edge: u16,
     /// Open scenes. The first scene is the active scene for now.
     pub scenes: Vec<Scene>,
     /// Project resources.
@@ -7564,6 +8110,12 @@ impl ProjectDocument {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            editor_camera: EditorCameraState::default(),
+            editor_visibility: EditorVisibilityState::default(),
+            runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
+            runtime_texture_split_mode: RuntimeTextureSplitMode::default(),
+            runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),
+            runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
             resources: Vec::new(),
             next_resource_id: 1,
@@ -7937,7 +8489,9 @@ impl ProjectDocument {
 
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
+        self.editor_camera.normalize();
         for scene in &mut self.scenes {
+            scene.normalize_world_root();
             for node in &mut scene.nodes {
                 match &mut node.kind {
                     NodeKind::World {
@@ -8151,6 +8705,10 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
                 + option_resource_reference_count(*material, id)
         }
         NodeKind::ImageProp { material, .. } => option_resource_reference_count(*material, id),
+        NodeKind::BoxProp { materials, .. } => materials
+            .iter()
+            .filter(|material| **material == Some(id))
+            .count(),
         NodeKind::ModelRenderer {
             model, material, ..
         } => {
@@ -8202,6 +8760,13 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
             clear_option_resource(mesh, id) + clear_option_resource(material, id)
         }
         NodeKind::ImageProp { material, .. } => clear_option_resource(material, id),
+        NodeKind::BoxProp { materials, .. } => {
+            let mut cleared = 0;
+            for material in materials {
+                cleared += clear_option_resource(material, id);
+            }
+            cleared
+        }
         NodeKind::ModelRenderer {
             model, material, ..
         } => clear_option_resource(model, id) + clear_option_resource(material, id),
@@ -8692,7 +9257,7 @@ const fn resource_default_stem(data: &ResourceData) -> &'static str {
         ResourceData::AnimationSet(_) => "animation_set",
         ResourceData::Weapon(_) => "weapon",
         ResourceData::Mesh { .. } => "mesh",
-        ResourceData::Scene { .. } => "scene",
+        ResourceData::Scene { .. } => "room",
         ResourceData::Script { .. } => "script",
         ResourceData::Audio { .. } => "audio",
         ResourceData::Character(_) => "character",
@@ -9031,10 +9596,15 @@ mod tests {
             .map(|node| node.id)
             .expect("starter has room");
 
-        assert_eq!(
-            scene.world_camera_for_node(room_id),
-            Some(WorldCameraSettings::default())
-        );
+        let inherited_camera = scene
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::World { camera, .. } => Some(*camera),
+                _ => None,
+            })
+            .expect("starter world has camera settings");
+        assert_eq!(scene.world_camera_for_node(room_id), Some(inherited_camera));
 
         {
             let world = project.active_scene_mut().node_mut(world_id).unwrap();
@@ -9065,8 +9635,6 @@ mod tests {
     #[test]
     fn world_streaming_settings_separate_resident_and_visible_limits() {
         let settings = WorldStreamingSettings {
-            chunk_target_width: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
-            chunk_target_depth: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
             resident_chunk_limit: 24,
             visible_chunk_limit: 8,
         }
@@ -9079,8 +9647,6 @@ mod tests {
     #[test]
     fn world_streaming_legacy_visible_limit_inherits_resident_limit() {
         let settings = WorldStreamingSettings {
-            chunk_target_width: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
-            chunk_target_depth: DEFAULT_WORLD_STREAMING_CHUNK_TARGET_SECTORS,
             resident_chunk_limit: 18,
             visible_chunk_limit: 0,
         }
@@ -9750,11 +10316,11 @@ mod tests {
         let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
         assert!(project.resources.iter().any(|r| matches!(
             &r.data,
-            ResourceData::Texture { psxt_path } if psxt_path.ends_with("delven_01_slateflr1a_q2.psxt")
+            ResourceData::Texture { psxt_path } if psxt_path.ends_with("block_1a.psxt")
         )));
         assert!(project.resources.iter().any(|r| matches!(
             &r.data,
-            ResourceData::Texture { psxt_path } if psxt_path.ends_with("delven_38_ground4b_q0.psxt")
+            ResourceData::Texture { psxt_path } if psxt_path.ends_with("fence_1a.psxt")
         )));
         assert!(!project.resources.iter().any(|r| matches!(
             &r.data,
@@ -9762,54 +10328,99 @@ mod tests {
                 if psxt_path.ends_with("floor.psxt")
                     || psxt_path.ends_with("brick-wall.psxt")
         )));
-        // Starter ships the obsidian wraith model plus a shared
-        // standalone FBX animation library, so characters are
-        // animated without relying on model-local Meshy clips.
-        let (wraith_id, wraith) = project
+        // Starter now mirrors demo7: the active player is the
+        // Crimson Cross Knight profile with its Meshy Gold animation
+        // library and material atlas.
+        let (character_id, character) = project
             .resources
             .iter()
             .find_map(|r| match &r.data {
-                ResourceData::Model(m) if r.name == "Obsidian Wraith" => Some((r.id, m)),
+                ResourceData::Character(c) if r.name == "Crimson Cross Knight Player" => {
+                    Some((r.id, c))
+                }
                 _ => None,
             })
-            .expect("starter model resource missing");
-        assert!(wraith.model_path.ends_with("obsidian_wraith.psxmdl"));
-        assert!(wraith.texture_path.is_some());
-        assert!(wraith.clips.is_empty());
-        assert_eq!(wraith.default_clip, Some(0));
+            .expect("starter player character resource missing");
+        let model_id = character.model.expect("starter character has a model");
+        let model = project
+            .resource(model_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Model(model) => Some(model),
+                _ => None,
+            })
+            .expect("starter player model resource missing");
+        assert!(model
+            .model_path
+            .ends_with("crimson_cross_knight/crimson_cross_knight.psxmdl"));
+        assert!(model
+            .texture_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("crimson_cross_knight.psxt")));
+        assert!(model.skeleton.is_some());
+        assert!(model.clips.len() >= 50);
+        assert_eq!(model.default_clip, Some(22));
         assert_eq!(
-            wraith.collision_radius,
-            default_model_collision_radius_for_height(wraith.world_height)
+            model.collision_radius,
+            default_model_collision_radius_for_height(model.world_height)
         );
-        let resolved_clips = project.resolved_model_animation_clips(wraith_id);
-        assert_eq!(resolved_clips.len(), 8);
-        assert_eq!(resolved_clips[0].name, "Standalone FBX / neutral idle");
-        assert_eq!(wraith.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
+        let resolved_clips = project.resolved_model_animation_clips(model_id);
+        assert!(resolved_clips.len() >= 50);
+        assert!(resolved_clips
+            .iter()
+            .any(|clip| clip.name == "Meshy Gold / idle 03"));
+        assert_eq!(model.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
+        assert!(project.active_scene().nodes().iter().any(|node| matches!(
+            &node.kind,
+            NodeKind::CharacterController {
+                player: true,
+                character: Some(id),
+                ..
+            } if *id == character_id
+        )));
     }
 
     #[test]
     fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
+        fn replace_first_world_payload(source: &str) -> String {
+            let start = source
+                .find("kind: World(")
+                .expect("default fixture has a parameterised World kind");
+            let payload_start = start + "kind: World".len();
+            let mut depth = 0i32;
+            for (offset, ch) in source[payload_start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let end = payload_start + offset + ch.len_utf8();
+                            return format!("{}kind: World{}", &source[..start], &source[end..]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unterminated World payload");
+        }
+
         let starter = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
-        let starter_world_sector_size = starter
+        assert!(starter
             .active_scene()
             .nodes()
             .iter()
-            .find_map(|node| match &node.kind {
-                NodeKind::World { sector_size, .. } => Some(*sector_size),
-                _ => None,
-            })
-            .expect("starter world exists");
-        let legacy = DEFAULT_PROJECT_RON
-            .replace(
-                &format!(
-                    "kind: World(sector_size: {starter_world_sector_size}, sky: (mode: Gradient, top_color: (7, 8, 14), horizon_color: (32, 30, 34), lower_color: (5, 7, 12), horizon_percent: 58, match_room_fog: true), far_vista: (enabled: false, texture: None, texture_panels: (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None), radius: 18000, height: 4096, vertical_offset: -512, segments: 12, rotation_degrees: 0, tint: (54, 58, 62), match_room_fog: true), camera: (distance: 2700, height: 1280, target_height: 640, min_floor_clearance: 64)),"
-                ),
-                "kind: World,",
-            )
-            .replacen("kind: Entity,", "kind: Actor,", 1);
+            .any(|node| matches!(node.kind, NodeKind::World { .. })));
+        let legacy = replace_first_world_payload(DEFAULT_PROJECT_RON).replacen(
+            "kind: Entity,",
+            "kind: Actor,",
+            1,
+        );
 
         let project = ProjectDocument::from_ron_str(&legacy).unwrap();
         let scene = project.active_scene();
+        let root = scene.node(scene.root).expect("world root exists");
+        assert!(matches!(root.kind, NodeKind::World { .. }));
+        assert_eq!(root.name, "World");
+        assert!(scene.nodes().iter().all(|node| node.name != "Root"));
         let world = scene
             .nodes()
             .iter()
@@ -9831,13 +10442,13 @@ mod tests {
     fn starter_model_files_present_on_disk() {
         let root = default_project_dir();
         assert!(root
-            .join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl")
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
             .is_file());
         assert!(root
-            .join("assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt")
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxt")
             .is_file());
         assert!(root
-            .join("assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim")
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_03_baselayer.psxanim")
             .is_file());
     }
 
@@ -9846,10 +10457,13 @@ mod tests {
         assert!(projects_dir().is_dir(), "{}", projects_dir().display());
         assert!(default_project_dir().join("project.ron").is_file());
         assert!(default_project_dir()
-            .join("assets/textures/delven_01_slateflr1a_q2.psxt")
+            .join("assets/textures/block_1a.psxt")
             .is_file());
         assert!(default_project_dir()
-            .join("assets/textures/delven_38_ground4b_q0.psxt")
+            .join("assets/textures/fence_1a.psxt")
+            .is_file());
+        assert!(default_project_dir()
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
             .is_file());
         assert!(!default_project_dir()
             .join("assets/textures/floor.psxt")
@@ -9874,14 +10488,14 @@ mod tests {
         let project = ProjectDocument::starter();
 
         assert_eq!(project.scenes.len(), 1);
-        // Starter includes the Delven room texture/material set plus gameplay
+        // Starter includes the demo7 room texture/material set plus gameplay
         // resources for the animated character and weapon path.
         assert!(project.resources.len() >= 10);
         assert!(project
             .active_scene()
             .hierarchy_rows()
             .iter()
-            .any(|row| row.name == "Room"));
+            .any(|row| row.kind == "Room" && row.name == "Demo7 Map"));
         let grid = project
             .active_scene()
             .nodes()
@@ -10063,7 +10677,62 @@ mod tests {
         let project = ProjectDocument::starter();
         let ron = project.to_ron_string().unwrap();
 
-        assert!(ron.contains("Room"));
+        assert!(ron.contains("Demo7 Map"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn editor_camera_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("camera");
+        project.editor_camera = EditorCameraState {
+            mode: EditorCameraMode::Free,
+            orbit_yaw_q12: 384,
+            orbit_pitch_q12: 4096 - 128,
+            orbit_radius: 8192,
+            orbit_target: [1024, 512, -2048],
+            free_yaw_q12: 1536,
+            free_pitch_q12: 128,
+            free_position: [-300, 700, 900],
+            free_initialized: true,
+        };
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("editor_camera"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn editor_visibility_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("visibility");
+        project.editor_visibility = EditorVisibilityState {
+            show_grid: false,
+            show_portals: true,
+            show_lights: false,
+            preview_fog: false,
+            preview_backface_wireframe: true,
+            preview_bounds: false,
+            show_play_debug_overlays: false,
+            show_play_debug_map: true,
+        };
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("editor_visibility"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn runtime_depth_sort_mode_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("depth-sort");
+        project.runtime_depth_sort_mode = RuntimeDepthSortMode::HybridWalls;
+        project.runtime_texture_split_mode = RuntimeTextureSplitMode::DepthSorted;
+        project.runtime_room_draw_order_mode = RuntimeRoomDrawOrderMode::Portal;
+        project.runtime_texture_split_max_edge = 96;
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("runtime_depth_sort_mode"));
+        assert!(ron.contains("runtime_texture_split_mode"));
+        assert!(ron.contains("runtime_room_draw_order_mode"));
+        assert!(ron.contains("runtime_texture_split_max_edge"));
         assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
     }
 
@@ -10868,6 +11537,38 @@ mod tests {
     }
 
     #[test]
+    fn grid_uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
+        let transform = GridUvTransform {
+            offset: [0, 0],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg45,
+            flip_u: false,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+            [(32, 0), (64, 32), (32, 64), (0, 32)]
+        );
+    }
+
+    #[test]
+    fn grid_uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
+        let transform = GridUvTransform {
+            offset: [0, 0],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg315,
+            flip_u: false,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+            [(0, 32), (32, 0), (64, 32), (32, 64)]
+        );
+    }
+
+    #[test]
     fn grid_uv_transform_flips_and_wraps_ps1_uv_offsets() {
         let transform = GridUvTransform {
             offset: [-8, 12],
@@ -10931,6 +11632,17 @@ mod tests {
         assert!(clamped);
         assert_eq!(wall.heights, [0, 0, 3840, 3840]);
         assert_eq!(wall.uv.span, [0, 255]);
+    }
+
+    #[test]
+    fn default_tall_wall_keeps_single_authored_uv_primitive() {
+        let wall = GridVerticalFace::flat(0, 768 * 5, None);
+
+        let segments = wall.split_into_autotile_segments(768);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].heights, [0, 0, 3840, 3840]);
+        assert_eq!(segments[0].uv.span, [0, 0]);
     }
 
     #[test]

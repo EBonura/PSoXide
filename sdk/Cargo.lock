@@ -52,6 +52,9 @@ dependencies = [
 [[package]]
 name = "psx-gte-core"
 version = "0.1.0"
+dependencies = [
+ "psx-math",
+]
 
 [[package]]
 name = "psx-hw"

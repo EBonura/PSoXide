@@ -5,12 +5,12 @@
 //! access (`mtc2!` / `ctc2!` macros) lives in `psx-gte`, which
 //! re-exports this module so callers can keep importing it from there.
 //!
-//! The PS1 has no hardware sin/cos -- we ship a 65-entry quarter-sine
-//! lookup and derive the full range by reflection. Angles are in
+//! The PS1 has no hardware sin/cos -- rotations use the shared
+//! [`psx_math::sincos::SIN_TABLE`] lookup. Angles are in
 //! **256-per-revolution** units (`u16` with implicit wrap at 256)
 //! rather than radians or degrees, matching the convention most PSX
-//! homebrew uses. A full turn fits in a single byte, and the
-//! quarter-table lookup is one mask away.
+//! homebrew uses. A full turn fits in a single byte, which indexes
+//! every sixteenth entry of the SDK's Q0.12 sine table.
 //!
 //! Fixed-point conventions (inherited from the GTE):
 //! - Matrix cells: **1.3.12** signed -- `0x1000` = 1.0.
@@ -22,23 +22,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::math::{Mat3I16, Vec3I16};
-
-/// Quarter-sine table -- 65 entries (indices 0..=64) covering angles
-/// `0..=π/2` in 1.3.12. Full-range [`sin_1_3_12`] / [`cos_1_3_12`] use
-/// this plus quadrant reflection. Values were computed as
-/// `round(sin(i * π / 128) * 4096)`.
-#[rustfmt::skip]
-static QUARTER_SIN: [i16; 65] = [
-    0,    101,  201,  301,  401,  501,  601,  700,
-    799,  898,  995,  1092, 1189, 1285, 1380, 1474,
-    1567, 1660, 1751, 1841, 1930, 2019, 2106, 2191,
-    2276, 2359, 2440, 2520, 2598, 2675, 2751, 2824,
-    2896, 2967, 3035, 3102, 3166, 3229, 3290, 3349,
-    3406, 3461, 3513, 3564, 3612, 3659, 3702, 3744,
-    3784, 3821, 3856, 3889, 3919, 3948, 3973, 3996,
-    4017, 4036, 4051, 4065, 4076, 4085, 4091, 4094,
-    4096,
-];
+use psx_math::SIN_TABLE;
 
 /// Sine of `angle` in 256-per-revolution units, returned in 1.3.12.
 ///
@@ -47,20 +31,7 @@ static QUARTER_SIN: [i16; 65] = [
 /// which is good enough for real-time 3D but not for scientific use.
 #[inline]
 pub const fn sin_1_3_12(angle: u16) -> i16 {
-    let i = (angle & 0xFF) as usize;
-    // Four quadrants: Q0 [0..=63] rising 0→~1, Q1 [64..=127] falling
-    // ~1→0, Q2 [128..=191] falling 0→~-1, Q3 [192..=255] rising
-    // ~-1→0. Endpoint values (64, 128, 192) are handled by the
-    // quarter table's 65th entry.
-    if i <= 64 {
-        QUARTER_SIN[i]
-    } else if i <= 128 {
-        QUARTER_SIN[128 - i]
-    } else if i <= 192 {
-        -QUARTER_SIN[i - 128]
-    } else {
-        -QUARTER_SIN[256 - i]
-    }
+    SIN_TABLE[(angle & 0xFF) as usize]
 }
 
 /// Cosine of `angle` in 256-per-revolution units, returned in 1.3.12.

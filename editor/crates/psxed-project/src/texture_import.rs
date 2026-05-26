@@ -67,6 +67,8 @@ pub struct TextureStats {
     /// CLUT entry count (`16` for 4bpp, `256` for 8bpp, `0`
     /// for direct 15bpp).
     pub clut_entries: u16,
+    /// Indexed palette entry 0 is reserved for transparent texels.
+    pub index_zero_transparent: bool,
 }
 
 /// Cooked preview returned by [`preview_texture_import`].
@@ -76,6 +78,20 @@ pub struct TextureImportPreview {
     pub texture: Vec<u8>,
     /// Parsed stats from the cooked blob.
     pub stats: TextureStats,
+}
+
+/// Summary of a cooked indexed texture colour-key edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureColorKeyReport {
+    /// Palette index at the clicked texel.
+    pub picked_index: u8,
+    /// RGB888 display colour represented by the picked palette entry.
+    pub picked_rgb: [u8; 3],
+    /// Number of palette indices with the same RGB555 colour as the
+    /// picked texel.
+    pub keyed_indices: u16,
+    /// Number of visible texels rewritten to palette index 0.
+    pub rewritten_texels: usize,
 }
 
 /// Failure modes for cooked texture registration/import.
@@ -154,6 +170,127 @@ pub fn texture_stats_from_bytes(bytes: &[u8]) -> Result<TextureStats, TextureImp
         height: texture.height(),
         depth,
         clut_entries: texture.clut_entries(),
+        index_zero_transparent: texture.index_zero_transparent(),
+    })
+}
+
+/// Treat the colour under `(x, y)` in a cooked indexed `.psxt` as a
+/// colour key: all texels using palette entries with the same RGB555
+/// colour are rewritten to index 0, CLUT entry 0 is cleared to raw
+/// transparent black, and the asset header's transparent-zero flag is
+/// set.
+///
+/// This is intentionally a cooked-asset edit. It lets the editor add
+/// PS1-style cutout transparency to imported opaque sources without
+/// requiring the original PNG/BMP to carry alpha.
+pub fn apply_texel_color_key_transparency(
+    bytes: &mut [u8],
+    x: u16,
+    y: u16,
+) -> Result<TextureColorKeyReport, TextureImportError> {
+    let (depth, width, height, clut_entries, pixel_len, clut_len) = {
+        let texture = psx_asset::Texture::from_bytes(bytes).map_err(|e| {
+            TextureImportError::InvalidTexture {
+                path: PathBuf::new(),
+                detail: format!("{:?}", e),
+            }
+        })?;
+        (
+            texture.depth(),
+            texture.width(),
+            texture.height(),
+            texture.clut_entries(),
+            texture.pixel_bytes().len(),
+            texture.clut_bytes().len(),
+        )
+    };
+    if x >= width || y >= height {
+        return Err(TextureImportError::InvalidTexture {
+            path: PathBuf::new(),
+            detail: format!("texel ({x}, {y}) outside {width}x{height} texture"),
+        });
+    }
+    let Some(expected_clut_entries) = depth.clut_entries() else {
+        return Err(TextureImportError::InvalidTexture {
+            path: PathBuf::new(),
+            detail: "colour-key transparency requires an indexed texture".to_string(),
+        });
+    };
+    if clut_entries != expected_clut_entries {
+        return Err(TextureImportError::InvalidTexture {
+            path: PathBuf::new(),
+            detail: format!(
+                "colour-key transparency expects {} CLUT entries for {}bpp, found {}",
+                expected_clut_entries, depth as u8, clut_entries
+            ),
+        });
+    }
+
+    let pixel_start = AssetHeader::SIZE + TextureHeader::SIZE;
+    let pixel_end = pixel_start
+        .checked_add(pixel_len)
+        .ok_or_else(|| invalid_texture("pixel block length overflow"))?;
+    let clut_end = pixel_end
+        .checked_add(clut_len)
+        .ok_or_else(|| invalid_texture("CLUT block length overflow"))?;
+    if clut_end > bytes.len() || clut_len < usize::from(clut_entries) * 2 {
+        return Err(invalid_texture("PSXT payload shorter than declared blocks"));
+    }
+
+    let halfwords_per_row = usize::from(TextureHeader::halfwords_per_row(depth, width));
+    let expected_pixel_len = halfwords_per_row
+        .checked_mul(usize::from(height))
+        .and_then(|halfwords| halfwords.checked_mul(2))
+        .ok_or_else(|| invalid_texture("indexed pixel block length overflow"))?;
+    if pixel_len < expected_pixel_len {
+        return Err(invalid_texture(
+            "indexed pixel block shorter than texture dimensions",
+        ));
+    }
+
+    let picked_index = indexed_texel_at(
+        bytes,
+        pixel_start,
+        halfwords_per_row,
+        depth,
+        usize::from(x),
+        usize::from(y),
+    )
+    .ok_or_else(|| invalid_texture("failed to sample indexed texel"))?;
+    let target_rgb555 = palette_rgb555(bytes, pixel_end, picked_index)
+        .ok_or_else(|| invalid_texture("failed to sample CLUT entry"))?;
+    let picked_rgb = rgb555_to_rgb888(target_rgb555);
+    let mut keyed = [false; 256];
+    let mut keyed_indices = 0_u16;
+    for index in 0..usize::from(clut_entries) {
+        if palette_rgb555(bytes, pixel_end, index as u8) == Some(target_rgb555) {
+            keyed[index] = true;
+            keyed_indices += 1;
+        }
+    }
+
+    let rewritten_texels = rewrite_indexed_texels_to_zero(
+        bytes,
+        pixel_start,
+        halfwords_per_row,
+        depth,
+        width,
+        height,
+        &keyed,
+    );
+
+    bytes[pixel_end] = 0;
+    bytes[pixel_end + 1] = 0;
+    let flags_offset = 6;
+    let mut flags = u16::from_le_bytes([bytes[flags_offset], bytes[flags_offset + 1]]);
+    flags |= psxed_format::texture::flags::INDEX_ZERO_TRANSPARENT;
+    bytes[flags_offset..flags_offset + 2].copy_from_slice(&flags.to_le_bytes());
+
+    Ok(TextureColorKeyReport {
+        picked_index,
+        picked_rgb,
+        keyed_indices,
+        rewritten_texels,
     })
 }
 
@@ -305,6 +442,99 @@ fn apply_tint_to_psxt(bytes: &mut [u8], tint: [u8; 3]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn indexed_texel_at(
+    bytes: &[u8],
+    pixel_start: usize,
+    halfwords_per_row: usize,
+    depth: TextureDepth,
+    x: usize,
+    y: usize,
+) -> Option<u8> {
+    match depth {
+        TextureDepth::Bit4 => {
+            let off = pixel_start + (y * halfwords_per_row + x / 4) * 2;
+            let word = u16::from_le_bytes([*bytes.get(off)?, *bytes.get(off + 1)?]);
+            Some(((word >> ((x & 3) * 4)) & 0xF) as u8)
+        }
+        TextureDepth::Bit8 => {
+            let off = pixel_start + (y * halfwords_per_row + x / 2) * 2 + (x & 1);
+            bytes.get(off).copied()
+        }
+        TextureDepth::Bit15 => None,
+    }
+}
+
+fn palette_rgb555(bytes: &[u8], clut_start: usize, index: u8) -> Option<u16> {
+    let off = clut_start + usize::from(index) * 2;
+    Some(u16::from_le_bytes([*bytes.get(off)?, *bytes.get(off + 1)?]) & 0x7FFF)
+}
+
+fn rgb555_to_rgb888(raw: u16) -> [u8; 3] {
+    let r5 = (raw & 0x1F) as u8;
+    let g5 = ((raw >> 5) & 0x1F) as u8;
+    let b5 = ((raw >> 10) & 0x1F) as u8;
+    [
+        (r5 << 3) | (r5 >> 2),
+        (g5 << 3) | (g5 >> 2),
+        (b5 << 3) | (b5 >> 2),
+    ]
+}
+
+fn rewrite_indexed_texels_to_zero(
+    bytes: &mut [u8],
+    pixel_start: usize,
+    halfwords_per_row: usize,
+    depth: TextureDepth,
+    width: u16,
+    height: u16,
+    keyed: &[bool; 256],
+) -> usize {
+    let mut rewritten = 0;
+    match depth {
+        TextureDepth::Bit4 => {
+            for row in 0..usize::from(height) {
+                for hw in 0..halfwords_per_row {
+                    let off = pixel_start + (row * halfwords_per_row + hw) * 2;
+                    let mut word = u16::from_le_bytes([bytes[off], bytes[off + 1]]);
+                    for nibble in 0..4 {
+                        if hw * 4 + nibble >= usize::from(width) {
+                            break;
+                        }
+                        let shift = nibble * 4;
+                        let index = ((word >> shift) & 0xF) as usize;
+                        if keyed[index] {
+                            rewritten += 1;
+                            word &= !(0xF << shift);
+                        }
+                    }
+                    bytes[off..off + 2].copy_from_slice(&word.to_le_bytes());
+                }
+            }
+        }
+        TextureDepth::Bit8 => {
+            for row in 0..usize::from(height) {
+                for x in 0..usize::from(width) {
+                    let off = pixel_start + (row * halfwords_per_row + x / 2) * 2 + (x & 1);
+                    let index = bytes[off] as usize;
+                    if keyed[index] {
+                        rewritten += 1;
+                        bytes[off] = 0;
+                    }
+                }
+            }
+        }
+        TextureDepth::Bit15 => {}
+    }
+    rewritten
+}
+
+fn invalid_texture(detail: impl Into<String>) -> TextureImportError {
+    TextureImportError::InvalidTexture {
+        path: PathBuf::new(),
+        detail: detail.into(),
+    }
 }
 
 fn tint_rgb555_bytes(bytes: &mut [u8], tint: [u8; 3]) {
@@ -469,5 +699,41 @@ mod tests {
         assert_eq!(tinted & 0x1F, 31);
         assert_eq!((tinted >> 5) & 0x1F, 0);
         assert_eq!((tinted >> 10) & 0x1F, 4);
+    }
+
+    #[test]
+    fn texel_color_key_rewrites_matching_palette_entries_to_zero() {
+        let indices = [
+            1, 2, 3, 1, //
+            2, 3, 1, 2, //
+        ];
+        let palette = [[0, 0, 0], [16, 24, 32], [255, 0, 0], [255, 0, 0]];
+        let mut bytes =
+            psxed_tex::encode_indexed_psxt(4, 2, TextureDepth::Bit4, &indices, &palette, false)
+                .expect("encode indexed psxt");
+
+        let report =
+            apply_texel_color_key_transparency(&mut bytes, 1, 0).expect("colour key applies");
+        assert_eq!(report.picked_index, 2);
+        assert_eq!(report.keyed_indices, 2);
+        assert_eq!(report.rewritten_texels, 5);
+
+        let stats = texture_stats_from_bytes(&bytes).expect("rewritten texture parses");
+        assert!(stats.index_zero_transparent);
+        let texture = psx_asset::Texture::from_bytes(&bytes).expect("texture parses");
+        assert!(texture.index_zero_transparent());
+        assert_eq!(&texture.clut_bytes()[0..2], &[0, 0]);
+
+        let pixel_start = AssetHeader::SIZE + TextureHeader::SIZE;
+        let row0 = u16::from_le_bytes([bytes[pixel_start], bytes[pixel_start + 1]]);
+        let row1 = u16::from_le_bytes([bytes[pixel_start + 2], bytes[pixel_start + 3]]);
+        assert_eq!(row0 & 0x000F, 1);
+        assert_eq!((row0 >> 4) & 0x000F, 0);
+        assert_eq!((row0 >> 8) & 0x000F, 0);
+        assert_eq!((row0 >> 12) & 0x000F, 1);
+        assert_eq!(row1 & 0x000F, 0);
+        assert_eq!((row1 >> 4) & 0x000F, 0);
+        assert_eq!((row1 >> 8) & 0x000F, 1);
+        assert_eq!((row1 >> 12) & 0x000F, 0);
     }
 }

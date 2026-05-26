@@ -17,8 +17,12 @@ pub const EVENT_PHYS: u32 = BASE_PHYS;
 pub const VALUE_PHYS: u32 = BASE_PHYS + 4;
 /// Read-only low 32 bits of the emulator-observed guest cycle counter.
 pub const CYCLE_PHYS: u32 = BASE_PHYS + 8;
+/// Write-only byte sink for guest debug text. Newline commits one log line.
+pub const LOG_PHYS: u32 = BASE_PHYS + 12;
 
 const EVENT_CAP: usize = 65_536;
+const LOG_CAP: usize = 2_048;
+const LOG_LINE_CAP: usize = 384;
 const KIND_SHIFT: u32 = 24;
 const KIND_MASK: u32 = 0xFF;
 const ID_MASK: u32 = 0xFFFF;
@@ -87,6 +91,8 @@ pub mod stage {
     pub const FAR_VISTA: u16 = 33;
     /// Editor-authored image/card prop rendering.
     pub const IMAGE_PROPS: u16 = 34;
+    /// Portal traversal and visible-room selection.
+    pub const PORTAL_VISIBILITY: u16 = 35;
     /// Player-attached equipment / weapon rendering and hit-volume evaluation.
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
@@ -96,7 +102,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 35;
+pub const STAGE_COUNT: usize = 36;
 
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
@@ -376,10 +382,122 @@ pub mod counter {
     pub const ROOM_PLAYER_LOCAL_Z_BIASED: u16 = 137;
     /// Camera/view yaw used by player-centred chunk diagnostics, in Q12 angle units.
     pub const ROOM_PLAYER_VIEW_YAW_Q12: u16 = 138;
+    /// Current room used as the root of portal traversal.
+    pub const PORTAL_VIS_CURRENT_ROOM: u16 = 139;
+    /// Portal-visible rooms accepted by the runtime traversal.
+    pub const PORTAL_VIS_VISIBLE_ROOMS: u16 = 140;
+    /// Rooms one portal beyond the visible set.
+    pub const PORTAL_VIS_FRONTIER_ROOMS: u16 = 141;
+    /// Portal frustums accepted by the runtime traversal.
+    pub const PORTAL_VIS_FRUSTUMS: u16 = 142;
+    /// Directed portals tested by the runtime traversal.
+    pub const PORTAL_VIS_PORTALS_TESTED: u16 = 143;
+    /// Directed portals accepted by the runtime traversal.
+    pub const PORTAL_VIS_PORTALS_ACCEPTED: u16 = 144;
+    /// Portals rejected by source-facing backface tests.
+    pub const PORTAL_VIS_REJECT_BACKFACE: u16 = 145;
+    /// Portals rejected by camera/window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM: u16 = 146;
+    /// Portals rejected because the clipped cone was tiny.
+    pub const PORTAL_VIS_REJECT_TINY: u16 = 147;
+    /// Visible-room pool capacity hits.
+    pub const PORTAL_VIS_CAP_ROOM: u16 = 148;
+    /// Frustum pool capacity hits.
+    pub const PORTAL_VIS_CAP_FRUSTUM: u16 = 149;
+    /// Portal traversal max-depth hits.
+    pub const PORTAL_VIS_CAP_DEPTH: u16 = 150;
+    /// Portal-visible rooms neither resident nor loading when the active window was built.
+    pub const PORTAL_VIS_VISIBLE_MISSING_RESIDENT: u16 = 151;
+    /// Stream priority requests for the current room.
+    pub const ROOM_STREAM_PRIORITY_CURRENT: u16 = 152;
+    /// Stream priority requests for portal-visible rooms.
+    pub const ROOM_STREAM_PRIORITY_VISIBLE: u16 = 153;
+    /// Stream priority requests for portal-frontier rooms.
+    pub const ROOM_STREAM_PRIORITY_FRONTIER: u16 = 154;
+    /// Stream loads blocked because resident/requested rooms filled the pool.
+    pub const ROOM_STREAM_PROTECTED_FULL: u16 = 155;
+    /// Low 32 bits of the portal-visible room bitset.
+    pub const PORTAL_VIS_VISIBLE_MASK_LO: u16 = 156;
+    /// High 32 bits of the portal-visible room bitset.
+    pub const PORTAL_VIS_VISIBLE_MASK_HI: u16 = 157;
+    /// Low 32 bits of the portal-frontier room bitset.
+    pub const PORTAL_VIS_FRONTIER_MASK_LO: u16 = 158;
+    /// High 32 bits of the portal-frontier room bitset.
+    pub const PORTAL_VIS_FRONTIER_MASK_HI: u16 = 159;
+    /// Low 32 bits of the visible-but-missing-residency room bitset.
+    pub const PORTAL_VIS_MISSING_MASK_LO: u16 = 160;
+    /// High 32 bits of the visible-but-missing-residency room bitset.
+    pub const PORTAL_VIS_MISSING_MASK_HI: u16 = 161;
+    /// Render camera room-local X, biased for unsigned telemetry transport.
+    pub const ROOM_CAMERA_LOCAL_X_BIASED: u16 = 162;
+    /// Render camera room-local Z, biased for unsigned telemetry transport.
+    pub const ROOM_CAMERA_LOCAL_Z_BIASED: u16 = 163;
+    /// Low 32 bits of destination rooms for portals tested this frame.
+    pub const PORTAL_VIS_TESTED_MASK_LO: u16 = 164;
+    /// High 32 bits of destination rooms for portals tested this frame.
+    pub const PORTAL_VIS_TESTED_MASK_HI: u16 = 165;
+    /// Low 32 bits of destination rooms for accepted portals this frame.
+    pub const PORTAL_VIS_ACCEPTED_MASK_LO: u16 = 166;
+    /// High 32 bits of destination rooms for accepted portals this frame.
+    pub const PORTAL_VIS_ACCEPTED_MASK_HI: u16 = 167;
+    /// Low 32 bits of destination rooms rejected by portal window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_MASK_LO: u16 = 168;
+    /// High 32 bits of destination rooms rejected by portal window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_MASK_HI: u16 = 169;
+    /// Portals recovered by occupied-room-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACKS: u16 = 170;
+    /// Low 32 bits of destination rooms recovered by occupied-room-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO: u16 = 171;
+    /// High 32 bits of destination rooms recovered by occupied-room-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI: u16 = 172;
+    /// Effective resident streamed room slot limit for the current window.
+    pub const ROOM_STREAM_SLOT_LIMIT: u16 = 173;
+    /// Low 32 bits of rooms with in-flight streamed loads.
+    pub const ROOM_STREAM_LOADING_MASK_LO: u16 = 174;
+    /// High 32 bits of rooms with in-flight streamed loads.
+    pub const ROOM_STREAM_LOADING_MASK_HI: u16 = 175;
+    /// Portal-visible rooms resident in the stream cache but not buildable.
+    pub const PORTAL_VIS_VISIBLE_BUILD_FAILED: u16 = 176;
+    /// Low 32 bits of visible resident rooms that failed active-room build.
+    pub const PORTAL_VIS_BUILD_FAILED_MASK_LO: u16 = 177;
+    /// High 32 bits of visible resident rooms that failed active-room build.
+    pub const PORTAL_VIS_BUILD_FAILED_MASK_HI: u16 = 178;
+    /// Low 32 bits of directed portal records tested this frame.
+    pub const PORTAL_VIS_TESTED_PORTAL_MASK_LO: u16 = 179;
+    /// High 32 bits of directed portal records tested this frame.
+    pub const PORTAL_VIS_TESTED_PORTAL_MASK_HI: u16 = 180;
+    /// Low 32 bits of directed portal records accepted this frame.
+    pub const PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO: u16 = 181;
+    /// High 32 bits of directed portal records accepted this frame.
+    pub const PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI: u16 = 182;
+    /// Low 32 bits of directed portal records rejected by camera/window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO: u16 = 183;
+    /// High 32 bits of directed portal records rejected by camera/window clipping.
+    pub const PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI: u16 = 184;
+    /// Low 32 bits of directed portal records accepted by occupied-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO: u16 = 185;
+    /// High 32 bits of directed portal records accepted by occupied-bounds fallback.
+    pub const PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI: u16 = 186;
+    /// Render camera yaw sine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED: u16 = 187;
+    /// Render camera yaw cosine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED: u16 = 188;
+    /// Render camera room-local Y, biased for unsigned telemetry transport.
+    pub const ROOM_CAMERA_LOCAL_Y_BIASED: u16 = 189;
+    /// Render camera pitch sine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED: u16 = 190;
+    /// Render camera pitch cosine in Q12, biased by 4096 for unsigned transport.
+    pub const ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED: u16 = 191;
+    /// Render camera absolute level X used by portal traversal, biased for unsigned transport.
+    pub const ROOM_CAMERA_GLOBAL_X_BIASED: u16 = 192;
+    /// Render camera absolute level Y used by portal traversal, biased for unsigned transport.
+    pub const ROOM_CAMERA_GLOBAL_Y_BIASED: u16 = 193;
+    /// Render camera absolute level Z used by portal traversal, biased for unsigned transport.
+    pub const ROOM_CAMERA_GLOBAL_Z_BIASED: u16 = 194;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 139;
+pub const COUNTER_COUNT: usize = 195;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,13 +539,30 @@ pub struct GuestTelemetryEvent {
     pub value: u32,
 }
 
+/// One guest debug line emitted through the telemetry log byte sink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestDebugLogLine {
+    /// Bus cycles elapsed when the line began.
+    pub cycles: u64,
+    /// Guest frame count observed when the line began.
+    pub frame: u64,
+    /// Sanitised ASCII text emitted by the guest.
+    pub text: String,
+}
+
 /// Rolling capture buffer for guest telemetry events.
 pub struct GuestTelemetry {
     pending_value: u32,
     events: VecDeque<GuestTelemetryEvent>,
+    debug_logs: VecDeque<GuestDebugLogLine>,
+    pending_debug_log: String,
+    pending_debug_log_cycles: u64,
+    pending_debug_log_frame: u64,
+    pending_debug_log_truncated: bool,
     frames_seen: u64,
     counter_totals: [u64; COUNTER_COUNT],
     counter_max_values: [u32; COUNTER_COUNT],
+    counter_latest_values: [u32; COUNTER_COUNT],
 }
 
 impl Default for GuestTelemetry {
@@ -435,9 +570,15 @@ impl Default for GuestTelemetry {
         Self {
             pending_value: 0,
             events: VecDeque::with_capacity(EVENT_CAP),
+            debug_logs: VecDeque::with_capacity(LOG_CAP),
+            pending_debug_log: String::with_capacity(LOG_LINE_CAP),
+            pending_debug_log_cycles: 0,
+            pending_debug_log_frame: 0,
+            pending_debug_log_truncated: false,
             frames_seen: 0,
             counter_totals: [0; COUNTER_COUNT],
             counter_max_values: [0; COUNTER_COUNT],
+            counter_latest_values: [0; COUNTER_COUNT],
         }
     }
 }
@@ -450,7 +591,7 @@ impl GuestTelemetry {
 
     /// True if `phys` lands inside the telemetry port.
     pub const fn contains(phys: u32) -> bool {
-        phys == EVENT_PHYS || phys == VALUE_PHYS || phys == CYCLE_PHYS
+        phys == EVENT_PHYS || phys == VALUE_PHYS || phys == CYCLE_PHYS || phys == LOG_PHYS
     }
 
     /// Observe a 32-bit read. Returns a value if the telemetry port consumed it.
@@ -479,6 +620,10 @@ impl GuestTelemetry {
                 });
                 true
             }
+            LOG_PHYS => {
+                self.push_debug_log_byte((value & 0xFF) as u8, cycles);
+                true
+            }
             _ => false,
         }
     }
@@ -486,6 +631,11 @@ impl GuestTelemetry {
     /// Drain all captured events in chronological order.
     pub fn drain_events(&mut self) -> Vec<GuestTelemetryEvent> {
         self.events.drain(..).collect()
+    }
+
+    /// Drain all complete guest debug log lines in chronological order.
+    pub fn drain_debug_logs(&mut self) -> Vec<GuestDebugLogLine> {
+        self.debug_logs.drain(..).collect()
     }
 
     /// Number of guest frame-begin markers observed since reset.
@@ -509,6 +659,14 @@ impl GuestTelemetry {
             .unwrap_or_default()
     }
 
+    /// Most recent single value observed for a known counter since reset.
+    pub fn counter_latest_value(&self, id: u16) -> u32 {
+        self.counter_latest_values
+            .get(id as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Snapshot of all summed counter values observed since reset.
     pub const fn counter_totals(&self) -> [u64; COUNTER_COUNT] {
         self.counter_totals
@@ -517,6 +675,11 @@ impl GuestTelemetry {
     /// Snapshot of all largest counter values observed since reset.
     pub const fn counter_max_values(&self) -> [u32; COUNTER_COUNT] {
         self.counter_max_values
+    }
+
+    /// Snapshot of the most recent counter values observed since reset.
+    pub const fn counter_latest_values(&self) -> [u32; COUNTER_COUNT] {
+        self.counter_latest_values
     }
 
     fn push(&mut self, event: GuestTelemetryEvent) {
@@ -530,11 +693,66 @@ impl GuestTelemetry {
             if let Some(max_value) = self.counter_max_values.get_mut(event.id as usize) {
                 *max_value = (*max_value).max(event.value);
             }
+            if let Some(latest_value) = self.counter_latest_values.get_mut(event.id as usize) {
+                *latest_value = event.value;
+            }
         }
         if self.events.len() >= EVENT_CAP {
             self.events.pop_front();
         }
         self.events.push_back(event);
+    }
+
+    fn push_debug_log_byte(&mut self, byte: u8, cycles: u64) {
+        match byte {
+            b'\n' | 0 => {
+                self.flush_debug_log(cycles);
+            }
+            b'\r' => {}
+            byte => {
+                if self.pending_debug_log.is_empty() && !self.pending_debug_log_truncated {
+                    self.pending_debug_log_cycles = cycles;
+                    self.pending_debug_log_frame = self.frames_seen;
+                }
+                if self.pending_debug_log.len() < LOG_LINE_CAP {
+                    self.pending_debug_log.push(sanitise_debug_log_byte(byte));
+                } else {
+                    self.pending_debug_log_truncated = true;
+                }
+            }
+        }
+    }
+
+    fn flush_debug_log(&mut self, cycles: u64) {
+        if self.pending_debug_log.is_empty() && !self.pending_debug_log_truncated {
+            return;
+        }
+        if self.pending_debug_log_cycles == 0 {
+            self.pending_debug_log_cycles = cycles;
+            self.pending_debug_log_frame = self.frames_seen;
+        }
+        if self.pending_debug_log_truncated {
+            self.pending_debug_log.push_str("...");
+        }
+        if self.debug_logs.len() >= LOG_CAP {
+            self.debug_logs.pop_front();
+        }
+        self.debug_logs.push_back(GuestDebugLogLine {
+            cycles: self.pending_debug_log_cycles,
+            frame: self.pending_debug_log_frame,
+            text: core::mem::take(&mut self.pending_debug_log),
+        });
+        self.pending_debug_log_cycles = 0;
+        self.pending_debug_log_frame = 0;
+        self.pending_debug_log_truncated = false;
+    }
+}
+
+fn sanitise_debug_log_byte(byte: u8) -> char {
+    if byte == b'\t' || byte == b' ' || byte.is_ascii_graphic() {
+        byte as char
+    } else {
+        '.'
     }
 }
 
@@ -553,6 +771,8 @@ pub struct GuestTelemetrySummary {
     pub counters: [u64; COUNTER_COUNT],
     /// Largest single value observed per known counter id.
     pub counter_max_values: [u32; COUNTER_COUNT],
+    /// Most recent value observed per known counter id.
+    pub counter_latest_values: [u32; COUNTER_COUNT],
 }
 
 impl Default for GuestTelemetrySummary {
@@ -564,6 +784,7 @@ impl Default for GuestTelemetrySummary {
             stage_max_cycles: [0; STAGE_COUNT],
             counters: [0; COUNTER_COUNT],
             counter_max_values: [0; COUNTER_COUNT],
+            counter_latest_values: [0; COUNTER_COUNT],
         }
     }
 }
@@ -609,6 +830,9 @@ impl GuestTelemetrySummary {
                     }
                     if let Some(max_value) = self.counter_max_values.get_mut(idx) {
                         *max_value = (*max_value).max(event.value);
+                    }
+                    if let Some(latest_value) = self.counter_latest_values.get_mut(idx) {
+                        *latest_value = event.value;
                     }
                 }
                 GuestTelemetryKind::Unknown(_) => {}
@@ -658,6 +882,7 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::SKY => "sky",
         stage::FAR_VISTA => "far vista",
         stage::IMAGE_PROPS => "image props",
+        stage::PORTAL_VISIBILITY => "portal visibility",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
@@ -806,6 +1031,66 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_PLAYER_LOCAL_X_BIASED => "player local x",
         counter::ROOM_PLAYER_LOCAL_Z_BIASED => "player local z",
         counter::ROOM_PLAYER_VIEW_YAW_Q12 => "player view yaw q12",
+        counter::ROOM_CAMERA_LOCAL_X_BIASED => "camera local x",
+        counter::ROOM_CAMERA_LOCAL_Z_BIASED => "camera local z",
+        counter::PORTAL_VIS_CURRENT_ROOM => "portal current room",
+        counter::PORTAL_VIS_VISIBLE_ROOMS => "portal visible rooms",
+        counter::PORTAL_VIS_FRONTIER_ROOMS => "portal frontier rooms",
+        counter::PORTAL_VIS_FRUSTUMS => "portal frustums",
+        counter::PORTAL_VIS_PORTALS_TESTED => "portal tests",
+        counter::PORTAL_VIS_PORTALS_ACCEPTED => "portal accepts",
+        counter::PORTAL_VIS_REJECT_BACKFACE => "portal reject backface",
+        counter::PORTAL_VIS_REJECT_FRUSTUM => "portal reject frustum",
+        counter::PORTAL_VIS_REJECT_TINY => "portal reject tiny",
+        counter::PORTAL_VIS_CAP_ROOM => "portal room cap",
+        counter::PORTAL_VIS_CAP_FRUSTUM => "portal frustum cap",
+        counter::PORTAL_VIS_CAP_DEPTH => "portal depth cap",
+        counter::PORTAL_VIS_VISIBLE_MISSING_RESIDENT => "portal visible missing resident",
+        counter::ROOM_STREAM_PRIORITY_CURRENT => "stream priority current",
+        counter::ROOM_STREAM_PRIORITY_VISIBLE => "stream priority visible",
+        counter::ROOM_STREAM_PRIORITY_FRONTIER => "stream priority frontier",
+        counter::ROOM_STREAM_PROTECTED_FULL => "stream protected full",
+        counter::PORTAL_VIS_VISIBLE_MASK_LO => "portal visible mask lo",
+        counter::PORTAL_VIS_VISIBLE_MASK_HI => "portal visible mask hi",
+        counter::PORTAL_VIS_FRONTIER_MASK_LO => "portal frontier mask lo",
+        counter::PORTAL_VIS_FRONTIER_MASK_HI => "portal frontier mask hi",
+        counter::PORTAL_VIS_MISSING_MASK_LO => "portal missing mask lo",
+        counter::PORTAL_VIS_MISSING_MASK_HI => "portal missing mask hi",
+        counter::PORTAL_VIS_TESTED_MASK_LO => "portal tested mask lo",
+        counter::PORTAL_VIS_TESTED_MASK_HI => "portal tested mask hi",
+        counter::PORTAL_VIS_ACCEPTED_MASK_LO => "portal accepted mask lo",
+        counter::PORTAL_VIS_ACCEPTED_MASK_HI => "portal accepted mask hi",
+        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_LO => "portal frustum reject mask lo",
+        counter::PORTAL_VIS_REJECT_FRUSTUM_MASK_HI => "portal frustum reject mask hi",
+        counter::PORTAL_VIS_BOUNDS_FALLBACKS => "portal bounds fallback",
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_LO => "portal bounds fallback mask lo",
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_MASK_HI => "portal bounds fallback mask hi",
+        counter::ROOM_STREAM_SLOT_LIMIT => "room stream slot limit",
+        counter::ROOM_STREAM_LOADING_MASK_LO => "loading chunk mask lo",
+        counter::ROOM_STREAM_LOADING_MASK_HI => "loading chunk mask hi",
+        counter::PORTAL_VIS_VISIBLE_BUILD_FAILED => "portal visible build failed",
+        counter::PORTAL_VIS_BUILD_FAILED_MASK_LO => "portal build failed mask lo",
+        counter::PORTAL_VIS_BUILD_FAILED_MASK_HI => "portal build failed mask hi",
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_LO => "portal tested portal mask lo",
+        counter::PORTAL_VIS_TESTED_PORTAL_MASK_HI => "portal tested portal mask hi",
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_LO => "portal accepted portal mask lo",
+        counter::PORTAL_VIS_ACCEPTED_PORTAL_MASK_HI => "portal accepted portal mask hi",
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_LO => "portal frustum reject portal mask lo",
+        counter::PORTAL_VIS_REJECT_FRUSTUM_PORTAL_MASK_HI => "portal frustum reject portal mask hi",
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO => {
+            "portal bounds fallback portal mask lo"
+        }
+        counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI => {
+            "portal bounds fallback portal mask hi"
+        }
+        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED => "camera view sin yaw q12 biased",
+        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED => "camera view cos yaw q12 biased",
+        counter::ROOM_CAMERA_LOCAL_Y_BIASED => "camera local y",
+        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED => "camera view sin pitch q12 biased",
+        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED => "camera view cos pitch q12 biased",
+        counter::ROOM_CAMERA_GLOBAL_X_BIASED => "camera global x",
+        counter::ROOM_CAMERA_GLOBAL_Y_BIASED => "camera global y",
+        counter::ROOM_CAMERA_GLOBAL_Z_BIASED => "camera global z",
         _ => "unknown",
     }
 }
@@ -833,6 +1118,7 @@ mod tests {
         assert_eq!(telemetry.frames_seen(), 0);
         assert_eq!(telemetry.counter_total(counter::WORLD_COMMANDS), 42);
         assert_eq!(telemetry.counter_max_value(counter::WORLD_COMMANDS), 42);
+        assert_eq!(telemetry.counter_latest_value(counter::WORLD_COMMANDS), 42);
         assert_eq!(telemetry.observe_read32(CYCLE_PHYS, 1234), Some(1234));
         assert_eq!(
             events,
@@ -843,6 +1129,31 @@ mod tests {
                 value: 42,
             }]
         );
+    }
+
+    #[test]
+    fn telemetry_port_collects_debug_log_lines() {
+        let mut telemetry = GuestTelemetry::new();
+        assert!(GuestTelemetry::contains(LOG_PHYS));
+        assert!(telemetry.observe_write32(
+            EVENT_PHYS,
+            encode_event(1, 0),
+            90
+        ));
+        for (i, byte) in b"room cross 1->2\n".iter().copied().enumerate() {
+            assert!(telemetry.observe_write32(LOG_PHYS, byte as u32, 100 + i as u64));
+        }
+
+        let logs = telemetry.drain_debug_logs();
+        assert_eq!(
+            logs,
+            [GuestDebugLogLine {
+                cycles: 100,
+                frame: 1,
+                text: "room cross 1->2".to_string(),
+            }]
+        );
+        assert!(telemetry.drain_debug_logs().is_empty());
     }
 
     #[test]
@@ -898,6 +1209,10 @@ mod tests {
             summary.counter_max_values[counter::VISUAL_MAX_LATENESS_VBLANKS as usize],
             2
         );
+        assert_eq!(
+            summary.counter_latest_values[counter::VISUAL_MAX_LATENESS_VBLANKS as usize],
+            1
+        );
     }
 
     #[test]
@@ -918,6 +1233,7 @@ mod tests {
         assert_eq!(stage_name(stage::SKY), "sky");
         assert_eq!(stage_name(stage::FAR_VISTA), "far vista");
         assert_eq!(stage_name(stage::IMAGE_PROPS), "image props");
+        assert_eq!(stage_name(stage::PORTAL_VISIBILITY), "portal visibility");
         assert_eq!(
             counter_name(counter::CD_STREAM_BENCH_STATUS),
             "cd stream status"
