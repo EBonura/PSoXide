@@ -175,6 +175,396 @@ impl ResourceId {
     }
 }
 
+/// Stable identifier for a node inside one authored UI scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct UiNodeId(u64);
+
+impl UiNodeId {
+    /// The root UI node id every UI scene starts with.
+    pub const ROOT: Self = Self(1);
+
+    /// Return the raw integer value for compact UI/debug display.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// Screen-space rectangle in authored PSX framebuffer pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiRect {
+    /// Left edge in canvas pixels.
+    pub x: i16,
+    /// Top edge in canvas pixels.
+    pub y: i16,
+    /// Width in canvas pixels.
+    pub width: u16,
+    /// Height in canvas pixels.
+    pub height: u16,
+}
+
+impl UiRect {
+    /// Build a screen-space UI rectangle.
+    pub const fn new(x: i16, y: i16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+impl Default for UiRect {
+    fn default() -> Self {
+        Self::new(0, 0, 32, 12)
+    }
+}
+
+/// Runtime value a UI element can bind to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiValueBinding {
+    /// Literal fixed-point Q12 value.
+    ConstantQ12(i32),
+    /// Player health value.
+    PlayerHealth,
+    /// Player health maximum.
+    PlayerHealthMax,
+    /// Player stamina value.
+    PlayerStamina,
+    /// Player stamina maximum.
+    PlayerStaminaMax,
+}
+
+impl UiValueBinding {
+    /// Human-readable label for editor UI.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ConstantQ12(_) => "Constant",
+            Self::PlayerHealth => "Player Health",
+            Self::PlayerHealthMax => "Player Health Max",
+            Self::PlayerStamina => "Player Stamina",
+            Self::PlayerStaminaMax => "Player Stamina Max",
+        }
+    }
+}
+
+/// Authored 2D UI node type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiNodeKind {
+    /// Root fixed-resolution PSX canvas.
+    Canvas {
+        /// Canvas width in pixels.
+        width: u16,
+        /// Canvas height in pixels.
+        height: u16,
+    },
+    /// Organizational transform group.
+    Group {
+        /// Group bounds in canvas pixels.
+        rect: UiRect,
+    },
+    /// Solid screen-space rectangle.
+    Rect {
+        /// Rectangle bounds in canvas pixels.
+        rect: UiRect,
+        /// Fill colour.
+        color: [u8; 3],
+    },
+    /// Text label drawn with the runtime font atlas.
+    Label {
+        /// Label bounds in canvas pixels.
+        rect: UiRect,
+        /// Authored text.
+        text: String,
+        /// Text tint.
+        color: [u8; 3],
+    },
+    /// Horizontal status bar backed by a runtime value binding.
+    Bar {
+        /// Bar bounds in canvas pixels.
+        rect: UiRect,
+        /// Current value binding.
+        value: UiValueBinding,
+        /// Maximum value binding.
+        max: UiValueBinding,
+        /// Filled portion colour.
+        fill: [u8; 3],
+        /// Empty/background colour.
+        background: [u8; 3],
+    },
+}
+
+impl UiNodeKind {
+    /// Editor-facing node kind label.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Canvas { .. } => "Canvas",
+            Self::Group { .. } => "Group",
+            Self::Rect { .. } => "Rect",
+            Self::Label { .. } => "Label",
+            Self::Bar { .. } => "Bar",
+        }
+    }
+
+    /// Mutable bounds for node kinds that occupy a screen-space rectangle.
+    pub fn rect_mut(&mut self) -> Option<&mut UiRect> {
+        match self {
+            Self::Canvas { .. } => None,
+            Self::Group { rect }
+            | Self::Rect { rect, .. }
+            | Self::Label { rect, .. }
+            | Self::Bar { rect, .. } => Some(rect),
+        }
+    }
+
+    /// Bounds for node kinds that occupy a screen-space rectangle.
+    pub fn rect(&self) -> Option<UiRect> {
+        match self {
+            Self::Canvas { .. } => None,
+            Self::Group { rect }
+            | Self::Rect { rect, .. }
+            | Self::Label { rect, .. }
+            | Self::Bar { rect, .. } => Some(*rect),
+        }
+    }
+}
+
+/// One node in an authored UI scene tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiNode {
+    /// Stable node id.
+    pub id: UiNodeId,
+    /// Parent id. `None` only for the scene root.
+    pub parent: Option<UiNodeId>,
+    /// Child ids in display/draw order.
+    pub children: Vec<UiNodeId>,
+    /// Display name.
+    pub name: String,
+    /// Node payload.
+    pub kind: UiNodeKind,
+}
+
+impl UiNode {
+    /// Build a UI node.
+    pub fn new(
+        id: UiNodeId,
+        parent: Option<UiNodeId>,
+        name: impl Into<String>,
+        kind: UiNodeKind,
+    ) -> Self {
+        Self {
+            id,
+            parent,
+            children: Vec::new(),
+            name: name.into(),
+            kind,
+        }
+    }
+}
+
+/// One visible row in the UI scene hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiNodeRow {
+    /// Node id.
+    pub id: UiNodeId,
+    /// Nesting depth.
+    pub depth: usize,
+    /// Display name.
+    pub name: String,
+    /// Node kind label.
+    pub kind: &'static str,
+    /// Number of direct children.
+    pub child_count: usize,
+}
+
+/// One authored 2D UI scene.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiScene {
+    /// Display name.
+    pub name: String,
+    /// Root node id.
+    pub root: UiNodeId,
+    next_node_id: u64,
+    nodes: Vec<UiNode>,
+}
+
+impl UiScene {
+    /// Create the default HUD scene authored at PSX 320x240 resolution.
+    pub fn default_hud() -> Self {
+        let mut root = UiNode::new(
+            UiNodeId::ROOT,
+            None,
+            "HUD",
+            UiNodeKind::Canvas {
+                width: 320,
+                height: 240,
+            },
+        );
+        let health = UiNode::new(
+            UiNodeId(2),
+            Some(UiNodeId::ROOT),
+            "Health Bar",
+            UiNodeKind::Bar {
+                rect: UiRect::new(18, 16, 120, 8),
+                value: UiValueBinding::PlayerHealth,
+                max: UiValueBinding::PlayerHealthMax,
+                fill: [94, 16, 24],
+                background: [30, 26, 28],
+            },
+        );
+        let stamina = UiNode::new(
+            UiNodeId(3),
+            Some(UiNodeId::ROOT),
+            "Stamina Bar",
+            UiNodeKind::Bar {
+                rect: UiRect::new(18, 29, 96, 5),
+                value: UiValueBinding::PlayerStamina,
+                max: UiValueBinding::PlayerStaminaMax,
+                fill: [44, 98, 48],
+                background: [30, 26, 28],
+            },
+        );
+        root.children = vec![health.id, stamina.id];
+        Self {
+            name: "HUD".to_string(),
+            root: UiNodeId::ROOT,
+            next_node_id: 4,
+            nodes: vec![root, health, stamina],
+        }
+    }
+
+    /// All nodes in storage order.
+    pub fn nodes(&self) -> &[UiNode] {
+        &self.nodes
+    }
+
+    /// Get a node.
+    pub fn node(&self, id: UiNodeId) -> Option<&UiNode> {
+        self.nodes.iter().find(|node| node.id == id)
+    }
+
+    /// Get a mutable node.
+    pub fn node_mut(&mut self, id: UiNodeId) -> Option<&mut UiNode> {
+        self.nodes.iter_mut().find(|node| node.id == id)
+    }
+
+    /// Add a node under `parent`. Invalid parents fall back to the root.
+    pub fn add_node(
+        &mut self,
+        parent: UiNodeId,
+        name: impl Into<String>,
+        kind: UiNodeKind,
+    ) -> UiNodeId {
+        let parent = if self.node(parent).is_some() {
+            parent
+        } else {
+            self.root
+        };
+        let id = UiNodeId(self.next_node_id);
+        self.next_node_id = self.next_node_id.saturating_add(1);
+        self.nodes.push(UiNode::new(id, Some(parent), name, kind));
+        if let Some(parent_node) = self.node_mut(parent) {
+            parent_node.children.push(id);
+        }
+        id
+    }
+
+    /// Remove a non-root node and all of its descendants.
+    pub fn remove_node(&mut self, id: UiNodeId) -> bool {
+        if id == self.root {
+            return false;
+        }
+        if self.node(id).is_none() {
+            return false;
+        }
+
+        let mut remove_ids = HashSet::new();
+        let mut stack = vec![id];
+        while let Some(next) = stack.pop() {
+            if !remove_ids.insert(next) {
+                continue;
+            }
+            if let Some(node) = self.node(next) {
+                stack.extend(node.children.iter().copied());
+            }
+        }
+
+        self.nodes.retain(|node| !remove_ids.contains(&node.id));
+        for node in &mut self.nodes {
+            node.children.retain(|child| !remove_ids.contains(child));
+        }
+        true
+    }
+
+    /// Normalize loaded UI data.
+    pub fn normalize(&mut self) {
+        if self.node(self.root).is_none() {
+            self.root = UiNodeId::ROOT;
+            self.nodes.insert(
+                0,
+                UiNode::new(
+                    self.root,
+                    None,
+                    "HUD",
+                    UiNodeKind::Canvas {
+                        width: 320,
+                        height: 240,
+                    },
+                ),
+            );
+        }
+        if let Some(root) = self.node_mut(self.root) {
+            root.parent = None;
+            if root.name.trim().is_empty() {
+                root.name = "HUD".to_string();
+            }
+            if !matches!(root.kind, UiNodeKind::Canvas { .. }) {
+                root.kind = UiNodeKind::Canvas {
+                    width: 320,
+                    height: 240,
+                };
+            }
+        }
+        let mut max_id = self.root.raw();
+        let valid_ids: HashSet<UiNodeId> = self.nodes.iter().map(|node| node.id).collect();
+        for node in &mut self.nodes {
+            max_id = max_id.max(node.id.raw());
+            node.children.retain(|child| valid_ids.contains(child));
+            if node.id != self.root && node.parent.is_none() {
+                node.parent = Some(self.root);
+            }
+        }
+        self.next_node_id = self.next_node_id.max(max_id.saturating_add(1));
+    }
+
+    /// Flatten the hierarchy into display rows.
+    pub fn hierarchy_rows(&self) -> Vec<UiNodeRow> {
+        let mut rows = Vec::new();
+        self.push_hierarchy_row(self.root, 0, &mut rows);
+        rows
+    }
+
+    fn push_hierarchy_row(&self, id: UiNodeId, depth: usize, rows: &mut Vec<UiNodeRow>) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        rows.push(UiNodeRow {
+            id,
+            depth,
+            name: node.name.clone(),
+            kind: node.kind.label(),
+            child_count: node.children.len(),
+        });
+        for &child in &node.children {
+            self.push_hierarchy_row(child, depth.saturating_add(1), rows);
+        }
+    }
+}
+
+fn default_ui_scenes() -> Vec<UiScene> {
+    vec![UiScene::default_hud()]
+}
+
 /// Explicit material assignment for one floor/ceiling triangle.
 /// Missing override means "inherit the parent face material"; this
 /// enum represents the two explicit states a triangle can choose.
@@ -8100,6 +8490,9 @@ pub struct ProjectDocument {
     pub runtime_texture_split_max_edge: u16,
     /// Open scenes. The first scene is the active scene for now.
     pub scenes: Vec<Scene>,
+    /// Authored screen-space UI scenes. The first scene is the HUD for now.
+    #[serde(default = "default_ui_scenes")]
+    pub ui_scenes: Vec<UiScene>,
     /// Project resources.
     pub resources: Vec<Resource>,
     next_resource_id: u64,
@@ -8117,6 +8510,7 @@ impl ProjectDocument {
             runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),
             runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
+            ui_scenes: default_ui_scenes(),
             resources: Vec::new(),
             next_resource_id: 1,
         }
@@ -8144,6 +8538,16 @@ impl ProjectDocument {
     /// Active scene, mutable.
     pub fn active_scene_mut(&mut self) -> &mut Scene {
         &mut self.scenes[0]
+    }
+
+    /// Active UI scene.
+    pub fn active_ui_scene(&self) -> Option<&UiScene> {
+        self.ui_scenes.first()
+    }
+
+    /// Active UI scene, mutable.
+    pub fn active_ui_scene_mut(&mut self) -> Option<&mut UiScene> {
+        self.ui_scenes.first_mut()
     }
 
     /// Add a resource and return its id.
@@ -8490,6 +8894,12 @@ impl ProjectDocument {
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
         self.editor_camera.normalize();
+        if self.ui_scenes.is_empty() {
+            self.ui_scenes = default_ui_scenes();
+        }
+        for scene in &mut self.ui_scenes {
+            scene.normalize();
+        }
         for scene in &mut self.scenes {
             scene.normalize_world_root();
             for node in &mut scene.nodes {
@@ -10679,6 +11089,81 @@ mod tests {
 
         assert!(ron.contains("Demo7 Map"));
         assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn new_project_seeds_hud_ui_scene() {
+        let project = ProjectDocument::new("ui");
+        let ui_scene = project.active_ui_scene().expect("default UI scene");
+        assert_eq!(ui_scene.name, "HUD");
+        assert!(matches!(
+            ui_scene.node(ui_scene.root).map(|node| &node.kind),
+            Some(UiNodeKind::Canvas {
+                width: 320,
+                height: 240
+            })
+        ));
+        assert!(ui_scene.nodes().iter().any(|node| {
+            node.name == "Health Bar"
+                && matches!(
+                    node.kind,
+                    UiNodeKind::Bar {
+                        value: UiValueBinding::PlayerHealth,
+                        max: UiValueBinding::PlayerHealthMax,
+                        ..
+                    }
+                )
+        }));
+        assert!(ui_scene.nodes().iter().any(|node| {
+            node.name == "Stamina Bar"
+                && matches!(
+                    node.kind,
+                    UiNodeKind::Bar {
+                        value: UiValueBinding::PlayerStamina,
+                        max: UiValueBinding::PlayerStaminaMax,
+                        ..
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn normalize_loaded_restores_missing_ui_scenes() {
+        let mut project = ProjectDocument::new("legacy");
+        project.ui_scenes.clear();
+        project.normalize_loaded();
+        assert_eq!(project.active_ui_scene().unwrap().name, "HUD");
+    }
+
+    #[test]
+    fn ui_scene_remove_node_removes_descendants_and_root_is_stable() {
+        let mut scene = UiScene::default_hud();
+        let group = scene.add_node(
+            scene.root,
+            "Prompt",
+            UiNodeKind::Group {
+                rect: UiRect::new(48, 180, 120, 24),
+            },
+        );
+        let label = scene.add_node(
+            group,
+            "Prompt Text",
+            UiNodeKind::Label {
+                rect: UiRect::new(52, 184, 96, 12),
+                text: "Open".to_string(),
+                color: [220, 226, 240],
+            },
+        );
+
+        assert!(!scene.remove_node(scene.root));
+        assert!(scene.remove_node(group));
+        assert!(scene.node(group).is_none());
+        assert!(scene.node(label).is_none());
+        assert!(!scene
+            .node(scene.root)
+            .expect("root")
+            .children
+            .contains(&group));
     }
 
     #[test]

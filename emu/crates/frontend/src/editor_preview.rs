@@ -20,7 +20,7 @@
 //! strokes without PSX integer-pixel limitations.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use emulator_core::gpu::GpuCmdLogEntry;
 use psx_gpu::material::{BlendMode, TextureMaterial};
@@ -79,6 +79,7 @@ const PREVIEW_CLEAR_SLOT: usize = OT_DEPTH - 1;
 const PREVIEW_SKY_SLOT: usize = OT_DEPTH - 2;
 const PREVIEW_FAR_VISTA_SLOT: usize = OT_DEPTH - 3;
 const PREVIEW_GEOMETRY_SLOT_MAX: usize = OT_DEPTH - 4;
+const OT_ADDRESS_WINDOW_BYTES: usize = 0x0100_0000;
 const PREVIEW_SHADOW_DEPTH_BIAS: u32 = 128;
 const PREVIEW_SHADOW_FLOOR_LIFT: i32 = 4;
 const PREVIEW_SHADOW_RADIUS_SCALE_NUM: i32 = 5;
@@ -147,8 +148,14 @@ const EDITOR_PREVIEW_PAINT_STROKE_WIDTH: f32 = 2.0;
 /// That only works if every chained primitive sits in the same 16 MB
 /// window as the OT itself -- heap-allocated `Vec<TriFlat>` lives in
 /// a totally separate region on host and segfaults on dereference.
-/// Keeping the array inline alongside the OT in the static fixes
-/// that and matches PS1's flat 2 MB main RAM layout.
+/// Keeping the array inline alongside the OT is necessary but not
+/// sufficient on macOS: ASLR can place the static near the end of a
+/// 16 MB window, so later arrays cross into the next window and the
+/// 24-bit tag can no longer be reconstructed from the OT's high bits.
+/// The 16 MB-aligned heap allocation below makes the whole scratch
+/// arena live in one reconstructable address window and matches PS1's
+/// flat 2 MB main RAM layout closely enough for host preview.
+#[repr(C, align(16777216))]
 struct PreviewScratch {
     ot: OrderingTable<OT_DEPTH>,
     sky_quads: [QuadGouraud; SKY_QUAD_CAP],
@@ -172,13 +179,17 @@ struct PreviewScratch {
     overlay_lines: Vec<psxed_ui::EditorViewportOverlayLine>,
     /// GP0(02h) fill-rectangle packet: 1 tag word + 3 data words
     /// (`opcode|color`, `pack_xy(x, y)`, `pack_xy(w, h)`). Must live
-    /// in the same static as the OT for the same reason the prim
-    /// arrays do -- `iter_packets` reconstructs full pointers from
-    /// the OT's 24-bit chain encoding plus the OT struct's high
-    /// address bits, so chained packets must share that 16 MB
-    /// region.
+    /// in the same aligned arena as the OT for the same reason the
+    /// prim arrays do -- `iter_packets` reconstructs full pointers
+    /// from the OT's 24-bit chain encoding plus the OT struct's high
+    /// address bits, so chained packets must share that 16 MB region.
     clear_packet: [u32; 4],
 }
+
+const _: () = assert!(
+    core::mem::size_of::<PreviewScratch>() <= OT_ADDRESS_WINDOW_BYTES,
+    "editor preview scratch must fit in one 24-bit OT address window"
+);
 
 const EMPTY_TRI: TriFlat = TriFlat::new([(0, 0), (0, 0), (0, 0)], 0, 0, 0);
 const EMPTY_FAR_VISTA_QUAD: QuadFlat = QuadFlat::new([(0, 0), (0, 0), (0, 0), (0, 0)], 0, 0, 0);
@@ -194,24 +205,46 @@ const EMPTY_TEX_TRI: TriTextured = TriTextured::new(
     (0x80, 0x80, 0x80),
 );
 
-static SCRATCH: Mutex<PreviewScratch> = Mutex::new(PreviewScratch {
-    ot: OrderingTable::new(),
-    sky_quads: [EMPTY_SKY_QUAD; SKY_QUAD_CAP],
-    far_vista_quads: [EMPTY_FAR_VISTA_QUAD; FAR_VISTA_QUAD_CAP],
-    tris: [EMPTY_TRI; TRI_CAP],
-    tex_tris: [EMPTY_TEX_TRI; TRI_CAP],
-    model_vertices: [psx_engine::ProjectedVertex::new(0, 0, 0); PREVIEW_MODEL_VERTEX_CAP],
-    model_faces: [psx_engine::TexturedModelRenderFace::ZERO; PREVIEW_MODEL_FACE_CAP],
-    model_parts: [psx_asset::ModelPart::ZERO; PREVIEW_MODEL_PART_CAP],
-    model_source_vertices: [psx_asset::ModelVertex::ZERO; PREVIEW_MODEL_SOURCE_VERTEX_CAP],
-    model_joint_transforms: [psx_engine::JointViewTransform::ZERO; PREVIEW_JOINT_CAP],
-    used: 0,
-    sky_used: 0,
-    far_vista_used: 0,
-    tex_used: 0,
-    overlay_lines: Vec::new(),
-    clear_packet: [0; 4],
-});
+static SCRATCH: OnceLock<Mutex<Box<PreviewScratch>>> = OnceLock::new();
+
+fn preview_scratch() -> &'static Mutex<Box<PreviewScratch>> {
+    SCRATCH.get_or_init(|| Mutex::new(new_preview_scratch()))
+}
+
+fn new_preview_scratch() -> Box<PreviewScratch> {
+    let mut scratch = Box::<PreviewScratch>::new_uninit();
+    let ptr = scratch.as_mut_ptr();
+    // SAFETY: every field is written exactly once before `assume_init`.
+    // `Box::<PreviewScratch>::new_uninit()` asks the allocator for
+    // the large alignment that static Mach-O sections did not
+    // reliably preserve, so release builds can still reconstruct
+    // 24-bit OT links from the OT's address window.
+    unsafe {
+        std::ptr::addr_of_mut!((*ptr).ot).write(OrderingTable::new());
+        std::ptr::addr_of_mut!((*ptr).sky_quads).write([EMPTY_SKY_QUAD; SKY_QUAD_CAP]);
+        std::ptr::addr_of_mut!((*ptr).far_vista_quads)
+            .write([EMPTY_FAR_VISTA_QUAD; FAR_VISTA_QUAD_CAP]);
+        std::ptr::addr_of_mut!((*ptr).tris).write([EMPTY_TRI; TRI_CAP]);
+        std::ptr::addr_of_mut!((*ptr).tex_tris).write([EMPTY_TEX_TRI; TRI_CAP]);
+        std::ptr::addr_of_mut!((*ptr).model_vertices)
+            .write([psx_engine::ProjectedVertex::new(0, 0, 0); PREVIEW_MODEL_VERTEX_CAP]);
+        std::ptr::addr_of_mut!((*ptr).model_faces)
+            .write([psx_engine::TexturedModelRenderFace::ZERO; PREVIEW_MODEL_FACE_CAP]);
+        std::ptr::addr_of_mut!((*ptr).model_parts)
+            .write([psx_asset::ModelPart::ZERO; PREVIEW_MODEL_PART_CAP]);
+        std::ptr::addr_of_mut!((*ptr).model_source_vertices)
+            .write([psx_asset::ModelVertex::ZERO; PREVIEW_MODEL_SOURCE_VERTEX_CAP]);
+        std::ptr::addr_of_mut!((*ptr).model_joint_transforms)
+            .write([psx_engine::JointViewTransform::ZERO; PREVIEW_JOINT_CAP]);
+        std::ptr::addr_of_mut!((*ptr).used).write(0);
+        std::ptr::addr_of_mut!((*ptr).sky_used).write(0);
+        std::ptr::addr_of_mut!((*ptr).far_vista_used).write(0);
+        std::ptr::addr_of_mut!((*ptr).tex_used).write(0);
+        std::ptr::addr_of_mut!((*ptr).overlay_lines).write(Vec::new());
+        std::ptr::addr_of_mut!((*ptr).clear_packet).write([0; 4]);
+        scratch.assume_init()
+    }
+}
 
 impl PreviewScratch {
     fn geometry_full(&self) -> bool {
@@ -274,7 +307,9 @@ pub fn build_phase1_frame(
         };
     };
 
-    let mut scratch = SCRATCH.lock().expect("editor preview scratch mutex");
+    let mut scratch = preview_scratch()
+        .lock()
+        .expect("editor preview scratch mutex");
     scratch.used = 0;
     scratch.sky_used = 0;
     scratch.far_vista_used = 0;
@@ -439,10 +474,10 @@ pub fn build_phase1_frame(
     let _ = setup_gte_for_camera(camera);
     if preview_bounds {
         walk_entity_bounds(entity_bounds, selected, hovered_entity_node, &mut scratch);
-        if let Some((center, half_extents)) = selected_bounds {
-            if !selected_node_is_image_prop(project, selected) {
-                push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
-            }
+    }
+    if let Some((center, half_extents)) = selected_bounds {
+        if !selected_node_is_image_prop(project, selected) {
+            push_aabb_wireframe(&mut scratch, center, half_extents, ENTITY_BOUND_SELECTED);
         }
     }
     for selection in validation_issue_primitives {
@@ -454,9 +489,10 @@ pub fn build_phase1_frame(
         }
     }
 
-    // SAFETY: `scratch.tris` lives until end of this function (the
-    // mutex guard keeps it alive); the OT chain pointers reference
-    // packets inside that vec and are stable while the lock is held.
+    // SAFETY: the mutex guard keeps the preview packet arenas alive
+    // while the OT is walked. `PreviewScratch` is 16 MB-aligned so the
+    // OT's 24-bit packet links reconstruct addresses inside the same
+    // host address window.
     let cmd_log = unsafe { psx_gpu_render::build_cmd_log(&scratch.ot) };
     EditorPreviewFrame {
         cmd_log,
@@ -5418,13 +5454,14 @@ mod tests {
         face_side_visible, floor_anchored_model_origin, horizontal_triangle_world_points,
         light_face, material_sized_uvs, material_texture_tint, node_room_local_origin,
         preview_lights, preview_model_reference, preview_player_reference,
-        preview_projected_triangle_hw_safe, preview_shadow_radius, preview_static_model_reference,
-        preview_vertices_in_front, push_wall_face, room_depth_slot, rotate_image_prop_local,
-        setup_gte_for_camera, shadow_depth_slot, should_draw_culled_face_outline,
-        wall_material_sidedness_for_edge, wall_side_visible, yaw_rotation_q12, FaceShade,
-        MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV, PREVIEW_FLOOR_UVS,
-        PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_SHADOW_DEPTH_BIAS,
-        PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN, PREVIEW_WALL_UVS, SCRATCH,
+        preview_projected_triangle_hw_safe, preview_scratch, preview_shadow_radius,
+        preview_static_model_reference, preview_vertices_in_front, push_clear, push_tri,
+        push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
+        shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
+        wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
+        GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
+        PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
+        PREVIEW_WALL_UVS,
     };
     use psx_engine::{PointLightSample, WorldVertex};
     use psx_gpu::material::BlendMode;
@@ -5454,6 +5491,192 @@ mod tests {
         match shade {
             FaceShade::Flat { rgb, .. } => rgb,
             FaceShade::Textured { tint, .. } => tint,
+        }
+    }
+
+    fn address_window(addr: usize) -> usize {
+        addr & !(super::OT_ADDRESS_WINDOW_BYTES - 1)
+    }
+
+    fn assert_same_ot_window<T>(label: &str, ot_window: usize, value: &T) {
+        let start = value as *const T as usize;
+        let end = start + core::mem::size_of::<T>().saturating_sub(1);
+        assert_eq!(address_window(start), ot_window, "{label} start");
+        assert_eq!(address_window(end), ot_window, "{label} end");
+    }
+
+    fn headless_preview_renderer() -> Option<psx_gpu_render::HwRenderer> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("editor-preview-test-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+            },
+            None,
+        ))
+        .ok()?;
+        Some(psx_gpu_render::HwRenderer::new_headless(device, queue))
+    }
+
+    fn count_nonblack_rgba(rgba: &[u8]) -> usize {
+        rgba.chunks_exact(4)
+            .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
+            .count()
+    }
+
+    #[test]
+    fn preview_scratch_packet_arenas_share_one_ot_address_window() {
+        let scratch = preview_scratch()
+            .lock()
+            .expect("editor preview scratch mutex");
+        let ot_window = address_window(scratch.ot.submit_head() as usize);
+
+        assert_same_ot_window("ordering table", ot_window, &scratch.ot);
+        assert_same_ot_window("clear packet", ot_window, &scratch.clear_packet);
+        assert_same_ot_window("sky quads", ot_window, &scratch.sky_quads);
+        assert_same_ot_window("far vista quads", ot_window, &scratch.far_vista_quads);
+        assert_same_ot_window("flat tris", ot_window, &scratch.tris);
+        assert_same_ot_window("textured tris", ot_window, &scratch.tex_tris);
+    }
+
+    #[test]
+    fn preview_scratch_command_log_walk_terminates() {
+        let mut scratch = preview_scratch()
+            .lock()
+            .expect("editor preview scratch mutex");
+        scratch.used = 0;
+        scratch.tex_used = 0;
+        scratch.overlay_lines.clear();
+        scratch.ot.clear();
+
+        push_clear(&mut scratch, [0, 0, 0]);
+        assert!(push_tri(
+            &mut scratch,
+            [
+                Projected {
+                    sx: 0,
+                    sy: 0,
+                    sz: 256,
+                },
+                Projected {
+                    sx: 32,
+                    sy: 0,
+                    sz: 256,
+                },
+                Projected {
+                    sx: 0,
+                    sy: 32,
+                    sz: 256,
+                },
+            ],
+            (255, 0, 0),
+        ));
+
+        let log = unsafe { psx_gpu_render::build_cmd_log(&scratch.ot) };
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].opcode, 0x02);
+        assert_eq!(log[1].opcode, 0x20);
+    }
+
+    #[test]
+    fn demo10_preview_frame_contains_draw_commands() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repo root");
+        let project_root = repo_root.join("editor/projects/demo10");
+        let project =
+            ProjectDocument::load_from_path(project_root.join("project.ron")).expect("demo10");
+        let mut textures = crate::editor_textures::EditorTextures::new();
+        textures.refresh(&project, &project_root);
+        textures.refresh_models(&project, &project_root);
+        let mut assets = crate::editor_assets::EditorAssets::new();
+        assets.refresh(&project, &project_root);
+
+        let camera = ViewportCameraState {
+            mode: ViewportCameraMode::Orbit,
+            yaw_q12: 320,
+            pitch_q12: 300,
+            radius: 8192,
+            target: [2048, 512, 2048],
+            position: [0, 0, 0],
+        };
+        let empty_hidden = std::collections::HashSet::new();
+        let frame = super::build_phase1_frame(
+            &project,
+            camera,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            &empty_hidden,
+            None,
+            NodeId::ROOT,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            &textures,
+            &assets,
+        );
+
+        let draw_count = frame
+            .cmd_log
+            .iter()
+            .filter(|entry| matches!(entry.opcode, 0x20..=0x7F))
+            .count();
+        let mut translator = psx_gpu_render::Translator::new();
+        let translated = translator.translate(&frame.cmd_log);
+        let nonblack_vertices = translated
+            .vertices
+            .iter()
+            .filter(|v| v.color[0] != 0 || v.color[1] != 0 || v.color[2] != 0)
+            .count();
+        assert!(
+            draw_count > 0,
+            "demo10 preview should emit draw commands; opcodes={:?}",
+            frame
+                .cmd_log
+                .iter()
+                .map(|entry| entry.opcode)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            translated.total() > 0,
+            "demo10 preview should translate to vertices"
+        );
+        assert!(
+            nonblack_vertices > 0,
+            "demo10 preview should contain visible non-black vertices"
+        );
+
+        if let Some(mut renderer) = headless_preview_renderer() {
+            assert!(renderer.set_internal_scale(2, None));
+            let vram = textures.vram_words();
+            renderer.render_frame(&emulator_core::Gpu::new(), &frame.cmd_log, vram);
+            let scale = renderer.internal_scale();
+            let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+            assert!(
+                count_nonblack_rgba(&rgba) > 0,
+                "demo10 preview should render non-black pixels"
+            );
         }
     }
 
@@ -6023,7 +6246,9 @@ mod tests {
             target: [512, 512, 512],
             position,
         });
-        let mut scratch = SCRATCH.lock().expect("editor preview scratch mutex");
+        let mut scratch = preview_scratch()
+            .lock()
+            .expect("editor preview scratch mutex");
         scratch.used = 0;
         scratch.tex_used = 0;
         scratch.overlay_lines.clear();
