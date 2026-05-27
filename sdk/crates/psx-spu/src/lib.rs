@@ -31,9 +31,10 @@
 //!   byte-stream upload path, ADSR encoding helpers, sample-start
 //!   address alignment.
 //! - **Doesn't own (yet)**: ADPCM encoder (ship pre-baked samples
-//!   instead -- see `vendor/tone_*.adpcm`), XA-ADPCM / CD-audio
-//!   streaming, reverb preset tables, DMA-based sample upload.
-//!   Those land as the ladder pulls them in.
+//!   instead -- see `vendor/tone_*.adpcm`, or cook `.psau` with
+//!   `psxed audio-pack`), XA-ADPCM / CD-audio streaming, reverb
+//!   preset tables, DMA-based sample upload. Those land as the
+//!   ladder pulls them in.
 //!
 //! ## Q-format conventions
 //!
@@ -247,6 +248,22 @@ impl Pitch {
         }
     }
 
+    /// Pitch that plays a decoded sample stream at its declared
+    /// source rate. `44100` maps to [`Pitch::UNITY`].
+    pub const fn for_sample_rate(sample_rate_hz: u32) -> Self {
+        if sample_rate_hz == 0 {
+            return Self::UNITY;
+        }
+        let raw = ((0x1000u32) * sample_rate_hz + 22_050) / 44_100;
+        if raw > 0x3FFF {
+            Self(0x3FFF)
+        } else if raw == 0 {
+            Self(1)
+        } else {
+            Self(raw as u16)
+        }
+    }
+
     /// Underlying 14-bit value.
     pub const fn as_u16(self) -> u16 {
         self.0
@@ -350,6 +367,15 @@ impl Adsr {
         }
     }
 
+    /// Full-level envelope for one-shot sampled SFX. The ADPCM end
+    /// flag stops playback; the envelope stays open for the sample.
+    pub const fn sample() -> Self {
+        Self {
+            lower: 0x000F,
+            upper: 0x001F,
+        }
+    }
+
     /// Silent / "no envelope" -- voice stays at key-on volume until
     /// key-off. Useful as a placeholder while iterating.
     pub const fn passthrough() -> Self {
@@ -436,6 +462,14 @@ impl Voice {
     pub fn set_adsr(self, adsr: Adsr) {
         write_reg16(self.reg_base() + VOICE_ADSR_LO, adsr.lower);
         write_reg16(self.reg_base() + VOICE_ADSR_HI, adsr.upper);
+    }
+
+    /// Configure this voice to play a sample already uploaded at `addr`.
+    pub fn configure_sample(self, addr: SpuAddr, sample_rate_hz: u32, volume: Volume, adsr: Adsr) {
+        self.set_volume(volume, volume);
+        self.set_pitch(Pitch::for_sample_rate(sample_rate_hz));
+        self.set_start_addr(addr);
+        self.set_adsr(adsr);
     }
 
     /// Trigger the voices whose bits are set in `mask`. The SPU
@@ -542,6 +576,13 @@ mod tests {
         // Very high multiplier clamps to MAX.
         let p = Pitch::for_frequency(100_000, 440);
         assert_eq!(p, Pitch::MAX);
+    }
+
+    #[test]
+    fn pitch_for_sample_rate_maps_to_spu_step() {
+        assert_eq!(Pitch::for_sample_rate(44_100), Pitch::UNITY);
+        assert_eq!(Pitch::for_sample_rate(22_050).as_u16(), 0x0800);
+        assert_eq!(Pitch::for_sample_rate(88_200).as_u16(), 0x2000);
     }
 
     #[test]

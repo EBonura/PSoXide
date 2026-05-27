@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/psxed-audio",
     "crates/psxed-format",
     "crates/psxed-gltf",
     "crates/psxed-obj",
@@ -28,6 +29,7 @@ too_many_arguments = "allow"
 
 [workspace.dependencies]
 psx-asset    = { path = "../sdk/crates/psx-asset" }
+psxed-audio  = { path = "crates/psxed-audio" }
 psxed-format = { path = "crates/psxed-format" }
 psxed-gltf   = { path = "crates/psxed-gltf" }
 psxed-obj    = { path = "crates/psxed-obj" }
@@ -35,5 +37,8 @@ psxed-project = { path = "crates/psxed-project" }
 psxed-tex    = { path = "crates/psxed-tex" }
 psxed-ui     = { path = "crates/psxed-ui" }
 
-egui  = "0.31"
-serde = { version = "1.0", features = ["derive"] }
+egui       = "0.31"
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2       = "0.10"
+zip        = { version = "2", default-features = false, features = ["deflate"] }
