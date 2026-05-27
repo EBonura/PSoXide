@@ -76,6 +76,8 @@ const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
 const UI_RESIZE_HANDLE_SIZE: f32 = 8.0;
+const UI_RESIZE_HANDLE_HIT_SIZE: f32 = 14.0;
+const UI_NODE_HIT_MIN_SIZE: f32 = 10.0;
 const UI_NODE_MIN_SIZE: i32 = 1;
 const UI_NODE_COORD_MIN: i32 = -4096;
 const UI_NODE_COORD_MAX: i32 = 4096;
@@ -4476,13 +4478,19 @@ impl EditorWorkspace {
         let pointer = response
             .hover_pos()
             .or_else(|| response.interact_pointer_pos());
-        let hovered_handle = pointer.and_then(|pos| {
-            ui_scene_resize_handle_hit(&scene, self.selected_ui_node, canvas_rect, canvas_size, pos)
+        let hovered_resize_target = pointer.and_then(|pos| {
+            ui_scene_resize_handle_target(
+                &scene,
+                self.selected_ui_node,
+                canvas_rect,
+                canvas_size,
+                pos,
+            )
         });
         let hovered_node =
             pointer.and_then(|pos| ui_scene_hit_test(&scene, canvas_rect, canvas_size, pos));
         if response.hovered() {
-            if let Some(handle) = hovered_handle {
+            if let Some((_, handle)) = hovered_resize_target {
                 ui.output_mut(|output| output.cursor_icon = handle.cursor());
             } else if hovered_node.is_some() {
                 ui.output_mut(|output| output.cursor_icon = egui::CursorIcon::Grab);
@@ -4491,16 +4499,16 @@ impl EditorWorkspace {
 
         if response.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
-                let picked_handle = ui_scene_resize_handle_hit(
+                let resize_target = ui_scene_resize_handle_target(
                     &scene,
                     self.selected_ui_node,
                     canvas_rect,
                     canvas_size,
                     pos,
                 );
-                if let Some(handle) = picked_handle {
+                if let Some((node, handle)) = resize_target {
                     self.begin_ui_canvas_drag(
-                        self.selected_ui_node,
+                        node,
                         UiCanvasDragMode::Resize(handle),
                         canvas_rect,
                         canvas_size,
@@ -4552,7 +4560,8 @@ impl EditorWorkspace {
             canvas_rect,
             canvas_size,
             self.selected_ui_node,
-            hovered_handle,
+            hovered_resize_target
+                .and_then(|(node, handle)| (node == self.selected_ui_node).then_some(handle)),
         );
 
         let label = format!("{}  {}x{}", preview_scene.name, canvas_w, canvas_h);
@@ -27247,23 +27256,54 @@ fn draw_ui_resize_handles(painter: &egui::Painter, rect: Rect, hovered: Option<U
     }
 }
 
-fn ui_scene_resize_handle_hit(
+fn ui_scene_resize_handle_target(
     scene: &psxed_project::UiScene,
     selected: UiNodeId,
     canvas: Rect,
     canvas_size: [u16; 2],
     pos: Pos2,
+) -> Option<(UiNodeId, UiResizeHandle)> {
+    if let Some(handle) = ui_scene_node_resize_handle_hit(scene, selected, canvas, canvas_size, pos)
+    {
+        return Some((selected, handle));
+    }
+    scene
+        .hierarchy_node_ids()
+        .into_iter()
+        .rev()
+        .filter(|id| *id != selected)
+        .find_map(|id| {
+            ui_scene_node_resize_handle_hit(scene, id, canvas, canvas_size, pos)
+                .map(|handle| (id, handle))
+        })
+}
+
+fn ui_scene_node_resize_handle_hit(
+    scene: &psxed_project::UiScene,
+    id: UiNodeId,
+    canvas: Rect,
+    canvas_size: [u16; 2],
+    pos: Pos2,
 ) -> Option<UiResizeHandle> {
-    scene.node(selected).and_then(|node| node.kind.rect())?;
+    let node = scene.node(id)?;
+    node.kind.rect()?;
     let rect = scene
-        .absolute_rect(selected)
+        .absolute_rect(id)
         .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size))?;
-    ui_resize_handle_rects(rect)
+    ui_resize_handle_hit_rects(rect)
         .into_iter()
         .find_map(|(handle, handle_rect)| handle_rect.contains(pos).then_some(handle))
 }
 
 fn ui_resize_handle_rects(rect: Rect) -> Vec<(UiResizeHandle, Rect)> {
+    ui_resize_handle_rects_with_size(rect, UI_RESIZE_HANDLE_SIZE)
+}
+
+fn ui_resize_handle_hit_rects(rect: Rect) -> Vec<(UiResizeHandle, Rect)> {
+    ui_resize_handle_rects_with_size(rect, UI_RESIZE_HANDLE_HIT_SIZE)
+}
+
+fn ui_resize_handle_rects_with_size(rect: Rect, size: f32) -> Vec<(UiResizeHandle, Rect)> {
     let c = rect.center();
     let centers = [
         (UiResizeHandle::TopLeft, rect.left_top()),
@@ -27277,12 +27317,7 @@ fn ui_resize_handle_rects(rect: Rect) -> Vec<(UiResizeHandle, Rect)> {
     ];
     centers
         .into_iter()
-        .map(|(handle, center)| {
-            (
-                handle,
-                Rect::from_center_size(center, Vec2::splat(UI_RESIZE_HANDLE_SIZE)),
-            )
-        })
+        .map(|(handle, center)| (handle, Rect::from_center_size(center, Vec2::splat(size))))
         .collect()
 }
 
@@ -27296,10 +27331,16 @@ fn ui_scene_hit_test(
         let node = scene.node(id)?;
         node.kind.rect()?;
         let rect = scene.absolute_rect(id)?;
-        ui_rect_to_screen(rect, canvas, canvas_size)
+        ui_node_hit_rect(ui_rect_to_screen(rect, canvas, canvas_size))
             .contains(pos)
             .then_some(id)
     })
+}
+
+fn ui_node_hit_rect(rect: Rect) -> Rect {
+    let expand_x = ((UI_NODE_HIT_MIN_SIZE - rect.width()) * 0.5).max(0.0);
+    let expand_y = ((UI_NODE_HIT_MIN_SIZE - rect.height()) * 0.5).max(0.0);
+    rect.expand2(Vec2::new(expand_x, expand_y))
 }
 
 fn ui_screen_to_canvas(pos: Pos2, canvas: Rect, canvas_size: [u16; 2]) -> Option<[f32; 2]> {

@@ -16,8 +16,8 @@
 //! (points the BIOS at `PSX.EXE`) and the EXE itself, both in the
 //! root directory. Pass `--cdtest-sectors N` to insert deterministic
 //! `CDTEST.BIN` stream-benchmark data before `PSX.EXE`. Pass one or
-//! more `--cdda-track <raw-pcm>` paths to copy sector-aligned raw
-//! CD-DA track files beside the data image and emit a sibling `.cue`.
+//! more `--cdda-track <raw-pcm>` paths to append sector-aligned raw
+//! CD-DA tracks into the same `.bin` and emit a sibling `.cue`.
 //!
 //! The tool is deliberately a tiny CLI -- actual encoding lives in
 //! `psx-iso::iso9660` so it's reusable from build scripts, test
@@ -32,6 +32,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+const CDDA_PREGAP_SECTORS: u32 = 150;
 
 struct Args {
     exe: PathBuf,
@@ -144,8 +146,9 @@ fn print_usage() {
                          Optional newline-delimited room id order for\n\
                          WORLD.PAK payload placement.\n\
          --cdda-track PATH\n\
-                         Add a sector-aligned raw CD-DA track and emit\n\
-                         a sibling .cue. May be repeated.\n\
+                         Append a sector-aligned raw CD-DA track to\n\
+                         the output .bin and emit a sibling .cue. May\n\
+                         be repeated.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );
@@ -203,7 +206,7 @@ fn main() -> ExitCode {
     }
     builder.add_file("PSX.EXE", exe_bytes);
 
-    let (image, sector_size, format_label) = if args.cooked_iso {
+    let (mut image, sector_size, format_label) = if args.cooked_iso {
         let iso = builder.build();
         (iso, psx_iso::iso9660::SECTOR_SIZE, "cooked .iso")
     } else {
@@ -211,15 +214,10 @@ fn main() -> ExitCode {
         (bin, psx_iso::iso9660::RAW_SECTOR_SIZE, "raw .bin")
     };
 
-    if let Err(e) = fs::write(&args.out, &image) {
-        eprintln!("write {}: {e}", args.out.display());
-        return ExitCode::from(1);
-    }
-
-    let cue_tracks = if args.cdda_tracks.is_empty() {
+    let cdda_tracks = if args.cdda_tracks.is_empty() {
         Vec::new()
     } else {
-        match copy_cdda_tracks_next_to_image(&args.out, &args.cdda_tracks) {
+        match append_cdda_tracks_to_image(&mut image, &args.cdda_tracks) {
             Ok(tracks) => tracks,
             Err(e) => {
                 eprintln!("{e}");
@@ -227,9 +225,15 @@ fn main() -> ExitCode {
             }
         }
     };
-    if !cue_tracks.is_empty() {
+
+    if let Err(e) = fs::write(&args.out, &image) {
+        eprintln!("write {}: {e}", args.out.display());
+        return ExitCode::from(1);
+    }
+
+    if !args.cooked_iso {
         let cue_path = args.out.with_extension("cue");
-        if let Err(e) = write_mixed_mode_cue(&cue_path, &args.out, &cue_tracks) {
+        if let Err(e) = write_cue(&cue_path, &args.out, &cdda_tracks) {
             eprintln!("{e}");
             return ExitCode::from(1);
         }
@@ -246,15 +250,22 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn copy_cdda_tracks_next_to_image(
-    image_path: &Path,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CddaCueTrack {
+    number: u8,
+    index0_sector: u32,
+    index1_sector: u32,
+}
+
+fn append_cdda_tracks_to_image(
+    image: &mut Vec<u8>,
     tracks: &[PathBuf],
-) -> Result<Vec<String>, String> {
-    let out_dir = image_path
-        .parent()
-        .ok_or_else(|| format!("{} has no parent directory", image_path.display()))?;
-    let mut cue_names = Vec::with_capacity(tracks.len());
-    for track in tracks {
+) -> Result<Vec<CddaCueTrack>, String> {
+    let mut cue_tracks = Vec::with_capacity(tracks.len());
+    for (index, track) in tracks.iter().enumerate() {
+        if index >= 98 {
+            return Err("CUE sheets can only address tracks 01 through 99".to_string());
+        }
         let bytes = fs::read(track).map_err(|e| format!("read {}: {e}", track.display()))?;
         if bytes.is_empty() || bytes.len() % psx_iso::SECTOR_BYTES != 0 {
             return Err(format!(
@@ -262,20 +273,26 @@ fn copy_cdda_tracks_next_to_image(
                 track.display()
             ));
         }
-        let name = cue_file_name(track)?;
-        let dest = out_dir.join(&name);
-        if track != &dest {
-            fs::write(&dest, bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
-        }
-        cue_names.push(name);
+        let index0_sector = (image.len() / psx_iso::SECTOR_BYTES) as u32;
+        image.resize(
+            image.len() + CDDA_PREGAP_SECTORS as usize * psx_iso::SECTOR_BYTES,
+            0,
+        );
+        let index1_sector = (image.len() / psx_iso::SECTOR_BYTES) as u32;
+        image.extend_from_slice(&bytes);
+        cue_tracks.push(CddaCueTrack {
+            number: (index + 2) as u8,
+            index0_sector,
+            index1_sector,
+        });
     }
-    Ok(cue_names)
+    Ok(cue_tracks)
 }
 
-fn write_mixed_mode_cue(
+fn write_cue(
     cue_path: &Path,
     image_path: &Path,
-    cdda_track_names: &[String],
+    cdda_tracks: &[CddaCueTrack],
 ) -> Result<(), String> {
     let data_name = cue_file_name(image_path)?;
     let mut text = String::new();
@@ -283,14 +300,22 @@ fn write_mixed_mode_cue(
         "FILE \"{}\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
         data_name
     ));
-    for (i, name) in cdda_track_names.iter().enumerate() {
-        let track_number = i + 2;
+    for track in cdda_tracks {
         text.push_str(&format!(
-            "FILE \"{}\" BINARY\n  TRACK {:02} AUDIO\n    PREGAP 00:02:00\n    INDEX 01 00:00:00\n",
-            name, track_number
+            "  TRACK {:02} AUDIO\n    INDEX 00 {}\n    INDEX 01 {}\n",
+            track.number,
+            cue_msf(track.index0_sector),
+            cue_msf(track.index1_sector)
         ));
     }
     fs::write(cue_path, text).map_err(|e| format!("write {}: {e}", cue_path.display()))
+}
+
+fn cue_msf(frames: u32) -> String {
+    let m = frames / (60 * 75);
+    let s = (frames / 75) % 60;
+    let f = frames % 75;
+    format!("{m:02}:{s:02}:{f:02}")
 }
 
 fn cue_file_name(path: &Path) -> Result<String, String> {
@@ -460,5 +485,55 @@ mod tests {
             "song.bin"
         );
         assert!(cue_file_name(std::path::Path::new("bad\"name.bin")).is_err());
+    }
+
+    #[test]
+    fn cue_msf_formats_file_relative_frames() {
+        assert_eq!(cue_msf(0), "00:00:00");
+        assert_eq!(cue_msf(74), "00:00:74");
+        assert_eq!(cue_msf(75), "00:01:00");
+        assert_eq!(cue_msf(150), "00:02:00");
+    }
+
+    #[test]
+    fn cdda_tracks_are_appended_to_single_bin_with_index_offsets() {
+        let dir = std::env::temp_dir().join(format!(
+            "mkisopsx-test-{}-{}",
+            std::process::id(),
+            "single-bin-cdda"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let track_path = dir.join("track02.cdda");
+        let mut audio = vec![0x7Au8; psx_iso::SECTOR_BYTES * 2];
+        audio[psx_iso::SECTOR_BYTES] = 0x5D;
+        std::fs::write(&track_path, &audio).unwrap();
+
+        let mut image = vec![0x11u8; psx_iso::SECTOR_BYTES * 10];
+        let tracks = append_cdda_tracks_to_image(&mut image, &[track_path]).unwrap();
+        assert_eq!(
+            tracks,
+            vec![CddaCueTrack {
+                number: 2,
+                index0_sector: 10,
+                index1_sector: 160,
+            }]
+        );
+        assert_eq!(image.len(), psx_iso::SECTOR_BYTES * 162);
+        assert_eq!(image[10 * psx_iso::SECTOR_BYTES], 0);
+        assert_eq!(image[160 * psx_iso::SECTOR_BYTES], 0x7A);
+        assert_eq!(image[161 * psx_iso::SECTOR_BYTES], 0x5D);
+
+        let cue_path = dir.join("game.cue");
+        let image_path = dir.join("game.bin");
+        write_cue(&cue_path, &image_path, &tracks).unwrap();
+        let cue = std::fs::read_to_string(cue_path).unwrap();
+        assert!(cue.contains("FILE \"game.bin\" BINARY\n"));
+        assert!(cue.contains("  TRACK 02 AUDIO\n"));
+        assert!(cue.contains("    INDEX 00 00:00:10\n"));
+        assert!(cue.contains("    INDEX 01 00:02:10\n"));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
