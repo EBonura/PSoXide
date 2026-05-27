@@ -182,14 +182,14 @@ pub struct SchedulerConfig {
     /// presenting anyway. Higher values preserve gameplay speed under render
     /// load; lower values reduce black-screen risk under catastrophic overload.
     ///
-    /// `0` means "match the visual cadence": a 30 Hz visual target on a
-    /// 60 Hz display runs at most two fixed ticks before presenting.
+    /// `0` means "no cap": fixed simulation catches up to display VBlank
+    /// time before another visual frame is rendered. This is the default
+    /// because slow visuals should drop frames, not slow gameplay time.
     pub max_fixed_ticks_before_visual: u16,
 }
 
 impl SchedulerConfig {
-    /// Cadence-aware default: match the visual interval supplied to
-    /// [`FrameScheduler::new`].
+    /// Default: preserve fixed simulation speed and let visuals drop.
     pub const DEFAULT_MAX_FIXED_TICKS_BEFORE_VISUAL: u16 = 0;
 
     /// Build default scheduler tuning.
@@ -205,13 +205,9 @@ impl SchedulerConfig {
         self
     }
 
-    const fn normalized(self, visual_interval: u16) -> Self {
+    const fn normalized(self, _visual_interval: u16) -> Self {
         Self {
-            max_fixed_ticks_before_visual: if self.max_fixed_ticks_before_visual == 0 {
-                visual_interval
-            } else {
-                self.max_fixed_ticks_before_visual
-            },
+            max_fixed_ticks_before_visual: self.max_fixed_ticks_before_visual,
         }
     }
 }
@@ -284,6 +280,7 @@ impl FrameScheduler {
         let fixed_ticks_ready = self.next_fixed_tick <= elapsed_vblank_ticks;
         let visual_due = self.due_visual_intervals != 0;
         let fixed_burst_open = !visual_due
+            || self.config.max_fixed_ticks_before_visual == 0
             || self.fixed_ticks_since_visual < self.config.max_fixed_ticks_before_visual;
 
         if fixed_ticks_ready && fixed_burst_open {
@@ -445,18 +442,18 @@ mod tests {
             updates += 1;
         }
 
-        assert_eq!(updates, 2);
+        assert_eq!(updates, 4);
         assert_eq!(
             scheduler.next_action(4),
             SchedulerAction::RunVisualFrame {
                 missed_visual_intervals: 1,
-                fixed_update_clamped: true,
+                fixed_update_clamped: false,
             }
         );
     }
 
     #[test]
-    fn scheduler_default_fixed_burst_tracks_visual_interval() {
+    fn scheduler_default_fixed_burst_catches_up_to_display_time() {
         let mut scheduler = FrameScheduler::new(SchedulerConfig::new(), 3);
         complete_due_update(&mut scheduler, 0);
         scheduler.complete_visual_frame();
@@ -467,14 +464,14 @@ mod tests {
             updates += 1;
         }
 
-        assert_eq!(updates, 3);
-        assert!(matches!(
+        assert_eq!(updates, 9);
+        assert_eq!(
             scheduler.next_action(9),
             SchedulerAction::RunVisualFrame {
-                fixed_update_clamped: true,
-                ..
+                missed_visual_intervals: 2,
+                fixed_update_clamped: false,
             }
-        ));
+        );
     }
 
     #[test]
