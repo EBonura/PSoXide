@@ -29,7 +29,7 @@ use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
-use psx_spu::{self as spu, tones, Pitch, SpuAddr, Voice};
+use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
 
 // ----------------------------------------------------------------------
@@ -85,15 +85,35 @@ const START_AUTO_FRAMES: u16 = 30;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
-const SPU_SHOOT: SpuAddr = SpuAddr::new(0x1010);
-const SPU_KILL: SpuAddr = SpuAddr::new(0x1020);
-const SPU_MARCH: SpuAddr = SpuAddr::new(0x1030);
-const SPU_LOSE: SpuAddr = SpuAddr::new(0x1040);
+const SPU_SAMPLE_BASE: SpuAddr = SpuAddr::new(0x1010);
 
 const VOICE_SHOOT: Voice = Voice::V0;
 const VOICE_KILL: Voice = Voice::V1;
 const VOICE_MARCH: Voice = Voice::V2;
 const VOICE_LOSE: Voice = Voice::V3;
+
+const SFX_BANK: [sfx::Sample<'static>; 4] = [
+    sfx::Sample {
+        voice: VOICE_SHOOT,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/swoosh.psau"),
+        volume: Volume::linear(1, 20),
+    },
+    sfx::Sample {
+        voice: VOICE_KILL,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/explosion_short.psau"),
+        volume: Volume::linear(1, 22),
+    },
+    sfx::Sample {
+        voice: VOICE_MARCH,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau"),
+        volume: Volume::linear(1, 24),
+    },
+    sfx::Sample {
+        voice: VOICE_LOSE,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/hit_metal.psau"),
+        volume: Volume::linear(1, 26),
+    },
+];
 
 // ----------------------------------------------------------------------
 // Effects tunables
@@ -466,14 +486,7 @@ static mut BG_QUAD: QuadGouraud = QuadGouraud {
 impl Scene for Invaders {
     fn init(&mut self, _ctx: &mut Ctx) {
         spu::init();
-        spu::upload_adpcm(SPU_SHOOT, tones::SAWTOOTH);
-        spu::upload_adpcm(SPU_KILL, tones::SQUARE);
-        spu::upload_adpcm(SPU_MARCH, tones::TRIANGLE);
-        spu::upload_adpcm(SPU_LOSE, tones::SINE);
-        sfx::configure_voice(VOICE_SHOOT, SPU_SHOOT, Pitch::raw(0x1800));
-        sfx::configure_voice(VOICE_KILL, SPU_KILL, Pitch::raw(0x1200));
-        sfx::configure_voice(VOICE_MARCH, SPU_MARCH, Pitch::raw(0x0A00));
-        sfx::configure_voice(VOICE_LOSE, SPU_LOSE, Pitch::raw(0x0500));
+        sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
 

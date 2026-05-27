@@ -683,9 +683,14 @@ impl AppState {
     pub fn refresh_menu_library(&mut self) {
         use std::collections::HashMap;
 
+        let sdk_examples_root = self.resolve_sdk_examples_dir().filter(|p| p.exists());
+
         // Pass 1: map "BIN path" → (CUE-derived title, CUE id).
         let mut cue_owns_bin: HashMap<PathBuf, (String, String)> = HashMap::new();
         for e in &self.library.entries {
+            if is_sdk_examples_disc_artifact(&e.path, e.kind, sdk_examples_root.as_deref()) {
+                continue;
+            }
             if e.kind != GameKind::DiscCue {
                 continue;
             }
@@ -716,6 +721,9 @@ impl AppState {
                 && !label.contains("(Track 01)")
                 && !label.contains("(Track 1)")
             {
+                continue;
+            }
+            if is_sdk_examples_disc_artifact(&e.path, e.kind, sdk_examples_root.as_deref()) {
                 continue;
             }
 
@@ -1572,10 +1580,7 @@ const PROJECT_LAUNCH_ID_PREFIX: &str = "project-path:";
 
 fn project_build_launch_id(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    format!(
-        "{PROJECT_LAUNCH_ID_PREFIX}{}",
-        canonical.to_string_lossy()
-    )
+    format!("{PROJECT_LAUNCH_ID_PREFIX}{}", canonical.to_string_lossy())
 }
 
 fn library_entry_for_launch_id<'a>(
@@ -1584,22 +1589,26 @@ fn library_entry_for_launch_id<'a>(
 ) -> Option<&'a LibraryEntry> {
     if let Some(path) = launch_id.strip_prefix(PROJECT_LAUNCH_ID_PREFIX) {
         let path = Path::new(path);
-        return entries.iter().find(|entry| paths_equivalent(&entry.path, path));
+        return entries
+            .iter()
+            .find(|entry| paths_equivalent(&entry.path, path));
     }
     entries.iter().find(|entry| entry.id == launch_id)
 }
 
 fn is_internal_example_artifact(path: &Path) -> bool {
-    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+    let Some(stem) = path.file_stem().and_then(|n| n.to_str()) else {
         return false;
     };
-    if !matches!(
-        file_name,
-        "editor-playtest.exe"
-            | "editor-playtest.bin"
-            | "editor-playtest.cue"
-            | "editor-playtest.iso"
-    ) {
+    let Some(ext) = path.extension().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !stem.starts_with("editor-playtest")
+        || !matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "exe" | "bin" | "cue" | "iso"
+        )
+    {
         return false;
     }
 
@@ -1625,6 +1634,20 @@ fn is_internal_example_artifact(path: &Path) -> bool {
             Some("build")
         )
     )
+}
+
+fn is_sdk_examples_disc_artifact(
+    path: &Path,
+    kind: GameKind,
+    sdk_examples_root: Option<&Path>,
+) -> bool {
+    if matches!(kind, GameKind::Exe | GameKind::Unknown) {
+        return false;
+    }
+    let Some(root) = sdk_examples_root else {
+        return false;
+    };
+    path_is_under(path, root)
 }
 
 fn path_is_under(path: &Path, root: &Path) -> bool {
@@ -2310,12 +2333,45 @@ mod tests {
         assert!(is_internal_example_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/editor-playtest.iso"
         )));
+        assert!(is_internal_example_artifact(Path::new(
+            "build/examples/mipsel-sony-psx/release/editor-playtest-demo10-profile.bin"
+        )));
         assert!(!is_internal_example_artifact(Path::new(
-            "build/examples/mipsel-sony-psx/release/showcase-room.exe"
+            "build/examples/mipsel-sony-psx/release/hello-cdda.exe"
         )));
         assert!(!is_internal_example_artifact(Path::new(
             "/games/editor-playtest.bin"
         )));
+    }
+
+    #[test]
+    fn sdk_example_disc_artifacts_are_hidden_from_games() {
+        let sdk_root = Path::new("build/examples/mipsel-sony-psx/release");
+        assert!(is_sdk_examples_disc_artifact(
+            Path::new("build/examples/mipsel-sony-psx/release/hello-cdda.bin"),
+            GameKind::DiscBin,
+            Some(sdk_root)
+        ));
+        assert!(is_sdk_examples_disc_artifact(
+            Path::new("build/examples/mipsel-sony-psx/release/hello-cdda.cue"),
+            GameKind::DiscCue,
+            Some(sdk_root)
+        ));
+        assert!(is_sdk_examples_disc_artifact(
+            Path::new("build/examples/mipsel-sony-psx/release/editor-playtest-demo10.bin"),
+            GameKind::DiscBin,
+            Some(sdk_root)
+        ));
+        assert!(!is_sdk_examples_disc_artifact(
+            Path::new("build/examples/mipsel-sony-psx/release/hello-cdda.exe"),
+            GameKind::Exe,
+            Some(sdk_root)
+        ));
+        assert!(!is_sdk_examples_disc_artifact(
+            Path::new("/games/Crash Bandicoot (USA).bin"),
+            GameKind::DiscBin,
+            Some(sdk_root)
+        ));
     }
 
     #[test]

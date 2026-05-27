@@ -16,23 +16,21 @@
 .PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run \
         test-sdk \
         psxed assets \
-        examples hello-tri hello-input hello-ot hello-tex hello-gte hello-audio hello-cdda hello-cdda-disc \
-        run-tri run-input run-ot run-tex run-gte run-audio run-cdda probe-cdda-audio \
-        showcase-textured-sprite run-showcase-textured-sprite \
-        showcase-text run-showcase-text \
-        game-pong run-game-pong \
-        game-breakout run-game-breakout \
+	examples hello-tri hello-input hello-ot hello-tex hello-gte hello-audio hello-cdda hello-cdda-disc \
+	run-tri run-input run-ot run-tex run-gte run-audio run-cdda probe-cdda-audio \
+	showcase-text run-showcase-text \
+	game-pong run-game-pong \
+	game-breakout run-game-breakout \
         game-invaders run-game-invaders \
         showcase-3d run-showcase-3d \
         showcase-model run-showcase-model \
         showcase-lights run-showcase-lights \
-        showcase-fog run-showcase-fog \
-        showcase-particles run-showcase-particles \
-        hello-engine run-hello-engine \
-        showcase-room run-showcase-room \
-        cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
-        profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
-        profile-demo3-disc-stream-forward profile-demo7-camera-sweep
+	showcase-fog run-showcase-fog \
+	showcase-particles run-showcase-particles \
+	hello-engine run-hello-engine \
+	cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
+	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
+	profile-demo3-disc-stream-forward profile-demo7-camera-sweep
 
 help:
 	@echo "PSoXide targets:"
@@ -74,12 +72,10 @@ help:
 	@echo "    make hello-tri    - build the direct-GP0 triangle demo"
 	@echo "    make hello-input  - build the pad-poll demo"
 	@echo "    make hello-ot     - build the DMA linked-list demo"
-	@echo "    make hello-tex    - build the textured-sprite demo"
+	@echo "    make hello-tex    - build the CLUT texture demo"
 	@echo "    make hello-gte    - build the GTE perspective-transform demo"
 	@echo "    make hello-audio  - build the imported SPU sample demo"
 	@echo "    make hello-cdda   - build the CD-DA playback demo"
-	@echo "    make showcase-textured-sprite"
-	@echo "                      - build the polished textured-sprite showcase"
 	@echo "    make showcase-text"
 	@echo "                      - build the text / font capabilities showcase"
 	@echo "    make game-pong     - build the Pong mini-game"
@@ -98,8 +94,6 @@ help:
 	@echo "    make run-audio    - build + side-load hello-audio into the frontend"
 	@echo "    make run-cdda     - build + side-load hello-cdda with a mixed-mode disc"
 	@echo "    make probe-cdda-audio - render hello-cdda audio to a WAV + silence check"
-	@echo "    make run-showcase-textured-sprite"
-	@echo "                      - build + side-load the textured-sprite showcase"
 	@echo "    make run-showcase-text"
 	@echo "                      - build + side-load the text capabilities showcase"
 	@echo "    make run-game-pong     - build + side-load the Pong mini-game"
@@ -286,9 +280,6 @@ hello-cdda-disc: hello-cdda
 		--volume PSOXIDE \
 		--cdda-track ../../$(CDDA_DEMO_TRACK)
 
-showcase-textured-sprite:
-	cd engine/examples/showcase-textured-sprite && cargo build --release
-
 showcase-text:
 	cd engine/examples/showcase-text && cargo build --release
 
@@ -317,9 +308,6 @@ showcase-fog: assets
 
 showcase-particles:
 	cd engine/examples/showcase-particles && cargo build --release
-
-showcase-room:
-	cd engine/examples/showcase-room && cargo build --release
 
 # Cook a project into editor-playtest/generated/. With no
 # arguments cooks the embedded starter project; pass
@@ -459,7 +447,7 @@ assets: psxed
 	$(call cook_texture,$(HELLO_TEX)/vendor/brick-wall.jpg,$(TEXTURE_ASSETS)/brick-wall.psxt,64x64,4)
 	$(call cook_texture,$(HELLO_TEX)/vendor/floor.jpg,$(TEXTURE_ASSETS)/floor.psxt,64x64,4)
 
-examples: hello-tri hello-input hello-ot hello-tex hello-gte hello-audio hello-cdda showcase-textured-sprite showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles showcase-room hello-engine
+examples: hello-tri hello-input hello-ot hello-tex hello-gte hello-audio hello-cdda showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles hello-engine
 	@echo ""
 	@echo "Built public examples:"
 	@find $(EXAMPLE_OUT) -maxdepth 1 -type f -name '*.exe' ! -name 'editor-playtest.exe' -print | sort | while IFS= read -r exe; do ls -la "$$exe"; done
@@ -492,9 +480,6 @@ run-cdda: hello-cdda-disc
 probe-cdda-audio: hello-cdda-disc
 	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.exe PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.cue cargo run -p emulator-core --example probe_cdda_wav --release
 
-run-showcase-textured-sprite: showcase-textured-sprite
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-textured-sprite.exe cargo run -p frontend --release
-
 run-showcase-text: showcase-text
 	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-text.exe cargo run -p frontend --release
 
@@ -524,6 +509,3 @@ run-showcase-particles: showcase-particles
 
 run-hello-engine: hello-engine
 	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-engine.exe cargo run -p frontend --release
-
-run-showcase-room: showcase-room
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-room.exe cargo run -p frontend --release

@@ -28,12 +28,12 @@
 
 extern crate psx_rt;
 
-use psx_engine::{App, Config, Ctx, Scene, button, sfx};
-use psx_font::{FontAtlas, fonts::BASIC_8X16};
+use psx_engine::{button, sfx, App, Config, Ctx, Scene};
+use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
-use psx_spu::{self as spu, Pitch, SpuAddr, Voice, tones};
+use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
 
 // ----------------------------------------------------------------------
@@ -81,15 +81,35 @@ const ROW_COLORS: [(u8, u8, u8); ROWS] = [
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
-const SPU_WALL: SpuAddr = SpuAddr::new(0x1010);
-const SPU_PADDLE: SpuAddr = SpuAddr::new(0x1020);
-const SPU_BRICK: SpuAddr = SpuAddr::new(0x1030);
-const SPU_LOSE: SpuAddr = SpuAddr::new(0x1040);
+const SPU_SAMPLE_BASE: SpuAddr = SpuAddr::new(0x1010);
 
 const VOICE_WALL: Voice = Voice::V0;
 const VOICE_PADDLE: Voice = Voice::V1;
 const VOICE_BRICK: Voice = Voice::V2;
 const VOICE_LOSE: Voice = Voice::V3;
+
+const SFX_BANK: [sfx::Sample<'static>; 4] = [
+    sfx::Sample {
+        voice: VOICE_WALL,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau"),
+        volume: Volume::linear(1, 18),
+    },
+    sfx::Sample {
+        voice: VOICE_PADDLE,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/hit_punch.psau"),
+        volume: Volume::linear(1, 16),
+    },
+    sfx::Sample {
+        voice: VOICE_BRICK,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/hit_metal.psau"),
+        volume: Volume::linear(1, 22),
+    },
+    sfx::Sample {
+        voice: VOICE_LOSE,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/explosion_short.psau"),
+        volume: Volume::linear(1, 22),
+    },
+];
 
 // ----------------------------------------------------------------------
 // Game tunables
@@ -305,14 +325,7 @@ static mut BG_QUAD: QuadGouraud = QuadGouraud {
 impl Scene for Breakout {
     fn init(&mut self, _ctx: &mut Ctx) {
         spu::init();
-        spu::upload_adpcm(SPU_WALL, tones::SINE);
-        spu::upload_adpcm(SPU_PADDLE, tones::SQUARE);
-        spu::upload_adpcm(SPU_BRICK, tones::TRIANGLE);
-        spu::upload_adpcm(SPU_LOSE, tones::SAWTOOTH);
-        sfx::configure_voice(VOICE_WALL, SPU_WALL, Pitch::raw(0x1200));
-        sfx::configure_voice(VOICE_PADDLE, SPU_PADDLE, Pitch::raw(0x0E00));
-        sfx::configure_voice(VOICE_BRICK, SPU_BRICK, Pitch::raw(0x1600));
-        sfx::configure_voice(VOICE_LOSE, SPU_LOSE, Pitch::raw(0x0600));
+        sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
 
@@ -378,9 +391,11 @@ impl Scene for Breakout {
         {
             self.ball_y = PADDLE_Y - BALL_SIZE as i16;
             self.ball_vy = -self.ball_vy.abs();
-            let hit_offset = (self.ball_x + BALL_SIZE as i16 / 2) - (self.paddle_x + PADDLE_W as i16 / 2);
+            let hit_offset =
+                (self.ball_x + BALL_SIZE as i16 / 2) - (self.paddle_x + PADDLE_W as i16 / 2);
             let half = PADDLE_W as i16 / 2;
-            self.ball_vx = (hit_offset * BALL_MAX_SPEED / half).clamp(-BALL_MAX_SPEED, BALL_MAX_SPEED);
+            self.ball_vx =
+                (hit_offset * BALL_MAX_SPEED / half).clamp(-BALL_MAX_SPEED, BALL_MAX_SPEED);
             if self.ball_vx == 0 {
                 self.ball_vx = 1;
             }
@@ -427,18 +442,8 @@ impl Breakout {
 
         // Slot 7 (back) -- gradient background.
         *bg = QuadGouraud::new(
-            [
-                (0, 0),
-                (SCREEN_W, 0),
-                (0, SCREEN_H),
-                (SCREEN_W, SCREEN_H),
-            ],
-            [
-                (22, 30, 64),
-                (22, 30, 64),
-                (4, 6, 18),
-                (4, 6, 18),
-            ],
+            [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
+            [(22, 30, 64), (22, 30, 64), (4, 6, 18), (4, 6, 18)],
         );
         ot.add(7, bg, QuadGouraud::WORDS);
 
@@ -535,7 +540,9 @@ impl Breakout {
     }
 
     fn draw_hud(&self) {
-        let Some(font) = self.font.as_ref() else { return };
+        let Some(font) = self.font.as_ref() else {
+            return;
+        };
         font.draw_text(4, 4, "SCORE", (180, 180, 220));
         let score = u16_hex(self.score);
         font.draw_text(4 + 8 * 6, 4, score.as_str(), (240, 240, 140));
@@ -553,12 +560,7 @@ impl Breakout {
                 );
             }
             Phase::Won => {
-                font.draw_text(
-                    (SCREEN_W - 8 * 10) / 2,
-                    100,
-                    "YOU  WIN!",
-                    (255, 220, 120),
-                );
+                font.draw_text((SCREEN_W - 8 * 10) / 2, 100, "YOU  WIN!", (255, 220, 120));
                 font.draw_text(
                     (SCREEN_W - 8 * 17) / 2,
                     130,
@@ -567,12 +569,7 @@ impl Breakout {
                 );
             }
             Phase::Lost => {
-                font.draw_text(
-                    (SCREEN_W - 8 * 10) / 2,
-                    100,
-                    "GAME OVER",
-                    (255, 120, 120),
-                );
+                font.draw_text((SCREEN_W - 8 * 10) / 2, 100, "GAME OVER", (255, 120, 120));
                 font.draw_text(
                     (SCREEN_W - 8 * 17) / 2,
                     130,
