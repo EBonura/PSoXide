@@ -5249,7 +5249,7 @@ impl EditorWorkspace {
         let show_debug_map = self.show_play_debug_map;
         let debug_rect = Rect::from_min_size(
             rect.left_top() + Vec2::new(44.0, 8.0),
-            Vec2::new(272.0, 145.0),
+            Vec2::new(320.0, 158.0),
         );
         let clicked_overlay = response.interact_pointer_pos().is_some_and(|pos| {
             controls_rect.contains(pos) || (show_debug_overlays && debug_rect.contains(pos))
@@ -5318,6 +5318,19 @@ impl EditorWorkspace {
                         metrics.total_ms, metrics.emu_ms, metrics.hw_ms, metrics.ui_ms
                     ),
                     STUDIO_TEXT_WEAK,
+                );
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "TASK fix {:>4.1}/{:>4.1}  vis {:>4.1}/{:>4.1} ms",
+                        metrics.fixed_update_task_ms,
+                        metrics.fixed_update_task_max_ms,
+                        metrics.visual_render_task_ms,
+                        metrics.visual_render_task_max_ms
+                    ),
+                    STUDIO_TEXT,
                 );
                 draw_play_metric_line(
                     &painter,
@@ -10945,6 +10958,14 @@ impl EditorWorkspace {
             metrics.camera_view_sin_pitch_q12,
             metrics.camera_view_cos_pitch_q12,
             camera_forward
+        );
+        let _ = writeln!(
+            out,
+            "scheduler_tasks: fixed_avg_ms={:.3} fixed_max_ms={:.3} visual_avg_ms={:.3} visual_max_ms={:.3}",
+            metrics.fixed_update_task_ms,
+            metrics.fixed_update_task_max_ms,
+            metrics.visual_render_task_ms,
+            metrics.visual_render_task_max_ms
         );
         let _ = writeln!(
             out,
@@ -34757,6 +34778,10 @@ mod tests {
             hw_ms: 0.0,
             ui_ms: 0.0,
             step_budget_percent: 0.0,
+            fixed_update_task_ms: 0.0,
+            fixed_update_task_max_ms: 0.0,
+            visual_render_task_ms: 0.0,
+            visual_render_task_max_ms: 0.0,
             chunk_visible: 1,
             chunk_loaded: 1,
             chunk_candidates: 0,
@@ -34822,6 +34847,7 @@ mod tests {
             .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("scheduler_tasks:"));
         assert!(content.contains("runtime_player: valid=true room_index=0"));
         assert!(content.contains("connected_portals: count="));
         assert!(content.contains("portal #0:"));
