@@ -483,7 +483,7 @@ MAGIKAAAAARP_PONG := engine/examples/game-magikaaaaaarp-pong
 # high-res replacements do not break fresh clones or CI.
 define cook_texture
 	@if [ -f "$(1)" ]; then \
-	    $(PSXED) tex "$(1)" -o "$(2)" --size $(3) --depth $(4) --resample lanczos3 ; \
+	    $(PSXED) tex "$(1)" -o "$(2)" --size $(3) --depth $(4) --resample lanczos3 $(5) ; \
 	else \
 	    echo "[psxed tex] skip: source $(1) not present (using committed $(2))" ; \
 	fi
@@ -503,6 +503,7 @@ assets: psxed
 	$(call cook_texture,$(HELLO_TEX)/vendor/brick-wall.jpg,$(TEXTURE_ASSETS)/brick-wall.psxt,64x64,4)
 	$(call cook_texture,$(HELLO_TEX)/vendor/floor.jpg,$(TEXTURE_ASSETS)/floor.psxt,64x64,4)
 	$(call cook_texture,$(MAGIKAAAAARP_PONG)/vendor/magikaaaaaarp_album.jpg,$(MAGIKAAAAARP_PONG)/assets/magikaaaaaarp_album.psxt,128x128,8)
+	$(call cook_texture,$(MAGIKAAAAARP_PONG)/vendor/score_flyby.png,$(MAGIKAAAAARP_PONG)/assets/score_flyby.psxt,128x128,8,--transparent-index-zero)
 	@$(MAKE) magikaaaaaarp-pong-spectrum
 
 examples: $(PUBLIC_EXAMPLE_DISCS)

@@ -51,7 +51,7 @@ const PADDLE_H: u16 = 56;
 const PADDLE_MARGIN: i16 = 10;
 const PADDLE_SPEED: i16 = 4;
 
-const AI_SPEED: i16 = 2;
+const AI_SPEED: i16 = 3;
 const AI_HYSTERESIS: i16 = 10;
 const AI_REACTION_TICKS: u32 = 3;
 
@@ -73,14 +73,15 @@ const CUBE_HALF: i32 = 34;
 const CUBE_Z: i32 = 180;
 const CUBE_PROJECTION: i32 = 190;
 const CUBE_UVS: [(u8, u8); 4] = [(0, 0), (127, 0), (0, 127), (127, 127)];
+const SCORE_FLYBY_UVS: [(u8, u8); 4] = [(128, 0), (255, 0), (128, 127), (255, 127)];
 const CUBE_SPIN_X_STEP: Angle = Angle::from_raw_q16(0x00D0);
 const CUBE_SPIN_Y_STEP: Angle = Angle::from_raw_q16(0x0130);
 const CUBE_SPIN_Z_STEP: Angle = Angle::from_raw_q16(0x0058);
-const SCORE_FLYBY_SIZE: i16 = 74;
-const SCORE_FLYBY_Y: i16 = 120;
+const SCORE_FLYBY_SIZE: i16 = 54;
+const SCORE_FLYBY_Y: i16 = 22;
 const SCORE_FLYBY_DURATION_TICKS: u16 = 150;
 const SCORE_FLYBY_SPIN_STEP: Angle = Angle::from_raw_q16(0x0180);
-const SCORE_FLYBY_OT_SLOT: usize = 4;
+const SCORE_FLYBY_OT_SLOT: usize = 14;
 
 const SPECTRUM_BANDS: usize = 16;
 const SPECTRUM_FRAME_COUNT: usize = 6990;
@@ -98,7 +99,9 @@ const PADDLE_RECT_START: usize = CENTER_RECTS_START + CENTER_DASH_RECTS;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 const CUBE_TPAGE: Tpage = Tpage::new(640, 0, TexDepth::Bit8);
-const CUBE_CLUT: Clut = Clut::new(640, 256);
+const CUBE_CLUT: Clut = Clut::new(0, 480);
+const SCORE_FLYBY_CLUT: Clut = Clut::new(256, 480);
+const SCORE_FLYBY_TEX_X: u16 = CUBE_TPAGE.x() + 64;
 
 const SPU_SAMPLE_BASE: SpuAddr = SpuAddr::new(0x1010);
 const VOICE_WALL: Voice = Voice::V0;
@@ -147,7 +150,7 @@ static mut CUBE_QUADS: [QuadTexturedMaterial; 6] = [const {
 }; 6];
 static mut SCORE_FLYBY_QUAD: QuadTexturedMaterial = QuadTexturedMaterial::with_material(
     [(0, 0), (0, 0), (0, 0), (0, 0)],
-    CUBE_UVS,
+    SCORE_FLYBY_UVS,
     TextureMaterial::opaque(0, 0, (0, 0, 0)),
 );
 
@@ -345,6 +348,8 @@ impl Scene for MagikaaaaaarpPong {
         game_trace("magikarp: font ok");
         upload_cube_texture();
         game_trace("magikarp: texture ok");
+        upload_score_flyby_texture();
+        game_trace("magikarp: flyby texture ok");
 
         self.reset_match();
         game_trace("magikarp: init ok");
@@ -632,9 +637,9 @@ impl MagikaaaaaarpPong {
 
         *quad = QuadTexturedMaterial::with_material(
             verts,
-            CUBE_UVS,
+            SCORE_FLYBY_UVS,
             TextureMaterial::opaque(
-                CUBE_CLUT.uv_clut_word(),
+                SCORE_FLYBY_CLUT.uv_clut_word(),
                 CUBE_TPAGE.uv_tpage_word(0),
                 (128, 128, 128),
             ),
@@ -918,6 +923,47 @@ fn upload_cube_texture() {
     );
 }
 
+fn upload_score_flyby_texture() {
+    let texture =
+        Texture::from_bytes(include_bytes!("../assets/score_flyby.psxt")).expect("score flyby");
+    assert!(texture.index_zero_transparent());
+    upload_bytes(
+        VramRect::new(
+            SCORE_FLYBY_TEX_X,
+            CUBE_TPAGE.y(),
+            texture.halfwords_per_row(),
+            texture.height(),
+        ),
+        texture.pixel_bytes(),
+    );
+    upload_transparent_zero_clut(
+        VramRect::new(
+            SCORE_FLYBY_CLUT.x(),
+            SCORE_FLYBY_CLUT.y(),
+            texture.clut_entries(),
+            1,
+        ),
+        texture.clut_bytes(),
+    );
+}
+
+fn upload_transparent_zero_clut(rect: VramRect, bytes: &[u8]) {
+    let mut marked = [0u8; 512];
+    assert!(bytes.len() <= marked.len());
+    assert!(bytes.len() % 2 == 0);
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let mut color = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+        if i != 0 && color == 0 {
+            color = 1;
+        }
+        marked[i..i + 2].copy_from_slice(&color.to_le_bytes());
+        i += 2;
+    }
+    upload_bytes(rect, &marked[..bytes.len()]);
+}
+
 fn upload_opaque_clut(rect: VramRect, bytes: &[u8]) {
     let mut marked = [0u8; 512];
     assert!(bytes.len() <= marked.len());
@@ -974,11 +1020,20 @@ fn draw_title(font: &FontAtlas, tick: u32) {
     let mut i = 0;
     while i < TITLE.len() {
         let phase = base.add(Angle::from_q12(((i as u16) * 248) & 0x0FFF));
-        let y = TITLE_Y + (((phase.sin_q12() * amp as i32) >> 12) as i16);
+        let wave = phase.sin_q12();
+        let y = TITLE_Y + (((wave * amp as i32) >> 12) as i16);
+        let color = title_wave_color(wave, amp);
         let glyph = ByteStr([TITLE[i]]);
-        font.draw_text(TITLE_X + i as i16 * TITLE_GLYPH_W, y, glyph.as_str(), INK);
+        font.draw_text(TITLE_X + i as i16 * TITLE_GLYPH_W, y, glyph.as_str(), color);
         i += 1;
     }
+}
+
+fn title_wave_color(wave_q12: i32, amp: i16) -> (u8, u8, u8) {
+    let shoulder = wave_q12.abs().saturating_sub(512).min(3584);
+    let envelope = ((shoulder * 255) / 3584) as u16;
+    let fade = (amp as u16 * 255) / TITLE_WAVE_MAX_PX as u16;
+    blend_color(INK, SPECTRUM_HIGH, (envelope * fade) / 255)
 }
 
 fn title_wave_amplitude(tick: u32) -> i16 {
