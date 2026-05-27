@@ -1912,22 +1912,9 @@ fn cook_fbx_animation_bytes(
 ) -> Result<Option<Vec<u8>>, Error> {
     let duration = max_time - min_time;
     let frame_count = (duration * fps as f64).round() as usize + 1;
-    ensure_u16("animation frames", frame_count)?;
-
-    let payload_len = psxed_format::animation::AnimationHeader::SIZE
-        + frame_count * joints.len() * psxed_format::animation::POSE_RECORD_SIZE;
-    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
-    append_asset_header(
-        &mut out,
-        psxed_format::animation::MAGIC,
-        psxed_format::animation::VERSION,
-        0,
-        payload_len,
-    )?;
-    append_u16(&mut out, ensure_u16("joints", joints.len())?);
-    append_u16(&mut out, ensure_u16("animation frames", frame_count)?);
-    append_u16(&mut out, fps);
-    append_u16(&mut out, 0);
+    let frame_count_u16 = ensure_u16("animation frames", frame_count)?;
+    let joint_count_u16 = ensure_u16("joints", joints.len())?;
+    let mut records = Vec::with_capacity(frame_count * joints.len());
 
     for frame in 0..frame_count {
         let time = (min_time + frame as f64 / fps as f64).min(max_time);
@@ -1946,11 +1933,16 @@ fn cook_fbx_animation_bytes(
             if strip_animation_scale {
                 skin = strip_pose_scale(skin);
             }
-            append_pose_record(&mut out, &skin, bounds);
+            records.push(pose_record(&skin, bounds));
         }
     }
 
-    Ok(Some(out))
+    Ok(Some(finish_animation_bytes(
+        joint_count_u16,
+        frame_count_u16,
+        fps,
+        &records,
+    )?))
 }
 
 fn first_fbx_material_base_color(mesh: &ufbx::Mesh) -> [u8; 4] {
@@ -3406,22 +3398,9 @@ fn cook_animation_bytes(
 ) -> Result<Option<Vec<u8>>, Error> {
     let duration = max_time - min_time;
     let frame_count = (duration * fps as f32).round() as usize + 1;
-    ensure_u16("animation frames", frame_count)?;
-
-    let payload_len = psxed_format::animation::AnimationHeader::SIZE
-        + frame_count * joints.len() * psxed_format::animation::POSE_RECORD_SIZE;
-    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
-    append_asset_header(
-        &mut out,
-        psxed_format::animation::MAGIC,
-        psxed_format::animation::VERSION,
-        0,
-        payload_len,
-    )?;
-    append_u16(&mut out, ensure_u16("joints", joints.len())?);
-    append_u16(&mut out, ensure_u16("animation frames", frame_count)?);
-    append_u16(&mut out, fps);
-    append_u16(&mut out, 0);
+    let frame_count_u16 = ensure_u16("animation frames", frame_count)?;
+    let joint_count_u16 = ensure_u16("joints", joints.len())?;
+    let mut records = Vec::with_capacity(frame_count * joints.len());
 
     for frame in 0..frame_count {
         let time = (min_time + frame as f32 / fps as f32).min(max_time);
@@ -3439,11 +3418,16 @@ fn cook_animation_bytes(
             if strip_animation_scale {
                 skin = strip_pose_scale(skin);
             }
-            append_pose_record(&mut out, &skin, bounds);
+            records.push(pose_record(&skin, bounds));
         }
     }
 
-    Ok(Some(out))
+    Ok(Some(finish_animation_bytes(
+        joint_count_u16,
+        frame_count_u16,
+        fps,
+        &records,
+    )?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3467,22 +3451,9 @@ fn cook_mapped_gltf_animation_bytes(
 ) -> Result<Option<Vec<u8>>, Error> {
     let duration = max_time - min_time;
     let frame_count = (duration * fps as f32).round() as usize + 1;
-    ensure_u16("animation frames", frame_count)?;
-
-    let payload_len = psxed_format::animation::AnimationHeader::SIZE
-        + frame_count * joints.len() * psxed_format::animation::POSE_RECORD_SIZE;
-    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
-    append_asset_header(
-        &mut out,
-        psxed_format::animation::MAGIC,
-        psxed_format::animation::VERSION,
-        0,
-        payload_len,
-    )?;
-    append_u16(&mut out, ensure_u16("joints", joints.len())?);
-    append_u16(&mut out, ensure_u16("animation frames", frame_count)?);
-    append_u16(&mut out, fps);
-    append_u16(&mut out, 0);
+    let frame_count_u16 = ensure_u16("animation frames", frame_count)?;
+    let joint_count_u16 = ensure_u16("joints", joints.len())?;
+    let mut records = Vec::with_capacity(frame_count * joints.len());
 
     for frame in 0..frame_count {
         let time = (min_time + frame as f32 / fps as f32).min(max_time);
@@ -3506,11 +3477,16 @@ fn cook_mapped_gltf_animation_bytes(
             if strip_animation_scale {
                 skin = strip_pose_scale(skin);
             }
-            append_pose_record(&mut out, &skin, bounds);
+            records.push(pose_record(&skin, bounds));
         }
     }
 
-    Ok(Some(out))
+    Ok(Some(finish_animation_bytes(
+        joint_count_u16,
+        frame_count_u16,
+        fps,
+        &records,
+    )?))
 }
 
 fn gltf_animation_source_name(
@@ -3721,21 +3697,112 @@ fn strip_pose_scale(mut matrix: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     matrix
 }
 
-fn append_pose_record(out: &mut Vec<u8>, skin_matrix: &[[f32; 4]; 4], bounds: &ModelBounds) {
+#[derive(Clone, Debug)]
+struct PoseRecord {
+    matrix: [i16; 9],
+    translation: [i32; 3],
+}
+
+fn finish_animation_bytes(
+    joint_count: u16,
+    frame_count: u16,
+    fps: u16,
+    records: &[PoseRecord],
+) -> Result<Vec<u8>, Error> {
+    let payload_len = psxed_format::animation::AnimationHeader::SIZE
+        + records.len() * psxed_format::animation::POSE_RECORD_SIZE;
+    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
+    let translation_shift = animation_translation_shift(records);
+    append_asset_header(
+        &mut out,
+        psxed_format::animation::MAGIC,
+        psxed_format::animation::VERSION,
+        0,
+        payload_len,
+    )?;
+    append_u16(&mut out, joint_count);
+    append_u16(&mut out, frame_count);
+    append_u16(&mut out, fps);
+    append_u16(&mut out, translation_shift);
+
+    for record in records {
+        append_pose_record(&mut out, record, translation_shift as u8);
+    }
+
+    Ok(out)
+}
+
+fn pose_record(skin_matrix: &[[f32; 4]; 4], bounds: &ModelBounds) -> PoseRecord {
+    let mut matrix = [0i16; 9];
+    let mut index = 0;
     for column in skin_matrix.iter().take(3) {
         for value in column.iter().take(3) {
-            append_i16(out, q12_i16(*value));
+            matrix[index] = q12_i16(*value);
+            index += 1;
         }
     }
     let center_in_pose = transform_point(skin_matrix, bounds.center);
-    let translation = [
-        (center_in_pose[0] - bounds.center[0]) / bounds.extent,
-        (center_in_pose[1] - bounds.center[1]) / bounds.extent,
-        (center_in_pose[2] - bounds.center[2]) / bounds.extent,
-    ];
-    append_i32(out, q12_i32(translation[0]));
-    append_i32(out, q12_i32(translation[1]));
-    append_i32(out, q12_i32(translation[2]));
+    PoseRecord {
+        matrix,
+        translation: [
+            q12_i32((center_in_pose[0] - bounds.center[0]) / bounds.extent),
+            q12_i32((center_in_pose[1] - bounds.center[1]) / bounds.extent),
+            q12_i32((center_in_pose[2] - bounds.center[2]) / bounds.extent),
+        ],
+    }
+}
+
+fn append_pose_record(out: &mut Vec<u8>, record: &PoseRecord, translation_shift: u8) {
+    for value in record.matrix {
+        append_i16(out, value);
+    }
+    for value in record.translation {
+        append_i16(out, quantize_translation_i16(value, translation_shift));
+    }
+}
+
+fn animation_translation_shift(records: &[PoseRecord]) -> u16 {
+    let mut max_abs = 0i32;
+    for record in records {
+        for value in record.translation {
+            max_abs = max_abs.max(abs_i32_saturating(value));
+        }
+    }
+
+    let mut shift = 0u16;
+    while max_abs > i16::MAX as i32 && shift < 15 {
+        max_abs = (max_abs + 1) >> 1;
+        shift += 1;
+    }
+    shift
+}
+
+fn quantize_translation_i16(value: i32, shift: u8) -> i16 {
+    let shifted = round_shift_i32(value, shift);
+    shifted.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn round_shift_i32(value: i32, shift: u8) -> i32 {
+    if shift == 0 {
+        return value;
+    }
+    let value = value as i64;
+    let half = 1i64 << (shift - 1);
+    if value >= 0 {
+        ((value + half) >> shift) as i32
+    } else {
+        -(((-value + half) >> shift) as i32)
+    }
+}
+
+fn abs_i32_saturating(value: i32) -> i32 {
+    if value == i32::MIN {
+        i32::MAX
+    } else if value < 0 {
+        -value
+    } else {
+        value
+    }
 }
 
 fn animation_frame_count_from_bytes(bytes: &[u8]) -> usize {
@@ -3777,10 +3844,6 @@ fn append_i16(out: &mut Vec<u8>, value: i16) {
 }
 
 fn append_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn append_i32(out: &mut Vec<u8>, value: i32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -4425,22 +4488,7 @@ mod tests {
         let bounds =
             ModelBounds::from_min_max([-2.0, -3.0, -4.0], [4.0, 5.0, 6.0], 30_000.0).unwrap();
         let skin = compose_trs([3.0, -2.0, 1.0], quat_z_degrees(90.0), [1.0, 1.0, 1.0]);
-        let payload_len = psxed_format::animation::AnimationHeader::SIZE
-            + psxed_format::animation::POSE_RECORD_SIZE;
-        let mut bytes = Vec::new();
-        append_asset_header(
-            &mut bytes,
-            psxed_format::animation::MAGIC,
-            psxed_format::animation::VERSION,
-            0,
-            payload_len,
-        )
-        .unwrap();
-        append_u16(&mut bytes, 1);
-        append_u16(&mut bytes, 1);
-        append_u16(&mut bytes, 15);
-        append_u16(&mut bytes, 0);
-        append_pose_record(&mut bytes, &skin, &bounds);
+        let bytes = finish_animation_bytes(1, 1, 15, &[pose_record(&skin, &bounds)]).unwrap();
 
         let animation = psx_asset::Animation::from_bytes(&bytes).unwrap();
         let pose = animation.pose(0, 0).unwrap();

@@ -749,12 +749,16 @@ pub struct Animation<'a> {
     joint_count: u16,
     frame_count: u16,
     sample_rate_hz: u16,
+    pose_record_size: usize,
+    translation_shift: u8,
 }
 
 impl<'a> Animation<'a> {
     /// Parse a cooked `.psxanim` blob.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
-        use psxed_format::animation::{AnimationHeader, MAGIC, POSE_RECORD_SIZE, VERSION};
+        use psxed_format::animation::{
+            AnimationHeader, MAGIC, POSE_RECORD_SIZE, POSE_RECORD_SIZE_V1, VERSION, VERSION_V1,
+        };
 
         if bytes.len() < psxed_format::AssetHeader::SIZE {
             return Err(ParseError::Truncated);
@@ -764,9 +768,13 @@ impl<'a> Animation<'a> {
             return Err(ParseError::WrongMagic);
         }
         let version = read_u16(bytes, 4);
-        if version != VERSION {
-            return Err(ParseError::UnsupportedVersion(version));
-        }
+        let pose_record_size = match version {
+            VERSION => POSE_RECORD_SIZE,
+            VERSION_V1 => POSE_RECORD_SIZE_V1,
+            _ => {
+                return Err(ParseError::UnsupportedVersion(version));
+            }
+        };
         let payload_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
         let payload_start = psxed_format::AssetHeader::SIZE;
         let actual_payload = bytes.len().saturating_sub(payload_start);
@@ -784,6 +792,15 @@ impl<'a> Animation<'a> {
         let joint_count = read_u16(ah, 0);
         let frame_count = read_u16(ah, 2);
         let sample_rate_hz = read_u16(ah, 4);
+        let translation_shift = if version == VERSION {
+            let shift = read_u16(ah, 6);
+            if shift > 15 {
+                return Err(ParseError::InvalidAnimationLayout);
+            }
+            shift as u8
+        } else {
+            0
+        };
         if joint_count == 0 || frame_count == 0 || sample_rate_hz == 0 {
             return Err(ParseError::InvalidAnimationLayout);
         }
@@ -793,7 +810,7 @@ impl<'a> Animation<'a> {
             .checked_mul(frame_count as usize)
             .ok_or(ParseError::TableOverflow)?;
         let pose_bytes = pose_count
-            .checked_mul(POSE_RECORD_SIZE)
+            .checked_mul(pose_record_size)
             .ok_or(ParseError::TableOverflow)?;
         let poses = take_table(bytes, &mut off, pose_bytes)?;
         if off != bytes.len() {
@@ -805,6 +822,8 @@ impl<'a> Animation<'a> {
             joint_count,
             frame_count,
             sample_rate_hz,
+            pose_record_size,
+            translation_shift,
         })
     }
 
@@ -824,6 +843,18 @@ impl<'a> Animation<'a> {
     #[inline]
     pub fn sample_rate_hz(&self) -> u16 {
         self.sample_rate_hz
+    }
+
+    /// Byte size of one stored pose record.
+    #[inline]
+    pub fn pose_record_size(&self) -> usize {
+        self.pose_record_size
+    }
+
+    /// Shared right shift used by compact v2 stored translations.
+    #[inline]
+    pub fn translation_shift(&self) -> u8 {
+        self.translation_shift
     }
 
     /// Q12 sampled-frame phase advance for one playback tick.
@@ -851,9 +882,7 @@ impl<'a> Animation<'a> {
         if frame_index >= self.frame_count || joint_index >= self.joint_count {
             return None;
         }
-        let base = frame_index as usize
-            * self.joint_count as usize
-            * psxed_format::animation::POSE_RECORD_SIZE;
+        let base = frame_index as usize * self.joint_count as usize * self.pose_record_size;
         self.pose_at_frame_offset(base, joint_index)
     }
 
@@ -862,29 +891,50 @@ impl<'a> Animation<'a> {
         if joint_index >= self.joint_count {
             return None;
         }
-        let base = frame_offset
-            .checked_add(joint_index as usize * psxed_format::animation::POSE_RECORD_SIZE)?;
-        let bytes = self
-            .poses
-            .get(base..base + psxed_format::animation::POSE_RECORD_SIZE)?;
-        let matrix = [
-            [read_i16(bytes, 0), read_i16(bytes, 2), read_i16(bytes, 4)],
-            [read_i16(bytes, 6), read_i16(bytes, 8), read_i16(bytes, 10)],
-            [
-                read_i16(bytes, 12),
-                read_i16(bytes, 14),
-                read_i16(bytes, 16),
-            ],
-        ];
+        let base = frame_offset.checked_add(joint_index as usize * self.pose_record_size)?;
+        let bytes = self.poses.get(base..base + self.pose_record_size)?;
+        let matrix = read_pose_matrix(bytes);
         let off = 18;
-        let translation = Vec3I32::new(
-            read_i32(bytes, off),
-            read_i32(bytes, off + 4),
-            read_i32(bytes, off + 8),
-        );
+        let translation = if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE {
+            Vec3I32::new(
+                decode_packed_translation(read_i16(bytes, off), self.translation_shift),
+                decode_packed_translation(read_i16(bytes, off + 2), self.translation_shift),
+                decode_packed_translation(read_i16(bytes, off + 4), self.translation_shift),
+            )
+        } else {
+            Vec3I32::new(
+                read_i32(bytes, off),
+                read_i32(bytes, off + 4),
+                read_i32(bytes, off + 8),
+            )
+        };
         Some(JointPose {
             matrix,
             translation,
+        })
+    }
+
+    #[inline]
+    fn packed_pose_at_frame_offset(
+        &self,
+        frame_offset: usize,
+        joint_index: u16,
+    ) -> Option<GteJointPose> {
+        if joint_index >= self.joint_count
+            || self.pose_record_size != psxed_format::animation::POSE_RECORD_SIZE
+        {
+            return None;
+        }
+        let base = frame_offset.checked_add(joint_index as usize * self.pose_record_size)?;
+        let bytes = self.poses.get(base..base + self.pose_record_size)?;
+        Some(GteJointPose {
+            matrix: read_pose_matrix(bytes),
+            translation: Vec3I16::new(
+                read_i16(bytes, 18),
+                read_i16(bytes, 20),
+                read_i16(bytes, 22),
+            ),
+            translation_shift: self.translation_shift,
         })
     }
 
@@ -924,10 +974,10 @@ impl<'a> Animation<'a> {
             next_frame,
             base_frame_offset: base_frame as usize
                 * self.joint_count as usize
-                * psxed_format::animation::POSE_RECORD_SIZE,
+                * self.pose_record_size,
             next_frame_offset: next_frame as usize
                 * self.joint_count as usize
-                * psxed_format::animation::POSE_RECORD_SIZE,
+                * self.pose_record_size,
             alpha_q12: (frame_q12 & 0x0fff) as u16,
         })
     }
@@ -962,6 +1012,27 @@ impl AnimationPoseSample<'_> {
             .pose_at_frame_offset(self.next_frame_offset, joint_index)?;
         Some(lerp_pose_q12(a, b, self.alpha_q12))
     }
+
+    /// Packed GTE-friendly joint pose at this sample's phase.
+    ///
+    /// This is available for current v2 `.psxanim` files. Legacy v1
+    /// files return `None` and callers can fall back to [`Self::pose`].
+    #[inline]
+    pub fn gte_pose(&self, joint_index: u16) -> Option<GteJointPose> {
+        if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
+            return self
+                .animation
+                .packed_pose_at_frame_offset(self.base_frame_offset, joint_index);
+        }
+
+        let a = self
+            .animation
+            .packed_pose_at_frame_offset(self.base_frame_offset, joint_index)?;
+        let b = self
+            .animation
+            .packed_pose_at_frame_offset(self.next_frame_offset, joint_index)?;
+        Some(lerp_gte_pose_q12(a, b, self.alpha_q12))
+    }
 }
 
 /// Decoded joint pose matrix.
@@ -971,6 +1042,17 @@ pub struct JointPose {
     pub matrix: [[i16; 3]; 3],
     /// Q3.12 translation vector.
     pub translation: Vec3I32,
+}
+
+/// Compact joint pose that can feed GTE vector inputs directly.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct GteJointPose {
+    /// Q3.12 column-major 3×3 transform.
+    pub matrix: [[i16; 3]; 3],
+    /// Packed model-local translation vector.
+    pub translation: Vec3I16,
+    /// Shared left shift used to reconstruct model-local units.
+    pub translation_shift: u8,
 }
 
 /// A parsed `.psau` SPU audio sample backed by the caller's cooked blob.
@@ -1122,6 +1204,48 @@ fn lerp_pose_q12(a: JointPose, b: JointPose, alpha_q12: u16) -> JointPose {
             lerp_i32_q12(a.translation.z, b.translation.z, alpha_q12),
         ),
     }
+}
+
+#[inline]
+fn lerp_gte_pose_q12(a: GteJointPose, b: GteJointPose, alpha_q12: u16) -> GteJointPose {
+    let mut matrix = [[0i16; 3]; 3];
+    let mut col = 0;
+    while col < 3 {
+        let mut row = 0;
+        while row < 3 {
+            matrix[col][row] = lerp_i16_q12(a.matrix[col][row], b.matrix[col][row], alpha_q12);
+            row += 1;
+        }
+        col += 1;
+    }
+
+    GteJointPose {
+        matrix,
+        translation: Vec3I16::new(
+            lerp_i16_q12(a.translation.x, b.translation.x, alpha_q12),
+            lerp_i16_q12(a.translation.y, b.translation.y, alpha_q12),
+            lerp_i16_q12(a.translation.z, b.translation.z, alpha_q12),
+        ),
+        translation_shift: a.translation_shift,
+    }
+}
+
+#[inline]
+fn read_pose_matrix(bytes: &[u8]) -> [[i16; 3]; 3] {
+    [
+        [read_i16(bytes, 0), read_i16(bytes, 2), read_i16(bytes, 4)],
+        [read_i16(bytes, 6), read_i16(bytes, 8), read_i16(bytes, 10)],
+        [
+            read_i16(bytes, 12),
+            read_i16(bytes, 14),
+            read_i16(bytes, 16),
+        ],
+    ]
+}
+
+#[inline]
+fn decode_packed_translation(value: i16, shift: u8) -> i32 {
+    (value as i32).saturating_mul(1i32 << shift)
 }
 
 #[inline]
@@ -2688,7 +2812,7 @@ mod tests {
         buf.extend_from_slice(&15u16.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
 
-        for frame in 0..2i32 {
+        for frame in 0..2i16 {
             for value in [4096i16, 0, 0, 0, 4096, 0, 0, 0, 4096] {
                 buf.extend_from_slice(&value.to_le_bytes());
             }
@@ -2706,6 +2830,10 @@ mod tests {
         let pose = animation.pose(1, 0).unwrap();
         assert_eq!(pose.matrix[0][0], 4096);
         assert_eq!(pose.translation, Vec3I32::new(100, 200, 300));
+        let sample = animation.looped_pose_sample_q12(0).unwrap();
+        let gte_pose = sample.gte_pose(0).unwrap();
+        assert_eq!(gte_pose.translation, Vec3I16::new(0, 0, 0));
+        assert_eq!(gte_pose.translation_shift, 0);
     }
 
     #[test]
@@ -2724,9 +2852,9 @@ mod tests {
         buf.extend_from_slice(&0u16.to_le_bytes());
 
         for (m00, tx, ty, tz) in [
-            (4096i16, 0i32, 0i32, 0i32),
-            (2048i16, 100i32, -100i32, 50i32),
-            (4096i16, 0i32, 0i32, 0i32),
+            (4096i16, 0i16, 0i16, 0i16),
+            (2048i16, 100i16, -100i16, 50i16),
+            (4096i16, 0i16, 0i16, 0i16),
         ] {
             for value in [m00, 0, 0, 0, 4096, 0, 0, 0, 4096] {
                 buf.extend_from_slice(&value.to_le_bytes());
@@ -2742,6 +2870,10 @@ mod tests {
         assert_eq!(halfway.translation, Vec3I32::new(50, -50, 25));
         let sample = animation.looped_pose_sample_q12(0x0800).unwrap();
         assert_eq!(sample.pose(0), Some(halfway));
+        assert_eq!(
+            sample.gte_pose(0).unwrap().translation,
+            Vec3I16::new(50, -50, 25)
+        );
 
         let wrapped = animation.pose_looped_q12(0x1800, 0).unwrap();
         assert_eq!(wrapped.matrix[0][0], 3072);

@@ -2235,6 +2235,7 @@ fn register_model_for_instance(
             }
         };
         let baked_bounds = bake_model_clip_frame_bounds(&parsed_model, &parsed_anim);
+        let animation_bytes = compact_animation_bytes(&parsed_anim);
         let frame_count = match u16::try_from(baked_bounds.len()) {
             Ok(count) => count,
             Err(_) => {
@@ -2267,7 +2268,7 @@ fn register_model_for_instance(
         let safe_clip = sanitise_model_dirname(&clip.name);
         assets.push(PlaytestAsset {
             kind: PlaytestAssetKind::ModelAnimation,
-            bytes,
+            bytes: animation_bytes,
             filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
             source_label: format!("{} / {}", resource.name, clip.name),
         });
@@ -2357,6 +2358,98 @@ fn register_model_for_instance(
 }
 
 const MODEL_FRAME_BOUNDS_PAD_UNITS: i32 = 64;
+
+fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> Vec<u8> {
+    let joint_count = animation.joint_count();
+    let frame_count = animation.frame_count();
+    let sample_rate_hz = animation.sample_rate_hz();
+    let mut translations_max_abs = 0i32;
+    let mut frame = 0u16;
+    while frame < frame_count {
+        let mut joint = 0u16;
+        while joint < joint_count {
+            if let Some(pose) = animation.pose(frame, joint) {
+                translations_max_abs =
+                    translations_max_abs.max(abs_i32_saturating(pose.translation.x));
+                translations_max_abs =
+                    translations_max_abs.max(abs_i32_saturating(pose.translation.y));
+                translations_max_abs =
+                    translations_max_abs.max(abs_i32_saturating(pose.translation.z));
+            }
+            joint += 1;
+        }
+        frame += 1;
+    }
+
+    let mut translation_shift = 0u16;
+    while translations_max_abs > i16::MAX as i32 && translation_shift < 15 {
+        translations_max_abs = (translations_max_abs + 1) >> 1;
+        translation_shift += 1;
+    }
+
+    let pose_count = frame_count as usize * joint_count as usize;
+    let payload_len = psxed_format::animation::AnimationHeader::SIZE
+        + pose_count * psxed_format::animation::POSE_RECORD_SIZE;
+    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
+    out.extend_from_slice(&psxed_format::animation::MAGIC);
+    out.extend_from_slice(&psxed_format::animation::VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    out.extend_from_slice(&joint_count.to_le_bytes());
+    out.extend_from_slice(&frame_count.to_le_bytes());
+    out.extend_from_slice(&sample_rate_hz.to_le_bytes());
+    out.extend_from_slice(&translation_shift.to_le_bytes());
+
+    let shift = translation_shift as u8;
+    let mut frame = 0u16;
+    while frame < frame_count {
+        let mut joint = 0u16;
+        while joint < joint_count {
+            let pose = animation
+                .pose(frame, joint)
+                .expect("validated animation frame/joint indices");
+            for column in pose.matrix {
+                for value in column {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            for value in [pose.translation.x, pose.translation.y, pose.translation.z] {
+                out.extend_from_slice(&quantize_animation_translation(value, shift).to_le_bytes());
+            }
+            joint += 1;
+        }
+        frame += 1;
+    }
+
+    out
+}
+
+fn quantize_animation_translation(value: i32, shift: u8) -> i16 {
+    round_shift_i32(value, shift).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn round_shift_i32(value: i32, shift: u8) -> i32 {
+    if shift == 0 {
+        return value;
+    }
+    let value = value as i64;
+    let half = 1i64 << (shift - 1);
+    if value >= 0 {
+        ((value + half) >> shift) as i32
+    } else {
+        -(((-value + half) >> shift) as i32)
+    }
+}
+
+fn abs_i32_saturating(value: i32) -> i32 {
+    if value == i32::MIN {
+        i32::MAX
+    } else if value < 0 {
+        -value
+    } else {
+        value
+    }
+}
 
 #[derive(Clone, Copy)]
 struct ModelBoundsJointTransform {
