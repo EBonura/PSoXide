@@ -34,6 +34,7 @@ const PSX_TRI_MAX_DY: i32 = 511;
 const MAX_TEXTURED_HW_SPLIT_DEPTH: u8 = 5;
 const WORLD_COMMAND_NONE: u16 = u16::MAX;
 const GOURAUD_COMMAND_NONE: u16 = u16::MAX;
+const MODEL_GTE_JOINT_COMPOSE: bool = option_env!("PSXO_GTE_JOINT_COMPOSE").is_some();
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum WorldCommandOrdering {
@@ -2612,6 +2613,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
         let camera_view = camera_gte_view_matrix(camera);
+        let view_instance = if MODEL_GTE_JOINT_COMPOSE {
+            mat3_mul_q12(&camera_view, &instance_rotation)
+        } else {
+            Mat3I16::IDENTITY
+        };
         load_world_projection_gte(camera.projection);
 
         let joint_count = (model.joint_count() as usize).min(joint_view_transforms.len());
@@ -2626,14 +2632,26 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 *joint_view_transform = match sample.pose(joint as u16) {
                     Some(pose) => {
                         let pose = apply_model_pose_translation(pose, pose_translation);
-                        let (rotation, translation) = textured_model_part_gte_transform_with_view(
-                            camera_view,
-                            camera.position,
-                            pose,
-                            instance_rotation,
-                            local_to_world,
-                            origin,
-                        );
+                        let (rotation, translation) = if MODEL_GTE_JOINT_COMPOSE {
+                            textured_model_part_gte_transform_with_view_gte_compose(
+                                camera_view,
+                                view_instance,
+                                camera.position,
+                                pose,
+                                instance_rotation,
+                                local_to_world,
+                                origin,
+                            )
+                        } else {
+                            textured_model_part_gte_transform_with_view(
+                                camera_view,
+                                camera.position,
+                                pose,
+                                instance_rotation,
+                                local_to_world,
+                                origin,
+                            )
+                        };
                         JointViewTransform {
                             rotation,
                             translation,
@@ -4212,6 +4230,76 @@ fn textured_model_part_gte_transform_with_view(
     (rotation, translation)
 }
 
+fn textured_model_part_gte_transform_with_view_gte_compose(
+    view: Mat3I16,
+    view_instance: Mat3I16,
+    camera_position: WorldVertex,
+    pose: JointPose,
+    instance_rotation: Mat3I16,
+    local_to_world: LocalToWorldScale,
+    origin: WorldVertex,
+) -> (Mat3I16, Vec3I32) {
+    let model = scaled_pose_matrix(pose, local_to_world);
+    let rotation = gte_compose_joint_rotation(view_instance, model);
+
+    // Keep translation on the CPU for now. Cooked pose translations are
+    // i32 model-local values, while MVMVA takes i16 vector inputs.
+    let scaled_pose_translation = Vec3I32::new(
+        local_to_world.apply(pose.translation.x),
+        local_to_world.apply(pose.translation.y),
+        local_to_world.apply(pose.translation.z),
+    );
+    let rotated_pose_translation =
+        rotate_translation_q12(&instance_rotation, scaled_pose_translation);
+
+    let world_translation = WorldVertex::new(
+        origin.x.saturating_add(rotated_pose_translation.x),
+        origin.y.saturating_add(rotated_pose_translation.y),
+        origin.z.saturating_add(rotated_pose_translation.z),
+    );
+    let delta = WorldVertex::new(
+        world_translation.x.saturating_sub(camera_position.x),
+        world_translation.y.saturating_sub(camera_position.y),
+        world_translation.z.saturating_sub(camera_position.z),
+    );
+    let translation = Vec3I32::new(
+        dot_world_q12(view.m[0], delta),
+        dot_world_q12(view.m[1], delta),
+        dot_world_q12(view.m[2], delta),
+    );
+
+    (rotation, translation)
+}
+
+fn gte_compose_joint_rotation(view_instance: Mat3I16, model: Mat3I16) -> Mat3I16 {
+    scene::load_rotation(&view_instance);
+    scene::load_translation(Vec3I32::ZERO);
+
+    let c0 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][0],
+        model.m[1][0],
+        model.m[2][0],
+    ));
+    let c1 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][1],
+        model.m[1][1],
+        model.m[2][1],
+    ));
+    let c2 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][2],
+        model.m[1][2],
+        model.m[2][2],
+    ));
+
+    Mat3I16 {
+        m: [
+            [clamp_i16(c0.x), clamp_i16(c1.x), clamp_i16(c2.x)],
+            [clamp_i16(c0.y), clamp_i16(c1.y), clamp_i16(c2.y)],
+            [clamp_i16(c0.z), clamp_i16(c1.z), clamp_i16(c2.z)],
+        ],
+    }
+}
+
 /// Apply a Q12 rotation matrix to an i32 translation vector.
 /// Runtime pose translations are model-local and bounded by cooked
 /// asset scale, so keep this on the PS1's native 32-bit fast path.
@@ -5458,6 +5546,56 @@ mod tests {
         let gte_sy = projection.screen_y as i32 + (gte_y * projection.focal_length) / gte_z;
         assert_close_i32(gte_sx, cpu_projected.sx as i32, 1);
         assert_close_i32(gte_sy, cpu_projected.sy as i32, 1);
+    }
+
+    #[test]
+    fn gte_joint_compose_matches_cpu_joint_rotation_path() {
+        let projection = WorldProjection::new(160, 118, 320, 48);
+        let target = WorldVertex::new(80, 256, -48);
+        let camera = WorldCamera::orbit_yaw(projection, target, 960, 1536, Angle::from_q12(337));
+        let view = camera_gte_view_matrix(camera);
+        let instance_rotation = Mat3I16::rotate_y(704).mul(&Mat3I16::rotate_x(192));
+        let view_instance = mat3_mul_q12(&view, &instance_rotation);
+        let pose = JointPose {
+            matrix: Mat3I16::rotate_z(384).mul(&Mat3I16::rotate_y(256)).m,
+            translation: Vec3I32::new(320, -128, 512),
+        };
+        let origin = WorldVertex::new(384, 768, -256);
+
+        let (cpu_rotation, cpu_translation) = textured_model_part_gte_transform_with_view(
+            view,
+            camera.position,
+            pose,
+            instance_rotation,
+            LocalToWorldScale::IDENTITY,
+            origin,
+        );
+        let (gte_rotation, gte_translation) = textured_model_part_gte_transform_with_view_gte_compose(
+            view,
+            view_instance,
+            camera.position,
+            pose,
+            instance_rotation,
+            LocalToWorldScale::IDENTITY,
+            origin,
+        );
+
+        let mut row = 0usize;
+        while row < 3 {
+            let mut col = 0usize;
+            while col < 3 {
+                assert_close_i32(
+                    gte_rotation.m[row][col] as i32,
+                    cpu_rotation.m[row][col] as i32,
+                    1,
+                );
+                col += 1;
+            }
+            row += 1;
+        }
+        assert_close_i32(gte_translation.x, cpu_translation.x, 0);
+        assert_close_i32(gte_translation.y, cpu_translation.y, 0);
+        assert_close_i32(gte_translation.z, cpu_translation.z, 0);
     }
 
     #[test]
