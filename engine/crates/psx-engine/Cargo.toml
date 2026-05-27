@@ -28,6 +28,7 @@ trybuild = "1"
 [features]
 default = []
 boot-trace = ["psx-rt/boot-trace"]
+emulator-telemetry = []
 room-surface-profile = []
 
 [lints]

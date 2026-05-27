@@ -1105,9 +1105,8 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             0.0
         }
     };
-    let task_max_ms = |task_id: u16| {
-        sample.guest.task_max_cycles[task_id as usize] / PSX_CYCLES_PER_MS
-    };
+    let task_max_ms =
+        |task_id: u16| sample.guest.task_max_cycles[task_id as usize] / PSX_CYCLES_PER_MS;
     const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
     const CHUNK_MAP_COUNTERS: &[u16] = &[
         counter::ROOM_STREAM_RESIDENT_MASK_LO,

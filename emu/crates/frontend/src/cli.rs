@@ -745,11 +745,16 @@ fn cmd_build_project_disc(args: BuildProjectDiscArgs) -> Result<(), String> {
     run_make(&repo_root, "build-editor-playtest", &[])?;
 
     let source_cue = build_embedded_playtest_disc()?;
-    let dest_cue = project_root
-        .join("baked")
-        .join(format!("{}.cue", psxed_project::project_file_stem(&project.name)));
+    let dest_cue = project_root.join("baked").join(format!(
+        "{}.cue",
+        psxed_project::project_file_stem(&project.name)
+    ));
     let bytes = copy_project_disc(&source_cue, &dest_cue)?;
-    eprintln!("[cli] project disc -> {} ({} KiB)", dest_cue.display(), bytes / 1024);
+    eprintln!(
+        "[cli] project disc -> {} ({} KiB)",
+        dest_cue.display(),
+        bytes / 1024
+    );
     println!("{}", dest_cue.display());
     Ok(())
 }

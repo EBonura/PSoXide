@@ -1139,6 +1139,18 @@ pub fn primary_bin_from_cue(cue_path: &Path) -> Option<PathBuf> {
         .map(|track| track.path)
 }
 
+/// Parse a CUE sheet and return every referenced image file path once,
+/// preserving sheet order.
+pub fn cue_referenced_files(cue_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    for track in parse_cue_tracks(cue_path)? {
+        if !files.iter().any(|path| path == &track.path) {
+            files.push(track.path);
+        }
+    }
+    Ok(files)
+}
+
 /// Return the decoded `.img` sidecar for a `.ccd` sheet, or the
 /// `.img.ecm` sidecar when the decoded image has not been created yet.
 pub fn primary_image_from_ccd(ccd_path: &Path) -> Option<PathBuf> {
@@ -1432,6 +1444,31 @@ mod tests {
         .unwrap();
         let bin = primary_bin_from_cue(&cue_path).unwrap();
         assert_eq!(bin, tmp.path().join("game (Track 01).bin"));
+    }
+
+    #[test]
+    fn cue_referenced_files_dedups_reused_images_in_sheet_order() {
+        let tmp = TempDir::new().unwrap();
+        let cue_path = tmp.path().join("game.cue");
+        std::fs::write(
+            &cue_path,
+            concat!(
+                "FILE \"game.bin\" BINARY\n",
+                "  TRACK 01 MODE2/2352\n",
+                "    INDEX 01 00:00:00\n",
+                "  TRACK 02 AUDIO\n",
+                "    INDEX 01 10:00:00\n",
+                "FILE \"bonus.bin\" BINARY\n",
+                "  TRACK 03 AUDIO\n",
+                "    INDEX 01 00:00:00\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cue_referenced_files(&cue_path).unwrap(),
+            vec![tmp.path().join("game.bin"), tmp.path().join("bonus.bin")]
+        );
     }
 
     #[test]

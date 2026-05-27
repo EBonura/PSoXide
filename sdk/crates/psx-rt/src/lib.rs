@@ -49,6 +49,11 @@ extern "Rust" {
     fn main();
 }
 
+#[cfg(target_arch = "mips")]
+#[used]
+#[link_section = ".region"]
+static PSX_EXE_REGION: [u8; 55] = *b"Sony Computer Entertainment Inc. for North America area";
+
 /// Entry point the PSX-EXE loader jumps to.
 ///
 /// # Safety
