@@ -24,21 +24,16 @@ pub(crate) fn draw_player_hud(
         return;
     }
 
-    for node in nodes {
+    for (index, node) in nodes.iter().enumerate() {
+        let (x, y) = ui_node_absolute_position(nodes, index);
         match node.kind {
             LevelUiNodeKind::Canvas | LevelUiNodeKind::Group => {}
             LevelUiNodeKind::Rect => {
-                draw_rect(
-                    node.x,
-                    node.y,
-                    node.width as i16,
-                    node.height as i16,
-                    rgb(node.color),
-                );
+                draw_rect(x, y, node.width as i16, node.height as i16, rgb(node.color));
             }
             LevelUiNodeKind::Label => {
                 if let Some(font) = font {
-                    font.draw_text(node.x, node.y, node.text, rgb(node.color));
+                    font.draw_text(x, y, node.text, rgb(node.color));
                 }
             }
             LevelUiNodeKind::Bar => {
@@ -46,8 +41,8 @@ pub(crate) fn draw_player_hud(
                 let value_q12 =
                     ui_binding_value(node.value, stamina_q12, stamina_max_q12).clamp(0, max_q12);
                 draw_status_bar(
-                    node.x,
-                    node.y,
+                    x,
+                    y,
                     node.width as i16,
                     node.height as i16,
                     value_q12,
@@ -58,6 +53,31 @@ pub(crate) fn draw_player_hud(
             }
         }
     }
+}
+
+fn ui_node_absolute_position(nodes: &[LevelUiNodeRecord], index: usize) -> (i16, i16) {
+    let mut x = 0i32;
+    let mut y = 0i32;
+    let mut current = Some(index);
+    let mut guard = 0usize;
+    while let Some(node_index) = current {
+        if guard >= nodes.len() {
+            break;
+        }
+        let Some(node) = nodes.get(node_index) else {
+            break;
+        };
+        if !matches!(node.kind, LevelUiNodeKind::Canvas) {
+            x += node.x as i32;
+            y += node.y as i32;
+        }
+        current = node.parent.map(|parent| parent.to_usize());
+        guard += 1;
+    }
+    (
+        x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+    )
 }
 
 fn draw_legacy_player_hud(stamina_q12: i32, stamina_max_q12: i32) {
