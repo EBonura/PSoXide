@@ -46,8 +46,8 @@ use psxed_project::{
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ParticleEmitterSettings,
     ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
     RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings,
-    UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiValueBinding, WorldCameraSettings,
-    WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
+    UiAnchor, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiTextAlign, UiValueBinding,
+    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
     DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
     MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
@@ -11734,6 +11734,7 @@ impl EditorWorkspace {
     }
 
     fn draw_ui_inspector(&mut self, ui: &mut egui::Ui) {
+        self.refresh_texture_thumbs(ui.ctx());
         let requested = self.selected_ui_node;
         let mut changed = false;
         let Some(scene) = self.project.active_ui_scene() else {
@@ -11755,6 +11756,15 @@ impl EditorWorkspace {
         if selected != self.selected_ui_node {
             self.selected_ui_node = selected;
         }
+        let texture_options: Vec<(ResourceId, String)> = self
+            .project
+            .resources
+            .iter()
+            .filter_map(|resource| match resource.data {
+                ResourceData::Texture { .. } => Some((resource.id, resource.name.clone())),
+                _ => None,
+            })
+            .collect();
 
         let Some(scene) = self.project.active_ui_scene_mut() else {
             ui.weak("No UI scene");
@@ -11815,18 +11825,33 @@ impl EditorWorkspace {
                 rect,
                 text,
                 tag,
+                align,
+                wrap,
                 color,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 ui.horizontal(|ui| {
                     ui.label("Text");
-                    changed |= ui.text_edit_singleline(text).changed();
+                    changed |= ui
+                        .add(egui::TextEdit::multiline(text).desired_rows(2))
+                        .changed();
                 });
                 ui.horizontal(|ui| {
                     ui.label("Tag");
                     changed |= ui.text_edit_singleline(tag).changed();
                 });
+                changed |= draw_ui_text_align_editor(ui, align);
+                changed |= ui.checkbox(wrap, "Wrap").changed();
                 changed |= color_editor(ui, "Color", color);
+            }
+            UiNodeKind::Image {
+                rect,
+                texture,
+                tint,
+            } => {
+                changed |= draw_ui_rect_editor(ui, rect);
+                changed |= ui_texture_resource_picker(ui, "Texture", texture, &texture_options);
+                changed |= color_editor(ui, "Tint", tint);
             }
             UiNodeKind::Bar {
                 rect,
@@ -24165,6 +24190,87 @@ fn draw_ui_rect_editor(ui: &mut egui::Ui, rect: &mut UiRect) -> bool {
             changed |= drag_u16(ui, "H", &mut rect.height, 1, 4096);
             ui.end_row();
         });
+    changed |= draw_ui_anchor_editor(ui, &mut rect.anchor);
+    changed
+}
+
+fn draw_ui_anchor_editor(ui: &mut egui::Ui, anchor: &mut UiAnchor) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Anchor");
+        ui.weak(anchor.label());
+    });
+    egui::Grid::new(ui.id().with("ui_anchor_grid"))
+        .num_columns(3)
+        .spacing([3.0, 3.0])
+        .show(ui, |ui| {
+            for (index, candidate) in UiAnchor::ALL.into_iter().enumerate() {
+                let response = ui
+                    .selectable_label(*anchor == candidate, candidate.short_label())
+                    .on_hover_text(candidate.label());
+                if response.clicked() && *anchor != candidate {
+                    *anchor = candidate;
+                    changed = true;
+                }
+                if index % 3 == 2 {
+                    ui.end_row();
+                }
+            }
+        });
+    changed
+}
+
+fn draw_ui_text_align_editor(ui: &mut egui::Ui, align: &mut UiTextAlign) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_label("Align")
+        .selected_text(align.label())
+        .show_ui(ui, |ui| {
+            for candidate in UiTextAlign::ALL {
+                if ui
+                    .selectable_label(*align == candidate, candidate.label())
+                    .clicked()
+                    && *align != candidate
+                {
+                    *align = candidate;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+fn ui_texture_resource_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: &mut Option<ResourceId>,
+    options: &[(ResourceId, String)],
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let preview = current
+            .and_then(|id| {
+                options
+                    .iter()
+                    .find(|(rid, _)| *rid == id)
+                    .map(|(_, name)| name.as_str())
+            })
+            .unwrap_or("(none)");
+        egui::ComboBox::from_id_salt(ui.id().with(label))
+            .selected_text(preview)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "(none)").clicked() {
+                    *current = None;
+                    changed = true;
+                }
+                for (id, name) in options {
+                    if ui.selectable_label(*current == Some(*id), name).clicked() {
+                        *current = Some(*id);
+                        changed = true;
+                    }
+                }
+            });
+    });
     changed
 }
 
@@ -27109,7 +27215,17 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 rect: UiRect::new(24, 24, 96, 12),
                 text: "Label".to_string(),
                 tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
                 color: [220, 226, 240],
+            },
+        ),
+        (
+            "Image",
+            UiNodeKind::Image {
+                rect: UiRect::new(24, 24, 64, 64),
+                texture: None,
+                tint: [128, 128, 128],
             },
         ),
         (
@@ -27131,6 +27247,7 @@ fn ui_node_kind_icon(kind: &str) -> char {
         "Group" => icons::LAYERS,
         "Rect" => icons::SQUARE,
         "Label" => icons::FILE,
+        "Image" => icons::PALETTE,
         "Bar" => icons::BLEND,
         _ => icons::CIRCLE_DOT,
     }
@@ -27187,6 +27304,17 @@ fn draw_ui_scene_preview(
                     text,
                     FontId::monospace((8.0 * scale).clamp(8.0, 22.0)),
                     Color32::from_rgb(color[0], color[1], color[2]),
+                );
+            }
+            UiNodeKind::Image { rect, tint, .. } => {
+                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
+                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
+                painter.rect_filled(screen, 0.0, Color32::from_rgb(tint[0], tint[1], tint[2]));
+                painter.rect_stroke(
+                    screen,
+                    0.0,
+                    Stroke::new(1.0, Color32::from_rgb(180, 190, 210)),
+                    StrokeKind::Inside,
                 );
             }
             UiNodeKind::Bar {
@@ -27371,6 +27499,7 @@ fn move_ui_rect(rect: UiRect, delta: [i32; 2]) -> UiRect {
         y: clamp_ui_coord(rect.y as i32 + delta[1]) as i16,
         width: rect.width.min(UI_NODE_SIZE_MAX as u16).max(1),
         height: rect.height.min(UI_NODE_SIZE_MAX as u16).max(1),
+        anchor: rect.anchor,
     }
 }
 
@@ -27431,6 +27560,7 @@ fn resize_ui_rect(rect: UiRect, handle: UiResizeHandle, delta: [i32; 2]) -> UiRe
         y: y as i16,
         width,
         height,
+        anchor: rect.anchor,
     }
 }
 

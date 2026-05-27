@@ -76,6 +76,11 @@ const CUBE_UVS: [(u8, u8); 4] = [(0, 0), (127, 0), (0, 127), (127, 127)];
 const CUBE_SPIN_X_STEP: Angle = Angle::from_raw_q16(0x00D0);
 const CUBE_SPIN_Y_STEP: Angle = Angle::from_raw_q16(0x0130);
 const CUBE_SPIN_Z_STEP: Angle = Angle::from_raw_q16(0x0058);
+const SCORE_FLYBY_SIZE: i16 = 74;
+const SCORE_FLYBY_Y: i16 = 120;
+const SCORE_FLYBY_DURATION_TICKS: u16 = 150;
+const SCORE_FLYBY_SPIN_STEP: Angle = Angle::from_raw_q16(0x0180);
+const SCORE_FLYBY_OT_SLOT: usize = 4;
 
 const SPECTRUM_BANDS: usize = 16;
 const SPECTRUM_FRAME_COUNT: usize = 6990;
@@ -99,8 +104,9 @@ const SPU_SAMPLE_BASE: SpuAddr = SpuAddr::new(0x1010);
 const VOICE_WALL: Voice = Voice::V0;
 const VOICE_PADDLE: Voice = Voice::V1;
 const VOICE_SCORE: Voice = Voice::V2;
+const VOICE_FLYBY: Voice = Voice::V3;
 
-const SFX_BANK: [sfx::Sample<'static>; 3] = [
+const SFX_BANK: [sfx::Sample<'static>; 4] = [
     sfx::Sample {
         voice: VOICE_WALL,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau"),
@@ -115,6 +121,11 @@ const SFX_BANK: [sfx::Sample<'static>; 3] = [
         voice: VOICE_SCORE,
         bytes: include_bytes!("../../../../assets/audio/freesfx/psau/pickup_coin.psau"),
         volume: Volume::linear(1, 18),
+    },
+    sfx::Sample {
+        voice: VOICE_FLYBY,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/swoosh.psau"),
+        volume: Volume::linear(1, 10),
     },
 ];
 
@@ -134,6 +145,11 @@ static mut CUBE_QUADS: [QuadTexturedMaterial; 6] = [const {
         TextureMaterial::opaque(0, 0, (0, 0, 0)),
     )
 }; 6];
+static mut SCORE_FLYBY_QUAD: QuadTexturedMaterial = QuadTexturedMaterial::with_material(
+    [(0, 0), (0, 0), (0, 0), (0, 0)],
+    CUBE_UVS,
+    TextureMaterial::opaque(0, 0, (0, 0, 0)),
+);
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum CddaStartStep {
@@ -156,6 +172,9 @@ struct MagikaaaaaarpPong {
     spin_x: Angle,
     spin_y: Angle,
     spin_z: Angle,
+    score_flyby_tick: u16,
+    score_flyby_dir: i8,
+    score_flyby_spin: Angle,
     cdda_started: bool,
     cdda_start_step: CddaStartStep,
     cdda_started_tick: u32,
@@ -180,6 +199,9 @@ impl MagikaaaaaarpPong {
             spin_x: Angle::ZERO,
             spin_y: Angle::ZERO,
             spin_z: Angle::ZERO,
+            score_flyby_tick: SCORE_FLYBY_DURATION_TICKS,
+            score_flyby_dir: 0,
+            score_flyby_spin: Angle::ZERO,
             cdda_started: false,
             cdda_start_step: CddaStartStep::SetMode,
             cdda_started_tick: 0,
@@ -199,6 +221,9 @@ impl MagikaaaaaarpPong {
         self.spin_x = Angle::ZERO;
         self.spin_y = Angle::ZERO;
         self.spin_z = Angle::ZERO;
+        self.score_flyby_tick = SCORE_FLYBY_DURATION_TICKS;
+        self.score_flyby_dir = 0;
+        self.score_flyby_spin = Angle::ZERO;
         self.reset_ball();
     }
 
@@ -268,6 +293,21 @@ impl MagikaaaaaarpPong {
         self.spin_z = self.spin_z.add(CUBE_SPIN_Z_STEP);
     }
 
+    fn start_score_flyby(&mut self, dir: i8) {
+        self.score_flyby_tick = 0;
+        self.score_flyby_dir = dir;
+        self.score_flyby_spin = Angle::ZERO;
+        sfx::play(VOICE_FLYBY);
+    }
+
+    fn advance_score_flyby(&mut self) {
+        if self.score_flyby_tick >= SCORE_FLYBY_DURATION_TICKS {
+            return;
+        }
+        self.score_flyby_tick += 1;
+        self.score_flyby_spin = self.score_flyby_spin.add(SCORE_FLYBY_SPIN_STEP);
+    }
+
     fn ball_center_y(&self) -> i16 {
         self.ball_y + BALL_SIZE as i16 / 2
     }
@@ -313,6 +353,7 @@ impl Scene for MagikaaaaaarpPong {
     fn update(&mut self, ctx: &mut Ctx) {
         let tick = ctx.sim_tick.as_u32();
         self.advance_cube_spin();
+        self.advance_score_flyby();
         self.maybe_start_goncharov(tick);
         let cube_scale = cube_scale_q12(tick);
         let ball_size = ball_size_for_scale(cube_scale);
@@ -390,11 +431,13 @@ impl Scene for MagikaaaaaarpPong {
         if hitbox.right < 0 {
             self.p2_score = self.p2_score.saturating_add(1);
             self.serve_dir = -1;
+            self.start_score_flyby(-1);
             sfx::play(VOICE_SCORE);
             self.check_win_and_reset();
         } else if hitbox.left > SCREEN_W {
             self.p1_score = self.p1_score.saturating_add(1);
             self.serve_dir = 1;
+            self.start_score_flyby(1);
             sfx::play(VOICE_SCORE);
             self.check_win_and_reset();
         }
@@ -475,6 +518,7 @@ impl MagikaaaaaarpPong {
         ot.add(5, &mut rects[PADDLE_RECT_START + 1], RectFlat::WORDS);
 
         self.add_cube_to_ot(ot, cube_scale_q12(sim_tick));
+        self.add_score_flyby_to_ot(ot);
     }
 
     fn add_spectrum_to_ot(&self, ot: &mut OrderingTable<16>, tick: u32) {
@@ -562,6 +606,40 @@ impl MagikaaaaaarpPong {
             }
             i += 1;
         }
+    }
+
+    fn add_score_flyby_to_ot(&self, ot: &mut OrderingTable<16>) {
+        if self.score_flyby_tick >= SCORE_FLYBY_DURATION_TICKS || self.score_flyby_dir == 0 {
+            return;
+        }
+
+        let quad = unsafe { &mut SCORE_FLYBY_QUAD };
+        let center_x = score_flyby_x(self.score_flyby_tick, self.score_flyby_dir);
+        let half = SCORE_FLYBY_SIZE as i32 / 2;
+        let sin = self.score_flyby_spin.sin_q12();
+        let cos = self.score_flyby_spin.cos_q12();
+        let corners = [(-half, -half), (half, -half), (-half, half), (half, half)];
+        let mut verts = [(0, 0); 4];
+        let mut i = 0;
+        while i < corners.len() {
+            let (x, y) = corners[i];
+            verts[i] = (
+                clamp_i16(center_x as i32 + ((x * cos - y * sin) >> 12)),
+                clamp_i16(SCORE_FLYBY_Y as i32 + ((x * sin + y * cos) >> 12)),
+            );
+            i += 1;
+        }
+
+        *quad = QuadTexturedMaterial::with_material(
+            verts,
+            CUBE_UVS,
+            TextureMaterial::opaque(
+                CUBE_CLUT.uv_clut_word(),
+                CUBE_TPAGE.uv_tpage_word(0),
+                (128, 128, 128),
+            ),
+        );
+        ot.add(SCORE_FLYBY_OT_SLOT, quad, QuadTexturedMaterial::WORDS);
     }
 
     fn draw_hud(&self, sim_tick: u32) {
@@ -761,6 +839,17 @@ fn blend_channel(a: u8, b: u8, t: u16) -> u8 {
 fn cube_depth_slot(avg_z: i32) -> usize {
     let slot = avg_z / 24;
     slot.clamp(6, 11) as usize
+}
+
+fn score_flyby_x(tick: u16, dir: i8) -> i16 {
+    let margin = SCORE_FLYBY_SIZE + 8;
+    let span = SCREEN_W + margin * 2;
+    let offset = ((span as i32 * tick as i32) / SCORE_FLYBY_DURATION_TICKS as i32) as i16;
+    if dir > 0 {
+        -margin + offset
+    } else {
+        SCREEN_W + margin - offset
+    }
 }
 
 fn clamp_i16(value: i32) -> i16 {
