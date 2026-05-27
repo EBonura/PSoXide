@@ -35,7 +35,7 @@
 //! can't build them transparently. First:
 //!
 //! ```bash
-//! make examples             # builds all 5 .exe files
+//! make examples             # builds every public example .exe
 //! make test-sdk             # runs this module's ignored tests
 //! # or, directly:
 //! cargo test -p emulator-core --release --test sdk_milestones -- --ignored
@@ -478,6 +478,21 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             final_pc: 0x8001_17c8,
             redux_display_hash: None,
         }),
+        // Birthday Pong variant. 8 VBlanks captures the textured
+        // cube ball early in its rotation with the first rally still
+        // centred, while also pinning the texture upload and SPU
+        // sample-bank setup.
+        "game-birthday-pong" => Some(SdkGolden {
+            example: "game-birthday-pong",
+            vblanks: 8,
+            vram_hash: 0xfd71_b4f1_a45b_0307,
+            display_hash: 0xaf3a_c8d0_80f0_77cb,
+            display_size: (320, 240),
+            vblank_raises: 8,
+            spu_samples: 5145,
+            final_pc: 0x8001_10e0,
+            redux_display_hash: None,
+        }),
         // Second mini-game. 60 VBlanks captures one serve-arc +
         // brick-break region with effects active (gradient BG,
         // ball trail, particles, potentially screen shake).
@@ -723,6 +738,12 @@ fn milestone_c_game_pong() {
     // after 8 frames it's hit the right paddle area, triggered
     // the paddle-hit SFX, and the AI has begun tracking.
     run_sdk_milestone("game-pong", 8);
+}
+
+#[test]
+#[ignore = "SDK milestone: birthday pong roundtrip"]
+fn milestone_c_game_birthday_pong() {
+    run_sdk_milestone("game-birthday-pong", 8);
 }
 
 #[test]
