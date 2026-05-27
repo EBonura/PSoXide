@@ -176,7 +176,7 @@ impl ResourceId {
 }
 
 /// Stable identifier for a node inside one authored UI scene.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct UiNodeId(u64);
 
 impl UiNodeId {
@@ -496,6 +496,109 @@ impl UiScene {
         true
     }
 
+    /// `true` when `ancestor` appears anywhere on the parent chain of
+    /// `id`. Includes `id` itself, matching [`Scene::is_descendant_of`].
+    pub fn is_descendant_of(&self, id: UiNodeId, ancestor: UiNodeId) -> bool {
+        if id == ancestor {
+            return true;
+        }
+        let mut current = self.node(id).and_then(|node| node.parent);
+        let mut guard = 0usize;
+        while let Some(parent) = current {
+            if guard >= self.nodes.len() {
+                break;
+            }
+            if parent == ancestor {
+                return true;
+            }
+            current = self.node(parent).and_then(|node| node.parent);
+            guard += 1;
+        }
+        false
+    }
+
+    /// Move `id` under `new_parent` at `position` in the child list.
+    ///
+    /// The canvas root cannot be moved and cycles are rejected. This is
+    /// deliberately parallel to [`Scene::move_node`] so 2D and 3D tree
+    /// authoring share the same parent/child rules.
+    pub fn move_node(&mut self, id: UiNodeId, new_parent: UiNodeId, position: usize) -> bool {
+        if id == self.root {
+            return false;
+        }
+        if self.node(id).is_none() || self.node(new_parent).is_none() {
+            return false;
+        }
+        if self.is_descendant_of(new_parent, id) {
+            return false;
+        }
+
+        for node in &mut self.nodes {
+            node.children.retain(|child| *child != id);
+        }
+        if let Some(parent) = self.node_mut(new_parent) {
+            let pos = position.min(parent.children.len());
+            parent.children.insert(pos, id);
+        }
+        if let Some(node) = self.node_mut(id) {
+            node.parent = Some(new_parent);
+        }
+        true
+    }
+
+    /// Node ids in tree draw order.
+    pub fn hierarchy_node_ids(&self) -> Vec<UiNodeId> {
+        let mut ids = Vec::new();
+        let mut visited = HashSet::new();
+        self.push_hierarchy_node_id(self.root, &mut ids, &mut visited);
+        for node in &self.nodes {
+            self.push_hierarchy_node_id(node.id, &mut ids, &mut visited);
+        }
+        ids
+    }
+
+    fn push_hierarchy_node_id(
+        &self,
+        id: UiNodeId,
+        ids: &mut Vec<UiNodeId>,
+        visited: &mut HashSet<UiNodeId>,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+        if let Some(node) = self.node(id) {
+            ids.push(id);
+            for &child in &node.children {
+                self.push_hierarchy_node_id(child, ids, visited);
+            }
+        }
+    }
+
+    /// Bounds resolved into canvas space by accumulating parent UI
+    /// rectangles. Child `x/y` values are local to their parent.
+    pub fn absolute_rect(&self, id: UiNodeId) -> Option<UiRect> {
+        let node = self.node(id)?;
+        let mut rect = match &node.kind {
+            UiNodeKind::Canvas { width, height } => UiRect::new(0, 0, *width, *height),
+            _ => node.kind.rect()?,
+        };
+        let mut current = node.parent;
+        let mut guard = 0usize;
+        while let Some(parent_id) = current {
+            if guard >= self.nodes.len() {
+                return None;
+            }
+            let parent = self.node(parent_id)?;
+            if let Some(parent_rect) = parent.kind.rect() {
+                rect.x = clamp_ui_rect_coord(rect.x as i32 + parent_rect.x as i32);
+                rect.y = clamp_ui_rect_coord(rect.y as i32 + parent_rect.y as i32);
+            }
+            current = parent.parent;
+            guard += 1;
+        }
+        Some(rect)
+    }
+
     /// Normalize loaded UI data.
     pub fn normalize(&mut self) {
         if self.node(self.root).is_none() {
@@ -529,12 +632,84 @@ impl UiScene {
         let valid_ids: HashSet<UiNodeId> = self.nodes.iter().map(|node| node.id).collect();
         for node in &mut self.nodes {
             max_id = max_id.max(node.id.raw());
-            node.children.retain(|child| valid_ids.contains(child));
-            if node.id != self.root && node.parent.is_none() {
+            node.children
+                .retain(|child| *child != node.id && valid_ids.contains(child));
+            if node.id != self.root
+                && !node
+                    .parent
+                    .is_some_and(|id| id != node.id && valid_ids.contains(&id))
+            {
                 node.parent = Some(self.root);
             }
         }
+        let parent_by_id = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.parent))
+            .collect::<BTreeMap<_, _>>();
+        for node in &mut self.nodes {
+            if node.id == self.root {
+                continue;
+            }
+            let mut seen = HashSet::new();
+            let mut current = node.parent;
+            let mut valid_parent_chain = true;
+            while let Some(parent) = current {
+                if parent == node.id || !seen.insert(parent) {
+                    valid_parent_chain = false;
+                    break;
+                }
+                current = parent_by_id.get(&parent).copied().flatten();
+            }
+            if !valid_parent_chain {
+                node.parent = Some(self.root);
+            }
+        }
+        self.rebuild_child_links();
         self.next_node_id = self.next_node_id.max(max_id.saturating_add(1));
+    }
+
+    fn rebuild_child_links(&mut self) {
+        let parent_by_id = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.parent))
+            .collect::<BTreeMap<_, _>>();
+        let mut children_by_parent = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, Vec::new()))
+            .collect::<BTreeMap<_, Vec<UiNodeId>>>();
+        let mut assigned = HashSet::new();
+
+        for node in &self.nodes {
+            for &child in &node.children {
+                if child == self.root || assigned.contains(&child) {
+                    continue;
+                }
+                if parent_by_id.get(&child).copied().flatten() == Some(node.id) {
+                    if let Some(children) = children_by_parent.get_mut(&node.id) {
+                        children.push(child);
+                        assigned.insert(child);
+                    }
+                }
+            }
+        }
+
+        for node in &self.nodes {
+            if node.id == self.root || assigned.contains(&node.id) {
+                continue;
+            }
+            let parent = node.parent.unwrap_or(self.root);
+            if let Some(children) = children_by_parent.get_mut(&parent) {
+                children.push(node.id);
+                assigned.insert(node.id);
+            }
+        }
+
+        for node in &mut self.nodes {
+            node.children = children_by_parent.remove(&node.id).unwrap_or_default();
+        }
     }
 
     /// Flatten the hierarchy into display rows.
@@ -559,6 +734,10 @@ impl UiScene {
             self.push_hierarchy_row(child, depth.saturating_add(1), rows);
         }
     }
+}
+
+fn clamp_ui_rect_coord(value: i32) -> i16 {
+    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 fn default_ui_scenes() -> Vec<UiScene> {
@@ -8154,11 +8333,16 @@ impl Scene {
             return true;
         }
         let mut current = self.node(id).and_then(|n| n.parent);
+        let mut guard = 0usize;
         while let Some(p) = current {
+            if guard >= self.nodes.len() {
+                break;
+            }
             if p == ancestor {
                 return true;
             }
             current = self.node(p).and_then(|n| n.parent);
+            guard += 1;
         }
         false
     }
@@ -8186,11 +8370,8 @@ impl Scene {
             return false;
         }
 
-        let old_parent = self.node(id).and_then(|n| n.parent);
-        if let Some(old) = old_parent {
-            if let Some(parent) = self.node_mut(old) {
-                parent.children.retain(|c| *c != id);
-            }
+        for node in &mut self.nodes {
+            node.children.retain(|c| *c != id);
         }
         if let Some(parent) = self.node_mut(new_parent) {
             let pos = position.min(parent.children.len());
@@ -11314,6 +11495,74 @@ mod tests {
             .expect("root")
             .children
             .contains(&group));
+    }
+
+    #[test]
+    fn ui_scene_parent_rect_offsets_children() {
+        let mut scene = UiScene::default_hud();
+        let group = scene.add_node(
+            scene.root,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(40, 30, 100, 50),
+            },
+        );
+        let label = scene.add_node(
+            group,
+            "Prompt",
+            UiNodeKind::Label {
+                rect: UiRect::new(8, 6, 48, 12),
+                text: "Open".to_string(),
+                color: [220, 226, 240],
+            },
+        );
+
+        assert_eq!(
+            scene.absolute_rect(label),
+            Some(UiRect::new(48, 36, 48, 12))
+        );
+        assert_eq!(
+            scene
+                .hierarchy_node_ids()
+                .into_iter()
+                .filter(|id| *id == group || *id == label)
+                .collect::<Vec<_>>(),
+            vec![group, label]
+        );
+    }
+
+    #[test]
+    fn ui_scene_move_node_reparents_and_rejects_cycles() {
+        let mut scene = UiScene::default_hud();
+        let a = scene.add_node(
+            scene.root,
+            "A",
+            UiNodeKind::Group {
+                rect: UiRect::new(4, 5, 16, 16),
+            },
+        );
+        let b = scene.add_node(
+            scene.root,
+            "B",
+            UiNodeKind::Group {
+                rect: UiRect::new(20, 30, 16, 16),
+            },
+        );
+        let label = scene.add_node(
+            a,
+            "Label",
+            UiNodeKind::Label {
+                rect: UiRect::new(2, 3, 8, 8),
+                text: "x".to_string(),
+                color: [255, 255, 255],
+            },
+        );
+
+        assert!(scene.move_node(label, b, 0));
+        assert_eq!(scene.node(label).unwrap().parent, Some(b));
+        assert_eq!(scene.absolute_rect(label), Some(UiRect::new(22, 33, 8, 8)));
+        assert!(!scene.move_node(b, label, 0));
+        assert!(!scene.move_node(scene.root, b, 0));
     }
 
     #[test]
