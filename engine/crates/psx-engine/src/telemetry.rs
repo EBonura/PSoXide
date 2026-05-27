@@ -79,6 +79,14 @@ pub mod stage {
     pub const OT_SUBMIT: u16 = 11;
 }
 
+/// Runtime task ids. Keep in sync with `emulator_core::telemetry::task`.
+pub mod task {
+    /// Built-in fixed simulation/update task.
+    pub const FIXED_UPDATE: u16 = 0;
+    /// Built-in visual render/present task.
+    pub const VISUAL_RENDER: u16 = 1;
+}
+
 /// Runtime counter ids. Keep in sync with `emulator_core::telemetry::counter`.
 pub mod counter {
     /// Textured primitive packets allocated this frame.
@@ -469,20 +477,66 @@ pub mod counter {
     pub const ROOM_CAMERA_GLOBAL_Y_BIASED: u16 = 193;
     /// Render camera absolute level Z used by portal traversal, biased for unsigned transport.
     pub const ROOM_CAMERA_GLOBAL_Z_BIASED: u16 = 194;
+    /// Model vertices projected through CPU blend skinning.
+    pub const TEXTURED_MODEL_CPU_BLEND_VERTICES: u16 = 195;
+    /// Model faces handled by any packed fast-path helper.
+    pub const TEXTURED_MODEL_PACKED_FACE_CALLS: u16 = 196;
+    /// Model faces handled by the packed all-front/all-HW-bounds helper.
+    pub const TEXTURED_MODEL_PACKED_UNCLAMPED_CALLS: u16 = 197;
+    /// Model faces handled by packed all-front helpers that still clamp screen coordinates.
+    pub const TEXTURED_MODEL_PACKED_CLAMPED_CALLS: u16 = 198;
+    /// Model faces handled by the generic packed helper.
+    pub const TEXTURED_MODEL_PACKED_GENERAL_CALLS: u16 = 199;
+    /// Model faces handled by the fully general face path.
+    pub const TEXTURED_MODEL_FALLBACK_FACE_CALLS: u16 = 200;
+    /// Packed model faces that fell back to split/general submission due hardware extents.
+    pub const TEXTURED_MODEL_HW_EXTENT_FALLBACKS: u16 = 201;
+    /// Model faces dropped because they crossed or sat behind the near plane.
+    pub const TEXTURED_MODEL_NEAR_DROPS: u16 = 202;
+    /// Model faces dropped because the projected triangle was not hardware-safe.
+    pub const TEXTURED_MODEL_HW_UNSAFE_DROPS: u16 = 203;
+    /// Model triangles submitted through packed fast paths.
+    pub const TEXTURED_MODEL_FAST_SUBMITTED_TRIS: u16 = 204;
+    /// Model submits that required CPU blended vertices.
+    pub const TEXTURED_MODEL_CPU_BLEND_SUBMITS: u16 = 205;
+    /// Model submits that used primary-joint-only projection.
+    pub const TEXTURED_MODEL_PRIMARY_JOINT_SUBMITS: u16 = 206;
+    /// Model submits where all projected vertices were in front of the near plane.
+    pub const TEXTURED_MODEL_ALL_FRONT_SUBMITS: u16 = 207;
+    /// Model submits where all projected vertices were inside PS1 hardware bounds.
+    pub const TEXTURED_MODEL_ALL_HW_BOUNDS_SUBMITS: u16 = 208;
+    /// Model submits eligible for the fastest packed-unclamped face path.
+    pub const TEXTURED_MODEL_PACKED_UNCLAMPED_ELIGIBLE_SUBMITS: u16 = 209;
+    /// Model submits eligible for packed all-front helpers.
+    pub const TEXTURED_MODEL_PACKED_CLAMPED_ELIGIBLE_SUBMITS: u16 = 210;
+    /// Model submits eligible for the generic packed helper only.
+    pub const TEXTURED_MODEL_PACKED_GENERAL_ELIGIBLE_SUBMITS: u16 = 211;
+    /// Model triangles emitted by split/general fallback submission.
+    pub const TEXTURED_MODEL_SPLIT_TRIS: u16 = 212;
+    /// Model triangles skipped because face indices exceeded projected vertex ranges.
+    pub const TEXTURED_MODEL_SKIPPED_TRIS: u16 = 213;
+    /// Model submits that exceeded the projected vertex scratch buffer.
+    pub const TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS: u16 = 214;
+    /// Model submits that exceeded primitive packet storage.
+    pub const TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS: u16 = 215;
+    /// Model submits that exceeded world-command storage.
+    pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
 const EVENT_KIND_STAGE_BEGIN: u8 = 2;
 const EVENT_KIND_STAGE_END: u8 = 3;
 const EVENT_KIND_COUNTER: u8 = 4;
+const EVENT_KIND_TASK_BEGIN: u8 = 5;
+const EVENT_KIND_TASK_END: u8 = 6;
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const EVENT_ADDR: *mut u32 = 0xBF80_2F00 as *mut u32;
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const VALUE_ADDR: *mut u32 = 0xBF80_2F04 as *mut u32;
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const CYCLE_ADDR: *const u32 = 0xBF80_2F08 as *const u32;
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const LOG_ADDR: *mut u32 = 0xBF80_2F0C as *mut u32;
 
 /// Mark the start of a guest frame.
@@ -511,11 +565,23 @@ pub fn counter(counter_id: u16, value: u32) {
     emit_event(EVENT_KIND_COUNTER, counter_id);
 }
 
+/// Mark the start of a scheduled task.
+#[inline(always)]
+pub fn task_begin(task_id: u16) {
+    emit_event(EVENT_KIND_TASK_BEGIN, task_id);
+}
+
+/// Mark the end of a scheduled task.
+#[inline(always)]
+pub fn task_end(task_id: u16) {
+    emit_event(EVENT_KIND_TASK_END, task_id);
+}
+
 /// Read the emulator-observed guest cycle counter.
 ///
-/// This is only meaningful under PSoXide's emulator telemetry port. On
-/// hardware, and on host builds, it is a profiling-only helper and returns
-/// zero unless the emulator provides the Expansion 2 cycle register.
+/// This is only meaningful under PSoXide's emulator telemetry port. It
+/// returns zero unless the `emulator-telemetry` feature is enabled and the
+/// emulator provides the Expansion 2 cycle register.
 #[inline(always)]
 pub fn cycle_counter() -> u32 {
     read_cycle_counter()
@@ -524,8 +590,9 @@ pub fn cycle_counter() -> u32 {
 /// Emit one complete debug line to the PSoXide host terminal.
 ///
 /// This is an emulator-only diagnostic path. On host builds it compiles to a
-/// no-op; on PS1/MIPS it writes ASCII bytes through the same Expansion 2
-/// telemetry page as stage/counter profiling.
+/// no-op unless the `emulator-telemetry` feature is enabled, in which
+/// case PS1/MIPS builds write ASCII bytes through the Expansion 2
+/// telemetry page.
 #[inline(always)]
 pub fn debug_log(message: &str) {
     debug_bytes(message.as_bytes());
@@ -547,13 +614,13 @@ pub fn debug_bytes(bytes: &[u8]) {
     }
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn encode_event(kind: u8, id: u16) -> u32 {
     ((kind as u32) << 24) | id as u32
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn emit_value(value: u32) {
     unsafe {
@@ -561,23 +628,23 @@ fn emit_value(value: u32) {
     }
 }
 
-#[cfg(not(target_arch = "mips"))]
+#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
 #[inline(always)]
 fn emit_value(_value: u32) {}
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn read_cycle_counter() -> u32 {
     unsafe { core::ptr::read_volatile(CYCLE_ADDR) }
 }
 
-#[cfg(not(target_arch = "mips"))]
+#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
 #[inline(always)]
 fn read_cycle_counter() -> u32 {
     0
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn debug_byte(byte: u8) {
     unsafe {
@@ -585,11 +652,11 @@ fn debug_byte(byte: u8) {
     }
 }
 
-#[cfg(not(target_arch = "mips"))]
+#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
 #[inline(always)]
 fn debug_byte(_byte: u8) {}
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn emit_event(kind: u8, id: u16) {
     unsafe {
@@ -597,7 +664,7 @@ fn emit_event(kind: u8, id: u16) {
     }
 }
 
-#[cfg(not(target_arch = "mips"))]
+#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
 #[inline(always)]
 fn emit_event(_kind: u8, _id: u16) {}
 

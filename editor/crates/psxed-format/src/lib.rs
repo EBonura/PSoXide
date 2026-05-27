@@ -44,6 +44,7 @@
 #![warn(missing_docs)]
 
 pub mod animation;
+pub mod audio;
 pub mod mesh;
 pub mod model;
 pub mod texture;

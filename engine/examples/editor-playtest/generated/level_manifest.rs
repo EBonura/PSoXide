@@ -9,9 +9,10 @@ use psx_level::{
     LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelRoomPortalRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord,
-    LevelRoomVisibilityRecord, LevelSkyRecord, LevelVisibilityCellRecord, LevelVisibilityPvsRecord,
-    LevelWeaponRecord, LevelWorldPackEntryRecord, PlayerControllerRecord, PlayerSpawnRecord,
-    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
+    LevelRoomVisibilityRecord, LevelSkyRecord, LevelUiNodeRecord, LevelVisibilityCellRecord,
+    LevelVisibilityPvsRecord, LevelWeaponRecord, LevelWorldPackEntryRecord,
+    ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
+    RoomResidencyRecord, WeaponHitboxRecord,
 };
 
 pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
@@ -57,10 +58,12 @@ pub static MODELS: &[LevelModelRecord] = &[];
 pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
 pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
 pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
+pub static UI_NODES: &[LevelUiNodeRecord] = &[];
 pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[];
 pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
 pub static LIGHTS: &[PointLightRecord] = &[];
+pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[];
 pub static CHARACTERS: &[LevelCharacterRecord] = &[];
 pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;
 pub static ENTITIES: &[EntityRecord] = &[];

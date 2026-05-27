@@ -30,7 +30,7 @@
 //! Ported to `psx-engine` in Phase 3e. The `Scene` struct (renamed
 //! to `Lighting` to avoid collision with the engine trait) now
 //! holds per-frame state inline; GTE one-time setup moved to
-//! `Scene::init`; geometry animation drives off `ctx.frame` instead
+//! `Scene::init`; geometry animation drives off `ctx.sim_tick` instead
 //! of an incrementing `static mut SCENE.frame`.
 
 #![no_std]
@@ -42,7 +42,7 @@ extern crate psx_rt;
 use psx_asset::Mesh;
 use psx_engine::{
     ActorTransform, App, Config, Ctx, DepthBand, DepthRange, GouraudMeshOptions, GouraudRenderPass,
-    GouraudTriCommand, OtDepth, OtFrame, PrimitiveArena, Scene, Vec3World,
+    GouraudTriCommand, OtDepth, OtFrame, PrimitiveArena, Scene, SimTick, Vec3World,
 };
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_gpu::ot::OrderingTable;
@@ -366,7 +366,8 @@ impl Scene for Lighting {
         ];
         for i in 0..NUM_LIGHTS {
             let (r, speed, y, phase) = phases[i];
-            let angle = (ctx.frame.wrapping_mul(speed as u32) as u16).wrapping_add(phase);
+            let angle =
+                (ctx.sim_tick.as_u32().wrapping_mul(speed as u32) as u16).wrapping_add(phase);
             // Q1.12 sin/cos scaled by Q3.12 radius → Q4.24 position,
             // shift right 12 to bring back to Q3.12.
             let x = ((sincos::cos_q12(angle) * r as i32) >> 12) as i16;
@@ -376,14 +377,15 @@ impl Scene for Lighting {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        self.build_frame_ot(ctx.frame);
+        self.build_frame_ot(ctx.sim_tick);
         let font = self.font.as_ref().expect("font uploaded in init");
-        self.draw_hud(font, ctx.frame);
+        self.draw_hud(font, ctx.sim_tick);
     }
 }
 
 impl Lighting {
-    fn build_frame_ot(&mut self, frame: u32) {
+    fn build_frame_ot(&mut self, tick: SimTick) {
+        let frame = tick.as_u32();
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut gouraud = unsafe { PrimitiveArena::new(&mut GOURAUD_TRIS) };
         let mut markers = unsafe { PrimitiveArena::new(&mut LIGHT_MARKERS) };
@@ -500,13 +502,13 @@ impl Lighting {
         ot.submit();
     }
 
-    fn draw_hud(&self, font: &FontAtlas, frame: u32) {
+    fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {
         font.draw_text(4, 4, "SHOWCASE-LIGHTS", (220, 220, 250));
         // "4 lights" = 8 chars × 8 = 64 px. Anchor at W - 64 - 4.
         font.draw_text(SCREEN_W - 68, 4, "4 lights", (180, 180, 220));
 
         font.draw_text(4, SCREEN_H - 20, "frame", (160, 160, 200));
-        let frame_hex = u16_hex((frame & 0xFFFF) as u16);
+        let frame_hex = u16_hex((tick.as_u32() & 0xFFFF) as u16);
         font.draw_text(
             4 + 8 * 6,
             SCREEN_H - 20,
