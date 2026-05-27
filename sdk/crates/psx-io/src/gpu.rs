@@ -39,6 +39,9 @@ pub fn gpuread() -> u32 {
 /// Polls `GPUSTAT.READY_CMD`. On real hardware this bit is briefly
 /// cleared while the GPU is busy ingesting a multi-word packet; our
 /// emulator forces it on, so the loop is essentially a single read.
+/// Do not use this between GP0(0xA0) image payload words: after the
+/// transfer setup packet, the GPU is waiting for data, not a new
+/// normal command.
 #[inline]
 pub fn wait_cmd_ready() {
     while !gpustat().contains(GpuStat::READY_CMD) {}

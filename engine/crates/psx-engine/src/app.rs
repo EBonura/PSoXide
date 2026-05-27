@@ -45,6 +45,16 @@ use crate::telemetry;
 use crate::time::EngineClock;
 use crate::{SimTick, VideoHz, VisualFrame};
 
+#[cfg(all(target_arch = "mips", feature = "boot-trace"))]
+#[inline(always)]
+fn boot_trace(message: &str) {
+    psx_rt::tty::println(message);
+}
+
+#[cfg(not(all(target_arch = "mips", feature = "boot-trace")))]
+#[inline(always)]
+fn boot_trace(_message: &str) {}
+
 /// Configuration passed to [`App::run`]. Sensible defaults via
 /// [`Config::default`] so simple games can just write
 /// `App::run(Config::default(), &mut game)`.
@@ -163,8 +173,11 @@ impl App {
     /// }
     /// ```
     pub fn run<S: Scene>(config: Config, scene: &mut S) -> ! {
+        boot_trace("psx-engine: run");
         gpu::init(config.video_mode, config.resolution);
+        boot_trace("psx-engine: gpu ok");
         let clock = EngineClock::new();
+        boot_trace("psx-engine: clock ok");
         let fb = FrameBuffer::new(config.screen_w, config.screen_h);
         gpu::set_draw_area(
             0,
@@ -173,6 +186,7 @@ impl App {
             config.screen_h.saturating_sub(1),
         );
         gpu::set_draw_offset(0, 0);
+        boot_trace("psx-engine: framebuffer ok");
 
         let mut ctx = Ctx {
             sim_tick: SimTick::ZERO,
@@ -183,9 +197,12 @@ impl App {
             fb,
         };
 
+        boot_trace("psx-engine: scene init");
         scene.init(&mut ctx);
+        boot_trace("psx-engine: scene init ok");
 
         let visual_interval = config.visual_pacing.interval_vblanks();
+        boot_trace("psx-engine: loop");
         Self::run_scheduled(config, scene, clock, ctx, visual_interval);
     }
 
@@ -197,24 +214,48 @@ impl App {
         visual_interval: u16,
     ) -> ! {
         let mut scheduler = FrameScheduler::new(config.scheduler, visual_interval);
+        let mut traced_wait = false;
+        let mut traced_update = false;
+        let mut traced_render = false;
+        let mut traced_present = false;
 
         loop {
             let elapsed_sim_ticks = clock.elapsed_sim_ticks();
             match scheduler.next_action(elapsed_sim_ticks) {
                 SchedulerAction::WaitForVBlank => {
+                    if !traced_wait {
+                        boot_trace("psx-engine: wait vblank");
+                    }
                     clock.wait_next_vblank();
+                    if !traced_wait {
+                        boot_trace("psx-engine: vblank ok");
+                        traced_wait = true;
+                    }
                 }
                 SchedulerAction::RunFixedUpdate { tick } => {
+                    if !traced_update {
+                        boot_trace("psx-engine: update begin");
+                    }
                     telemetry::task_begin(telemetry::task::FIXED_UPDATE);
                     telemetry::frame_begin(tick.as_u32());
                     ctx.sim_tick = tick;
                     emit_sim_tick_counters(visual_interval);
                     ctx.pad_prev = ctx.pad;
+                    if !traced_update {
+                        boot_trace("psx-engine: pad poll begin");
+                    }
                     ctx.pad = poll_port1();
+                    if !traced_update {
+                        boot_trace("psx-engine: pad poll ok");
+                    }
 
                     telemetry::stage_begin(telemetry::stage::UPDATE);
                     scene.update(&mut ctx);
                     telemetry::stage_end(telemetry::stage::UPDATE);
+                    if !traced_update {
+                        boot_trace("psx-engine: update ok");
+                        traced_update = true;
+                    }
 
                     let outcome = scheduler.complete_fixed_update();
                     if outcome.visual_intervals_due == 0 {
@@ -226,6 +267,9 @@ impl App {
                     missed_visual_intervals,
                     fixed_update_clamped: _,
                 } => {
+                    if !traced_render {
+                        boot_trace("psx-engine: render begin");
+                    }
                     telemetry::task_begin(telemetry::task::VISUAL_RENDER);
                     telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
                     ctx.fb.clear(
@@ -238,13 +282,24 @@ impl App {
                     telemetry::stage_begin(telemetry::stage::RENDER);
                     scene.render(&mut ctx);
                     telemetry::stage_end(telemetry::stage::RENDER);
+                    if !traced_render {
+                        boot_trace("psx-engine: render ok");
+                        traced_render = true;
+                    }
                     telemetry::task_end(telemetry::task::VISUAL_RENDER);
 
+                    if !traced_present {
+                        boot_trace("psx-engine: present begin");
+                    }
                     telemetry::stage_begin(telemetry::stage::PRESENT);
                     clock.wait_next_vblank();
                     gpu::draw_sync();
                     ctx.fb.swap();
                     telemetry::stage_end(telemetry::stage::PRESENT);
+                    if !traced_present {
+                        boot_trace("psx-engine: present ok");
+                        traced_present = true;
+                    }
 
                     scheduler.complete_visual_frame();
                     emit_visual_frame_counters(missed_visual_intervals);

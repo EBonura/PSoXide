@@ -764,18 +764,16 @@ fn convert_rigid_model_document_with_extra_animations(
         return Err(Error::Empty);
     }
     assign_face_joints(&mut source, joints.len());
-    let bounds_extra_fbx_animation_scenes =
-        if cfg.extra_animations_affect_bounds {
-            extra_fbx_animation_scenes
-        } else {
-            &[]
-        };
-    let bounds_extra_gltf_animation_scenes =
-        if cfg.extra_animations_affect_bounds {
-            extra_gltf_animation_scenes
-        } else {
-            &[]
-        };
+    let bounds_extra_fbx_animation_scenes = if cfg.extra_animations_affect_bounds {
+        extra_fbx_animation_scenes
+    } else {
+        &[]
+    };
+    let bounds_extra_gltf_animation_scenes = if cfg.extra_animations_affect_bounds {
+        extra_gltf_animation_scenes
+    } else {
+        &[]
+    };
     let precision_bounds = collect_precision_bounds(
         document,
         buffers,
@@ -2340,8 +2338,7 @@ fn collect_precision_bounds(
         validate_gltf_animation_mapping(extra.document, &mapping)?;
         let source_parents = build_parent_indices(extra.document);
         let source_base_trs = collect_base_trs(extra.document);
-        let copy_full_local_trs =
-            mapped_local_binds_match(base_trs, &source_base_trs, &mapping);
+        let copy_full_local_trs = mapped_local_binds_match(base_trs, &source_base_trs, &mapping);
         for animation in extra.document.animations() {
             let channels = read_animation_channels(&animation, extra.buffers)?;
             if channels.is_empty() {
@@ -3336,8 +3333,7 @@ fn cook_all_animations(
         validate_gltf_animation_mapping(extra.document, &mapping)?;
         let source_parents = build_parent_indices(extra.document);
         let source_base_trs = collect_base_trs(extra.document);
-        let copy_full_local_trs =
-            mapped_local_binds_match(base_trs, &source_base_trs, &mapping);
+        let copy_full_local_trs = mapped_local_binds_match(base_trs, &source_base_trs, &mapping);
         for animation in extra.document.animations() {
             let channels = read_animation_channels(&animation, extra.buffers)?;
             if channels.is_empty() {
@@ -4511,7 +4507,9 @@ mod tests {
                 >> 12)
                 + pose.translation.z,
         ];
-        let expected = bounds.normalize_point(transform_point(&skin, source)).map(q12_i32);
+        let expected = bounds
+            .normalize_point(transform_point(&skin, source))
+            .map(q12_i32);
         for axis in 0..3 {
             assert!(
                 (actual[axis] - expected[axis]).abs() <= 2,
