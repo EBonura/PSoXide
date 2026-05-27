@@ -667,6 +667,8 @@ pub struct PlaytestUiNode {
     pub value: UiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: UiValueBinding,
+    /// Texture asset index for `Image`, or `None`.
+    pub texture_asset: Option<usize>,
     /// Text for `Label`.
     pub text: String,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
