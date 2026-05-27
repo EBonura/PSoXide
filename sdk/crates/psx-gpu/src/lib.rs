@@ -420,7 +420,6 @@ pub fn upload_rect_raw(x: u16, y: u16, w: u16, h: u16, pixels: &[u32]) {
     write_gp0(pack_xy(x, y));
     write_gp0(pack_xy(w, h));
     for word in pixels {
-        wait_cmd_ready();
         write_gp0(*word);
     }
 }

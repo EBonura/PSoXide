@@ -438,13 +438,9 @@ mod tests {
     fn gouraud_packet_material_is_compact_and_tracks_translucency() {
         let opaque = TextureMaterial::opaque(0x1234, 0x018f, (0x80, 0x80, 0x80))
             .textured_gouraud_packet_material();
-        let translucent = TextureMaterial::blended(
-            0x1234,
-            0x018f,
-            (0x80, 0x80, 0x80),
-            BlendMode::Average,
-        )
-        .textured_gouraud_packet_material();
+        let translucent =
+            TextureMaterial::blended(0x1234, 0x018f, (0x80, 0x80, 0x80), BlendMode::Average)
+                .textured_gouraud_packet_material();
 
         assert_eq!(
             core::mem::size_of::<super::TexturedGouraudPacketMaterial>(),

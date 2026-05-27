@@ -1,4 +1,4 @@
-//! Capture the `hello-cdda` side-load path to a WAV and fail if it is silent.
+//! Capture a side-loaded CD-DA path to a WAV and fail if it is silent.
 //!
 //! ```bash
 //! make probe-cdda-audio
@@ -72,7 +72,7 @@ fn main() {
     write_wav(&wav_path, &samples).expect("write WAV");
     let stats = AudioStats::from_samples(&samples);
 
-    println!("=== hello-cdda audio probe ===");
+    println!("=== CD-DA audio probe ===");
     println!("EXE:      {}", exe_path.display());
     println!("Disc:     {}", disc_path.display());
     println!("WAV:      {}", wav_path.display());
