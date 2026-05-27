@@ -12,6 +12,7 @@ pub(crate) struct RuntimeScheduleConfig {
     pub(crate) stream_load_batch_count: usize,
     pub(crate) stream_pump_sectors_per_tick: usize,
     pub(crate) stream_bootstrap_pump_limit: usize,
+    pub(crate) max_fixed_ticks_before_visual: u16,
 }
 
 /// Central runtime scheduling policy.
@@ -32,4 +33,5 @@ pub(crate) const RUNTIME_SCHEDULE: RuntimeScheduleConfig = RuntimeScheduleConfig
     stream_load_batch_count: 4,
     stream_pump_sectors_per_tick: 8,
     stream_bootstrap_pump_limit: 4096,
+    max_fixed_ticks_before_visual: 2,
 };

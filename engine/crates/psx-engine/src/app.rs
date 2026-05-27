@@ -10,22 +10,16 @@
 //!   loop:
 //!     ctx.pad_prev ← ctx.pad           (one-frame input history)
 //!     ctx.pad      ← poll_port1()
-//!     scene.update(&mut ctx)
-//!     if a visual frame is due:
-//!       ctx.fb.clear(config.clear_color)
-//!       scene.render(&mut ctx)
-//!       display-clock wait + draw_sync + fb.swap
-//!       ctx.visual_frame += 1
-//!     else:
-//!       wait for the next display VBlank, leaving the last framebuffer visible
+//!     ask FrameScheduler for the next task:
+//!       fixed update  -> poll pad + scene.update(&mut ctx)
+//!       visual render -> clear + scene.render(&mut ctx) + present
+//!       wait          -> wait for the next display VBlank
 //! ```
 //!
-//! Paced rendering intentionally bounds simulation catch-up before every visual
-//! frame. Startup streaming or a heavy update can make the CPU fall behind the
-//! display clock; if the loop drains the entire backlog first, rendering can
-//! starve and the player sees a black viewport. When the engine is late, it
-//! records the miss and presents the next visual as soon as the cadence interval
-//! has been simulated.
+//! The scheduler keeps fixed update and visual render as separate tasks.
+//! Rendering can drop visual intervals when the machine is busy, but fixed
+//! update catch-up is bounded by the project schedule so a late visual cannot
+//! be starved by an unbounded simulation burst.
 //!
 //! This mirrors every `sdk/examples/game-*/src/main.rs` file's
 //! inner loop by eye -- the engine just factors the shared cadence
@@ -46,6 +40,7 @@ use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_pad::{poll_port1, PadState};
 
 use crate::scene::{Ctx, Scene};
+use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
 use crate::time::EngineClock;
 use crate::{SimTick, VideoHz, VisualFrame};
@@ -74,6 +69,8 @@ pub struct Config {
     /// VBlank; paced modes keep update/control ticking every VBlank
     /// while rendering only on selected VBlanks.
     pub visual_pacing: VisualPacing,
+    /// Manual frame/task scheduler tuning.
+    pub scheduler: SchedulerConfig,
 }
 
 /// Engine-level visual render cadence.
@@ -107,6 +104,7 @@ impl Default for Config {
             resolution: Resolution::R320X240,
             clear_color: (0, 0, 0),
             visual_pacing: VisualPacing::EveryVBlank,
+            scheduler: SchedulerConfig::new(),
         }
     }
 }
@@ -119,37 +117,6 @@ impl VisualPacing {
             Self::EveryNVBlanks(n) if n > 1 => n,
             Self::EveryNVBlanks(_) => 1,
         }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-struct VisualPacer {
-    interval: u16,
-    next_visual_tick: u32,
-}
-
-impl VisualPacer {
-    const fn new(interval: u16) -> Self {
-        Self {
-            interval,
-            next_visual_tick: 0,
-        }
-    }
-
-    fn mark_due_intervals(&mut self, simulation_tick: u32) -> u16 {
-        if simulation_tick < self.next_visual_tick {
-            return 0;
-        }
-        let interval = self.interval.max(1) as u32;
-        let due = simulation_tick
-            .wrapping_sub(self.next_visual_tick)
-            .checked_div(interval)
-            .unwrap_or(0)
-            .saturating_add(1);
-        self.next_visual_tick = self
-            .next_visual_tick
-            .saturating_add(due.saturating_mul(interval));
-        due.min(u16::MAX as u32) as u16
     }
 }
 
@@ -172,11 +139,6 @@ fn emit_visual_frame_counters(lateness_vblanks: u16) {
         telemetry::counter::VISUAL_MAX_LATENESS_VBLANKS,
         lateness_vblanks as u32,
     );
-}
-
-#[inline(always)]
-fn max_sim_ticks_before_visual(visual_interval: u16) -> u16 {
-    visual_interval.max(1)
 }
 
 /// Engine entry point. Namespaced as a type (rather than a free
@@ -224,93 +186,71 @@ impl App {
         scene.init(&mut ctx);
 
         let visual_interval = config.visual_pacing.interval_vblanks();
-        Self::run_paced_visuals(config, scene, clock, ctx, visual_interval);
+        Self::run_scheduled(config, scene, clock, ctx, visual_interval);
     }
 
-    fn run_paced_visuals<S: Scene>(
+    fn run_scheduled<S: Scene>(
         config: Config,
         scene: &mut S,
         mut clock: EngineClock,
         mut ctx: Ctx,
         visual_interval: u16,
     ) -> ! {
-        let mut pacer = VisualPacer::new(visual_interval);
-        let mut next_simulation_tick = 0u32;
+        let mut scheduler = FrameScheduler::new(config.scheduler, visual_interval);
 
         loop {
             let elapsed_sim_ticks = clock.elapsed_sim_ticks();
-            if next_simulation_tick > elapsed_sim_ticks {
-                clock.wait_next_vblank();
-                continue;
-            }
-
-            let mut due_visual_intervals = 0u16;
-            let mut simulation_ticks_this_pass = 0u16;
-            // Simulation owns real time: drain every elapsed VBlank before
-            // drawing, but never starve rendering once a visual interval is due.
-            // If rendering or update work is too expensive, VIS drops and the
-            // lateness counters record it, while the viewport still updates.
-            while next_simulation_tick <= elapsed_sim_ticks {
-                telemetry::frame_begin(next_simulation_tick);
-                ctx.sim_tick = SimTick::from_u32(next_simulation_tick);
-                emit_sim_tick_counters(visual_interval);
-                ctx.pad_prev = ctx.pad;
-                ctx.pad = poll_port1();
-
-                telemetry::stage_begin(telemetry::stage::UPDATE);
-                scene.update(&mut ctx);
-                telemetry::stage_end(telemetry::stage::UPDATE);
-
-                let tick_visual_intervals = pacer.mark_due_intervals(next_simulation_tick);
-                if tick_visual_intervals == 0 {
-                    telemetry::counter(telemetry::counter::VISUAL_SKIPPED_VBLANKS, 1);
-                } else {
-                    due_visual_intervals =
-                        due_visual_intervals.saturating_add(tick_visual_intervals);
+            match scheduler.next_action(elapsed_sim_ticks) {
+                SchedulerAction::WaitForVBlank => {
+                    clock.wait_next_vblank();
                 }
-                next_simulation_tick = next_simulation_tick.wrapping_add(1);
-                simulation_ticks_this_pass = simulation_ticks_this_pass.saturating_add(1);
-                let catchup_limit = max_sim_ticks_before_visual(visual_interval);
-                if due_visual_intervals != 0 && simulation_ticks_this_pass >= catchup_limit {
-                    break;
+                SchedulerAction::RunFixedUpdate { tick } => {
+                    telemetry::task_begin(telemetry::task::FIXED_UPDATE);
+                    telemetry::frame_begin(tick.as_u32());
+                    ctx.sim_tick = tick;
+                    emit_sim_tick_counters(visual_interval);
+                    ctx.pad_prev = ctx.pad;
+                    ctx.pad = poll_port1();
+
+                    telemetry::stage_begin(telemetry::stage::UPDATE);
+                    scene.update(&mut ctx);
+                    telemetry::stage_end(telemetry::stage::UPDATE);
+
+                    let outcome = scheduler.complete_fixed_update();
+                    if outcome.visual_intervals_due == 0 {
+                        telemetry::counter(telemetry::counter::VISUAL_SKIPPED_VBLANKS, 1);
+                    }
+                    telemetry::task_end(telemetry::task::FIXED_UPDATE);
+                }
+                SchedulerAction::RunVisualFrame {
+                    missed_visual_intervals,
+                    fixed_update_clamped: _,
+                } => {
+                    telemetry::task_begin(telemetry::task::VISUAL_RENDER);
+                    telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+                    ctx.fb.clear(
+                        config.clear_color.0,
+                        config.clear_color.1,
+                        config.clear_color.2,
+                    );
+                    telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
+
+                    telemetry::stage_begin(telemetry::stage::RENDER);
+                    scene.render(&mut ctx);
+                    telemetry::stage_end(telemetry::stage::RENDER);
+                    telemetry::task_end(telemetry::task::VISUAL_RENDER);
+
+                    telemetry::stage_begin(telemetry::stage::PRESENT);
+                    clock.wait_next_vblank();
+                    gpu::draw_sync();
+                    ctx.fb.swap();
+                    telemetry::stage_end(telemetry::stage::PRESENT);
+
+                    scheduler.complete_visual_frame();
+                    emit_visual_frame_counters(missed_visual_intervals);
+                    ctx.visual_frame = ctx.visual_frame.advance();
                 }
             }
-
-            if due_visual_intervals == 0 {
-                continue;
-            }
-
-            let pending_vblanks = if next_simulation_tick <= elapsed_sim_ticks {
-                elapsed_sim_ticks
-                    .wrapping_sub(next_simulation_tick)
-                    .saturating_add(1)
-            } else {
-                0
-            };
-            let pending_visual_intervals = pending_vblanks / visual_interval.max(1) as u32;
-            let missed_visual_intervals = due_visual_intervals
-                .saturating_sub(1)
-                .saturating_add(pending_visual_intervals.min(u16::MAX as u32) as u16);
-
-            telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
-            ctx.fb.clear(
-                config.clear_color.0,
-                config.clear_color.1,
-                config.clear_color.2,
-            );
-            telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
-
-            telemetry::stage_begin(telemetry::stage::RENDER);
-            scene.render(&mut ctx);
-            telemetry::stage_end(telemetry::stage::RENDER);
-
-            telemetry::stage_begin(telemetry::stage::PRESENT);
-            clock.wait_next_vblank();
-            gpu::draw_sync();
-            ctx.fb.swap();
-            telemetry::stage_end(telemetry::stage::PRESENT);
-            emit_visual_frame_counters(missed_visual_intervals);
-            ctx.visual_frame = ctx.visual_frame.advance();
         }
     }
 }
@@ -325,23 +265,5 @@ mod tests {
         assert_eq!(VisualPacing::EveryNVBlanks(0).interval_vblanks(), 1);
         assert_eq!(VisualPacing::EveryNVBlanks(1).interval_vblanks(), 1);
         assert_eq!(VisualPacing::EveryNVBlanks(3).interval_vblanks(), 3);
-    }
-
-    #[test]
-    fn visual_pacer_marks_due_and_collapses_missed_intervals() {
-        let mut pacer = VisualPacer::new(3);
-        assert_eq!(pacer.mark_due_intervals(0), 1);
-        assert_eq!(pacer.mark_due_intervals(1), 0);
-        assert_eq!(pacer.mark_due_intervals(2), 0);
-        assert_eq!(pacer.mark_due_intervals(3), 1);
-        assert_eq!(pacer.mark_due_intervals(10), 2);
-    }
-
-    #[test]
-    fn visual_catchup_budget_tracks_visual_interval() {
-        assert_eq!(max_sim_ticks_before_visual(0), 1);
-        assert_eq!(max_sim_ticks_before_visual(1), 1);
-        assert_eq!(max_sim_ticks_before_visual(2), 2);
-        assert_eq!(max_sim_ticks_before_visual(4), 4);
     }
 }
