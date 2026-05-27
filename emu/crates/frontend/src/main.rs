@@ -42,7 +42,12 @@ use crate::playtest_input::Port1PadSample;
 use crate::ui::profiler::FrameProfileSample;
 use crate::ui::{menu::MenuInput, MenuOutcome};
 
-use emulator_core::{button, pad::PadMode, spu::SAMPLE_CYCLES, telemetry::counter};
+use emulator_core::{
+    button,
+    pad::PadMode,
+    spu::SAMPLE_CYCLES,
+    telemetry::{counter, task},
+};
 use psoxide_settings::settings::{InputBinding, PortBindings, StickBindings};
 
 /// Default window size when not running fullscreen. Chosen big
@@ -58,6 +63,7 @@ const MIN_HEIGHT: u32 = 700;
 /// Frontend run cadence target. The toolbar, "advance one frame"
 /// control, and sample pump all assume an NTSC-ish 60 Hz shell.
 const TARGET_FRAME_DT: f32 = 1.0 / 60.0;
+const PSX_CYCLES_PER_MS: f32 = 33_868_800.0 / 1000.0;
 /// Don't try to catch up an arbitrarily long stall in one redraw;
 /// cap the burst so a debugger stop or window drag doesn't spend
 /// seconds chewing through delayed emu frames.
@@ -1064,7 +1070,11 @@ fn hw_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
 
 fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytestMetrics> {
     let latest = state.profiler.latest()?;
-    let sample = state.profiler.average().unwrap_or(latest);
+    let sample = state
+        .profiler
+        .live_average()
+        .or_else(|| state.profiler.average())
+        .unwrap_or(latest);
     let visual_hz = sample.guest_visual_frame_hz();
     let display_hz = visual_hz.unwrap_or_else(|| sample.psx_draw_hz());
     let visual_interval_vblanks = latest
@@ -1083,6 +1093,18 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         1000.0 / display_hz
     } else {
         latest.total_ms
+    };
+    let task_ms_per_hit = |task_id: u16| {
+        let task_id = task_id as usize;
+        let hits = sample.guest.task_hits[task_id];
+        if hits > 0.0 {
+            sample.guest.task_cycles[task_id] / hits / PSX_CYCLES_PER_MS
+        } else {
+            0.0
+        }
+    };
+    let task_max_ms = |task_id: u16| {
+        sample.guest.task_max_cycles[task_id as usize] / PSX_CYCLES_PER_MS
     };
     const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
     const CHUNK_MAP_COUNTERS: &[u16] = &[
@@ -1268,6 +1290,10 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         hw_ms: sample.hw_render_ms,
         ui_ms: sample.egui.total_ms,
         step_budget_percent: sample.psx_budget_percent(),
+        fixed_update_task_ms: task_ms_per_hit(task::FIXED_UPDATE),
+        fixed_update_task_max_ms: task_max_ms(task::FIXED_UPDATE),
+        visual_render_task_ms: task_ms_per_hit(task::VISUAL_RENDER),
+        visual_render_task_max_ms: task_max_ms(task::VISUAL_RENDER),
         chunk_visible: recent_counter(counter::ROOM_ACTIVE_CHUNKS),
         chunk_loaded: recent_counter(counter::ROOM_STREAM_RESIDENT_SLOTS),
         chunk_candidates: recent_counter(counter::ROOM_CHUNKS_CONSIDERED),
