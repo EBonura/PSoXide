@@ -335,6 +335,18 @@ typed_index! {
     pub struct UiNodeIndex;
 }
 
+/// Bit layout for [`LevelUiNodeRecord::flags`].
+pub mod ui_node_flags {
+    /// Low nibble stores the anchor id.
+    pub const ANCHOR_MASK: u16 = 0x000f;
+    /// Text alignment bit shift.
+    pub const TEXT_ALIGN_SHIFT: u16 = 4;
+    /// Text alignment mask.
+    pub const TEXT_ALIGN_MASK: u16 = 0x0030;
+    /// Label text wraps inside its rectangle.
+    pub const TEXT_WRAP: u16 = 1 << 6;
+}
+
 typed_index! {
     /// Runtime resource slot for entity records.
     pub struct ResourceSlot;
@@ -1446,6 +1458,8 @@ pub enum LevelUiNodeKind {
     Rect,
     /// Text label.
     Label,
+    /// Textured screen-space image.
+    Image,
     /// Horizontal value bar.
     Bar,
 }
@@ -1488,6 +1502,8 @@ pub struct LevelUiNodeRecord {
     pub value: LevelUiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: LevelUiValueBinding,
+    /// Texture asset for `Image`, or `AssetId(u16::MAX)`.
+    pub texture_asset: AssetId,
     /// Text for `Label`.
     pub text: &'static str,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
