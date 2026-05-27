@@ -9,8 +9,8 @@
 use psx_gpu::{
     ot::OrderingTable,
     prim::{
-        LineMono, QuadFlat, QuadGouraud, QuadTextured, RectFlat, Sprite, TriFlat, TriGouraud,
-        TriTextured, TriTexturedGouraud,
+        LineMono, QuadFlat, QuadGouraud, QuadTextured, QuadTexturedMaterial, RectFlat, Sprite,
+        TriFlat, TriGouraud, TriTextured, TriTexturedGouraud,
     },
 };
 
@@ -45,6 +45,7 @@ impl_gpu_packet!(
     TriTextured,
     TriTexturedGouraud,
     QuadTextured,
+    QuadTexturedMaterial,
     Sprite,
 );
 
@@ -514,8 +515,7 @@ impl<T> PrimitiveSink<T> for PrimitiveArena<'_, T> {
 }
 
 const PRIMITIVE_PACKET_SLOT_WORDS: usize =
-    (core::mem::size_of::<TriTexturedGouraud>() + core::mem::size_of::<u32>() - 1)
-        / core::mem::size_of::<u32>();
+    core::mem::size_of::<TriTexturedGouraud>().div_ceil(core::mem::size_of::<u32>());
 
 /// One aligned primitive packet slot sized for the largest triangle packet.
 #[derive(Copy, Clone)]

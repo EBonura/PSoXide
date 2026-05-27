@@ -1,15 +1,16 @@
 //! `hello-audio` -- the audio equivalent of hello-input.
 //!
-//! Four face buttons trigger four SPU voices, each playing a
-//! different built-in [`psx_spu::tones`] waveform at a different
-//! pitch so the ear can tell them apart:
+//! Face buttons, d-pad directions, and START trigger cooked `.psau`
+//! gameplay SFX imported by `psxed audio-pack`:
 //!
-//! | Button   | Waveform | Pitch     | Character            |
-//! |----------|----------|-----------|----------------------|
-//! | CROSS    | SINE     | 0x0C00    | Low, smooth          |
-//! | CIRCLE   | SQUARE   | 0x1000    | Mid, buzzy           |
-//! | TRIANGLE | TRIANGLE | 0x1400    | High, soft           |
-//! | SQUARE   | SAWTOOTH | 0x1800    | Highest, bright      |
+//! | Button   | Sample    |
+//! |----------|-----------|
+//! | CROSS    | Jump      |
+//! | CIRCLE   | Coin      |
+//! | TRIANGLE | Swoosh    |
+//! | SQUARE   | Punch     |
+//! | D-pad    | UI / step |
+//! | START    | Explosion |
 //!
 //! Visual feedback:
 //! - Background flashes the colour of whichever voice just triggered.
@@ -26,63 +27,119 @@
 
 extern crate psx_rt;
 
+use psx_asset::Audio;
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{self as gpu, framebuf::FrameBuffer, Resolution, VideoMode};
 use psx_pad::{button, poll_port1, ButtonState};
-use psx_spu::{self as spu, tones, Adsr, Pitch, SpuAddr, Voice, Volume};
+use psx_spu::{self as spu, Adsr, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
 
 /// Font atlas tpage -- past the 320-wide display buffers.
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
-/// SPU RAM addresses for each tone. Each tone is 16 bytes (one
-/// ADPCM block). We park them starting at 0x1010 -- the BIOS
-/// convention is to leave 0x0000..0x1000 for system use, with the
-/// required "zero" block at 0x1000. We skip past that.
-const SPU_ADDR_SINE: SpuAddr = SpuAddr::new(0x1010);
-const SPU_ADDR_SQUARE: SpuAddr = SpuAddr::new(0x1020);
-const SPU_ADDR_TRIANGLE: SpuAddr = SpuAddr::new(0x1030);
-const SPU_ADDR_SAWTOOTH: SpuAddr = SpuAddr::new(0x1040);
+static JUMP_SFX: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/jump.psau");
+static COIN_SFX: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/pickup_coin.psau");
+static SWOOSH_SFX: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/swoosh.psau");
+static PUNCH_SFX: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/hit_punch.psau");
+static UI_SELECT_SFX: &[u8] =
+    include_bytes!("../../../../assets/audio/freesfx/psau/ui_select.psau");
+static METAL_SFX: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/hit_metal.psau");
+static BEEP_SFX: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau");
+static FOOTSTEP_SFX: &[u8] = include_bytes!("../../../../assets/audio/freesfx/psau/footstep.psau");
+static EXPLOSION_SFX: &[u8] =
+    include_bytes!("../../../../assets/audio/freesfx/psau/explosion_short.psau");
 
-/// Per-button setup: which voice, which SPU start addr, which
-/// pitch, which display label and tint.
-struct Channel {
+/// SPU RAM addresses. We park samples starting at 0x1010 -- the BIOS
+/// convention is to leave 0x0000..0x1000 for system use, with the
+/// required "zero" block at 0x1000.
+const SPU_SAMPLE_BASE: u32 = 0x1010;
+const FLASH_FRAMES: u8 = 12;
+const SFX_COUNT: usize = 9;
+
+struct SfxChannel {
     voice: Voice,
-    start: SpuAddr,
-    pitch: Pitch,
+    button: u16,
+    bytes: &'static [u8],
+    volume: Volume,
     label: &'static str,
     tint: (u8, u8, u8),
 }
 
-const CROSS_CHAN: Channel = Channel {
-    voice: Voice::V0,
-    start: SPU_ADDR_SINE,
-    pitch: Pitch::raw(0x0C00),
-    label: "CROSS    : SINE  lo",
-    tint: (80, 160, 220),
-};
-const CIRCLE_CHAN: Channel = Channel {
-    voice: Voice::V1,
-    start: SPU_ADDR_SQUARE,
-    pitch: Pitch::raw(0x1000),
-    label: "CIRCLE   : SQR   mid",
-    tint: (220, 80, 80),
-};
-const TRIANGLE_CHAN: Channel = Channel {
-    voice: Voice::V2,
-    start: SPU_ADDR_TRIANGLE,
-    pitch: Pitch::raw(0x1400),
-    label: "TRIANGLE : TRI   hi",
-    tint: (80, 220, 80),
-};
-const SQUARE_CHAN: Channel = Channel {
-    voice: Voice::V3,
-    start: SPU_ADDR_SAWTOOTH,
-    pitch: Pitch::raw(0x1800),
-    label: "SQUARE   : SAW   top",
-    tint: (220, 80, 220),
-};
+const SFX_CHANNELS: [SfxChannel; SFX_COUNT] = [
+    SfxChannel {
+        voice: Voice::V0,
+        button: button::CROSS,
+        bytes: JUMP_SFX,
+        volume: Volume::linear(1, 8),
+        label: "CROSS    : jump",
+        tint: (80, 160, 220),
+    },
+    SfxChannel {
+        voice: Voice::V1,
+        button: button::CIRCLE,
+        bytes: COIN_SFX,
+        volume: Volume::linear(1, 10),
+        label: "CIRCLE   : coin",
+        tint: (220, 170, 80),
+    },
+    SfxChannel {
+        voice: Voice::V2,
+        button: button::TRIANGLE,
+        bytes: SWOOSH_SFX,
+        volume: Volume::linear(1, 10),
+        label: "TRIANGLE : swoosh",
+        tint: (80, 220, 140),
+    },
+    SfxChannel {
+        voice: Voice::V3,
+        button: button::SQUARE,
+        bytes: PUNCH_SFX,
+        volume: Volume::linear(1, 10),
+        label: "SQUARE   : punch",
+        tint: (220, 90, 90),
+    },
+    SfxChannel {
+        voice: Voice::V4,
+        button: button::UP,
+        bytes: UI_SELECT_SFX,
+        volume: Volume::linear(1, 12),
+        label: "UP       : select",
+        tint: (140, 180, 240),
+    },
+    SfxChannel {
+        voice: Voice::V5,
+        button: button::RIGHT,
+        bytes: METAL_SFX,
+        volume: Volume::linear(1, 12),
+        label: "RIGHT    : metal",
+        tint: (180, 180, 190),
+    },
+    SfxChannel {
+        voice: Voice::V6,
+        button: button::DOWN,
+        bytes: BEEP_SFX,
+        volume: Volume::linear(1, 12),
+        label: "DOWN     : beep",
+        tint: (120, 220, 230),
+    },
+    SfxChannel {
+        voice: Voice::V7,
+        button: button::LEFT,
+        bytes: FOOTSTEP_SFX,
+        volume: Volume::linear(1, 8),
+        label: "LEFT     : footstep",
+        tint: (170, 130, 90),
+    },
+    SfxChannel {
+        voice: Voice::new(8),
+        button: button::START,
+        bytes: EXPLOSION_SFX,
+        volume: Volume::linear(1, 14),
+        label: "START    : explosion",
+        tint: (230, 120, 70),
+    },
+];
 
 #[no_mangle]
 fn main() {
@@ -94,21 +151,17 @@ fn main() {
     // Audio side init: SPU on, unmuted, main volume full.
     spu::init();
 
-    // Upload all four tone samples into SPU RAM.
-    spu::upload_adpcm(SPU_ADDR_SINE, tones::SINE);
-    spu::upload_adpcm(SPU_ADDR_SQUARE, tones::SQUARE);
-    spu::upload_adpcm(SPU_ADDR_TRIANGLE, tones::TRIANGLE);
-    spu::upload_adpcm(SPU_ADDR_SAWTOOTH, tones::SAWTOOTH);
-
-    // Configure each voice once: volume, start addr, envelope.
-    // Pitch is also set here; it doesn't change while held (per-
-    // channel pitch is constant in this demo, though a fancier one
-    // could modulate).
-    for ch in [&CROSS_CHAN, &CIRCLE_CHAN, &TRIANGLE_CHAN, &SQUARE_CHAN] {
-        ch.voice.set_volume(Volume::HALF, Volume::HALF);
-        ch.voice.set_pitch(ch.pitch);
-        ch.voice.set_start_addr(ch.start);
-        ch.voice.set_adsr(Adsr::default_tone());
+    // Upload each cooked PSAU sample into SPU RAM and configure its
+    // voice once. PSAU payloads are ADPCM blocks, so advancing by the
+    // byte length keeps the next start address aligned.
+    let mut next_addr = SPU_SAMPLE_BASE;
+    for ch in SFX_CHANNELS.iter() {
+        let audio = Audio::from_bytes(ch.bytes).expect("psau sample");
+        let addr = SpuAddr::new(next_addr);
+        spu::upload_adpcm(addr, audio.adpcm_bytes());
+        ch.voice
+            .configure_sample(addr, audio.sample_rate_hz(), ch.volume, Adsr::sample());
+        next_addr += audio.adpcm_bytes().len() as u32;
     }
 
     let font = FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT);
@@ -117,55 +170,50 @@ fn main() {
     // -- otherwise we'd retrigger the attack phase every frame, which
     // sounds like a constant click.
     let mut prev_pad = ButtonState::NONE;
+    let mut flashes = [0u8; SFX_COUNT];
 
     loop {
         let pad = poll_port1().buttons;
 
-        // Compute which channels are newly pressed / newly released.
+        // Compute which one-shot channels are newly pressed.
         let mut on_mask: u32 = 0;
-        let mut off_mask: u32 = 0;
-        for (ch, btn) in [
-            (&CROSS_CHAN, button::CROSS),
-            (&CIRCLE_CHAN, button::CIRCLE),
-            (&TRIANGLE_CHAN, button::TRIANGLE),
-            (&SQUARE_CHAN, button::SQUARE),
-        ] {
-            let now = pad.is_held(btn);
-            let was = prev_pad.is_held(btn);
+        for (i, ch) in SFX_CHANNELS.iter().enumerate() {
+            let now = pad.is_held(ch.button);
+            let was = prev_pad.is_held(ch.button);
             if now && !was {
                 on_mask |= ch.voice.mask();
-            } else if !now && was {
-                off_mask |= ch.voice.mask();
+                flashes[i] = FLASH_FRAMES;
             }
         }
         if on_mask != 0 {
             Voice::key_on(on_mask);
         }
-        if off_mask != 0 {
-            Voice::key_off(off_mask);
-        }
         prev_pad = pad;
+        for flash in flashes.iter_mut() {
+            if *flash != 0 {
+                *flash -= 1;
+            }
+        }
 
         // Visual feedback -- tint the background with the sum of
         // currently-active channel colours for a low-effort "you
         // can see what you hear" cue.
-        let (r, g, b) = mix_background(pad);
+        let (r, g, b) = mix_background(&flashes);
         fb.clear(r, g, b);
 
         // Header.
         font.draw_text(4, 4, "hello-audio", (200, 200, 200));
-        font.draw_text(4, 14, "Hold face buttons to play tones.", (140, 140, 140));
+        font.draw_text(
+            4,
+            14,
+            "Press a mapped button to trigger a sample.",
+            (140, 140, 140),
+        );
 
-        // Per-channel row: label + PLAYING / silent indicator.
+        // Per-channel row: label + trigger indicator.
         let mut y: i16 = 32;
-        for (ch, btn) in [
-            (&CROSS_CHAN, button::CROSS),
-            (&CIRCLE_CHAN, button::CIRCLE),
-            (&TRIANGLE_CHAN, button::TRIANGLE),
-            (&SQUARE_CHAN, button::SQUARE),
-        ] {
-            let held = pad.is_held(btn);
-            let (line_tint, state_text) = if held {
+        for (i, ch) in SFX_CHANNELS.iter().enumerate() {
+            let (line_tint, state_text) = if flashes[i] != 0 {
                 (ch.tint, "PLAYING")
             } else {
                 ((100, 100, 100), "silent ")
@@ -176,7 +224,12 @@ fn main() {
         }
 
         // Footer hint.
-        font.draw_text(4, 220, "press any button to hear a tone", (120, 120, 120));
+        font.draw_text(
+            4,
+            220,
+            "face buttons + d-pad + start trigger samples",
+            (120, 120, 120),
+        );
 
         gpu::draw_sync();
         gpu::vsync();
@@ -184,20 +237,14 @@ fn main() {
     }
 }
 
-/// Mix a background tint from the set of currently-held buttons.
-/// Additive blend so "all four" is white-ish and "one" is a clear
-/// single hue. Keeps output dim so text stays legible on top.
-fn mix_background(pad: ButtonState) -> (u8, u8, u8) {
+/// Mix a background tint from recently-triggered samples. Additive
+/// blend keeps simultaneous hits visible without covering the text.
+fn mix_background(flashes: &[u8; SFX_COUNT]) -> (u8, u8, u8) {
     let mut r: u16 = 8;
     let mut g: u16 = 8;
     let mut b: u16 = 20;
-    for (ch, btn) in [
-        (&CROSS_CHAN, button::CROSS),
-        (&CIRCLE_CHAN, button::CIRCLE),
-        (&TRIANGLE_CHAN, button::TRIANGLE),
-        (&SQUARE_CHAN, button::SQUARE),
-    ] {
-        if pad.is_held(btn) {
+    for (i, ch) in SFX_CHANNELS.iter().enumerate() {
+        if flashes[i] != 0 {
             r = r.saturating_add((ch.tint.0 >> 2) as u16);
             g = g.saturating_add((ch.tint.1 >> 2) as u16);
             b = b.saturating_add((ch.tint.2 >> 2) as u16);

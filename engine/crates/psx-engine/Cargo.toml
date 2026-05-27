@@ -22,9 +22,14 @@ psx-vram  = { path = "../../../sdk/crates/psx-vram" }
 [target.'cfg(target_arch = "mips")'.dependencies]
 psx-rt = { path = "../../../sdk/crates/psx-rt" }
 
+[dev-dependencies]
+trybuild = "1"
+
 [features]
 default = []
+boot-trace = ["psx-rt/boot-trace"]
+emulator-telemetry = []
 room-surface-profile = []
 
-[lints.rust]
-missing_docs = "warn"
+[lints]
+workspace = true

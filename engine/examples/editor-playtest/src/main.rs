@@ -51,13 +51,14 @@ use psx_engine::{
     CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
     CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame, PointLightSample,
-    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
-    RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, TexturedModelGeometry,
-    TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VisualPacing,
-    WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
-    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
+    LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame,
+    PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex,
+    Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SchedulerConfig,
+    SimTick, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
+    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
+    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -76,7 +77,7 @@ use psx_gpu::{
     draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
-    prim::{TriTextured, TriTexturedGouraud},
+    prim::{QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
     VideoMode,
 };
 use psx_level::portal_visibility::{
@@ -86,12 +87,13 @@ use psx_level::portal_visibility::{
 };
 use psx_level::{
     box_prop_flags, character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind,
-    image_prop_flags, model_clip_flags, room_flags, sky_flags, visibility_cell_flags, AssetId,
-    AssetKind, CharacterAnimationAction, EntityRecord, LevelBoxPropRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ResidencyManager, RoomIndex,
+    image_prop_flags, model_clip_flags, particle_emitter_flags, room_flags, sky_flags,
+    visibility_cell_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
+    LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
+    LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness,
+    LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
+    LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
+    OptionalModelClipIndex, ParticleEmitterRecord, ResidencyManager, RoomIndex, RuntimeDebugMask,
     WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
 };
 #[cfg(feature = "cd-stream-bench")]
@@ -125,10 +127,10 @@ use generated::{
     ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS, ENTITIES,
     EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
-    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS,
-    ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES,
-    ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY,
-    VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
+    PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
+    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
+    ROOM_VISIBILITY, UI_NODES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -226,6 +228,8 @@ const SKY_PANORAMA_PALETTE_BANDS: usize = 8;
 const SKY_PANORAMA_WIDTH: u16 = 512;
 const SKY_PANORAMA_HEIGHT: u16 = 256;
 const SKY_PANORAMA_PAGE_WIDTH: u16 = 256;
+const SKY_CYCLORAMA_GRID_POINTS_MAX: usize =
+    (SKY_CYCLORAMA_COLUMNS_MAX as usize + 1) * (SKY_PANORAMA_PALETTE_BANDS + 1);
 /// Model atlases pack left-to-right until the reserved sky page.
 const MODEL_TPAGE_LIMIT_X: u16 = SKY_PANORAMA_LEFT_TPAGE.x();
 const SKY_CYCLORAMA_COLUMNS_MIN: u8 = 8;
@@ -245,6 +249,14 @@ const SHADOW_TEXEL_U: u8 = 64;
 const SHADOW_TEXTURE_X: u16 = SHADOW_TPAGE.x() + ((SHADOW_TEXEL_U as u16) / 4);
 const SHADOW_CLUT: Clut = Clut::new(336, 481);
 const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
+const PARTICLE_TPAGE: Tpage = SHADOW_TPAGE;
+const PARTICLE_TEXEL_U: u8 = 0;
+const PARTICLE_TEXEL_V: u8 = 0;
+const PARTICLE_TEXTURE_SIZE: u16 = 16;
+const PARTICLE_UV_MAX: u8 = PARTICLE_TEXEL_U + PARTICLE_TEXTURE_SIZE as u8 - 1;
+const PARTICLE_TEXTURE_X: u16 = PARTICLE_TPAGE.x() + ((PARTICLE_TEXEL_U as u16) / 4);
+const PARTICLE_TEXTURE_HALFWORDS_PER_ROW: u16 = PARTICLE_TEXTURE_SIZE / 4;
+const PARTICLE_CLUT: Clut = Clut::new(352, 481);
 
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
@@ -254,6 +266,9 @@ const ATMOSPHERE_PARTICLE_MAX: u32 = 96;
 const ATMOSPHERE_SCREEN_MARGIN: i32 = 24;
 const ATMOSPHERE_WRAP_W: i32 = SCREEN_W as i32 + ATMOSPHERE_SCREEN_MARGIN * 2;
 const ATMOSPHERE_WRAP_H: i32 = SCREEN_H as i32 + ATMOSPHERE_SCREEN_MARGIN * 2;
+const PARTICLE_EMITTER_DRAW_CAP: u16 = 64;
+const PARTICLE_MIN_SCREEN_SIZE: i16 = 2;
+const PARTICLE_MAX_SCREEN_SIZE: i16 = 18;
 const FOCAL: i32 = 320;
 const NEAR_Z: i32 = 64;
 const FAR_Z: i32 = 16384;
@@ -279,8 +294,15 @@ const CAMERA_RADIUS_STEP: i32 = 64;
 const CAMERA_START_YAW: Angle = Angle::from_q12(220);
 const CAMERA_YAW_STEP: Angle = Angle::from_q12(12);
 const CAMERA_SWEEP_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP").is_some();
-const CAMERA_SWEEP_YAW_STEP_Q12: i16 = 4;
-const CAMERA_SWEEP_RADIUS: i32 = CAMERA_START_RADIUS;
+const CAMERA_SWEEP_FAST_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP_FAST").is_some();
+const CAMERA_SWEEP_WIDE_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP_WIDE").is_some();
+const CAMERA_SWEEP_FORCE_VISIBILITY: bool = option_env!("PSXO_CAMERA_SWEEP_FORCE_VIS").is_some();
+const CAMERA_SWEEP_YAW_STEP_Q12: i16 = if CAMERA_SWEEP_FAST_ENABLED { 96 } else { 4 };
+const CAMERA_SWEEP_RADIUS: i32 = if CAMERA_SWEEP_WIDE_ENABLED {
+    CAMERA_RADIUS_MAX
+} else {
+    CAMERA_START_RADIUS
+};
 const MOVE_STICK_DEADZONE: i16 = 18;
 const STICK_MAX: i16 = 127;
 const CAMERA_STICK_DEADZONE: i16 = 18;
@@ -350,12 +372,12 @@ const ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS: i32 = 3;
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-const ROOM_VISIBLE_CELL_WEDGE_NUM: u64 = 3;
+const ROOM_VISIBLE_CELL_WEDGE_NUM: i32 = 3;
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-const ROOM_VISIBLE_CELL_WEDGE_DEN: u64 = 4;
+const ROOM_VISIBLE_CELL_WEDGE_DEN: i32 = 4;
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
@@ -428,18 +450,13 @@ fn room_active_chunk_limit(record: &LevelRoomRecord) -> usize {
     }
 }
 
-fn room_index_debug_mask(index: RoomIndex) -> u64 {
-    let raw = index.to_usize();
-    if raw < u64::BITS as usize {
-        1u64 << raw
-    } else {
-        0
-    }
+fn room_index_debug_mask(index: RoomIndex) -> RuntimeDebugMask {
+    RuntimeDebugMask::from_room(index)
 }
 
-fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: u64) {
-    telemetry::counter(counter_lo, (mask & 0xffff_ffff) as u32);
-    telemetry::counter(counter_hi, (mask >> 32) as u32);
+fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: RuntimeDebugMask) {
+    telemetry::counter(counter_lo, mask.lo());
+    telemetry::counter(counter_hi, mask.hi());
 }
 
 const DEBUG_LOG_LINE_CAP: usize = 256;
@@ -522,22 +539,31 @@ impl DebugLogLine {
         self.push_byte(b')');
     }
 
-    fn push_hex_u64(&mut self, value: u64) {
+    fn push_hex_u32_digits(&mut self, value: u32, pad_to_eight: bool) {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
-        self.push_str("0x");
-        if value == 0 {
+        if value == 0 && !pad_to_eight {
             self.push_byte(b'0');
             return;
         }
         let mut started = false;
-        let mut shift = 60i32;
+        let mut shift = 28i32;
         while shift >= 0 {
             let nibble = ((value >> shift) & 0xF) as usize;
-            if nibble != 0 || started {
+            if nibble != 0 || started || pad_to_eight || shift == 0 {
                 started = true;
                 self.push_byte(DIGITS[nibble]);
             }
             shift -= 4;
+        }
+    }
+
+    fn push_hex_mask(&mut self, mask: RuntimeDebugMask) {
+        self.push_str("0x");
+        if mask.hi() != 0 {
+            self.push_hex_u32_digits(mask.hi(), false);
+            self.push_hex_u32_digits(mask.lo(), true);
+        } else {
+            self.push_hex_u32_digits(mask.lo(), false);
         }
     }
 
@@ -576,12 +602,12 @@ fn debug_log_room_window_after_cross(
     room: RoomIndex,
     visible_count: usize,
     frontier_count: usize,
-    visible_mask: u64,
-    active_mask: u64,
-    drawable_mask: u64,
-    loading_mask: u64,
-    missing_mask: u64,
-    build_failed_mask: u64,
+    visible_mask: RuntimeDebugMask,
+    active_mask: RuntimeDebugMask,
+    drawable_mask: RuntimeDebugMask,
+    loading_mask: RuntimeDebugMask,
+    missing_mask: RuntimeDebugMask,
+    build_failed_mask: RuntimeDebugMask,
     current_render_ready: bool,
     current_collision_ready: bool,
     portals_tested: u16,
@@ -598,17 +624,17 @@ fn debug_log_room_window_after_cross(
     line.push_str(" accepted=");
     line.push_u32(portals_accepted as u32);
     line.push_str(" vis=");
-    line.push_hex_u64(visible_mask);
+    line.push_hex_mask(visible_mask);
     line.push_str(" active=");
-    line.push_hex_u64(active_mask);
+    line.push_hex_mask(active_mask);
     line.push_str(" draw=");
-    line.push_hex_u64(drawable_mask);
+    line.push_hex_mask(drawable_mask);
     line.push_str(" loading=");
-    line.push_hex_u64(loading_mask);
+    line.push_hex_mask(loading_mask);
     line.push_str(" missing=");
-    line.push_hex_u64(missing_mask);
+    line.push_hex_mask(missing_mask);
     line.push_str(" build_fail=");
-    line.push_hex_u64(build_failed_mask);
+    line.push_hex_mask(build_failed_mask);
     line.push_str(" render=");
     line.push_bool(current_render_ready);
     line.push_str(" coll=");
@@ -616,12 +642,8 @@ fn debug_log_room_window_after_cross(
     line.emit();
 }
 
-fn portal_debug_mask_bit(index: usize) -> u64 {
-    if index < u64::BITS as usize {
-        1u64 << index
-    } else {
-        0
-    }
+fn portal_debug_mask_bit(index: usize) -> RuntimeDebugMask {
+    RuntimeDebugMask::from_index(index)
 }
 
 fn portal_debug_decision_name(decision: PortalClipDebugDecision) -> &'static str {
@@ -765,15 +787,15 @@ fn debug_log_portal_visibility_summary(
     line.emit();
 
     let mut line = DebugLogLine::new("portal vis masks visible=");
-    line.push_hex_u64(result.visible_room_mask());
+    line.push_hex_mask(result.visible_room_mask());
     line.push_str(" tested=");
-    line.push_hex_u64(stats.tested_room_mask);
+    line.push_hex_mask(stats.tested_room_mask);
     line.push_str(" accepted=");
-    line.push_hex_u64(stats.accepted_room_mask);
+    line.push_hex_mask(stats.accepted_room_mask);
     line.push_str(" rej_rooms=");
-    line.push_hex_u64(stats.reject_frustum_room_mask);
+    line.push_hex_mask(stats.reject_frustum_room_mask);
     line.push_str(" rej_portals=");
-    line.push_hex_u64(stats.reject_frustum_portal_mask);
+    line.push_hex_mask(stats.reject_frustum_portal_mask);
     line.emit();
 }
 
@@ -785,9 +807,13 @@ fn debug_log_portal_clip_summary_line(
     stats: psx_level::portal_visibility::PortalVisibilityStats,
 ) {
     let portal_bit = portal_debug_mask_bit(portal_index);
-    let tested = portal_bit != 0 && (stats.tested_portal_mask & portal_bit) != 0;
-    let accepted = portal_bit != 0 && (stats.accepted_portal_mask & portal_bit) != 0;
-    let rejected = portal_bit != 0 && (stats.reject_frustum_portal_mask & portal_bit) != 0;
+    let tested = !portal_bit.is_empty() && stats.tested_portal_mask.contains_index(portal_index);
+    let accepted =
+        !portal_bit.is_empty() && stats.accepted_portal_mask.contains_index(portal_index);
+    let rejected = !portal_bit.is_empty()
+        && stats
+            .reject_frustum_portal_mask
+            .contains_index(portal_index);
 
     let mut line = DebugLogLine::new("portal p summary idx=");
     line.push_u32(portal_index.min(u32::MAX as usize) as u32);
@@ -892,9 +918,13 @@ fn debug_log_portal_clip_line(
     stats: psx_level::portal_visibility::PortalVisibilityStats,
 ) {
     let portal_bit = portal_debug_mask_bit(portal_index);
-    let tested = portal_bit != 0 && (stats.tested_portal_mask & portal_bit) != 0;
-    let accepted = portal_bit != 0 && (stats.accepted_portal_mask & portal_bit) != 0;
-    let rejected = portal_bit != 0 && (stats.reject_frustum_portal_mask & portal_bit) != 0;
+    let tested = !portal_bit.is_empty() && stats.tested_portal_mask.contains_index(portal_index);
+    let accepted =
+        !portal_bit.is_empty() && stats.accepted_portal_mask.contains_index(portal_index);
+    let rejected = !portal_bit.is_empty()
+        && stats
+            .reject_frustum_portal_mask
+            .contains_index(portal_index);
     let skip_backlink =
         portal.destination_room == root_room || portal.destination_room == parent.source_room;
 
@@ -1084,8 +1114,8 @@ fn active_room_cache_status_debug_code(status: ActiveRoomCacheStatus) -> u32 {
 fn debug_log_post_cross_render_start(
     room: RoomIndex,
     camera: WorldCamera,
-    visible_mask: u64,
-    active_mask: u64,
+    visible_mask: RuntimeDebugMask,
+    active_mask: RuntimeDebugMask,
     current_collision_ready: bool,
 ) {
     let mut line = DebugLogLine::new("render start room=");
@@ -1097,9 +1127,9 @@ fn debug_log_post_cross_render_start(
         camera.position.z,
     ));
     line.push_str(" vis=");
-    line.push_hex_u64(visible_mask);
+    line.push_hex_mask(visible_mask);
     line.push_str(" active=");
-    line.push_hex_u64(active_mask);
+    line.push_hex_mask(active_mask);
     line.push_str(" coll=");
     line.push_bool(current_collision_ready);
     line.emit();
@@ -1139,8 +1169,8 @@ fn debug_log_post_cross_render_room(slot: usize, active: ActiveRuntimeRoom, draw
 
 fn debug_log_post_cross_render_end(
     room: RoomIndex,
-    active_mask: u64,
-    drawn_mask: u64,
+    active_mask: RuntimeDebugMask,
+    drawn_mask: RuntimeDebugMask,
     primitive_count: usize,
     primitive_remaining: usize,
     world_commands: usize,
@@ -1148,9 +1178,9 @@ fn debug_log_post_cross_render_end(
     let mut line = DebugLogLine::new("render end room=");
     line.push_room(room);
     line.push_str(" active=");
-    line.push_hex_u64(active_mask);
+    line.push_hex_mask(active_mask);
     line.push_str(" drawn=");
-    line.push_hex_u64(drawn_mask);
+    line.push_hex_mask(drawn_mask);
     line.push_str(" prim=");
     line.push_u32(primitive_count.min(u32::MAX as usize) as u32);
     line.push_str(" rem=");
@@ -1423,6 +1453,7 @@ const BOX_PROP_BREAK_FRAMES: u8 = 24;
 const BOX_PROP_BREAK_MOTION_FRAMES: u8 = 20;
 const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
 const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
+const BOX_PROP_FACE_NORMAL_SHIFT: u32 = 10;
 /// Cap on attached weapon/equipment visuals rendered per frame.
 const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// Runtime model cache capacity. The current playtest package only
@@ -1436,6 +1467,8 @@ const MAX_RUNTIME_MODEL_CLIPS: usize = 128;
 const MODEL_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_MODELS").is_some();
 const MODEL_BOUNDS_CULLING_ENABLED: bool =
     option_env!("PSXO_BENCH_DISABLE_MODEL_BOUNDS_CULL").is_none();
+const PROP_PARTICLE_GTE_PROJECT_ENABLED: bool =
+    option_env!("PSXO_GTE_PROP_PARTICLE_PROJECT").is_some();
 
 /// Marker visualization tuning. Markers are debug stubs -- keep
 /// them visible at orbit-camera scales without dominating the
@@ -1746,7 +1779,7 @@ impl RuntimeStreamingJobs {
     }
 
     fn background_tick(self, ctx: &Ctx) -> bool {
-        (ctx.simulation_tick & ROOM_WINDOW_BACKGROUND_TICK_MASK) != 0
+        (ctx.sim_tick.as_u32() & ROOM_WINDOW_BACKGROUND_TICK_MASK) != 0
     }
 
     fn step_vram_uploads(self) -> bool {
@@ -2898,28 +2931,28 @@ impl<const N: usize> RoomStreamScheduler<N> {
         count
     }
 
-    fn resident_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn resident_room_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut slot = 0usize;
         let limit = self.effective_slot_limit();
         while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Resident {
-                mask |= room_index_debug_mask(meta.room);
+                mask.insert_room(meta.room);
             }
             slot += 1;
         }
         mask
     }
 
-    fn loading_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn loading_room_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut slot = 0usize;
         let limit = self.effective_slot_limit();
         while slot < limit {
             let meta = self.slots[slot];
             if meta.state == RoomStreamSlotState::Loading {
-                mask |= room_index_debug_mask(meta.room);
+                mask.insert_room(meta.room);
             }
             slot += 1;
         }
@@ -3095,9 +3128,9 @@ struct Playtest {
     /// Global chunk bounds retained for portal diagnostics and streaming.
     portal_room_bounds: [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
     portal_visible_missing_resident: u16,
-    portal_visible_missing_mask: u64,
+    portal_visible_missing_mask: RuntimeDebugMask,
     portal_visible_build_failed: u16,
-    portal_visible_build_failed_mask: u64,
+    portal_visible_build_failed_mask: RuntimeDebugMask,
     portal_stream_priority_current: u16,
     portal_stream_priority_visible: u16,
     portal_stream_priority_frontier: u16,
@@ -3146,11 +3179,11 @@ struct Playtest {
     /// Tick the current animation started at -- used to phase
     /// the loop relative to clip switches so transitions don't
     /// pop into the middle of the new clip.
-    anim_start_tick: u32,
+    anim_start_tick: SimTick,
     /// Non-looping gameplay animation lock. While active,
     /// locomotion input is ignored and the current action clip
     /// plays from start to finish.
-    anim_lock_until_tick: u32,
+    anim_lock_until_tick: SimTick,
     /// Persistent runtime state for authored breakable box props.
     box_prop_broken: [u32; BOX_PROP_BROKEN_WORDS],
     /// Short-lived baked face-burst events for newly broken box props.
@@ -3204,6 +3237,8 @@ struct Playtest {
     clips: [Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     /// VRAM-bound subtract-blended circular floor shadow.
     shadow_material: Option<TextureMaterial>,
+    /// VRAM-bound 16x16 white circular sprite used by particle emitters.
+    particle_material: Option<TextureMaterial>,
     /// Immediate-mode cylinder overlay for tuning actor blockers.
     show_collision_debug: bool,
     /// Cooperative background policy for room-window and VRAM upload work.
@@ -3229,9 +3264,9 @@ impl Playtest {
             portal_visibility_camera_global: RoomPoint::ZERO,
             portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
             portal_visible_missing_resident: 0,
-            portal_visible_missing_mask: 0,
+            portal_visible_missing_mask: RuntimeDebugMask::EMPTY,
             portal_visible_build_failed: 0,
-            portal_visible_build_failed_mask: 0,
+            portal_visible_build_failed_mask: RuntimeDebugMask::EMPTY,
             portal_stream_priority_current: 0,
             portal_stream_priority_visible: 0,
             portal_stream_priority_frontier: 0,
@@ -3264,8 +3299,8 @@ impl Playtest {
             motor: CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO),
             character: None,
             anim_state: PlayerAnim::Idle,
-            anim_start_tick: 0,
-            anim_lock_until_tick: 0,
+            anim_start_tick: SimTick::ZERO,
+            anim_lock_until_tick: SimTick::ZERO,
             box_prop_broken: [0; BOX_PROP_BROKEN_WORDS],
             box_prop_break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
             evade_run_hold_ticks: 0,
@@ -3299,6 +3334,7 @@ impl Playtest {
             model_vertex_count: 0,
             clips: [const { None }; MAX_RUNTIME_MODEL_CLIPS],
             shadow_material: None,
+            particle_material: None,
             show_collision_debug: false,
             streaming_jobs: RuntimeStreamingJobs::new(),
             post_cross_debug_frames: 0,
@@ -3343,6 +3379,7 @@ impl Scene for Playtest {
     fn init(&mut self, _ctx: &mut Ctx) {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
         self.shadow_material = upload_shadow_texture();
+        self.particle_material = Some(upload_particle_texture());
 
         // Empty manifest? Boot to a clear-coloured screen.
         if ROOMS.is_empty() {
@@ -3372,8 +3409,8 @@ impl Scene for Playtest {
             .snap_to(self.spawn, Angle::from_q12(spawn.yaw as u16));
         self.room_index = spawn.room;
         self.anim_state = PlayerAnim::Idle;
-        self.anim_start_tick = 0;
-        self.anim_lock_until_tick = 0;
+        self.anim_start_tick = SimTick::ZERO;
+        self.anim_lock_until_tick = SimTick::ZERO;
         self.box_prop_broken = [0; BOX_PROP_BROKEN_WORDS];
         self.box_prop_break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
         self.camera.snap_to_player_with_yaw(
@@ -3405,7 +3442,11 @@ impl Scene for Playtest {
         if background_tick {
             #[cfg(feature = "cd-stream-bench")]
             if stream_progress {
-                self.begin_active_room_window_job(true);
+                if self.active_room_job.active {
+                    self.active_room_job.update_streaming = true;
+                } else {
+                    self.begin_active_room_window_job(true);
+                }
             }
             if self.streaming_jobs.step_vram_uploads() {
                 self.refresh_active_room_materials();
@@ -3433,7 +3474,7 @@ impl Scene for Playtest {
         if ctx.just_pressed(button::SELECT) {
             self.free_orbit = !self.free_orbit;
         }
-        let delta_vblanks = ctx.time.delta_vblanks();
+        let delta_vblanks = 1u16;
         self.advance_box_prop_break_events(delta_vblanks);
         if CAMERA_SWEEP_ENABLED {
             self.update_camera_sweep(delta_vblanks);
@@ -3477,7 +3518,7 @@ impl Scene for Playtest {
             return;
         }
 
-        let now = ctx.time.elapsed_vblanks();
+        let now = ctx.sim_tick;
         let action_locked = self.anim_lock_until_tick > now;
         let circle = self.update_evade_run_button(ctx, delta_vblanks);
         let mut input = if action_locked {
@@ -3487,9 +3528,9 @@ impl Scene for Playtest {
         };
         if !action_locked && self.motor.action().is_idle() {
             let started = if ctx.just_pressed(LIGHT_ATTACK_BUTTON) {
-                self.start_player_anim_action(PlayerAnim::LightAttack, now, ctx.time.video_hz())
+                self.start_player_anim_action(PlayerAnim::LightAttack, now, ctx.video_hz)
             } else if ctx.just_pressed(HEAVY_ATTACK_BUTTON) {
-                self.start_player_anim_action(PlayerAnim::HeavyAttack, now, ctx.time.video_hz())
+                self.start_player_anim_action(PlayerAnim::HeavyAttack, now, ctx.video_hz)
             } else {
                 false
             };
@@ -3563,7 +3604,7 @@ impl Scene for Playtest {
             self.anim_start_tick = now;
             if new_state.is_motor_fixed_action() {
                 if let Some(character) = self.character {
-                    self.lock_player_anim_action(character, new_state, now, ctx.time.video_hz());
+                    self.lock_player_anim_action(character, new_state, now, ctx.video_hz);
                 }
             }
         }
@@ -3653,8 +3694,8 @@ impl Scene for Playtest {
                 not(feature = "vis-full-active-chunks")
             )))]
             let room_visibility_fallback_draws = 0u32;
-            let mut room_active_chunk_mask = 0u64;
-            let mut room_drawn_chunk_mask = 0u64;
+            let mut room_active_chunk_mask = RuntimeDebugMask::EMPTY;
+            let mut room_drawn_chunk_mask = RuntimeDebugMask::EMPTY;
             #[cfg(feature = "world-grid-visible")]
             let mut room_visible_cells = 0u32;
             #[cfg(all(
@@ -4055,8 +4096,8 @@ impl Scene for Playtest {
                 }
                 let instance_stats = draw_model_instances(
                     active.index,
-                    ctx.time.elapsed_vblanks(),
-                    ctx.time.video_hz(),
+                    ctx.sim_tick,
+                    ctx.video_hz,
                     &room_camera,
                     actor_options,
                     &lighting,
@@ -4109,8 +4150,8 @@ impl Scene for Playtest {
                             self.anim_state.action(),
                             character.clip_for(self.anim_state),
                             self.anim_start_tick,
-                            ctx.time.elapsed_vblanks(),
-                            ctx.time.video_hz(),
+                            ctx.sim_tick,
+                            ctx.video_hz,
                             &camera,
                             actor_options,
                             &lighting,
@@ -4154,8 +4195,8 @@ impl Scene for Playtest {
                             self.anim_state.action(),
                             character.clip_for(self.anim_state),
                             self.anim_start_tick,
-                            ctx.time.elapsed_vblanks(),
-                            ctx.time.video_hz(),
+                            ctx.sim_tick,
+                            ctx.video_hz,
                             &camera,
                             actor_options,
                             &lighting,
@@ -4224,8 +4265,8 @@ impl Scene for Playtest {
                     telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                     let instance_stats = draw_model_instances(
                         active.index,
-                        ctx.time.elapsed_vblanks(),
-                        ctx.time.video_hz(),
+                        ctx.sim_tick,
+                        ctx.video_hz,
                         &room_camera,
                         actor_options,
                         &lighting,
@@ -4368,8 +4409,8 @@ impl Scene for Playtest {
         if post_cross_debug && !post_cross_logged_end {
             debug_log_post_cross_render_end(
                 self.room_index,
-                0,
-                0,
+                RuntimeDebugMask::EMPTY,
+                RuntimeDebugMask::EMPTY,
                 primitive_packets.len(),
                 primitive_packets.remaining(),
                 world.command_len(),
@@ -4379,6 +4420,11 @@ impl Scene for Playtest {
             self.post_cross_debug_frames = self.post_cross_debug_frames.saturating_sub(1);
         }
 
+        let world_command_len = world.command_len();
+        telemetry::stage_begin(telemetry::stage::WORLD_FLUSH);
+        world.flush();
+        telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
+        let _ = self.draw_particle_emitters(camera, ctx.sim_tick, &mut ot, &mut primitive_packets);
         telemetry::counter(
             telemetry::counter::TRI_PRIMITIVES,
             primitive_packets.len() as u32,
@@ -4387,19 +4433,13 @@ impl Scene for Playtest {
             telemetry::counter::TRI_PRIMITIVE_REMAINING,
             primitive_packets.remaining() as u32,
         );
-        telemetry::counter(
-            telemetry::counter::WORLD_COMMANDS,
-            world.command_len() as u32,
-        );
-        telemetry::stage_begin(telemetry::stage::WORLD_FLUSH);
-        world.flush();
-        telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
+        telemetry::counter(telemetry::counter::WORLD_COMMANDS, world_command_len as u32);
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         ot.submit();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            draw_room_atmosphere_overlay(room_record, ctx.time.elapsed_vblanks());
+            draw_room_atmosphere_overlay(room_record, ctx.sim_tick);
         }
 
         if self.show_collision_debug {
@@ -4407,11 +4447,13 @@ impl Scene for Playtest {
         }
 
         if let Some(target) = self.lock_target_indicator_position() {
-            draw_lock_target_indicator(target, camera, ctx.time.elapsed_vblanks());
+            draw_lock_target_indicator(target, camera, ctx.sim_tick);
         }
 
         if self.character.is_some() {
             draw_player_hud(
+                UI_NODES,
+                self.font.as_ref(),
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );
@@ -4468,7 +4510,12 @@ fn begin_world_render_pass<'a, 'ot>(
 }
 
 impl Playtest {
-    fn start_player_anim_action(&mut self, anim: PlayerAnim, now: u32, video_hz: u16) -> bool {
+    fn start_player_anim_action(
+        &mut self,
+        anim: PlayerAnim,
+        now: SimTick,
+        video_hz: VideoHz,
+    ) -> bool {
         let Some(character) = self.character else {
             return false;
         };
@@ -4484,8 +4531,8 @@ impl Playtest {
         &mut self,
         character: RuntimeCharacter,
         anim: PlayerAnim,
-        now: u32,
-        video_hz: u16,
+        now: SimTick,
+        video_hz: VideoHz,
     ) -> bool {
         if character.action_clip(anim.action()).is_none() {
             return false;
@@ -4503,7 +4550,7 @@ impl Playtest {
         &self,
         character: RuntimeCharacter,
         clip: ModelClipIndex,
-        video_hz: u16,
+        video_hz: VideoHz,
     ) -> Option<u32> {
         let runtime_model = self
             .models
@@ -4515,7 +4562,7 @@ impl Playtest {
         let frames = animation.frame_count().max(1) as u32;
         Some(
             frames
-                .saturating_mul(video_hz.max(1) as u32)
+                .saturating_mul(video_hz.as_nonzero_u32())
                 .div_ceil(sample_rate),
         )
     }
@@ -4919,6 +4966,58 @@ impl Playtest {
         }
     }
 
+    fn draw_particle_emitters(
+        &self,
+        camera: WorldCamera,
+        elapsed_tick: SimTick,
+        ot: &mut OtFrame<'_, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'_>,
+    ) -> usize {
+        let Some(particle_material) = self.particle_material else {
+            return 0;
+        };
+        let mut submitted = 0usize;
+        for active in self.active_rooms.iter().flatten().copied() {
+            if !self.portal_visibility_draws_room(active.index) {
+                continue;
+            }
+            let room_camera = camera_for_room(camera, active);
+            let depth_range = ROOMS
+                .get(active.index.to_usize())
+                .map(room_depth_range)
+                .unwrap_or(WORLD_DEPTH_RANGE);
+            let mut projector = None;
+            for emitter in PARTICLE_EMITTERS {
+                if emitter.room != active.index {
+                    continue;
+                }
+                let projector = match projector {
+                    Some(projector) => Some(projector),
+                    None => {
+                        if !PROP_PARTICLE_GTE_PROJECT_ENABLED {
+                            None
+                        } else {
+                            let loaded = LoadedWorldCameraGte::load(room_camera);
+                            projector = Some(loaded);
+                            Some(loaded)
+                        }
+                    }
+                };
+                submitted += draw_particle_emitter(
+                    *emitter,
+                    room_camera,
+                    projector,
+                    depth_range,
+                    particle_material,
+                    elapsed_tick,
+                    ot,
+                    primitive_packets,
+                );
+            }
+        }
+        submitted
+    }
+
     fn camera_config(&self) -> ThirdPersonCameraConfig {
         let camera = ROOMS
             .get(self.room_index.to_usize())
@@ -4982,7 +5081,11 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::CAMERA);
         self.render_camera = self.free_orbit_camera();
         telemetry::stage_end(telemetry::stage::CAMERA);
-        self.refresh_active_room_window_if_needed();
+        if CAMERA_SWEEP_FORCE_VISIBILITY {
+            self.force_refresh_active_room_window_view();
+        } else {
+            self.refresh_active_room_window_if_needed();
+        }
     }
 
     fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
@@ -5017,7 +5120,7 @@ impl Playtest {
                     target,
                     input,
                     config,
-                    ctx.time.delta_vblanks(),
+                    1u16,
                 )
                 .camera;
         }
@@ -5029,14 +5132,7 @@ impl Playtest {
             None
         };
         self.camera
-            .update_vblanks(
-                PROJECTION,
-                collision,
-                target,
-                input,
-                config,
-                ctx.time.delta_vblanks(),
-            )
+            .update_vblanks(PROJECTION, collision, target, input, config, 1u16)
             .camera
     }
 
@@ -5131,9 +5227,9 @@ impl Playtest {
         );
         self.active_room_candidates = self.portal_visibility.stats.portals_tested.min(u16::MAX);
         self.portal_visible_missing_resident = 0;
-        self.portal_visible_missing_mask = 0;
+        self.portal_visible_missing_mask = RuntimeDebugMask::EMPTY;
         self.portal_visible_build_failed = 0;
-        self.portal_visible_build_failed_mask = 0;
+        self.portal_visible_build_failed_mask = RuntimeDebugMask::EMPTY;
     }
 
     fn portal_visible_room_limit(&self, current_record: &LevelRoomRecord) -> usize {
@@ -5215,20 +5311,20 @@ impl Playtest {
         false
     }
 
-    fn active_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn active_room_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
             if let Some(active) = self.active_rooms[slot] {
-                mask |= room_index_debug_mask(active.index);
+                mask.insert_room(active.index);
             }
             slot += 1;
         }
         mask
     }
 
-    fn active_room_drawable_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    fn active_room_drawable_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
             if let Some(active) = self.active_rooms[slot] {
@@ -5236,7 +5332,7 @@ impl Playtest {
                     || active.render_room.is_some()
                     || active.surface_cache.ready
                 {
-                    mask |= room_index_debug_mask(active.index);
+                    mask.insert_room(active.index);
                 }
             }
             slot += 1;
@@ -5386,7 +5482,49 @@ impl Playtest {
 
     fn load_active_room_window(&mut self) {
         self.active_room_job = ActiveRoomWindowJob::EMPTY;
-        self.rebuild_active_room_window(true);
+        if !self.chunked_level() {
+            self.rebuild_active_room_window(true);
+            return;
+        }
+        self.rebase_active_rooms_to_current_room();
+        #[cfg(all(
+            feature = "world-grid-visible",
+            not(feature = "vis-full-active-chunks")
+        ))]
+        {
+            self.clear_visible_cell_caches();
+        }
+        self.apply_current_active_room_fields();
+        self.begin_active_room_window_job(true);
+        if self.current_collision_room.is_none() {
+            self.step_active_room_window_job();
+        }
+    }
+
+    fn rebase_active_rooms_to_current_room(&mut self) {
+        let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
+            return;
+        };
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            let Some(active) = self.active_rooms[slot] else {
+                slot += 1;
+                continue;
+            };
+            let Some(record) = ROOMS.get(active.index.to_usize()) else {
+                self.active_rooms[slot] = None;
+                slot += 1;
+                continue;
+            };
+            if active.stream_slot != active_room_stream_slot(active.index) {
+                self.active_rooms[slot] = None;
+                slot += 1;
+                continue;
+            }
+            self.active_rooms[slot] =
+                Some(active.with_current_room_offsets(record, current_record));
+            slot += 1;
+        }
     }
 
     fn begin_active_room_window_job(&mut self, update_streaming: bool) {
@@ -5414,6 +5552,7 @@ impl Playtest {
         }
 
         self.active_room_anchor = self.motor.position();
+        self.active_room_cache_skips = 0;
         self.active_room_job = ActiveRoomWindowJob {
             active: true,
             update_streaming,
@@ -5457,6 +5596,7 @@ impl Playtest {
         let mut built_this_tick = 0usize;
         let mut skipped = 0u16;
         let mut unbuilt_room = INVALID_ROOM_INDEX;
+        let mut current_active = None;
         {
             let job = &mut self.active_room_job;
             while job.cursor < job.requested_count
@@ -5485,6 +5625,9 @@ impl Playtest {
                             || active.surface_cache.ready =>
                     {
                         job.rooms[job.next_slot] = Some(active);
+                        if active.index == current_room {
+                            current_active = Some(active);
+                        }
                         job.next_slot += 1;
                         job.cursor += 1;
                         built_this_tick += 1;
@@ -5514,6 +5657,9 @@ impl Playtest {
         self.active_room_cache_skips = self.active_room_cache_skips.saturating_add(skipped);
         if unbuilt_room != INVALID_ROOM_INDEX {
             self.mark_visible_room_unbuilt(unbuilt_room);
+        }
+        if let Some(active) = current_active {
+            self.apply_current_active_room(active);
         }
 
         telemetry::counter(
@@ -5549,16 +5695,20 @@ impl Playtest {
         while slot < MAX_ACTIVE_ROOMS {
             if let Some(active) = self.active_rooms[slot] {
                 if active.index == self.room_index {
-                    self.room = active.render_room;
-                    self.current_collision_room = Some(active.collision_room);
-                    self.current_ambient_rgb = active.ambient_rgb;
-                    self.materials = active.materials;
-                    self.material_count = active.material_count;
+                    self.apply_current_active_room(active);
                     return;
                 }
             }
             slot += 1;
         }
+    }
+
+    fn apply_current_active_room(&mut self, active: ActiveRuntimeRoom) {
+        self.room = active.render_room;
+        self.current_collision_room = Some(active.collision_room);
+        self.current_ambient_rgb = active.ambient_rgb;
+        self.materials = active.materials;
+        self.material_count = active.material_count;
     }
 
     fn refresh_active_room_materials(&mut self) {
@@ -5736,9 +5886,9 @@ impl Playtest {
         }
         if self.portal_visibility.room_count == 0 {
             self.portal_visible_missing_resident = 0;
-            self.portal_visible_missing_mask = 0;
+            self.portal_visible_missing_mask = RuntimeDebugMask::EMPTY;
             self.portal_visible_build_failed = 0;
-            self.portal_visible_build_failed_mask = 0;
+            self.portal_visible_build_failed_mask = RuntimeDebugMask::EMPTY;
         }
         telemetry::counter(
             telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
@@ -5766,9 +5916,9 @@ impl Playtest {
         let active_limit = room_active_chunk_limit(current_record).min(MAX_ACTIVE_ROOMS);
         let mut visible_slot = 0usize;
         self.portal_visible_missing_resident = 0;
-        self.portal_visible_missing_mask = 0;
+        self.portal_visible_missing_mask = RuntimeDebugMask::EMPTY;
         self.portal_visible_build_failed = 0;
-        self.portal_visible_build_failed_mask = 0;
+        self.portal_visible_build_failed_mask = RuntimeDebugMask::EMPTY;
         if next_slot < active_limit {
             match reuse_or_build_active_room(
                 next_slot,
@@ -6355,7 +6505,7 @@ impl Playtest {
         #[cfg(feature = "cd-stream-bench")]
         let loading_mask = unsafe { ROOM_STREAM_SCHEDULER.loading_room_mask() };
         #[cfg(not(feature = "cd-stream-bench"))]
-        let loading_mask = 0;
+        let loading_mask = RuntimeDebugMask::EMPTY;
         let stats = self.portal_visibility.stats;
         debug_log_room_window_after_cross(
             next_room,
@@ -6407,6 +6557,20 @@ impl Playtest {
         if !camera_moved_far && !view_changed {
             return;
         }
+        self.refresh_portal_visibility_for_view(self.room_index, record, view);
+        if !self.active_room_job.active && !self.portal_visible_rooms_are_active(record) {
+            self.begin_active_room_window_job(true);
+        }
+    }
+
+    fn force_refresh_active_room_window_view(&mut self) {
+        if !self.chunked_level() {
+            return;
+        }
+        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
+            return;
+        };
+        let view = self.active_room_selection_view();
         self.refresh_portal_visibility_for_view(self.room_index, record, view);
         if !self.active_room_job.active && !self.portal_visible_rooms_are_active(record) {
             self.begin_active_room_window_job(true);
@@ -6623,9 +6787,9 @@ fn draw_player(
     yaw: Angle,
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
-    anim_start_tick: u32,
-    elapsed_vblanks: u32,
-    video_hz: u16,
+    anim_start_tick: SimTick,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -6641,7 +6805,7 @@ fn draw_player(
     };
     // Phase the animation relative to the clip-start tick so
     // state changes don't pop into the middle of a new clip.
-    let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
+    let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
     let phase = animation_phase_at_tick_q12(
         anim,
         local_tick,
@@ -6855,9 +7019,9 @@ fn draw_player_equipment(
     yaw: Angle,
     anim_action: CharacterAnimationAction,
     clip_local: ModelClipIndex,
-    anim_start_tick: u32,
-    elapsed_vblanks: u32,
-    video_hz: u16,
+    anim_start_tick: SimTick,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -6871,7 +7035,7 @@ fn draw_player_equipment(
     let Some(character_anim) = character_model.clip(clips, clip_local) else {
         return out;
     };
-    let local_tick = elapsed_vblanks.saturating_sub(anim_start_tick);
+    let local_tick = elapsed_tick.saturating_sub(anim_start_tick);
     let character_phase = animation_phase_at_tick_q12(
         character_anim,
         local_tick,
@@ -6947,7 +7111,7 @@ fn draw_player_equipment(
                     socket_pose.origin.z.saturating_sub(grip_world[2]),
                 );
                 if let Some(anim) = weapon_model.clip(clips, weapon_model.default_clip) {
-                    let phase = anim.phase_at_tick_q12(elapsed_vblanks, video_hz);
+                    let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
                     let material = lighting.shade_model_material(origin, weapon_model.material);
                     let model_options = options
                         .with_depth_policy(DepthPolicy::Average)
@@ -7233,20 +7397,27 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
     if columns % 2 != 0 {
         columns += 1;
     }
-    let rows = SKY_PANORAMA_PALETTE_BANDS;
+    let rows = sky_panorama_runtime_rows(sky);
     let horizon_pitch = sky_horizon_pitch_degrees_i32(sky.horizon_percent);
     let top_pitch = (horizon_pitch + 58).min(78);
     let bottom_pitch = (horizon_pitch - 46).max(-72);
+    let mut projected_grid: [Option<(i16, i16)>; SKY_CYCLORAMA_GRID_POINTS_MAX] =
+        [None; SKY_CYCLORAMA_GRID_POINTS_MAX];
+
+    for row in 0..=rows {
+        let pitch = sky_lerp_i32(top_pitch, bottom_pitch, row, rows);
+        for column in 0..=columns {
+            let yaw = sky_yaw_degrees_for_column(column, columns);
+            projected_grid[sky_grid_index(row, column, columns)] =
+                project_sky_direction(sky_direction_q12(yaw, pitch), camera);
+        }
+    }
 
     for row in 0..rows {
-        let pitch_top = sky_lerp_i32(top_pitch, bottom_pitch, row, rows);
-        let pitch_bottom = sky_lerp_i32(top_pitch, bottom_pitch, row + 1, rows);
         let v0 = sky_uv_for_step(row, rows, SKY_PANORAMA_HEIGHT);
         let v1 = sky_uv_for_step(row + 1, rows, SKY_PANORAMA_HEIGHT);
-        let clut_word = sky_panorama_clut_word(row);
+        let clut_word = sky_panorama_clut_word(sky_panorama_clut_band_for_row(row, rows));
         for column in 0..columns {
-            let yaw0 = sky_yaw_degrees_for_column(column, columns);
-            let yaw1 = sky_yaw_degrees_for_column(column + 1, columns);
             let page = sky_panorama_page_for_column(column, columns);
             let material = TextureMaterial::opaque(
                 clut_word,
@@ -7263,43 +7434,35 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
                 sky_coord_for_step(column + 1, columns, SKY_PANORAMA_WIDTH),
                 page,
             );
-            draw_sky_cyclorama_quad(
-                camera,
-                material,
-                [
-                    sky_direction_q12(yaw0, pitch_top),
-                    sky_direction_q12(yaw1, pitch_top),
-                    sky_direction_q12(yaw0, pitch_bottom),
-                    sky_direction_q12(yaw1, pitch_bottom),
-                ],
+            let Some(p0) = projected_grid[sky_grid_index(row, column, columns)] else {
+                continue;
+            };
+            let Some(p1) = projected_grid[sky_grid_index(row, column + 1, columns)] else {
+                continue;
+            };
+            let Some(p2) = projected_grid[sky_grid_index(row + 1, column, columns)] else {
+                continue;
+            };
+            let Some(p3) = projected_grid[sky_grid_index(row + 1, column + 1, columns)] else {
+                continue;
+            };
+            let projected = [p0, p1, p2, p3];
+            if sky_quad_outside_screen(projected) {
+                continue;
+            }
+            draw_quad_textured_material(
+                projected,
                 [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
+                material,
             );
         }
     }
 }
 
-fn draw_sky_cyclorama_quad(
-    camera: WorldCamera,
-    material: TextureMaterial,
-    dirs: [[i16; 3]; 4],
-    uvs: [(u8, u8); 4],
-) {
-    let Some(projected) = project_sky_quad(dirs, camera) else {
-        return;
-    };
-    if sky_quad_outside_screen(projected) {
-        return;
-    }
-    draw_quad_textured_material(projected, uvs, material);
-}
-
-fn project_sky_quad(dirs: [[i16; 3]; 4], camera: WorldCamera) -> Option<[(i16, i16); 4]> {
-    Some([
-        project_sky_direction(dirs[0], camera)?,
-        project_sky_direction(dirs[1], camera)?,
-        project_sky_direction(dirs[2], camera)?,
-        project_sky_direction(dirs[3], camera)?,
-    ])
+fn sky_grid_index(row: usize, column: usize, columns: usize) -> usize {
+    row.saturating_mul(columns.saturating_add(1))
+        .saturating_add(column)
+        .min(SKY_CYCLORAMA_GRID_POINTS_MAX - 1)
 }
 
 fn project_sky_direction(dir: [i16; 3], camera: WorldCamera) -> Option<(i16, i16)> {
@@ -7374,6 +7537,16 @@ fn sky_coord_for_step(step: usize, steps: usize, size: u16) -> u16 {
 
 fn sky_uv_for_step(step: usize, steps: usize, size: u16) -> u8 {
     sky_coord_for_step(step, steps, size).min(255) as u8
+}
+
+fn sky_panorama_runtime_rows(sky: LevelSkyRecord) -> usize {
+    sky.skybox_rows.clamp(1, SKY_PANORAMA_PALETTE_BANDS as u8) as usize
+}
+
+fn sky_panorama_clut_band_for_row(row: usize, rows: usize) -> usize {
+    let rows = rows.max(1);
+    ((row.saturating_mul(2).saturating_add(1)) * SKY_PANORAMA_PALETTE_BANDS / (rows * 2))
+        .min(SKY_PANORAMA_PALETTE_BANDS - 1)
 }
 
 fn sky_panorama_page_for_column(column: usize, columns: usize) -> usize {
@@ -8337,31 +8510,26 @@ fn visibility_cell_in_view_wedge(
         .anchor_z
         .saturating_mul(sector_size)
         .saturating_add(half);
-    let dx = center_x.saturating_sub(anchor_x) as i64;
-    let dz = center_z.saturating_sub(anchor_z) as i64;
-    let sin_yaw = filter.camera.sin_yaw.raw() as i64;
-    let cos_yaw = filter.camera.cos_yaw.raw() as i64;
+    let dx = center_x.saturating_sub(anchor_x);
+    let dz = center_z.saturating_sub(anchor_z);
+    let sin_yaw = filter.camera.sin_yaw.raw();
+    let cos_yaw = filter.camera.cos_yaw.raw();
     let forward_x = -sin_yaw;
     let forward_z = -cos_yaw;
-    let depth = dx
-        .saturating_mul(forward_x)
-        .saturating_add(dz.saturating_mul(forward_z))
-        >> 12;
+    let depth = mul_q12_i32(dx, forward_x).saturating_add(mul_q12_i32(dz, forward_z));
     if depth < 0 {
         return anchor_distance <= ROOM_VISIBLE_CELL_REAR_RING;
     }
-    let lateral = (dx
-        .saturating_mul(cos_yaw)
-        .saturating_sub(dz.saturating_mul(sin_yaw))
-        >> 12)
+    let lateral = mul_q12_i32(dx, cos_yaw)
+        .saturating_sub(mul_q12_i32(dz, sin_yaw))
         .unsigned_abs();
-    let lateral_limit = (depth as u64)
+    let lateral_limit = depth
         .saturating_mul(ROOM_VISIBLE_CELL_WEDGE_NUM)
         .checked_div(ROOM_VISIBLE_CELL_WEDGE_DEN.max(1))
-        .unwrap_or(u64::MAX)
-        .saturating_add(
-            (sector_size as u64).saturating_mul(ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS as u64),
-        );
+        .unwrap_or(i32::MAX)
+        .saturating_add(sector_size.saturating_mul(ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS))
+        .max(0)
+        .unsigned_abs();
     lateral <= lateral_limit
 }
 
@@ -8412,13 +8580,13 @@ fn aabb_intersects_camera_frustum(
 ) -> bool {
     let near = camera.projection.near_z.max(1);
     let far = far_z.max(near);
-    let focal = camera.projection.focal_length.max(1) as i64;
+    let focal = camera.projection.focal_length.max(1);
     let half_w = (camera.projection.screen_x as i32)
         .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
-        .max(1) as i64;
+        .max(1);
     let half_h = (camera.projection.screen_y as i32)
         .saturating_add(ROOM_VISIBLE_CELL_CAMERA_MARGIN)
-        .max(1) as i64;
+        .max(1);
     let mut max_depth = i32::MIN;
     let mut min_depth = i32::MAX;
     let mut all_right = true;
@@ -8438,10 +8606,10 @@ fn aabb_intersects_camera_frustum(
                     all_below = false;
                     continue;
                 }
-                let depth_limit_x = half_w.saturating_mul(view.z as i64);
-                let depth_limit_y = half_h.saturating_mul(view.z as i64);
-                let projected_x = (view.x as i64).saturating_mul(focal);
-                let projected_y = (view.y as i64).saturating_mul(focal);
+                let depth_limit_x = half_w.saturating_mul(view.z);
+                let depth_limit_y = half_h.saturating_mul(view.z);
+                let projected_x = view.x.saturating_mul(focal);
+                let projected_y = view.y.saturating_mul(focal);
                 if projected_x <= depth_limit_x {
                     all_right = false;
                 }
@@ -8722,10 +8890,10 @@ fn nearest_runtime_visibility_cell(
     z: i32,
 ) -> Option<usize> {
     let mut best_index = None;
-    let mut best_score = u64::MAX;
+    let mut best_score = u32::MAX;
     for (index, cell) in cells.iter().enumerate() {
-        let dx = (cell.x as i64).saturating_sub(x as i64).unsigned_abs();
-        let dz = (cell.z as i64).saturating_sub(z as i64).unsigned_abs();
+        let dx = (cell.x as i32).saturating_sub(x).unsigned_abs();
+        let dz = (cell.z as i32).saturating_sub(z).unsigned_abs();
         let score = dx.saturating_mul(dx).saturating_add(dz.saturating_mul(dz));
         if best_index.is_none() || score < best_score {
             best_index = Some(index);
@@ -9978,6 +10146,57 @@ fn upload_shadow_texture() -> Option<TextureMaterial> {
     )
 }
 
+fn upload_particle_texture() -> TextureMaterial {
+    let mut pixels =
+        [0u8; (PARTICLE_TEXTURE_HALFWORDS_PER_ROW as usize) * (PARTICLE_TEXTURE_SIZE as usize) * 2];
+    let mut row = 0usize;
+    while row < PARTICLE_TEXTURE_SIZE as usize {
+        let mut col = 0usize;
+        while col < PARTICLE_TEXTURE_SIZE as usize {
+            let dx = (col as i32 * 2 + 1) - PARTICLE_TEXTURE_SIZE as i32;
+            let dy = (row as i32 * 2 + 1) - PARTICLE_TEXTURE_SIZE as i32;
+            let inside = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)) <= 225;
+            if inside {
+                let halfword = row * PARTICLE_TEXTURE_HALFWORDS_PER_ROW as usize + (col / 4);
+                let shift = (col & 3) * 4;
+                let raw = u16::from_le_bytes([pixels[halfword * 2], pixels[halfword * 2 + 1]])
+                    | (1u16 << shift);
+                let packed = raw.to_le_bytes();
+                pixels[halfword * 2] = packed[0];
+                pixels[halfword * 2 + 1] = packed[1];
+            }
+            col += 1;
+        }
+        row += 1;
+    }
+
+    let mut clut = [0u8; 32];
+    let white = 0x7FFFu16.to_le_bytes();
+    clut[2] = white[0];
+    clut[3] = white[1];
+
+    upload_bytes(
+        VramRect::new(
+            PARTICLE_TEXTURE_X,
+            PARTICLE_TPAGE.y(),
+            PARTICLE_TEXTURE_HALFWORDS_PER_ROW,
+            PARTICLE_TEXTURE_SIZE,
+        ),
+        &pixels,
+    );
+    upload_clut(
+        VramRect::new(PARTICLE_CLUT.x(), PARTICLE_CLUT.y(), 16, 1),
+        &clut,
+    );
+
+    TextureMaterial::blended(
+        PARTICLE_CLUT.uv_clut_word(),
+        PARTICLE_TPAGE.uv_tpage_word(0),
+        (0x80, 0x80, 0x80),
+        BlendMode::Average,
+    )
+}
+
 /// Upload `asset_bytes` to VRAM if not already resident; return
 /// the slot record so the caller can build a TextureMaterial.
 /// Returns `None` if the texture parse fails or the VRAM table
@@ -10585,8 +10804,8 @@ fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color:
 
 fn draw_model_instances(
     current_room: RoomIndex,
-    elapsed_vblanks: u32,
-    video_hz: u16,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -10616,7 +10835,7 @@ fn draw_model_instances(
         let Some(anim) = runtime_model.clip(clips, clip_local) else {
             continue;
         };
-        let phase = anim.phase_at_tick_q12(elapsed_vblanks, video_hz);
+        let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
         let bounds = model_frame_bounds(runtime_model, clip_local, phase);
         let clip_anchor = model_clip_anchor(runtime_model, clip_local);
         let reference_anchor = model_clip_anchor(runtime_model, runtime_model.default_clip);
@@ -10719,6 +10938,36 @@ fn accumulate_model_stats(total: &mut TexturedModelRenderStats, next: TexturedMo
     total.dropped_triangles = total
         .dropped_triangles
         .saturating_add(next.dropped_triangles);
+    total.cpu_blended_vertices = total
+        .cpu_blended_vertices
+        .saturating_add(next.cpu_blended_vertices);
+    total.packed_face_calls = total
+        .packed_face_calls
+        .saturating_add(next.packed_face_calls);
+    total.packed_unclamped_face_calls = total
+        .packed_unclamped_face_calls
+        .saturating_add(next.packed_unclamped_face_calls);
+    total.packed_clamped_face_calls = total
+        .packed_clamped_face_calls
+        .saturating_add(next.packed_clamped_face_calls);
+    total.packed_general_face_calls = total
+        .packed_general_face_calls
+        .saturating_add(next.packed_general_face_calls);
+    total.fallback_face_calls = total
+        .fallback_face_calls
+        .saturating_add(next.fallback_face_calls);
+    total.hw_extent_fallbacks = total
+        .hw_extent_fallbacks
+        .saturating_add(next.hw_extent_fallbacks);
+    total.near_plane_dropped_faces = total
+        .near_plane_dropped_faces
+        .saturating_add(next.near_plane_dropped_faces);
+    total.hw_unsafe_dropped_faces = total
+        .hw_unsafe_dropped_faces
+        .saturating_add(next.hw_unsafe_dropped_faces);
+    total.fast_submitted_triangles = total
+        .fast_submitted_triangles
+        .saturating_add(next.fast_submitted_triangles);
     total.vertex_overflow |= next.vertex_overflow;
     total.primitive_overflow |= next.primitive_overflow;
     total.command_overflow |= next.command_overflow;
@@ -10773,10 +11022,10 @@ fn visual_model_origin(
 fn animation_phase_at_tick_q12(
     animation: Animation<'static>,
     local_tick: u32,
-    video_hz: u16,
+    video_hz: VideoHz,
     looping: bool,
 ) -> u32 {
-    let phase = animation.phase_at_tick_q12(local_tick, video_hz);
+    let phase = animation.phase_at_tick_q12(local_tick, video_hz.as_u16());
     if looping {
         return phase;
     }
@@ -10998,20 +11247,11 @@ fn draw_image_props<T>(
 ) where
     T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
 {
+    let mut projector = None;
     for prop in props {
         if prop.room != current_room {
             continue;
         }
-        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
-            continue;
-        };
-        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-            asset.id,
-            asset.bytes,
-            VramSlotClutMode::TransparentZero,
-        ) else {
-            continue;
-        };
         let origin = WorldVertex::new(prop.x, prop.y, prop.z);
         let verts = image_prop_vertices(
             origin,
@@ -11027,29 +11267,98 @@ fn draw_image_props<T>(
         if !sphere_visible_to_camera(camera, options, center, radius, 96) {
             continue;
         }
-        let sort_depth = image_prop_sort_depth(camera, verts);
+        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
+            continue;
+        };
+        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
+            asset.id,
+            asset.bytes,
+            VramSlotClutMode::TransparentZero,
+        ) else {
+            continue;
+        };
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
+            .with_texture_window(slot.texture_window);
+        let u_max = model_render_uv_max(slot.texture_width);
+        let v_max = model_render_uv_max(slot.texture_height);
+        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+        if PROP_PARTICLE_GTE_PROJECT_ENABLED {
+            let projector = match projector {
+                Some(projector) => projector,
+                None => {
+                    let loaded = LoadedWorldCameraGte::load(*camera);
+                    projector = Some(loaded);
+                    loaded
+                }
+            };
+            if let Some(projected) = projector.project_world_quad(verts) {
+                let colors = [
+                    lighting.apply_vertex_fog_weight(
+                        prop.baked_vertex_rgb[0],
+                        lighting.fog_weight_at_depth(projected[0].sz),
+                    ),
+                    lighting.apply_vertex_fog_weight(
+                        prop.baked_vertex_rgb[1],
+                        lighting.fog_weight_at_depth(projected[1].sz),
+                    ),
+                    lighting.apply_vertex_fog_weight(
+                        prop.baked_vertex_rgb[2],
+                        lighting.fog_weight_at_depth(projected[2].sz),
+                    ),
+                    lighting.apply_vertex_fog_weight(
+                        prop.baked_vertex_rgb[3],
+                        lighting.fog_weight_at_depth(projected[3].sz),
+                    ),
+                ];
+                let sort_depth =
+                    image_prop_sort_depth_projected(projected, camera.projection.near_z);
+                let depth_bias = options
+                    .depth_bias
+                    .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
+                let opts = options
+                    .with_depth_policy(DepthPolicy::Fixed(sort_depth))
+                    .with_depth_bias(depth_bias)
+                    .with_cull_mode(CullMode::None)
+                    .with_material_layer(material)
+                    .with_textured_triangle_splitting(true)
+                    .with_textured_triangle_max_edge(0);
+                let _ = world.submit_textured_gouraud_triangle(
+                    triangles,
+                    [projected[0], projected[1], projected[2]],
+                    [uvs[0], uvs[1], uvs[2]],
+                    [colors[0], colors[1], colors[2]],
+                    material,
+                    opts,
+                );
+                let _ = world.submit_textured_gouraud_triangle(
+                    triangles,
+                    [projected[0], projected[2], projected[3]],
+                    [uvs[0], uvs[2], uvs[3]],
+                    [colors[0], colors[2], colors[3]],
+                    material,
+                    opts,
+                );
+                continue;
+            }
+        }
         let colors = [
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[0], verts[0]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[1], verts[1]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[2], verts[2]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[3], verts[3]),
         ];
-        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
-            .with_texture_window(slot.texture_window);
-        let u_max = model_render_uv_max(slot.texture_width);
-        let v_max = model_render_uv_max(slot.texture_height);
-        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-        let depth_bias = options
-            .depth_bias
-            .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
-        let opts = options
-            .with_depth_policy(DepthPolicy::Fixed(sort_depth))
-            .with_depth_bias(depth_bias)
-            .with_cull_mode(CullMode::None)
-            .with_material_layer(material)
-            .with_textured_triangle_splitting(true)
-            .with_textured_triangle_max_edge(0);
         if let Some(projected) = camera.project_world_quad(verts) {
+            let sort_depth = image_prop_sort_depth_projected(projected, camera.projection.near_z);
+            let depth_bias = options
+                .depth_bias
+                .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
+            let opts = options
+                .with_depth_policy(DepthPolicy::Fixed(sort_depth))
+                .with_depth_bias(depth_bias)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(material)
+                .with_textured_triangle_splitting(true)
+                .with_textured_triangle_max_edge(0);
             let _ = world.submit_textured_gouraud_triangle(
                 triangles,
                 [projected[0], projected[1], projected[2]],
@@ -11070,7 +11379,17 @@ fn draw_image_props<T>(
             let tint = average_vertex_rgb(colors);
             let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
                 .with_texture_window(slot.texture_window);
-            let opts = opts.with_material_layer(material);
+            let sort_depth = image_prop_sort_depth(camera, verts);
+            let depth_bias = options
+                .depth_bias
+                .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
+            let opts = options
+                .with_depth_policy(DepthPolicy::Fixed(sort_depth))
+                .with_depth_bias(depth_bias)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(material)
+                .with_textured_triangle_splitting(true)
+                .with_textured_triangle_max_edge(0);
             let _ =
                 world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, opts);
         }
@@ -11857,6 +12176,10 @@ fn draw_box_prop_faces<T>(
     T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
 {
     for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        let face_vertices = faces[face];
+        if !box_prop_face_front_facing(camera, face_vertices) {
+            continue;
+        }
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
@@ -11875,7 +12198,6 @@ fn draw_box_prop_faces<T>(
         let u_max = model_render_uv_max(slot.texture_width);
         let v_max = model_render_uv_max(slot.texture_height);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-        let face_vertices = faces[face];
         let colors = [
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][0], face_vertices[0]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][1], face_vertices[1]),
@@ -11920,6 +12242,39 @@ fn draw_box_prop_faces<T>(
             );
         }
     }
+}
+
+fn box_prop_face_front_facing(camera: &WorldCamera, face: [WorldVertex; 4]) -> bool {
+    let abx = face[1].x.saturating_sub(face[0].x);
+    let aby = face[1].y.saturating_sub(face[0].y);
+    let abz = face[1].z.saturating_sub(face[0].z);
+    let acx = face[2].x.saturating_sub(face[0].x);
+    let acy = face[2].y.saturating_sub(face[0].y);
+    let acz = face[2].z.saturating_sub(face[0].z);
+    let nx = aby
+        .saturating_mul(acz)
+        .saturating_sub(abz.saturating_mul(acy))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    let ny = abz
+        .saturating_mul(acx)
+        .saturating_sub(abx.saturating_mul(acz))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    let nz = abx
+        .saturating_mul(acy)
+        .saturating_sub(aby.saturating_mul(acx))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    let center = WorldVertex::new(
+        average4_i32(face[0].x, face[1].x, face[2].x, face[3].x),
+        average4_i32(face[0].y, face[1].y, face[2].y, face[3].y),
+        average4_i32(face[0].z, face[1].z, face[2].z, face[3].z),
+    );
+    let vx = camera.position.x.saturating_sub(center.x);
+    let vy = camera.position.y.saturating_sub(center.y);
+    let vz = camera.position.z.saturating_sub(center.z);
+    nx.saturating_mul(vx)
+        .saturating_add(ny.saturating_mul(vy))
+        .saturating_add(nz.saturating_mul(vz))
+        > 0
 }
 
 fn box_prop_break_shard_quad(
@@ -12223,6 +12578,14 @@ fn image_prop_sort_depth(camera: &WorldCamera, verts: [WorldVertex; 4]) -> i32 {
         nearest = nearest.min(camera.view_vertex(vertex).z);
     }
     nearest.max(camera.projection.near_z)
+}
+
+fn image_prop_sort_depth_projected(verts: [ProjectedVertex; 4], near_z: i32) -> i32 {
+    let mut nearest = i32::MAX;
+    for vertex in verts {
+        nearest = nearest.min(vertex.sz);
+    }
+    nearest.max(near_z)
 }
 
 fn image_prop_vertices(
@@ -12623,7 +12986,7 @@ fn draw_entity_markers(
     }
 }
 
-fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_vblanks: u32) {
+fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_tick: SimTick) {
     let Some(center) = camera.project_world(target.to_world_vertex()) else {
         return;
     };
@@ -12631,7 +12994,7 @@ fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_vb
     let outer = TARGET_LOCK_OUTER;
     let inner = TARGET_LOCK_INNER;
     let half_width = TARGET_LOCK_TRI_HALF_WIDTH;
-    let angle = Angle::per_frames(TARGET_LOCK_ROTATION_FRAMES).mul_frame(elapsed_vblanks);
+    let angle = Angle::per_frames(TARGET_LOCK_ROTATION_FRAMES).mul_tick(elapsed_tick);
     let triangles = [
         [
             target_screen_vertex(center, 0, -inner, angle),
@@ -12677,7 +13040,244 @@ fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle)
     )
 }
 
-fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_vblanks: u32) {
+fn draw_particle_emitter(
+    emitter: ParticleEmitterRecord,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    elapsed_tick: SimTick,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    if emitter.flags & particle_emitter_flags::ENABLED == 0
+        || emitter.max_particles == 0
+        || emitter.lifetime_frames == 0
+        || emitter.spawn_rate_q8 == 0
+    {
+        return 0;
+    }
+
+    let lifetime = emitter.lifetime_frames as u32;
+    let steady_count = ((emitter.spawn_rate_q8 as u32)
+        .saturating_mul(lifetime)
+        .saturating_add(60 * 256 - 1))
+        / (60 * 256);
+    let count = (emitter.max_particles as u32)
+        .min(PARTICLE_EMITTER_DRAW_CAP as u32)
+        .min(steady_count.max(1));
+    if count == 0 {
+        return 0;
+    }
+
+    let mut submitted = 0usize;
+    let mut i = 0u32;
+    while i < count {
+        let seed = particle_seed(
+            emitter.room.to_usize() as u32,
+            emitter.x as u32,
+            emitter.z as u32,
+            i,
+        );
+        let age = (elapsed_tick.as_u32() + (i * lifetime / count)) % lifetime;
+        submitted += draw_particle_sample(
+            emitter,
+            camera,
+            projector,
+            depth_range,
+            particle_material,
+            seed,
+            age as i32,
+            lifetime as i32,
+            ot,
+            primitive_packets,
+        );
+        i += 1;
+    }
+    submitted
+}
+
+fn draw_particle_sample(
+    emitter: ParticleEmitterRecord,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    seed: u32,
+    age: i32,
+    lifetime: i32,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let spawn_radius = emitter.spawn_radius as i32;
+    let origin_x = emitter
+        .x
+        .saturating_add(particle_signed_spread(seed, spawn_radius));
+    let origin_y = emitter.y.saturating_add(particle_signed_spread(
+        seed.rotate_left(9),
+        spawn_radius / 2,
+    ));
+    let origin_z = emitter
+        .z
+        .saturating_add(particle_signed_spread(seed.rotate_left(17), spawn_radius));
+    let x = particle_axis_position(
+        origin_x,
+        emitter.base_velocity_q4[0],
+        emitter.random_velocity_q4[0],
+        emitter.acceleration_q4[0],
+        age,
+        seed.rotate_left(3),
+    );
+    let y = particle_axis_position(
+        origin_y,
+        emitter.base_velocity_q4[1],
+        emitter.random_velocity_q4[1],
+        emitter.acceleration_q4[1],
+        age,
+        seed.rotate_left(11),
+    );
+    let z = particle_axis_position(
+        origin_z,
+        emitter.base_velocity_q4[2],
+        emitter.random_velocity_q4[2],
+        emitter.acceleration_q4[2],
+        age,
+        seed.rotate_left(21),
+    );
+    let position = WorldVertex::new(x, y, z);
+    let center = if let Some(projector) = projector {
+        projector.project_world(position)
+    } else {
+        camera.project_world(position)
+    };
+    let Some(center) = center else {
+        return 0;
+    };
+
+    let t_q8 = if lifetime <= 1 {
+        255
+    } else {
+        ((age * 255) / (lifetime - 1)).clamp(0, 255)
+    };
+    let size = particle_lerp_u16(emitter.start_size, emitter.end_size, t_q8);
+    let half = ((i32::from(size) * camera.projection.focal_length) / center.sz.max(1)).clamp(
+        i32::from(PARTICLE_MIN_SCREEN_SIZE),
+        i32::from(PARTICLE_MAX_SCREEN_SIZE),
+    ) as i16;
+    let tint = particle_lerp_rgb(emitter.start_color, emitter.end_color, t_q8);
+    let blend = particle_blend_mode(emitter.blend_mode);
+    let slot = depth_range.slot::<OT_DEPTH>(center.sz);
+    draw_particle_quad(
+        center,
+        half,
+        particle_material.with_tint(tint).with_blend_mode(blend),
+        slot,
+        ot,
+        primitive_packets,
+    )
+}
+
+fn draw_particle_quad(
+    center: ProjectedVertex,
+    half: i16,
+    material: TextureMaterial,
+    slot: psx_engine::DepthSlot,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let left = clamp_i16(i32::from(center.sx).saturating_sub(i32::from(half)));
+    let right = clamp_i16(i32::from(center.sx).saturating_add(i32::from(half)));
+    let top = clamp_i16(i32::from(center.sy).saturating_sub(i32::from(half)));
+    let bottom = clamp_i16(i32::from(center.sy).saturating_add(i32::from(half)));
+    if left == right || top == bottom {
+        return 0;
+    }
+    let quad = QuadTexturedMaterial::with_material(
+        [(left, top), (right, top), (left, bottom), (right, bottom)],
+        [
+            (PARTICLE_TEXEL_U, PARTICLE_TEXEL_V),
+            (PARTICLE_UV_MAX, PARTICLE_TEXEL_V),
+            (PARTICLE_TEXEL_U, PARTICLE_UV_MAX),
+            (PARTICLE_UV_MAX, PARTICLE_UV_MAX),
+        ],
+        material,
+    );
+    let Some(packet) = primitive_packets.push(quad) else {
+        return 0;
+    };
+    ot.add_packet_slot(slot, packet);
+    1
+}
+
+fn particle_axis_position(
+    origin: i32,
+    base_velocity_q4: i16,
+    random_velocity_q4: u16,
+    acceleration_q4: i16,
+    age: i32,
+    seed: u32,
+) -> i32 {
+    let random_velocity = particle_signed_spread(seed, random_velocity_q4 as i32);
+    let velocity = i32::from(base_velocity_q4).saturating_add(random_velocity);
+    let velocity_term = velocity.saturating_mul(age) >> 4;
+    let acceleration_term = i32::from(acceleration_q4)
+        .saturating_mul(age)
+        .saturating_mul(age)
+        >> 5;
+    origin
+        .saturating_add(velocity_term)
+        .saturating_add(acceleration_term)
+}
+
+fn particle_seed(room: u32, x: u32, z: u32, index: u32) -> u32 {
+    let mut value = room
+        .wrapping_mul(0x9E37_79B9)
+        .wrapping_add(x.rotate_left(7))
+        .wrapping_add(z.rotate_left(17))
+        .wrapping_add(index.wrapping_mul(0x85EB_CA6B));
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7FEB_352D);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846C_A68B);
+    value ^ (value >> 16)
+}
+
+fn particle_signed_spread(seed: u32, spread: i32) -> i32 {
+    if spread <= 0 {
+        return 0;
+    }
+    let span = spread.saturating_mul(2).saturating_add(1) as u32;
+    (seed % span) as i32 - spread
+}
+
+fn particle_lerp_u16(a: u16, b: u16, t_q8: i32) -> u16 {
+    let inv = 255 - t_q8;
+    (((i32::from(a) * inv) + (i32::from(b) * t_q8)) / 255).clamp(0, u16::MAX as i32) as u16
+}
+
+fn particle_lerp_rgb(a: [u8; 3], b: [u8; 3], t_q8: i32) -> (u8, u8, u8) {
+    (
+        particle_lerp_u8(a[0], b[0], t_q8),
+        particle_lerp_u8(a[1], b[1], t_q8),
+        particle_lerp_u8(a[2], b[2], t_q8),
+    )
+}
+
+fn particle_lerp_u8(a: u8, b: u8, t_q8: i32) -> u8 {
+    let inv = 255 - t_q8;
+    (((i32::from(a) * inv) + (i32::from(b) * t_q8)) / 255).clamp(0, 255) as u8
+}
+
+const fn particle_blend_mode(mode: u8) -> BlendMode {
+    match mode & 3 {
+        1 => BlendMode::Add,
+        2 => BlendMode::Subtract,
+        3 => BlendMode::AddQuarter,
+        _ => BlendMode::Average,
+    }
+}
+
+fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_tick: SimTick) {
     if room.flags & room_flags::ATMOSPHERE_ENABLED == 0 {
         return;
     }
@@ -12687,6 +13287,7 @@ fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_vblanks: u32) {
     }
     let base_fall_q4 = room.atmosphere_fall_speed_q4.max(0) as i32;
     let base_wind_q4 = room.atmosphere_wind_speed_q4 as i32;
+    let elapsed_vblanks = elapsed_tick.as_u32();
     let elapsed = elapsed_vblanks as i32;
     let mut i = 0u32;
     while i < count {
@@ -12769,6 +13370,8 @@ fn main() -> ! {
         clear_color: (5, 7, 12),
         video_mode,
         visual_pacing: playtest_visual_pacing(video_mode),
+        scheduler: SchedulerConfig::new()
+            .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual),
         ..Config::default()
     };
     App::run(config, &mut scene);
