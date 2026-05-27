@@ -51,8 +51,9 @@ const PADDLE_H: u16 = 56;
 const PADDLE_MARGIN: i16 = 10;
 const PADDLE_SPEED: i16 = 4;
 
-const AI_SPEED: i16 = 3;
-const AI_HYSTERESIS: i16 = 4;
+const AI_SPEED: i16 = 2;
+const AI_HYSTERESIS: i16 = 10;
+const AI_REACTION_TICKS: u32 = 3;
 
 const BALL_SIZE: u16 = 42;
 const BALL_START_VX: i16 = 2;
@@ -310,9 +311,10 @@ impl Scene for MagikaaaaaarpPong {
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        let tick = ctx.sim_tick.as_u32();
         self.advance_cube_spin();
-        self.maybe_start_goncharov(ctx.sim_tick.as_u32());
-        let cube_scale = cube_scale_q12(ctx.sim_tick.as_u32());
+        self.maybe_start_goncharov(tick);
+        let cube_scale = cube_scale_q12(tick);
         let ball_size = ball_size_for_scale(cube_scale);
 
         if self.winner != 0 {
@@ -330,12 +332,14 @@ impl Scene for MagikaaaaaarpPong {
         }
         clamp_paddle(&mut self.p1_y);
 
-        let target = self.ball_center_y();
-        let paddle_mid = self.p2_y + PADDLE_H as i16 / 2;
-        if target < paddle_mid - AI_HYSTERESIS {
-            self.p2_y -= AI_SPEED;
-        } else if target > paddle_mid + AI_HYSTERESIS {
-            self.p2_y += AI_SPEED;
+        if tick % AI_REACTION_TICKS == 0 {
+            let target = ai_target_y(tick, self.ball_vx, self.ball_center_y());
+            let paddle_mid = self.p2_y + PADDLE_H as i16 / 2;
+            if target < paddle_mid - AI_HYSTERESIS {
+                self.p2_y -= AI_SPEED;
+            } else if target > paddle_mid + AI_HYSTERESIS {
+                self.p2_y += AI_SPEED;
+            }
         }
         clamp_paddle(&mut self.p2_y);
 
@@ -797,6 +801,14 @@ fn spin_from_paddle(ball_center_y: i16, paddle_y: i16, prev_vy: i16) -> i16 {
     } else {
         prev_vy.signum()
     }
+}
+
+fn ai_target_y(tick: u32, ball_vx: i16, ball_center_y: i16) -> i16 {
+    if ball_vx <= 0 {
+        return (PLAYFIELD_TOP + PLAYFIELD_BOT) / 2;
+    }
+    let offsets = [-24, 16, -12, 28];
+    ball_center_y + offsets[((tick / 90) & 3) as usize]
 }
 
 fn upload_cube_texture() {
