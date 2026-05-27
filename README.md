@@ -237,7 +237,7 @@ make assets        # cook shared source assets via psxed
 make hello-tri     # build one SDK example
 make showcase-model # build one engine showcase
 make game-pong     # build one mini-game
-make game-birthday-pong # build the birthday Pong mini-game
+make game-magikaaaaaarp-pong # build the magikAAAAArp Pong mini-game
 make run-tri       # build and side-load an example into the frontend
 ```
 
@@ -292,9 +292,9 @@ end-to-end through the emulator frontend (`make <name>` to build,
 | --- | --- |
 | ![showcase-particles screenshot](assets/media/readme/examples/showcase-particles.png) | ![showcase-text screenshot](assets/media/readme/examples/showcase-text.png) |
 
-| `game-pong` | `game-birthday-pong` | `game-breakout` | `game-invaders` |
+| `game-pong` | `game-magikaaaaaarp-pong` | `game-breakout` | `game-invaders` |
 | --- | --- | --- | --- |
-| ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-birthday-pong screenshot](assets/media/readme/examples/game-birthday-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) | ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
+| ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-magikaaaaaarp-pong screenshot](assets/media/readme/examples/game-magikaaaaaarp-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) | ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
 
 ### SDK examples - bare-metal MIPS, no engine framework
 
@@ -324,7 +324,7 @@ end-to-end through the emulator frontend (`make <name>` to build,
 | Example | What it demonstrates |
 | --- | --- |
 | `game-pong` | Two-paddle Pong, first full game ported to the engine framework. Left = D-pad, right = AI with hysteresis band, first to 7 wins. |
-| `game-birthday-pong` | Birthday Pong variant with a comically large rotating textured cube as the ball. Left = D-pad, right = AI, first to 5 wins. |
+| `game-magikaaaaaarp-pong` | magikAAAAArp-themed Pong with a comically large rotating album cube as the ball. Left = D-pad, right = AI, first to 5 wins. |
 | `game-breakout` | Brick-buster. 40-brick rainbow wall, gradient background, particle bursts on break, ball trail, screen shake. |
 | `game-invaders` | Space Invaders. 5×10 marching alien grid that speeds up as the formation thins, player bullet + up to 4 enemy bombs, wave progression. |
 
