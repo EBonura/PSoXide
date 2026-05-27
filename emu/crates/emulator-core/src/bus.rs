@@ -984,6 +984,7 @@ impl Bus {
     /// (CD-DA / XA ADPCM) into the SPU's CD input mix -- one
     /// drain-and-feed per call keeps the latency bounded.
     pub fn run_spu_samples(&mut self, n: usize) {
+        self.cdrom.pump_cdda_samples(n);
         // Move any freshly-decoded CDROM audio into the SPU's CD
         // input queue so it participates in this frame's mix.
         let cd_samples = self.cdrom.drain_cd_audio();

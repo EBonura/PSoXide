@@ -48,8 +48,8 @@ pub const MENU_TEXT_BRIGHT: Color32 = Color32::from_rgb(230, 230, 230);
 pub const MENU_TEXT_DIM: Color32 = Color32::from_rgb(128, 128, 140);
 pub const MENU_TEXT_VALUE: Color32 = Color32::from_rgb(179, 179, 191);
 pub const MENU_HINT: Color32 = Color32::from_rgb(102, 102, 115);
-pub const MENU_ITEM_BG: Color32 = Color32::from_rgba_premultiplied(25, 25, 30, 234);
-pub const MENU_ITEM_SEL: Color32 = Color32::from_rgba_premultiplied(0, 38, 51, 242);
+pub const MENU_ITEM_BG: Color32 = Color32::from_rgba_premultiplied(25, 25, 30, 248);
+pub const MENU_ITEM_SEL: Color32 = Color32::from_rgba_premultiplied(0, 38, 51, 252);
 
 // --- Font sizes ---
 

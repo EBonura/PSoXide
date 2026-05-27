@@ -50,6 +50,12 @@ const SHADOW_TPAGE_Y_BLOCK: u16 = 1;
 const SHADOW_TPAGE_Y: u16 = 256;
 const SHADOW_CLUT_X: u16 = 1008;
 const SHADOW_CLUT_Y: u16 = 479;
+const PARTICLE_TEXTURE_SIZE: usize = 16;
+const PARTICLE_TEXEL_U: u8 = 64;
+const PARTICLE_TEXTURE_X: u16 = SHADOW_TPAGE_X + ((PARTICLE_TEXEL_U as u16) / 4);
+const PARTICLE_TEXTURE_Y: u16 = SHADOW_TPAGE_Y;
+const PARTICLE_CLUT_X: u16 = 992;
+const PARTICLE_CLUT_Y: u16 = 479;
 
 /// Cached tpage/CLUT for one Material resource.
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +103,7 @@ pub struct EditorTextures {
     cache: HashMap<ResourceId, CacheEntry>,
     model_cache: HashMap<ResourceId, ModelAtlasCacheEntry>,
     shadow_slot: MaterialSlot,
+    particle_slot: MaterialSlot,
     /// Ordered material ids, texture paths, and fallback names used to
     /// populate the limited room-material VRAM band. Scene-used
     /// materials and active far-vista panels are prioritized ahead
@@ -147,11 +154,19 @@ impl EditorTextures {
             texture_width: 64,
             texture_height: 64,
         };
+        let particle_slot = MaterialSlot {
+            tpage_word: pack_tpage_word(SHADOW_TPAGE_INDEX, SHADOW_TPAGE_Y_BLOCK),
+            clut_word: pack_clut_word(PARTICLE_CLUT_X, PARTICLE_CLUT_Y),
+            texture_window: TextureWindow::NONE,
+            texture_width: PARTICLE_TEXTURE_SIZE as u8,
+            texture_height: PARTICLE_TEXTURE_SIZE as u8,
+        };
         let mut textures = Self {
             vram: vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize].into_boxed_slice(),
             cache: HashMap::new(),
             model_cache: HashMap::new(),
             shadow_slot,
+            particle_slot,
             room_signature: Vec::new(),
             room_allocator: TextureWindowAtlas::new(),
             next_clut_x: 0,
@@ -162,6 +177,7 @@ impl EditorTextures {
             next_model_clut_y: 481,
         };
         textures.upload_shadow_texture();
+        textures.upload_particle_texture();
         textures
     }
 
@@ -188,6 +204,12 @@ impl EditorTextures {
     /// preview's model-grounding decals.
     pub fn shadow_slot(&self) -> MaterialSlot {
         self.shadow_slot
+    }
+
+    /// Dedicated 4bpp circular particle texture used by both editor
+    /// preview and playtest particles.
+    pub fn particle_slot(&self) -> MaterialSlot {
+        self.particle_slot
     }
 
     /// Walk scene-used Materials first, then active far-vista panels,
@@ -506,6 +528,31 @@ impl EditorTextures {
                 (SHADOW_CLUT_Y as usize) * VRAM_WIDTH as usize + SHADOW_CLUT_X as usize + i;
             self.vram[vram_idx] = entry;
         }
+    }
+
+    fn upload_particle_texture(&mut self) {
+        let source_halfwords_per_row = PARTICLE_TEXTURE_SIZE / 4;
+        for row in 0..PARTICLE_TEXTURE_SIZE {
+            for hw in 0..source_halfwords_per_row {
+                let mut word = 0u16;
+                for lane in 0..4 {
+                    let col = hw * 4 + lane;
+                    let dx = (col as i32 * 2 + 1) - PARTICLE_TEXTURE_SIZE as i32;
+                    let dy = (row as i32 * 2 + 1) - PARTICLE_TEXTURE_SIZE as i32;
+                    if dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)) <= 225 {
+                        word |= 1u16 << (lane * 4);
+                    }
+                }
+                let vram_idx = (PARTICLE_TEXTURE_Y as usize + row) * VRAM_WIDTH as usize
+                    + PARTICLE_TEXTURE_X as usize
+                    + hw;
+                self.vram[vram_idx] = word;
+            }
+        }
+
+        let mut palette = [0u16; 16];
+        palette[1] = 0xFFFF;
+        self.upload_clut(PARTICLE_CLUT_X, PARTICLE_CLUT_Y, &palette);
     }
 
     /// Walk every Model resource and ensure its atlas (if any)

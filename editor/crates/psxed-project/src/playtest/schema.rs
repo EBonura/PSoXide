@@ -2,7 +2,7 @@
 
 use crate::{
     MaterialFaceSidedness, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
-    RuntimeTextureSplitMode, SkyCycloramaQuad,
+    RuntimeTextureSplitMode, SkyCycloramaQuad, UiNodeKind, UiValueBinding,
 };
 
 /// Number of cooked character animation action slots.
@@ -418,7 +418,7 @@ pub struct PlaytestCachedRoomSurface {
     pub uv_words: [u16; 4],
     /// Cached baked RGB values.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
-    /// Packed surface kind plus baked-light flag.
+    /// Packed surface kind plus cached render flags.
     pub kind_flags: u8,
     /// Runtime wall direction when this is a wall surface.
     pub wall_direction: u8,
@@ -644,6 +644,39 @@ pub struct PlaytestBoxProp {
     pub flags: u16,
 }
 
+/// One cooked screen-space UI node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiNode {
+    /// Parent index in [`PlaytestPackage::ui_nodes`], or `None` for the root canvas.
+    pub parent: Option<u16>,
+    /// Node kind.
+    pub kind: UiNodeKind,
+    /// Left edge in canvas pixels.
+    pub x: i16,
+    /// Top edge in canvas pixels.
+    pub y: i16,
+    /// Width in canvas pixels.
+    pub width: u16,
+    /// Height in canvas pixels.
+    pub height: u16,
+    /// Primary colour: fill for `Rect`/`Bar`, text tint for `Label`.
+    pub color: [u8; 3],
+    /// Secondary colour, currently the `Bar` background.
+    pub background: [u8; 3],
+    /// Current value binding for `Bar`.
+    pub value: UiValueBinding,
+    /// Maximum value binding for `Bar`.
+    pub max: UiValueBinding,
+    /// Texture asset index for `Image`, or `None`.
+    pub texture_asset: Option<usize>,
+    /// Text for `Label`.
+    pub text: String,
+    /// Runtime lookup tag for dynamic labels. Empty means untagged.
+    pub tag: String,
+    /// Runtime flags.
+    pub flags: u16,
+}
+
 /// Weapon-local hit shape, ready for manifest emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestWeaponHitShape {
@@ -745,6 +778,47 @@ pub struct PlaytestLight {
     pub intensity_q8: u16,
     /// 8-bit RGB tint.
     pub color: [u8; 3],
+}
+
+/// One placed point-projected particle emitter, room-local engine
+/// units. Mirrors [`psx_level::ParticleEmitterRecord`] so the
+/// generated manifest can copy fields directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestParticleEmitter {
+    /// Room index in [`PlaytestPackage::rooms`].
+    pub room: u16,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Hard live-particle cap.
+    pub max_particles: u16,
+    /// Spawn rate in particles/second, Q8 fixed point.
+    pub spawn_rate_q8: u16,
+    /// Particle lifetime in 60 Hz frames.
+    pub lifetime_frames: u8,
+    /// Particle size at birth, in engine units before projection.
+    pub start_size: u16,
+    /// Particle size at death, in engine units before projection.
+    pub end_size: u16,
+    /// 8-bit RGB tint at birth.
+    pub start_color: [u8; 3],
+    /// 8-bit RGB tint at death.
+    pub end_color: [u8; 3],
+    /// PS1 semi-transparency mode code: 0 average, 1 add, 2 subtract, 3 add-quarter.
+    pub blend_mode: u8,
+    /// Base velocity in Q4.4 engine units per 60 Hz frame.
+    pub base_velocity_q4: [i16; 3],
+    /// Random velocity spread in Q4.4 engine units per 60 Hz frame.
+    pub random_velocity_q4: [u16; 3],
+    /// Constant acceleration in Q4.4 engine units per 60 Hz frame.
+    pub acceleration_q4: [i16; 3],
+    /// Random spawn offset radius, in engine units.
+    pub spawn_radius: u16,
+    /// Runtime flags. Bit 0 = enabled.
+    pub flags: u16,
 }
 
 /// Player spawn record. Coordinates are room-local engine units
@@ -945,6 +1019,8 @@ pub struct PlaytestPackage {
     pub image_props: Vec<PlaytestImageProp>,
     /// Placed editable box props, room-local coordinates.
     pub box_props: Vec<PlaytestBoxProp>,
+    /// Cooked screen-space UI nodes.
+    pub ui_nodes: Vec<PlaytestUiNode>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.
@@ -953,6 +1029,8 @@ pub struct PlaytestPackage {
     pub equipment: Vec<PlaytestEquipment>,
     /// Placed point lights, room-local coordinates.
     pub lights: Vec<PlaytestLight>,
+    /// Placed point-projected particle emitters.
+    pub particle_emitters: Vec<PlaytestParticleEmitter>,
     /// Single player spawn -- required.
     pub spawn: Option<PlaytestSpawn>,
     /// Cooked Character resources used by player / future

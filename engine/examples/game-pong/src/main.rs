@@ -32,11 +32,11 @@
 
 extern crate psx_rt;
 
-use psx_engine::{App, Config, Ctx, Scene, button, sfx};
-use psx_font::{FontAtlas, fonts::BASIC_8X16};
+use psx_engine::{button, sfx, App, Config, Ctx, Scene};
+use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::RectFlat;
-use psx_spu::{self as spu, Pitch, SpuAddr, Voice, tones};
+use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
 
 // ----------------------------------------------------------------------
@@ -73,16 +73,32 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 // ----------------------------------------------------------------------
-// SPU layout -- one voice per SFX, tone samples at well-known offsets
+// SPU layout
 // ----------------------------------------------------------------------
 
-const SPU_WALL: SpuAddr = SpuAddr::new(0x1010);
-const SPU_PADDLE: SpuAddr = SpuAddr::new(0x1020);
-const SPU_SCORE: SpuAddr = SpuAddr::new(0x1030);
+const SPU_SAMPLE_BASE: SpuAddr = SpuAddr::new(0x1010);
 
 const VOICE_WALL: Voice = Voice::V0;
 const VOICE_PADDLE: Voice = Voice::V1;
 const VOICE_SCORE: Voice = Voice::V2;
+
+const SFX_BANK: [sfx::Sample<'static>; 3] = [
+    sfx::Sample {
+        voice: VOICE_WALL,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau"),
+        volume: Volume::linear(1, 18),
+    },
+    sfx::Sample {
+        voice: VOICE_PADDLE,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/hit_punch.psau"),
+        volume: Volume::linear(1, 16),
+    },
+    sfx::Sample {
+        voice: VOICE_SCORE,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/pickup_coin.psau"),
+        volume: Volume::linear(1, 18),
+    },
+];
 
 // ----------------------------------------------------------------------
 // DMA-facing arenas -- stay in .bss so the OT walker sees stable
@@ -214,12 +230,7 @@ fn spin_from_paddle(ball_y: i16, paddle_y: i16, prev_vy: i16) -> i16 {
 impl Scene for Pong {
     fn init(&mut self, _ctx: &mut Ctx) {
         spu::init();
-        spu::upload_adpcm(SPU_WALL, tones::SINE);
-        spu::upload_adpcm(SPU_PADDLE, tones::SQUARE);
-        spu::upload_adpcm(SPU_SCORE, tones::TRIANGLE);
-        sfx::configure_voice(VOICE_WALL, SPU_WALL, Pitch::raw(0x1400));
-        sfx::configure_voice(VOICE_PADDLE, SPU_PADDLE, Pitch::raw(0x0E00));
-        sfx::configure_voice(VOICE_SCORE, SPU_SCORE, Pitch::raw(0x0800));
+        sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
 
@@ -328,7 +339,15 @@ impl Pong {
         ot.clear();
 
         // Slot 0 (back) -- top + bottom border strips.
-        rects[0] = RectFlat::new(0, PLAYFIELD_TOP - 1, SCREEN_W as u16, BORDER_H, 140, 140, 180);
+        rects[0] = RectFlat::new(
+            0,
+            PLAYFIELD_TOP - 1,
+            SCREEN_W as u16,
+            BORDER_H,
+            140,
+            140,
+            180,
+        );
         rects[1] = RectFlat::new(0, PLAYFIELD_BOT, SCREEN_W as u16, BORDER_H, 140, 140, 180);
         ot.add(0, &mut rects[0], RectFlat::WORDS);
         ot.add(0, &mut rects[1], RectFlat::WORDS);
@@ -379,7 +398,9 @@ impl Pong {
 
     /// Scoreboard + game-over banner. Immediate-mode on top of OT.
     fn draw_scoreboard(&self) {
-        let Some(font) = self.font.as_ref() else { return };
+        let Some(font) = self.font.as_ref() else {
+            return;
+        };
         let p1 = digit_str(self.p1_score);
         let p2 = digit_str(self.p2_score);
         font.draw_text(60, 6, p1.as_str(), (220, 220, 240));
@@ -388,7 +409,11 @@ impl Pong {
         font.draw_text(SCREEN_W - 24 - 8 * 2, 6, "P2", (255, 180, 140));
 
         if self.winner != 0 {
-            let msg = if self.winner == 1 { "P1 WINS!" } else { "P2 WINS!" };
+            let msg = if self.winner == 1 {
+                "P1 WINS!"
+            } else {
+                "P2 WINS!"
+            };
             font.draw_text(
                 (SCREEN_W - 8 * 8) / 2,
                 (SCREEN_H - 16) / 2,

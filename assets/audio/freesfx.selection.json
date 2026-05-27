@@ -1,0 +1,48 @@
+{
+  "source": {
+    "name": "Kronbits Free SFX",
+    "url": "https://kronbits.itch.io/freesfx",
+    "license": "CC0-1.0",
+    "archive_sha256": "3378feb1912e0081a7e3d07b7dd378e7e0a4ec4696c25d18b0edd4aae1330ac1"
+  },
+  "target_sample_rate_hz": 44100,
+  "normalize_peak": 0.9,
+  "sounds": [
+    {
+      "id": "ui_beep",
+      "path": "FreeSFX/GameSFX/Alarms Blip Beeps/Retro Beeep 06.wav"
+    },
+    {
+      "id": "ui_select",
+      "path": "FreeSFX/GameSFX/Events/Retro Event UI 13.wav"
+    },
+    {
+      "id": "jump",
+      "path": "FreeSFX/GameSFX/Bounce Jump/Retro Jump Classic 08.wav"
+    },
+    {
+      "id": "footstep",
+      "path": "FreeSFX/GameSFX/FootStep/Retro FootStep 03.wav"
+    },
+    {
+      "id": "hit_punch",
+      "path": "FreeSFX/GameSFX/Impact/Retro Impact Punch 07.wav"
+    },
+    {
+      "id": "hit_metal",
+      "path": "FreeSFX/GameSFX/Impact/Retro Impact Metal 36.wav"
+    },
+    {
+      "id": "pickup_coin",
+      "path": "FreeSFX/GameSFX/PickUp/Retro PickUp Coin 04.wav"
+    },
+    {
+      "id": "swoosh",
+      "path": "FreeSFX/GameSFX/Swoosh/Retro Swooosh 02.wav"
+    },
+    {
+      "id": "explosion_short",
+      "path": "FreeSFX/GameSFX/Explosion/Retro Explosion Short 01.wav"
+    }
+  ]
+}

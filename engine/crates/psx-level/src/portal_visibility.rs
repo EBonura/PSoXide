@@ -6,7 +6,7 @@
 //! projected portal rectangle reaches it, not because the room's top-down
 //! footprint intersects the camera cone.
 
-use crate::{LevelRoomPortalRecord, LevelRoomRecord, RoomIndex};
+use crate::{LevelRoomPortalRecord, LevelRoomRecord, RoomIndex, RuntimeDebugMask};
 
 const INVALID_ROOM: RoomIndex = RoomIndex(u16::MAX);
 const INVALID_PORTAL: u16 = u16::MAX;
@@ -47,6 +47,7 @@ pub struct PortalVisibilityCamera {
 
 impl PortalVisibilityCamera {
     /// Build portal traversal camera inputs.
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         x: i32,
         y: i32,
@@ -334,23 +335,23 @@ pub struct PortalVisibilityStats {
     /// Deepest accepted portal depth.
     pub max_depth: u8,
     /// Destination-room bitset for portals considered by the traversal.
-    pub tested_room_mask: u64,
+    pub tested_room_mask: RuntimeDebugMask,
     /// Destination-room bitset for portals accepted by the traversal.
-    pub accepted_room_mask: u64,
+    pub accepted_room_mask: RuntimeDebugMask,
     /// Destination-room bitset for portals rejected by camera/window clipping.
-    pub reject_frustum_room_mask: u64,
+    pub reject_frustum_room_mask: RuntimeDebugMask,
     /// Directed portal-record bitset for portals considered by the traversal.
-    pub tested_portal_mask: u64,
+    pub tested_portal_mask: RuntimeDebugMask,
     /// Directed portal-record bitset for portals accepted by the traversal.
-    pub accepted_portal_mask: u64,
+    pub accepted_portal_mask: RuntimeDebugMask,
     /// Directed portal-record bitset for portals rejected by camera/window clipping.
-    pub reject_frustum_portal_mask: u64,
+    pub reject_frustum_portal_mask: RuntimeDebugMask,
     /// Deprecated: occupied-room bounds no longer rescue rejected portals.
     pub bounds_fallbacks: u16,
     /// Deprecated: always zero while portal visibility is surface-clipped.
-    pub bounds_fallback_room_mask: u64,
+    pub bounds_fallback_room_mask: RuntimeDebugMask,
     /// Deprecated: always zero while portal visibility is surface-clipped.
-    pub bounds_fallback_portal_mask: u64,
+    pub bounds_fallback_portal_mask: RuntimeDebugMask,
 }
 
 /// Fixed-pool output from a portal visibility traversal.
@@ -397,15 +398,15 @@ impl<const MAX_ROOMS: usize, const MAX_FRUSTUMS: usize, const MAX_FRONTIER: usiz
             cap_frustum: 0,
             cap_depth: 0,
             max_depth: 0,
-            tested_room_mask: 0,
-            accepted_room_mask: 0,
-            reject_frustum_room_mask: 0,
-            tested_portal_mask: 0,
-            accepted_portal_mask: 0,
-            reject_frustum_portal_mask: 0,
+            tested_room_mask: RuntimeDebugMask::EMPTY,
+            accepted_room_mask: RuntimeDebugMask::EMPTY,
+            reject_frustum_room_mask: RuntimeDebugMask::EMPTY,
+            tested_portal_mask: RuntimeDebugMask::EMPTY,
+            accepted_portal_mask: RuntimeDebugMask::EMPTY,
+            reject_frustum_portal_mask: RuntimeDebugMask::EMPTY,
             bounds_fallbacks: 0,
-            bounds_fallback_room_mask: 0,
-            bounds_fallback_portal_mask: 0,
+            bounds_fallback_room_mask: RuntimeDebugMask::EMPTY,
+            bounds_fallback_portal_mask: RuntimeDebugMask::EMPTY,
         },
     };
 
@@ -432,22 +433,22 @@ impl<const MAX_ROOMS: usize, const MAX_FRUSTUMS: usize, const MAX_FRONTIER: usiz
     }
 
     /// Bit mask of visible runtime rooms for debug telemetry.
-    pub fn visible_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    pub fn visible_room_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut i = 0usize;
         while i < self.room_count.min(MAX_ROOMS) {
-            mask |= room_mask_bit(self.rooms[i].room);
+            mask.insert_room(self.rooms[i].room);
             i += 1;
         }
         mask
     }
 
     /// Bit mask of frontier runtime rooms for debug telemetry.
-    pub fn frontier_room_mask(&self) -> u64 {
-        let mut mask = 0u64;
+    pub fn frontier_room_mask(&self) -> RuntimeDebugMask {
+        let mut mask = RuntimeDebugMask::EMPTY;
         let mut i = 0usize;
         while i < self.frontier_count.min(MAX_FRONTIER) {
-            mask |= room_mask_bit(self.frontier_rooms[i].room);
+            mask.insert_room(self.frontier_rooms[i].room);
             i += 1;
         }
         mask
@@ -631,7 +632,9 @@ pub fn build_portal_visibility_with_room_bounds<
             }
             let portal_mask = portal_mask_bit(current_portal_index);
             out.stats.portals_tested = out.stats.portals_tested.saturating_add(1);
-            out.stats.tested_room_mask |= room_mask_bit(portal.destination_room);
+            out.stats
+                .tested_room_mask
+                .insert_room(portal.destination_room);
             out.stats.tested_portal_mask |= portal_mask;
             if portal.destination_room == current_room
                 || portal.destination_room == frustum.source_room
@@ -644,7 +647,9 @@ pub fn build_portal_visibility_with_room_bounds<
             }
             let Some(child_clip) = clipped_portal_clip(portal, camera, frustum) else {
                 out.stats.reject_frustum = out.stats.reject_frustum.saturating_add(1);
-                out.stats.reject_frustum_room_mask |= room_mask_bit(portal.destination_room);
+                out.stats
+                    .reject_frustum_room_mask
+                    .insert_room(portal.destination_room);
                 out.stats.reject_frustum_portal_mask |= portal_mask;
                 continue;
             };
@@ -681,7 +686,9 @@ pub fn build_portal_visibility_with_room_bounds<
             };
             if out.push_frustum(room_slot, child) {
                 out.stats.portals_accepted = out.stats.portals_accepted.saturating_add(1);
-                out.stats.accepted_room_mask |= room_mask_bit(portal.destination_room);
+                out.stats
+                    .accepted_room_mask
+                    .insert_room(portal.destination_room);
                 out.stats.accepted_portal_mask |= portal_mask;
                 out.stats.max_depth = out.stats.max_depth.max(child_depth);
             }
@@ -1266,21 +1273,8 @@ fn portal_clip_is_tiny(clip: PortalClip, min_size_q12: i32) -> bool {
     width < min_size_q12 && height < min_size_q12
 }
 
-fn room_mask_bit(room: RoomIndex) -> u64 {
-    let raw = room.to_usize();
-    if raw < u64::BITS as usize {
-        1u64 << raw
-    } else {
-        0
-    }
-}
-
-fn portal_mask_bit(portal_index: usize) -> u64 {
-    if portal_index < u64::BITS as usize {
-        1u64 << portal_index
-    } else {
-        0
-    }
+fn portal_mask_bit(portal_index: usize) -> RuntimeDebugMask {
+    RuntimeDebugMask::from_index(portal_index)
 }
 
 fn clamp_slope_q12(value: i32) -> i32 {

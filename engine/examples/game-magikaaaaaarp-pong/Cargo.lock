@@ -9,6 +9,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
+name = "game-magikaaaaaarp-pong"
+version = "0.1.0"
+dependencies = [
+ "psx-asset",
+ "psx-engine",
+ "psx-font",
+ "psx-gpu",
+ "psx-io",
+ "psx-rt",
+ "psx-spu",
+ "psx-vram",
+]
+
+[[package]]
 name = "psx-asset"
 version = "0.1.0"
 dependencies = [
@@ -60,6 +74,9 @@ dependencies = [
 [[package]]
 name = "psx-gte-core"
 version = "0.1.0"
+dependencies = [
+ "psx-math",
+]
 
 [[package]]
 name = "psx-hw"
@@ -118,16 +135,3 @@ dependencies = [
 [[package]]
 name = "psxed-format"
 version = "0.1.0"
-
-[[package]]
-name = "showcase-textured-sprite"
-version = "0.1.0"
-dependencies = [
- "psx-asset",
- "psx-engine",
- "psx-font",
- "psx-gpu",
- "psx-math",
- "psx-rt",
- "psx-vram",
-]

@@ -330,12 +330,16 @@ impl Disc {
         self.track(number).map(|track| track.start_lba)
     }
 
+    /// Track metadata for the absolute disc LBA.
+    pub fn track_for_lba(&self, lba: u32) -> Option<&Track> {
+        self.tracks
+            .iter()
+            .find(|track| track_contains_lba(track, lba))
+    }
+
     /// Physical play position for an absolute LBA.
     pub fn track_position_for_lba(&self, lba: u32) -> Option<TrackPosition> {
-        let track = self
-            .tracks
-            .iter()
-            .find(|track| track_contains_lba(track, lba))?;
+        let track = self.track_for_lba(lba)?;
         let absolute_msf = lba_to_msf(lba);
         let (index_number, relative_msf) = if track.number != 1 && lba < track.start_lba {
             let frames_until_index1 = track.start_lba.saturating_sub(lba).saturating_sub(1);
@@ -374,6 +378,18 @@ impl Disc {
             }
         }
         None
+    }
+
+    /// Read one raw CD-DA audio frame from an audio track.
+    ///
+    /// CD-DA track files are 2352 bytes per 1/75 s frame: stereo
+    /// 16-bit little-endian PCM with no CD-ROM sync/header/subheader.
+    pub fn read_cdda_sector(&self, lba: u32) -> Option<&[u8]> {
+        let track = self.track_for_lba(lba)?;
+        if track.track_type != TrackType::Audio || lba < track.start_lba {
+            return None;
+        }
+        self.read_sector_raw(lba)
     }
 
     /// Read the 2048-byte user-data payload of a sector.
@@ -658,6 +674,36 @@ mod tests {
         ]);
         assert!(disc.read_sector_raw(10).is_none());
         assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xCD);
+    }
+
+    #[test]
+    fn cdda_sector_reads_only_audio_index1_frames() {
+        let mut track2 = vec![0u8; SECTOR_BYTES * 4];
+        track2[0] = 0x34;
+        let disc = Disc::from_tracks(vec![
+            Track {
+                number: 1,
+                track_type: TrackType::Data,
+                start_lba: 0,
+                sector_count: 10,
+                pregap: 0,
+                file_pregap: 0,
+                bytes: vec![0u8; SECTOR_BYTES * 10],
+            },
+            Track {
+                number: 2,
+                track_type: TrackType::Audio,
+                start_lba: 12,
+                sector_count: 4,
+                pregap: 2,
+                file_pregap: 0,
+                bytes: track2,
+            },
+        ]);
+
+        assert!(disc.read_cdda_sector(0).is_none());
+        assert!(disc.read_cdda_sector(10).is_none());
+        assert_eq!(disc.read_cdda_sector(12).unwrap()[0], 0x34);
     }
 
     #[test]
