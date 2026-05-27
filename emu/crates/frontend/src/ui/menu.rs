@@ -22,6 +22,7 @@ const ICON_SIZE_INACTIVE: f32 = 20.0;
 const ITEM_HEIGHT: f32 = 40.0;
 const ITEM_WIDTH: f32 = 400.0;
 const ITEM_GAP: f32 = 2.0;
+const ROW_ACTION_WIDTH: f32 = 40.0;
 const ANIM_SPEED: f32 = 10.0;
 
 /// A menu action the Menu emits when the user confirms an item. The
@@ -44,10 +45,12 @@ pub enum MenuAction {
     ToggleFastBoot,
     /// Paint a test pattern into VRAM (dev aid until the GPU renders).
     FillVramTestPattern,
-    /// Launch a game by its stable library ID. The app layer
-    /// looks the entry up in `AppState::library` and rebuilds
-    /// the emulator around it.
+    /// Launch a game by its menu launch token. Retail games use the
+    /// stable library ID; authored project builds use a path-qualified
+    /// token so projects sharing the same PSX volume ID remain distinct.
     LaunchGame(String),
+    /// Open the CD burn submenu for a launchable example/project disc.
+    OpenBurnMenu(String),
     /// Re-walk the configured library root and refresh
     /// `library.ron`. Surfaced as a "Refresh library" item in
     /// the Games / Examples categories so users can trigger a
@@ -94,6 +97,7 @@ pub struct MenuInput {
 struct MenuItem {
     label: String,
     action: MenuAction,
+    burn_action: Option<MenuAction>,
     /// Optional right-aligned subtitle -- used for region tags
     /// ("NTSC-U"), file sizes, and keyboard shortcut hints.
     value: Option<String>,
@@ -121,6 +125,7 @@ pub struct MenuState {
     /// category slide, so navigating a long list produces a smooth
     /// scroll rather than a snap.
     scroll_y: f32,
+    pending_pointer_action: Option<MenuAction>,
     categories: Vec<Category>,
 }
 
@@ -146,6 +151,10 @@ pub struct LibraryItem {
     pub title: String,
     /// Right-aligned subtitle, e.g. "NTSC-U · 602 MiB".
     pub subtitle: String,
+    /// Whether the launcher should show the CD burn affordance.
+    pub burnable: bool,
+    /// Whether confirming the row should launch a built artifact.
+    pub launchable: bool,
 }
 
 impl MenuState {
@@ -172,6 +181,7 @@ impl MenuState {
                 items: vec![MenuItem {
                     label: "Quit PSoXide".to_string(),
                     action: MenuAction::Quit,
+                    burn_action: None,
                     value: Some("Esc ×2".to_string()),
                 }],
             },
@@ -183,6 +193,7 @@ impl MenuState {
             item_index: 0,
             anim_x: 0.0,
             scroll_y: 0.0,
+            pending_pointer_action: None,
             categories,
         }
     }
@@ -306,6 +317,9 @@ impl MenuState {
     /// Feed one frame of input. Returns `Some(action)` when a confirm
     /// selects an item.
     pub fn update(&mut self, input: &MenuInput) -> Option<MenuAction> {
+        if let Some(action) = self.pending_pointer_action.take() {
+            return Some(action);
+        }
         if input.toggle_open {
             self.open = !self.open;
         }
@@ -460,6 +474,14 @@ impl MenuState {
         let label_font = FontId::proportional(15.0);
         let value_font = FontId::proportional(13.0);
         let row_stride = ITEM_HEIGHT + ITEM_GAP;
+        let pointer_release = ctx.input(|input| {
+            input
+                .pointer
+                .any_released()
+                .then(|| input.pointer.latest_pos())
+                .flatten()
+        });
+        let pointer_hover = ctx.input(|input| input.pointer.hover_pos());
 
         // How many full rows fit between `items_start_y` and the
         // bottom edge of the screen (with a small bottom margin so
@@ -551,14 +573,57 @@ impl MenuState {
                 label_color,
             );
 
+            let launch_action = matches!(item.action, MenuAction::LaunchGame(_))
+                .then_some(&item.action)
+                .filter(|_| item.burn_action.is_some());
+            let mut action_index = 0;
+            if let Some(action) = item.burn_action.as_ref() {
+                draw_row_icon_action(
+                    ctx,
+                    &painter,
+                    row_action_rect(items_x, y, action_index),
+                    pointer_hover,
+                    pointer_release,
+                    icons::DISC,
+                    "Burn disc",
+                    is_selected,
+                    action,
+                    &mut self.pending_pointer_action,
+                    value_font.clone(),
+                );
+                action_index += 1;
+            }
+            if let Some(action) = launch_action {
+                draw_row_icon_action(
+                    ctx,
+                    &painter,
+                    row_action_rect(items_x, y, action_index),
+                    pointer_hover,
+                    pointer_release,
+                    icons::PLAY,
+                    "Play",
+                    is_selected,
+                    action,
+                    &mut self.pending_pointer_action,
+                    value_font.clone(),
+                );
+            }
+
             if let Some(val) = item.value.as_deref() {
                 let val_color = if is_selected {
                     theme::MENU_TEXT_VALUE
                 } else {
                     theme::MENU_TEXT_DIM
                 };
+                let action_count =
+                    usize::from(item.burn_action.is_some()) + usize::from(launch_action.is_some());
+                let value_right = if action_count > 0 {
+                    items_x + ITEM_WIDTH - action_count as f32 * ROW_ACTION_WIDTH - 10.0
+                } else {
+                    items_x + ITEM_WIDTH - 12.0
+                };
                 painter.text(
-                    Pos2::new(items_x + ITEM_WIDTH - 12.0, y + ITEM_HEIGHT / 2.0),
+                    Pos2::new(value_right, y + ITEM_HEIGHT / 2.0),
                     Align2::RIGHT_CENTER,
                     val.to_string(),
                     value_font.clone(),
@@ -604,6 +669,78 @@ impl MenuState {
     }
 }
 
+fn row_action_rect(items_x: f32, y: f32, index_from_right: usize) -> Rect {
+    let right = items_x + ITEM_WIDTH - index_from_right as f32 * ROW_ACTION_WIDTH;
+    Rect::from_min_size(
+        Pos2::new(right - ROW_ACTION_WIDTH, y),
+        Vec2::new(ROW_ACTION_WIDTH, ITEM_HEIGHT),
+    )
+}
+
+fn draw_row_icon_action(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    rect: Rect,
+    pointer_hover: Option<Pos2>,
+    pointer_release: Option<Pos2>,
+    icon: char,
+    tooltip: &str,
+    selected: bool,
+    action: &MenuAction,
+    pending_pointer_action: &mut Option<MenuAction>,
+    tooltip_font: FontId,
+) {
+    let hovered = pointer_hover.is_some_and(|pos| rect.contains(pos));
+    if hovered {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        let hover_rect = rect.shrink2(Vec2::new(5.0, 5.0));
+        painter.rect_filled(
+            hover_rect,
+            4.0,
+            egui::Color32::from_rgba_premultiplied(0, 191, 230, 42),
+        );
+        painter.rect_stroke(
+            hover_rect,
+            4.0,
+            egui::Stroke::new(1.0, theme::MENU_ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let icon_color = if hovered || selected {
+        theme::MENU_ACCENT
+    } else {
+        theme::MENU_TEXT_DIM
+    };
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon.to_string(),
+        icons::font(15.0),
+        icon_color,
+    );
+
+    if hovered {
+        let width = (tooltip.len() as f32 * 7.0 + 18.0).max(44.0);
+        let tooltip_rect = Rect::from_min_size(
+            Pos2::new(rect.right() - width - 6.0, rect.top() - 26.0),
+            Vec2::new(width, 22.0),
+        );
+        painter.rect_filled(tooltip_rect, 3.0, theme::MENU_ITEM_BG);
+        painter.text(
+            tooltip_rect.center(),
+            Align2::CENTER_CENTER,
+            tooltip,
+            tooltip_font,
+            theme::MENU_TEXT_BRIGHT,
+        );
+    }
+
+    if pointer_release.is_some_and(|pos| rect.contains(pos)) {
+        *pending_pointer_action = Some(action.clone());
+    }
+}
+
 /// Emulator settings entry point.
 fn build_settings_category() -> Category {
     Category {
@@ -613,11 +750,13 @@ fn build_settings_category() -> Category {
             MenuItem {
                 label: "Choose BIOS path".into(),
                 action: MenuAction::ChooseBiosPath,
+                burn_action: None,
                 value: Some("Missing".into()),
             },
             MenuItem {
                 label: "Choose games path".into(),
                 action: MenuAction::ChooseGamesPath,
+                burn_action: None,
                 value: Some("Missing".into()),
             },
         ],
@@ -633,6 +772,7 @@ fn build_games_category(games: &[LibraryItem]) -> Category {
         items.push(MenuItem {
             label: "No games found yet".into(),
             action: MenuAction::RescanLibrary,
+            burn_action: None,
             value: Some("Refresh".into()),
         });
     } else {
@@ -640,6 +780,7 @@ fn build_games_category(games: &[LibraryItem]) -> Category {
             items.push(MenuItem {
                 label: g.title.clone(),
                 action: MenuAction::LaunchGame(g.id.clone()),
+                burn_action: None,
                 value: if g.subtitle.is_empty() {
                     None
                 } else {
@@ -652,6 +793,7 @@ fn build_games_category(games: &[LibraryItem]) -> Category {
         items.push(MenuItem {
             label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
+            burn_action: None,
             value: Some("↻".into()),
         });
     }
@@ -662,27 +804,35 @@ fn build_games_category(games: &[LibraryItem]) -> Category {
     }
 }
 
-/// Construct the Examples category. Homebrew EXEs are shown here
-/// so they don't compete with commercial games; the two lists
-/// have different conventions for naming + running.
+/// Construct the Examples category. Built examples launch from CUE/BIN
+/// discs; source placeholders are supplied by the app layer after it
+/// scans `sdk/examples` and `engine/examples`.
 fn build_examples_category(examples: &[LibraryItem]) -> Category {
-    let mut items = Vec::with_capacity(examples.len() + 1);
+    let mut items = Vec::with_capacity(examples.len() + 2);
     if examples.is_empty() {
         items.push(MenuItem {
             label: "Build public examples".into(),
             action: MenuAction::BuildExamples,
+            burn_action: None,
             value: Some("make examples".into()),
         });
         items.push(MenuItem {
             label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
+            burn_action: None,
             value: Some("↻".into()),
         });
     } else {
         for e in examples {
             items.push(MenuItem {
                 label: e.title.clone(),
-                action: MenuAction::LaunchGame(e.id.clone()),
+                action: if e.launchable {
+                    MenuAction::LaunchGame(e.id.clone())
+                } else {
+                    MenuAction::BuildExamples
+                },
+                burn_action: (e.launchable && e.burnable)
+                    .then(|| MenuAction::OpenBurnMenu(e.id.clone())),
                 value: if e.subtitle.is_empty() {
                     None
                 } else {
@@ -693,6 +843,7 @@ fn build_examples_category(examples: &[LibraryItem]) -> Category {
         items.push(MenuItem {
             label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
+            burn_action: None,
             value: Some("↻".into()),
         });
     }
@@ -703,15 +854,16 @@ fn build_examples_category(examples: &[LibraryItem]) -> Category {
     }
 }
 
-/// Construct the Projects category. These are project-baked PSX EXEs
-/// discovered under `editor/projects`, separated from SDK examples so
-/// authored games have their own launch surface.
+/// Construct the Projects category. These are project-baked CUE/BIN
+/// discs discovered under `editor/projects`, separated from SDK
+/// examples so authored games have their own launch surface.
 fn build_projects_category(projects: &[LibraryItem]) -> Category {
     let mut items = Vec::with_capacity(projects.len() + 1);
     if projects.is_empty() {
         items.push(MenuItem {
             label: "No project builds found".into(),
             action: MenuAction::RescanLibrary,
+            burn_action: None,
             value: Some("Refresh".into()),
         });
     } else {
@@ -719,6 +871,7 @@ fn build_projects_category(projects: &[LibraryItem]) -> Category {
             items.push(MenuItem {
                 label: p.title.clone(),
                 action: MenuAction::LaunchGame(p.id.clone()),
+                burn_action: p.burnable.then(|| MenuAction::OpenBurnMenu(p.id.clone())),
                 value: if p.subtitle.is_empty() {
                     None
                 } else {
@@ -729,6 +882,7 @@ fn build_projects_category(projects: &[LibraryItem]) -> Category {
         items.push(MenuItem {
             label: "Refresh library".into(),
             action: MenuAction::RescanLibrary,
+            burn_action: None,
             value: Some("↻".into()),
         });
     }
@@ -751,6 +905,7 @@ fn build_create_category(editor_open: bool) -> Category {
                 "Open editor workspace".into()
             },
             action: MenuAction::ToggleEditorWorkspace,
+            burn_action: None,
             value: Some(if editor_open { "Active" } else { "Studio" }.into()),
         }],
     }
@@ -768,21 +923,25 @@ fn build_system_category(running: bool) -> Category {
             MenuItem {
                 label: run_label.into(),
                 action: MenuAction::ToggleRun,
+                burn_action: None,
                 value: Some("Space".into()),
             },
             MenuItem {
                 label: "Step one instruction".into(),
                 action: MenuAction::StepOne,
+                burn_action: None,
                 value: None,
             },
             MenuItem {
                 label: "Reset emulator".into(),
                 action: MenuAction::Reset,
+                burn_action: None,
                 value: None,
             },
             MenuItem {
                 label: "Fast boot discs".into(),
                 action: MenuAction::ToggleFastBoot,
+                burn_action: None,
                 value: Some("On".into()),
             },
         ],
@@ -798,26 +957,31 @@ fn build_debug_category() -> Category {
             MenuItem {
                 label: "Toggle registers section".into(),
                 action: MenuAction::ToggleRegisters,
+                burn_action: None,
                 value: None,
             },
             MenuItem {
                 label: "Toggle memory section".into(),
                 action: MenuAction::ToggleMemory,
+                burn_action: None,
                 value: None,
             },
             MenuItem {
                 label: "Toggle VRAM section".into(),
                 action: MenuAction::ToggleVram,
+                burn_action: None,
                 value: None,
             },
             MenuItem {
                 label: "Toggle profiler section".into(),
                 action: MenuAction::ToggleProfiler,
+                burn_action: None,
                 value: None,
             },
             MenuItem {
                 label: "Fill VRAM test pattern".into(),
                 action: MenuAction::FillVramTestPattern,
+                burn_action: None,
                 value: None,
             },
         ],
@@ -833,6 +997,8 @@ mod tests {
             id: id.into(),
             title: title.into(),
             subtitle: sub.into(),
+            burnable: false,
+            launchable: true,
         }
     }
 
@@ -879,6 +1045,41 @@ mod tests {
         );
         assert_eq!(s.categories[1].items[0].label, "hello-tri");
         assert_eq!(s.categories[2].items[0].label, "Stone Room");
+    }
+
+    #[test]
+    fn burn_action_is_only_shown_for_burnable_examples_and_projects() {
+        let mut s = MenuState::new();
+        let game = LibraryItem {
+            burnable: true,
+            ..dummy_item("g1", "Retail Disc", "NTSC-U")
+        };
+        let example = LibraryItem {
+            burnable: true,
+            ..dummy_item("e1", "hello-cdda", "CUE")
+        };
+        let source_example = LibraryItem {
+            launchable: false,
+            burnable: true,
+            ..dummy_item("e2", "hello-tri", "not built")
+        };
+        let project = LibraryItem {
+            burnable: true,
+            ..dummy_item("p1", "Demo 10", "Project")
+        };
+
+        s.set_library(&[game], &[example, source_example], &[project]);
+
+        assert_eq!(s.categories[0].items[0].burn_action, None);
+        assert_eq!(
+            s.categories[1].items[0].burn_action,
+            Some(MenuAction::OpenBurnMenu("e1".to_string()))
+        );
+        assert_eq!(s.categories[1].items[1].burn_action, None);
+        assert_eq!(
+            s.categories[2].items[0].burn_action,
+            Some(MenuAction::OpenBurnMenu("p1".to_string()))
+        );
     }
 
     #[test]

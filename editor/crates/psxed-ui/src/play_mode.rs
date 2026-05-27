@@ -176,6 +176,14 @@ pub struct EditorPlaytestMetrics {
     pub ui_ms: f32,
     /// Guest cycle budget consumed by stepped frames.
     pub step_budget_percent: f32,
+    /// Average fixed-update scheduler task cost, in guest milliseconds per task hit.
+    pub fixed_update_task_ms: f32,
+    /// Worst fixed-update scheduler task cost in the current profiler window, in guest milliseconds.
+    pub fixed_update_task_max_ms: f32,
+    /// Average visual-render scheduler task cost, in guest milliseconds per task hit.
+    pub visual_render_task_ms: f32,
+    /// Worst visual-render scheduler task cost in the current profiler window, in guest milliseconds.
+    pub visual_render_task_max_ms: f32,
     /// Active room/chunk records submitted by the runtime renderer.
     pub chunk_visible: u32,
     /// Resident streamed room/chunk slots currently loaded.

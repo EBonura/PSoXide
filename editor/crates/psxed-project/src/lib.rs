@@ -175,6 +175,772 @@ impl ResourceId {
     }
 }
 
+/// Stable identifier for a node inside one authored UI scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct UiNodeId(u64);
+
+impl UiNodeId {
+    /// The root UI node id every UI scene starts with.
+    pub const ROOT: Self = Self(1);
+
+    /// Return the raw integer value for compact UI/debug display.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// Anchor point used to resolve a UI rectangle against its parent
+/// rectangle or the root canvas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiAnchor {
+    /// Parent top-left corner.
+    #[default]
+    TopLeft,
+    /// Parent top edge midpoint.
+    Top,
+    /// Parent top-right corner.
+    TopRight,
+    /// Parent left edge midpoint.
+    Left,
+    /// Parent center.
+    Center,
+    /// Parent right edge midpoint.
+    Right,
+    /// Parent bottom-left corner.
+    BottomLeft,
+    /// Parent bottom edge midpoint.
+    Bottom,
+    /// Parent bottom-right corner.
+    BottomRight,
+}
+
+impl UiAnchor {
+    /// Stable list used by editor controls.
+    pub const ALL: [Self; 9] = [
+        Self::TopLeft,
+        Self::Top,
+        Self::TopRight,
+        Self::Left,
+        Self::Center,
+        Self::Right,
+        Self::BottomLeft,
+        Self::Bottom,
+        Self::BottomRight,
+    ];
+
+    /// Compact display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top Left",
+            Self::Top => "Top",
+            Self::TopRight => "Top Right",
+            Self::Left => "Left",
+            Self::Center => "Center",
+            Self::Right => "Right",
+            Self::BottomLeft => "Bottom Left",
+            Self::Bottom => "Bottom",
+            Self::BottomRight => "Bottom Right",
+        }
+    }
+
+    /// Tiny grid label for dense editor controls.
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "TL",
+            Self::Top => "T",
+            Self::TopRight => "TR",
+            Self::Left => "L",
+            Self::Center => "C",
+            Self::Right => "R",
+            Self::BottomLeft => "BL",
+            Self::Bottom => "B",
+            Self::BottomRight => "BR",
+        }
+    }
+
+    /// Runtime flag value. Kept stable for cooked manifests.
+    pub const fn runtime_bits(self) -> u16 {
+        match self {
+            Self::TopLeft => 0,
+            Self::Top => 1,
+            Self::TopRight => 2,
+            Self::Left => 3,
+            Self::Center => 4,
+            Self::Right => 5,
+            Self::BottomLeft => 6,
+            Self::Bottom => 7,
+            Self::BottomRight => 8,
+        }
+    }
+
+    const fn factors(self) -> (i32, i32) {
+        match self {
+            Self::TopLeft => (0, 0),
+            Self::Top => (1, 0),
+            Self::TopRight => (2, 0),
+            Self::Left => (0, 1),
+            Self::Center => (1, 1),
+            Self::Right => (2, 1),
+            Self::BottomLeft => (0, 2),
+            Self::Bottom => (1, 2),
+            Self::BottomRight => (2, 2),
+        }
+    }
+}
+
+/// Text alignment for authored UI labels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiTextAlign {
+    /// Align text to the left edge.
+    #[default]
+    Left,
+    /// Center text within the label rectangle.
+    Center,
+    /// Align text to the right edge.
+    Right,
+}
+
+impl UiTextAlign {
+    /// Stable list used by editor controls.
+    pub const ALL: [Self; 3] = [Self::Left, Self::Center, Self::Right];
+
+    /// Compact display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Center => "Center",
+            Self::Right => "Right",
+        }
+    }
+
+    /// Runtime flag value. Kept stable for cooked manifests.
+    pub const fn runtime_bits(self) -> u16 {
+        match self {
+            Self::Left => 0,
+            Self::Center => 1,
+            Self::Right => 2,
+        }
+    }
+}
+
+/// Screen-space rectangle in authored PSX framebuffer pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiRect {
+    /// Local X offset from the selected anchor.
+    pub x: i16,
+    /// Local Y offset from the selected anchor.
+    pub y: i16,
+    /// Width in canvas pixels.
+    pub width: u16,
+    /// Height in canvas pixels.
+    pub height: u16,
+    /// Parent/canvas anchor used to resolve `x` and `y`.
+    #[serde(default)]
+    pub anchor: UiAnchor,
+}
+
+impl UiRect {
+    /// Build a screen-space UI rectangle.
+    pub const fn new(x: i16, y: i16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            anchor: UiAnchor::TopLeft,
+        }
+    }
+
+    /// Return a copy using a different anchor.
+    pub const fn with_anchor(mut self, anchor: UiAnchor) -> Self {
+        self.anchor = anchor;
+        self
+    }
+}
+
+impl Default for UiRect {
+    fn default() -> Self {
+        Self::new(0, 0, 32, 12)
+    }
+}
+
+/// Runtime value a UI element can bind to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiValueBinding {
+    /// Literal fixed-point Q12 value.
+    ConstantQ12(i32),
+    /// Player health value.
+    PlayerHealth,
+    /// Player health maximum.
+    PlayerHealthMax,
+    /// Player stamina value.
+    PlayerStamina,
+    /// Player stamina maximum.
+    PlayerStaminaMax,
+}
+
+impl UiValueBinding {
+    /// Human-readable label for editor UI.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ConstantQ12(_) => "Constant",
+            Self::PlayerHealth => "Player Health",
+            Self::PlayerHealthMax => "Player Health Max",
+            Self::PlayerStamina => "Player Stamina",
+            Self::PlayerStaminaMax => "Player Stamina Max",
+        }
+    }
+}
+
+/// Authored 2D UI node type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiNodeKind {
+    /// Root fixed-resolution PSX canvas.
+    Canvas {
+        /// Canvas width in pixels.
+        width: u16,
+        /// Canvas height in pixels.
+        height: u16,
+    },
+    /// Organizational transform group.
+    Group {
+        /// Group bounds in canvas pixels.
+        rect: UiRect,
+    },
+    /// Solid screen-space rectangle.
+    Rect {
+        /// Rectangle bounds in canvas pixels.
+        rect: UiRect,
+        /// Fill colour.
+        color: [u8; 3],
+    },
+    /// Text label drawn with the runtime font atlas.
+    Label {
+        /// Label bounds in canvas pixels.
+        rect: UiRect,
+        /// Authored text.
+        text: String,
+        /// Optional runtime lookup tag for game-controlled text.
+        #[serde(default)]
+        tag: String,
+        /// Text alignment inside `rect`.
+        #[serde(default)]
+        align: UiTextAlign,
+        /// Wrap words inside the label rectangle.
+        #[serde(default)]
+        wrap: bool,
+        /// Text tint.
+        color: [u8; 3],
+    },
+    /// Screen-space textured image.
+    Image {
+        /// Image bounds in canvas pixels.
+        rect: UiRect,
+        /// Optional Texture resource.
+        #[serde(default)]
+        texture: Option<ResourceId>,
+        /// Texture tint.
+        #[serde(default = "default_ui_image_tint")]
+        tint: [u8; 3],
+    },
+    /// Horizontal status bar backed by a runtime value binding.
+    Bar {
+        /// Bar bounds in canvas pixels.
+        rect: UiRect,
+        /// Current value binding.
+        value: UiValueBinding,
+        /// Maximum value binding.
+        max: UiValueBinding,
+        /// Filled portion colour.
+        fill: [u8; 3],
+        /// Empty/background colour.
+        background: [u8; 3],
+    },
+}
+
+impl UiNodeKind {
+    /// Editor-facing node kind label.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Canvas { .. } => "Canvas",
+            Self::Group { .. } => "Group",
+            Self::Rect { .. } => "Rect",
+            Self::Label { .. } => "Label",
+            Self::Image { .. } => "Image",
+            Self::Bar { .. } => "Bar",
+        }
+    }
+
+    /// Mutable bounds for node kinds that occupy a screen-space rectangle.
+    pub fn rect_mut(&mut self) -> Option<&mut UiRect> {
+        match self {
+            Self::Canvas { .. } => None,
+            Self::Group { rect }
+            | Self::Rect { rect, .. }
+            | Self::Label { rect, .. }
+            | Self::Image { rect, .. }
+            | Self::Bar { rect, .. } => Some(rect),
+        }
+    }
+
+    /// Bounds for node kinds that occupy a screen-space rectangle.
+    pub fn rect(&self) -> Option<UiRect> {
+        match self {
+            Self::Canvas { .. } => None,
+            Self::Group { rect }
+            | Self::Rect { rect, .. }
+            | Self::Label { rect, .. }
+            | Self::Image { rect, .. }
+            | Self::Bar { rect, .. } => Some(*rect),
+        }
+    }
+}
+
+fn default_ui_image_tint() -> [u8; 3] {
+    [128, 128, 128]
+}
+
+/// One node in an authored UI scene tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiNode {
+    /// Stable node id.
+    pub id: UiNodeId,
+    /// Parent id. `None` only for the scene root.
+    pub parent: Option<UiNodeId>,
+    /// Child ids in display/draw order.
+    pub children: Vec<UiNodeId>,
+    /// Display name.
+    pub name: String,
+    /// Node payload.
+    pub kind: UiNodeKind,
+}
+
+impl UiNode {
+    /// Build a UI node.
+    pub fn new(
+        id: UiNodeId,
+        parent: Option<UiNodeId>,
+        name: impl Into<String>,
+        kind: UiNodeKind,
+    ) -> Self {
+        Self {
+            id,
+            parent,
+            children: Vec::new(),
+            name: name.into(),
+            kind,
+        }
+    }
+}
+
+/// One visible row in the UI scene hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiNodeRow {
+    /// Node id.
+    pub id: UiNodeId,
+    /// Parent node id. `None` only for the root canvas.
+    pub parent: Option<UiNodeId>,
+    /// Index inside the parent's child list.
+    pub sibling_index: usize,
+    /// Nesting depth.
+    pub depth: usize,
+    /// Display name.
+    pub name: String,
+    /// Node kind label.
+    pub kind: &'static str,
+    /// Optional authored lookup tag, currently used by labels.
+    pub tag: Option<String>,
+    /// Number of direct children.
+    pub child_count: usize,
+}
+
+/// One authored 2D UI scene.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiScene {
+    /// Display name.
+    pub name: String,
+    /// Root node id.
+    pub root: UiNodeId,
+    next_node_id: u64,
+    nodes: Vec<UiNode>,
+}
+
+impl UiScene {
+    /// Create the default HUD scene authored at PSX 320x240 resolution.
+    pub fn default_hud() -> Self {
+        let mut root = UiNode::new(
+            UiNodeId::ROOT,
+            None,
+            "HUD",
+            UiNodeKind::Canvas {
+                width: 320,
+                height: 240,
+            },
+        );
+        let health = UiNode::new(
+            UiNodeId(2),
+            Some(UiNodeId::ROOT),
+            "Health Bar",
+            UiNodeKind::Bar {
+                rect: UiRect::new(18, 16, 120, 8),
+                value: UiValueBinding::PlayerHealth,
+                max: UiValueBinding::PlayerHealthMax,
+                fill: [94, 16, 24],
+                background: [30, 26, 28],
+            },
+        );
+        let stamina = UiNode::new(
+            UiNodeId(3),
+            Some(UiNodeId::ROOT),
+            "Stamina Bar",
+            UiNodeKind::Bar {
+                rect: UiRect::new(18, 29, 96, 5),
+                value: UiValueBinding::PlayerStamina,
+                max: UiValueBinding::PlayerStaminaMax,
+                fill: [44, 98, 48],
+                background: [30, 26, 28],
+            },
+        );
+        root.children = vec![health.id, stamina.id];
+        Self {
+            name: "HUD".to_string(),
+            root: UiNodeId::ROOT,
+            next_node_id: 4,
+            nodes: vec![root, health, stamina],
+        }
+    }
+
+    /// All nodes in storage order.
+    pub fn nodes(&self) -> &[UiNode] {
+        &self.nodes
+    }
+
+    /// Get a node.
+    pub fn node(&self, id: UiNodeId) -> Option<&UiNode> {
+        self.nodes.iter().find(|node| node.id == id)
+    }
+
+    /// Get a mutable node.
+    pub fn node_mut(&mut self, id: UiNodeId) -> Option<&mut UiNode> {
+        self.nodes.iter_mut().find(|node| node.id == id)
+    }
+
+    /// Add a node under `parent`. Invalid parents fall back to the root.
+    pub fn add_node(
+        &mut self,
+        parent: UiNodeId,
+        name: impl Into<String>,
+        kind: UiNodeKind,
+    ) -> UiNodeId {
+        let parent = if self.node(parent).is_some() {
+            parent
+        } else {
+            self.root
+        };
+        let id = UiNodeId(self.next_node_id);
+        self.next_node_id = self.next_node_id.saturating_add(1);
+        self.nodes.push(UiNode::new(id, Some(parent), name, kind));
+        if let Some(parent_node) = self.node_mut(parent) {
+            parent_node.children.push(id);
+        }
+        id
+    }
+
+    /// Remove a non-root node and all of its descendants.
+    pub fn remove_node(&mut self, id: UiNodeId) -> bool {
+        if id == self.root {
+            return false;
+        }
+        if self.node(id).is_none() {
+            return false;
+        }
+
+        let mut remove_ids = HashSet::new();
+        let mut stack = vec![id];
+        while let Some(next) = stack.pop() {
+            if !remove_ids.insert(next) {
+                continue;
+            }
+            if let Some(node) = self.node(next) {
+                stack.extend(node.children.iter().copied());
+            }
+        }
+
+        self.nodes.retain(|node| !remove_ids.contains(&node.id));
+        for node in &mut self.nodes {
+            node.children.retain(|child| !remove_ids.contains(child));
+        }
+        true
+    }
+
+    /// `true` when `ancestor` appears anywhere on the parent chain of
+    /// `id`. Includes `id` itself, matching [`Scene::is_descendant_of`].
+    pub fn is_descendant_of(&self, id: UiNodeId, ancestor: UiNodeId) -> bool {
+        if id == ancestor {
+            return true;
+        }
+        let mut current = self.node(id).and_then(|node| node.parent);
+        let mut guard = 0usize;
+        while let Some(parent) = current {
+            if guard >= self.nodes.len() {
+                break;
+            }
+            if parent == ancestor {
+                return true;
+            }
+            current = self.node(parent).and_then(|node| node.parent);
+            guard += 1;
+        }
+        false
+    }
+
+    /// Move `id` under `new_parent` at `position` in the child list.
+    ///
+    /// The canvas root cannot be moved and cycles are rejected. This is
+    /// deliberately parallel to [`Scene::move_node`] so 2D and 3D tree
+    /// authoring share the same parent/child rules.
+    pub fn move_node(&mut self, id: UiNodeId, new_parent: UiNodeId, position: usize) -> bool {
+        if id == self.root {
+            return false;
+        }
+        if self.node(id).is_none() || self.node(new_parent).is_none() {
+            return false;
+        }
+        if self.is_descendant_of(new_parent, id) {
+            return false;
+        }
+
+        for node in &mut self.nodes {
+            node.children.retain(|child| *child != id);
+        }
+        if let Some(parent) = self.node_mut(new_parent) {
+            let pos = position.min(parent.children.len());
+            parent.children.insert(pos, id);
+        }
+        if let Some(node) = self.node_mut(id) {
+            node.parent = Some(new_parent);
+        }
+        true
+    }
+
+    /// Node ids in tree draw order.
+    pub fn hierarchy_node_ids(&self) -> Vec<UiNodeId> {
+        let mut ids = Vec::new();
+        let mut visited = HashSet::new();
+        self.push_hierarchy_node_id(self.root, &mut ids, &mut visited);
+        for node in &self.nodes {
+            self.push_hierarchy_node_id(node.id, &mut ids, &mut visited);
+        }
+        ids
+    }
+
+    fn push_hierarchy_node_id(
+        &self,
+        id: UiNodeId,
+        ids: &mut Vec<UiNodeId>,
+        visited: &mut HashSet<UiNodeId>,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+        if let Some(node) = self.node(id) {
+            ids.push(id);
+            for &child in &node.children {
+                self.push_hierarchy_node_id(child, ids, visited);
+            }
+        }
+    }
+
+    /// Bounds resolved into canvas space. Child `x/y` values are
+    /// local offsets from their selected anchor on the parent rect.
+    pub fn absolute_rect(&self, id: UiNodeId) -> Option<UiRect> {
+        self.absolute_rect_inner(id, 0)
+    }
+
+    fn absolute_rect_inner(&self, id: UiNodeId, depth: usize) -> Option<UiRect> {
+        if depth > self.nodes.len() {
+            return None;
+        }
+        let node = self.node(id)?;
+        match &node.kind {
+            UiNodeKind::Canvas { width, height } => Some(UiRect::new(0, 0, *width, *height)),
+            _ => {
+                let local = node.kind.rect()?;
+                let parent = node
+                    .parent
+                    .and_then(|parent_id| self.absolute_rect_inner(parent_id, depth + 1))
+                    .unwrap_or_else(|| UiRect::new(0, 0, 0, 0));
+                let (anchor_x, anchor_y) = local.anchor.factors();
+                let x = parent.x as i32 + (parent.width as i32 * anchor_x) / 2 + local.x as i32;
+                let y = parent.y as i32 + (parent.height as i32 * anchor_y) / 2 + local.y as i32;
+                Some(UiRect::new(
+                    clamp_ui_rect_coord(x),
+                    clamp_ui_rect_coord(y),
+                    local.width,
+                    local.height,
+                ))
+            }
+        }
+    }
+
+    /// Normalize loaded UI data.
+    pub fn normalize(&mut self) {
+        if self.node(self.root).is_none() {
+            self.root = UiNodeId::ROOT;
+            self.nodes.insert(
+                0,
+                UiNode::new(
+                    self.root,
+                    None,
+                    "HUD",
+                    UiNodeKind::Canvas {
+                        width: 320,
+                        height: 240,
+                    },
+                ),
+            );
+        }
+        if let Some(root) = self.node_mut(self.root) {
+            root.parent = None;
+            if root.name.trim().is_empty() {
+                root.name = "HUD".to_string();
+            }
+            if !matches!(root.kind, UiNodeKind::Canvas { .. }) {
+                root.kind = UiNodeKind::Canvas {
+                    width: 320,
+                    height: 240,
+                };
+            }
+        }
+        let mut max_id = self.root.raw();
+        let valid_ids: HashSet<UiNodeId> = self.nodes.iter().map(|node| node.id).collect();
+        for node in &mut self.nodes {
+            max_id = max_id.max(node.id.raw());
+            node.children
+                .retain(|child| *child != node.id && valid_ids.contains(child));
+            if node.id != self.root
+                && !node
+                    .parent
+                    .is_some_and(|id| id != node.id && valid_ids.contains(&id))
+            {
+                node.parent = Some(self.root);
+            }
+        }
+        let parent_by_id = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.parent))
+            .collect::<BTreeMap<_, _>>();
+        for node in &mut self.nodes {
+            if node.id == self.root {
+                continue;
+            }
+            let mut seen = HashSet::new();
+            let mut current = node.parent;
+            let mut valid_parent_chain = true;
+            while let Some(parent) = current {
+                if parent == node.id || !seen.insert(parent) {
+                    valid_parent_chain = false;
+                    break;
+                }
+                current = parent_by_id.get(&parent).copied().flatten();
+            }
+            if !valid_parent_chain {
+                node.parent = Some(self.root);
+            }
+        }
+        self.rebuild_child_links();
+        self.next_node_id = self.next_node_id.max(max_id.saturating_add(1));
+    }
+
+    fn rebuild_child_links(&mut self) {
+        let parent_by_id = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.parent))
+            .collect::<BTreeMap<_, _>>();
+        let mut children_by_parent = self
+            .nodes
+            .iter()
+            .map(|node| (node.id, Vec::new()))
+            .collect::<BTreeMap<_, Vec<UiNodeId>>>();
+        let mut assigned = HashSet::new();
+
+        for node in &self.nodes {
+            for &child in &node.children {
+                if child == self.root || assigned.contains(&child) {
+                    continue;
+                }
+                if parent_by_id.get(&child).copied().flatten() == Some(node.id) {
+                    if let Some(children) = children_by_parent.get_mut(&node.id) {
+                        children.push(child);
+                        assigned.insert(child);
+                    }
+                }
+            }
+        }
+
+        for node in &self.nodes {
+            if node.id == self.root || assigned.contains(&node.id) {
+                continue;
+            }
+            let parent = node.parent.unwrap_or(self.root);
+            if let Some(children) = children_by_parent.get_mut(&parent) {
+                children.push(node.id);
+                assigned.insert(node.id);
+            }
+        }
+
+        for node in &mut self.nodes {
+            node.children = children_by_parent.remove(&node.id).unwrap_or_default();
+        }
+    }
+
+    /// Flatten the hierarchy into display rows.
+    pub fn hierarchy_rows(&self) -> Vec<UiNodeRow> {
+        let mut rows = Vec::new();
+        self.push_hierarchy_row(self.root, 0, None, 0, &mut rows);
+        rows
+    }
+
+    fn push_hierarchy_row(
+        &self,
+        id: UiNodeId,
+        depth: usize,
+        parent: Option<UiNodeId>,
+        sibling_index: usize,
+        rows: &mut Vec<UiNodeRow>,
+    ) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        rows.push(UiNodeRow {
+            id,
+            parent,
+            sibling_index,
+            depth,
+            name: node.name.clone(),
+            kind: node.kind.label(),
+            tag: match &node.kind {
+                UiNodeKind::Label { tag, .. } if !tag.trim().is_empty() => Some(tag.clone()),
+                _ => None,
+            },
+            child_count: node.children.len(),
+        });
+        for (index, &child) in node.children.iter().enumerate() {
+            self.push_hierarchy_row(child, depth.saturating_add(1), Some(id), index, rows);
+        }
+    }
+}
+
+fn clamp_ui_rect_coord(value: i32) -> i16 {
+    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn default_ui_scenes() -> Vec<UiScene> {
+    vec![UiScene::default_hud()]
+}
+
 /// Explicit material assignment for one floor/ceiling triangle.
 /// Missing override means "inherit the parent face material"; this
 /// enum represents the two explicit states a triangle can choose.
@@ -6802,6 +7568,145 @@ impl Default for CharacterControllerSettings {
     }
 }
 
+pub const DEFAULT_PARTICLE_EMITTER_MAX_PARTICLES: u16 = 32;
+pub const DEFAULT_PARTICLE_EMITTER_SPAWN_RATE_Q8: u16 = 8 * 256;
+pub const DEFAULT_PARTICLE_EMITTER_LIFETIME_FRAMES: u8 = 60;
+pub const DEFAULT_PARTICLE_EMITTER_START_SIZE: u16 = 128;
+pub const DEFAULT_PARTICLE_EMITTER_END_SIZE: u16 = 512;
+
+const fn default_particle_emitter_enabled() -> bool {
+    true
+}
+
+const fn default_particle_emitter_max_particles() -> u16 {
+    DEFAULT_PARTICLE_EMITTER_MAX_PARTICLES
+}
+
+const fn default_particle_emitter_spawn_rate_q8() -> u16 {
+    DEFAULT_PARTICLE_EMITTER_SPAWN_RATE_Q8
+}
+
+const fn default_particle_emitter_lifetime_frames() -> u8 {
+    DEFAULT_PARTICLE_EMITTER_LIFETIME_FRAMES
+}
+
+const fn default_particle_emitter_start_size() -> u16 {
+    DEFAULT_PARTICLE_EMITTER_START_SIZE
+}
+
+const fn default_particle_emitter_end_size() -> u16 {
+    DEFAULT_PARTICLE_EMITTER_END_SIZE
+}
+
+const fn default_particle_emitter_start_color() -> [u8; 3] {
+    [255, 255, 255]
+}
+
+const fn default_particle_emitter_end_color() -> [u8; 3] {
+    [96, 96, 96]
+}
+
+const fn default_particle_emitter_blend_mode() -> PsxBlendMode {
+    PsxBlendMode::Average
+}
+
+const fn default_particle_emitter_base_velocity_q4() -> [i16; 3] {
+    [0, 24, 0]
+}
+
+const fn default_particle_emitter_random_velocity_q4() -> [u16; 3] {
+    [16, 8, 16]
+}
+
+const fn default_particle_emitter_acceleration_q4() -> [i16; 3] {
+    [0, 0, 0]
+}
+
+const fn default_particle_emitter_spawn_radius() -> u16 {
+    0
+}
+
+/// Authoring settings for a cheap world-space particle emitter.
+///
+/// The intended runtime path is point-projected sprites: each live
+/// particle owns a 3D position, projects one centre point, then draws a
+/// screen-aligned textured sprite. Textures are authored or generated at
+/// build time; this node never implies runtime texture generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParticleEmitterSettings {
+    /// Whether the emitter should run in playtest/runtime.
+    #[serde(default = "default_particle_emitter_enabled")]
+    pub enabled: bool,
+    /// Optional 16x16 greyscale/white mask texture used for the sprite.
+    #[serde(default)]
+    pub texture: Option<ResourceId>,
+    /// Hard live-particle cap owned by this emitter.
+    #[serde(default = "default_particle_emitter_max_particles")]
+    pub max_particles: u16,
+    /// Spawn rate in particles/second, Q8 fixed point.
+    #[serde(default = "default_particle_emitter_spawn_rate_q8")]
+    pub spawn_rate_q8: u16,
+    /// Particle lifetime in 60 Hz simulation frames.
+    #[serde(default = "default_particle_emitter_lifetime_frames")]
+    pub lifetime_frames: u8,
+    /// Particle size at birth, in engine units before projection.
+    #[serde(default = "default_particle_emitter_start_size")]
+    pub start_size: u16,
+    /// Particle size at death, in engine units before projection.
+    #[serde(default = "default_particle_emitter_end_size")]
+    pub end_size: u16,
+    /// Tint at birth. Multiplies the greyscale texture.
+    #[serde(default = "default_particle_emitter_start_color")]
+    pub start_color: [u8; 3],
+    /// Tint at death. Runtime fades between start/end tint.
+    #[serde(default = "default_particle_emitter_end_color")]
+    pub end_color: [u8; 3],
+    /// PS1 semi-transparency mode used by the sprite packet.
+    #[serde(default = "default_particle_emitter_blend_mode")]
+    pub blend_mode: PsxBlendMode,
+    /// Base velocity in Q4.4 engine units per 60 Hz frame.
+    #[serde(default = "default_particle_emitter_base_velocity_q4")]
+    pub base_velocity_q4: [i16; 3],
+    /// Random velocity spread in Q4.4 engine units per 60 Hz frame.
+    ///
+    /// Runtime samples each component in `[-spread, +spread]`.
+    #[serde(default = "default_particle_emitter_random_velocity_q4")]
+    pub random_velocity_q4: [u16; 3],
+    /// Constant acceleration in Q4.4 engine units per 60 Hz frame.
+    #[serde(default = "default_particle_emitter_acceleration_q4")]
+    pub acceleration_q4: [i16; 3],
+    /// Random spawn offset radius around the emitter origin, in engine units.
+    #[serde(default = "default_particle_emitter_spawn_radius")]
+    pub spawn_radius: u16,
+}
+
+impl ParticleEmitterSettings {
+    pub const fn defaults() -> Self {
+        Self {
+            enabled: default_particle_emitter_enabled(),
+            texture: None,
+            max_particles: default_particle_emitter_max_particles(),
+            spawn_rate_q8: default_particle_emitter_spawn_rate_q8(),
+            lifetime_frames: default_particle_emitter_lifetime_frames(),
+            start_size: default_particle_emitter_start_size(),
+            end_size: default_particle_emitter_end_size(),
+            start_color: default_particle_emitter_start_color(),
+            end_color: default_particle_emitter_end_color(),
+            blend_mode: default_particle_emitter_blend_mode(),
+            base_velocity_q4: default_particle_emitter_base_velocity_q4(),
+            random_velocity_q4: default_particle_emitter_random_velocity_q4(),
+            acceleration_q4: default_particle_emitter_acceleration_q4(),
+            spawn_radius: default_particle_emitter_spawn_radius(),
+        }
+    }
+}
+
+impl Default for ParticleEmitterSettings {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
 /// Resource payloads available to editor scenes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceData {
@@ -7265,6 +8170,12 @@ pub enum NodeKind {
         /// Approximate editor/runtime radius in sectors.
         radius: f32,
     },
+    /// Cheap point-projected world particle emitter.
+    ParticleEmitter {
+        /// Fixed-budget emitter tuning.
+        #[serde(default)]
+        settings: ParticleEmitterSettings,
+    },
     /// Spawn marker.
     SpawnPoint {
         /// Whether this is the player spawn.
@@ -7339,6 +8250,7 @@ impl NodeKind {
             Self::Combat { .. } => "Combat",
             Self::Equipment { .. } => "Equipment",
             Self::PointLight { .. } => "Point Light",
+            Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
             Self::Trigger { .. } => "Trigger",
             Self::AudioSource { .. } => "Audio Source",
@@ -7618,11 +8530,16 @@ impl Scene {
             return true;
         }
         let mut current = self.node(id).and_then(|n| n.parent);
+        let mut guard = 0usize;
         while let Some(p) = current {
+            if guard >= self.nodes.len() {
+                break;
+            }
             if p == ancestor {
                 return true;
             }
             current = self.node(p).and_then(|n| n.parent);
+            guard += 1;
         }
         false
     }
@@ -7650,11 +8567,8 @@ impl Scene {
             return false;
         }
 
-        let old_parent = self.node(id).and_then(|n| n.parent);
-        if let Some(old) = old_parent {
-            if let Some(parent) = self.node_mut(old) {
-                parent.children.retain(|c| *c != id);
-            }
+        for node in &mut self.nodes {
+            node.children.retain(|c| *c != id);
         }
         if let Some(parent) = self.node_mut(new_parent) {
             let pos = position.min(parent.children.len());
@@ -8100,6 +9014,9 @@ pub struct ProjectDocument {
     pub runtime_texture_split_max_edge: u16,
     /// Open scenes. The first scene is the active scene for now.
     pub scenes: Vec<Scene>,
+    /// Authored screen-space UI scenes. The first scene is the HUD for now.
+    #[serde(default = "default_ui_scenes")]
+    pub ui_scenes: Vec<UiScene>,
     /// Project resources.
     pub resources: Vec<Resource>,
     next_resource_id: u64,
@@ -8117,6 +9034,7 @@ impl ProjectDocument {
             runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),
             runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
+            ui_scenes: default_ui_scenes(),
             resources: Vec::new(),
             next_resource_id: 1,
         }
@@ -8144,6 +9062,16 @@ impl ProjectDocument {
     /// Active scene, mutable.
     pub fn active_scene_mut(&mut self) -> &mut Scene {
         &mut self.scenes[0]
+    }
+
+    /// Active UI scene.
+    pub fn active_ui_scene(&self) -> Option<&UiScene> {
+        self.ui_scenes.first()
+    }
+
+    /// Active UI scene, mutable.
+    pub fn active_ui_scene_mut(&mut self) -> Option<&mut UiScene> {
+        self.ui_scenes.first_mut()
     }
 
     /// Add a resource and return its id.
@@ -8490,6 +9418,12 @@ impl ProjectDocument {
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
         self.editor_camera.normalize();
+        if self.ui_scenes.is_empty() {
+            self.ui_scenes = default_ui_scenes();
+        }
+        for scene in &mut self.ui_scenes {
+            scene.normalize();
+        }
         for scene in &mut self.scenes {
             scene.normalize_world_root();
             for node in &mut scene.nodes {
@@ -8719,6 +9653,9 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
             option_resource_reference_count(*character, id)
         }
         NodeKind::Equipment { weapon, .. } => option_resource_reference_count(*weapon, id),
+        NodeKind::ParticleEmitter { settings } => {
+            option_resource_reference_count(settings.texture, id)
+        }
         NodeKind::SpawnPoint { character, .. } => option_resource_reference_count(*character, id),
         NodeKind::AudioSource { sound, .. } => option_resource_reference_count(*sound, id),
         NodeKind::World { far_vista, .. } => far_vista_resource_reference_count(far_vista, id),
@@ -8772,6 +9709,7 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
         } => clear_option_resource(model, id) + clear_option_resource(material, id),
         NodeKind::CharacterController { character, .. } => clear_option_resource(character, id),
         NodeKind::Equipment { weapon, .. } => clear_option_resource(weapon, id),
+        NodeKind::ParticleEmitter { settings } => clear_option_resource(&mut settings.texture, id),
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
         NodeKind::AudioSource { sound, .. } => clear_option_resource(sound, id),
         NodeKind::World { far_vista, .. } => clear_far_vista_resource_references(far_vista, id),
@@ -10679,6 +11617,158 @@ mod tests {
 
         assert!(ron.contains("Demo7 Map"));
         assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn new_project_seeds_hud_ui_scene() {
+        let project = ProjectDocument::new("ui");
+        let ui_scene = project.active_ui_scene().expect("default UI scene");
+        assert_eq!(ui_scene.name, "HUD");
+        assert!(matches!(
+            ui_scene.node(ui_scene.root).map(|node| &node.kind),
+            Some(UiNodeKind::Canvas {
+                width: 320,
+                height: 240
+            })
+        ));
+        assert!(ui_scene.nodes().iter().any(|node| {
+            node.name == "Health Bar"
+                && matches!(
+                    node.kind,
+                    UiNodeKind::Bar {
+                        value: UiValueBinding::PlayerHealth,
+                        max: UiValueBinding::PlayerHealthMax,
+                        ..
+                    }
+                )
+        }));
+        assert!(ui_scene.nodes().iter().any(|node| {
+            node.name == "Stamina Bar"
+                && matches!(
+                    node.kind,
+                    UiNodeKind::Bar {
+                        value: UiValueBinding::PlayerStamina,
+                        max: UiValueBinding::PlayerStaminaMax,
+                        ..
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn normalize_loaded_restores_missing_ui_scenes() {
+        let mut project = ProjectDocument::new("legacy");
+        project.ui_scenes.clear();
+        project.normalize_loaded();
+        assert_eq!(project.active_ui_scene().unwrap().name, "HUD");
+    }
+
+    #[test]
+    fn ui_scene_remove_node_removes_descendants_and_root_is_stable() {
+        let mut scene = UiScene::default_hud();
+        let group = scene.add_node(
+            scene.root,
+            "Prompt",
+            UiNodeKind::Group {
+                rect: UiRect::new(48, 180, 120, 24),
+            },
+        );
+        let label = scene.add_node(
+            group,
+            "Prompt Text",
+            UiNodeKind::Label {
+                rect: UiRect::new(52, 184, 96, 12),
+                text: "Open".to_string(),
+                tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
+                color: [220, 226, 240],
+            },
+        );
+
+        assert!(!scene.remove_node(scene.root));
+        assert!(scene.remove_node(group));
+        assert!(scene.node(group).is_none());
+        assert!(scene.node(label).is_none());
+        assert!(!scene
+            .node(scene.root)
+            .expect("root")
+            .children
+            .contains(&group));
+    }
+
+    #[test]
+    fn ui_scene_parent_rect_offsets_children() {
+        let mut scene = UiScene::default_hud();
+        let group = scene.add_node(
+            scene.root,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(40, 30, 100, 50),
+            },
+        );
+        let label = scene.add_node(
+            group,
+            "Prompt",
+            UiNodeKind::Label {
+                rect: UiRect::new(8, 6, 48, 12),
+                text: "Open".to_string(),
+                tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
+                color: [220, 226, 240],
+            },
+        );
+
+        assert_eq!(
+            scene.absolute_rect(label),
+            Some(UiRect::new(48, 36, 48, 12))
+        );
+        assert_eq!(
+            scene
+                .hierarchy_node_ids()
+                .into_iter()
+                .filter(|id| *id == group || *id == label)
+                .collect::<Vec<_>>(),
+            vec![group, label]
+        );
+    }
+
+    #[test]
+    fn ui_scene_move_node_reparents_and_rejects_cycles() {
+        let mut scene = UiScene::default_hud();
+        let a = scene.add_node(
+            scene.root,
+            "A",
+            UiNodeKind::Group {
+                rect: UiRect::new(4, 5, 16, 16),
+            },
+        );
+        let b = scene.add_node(
+            scene.root,
+            "B",
+            UiNodeKind::Group {
+                rect: UiRect::new(20, 30, 16, 16),
+            },
+        );
+        let label = scene.add_node(
+            a,
+            "Label",
+            UiNodeKind::Label {
+                rect: UiRect::new(2, 3, 8, 8),
+                text: "x".to_string(),
+                tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
+                color: [255, 255, 255],
+            },
+        );
+
+        assert!(scene.move_node(label, b, 0));
+        assert_eq!(scene.node(label).unwrap().parent, Some(b));
+        assert_eq!(scene.absolute_rect(label), Some(UiRect::new(22, 33, 8, 8)));
+        assert!(!scene.move_node(b, label, 0));
+        assert!(!scene.move_node(scene.root, b, 0));
     }
 
     #[test]

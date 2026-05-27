@@ -13,26 +13,27 @@
 # with cargo build in their own directory so they can use their own
 # .cargo/config.toml for the mipsel-sony-psx target.
 
-.PHONY: help check test canaries fmt lint clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run \
         test-sdk \
         psxed assets \
-        examples hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
-        run-tri run-input run-ot run-tex run-gte run-audio \
-        showcase-textured-sprite run-showcase-textured-sprite \
-        showcase-text run-showcase-text \
-        game-pong run-game-pong \
-        game-breakout run-game-breakout \
-        game-invaders run-game-invaders \
-        showcase-3d run-showcase-3d \
-        showcase-model run-showcase-model \
-        showcase-lights run-showcase-lights \
-        showcase-fog run-showcase-fog \
-        showcase-particles run-showcase-particles \
-        hello-engine run-hello-engine \
-        showcase-room run-showcase-room \
-        cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
-        profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
-        profile-demo3-disc-stream-forward profile-demo7-camera-sweep
+	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
+	hello-tex hello-tex-disc hello-gte hello-gte-disc hello-audio hello-audio-disc \
+	hello-cdda hello-cdda-disc \
+	run-tri run-input run-ot run-tex run-gte run-audio run-cdda probe-cdda-audio \
+	showcase-text showcase-text-disc run-showcase-text \
+	game-pong game-pong-disc run-game-pong \
+	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
+	game-breakout game-breakout-disc run-game-breakout \
+        game-invaders game-invaders-disc run-game-invaders \
+        showcase-3d showcase-3d-disc run-showcase-3d \
+        showcase-model showcase-model-disc run-showcase-model \
+        showcase-lights showcase-lights-disc run-showcase-lights \
+	showcase-fog showcase-fog-disc run-showcase-fog \
+	showcase-particles showcase-particles-disc run-showcase-particles \
+	hello-engine hello-engine-disc run-hello-engine \
+	cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
+	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
+	profile-demo3-disc-stream-forward profile-demo7-camera-sweep
 
 help:
 	@echo "PSoXide targets:"
@@ -43,6 +44,10 @@ help:
 	@echo "    make canaries     - commercial-game canary tests (Milestones D-K)"
 	@echo "    make fmt          - format all code"
 	@echo "    make lint         - clippy -D warnings"
+	@echo "    make lint-policy-guard"
+	@echo "                      - assert Cargo workspace lint policy stays in sync"
+	@echo "    make runtime-numeric-guard"
+	@echo "                      - reject floats/wide ints in PS1 runtime code"
 	@echo "    make clean        - cargo clean all workspaces"
 	@echo "    make run          - launch the desktop frontend (no EXE)"
 	@echo "    make parity       - step both emulators and assert bit-identical traces"
@@ -63,46 +68,57 @@ help:
 	@echo "    make profile-demo3-disc-stream-forward - same, while holding forward"
 	@echo "    make profile-demo7-camera-sweep - streamed demo7 deterministic camera sweep profile"
 	@echo ""
-	@echo "  SDK examples (build mipsel-sony-psx binaries):"
-	@echo "    make examples     - build every example"
+	@echo "  SDK examples (build burnable .cue + .bin discs):"
+	@echo "    make examples     - build every public example disc"
 	@echo "    make psxed        - build the content-pipeline CLI"
 	@echo "    make assets       - cook source assets via psxed"
-	@echo "    make hello-tri    - build the direct-GP0 triangle demo"
-	@echo "    make hello-input  - build the pad-poll demo"
-	@echo "    make hello-ot     - build the DMA linked-list demo"
-	@echo "    make hello-tex    - build the textured-sprite demo"
-	@echo "    make hello-gte    - build the GTE perspective-transform demo"
-	@echo "    make hello-audio  - build the SPU-tone-per-button demo"
-	@echo "    make showcase-textured-sprite"
-	@echo "                      - build the polished textured-sprite showcase"
+	@echo "    make hello-tri-disc    - build the direct-GP0 triangle demo disc"
+	@echo "    make hello-input-disc  - build the pad-poll demo disc"
+	@echo "    make hello-ot-disc     - build the DMA linked-list demo disc"
+	@echo "    make hello-tex-disc    - build the CLUT texture demo disc"
+	@echo "    make hello-gte-disc    - build the GTE perspective-transform demo disc"
+	@echo "    make hello-audio-disc  - build the imported SPU sample demo disc"
+	@echo "    make hello-cdda-disc   - build the CD-DA playback demo disc"
 	@echo "    make showcase-text"
-	@echo "                      - build the text / font capabilities showcase"
-	@echo "    make game-pong     - build the Pong mini-game"
-	@echo "    make game-breakout - build the Breakout mini-game"
-	@echo "    make game-invaders - build the Space Invaders mini-game"
-	@echo "    make showcase-3d    - build the 3D geometry showcase"
-	@echo "    make showcase-model - build the animated native-model demo"
-	@echo "    make showcase-lights - build the 4-point-light demo"
-	@echo "    make showcase-fog   - build the fog / full-GTE-pipeline demo"
-	@echo "    make showcase-particles - build the particle-pool demo"
-	@echo "    make run-tri      - build + side-load hello-tri into the frontend"
-	@echo "    make run-input    - build + side-load hello-input into the frontend"
-	@echo "    make run-ot       - build + side-load hello-ot into the frontend"
-	@echo "    make run-tex      - build + side-load hello-tex into the frontend"
-	@echo "    make run-gte      - build + side-load hello-gte into the frontend"
-	@echo "    make run-audio    - build + side-load hello-audio into the frontend"
-	@echo "    make run-showcase-textured-sprite"
-	@echo "                      - build + side-load the textured-sprite showcase"
+	@echo "                      - build the text / font capabilities showcase disc"
+	@echo "    make game-pong-disc - build the Pong mini-game disc"
+	@echo "    make game-magikaaaaaarp-pong"
+	@echo "                      - build the magikAAAAArp Pong mini-game"
+	@echo "    make game-magikaaaaaarp-pong-disc"
+	@echo "                      - build magikAAAAArp Pong as a CD-DA disc"
+	@echo "    make magikaaaaaarp-pong-spectrum"
+	@echo "                      - bake the GONCHAROV spectrum visualizer asset"
+	@echo "    make game-breakout-disc - build the Breakout mini-game disc"
+	@echo "    make game-invaders-disc - build the Space Invaders mini-game disc"
+	@echo "    make showcase-3d-disc    - build the 3D geometry showcase disc"
+	@echo "    make showcase-model-disc - build the animated native-model demo disc"
+	@echo "    make showcase-lights-disc - build the 4-point-light demo disc"
+	@echo "    make showcase-fog-disc   - build the fog / full-GTE-pipeline demo disc"
+	@echo "    make showcase-particles-disc - build the particle-pool demo disc"
+	@echo "    make run-tri      - build + boot hello-tri as a disc"
+	@echo "    make run-input    - build + boot hello-input as a disc"
+	@echo "    make run-ot       - build + boot hello-ot as a disc"
+	@echo "    make run-tex      - build + boot hello-tex as a disc"
+	@echo "    make run-gte      - build + boot hello-gte as a disc"
+	@echo "    make run-audio    - build + boot hello-audio as a disc"
+	@echo "    make run-cdda     - build + boot hello-cdda with a mixed-mode disc"
+	@echo "    make probe-cdda-audio - render hello-cdda audio to a WAV + silence check"
+	@echo "    make probe-magikaaaaaarp-pong-audio"
+	@echo "                      - render magikAAAAArp Pong CD-DA to a WAV + silence check"
+	@echo "    make duckstation-magikaaaaaarp-pong"
+	@echo "                      - boot magikAAAAArp Pong in DuckStation and assert TTY markers"
 	@echo "    make run-showcase-text"
-	@echo "                      - build + side-load the text capabilities showcase"
-	@echo "    make run-game-pong     - build + side-load the Pong mini-game"
-	@echo "    make run-game-breakout - build + side-load the Breakout mini-game"
-	@echo "    make run-game-invaders - build + side-load the Space Invaders mini-game"
-	@echo "    make run-showcase-3d - build + side-load the 3D geometry showcase"
-	@echo "    make run-showcase-model - build + side-load the animated model demo"
-	@echo "    make run-showcase-lights - build + side-load the 4-point-light demo"
-	@echo "    make run-showcase-fog - build + side-load the fog demo"
-	@echo "    make run-showcase-particles - build + side-load the particle demo"
+	@echo "                      - build + boot the text capabilities showcase disc"
+	@echo "    make run-game-pong     - build + boot the Pong mini-game disc"
+	@echo "    make run-game-magikaaaaaarp-pong"
+	@echo "                      - build + boot magikAAAAArp Pong with CD-DA"
+	@echo "    make run-game-breakout - build + boot the Breakout mini-game disc"
+	@echo "    make run-game-invaders - build + boot the Space Invaders mini-game disc"
+	@echo "    make run-showcase-3d - build + boot the 3D geometry showcase disc"
+	@echo "    make run-showcase-model - build + boot the animated model demo disc"
+	@echo "    make run-showcase-lights - build + boot the 4-point-light demo disc"
+	@echo "    make run-showcase-fog - build + boot the fog demo disc"
+	@echo "    make run-showcase-particles - build + boot the particle demo disc"
 
 run:
 	cd emu && cargo run -p frontend --release
@@ -139,6 +155,8 @@ fmt:
 	cd tools/psx-exe-pack && cargo fmt --all
 
 lint:
+	python3 tools/lint_policy_guard.py
+	python3 tools/runtime_numeric_guard.py
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd editor && cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd emu && cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -146,6 +164,12 @@ lint:
 	cd sdk && cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd tools/mkisopsx && cargo clippy --all-targets --all-features -- -D warnings
 	cd tools/psx-exe-pack && cargo clippy --all-targets --all-features -- -D warnings
+
+lint-policy-guard:
+	python3 tools/lint_policy_guard.py
+
+runtime-numeric-guard:
+	python3 tools/runtime_numeric_guard.py
 
 clean:
 	cargo clean
@@ -209,6 +233,13 @@ test-sdk: examples
 # --- SDK examples ---------------------------------------------------------
 
 EXAMPLE_OUT := build/examples/mipsel-sony-psx/release
+CDDA_DEMO_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
+GONCHAROV_WAV ?= assets/audio/cdda/GONCHAROV.wav
+MAGIKAAAAARP_PONG_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
+MAGIKAAAAARP_PONG_SPECTRUM := engine/examples/game-magikaaaaaarp-pong/assets/goncharov_spectrum_16x30hz.bin
+DUCKSTATION_TIMEOUT ?= 45
+DUCKSTATION_MAGIKARP_LOG ?= build/duckstation-harness/game-magikaaaaaarp-pong.log
+PYTHON ?= python3
 PROFILE_DEMO3_FRAMES ?= 60
 PROFILE_DEMO3_STEPS ?= 120000000
 PROFILE_DEMO3_HW ?= /tmp/psoxide-demo3-hw-$(PROFILE_DEMO3_FRAMES).ppm
@@ -236,6 +267,20 @@ PROFILE_DEMO7_CAMERA_SWEEP_GUEST_FRAMES ?= 1600
 PROFILE_DEMO7_CAMERA_SWEEP_STEPS ?= 600000000
 PROFILE_DEMO7_CAMERA_SWEEP_HW ?= /tmp/psoxide-demo7-camera-sweep-hw.ppm
 PROFILE_DEMO7_CAMERA_SWEEP_HASH_LOG ?= /tmp/psoxide-demo7-camera-sweep-visual.csv
+DATA_DISC_EXAMPLES := \
+	hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
+	showcase-text game-pong game-breakout game-invaders \
+	showcase-3d showcase-model showcase-lights showcase-fog showcase-particles \
+	hello-engine
+PUBLIC_EXAMPLE_DISCS := $(addsuffix -disc,$(DATA_DISC_EXAMPLES)) hello-cdda-disc game-magikaaaaaarp-pong-disc
+
+define build_data_disc
+$(1)-disc: $(1)
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$$(EXAMPLE_OUT)/$(1).exe \
+		--out ../../$$(EXAMPLE_OUT)/$(1).bin \
+		--volume PSOXIDE
+endef
 
 hello-tri:
 	cd sdk/examples/hello-tri && cargo build --release
@@ -260,14 +305,36 @@ hello-gte:
 hello-audio:
 	cd sdk/examples/hello-audio && cargo build --release
 
-showcase-textured-sprite:
-	cd engine/examples/showcase-textured-sprite && cargo build --release
+hello-cdda:
+	cd sdk/examples/hello-cdda && cargo build --release
+
+hello-cdda-disc: hello-cdda
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/hello-cdda.exe \
+		--out ../../$(EXAMPLE_OUT)/hello-cdda.bin \
+		--volume PSOXIDE \
+		--cdda-track ../../$(CDDA_DEMO_TRACK)
 
 showcase-text:
 	cd engine/examples/showcase-text && cargo build --release
 
 game-pong:
 	cd engine/examples/game-pong && cargo build --release
+
+game-magikaaaaaarp-pong:
+	cd engine/examples/game-magikaaaaaarp-pong && cargo build --release
+
+magikaaaaaarp-pong-spectrum:
+	$(PYTHON) tools/bake_spectrum.py $(GONCHAROV_WAV) \
+		-o $(MAGIKAAAAARP_PONG_SPECTRUM) \
+		--fps 30 --bands 16 --seconds 233
+
+game-magikaaaaaarp-pong-disc: game-magikaaaaaarp-pong
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.exe \
+		--out ../../$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.bin \
+		--volume MAGIKARP \
+		--cdda-track ../../$(MAGIKAAAAARP_PONG_TRACK)
 
 game-breakout:
 	cd engine/examples/game-breakout && cargo build --release
@@ -292,8 +359,7 @@ showcase-fog: assets
 showcase-particles:
 	cd engine/examples/showcase-particles && cargo build --release
 
-showcase-room:
-	cd engine/examples/showcase-room && cargo build --release
+$(foreach example,$(DATA_DISC_EXAMPLES),$(eval $(call build_data_disc,$(example))))
 
 # Cook a project into editor-playtest/generated/. With no
 # arguments cooks the embedded starter project; pass
@@ -338,7 +404,8 @@ profile-demo3-disc-stream:
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
 	cd emu && cargo run -p frontend --release -- launch \
-		--path ../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
+		--embedded-playtest \
 		--guest-visual-frames $(PROFILE_DEMO3_DISC_STREAM_VISUAL_FRAMES) \
 		--guest-frames $(PROFILE_DEMO3_DISC_STREAM_GUEST_FRAMES) \
 		--steps $(PROFILE_DEMO3_DISC_STREAM_STEPS) \
@@ -357,7 +424,8 @@ profile-demo3-disc-stream-forward:
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
 	cd emu && cargo run -p frontend --release -- launch \
-		--path ../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
+		--embedded-playtest \
 		--guest-visual-frames $(PROFILE_DEMO3_DISC_STREAM_FORWARD_VISUAL_FRAMES) \
 		--guest-frames $(PROFILE_DEMO3_DISC_STREAM_FORWARD_GUEST_FRAMES) \
 		--steps $(PROFILE_DEMO3_DISC_STREAM_FORWARD_STEPS) \
@@ -377,7 +445,8 @@ profile-demo7-camera-sweep:
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
 	cd emu && cargo run -p frontend --release -- launch \
-		--path ../$(EXAMPLE_OUT)/editor-playtest.bin \
+		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
+		--embedded-playtest \
 		--guest-visual-frames $(PROFILE_DEMO7_CAMERA_SWEEP_VISUAL_FRAMES) \
 		--guest-frames $(PROFILE_DEMO7_CAMERA_SWEEP_GUEST_FRAMES) \
 		--steps $(PROFILE_DEMO7_CAMERA_SWEEP_STEPS) \
@@ -404,6 +473,7 @@ SHOWCASE_3D := engine/examples/showcase-3d
 SHOWCASE_LIGHTS := engine/examples/showcase-lights
 HELLO_TEX := sdk/examples/hello-tex
 TEXTURE_ASSETS := assets/textures
+MAGIKAAAAARP_PONG := engine/examples/game-magikaaaaaarp-pong
 
 # Texture sources committed under example `vendor/` directories are
 # small pre-cropped JPGs. Larger originals are intentionally not
@@ -413,7 +483,7 @@ TEXTURE_ASSETS := assets/textures
 # high-res replacements do not break fresh clones or CI.
 define cook_texture
 	@if [ -f "$(1)" ]; then \
-	    $(PSXED) tex "$(1)" -o "$(2)" --size $(3) --depth $(4) --resample lanczos3 ; \
+	    $(PSXED) tex "$(1)" -o "$(2)" --size $(3) --depth $(4) --resample lanczos3 $(5) ; \
 	else \
 	    echo "[psxed tex] skip: source $(1) not present (using committed $(2))" ; \
 	fi
@@ -432,66 +502,80 @@ assets: psxed
 	    --compute-normals --no-colors
 	$(call cook_texture,$(HELLO_TEX)/vendor/brick-wall.jpg,$(TEXTURE_ASSETS)/brick-wall.psxt,64x64,4)
 	$(call cook_texture,$(HELLO_TEX)/vendor/floor.jpg,$(TEXTURE_ASSETS)/floor.psxt,64x64,4)
+	$(call cook_texture,$(MAGIKAAAAARP_PONG)/vendor/magikaaaaaarp_album.jpg,$(MAGIKAAAAARP_PONG)/assets/magikaaaaaarp_album.psxt,128x128,8)
+	$(call cook_texture,$(MAGIKAAAAARP_PONG)/vendor/score_flyby.png,$(MAGIKAAAAARP_PONG)/assets/score_flyby.psxt,128x128,8,--transparent-index-zero)
+	@$(MAKE) magikaaaaaarp-pong-spectrum
 
-examples: hello-tri hello-input hello-ot hello-tex hello-gte hello-audio showcase-textured-sprite showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles showcase-room hello-engine
+examples: $(PUBLIC_EXAMPLE_DISCS)
 	@echo ""
-	@echo "Built public examples:"
-	@find $(EXAMPLE_OUT) -maxdepth 1 -type f -name '*.exe' ! -name 'editor-playtest.exe' -print | sort | while IFS= read -r exe; do ls -la "$$exe"; done
+	@echo "Built public example discs:"
+	@find $(EXAMPLE_OUT) -maxdepth 1 -type f \( -name '*.cue' -o -name '*.bin' \) ! -name 'editor-playtest.*' -print | sort | while IFS= read -r disc; do ls -la "$$disc"; done
 
-# Frontend side-load helpers. PSOXIDE_EXE makes the frontend skip the
-# BIOS reset vector and jump straight into the homebrew. HLE BIOS +
-# digital pad are auto-enabled for side-loaded EXEs.
+# Frontend disc helpers. Public examples boot from CUE/BIN so the same
+# artifact can be launched in emulators or burned to CD-R.
 
-run-tri: hello-tri
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-tri.exe cargo run -p frontend --release
+run-tri: hello-tri-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-tri.cue cargo run -p frontend --release
 
-run-input: hello-input
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-input.exe cargo run -p frontend --release
+run-input: hello-input-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-input.cue cargo run -p frontend --release
 
-run-ot: hello-ot
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-ot.exe cargo run -p frontend --release
+run-ot: hello-ot-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-ot.cue cargo run -p frontend --release
 
-run-tex: hello-tex
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-tex.exe cargo run -p frontend --release
+run-tex: hello-tex-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-tex.cue cargo run -p frontend --release
 
-run-gte: hello-gte
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-gte.exe cargo run -p frontend --release
+run-gte: hello-gte-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-gte.cue cargo run -p frontend --release
 
-run-audio: hello-audio
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-audio.exe cargo run -p frontend --release
+run-audio: hello-audio-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-audio.cue cargo run -p frontend --release
 
-run-showcase-textured-sprite: showcase-textured-sprite
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-textured-sprite.exe cargo run -p frontend --release
+run-cdda: hello-cdda-disc
+	cd emu && PSOXIDE_AUTORUN=1 PSOXIDE_AUDIO_TRACE=1 PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.cue cargo run -p frontend --release
 
-run-showcase-text: showcase-text
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-text.exe cargo run -p frontend --release
+probe-cdda-audio: hello-cdda-disc
+	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.exe PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.cue cargo run -p emulator-core --example probe_cdda_wav --release
 
-run-game-pong: game-pong
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-pong.exe cargo run -p frontend --release
+run-showcase-text: showcase-text-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/showcase-text.cue cargo run -p frontend --release
 
-run-game-breakout: game-breakout
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-breakout.exe cargo run -p frontend --release
+run-game-pong: game-pong-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-pong.cue cargo run -p frontend --release
 
-run-game-invaders: game-invaders
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-invaders.exe cargo run -p frontend --release
+run-game-magikaaaaaarp-pong: game-magikaaaaaarp-pong-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.cue cargo run -p frontend --release
 
-run-showcase-3d: showcase-3d
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-3d.exe cargo run -p frontend --release
+probe-magikaaaaaarp-pong-audio: game-magikaaaaaarp-pong-disc
+	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.exe PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.cue PSOXIDE_WAV=/tmp/psoxide_magikaaaaaarp_pong.wav PSOXIDE_AUDIO_SECONDS=6 cargo run -p emulator-core --example probe_cdda_wav --release
 
-run-showcase-model: showcase-model
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-model.exe cargo run -p frontend --release
+duckstation-magikaaaaaarp-pong: game-magikaaaaaarp-pong-disc
+	$(PYTHON) tools/duckstation_harness.py \
+		--cue $(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.cue \
+		--timeout $(DUCKSTATION_TIMEOUT) \
+		--log $(CURDIR)/$(DUCKSTATION_MAGIKARP_LOG)
 
-run-showcase-lights: showcase-lights
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-lights.exe cargo run -p frontend --release
+run-game-breakout: game-breakout-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-breakout.cue cargo run -p frontend --release
 
-run-showcase-fog: showcase-fog
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-fog.exe cargo run -p frontend --release
+run-game-invaders: game-invaders-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-invaders.cue cargo run -p frontend --release
 
-run-showcase-particles: showcase-particles
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-particles.exe cargo run -p frontend --release
+run-showcase-3d: showcase-3d-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/showcase-3d.cue cargo run -p frontend --release
 
-run-hello-engine: hello-engine
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-engine.exe cargo run -p frontend --release
+run-showcase-model: showcase-model-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/showcase-model.cue cargo run -p frontend --release
 
-run-showcase-room: showcase-room
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-room.exe cargo run -p frontend --release
+run-showcase-lights: showcase-lights-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/showcase-lights.cue cargo run -p frontend --release
+
+run-showcase-fog: showcase-fog-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/showcase-fog.cue cargo run -p frontend --release
+
+run-showcase-particles: showcase-particles-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/showcase-particles.cue cargo run -p frontend --release
+
+run-hello-engine: hello-engine-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-engine.cue cargo run -p frontend --release

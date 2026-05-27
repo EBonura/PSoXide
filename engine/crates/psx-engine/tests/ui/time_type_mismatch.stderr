@@ -1,0 +1,69 @@
+error[E0308]: mismatched types
+  --> tests/ui/time_type_mismatch.rs:13:20
+   |
+13 |     needs_sim_tick(visual);
+   |     -------------- ^^^^^^ expected `SimTick`, found `VisualFrame`
+   |     |
+   |     arguments to this function are incorrect
+   |
+note: function defined here
+  --> tests/ui/time_type_mismatch.rs:3:4
+   |
+ 3 | fn needs_sim_tick(_: SimTick) {}
+   |    ^^^^^^^^^^^^^^ ----------
+
+error[E0308]: mismatched types
+  --> tests/ui/time_type_mismatch.rs:14:24
+   |
+14 |     needs_visual_frame(sim);
+   |     ------------------ ^^^ expected `VisualFrame`, found `SimTick`
+   |     |
+   |     arguments to this function are incorrect
+   |
+note: function defined here
+  --> tests/ui/time_type_mismatch.rs:5:4
+   |
+ 5 | fn needs_visual_frame(_: VisualFrame) {}
+   |    ^^^^^^^^^^^^^^^^^^ --------------
+
+error[E0308]: mismatched types
+  --> tests/ui/time_type_mismatch.rs:15:20
+   |
+15 |     needs_video_hz(60u16);
+   |     -------------- ^^^^^ expected `VideoHz`, found `u16`
+   |     |
+   |     arguments to this function are incorrect
+   |
+note: function defined here
+  --> tests/ui/time_type_mismatch.rs:7:4
+   |
+ 7 | fn needs_video_hz(_: VideoHz) {}
+   |    ^^^^^^^^^^^^^^ ----------
+
+error[E0308]: mismatched types
+  --> tests/ui/time_type_mismatch.rs:17:44
+   |
+17 |     let _ = Angle::per_frames(60).mul_tick(visual);
+   |                                   -------- ^^^^^^ expected `SimTick`, found `VisualFrame`
+   |                                   |
+   |                                   arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/angle.rs
+   |
+   |     pub const fn mul_tick(self, tick: SimTick) -> Angle {
+   |                  ^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/time_type_mismatch.rs:18:45
+   |
+18 |     let _ = Angle::per_frames(60).mul_frame(sim);
+   |                                   --------- ^^^ expected `VisualFrame`, found `SimTick`
+   |                                   |
+   |                                   arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/angle.rs
+   |
+   |     pub const fn mul_frame(self, frame: VisualFrame) -> Angle {
+   |                  ^^^^^^^^^
