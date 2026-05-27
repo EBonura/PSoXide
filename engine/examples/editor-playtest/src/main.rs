@@ -52,10 +52,9 @@ use psx_engine::{
     CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
     LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame,
-    PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink,
-    ProjectedVertex, Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene,
-    SchedulerConfig, SimTick,
-    TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
+    PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex,
+    Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SchedulerConfig,
+    SimTick, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
     ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
     ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
     WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
@@ -295,8 +294,15 @@ const CAMERA_RADIUS_STEP: i32 = 64;
 const CAMERA_START_YAW: Angle = Angle::from_q12(220);
 const CAMERA_YAW_STEP: Angle = Angle::from_q12(12);
 const CAMERA_SWEEP_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP").is_some();
-const CAMERA_SWEEP_YAW_STEP_Q12: i16 = 4;
-const CAMERA_SWEEP_RADIUS: i32 = CAMERA_START_RADIUS;
+const CAMERA_SWEEP_FAST_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP_FAST").is_some();
+const CAMERA_SWEEP_WIDE_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP_WIDE").is_some();
+const CAMERA_SWEEP_FORCE_VISIBILITY: bool = option_env!("PSXO_CAMERA_SWEEP_FORCE_VIS").is_some();
+const CAMERA_SWEEP_YAW_STEP_Q12: i16 = if CAMERA_SWEEP_FAST_ENABLED { 96 } else { 4 };
+const CAMERA_SWEEP_RADIUS: i32 = if CAMERA_SWEEP_WIDE_ENABLED {
+    CAMERA_RADIUS_MAX
+} else {
+    CAMERA_START_RADIUS
+};
 const MOVE_STICK_DEADZONE: i16 = 18;
 const STICK_MAX: i16 = 127;
 const CAMERA_STICK_DEADZONE: i16 = 18;
@@ -5071,7 +5077,11 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::CAMERA);
         self.render_camera = self.free_orbit_camera();
         telemetry::stage_end(telemetry::stage::CAMERA);
-        self.refresh_active_room_window_if_needed();
+        if CAMERA_SWEEP_FORCE_VISIBILITY {
+            self.force_refresh_active_room_window_view();
+        } else {
+            self.refresh_active_room_window_if_needed();
+        }
     }
 
     fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
@@ -6489,6 +6499,20 @@ impl Playtest {
         if !camera_moved_far && !view_changed {
             return;
         }
+        self.refresh_portal_visibility_for_view(self.room_index, record, view);
+        if !self.active_room_job.active && !self.portal_visible_rooms_are_active(record) {
+            self.begin_active_room_window_job(true);
+        }
+    }
+
+    fn force_refresh_active_room_window_view(&mut self) {
+        if !self.chunked_level() {
+            return;
+        }
+        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
+            return;
+        };
+        let view = self.active_room_selection_view();
         self.refresh_portal_visibility_for_view(self.room_index, record, view);
         if !self.active_room_job.active && !self.portal_visible_rooms_are_active(record) {
             self.begin_active_room_window_job(true);
