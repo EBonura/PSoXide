@@ -33,5 +33,5 @@ pub(crate) const RUNTIME_SCHEDULE: RuntimeScheduleConfig = RuntimeScheduleConfig
     stream_load_batch_count: 4,
     stream_pump_sectors_per_tick: 8,
     stream_bootstrap_pump_limit: 4096,
-    max_fixed_ticks_before_visual: 2,
+    max_fixed_ticks_before_visual: 0,
 };
