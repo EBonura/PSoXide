@@ -104,6 +104,17 @@ pub mod stage {
 /// Number of stage slots, including index zero for unknown/reserved ids.
 pub const STAGE_COUNT: usize = 36;
 
+/// Runtime task id constants shared with `psx-engine::telemetry`.
+pub mod task {
+    /// Built-in fixed simulation/update task.
+    pub const FIXED_UPDATE: u16 = 0;
+    /// Built-in visual render task.
+    pub const VISUAL_RENDER: u16 = 1;
+}
+
+/// Number of task slots, including reserved future scheduler jobs.
+pub const TASK_COUNT: usize = 16;
+
 /// Runtime counter id constants shared with `psx-engine::telemetry`.
 pub mod counter {
     /// Textured primitive packets allocated this frame.
@@ -494,10 +505,54 @@ pub mod counter {
     pub const ROOM_CAMERA_GLOBAL_Y_BIASED: u16 = 193;
     /// Render camera absolute level Z used by portal traversal, biased for unsigned transport.
     pub const ROOM_CAMERA_GLOBAL_Z_BIASED: u16 = 194;
+    /// Model vertices projected through CPU blend skinning.
+    pub const TEXTURED_MODEL_CPU_BLEND_VERTICES: u16 = 195;
+    /// Model faces handled by any packed fast-path helper.
+    pub const TEXTURED_MODEL_PACKED_FACE_CALLS: u16 = 196;
+    /// Model faces handled by the packed all-front/all-HW-bounds helper.
+    pub const TEXTURED_MODEL_PACKED_UNCLAMPED_CALLS: u16 = 197;
+    /// Model faces handled by packed all-front helpers that still clamp screen coordinates.
+    pub const TEXTURED_MODEL_PACKED_CLAMPED_CALLS: u16 = 198;
+    /// Model faces handled by the generic packed helper.
+    pub const TEXTURED_MODEL_PACKED_GENERAL_CALLS: u16 = 199;
+    /// Model faces handled by the fully general face path.
+    pub const TEXTURED_MODEL_FALLBACK_FACE_CALLS: u16 = 200;
+    /// Packed model faces that fell back to split/general submission due hardware extents.
+    pub const TEXTURED_MODEL_HW_EXTENT_FALLBACKS: u16 = 201;
+    /// Model faces dropped because they crossed or sat behind the near plane.
+    pub const TEXTURED_MODEL_NEAR_DROPS: u16 = 202;
+    /// Model faces dropped because the projected triangle was not hardware-safe.
+    pub const TEXTURED_MODEL_HW_UNSAFE_DROPS: u16 = 203;
+    /// Model triangles submitted through packed fast paths.
+    pub const TEXTURED_MODEL_FAST_SUBMITTED_TRIS: u16 = 204;
+    /// Model submits that required CPU blended vertices.
+    pub const TEXTURED_MODEL_CPU_BLEND_SUBMITS: u16 = 205;
+    /// Model submits that used primary-joint-only projection.
+    pub const TEXTURED_MODEL_PRIMARY_JOINT_SUBMITS: u16 = 206;
+    /// Model submits where all projected vertices were in front of the near plane.
+    pub const TEXTURED_MODEL_ALL_FRONT_SUBMITS: u16 = 207;
+    /// Model submits where all projected vertices were inside PS1 hardware bounds.
+    pub const TEXTURED_MODEL_ALL_HW_BOUNDS_SUBMITS: u16 = 208;
+    /// Model submits eligible for the fastest packed-unclamped face path.
+    pub const TEXTURED_MODEL_PACKED_UNCLAMPED_ELIGIBLE_SUBMITS: u16 = 209;
+    /// Model submits eligible for packed all-front helpers.
+    pub const TEXTURED_MODEL_PACKED_CLAMPED_ELIGIBLE_SUBMITS: u16 = 210;
+    /// Model submits eligible for the generic packed helper only.
+    pub const TEXTURED_MODEL_PACKED_GENERAL_ELIGIBLE_SUBMITS: u16 = 211;
+    /// Model triangles emitted by split/general fallback submission.
+    pub const TEXTURED_MODEL_SPLIT_TRIS: u16 = 212;
+    /// Model triangles skipped because face indices exceeded projected vertex ranges.
+    pub const TEXTURED_MODEL_SKIPPED_TRIS: u16 = 213;
+    /// Model submits that exceeded the projected vertex scratch buffer.
+    pub const TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS: u16 = 214;
+    /// Model submits that exceeded primitive packet storage.
+    pub const TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS: u16 = 215;
+    /// Model submits that exceeded world-command storage.
+    pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 195;
+pub const COUNTER_COUNT: usize = 217;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -510,6 +565,10 @@ pub enum GuestTelemetryKind {
     StageEnd,
     /// A numeric counter was emitted.
     Counter,
+    /// A scheduled task began.
+    TaskBegin,
+    /// A scheduled task ended.
+    TaskEnd,
     /// Unknown event kind preserved for diagnostics.
     Unknown(u8),
 }
@@ -521,6 +580,8 @@ impl GuestTelemetryKind {
             2 => Self::StageBegin,
             3 => Self::StageEnd,
             4 => Self::Counter,
+            5 => Self::TaskBegin,
+            6 => Self::TaskEnd,
             other => Self::Unknown(other),
         }
     }
@@ -767,6 +828,12 @@ pub struct GuestTelemetrySummary {
     pub stage_hits: [u64; STAGE_COUNT],
     /// Largest single completed span per known stage id.
     pub stage_max_cycles: [u64; STAGE_COUNT],
+    /// Total cycles spent in each known scheduled task id.
+    pub task_cycles: [u64; TASK_COUNT],
+    /// Number of completed spans per known scheduled task id.
+    pub task_hits: [u64; TASK_COUNT],
+    /// Largest single completed span per known scheduled task id.
+    pub task_max_cycles: [u64; TASK_COUNT],
     /// Summed counter values per known counter id.
     pub counters: [u64; COUNTER_COUNT],
     /// Largest single value observed per known counter id.
@@ -782,6 +849,9 @@ impl Default for GuestTelemetrySummary {
             stage_cycles: [0; STAGE_COUNT],
             stage_hits: [0; STAGE_COUNT],
             stage_max_cycles: [0; STAGE_COUNT],
+            task_cycles: [0; TASK_COUNT],
+            task_hits: [0; TASK_COUNT],
+            task_max_cycles: [0; TASK_COUNT],
             counters: [0; COUNTER_COUNT],
             counter_max_values: [0; COUNTER_COUNT],
             counter_latest_values: [0; COUNTER_COUNT],
@@ -800,6 +870,7 @@ impl GuestTelemetrySummary {
     /// Add raw events to this summary.
     pub fn add_events(&mut self, events: &[GuestTelemetryEvent]) {
         let mut stage_start: [Option<u64>; STAGE_COUNT] = [None; STAGE_COUNT];
+        let mut task_start: [Option<u64>; TASK_COUNT] = [None; TASK_COUNT];
         for event in events {
             match event.kind {
                 GuestTelemetryKind::FrameBegin => {
@@ -823,6 +894,24 @@ impl GuestTelemetrySummary {
                     self.stage_hits[idx] = self.stage_hits[idx].saturating_add(1);
                     self.stage_max_cycles[idx] = self.stage_max_cycles[idx].max(elapsed);
                 }
+                GuestTelemetryKind::TaskBegin => {
+                    if let Some(slot) = task_start.get_mut(event.id as usize) {
+                        *slot = Some(event.cycles);
+                    }
+                }
+                GuestTelemetryKind::TaskEnd => {
+                    let Some(slot) = task_start.get_mut(event.id as usize) else {
+                        continue;
+                    };
+                    let Some(start) = slot.take() else {
+                        continue;
+                    };
+                    let idx = event.id as usize;
+                    let elapsed = event.cycles.saturating_sub(start);
+                    self.task_cycles[idx] = self.task_cycles[idx].saturating_add(elapsed);
+                    self.task_hits[idx] = self.task_hits[idx].saturating_add(1);
+                    self.task_max_cycles[idx] = self.task_max_cycles[idx].max(elapsed);
+                }
                 GuestTelemetryKind::Counter => {
                     let idx = event.id as usize;
                     if let Some(counter) = self.counters.get_mut(idx) {
@@ -844,6 +933,7 @@ impl GuestTelemetrySummary {
     pub fn has_data(&self) -> bool {
         self.frames > 0
             || self.stage_cycles.iter().any(|&cycles| cycles > 0)
+            || self.task_cycles.iter().any(|&cycles| cycles > 0)
             || self.counters.iter().any(|&value| value > 0)
     }
 }
@@ -886,6 +976,15 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
+        _ => "unknown",
+    }
+}
+
+/// Human-readable task name for host tooling.
+pub fn task_name(id: u16) -> &'static str {
+    match id {
+        task::FIXED_UPDATE => "fixed update",
+        task::VISUAL_RENDER => "visual render",
         _ => "unknown",
     }
 }
@@ -1091,6 +1190,30 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_CAMERA_GLOBAL_X_BIASED => "camera global x",
         counter::ROOM_CAMERA_GLOBAL_Y_BIASED => "camera global y",
         counter::ROOM_CAMERA_GLOBAL_Z_BIASED => "camera global z",
+        counter::TEXTURED_MODEL_CPU_BLEND_VERTICES => "mdl cpu blend verts",
+        counter::TEXTURED_MODEL_PACKED_FACE_CALLS => "mdl packed faces",
+        counter::TEXTURED_MODEL_PACKED_UNCLAMPED_CALLS => "mdl packed unclamped faces",
+        counter::TEXTURED_MODEL_PACKED_CLAMPED_CALLS => "mdl packed clamped faces",
+        counter::TEXTURED_MODEL_PACKED_GENERAL_CALLS => "mdl packed general faces",
+        counter::TEXTURED_MODEL_FALLBACK_FACE_CALLS => "mdl fallback faces",
+        counter::TEXTURED_MODEL_HW_EXTENT_FALLBACKS => "mdl hw extent fallbacks",
+        counter::TEXTURED_MODEL_NEAR_DROPS => "mdl near drops",
+        counter::TEXTURED_MODEL_HW_UNSAFE_DROPS => "mdl hw unsafe drops",
+        counter::TEXTURED_MODEL_FAST_SUBMITTED_TRIS => "mdl fast tris",
+        counter::TEXTURED_MODEL_CPU_BLEND_SUBMITS => "mdl cpu blend submits",
+        counter::TEXTURED_MODEL_PRIMARY_JOINT_SUBMITS => "mdl primary joint submits",
+        counter::TEXTURED_MODEL_ALL_FRONT_SUBMITS => "mdl all front submits",
+        counter::TEXTURED_MODEL_ALL_HW_BOUNDS_SUBMITS => "mdl all hw bounds submits",
+        counter::TEXTURED_MODEL_PACKED_UNCLAMPED_ELIGIBLE_SUBMITS => {
+            "mdl packed unclamped eligible"
+        }
+        counter::TEXTURED_MODEL_PACKED_CLAMPED_ELIGIBLE_SUBMITS => "mdl packed clamped eligible",
+        counter::TEXTURED_MODEL_PACKED_GENERAL_ELIGIBLE_SUBMITS => "mdl packed general eligible",
+        counter::TEXTURED_MODEL_SPLIT_TRIS => "mdl split tris",
+        counter::TEXTURED_MODEL_SKIPPED_TRIS => "mdl skipped tris",
+        counter::TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS => "mdl vertex overflow submits",
+        counter::TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS => "mdl primitive overflow submits",
+        counter::TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS => "mdl command overflow submits",
         _ => "unknown",
     }
 }
@@ -1135,11 +1258,7 @@ mod tests {
     fn telemetry_port_collects_debug_log_lines() {
         let mut telemetry = GuestTelemetry::new();
         assert!(GuestTelemetry::contains(LOG_PHYS));
-        assert!(telemetry.observe_write32(
-            EVENT_PHYS,
-            encode_event(1, 0),
-            90
-        ));
+        assert!(telemetry.observe_write32(EVENT_PHYS, encode_event(1, 0), 90));
         for (i, byte) in b"room cross 1->2\n".iter().copied().enumerate() {
             assert!(telemetry.observe_write32(LOG_PHYS, byte as u32, 100 + i as u64));
         }
@@ -1178,6 +1297,18 @@ mod tests {
                 value: 0,
             },
             GuestTelemetryEvent {
+                cycles: 72,
+                kind: GuestTelemetryKind::TaskBegin,
+                id: task::VISUAL_RENDER,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 120,
+                kind: GuestTelemetryKind::TaskEnd,
+                id: task::VISUAL_RENDER,
+                value: 0,
+            },
+            GuestTelemetryEvent {
                 cycles: 80,
                 kind: GuestTelemetryKind::Counter,
                 id: counter::TRI_PRIMITIVES,
@@ -1200,6 +1331,9 @@ mod tests {
         assert_eq!(summary.frames, 1);
         assert_eq!(summary.stage_cycles[stage::RENDER as usize], 50);
         assert_eq!(summary.stage_hits[stage::RENDER as usize], 1);
+        assert_eq!(summary.task_cycles[task::VISUAL_RENDER as usize], 48);
+        assert_eq!(summary.task_hits[task::VISUAL_RENDER as usize], 1);
+        assert_eq!(summary.task_max_cycles[task::VISUAL_RENDER as usize], 48);
         assert_eq!(summary.counters[counter::TRI_PRIMITIVES as usize], 12);
         assert_eq!(
             summary.counters[counter::VISUAL_MAX_LATENESS_VBLANKS as usize],
@@ -1234,6 +1368,8 @@ mod tests {
         assert_eq!(stage_name(stage::FAR_VISTA), "far vista");
         assert_eq!(stage_name(stage::IMAGE_PROPS), "image props");
         assert_eq!(stage_name(stage::PORTAL_VISIBILITY), "portal visibility");
+        assert_eq!(task_name(task::FIXED_UPDATE), "fixed update");
+        assert_eq!(task_name(task::VISUAL_RENDER), "visual render");
         assert_eq!(
             counter_name(counter::CD_STREAM_BENCH_STATUS),
             "cd stream status"

@@ -16,7 +16,8 @@ use crate::render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, OtFrame, PrimitiveArena, PrimitiveSink,
 };
 use crate::{Angle, WorldVertex, Q12};
-use psx_asset::{Animation, JointPose, Mesh, Model, ModelPart, ModelVertex};
+use core::mem::MaybeUninit;
+use psx_asset::{Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelVertex};
 use psx_gpu::{
     material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
     prim::{TriGouraud, TriTextured, TriTexturedGouraud},
@@ -34,6 +35,15 @@ const PSX_TRI_MAX_DY: i32 = 511;
 const MAX_TEXTURED_HW_SPLIT_DEPTH: u8 = 5;
 const WORLD_COMMAND_NONE: u16 = u16::MAX;
 const GOURAUD_COMMAND_NONE: u16 = u16::MAX;
+/// Compose animated joint matrices on the GTE by default. The CPU path is
+/// retained as a build-time escape hatch for regression testing.
+const MODEL_GTE_JOINT_COMPOSE: bool = option_env!("PSXO_DISABLE_GTE_JOINT_COMPOSE").is_none();
+/// Rotate joint translations on the GTE by default. This keeps the hot
+/// animated-model path on the same coprocessor used for vertex projection.
+const MODEL_GTE_JOINT_TRANSLATION: bool =
+    MODEL_GTE_JOINT_COMPOSE && option_env!("PSXO_DISABLE_GTE_JOINT_TRANSLATION").is_none();
+const MODEL_GTE_JOINT_PACKED_TRANSLATION: bool =
+    option_env!("PSXO_GTE_JOINT_PACKED_TRANSLATION").is_some();
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum WorldCommandOrdering {
@@ -41,6 +51,18 @@ enum WorldCommandOrdering {
     DeferredSorted,
     DeferredSlotSorted,
     Bucketed,
+}
+
+impl WorldCommandOrdering {
+    #[inline(always)]
+    const fn uses_slot_heads(self) -> bool {
+        matches!(self, Self::LinkedSorted | Self::DeferredSlotSorted)
+    }
+
+    #[inline(always)]
+    const fn uses_slot_tails(self) -> bool {
+        matches!(self, Self::DeferredSlotSorted)
+    }
 }
 
 /// Aggregated micro-profile for cached textured-Gouraud triangle submission.
@@ -716,6 +738,72 @@ impl WorldCamera {
     }
 }
 
+/// GTE-backed projector for repeated world-space projections from one camera.
+///
+/// Constructing this loads the camera's world-to-view transform and projection
+/// registers. Callers that project many independent points or quads can then
+/// reuse that loaded state instead of doing the same fixed-point matrix work on
+/// the CPU for every vertex.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LoadedWorldCameraGte {
+    camera: WorldCamera,
+}
+
+impl LoadedWorldCameraGte {
+    /// Load `camera` into the GTE and return a projector bound to that state.
+    #[inline]
+    pub fn load(camera: WorldCamera) -> Self {
+        load_world_camera_gte(camera);
+        Self { camera }
+    }
+
+    /// Return the camera this projector was loaded from.
+    #[inline(always)]
+    pub const fn camera(self) -> WorldCamera {
+        self.camera
+    }
+
+    /// Transform and project one world-space vertex through the loaded GTE.
+    ///
+    /// Vertices outside the GTE's signed 16-bit input range fall back to the
+    /// CPU path, preserving behaviour for very large authored worlds.
+    #[inline]
+    pub fn project_world(self, vertex: WorldVertex) -> Option<ProjectedVertex> {
+        let Some(input) = world_vertex_gte_input(vertex) else {
+            return self.camera.project_world(vertex);
+        };
+        projected_option_from_gte(
+            scene::project_vertex_scheduled(input),
+            self.camera.projection.near_z,
+        )
+    }
+
+    /// Transform and project a world-space quad through the loaded GTE.
+    ///
+    /// The first three vertices are projected with `RTPT`; the fourth uses
+    /// `RTPS`. If any vertex is behind the near plane this returns `None`,
+    /// matching [`WorldCamera::project_world_quad`].
+    #[inline]
+    pub fn project_world_quad(self, verts: [WorldVertex; 4]) -> Option<[ProjectedVertex; 4]> {
+        let a = world_vertex_gte_input(verts[0]);
+        let b = world_vertex_gte_input(verts[1]);
+        let c = world_vertex_gte_input(verts[2]);
+        let d = world_vertex_gte_input(verts[3]);
+        let near_z = self.camera.projection.near_z;
+        if let (Some(a), Some(b), Some(c), Some(d)) = (a, b, c, d) {
+            let tri = scene::project_triangle_scheduled(a, b, c);
+            let fourth = scene::project_vertex_scheduled(d);
+            return Some([
+                projected_option_from_gte(tri[0], near_z)?,
+                projected_option_from_gte(tri[1], near_z)?,
+                projected_option_from_gte(tri[2], near_z)?,
+                projected_option_from_gte(fourth, near_z)?,
+            ]);
+        }
+        self.camera.project_world_quad(verts)
+    }
+}
+
 pub(crate) fn project_world_vertex_indices_gte(
     camera: WorldCamera,
     vertices: &[WorldVertex],
@@ -996,6 +1084,26 @@ pub struct TexturedModelRenderStats {
     /// Triangles dropped before packet emission because they were
     /// behind the near plane or could not be made hardware-legal.
     pub dropped_triangles: u16,
+    /// Vertices projected through the CPU blend path.
+    pub cpu_blended_vertices: u16,
+    /// Faces routed through any packed fast path.
+    pub packed_face_calls: u16,
+    /// Faces routed through the packed unclamped helper.
+    pub packed_unclamped_face_calls: u16,
+    /// Faces routed through packed helpers that still clamp screen coordinates.
+    pub packed_clamped_face_calls: u16,
+    /// Faces routed through the generic packed helper.
+    pub packed_general_face_calls: u16,
+    /// Faces routed through the fully general helper.
+    pub fallback_face_calls: u16,
+    /// Packed faces that fell back to split/general submission for hardware extents.
+    pub hw_extent_fallbacks: u16,
+    /// Faces dropped by near-plane checks.
+    pub near_plane_dropped_faces: u16,
+    /// Faces dropped by final hardware-safety checks.
+    pub hw_unsafe_dropped_faces: u16,
+    /// Triangles submitted through packed fast paths.
+    pub fast_submitted_triangles: u16,
     /// True if the vertex scratch buffer was too small for any part.
     pub vertex_overflow: bool,
     /// True if the primitive packet arena filled up.
@@ -1013,8 +1121,8 @@ pub struct TexturedModelRenderStats {
 pub struct WorldRenderPass<'a, 'ot, const OT_DEPTH: usize> {
     ot: &'a mut OtFrame<'ot, OT_DEPTH>,
     commands: &'a mut [WorldTriCommand],
-    slot_heads: [u16; OT_DEPTH],
-    slot_tails: [u16; OT_DEPTH],
+    slot_heads: MaybeUninit<[u16; OT_DEPTH]>,
+    slot_tails: MaybeUninit<[u16; OT_DEPTH]>,
     command_len: usize,
     next_order: usize,
     ordering: WorldCommandOrdering,
@@ -1026,8 +1134,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
+            slot_tails: MaybeUninit::uninit(),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::LinkedSorted,
@@ -1046,8 +1154,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::uninit(),
+            slot_tails: MaybeUninit::uninit(),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::DeferredSorted,
@@ -1067,8 +1175,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
+            slot_tails: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::DeferredSlotSorted,
@@ -1088,8 +1196,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::uninit(),
+            slot_tails: MaybeUninit::uninit(),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::Bucketed,
@@ -1099,6 +1207,38 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Number of world/model triangle commands queued in this pass.
     pub const fn command_len(&self) -> usize {
         self.command_len
+    }
+
+    #[inline(always)]
+    fn slot_heads(&self) -> &[u16; OT_DEPTH] {
+        debug_assert!(self.ordering.uses_slot_heads());
+        // SAFETY: constructors initialize `slot_heads` exactly for ordering
+        // modes that access per-slot linked lists.
+        unsafe { self.slot_heads.assume_init_ref() }
+    }
+
+    #[inline(always)]
+    fn slot_heads_mut(&mut self) -> &mut [u16; OT_DEPTH] {
+        debug_assert!(self.ordering.uses_slot_heads());
+        // SAFETY: constructors initialize `slot_heads` exactly for ordering
+        // modes that access per-slot linked lists.
+        unsafe { self.slot_heads.assume_init_mut() }
+    }
+
+    #[inline(always)]
+    fn slot_tails(&self) -> &[u16; OT_DEPTH] {
+        debug_assert!(self.ordering.uses_slot_tails());
+        // SAFETY: constructors initialize `slot_tails` exactly for ordering
+        // modes that append commands into per-slot linked lists.
+        unsafe { self.slot_tails.assume_init_ref() }
+    }
+
+    #[inline(always)]
+    fn slot_tails_mut(&mut self) -> &mut [u16; OT_DEPTH] {
+        debug_assert!(self.ordering.uses_slot_tails());
+        // SAFETY: constructors initialize `slot_tails` exactly for ordering
+        // modes that append commands into per-slot linked lists.
+        unsafe { self.slot_tails.assume_init_mut() }
     }
 
     /// Submit a projected textured triangle.
@@ -2612,6 +2752,16 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
         let camera_view = camera_gte_view_matrix(camera);
+        let view_instance = if MODEL_GTE_JOINT_COMPOSE || MODEL_GTE_JOINT_TRANSLATION {
+            mat3_mul_q12(&camera_view, &instance_rotation)
+        } else {
+            Mat3I16::IDENTITY
+        };
+        let view_origin_translation = if MODEL_GTE_JOINT_TRANSLATION {
+            compute_view_origin_translation(camera_view, origin, camera.position)
+        } else {
+            Vec3I32::ZERO
+        };
         load_world_projection_gte(camera.projection);
 
         let joint_count = (model.joint_count() as usize).min(joint_view_transforms.len());
@@ -2623,22 +2773,68 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 .enumerate()
                 .take(joint_count)
             {
-                *joint_view_transform = match sample.pose(joint as u16) {
-                    Some(pose) => {
-                        let pose = apply_model_pose_translation(pose, pose_translation);
-                        let (rotation, translation) = textured_model_part_gte_transform_with_view(
-                            camera_view,
-                            camera.position,
-                            pose,
-                            instance_rotation,
-                            local_to_world,
-                            origin,
-                        );
-                        JointViewTransform {
-                            rotation,
-                            translation,
-                        }
-                    }
+                let joint_index = joint as u16;
+                let joint_transform =
+                    if MODEL_GTE_JOINT_TRANSLATION && MODEL_GTE_JOINT_PACKED_TRANSLATION {
+                        sample
+                            .gte_pose(joint_index)
+                            .and_then(|pose| {
+                                textured_model_part_gte_transform_with_view_gte_packed_translation(
+                                    view_instance,
+                                    view_origin_translation,
+                                    pose,
+                                    pose_translation,
+                                    local_to_world,
+                                )
+                            })
+                            .or_else(|| {
+                                sample.pose(joint_index).map(|pose| {
+                                    textured_model_part_gte_transform_with_view_gte_translation(
+                                        view_instance,
+                                        view_origin_translation,
+                                        apply_model_pose_translation(pose, pose_translation),
+                                        local_to_world,
+                                    )
+                                })
+                            })
+                    } else {
+                        sample.pose(joint_index).map(|pose| {
+                            let pose = apply_model_pose_translation(pose, pose_translation);
+                            if MODEL_GTE_JOINT_TRANSLATION {
+                                textured_model_part_gte_transform_with_view_gte_translation(
+                                    view_instance,
+                                    view_origin_translation,
+                                    pose,
+                                    local_to_world,
+                                )
+                            } else if MODEL_GTE_JOINT_COMPOSE {
+                                textured_model_part_gte_transform_with_view_gte_compose(
+                                    camera_view,
+                                    view_instance,
+                                    camera.position,
+                                    pose,
+                                    instance_rotation,
+                                    local_to_world,
+                                    origin,
+                                )
+                            } else {
+                                textured_model_part_gte_transform_with_view(
+                                    camera_view,
+                                    camera.position,
+                                    pose,
+                                    instance_rotation,
+                                    local_to_world,
+                                    origin,
+                                )
+                            }
+                        })
+                    };
+
+                *joint_view_transform = match joint_transform {
+                    Some((rotation, translation)) => JointViewTransform {
+                        rotation,
+                        translation,
+                    },
                     None => JointViewTransform::default(),
                 };
             }
@@ -2690,6 +2886,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             while global_index < part_end {
                 let vertex = vertices[global_index];
                 if blend_vertices && model_vertex_uses_cpu_blend(vertex, joint_count) {
+                    stats.cpu_blended_vertices = stats.cpu_blended_vertices.saturating_add(1);
                     let projected = project_blended_textured_model_vertex(
                         vertex,
                         primary,
@@ -2836,6 +3033,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     model.part_count(),
                     project_count,
                     faces_considered,
+                    blend_vertices,
+                    all_projected_vertices_in_front,
+                    all_projected_vertices_inside_hw_bounds,
+                    packed_back_average_unclamped_faces,
+                    packed_back_in_front_faces,
+                    packed_fast_faces,
+                    &stats,
                 );
                 return stats;
             }
@@ -2847,6 +3051,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             model.part_count(),
             project_count,
             faces_considered,
+            blend_vertices,
+            all_projected_vertices_in_front,
+            all_projected_vertices_inside_hw_bounds,
+            packed_back_average_unclamped_faces,
+            packed_back_in_front_faces,
+            packed_fast_faces,
+            &stats,
         );
 
         stats
@@ -2872,6 +3083,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
+        stats.packed_face_calls = stats.packed_face_calls.saturating_add(1);
+        stats.packed_unclamped_face_calls = stats.packed_unclamped_face_calls.saturating_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -2884,7 +3097,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         }
 
         if projected_triangle_preclamped_hw_extent_safe(projected) {
-            return self.submit_projected_model_triangle_preclamped_packed_average_fast(
+            let before = stats.submitted_triangles;
+            let overflow = self.submit_projected_model_triangle_preclamped_packed_average_fast(
                 triangles,
                 projected,
                 face.uv_words,
@@ -2892,8 +3106,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 options,
                 stats,
             );
+            stats.fast_submitted_triangles = stats
+                .fast_submitted_triangles
+                .saturating_add(stats.submitted_triangles.saturating_sub(before));
+            return overflow;
         }
 
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.saturating_add(1);
         let uvs = face.uvs();
         let textured = [
             ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
@@ -2926,6 +3145,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
+        stats.packed_face_calls = stats.packed_face_calls.saturating_add(1);
+        stats.packed_clamped_face_calls = stats.packed_clamped_face_calls.saturating_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -2943,7 +3164,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             clamp_projected_vertex(projected[2]),
         ];
         if projected_triangle_preclamped_hw_extent_safe(projected) {
-            return self.submit_projected_model_triangle_preclamped_packed_average_fast(
+            let before = stats.submitted_triangles;
+            let overflow = self.submit_projected_model_triangle_preclamped_packed_average_fast(
                 triangles,
                 projected,
                 face.uv_words,
@@ -2951,8 +3173,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 options,
                 stats,
             );
+            stats.fast_submitted_triangles = stats
+                .fast_submitted_triangles
+                .saturating_add(stats.submitted_triangles.saturating_sub(before));
+            return overflow;
         }
 
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.saturating_add(1);
         let uvs = face.uvs();
         let textured = [
             ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
@@ -2985,6 +3212,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
+        stats.packed_face_calls = stats.packed_face_calls.saturating_add(1);
+        stats.packed_clamped_face_calls = stats.packed_clamped_face_calls.saturating_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -3002,7 +3231,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             clamp_projected_vertex(projected[2]),
         ];
         if projected_triangle_preclamped_hw_extent_safe(projected) {
-            return self.submit_projected_model_triangle_preclamped_packed_fast(
+            let before = stats.submitted_triangles;
+            let overflow = self.submit_projected_model_triangle_preclamped_packed_fast(
                 triangles,
                 projected,
                 face.uv_words,
@@ -3010,8 +3240,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 options,
                 stats,
             );
+            stats.fast_submitted_triangles = stats
+                .fast_submitted_triangles
+                .saturating_add(stats.submitted_triangles.saturating_sub(before));
+            return overflow;
         }
 
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.saturating_add(1);
         let uvs = face.uvs();
         let textured = [
             ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
@@ -3046,6 +3281,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
+        stats.packed_face_calls = stats.packed_face_calls.saturating_add(1);
+        stats.packed_general_face_calls = stats.packed_general_face_calls.saturating_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -3055,6 +3292,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if !all_projected_vertices_in_front && projected_model_face_crosses_near(projected, near_z)
         {
             stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+            stats.near_plane_dropped_faces = stats.near_plane_dropped_faces.saturating_add(1);
             return false;
         }
 
@@ -3069,7 +3307,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             clamp_projected_vertex(projected[2]),
         ];
         if projected_triangle_preclamped_hw_extent_safe(projected) {
-            return self.submit_projected_model_triangle_preclamped_packed_fast(
+            let before = stats.submitted_triangles;
+            let overflow = self.submit_projected_model_triangle_preclamped_packed_fast(
                 triangles,
                 projected,
                 face.uv_words,
@@ -3077,8 +3316,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 options,
                 stats,
             );
+            stats.fast_submitted_triangles = stats
+                .fast_submitted_triangles
+                .saturating_add(stats.submitted_triangles.saturating_sub(before));
+            return overflow;
         }
 
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.saturating_add(1);
         let uvs = face.uvs();
         let textured = [
             ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
@@ -3113,6 +3357,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
+        stats.fallback_face_calls = stats.fallback_face_calls.saturating_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -3122,6 +3367,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if !all_projected_vertices_in_front && projected_model_face_crosses_near(projected, near_z)
         {
             stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+            stats.near_plane_dropped_faces = stats.near_plane_dropped_faces.saturating_add(1);
             return false;
         }
 
@@ -3140,7 +3386,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             if options.textured_split_max_edge == 0
                 && projected_triangle_preclamped_hw_extent_safe(projected)
             {
-                return self.submit_projected_model_triangle_preclamped_packed_fast(
+                let before = stats.submitted_triangles;
+                let overflow = self.submit_projected_model_triangle_preclamped_packed_fast(
                     triangles,
                     projected,
                     face.uv_words,
@@ -3148,6 +3395,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     options,
                     stats,
                 );
+                stats.fast_submitted_triangles = stats
+                    .fast_submitted_triangles
+                    .saturating_add(stats.submitted_triangles.saturating_sub(before));
+                return overflow;
             }
             let uvs = face.uvs();
             let textured = [
@@ -3278,6 +3529,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         ];
         if !projected_triangle_hw_safe(verts) {
             stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+            stats.hw_unsafe_dropped_faces = stats.hw_unsafe_dropped_faces.saturating_add(1);
             return false;
         }
         if self.command_len >= self.commands.len() {
@@ -3446,13 +3698,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
         let command_link = command_index as u16;
-        let tail = self.slot_tails[slot];
+        let tail = self.slot_tails()[slot];
         if tail == WORLD_COMMAND_NONE {
-            self.slot_heads[slot] = command_link;
+            self.slot_heads_mut()[slot] = command_link;
         } else {
             self.commands[tail as usize].next = command_link;
         }
-        self.slot_tails[slot] = command_link;
+        self.slot_tails_mut()[slot] = command_link;
     }
 
     fn insert_command_in_slot(&mut self, command_index: usize) {
@@ -3462,7 +3714,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
         let command_link = command_index as u16;
-        let head = self.slot_heads[slot];
+        let head = self.slot_heads()[slot];
         if head == WORLD_COMMAND_NONE
             || should_insert_world_before(
                 self.commands[command_index],
@@ -3470,7 +3722,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             )
         {
             self.commands[command_index].next = head;
-            self.slot_heads[slot] = command_link;
+            self.slot_heads_mut()[slot] = command_link;
             return;
         }
 
@@ -3494,8 +3746,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn sort_slot_links(&mut self) {
         let mut slot = 0;
         while slot < OT_DEPTH {
-            self.slot_heads[slot] = self.merge_sort_slot_links(self.slot_heads[slot]);
-            self.slot_tails[slot] = WORLD_COMMAND_NONE;
+            let head = self.slot_heads()[slot];
+            let sorted = self.merge_sort_slot_links(head);
+            self.slot_heads_mut()[slot] = sorted;
+            self.slot_tails_mut()[slot] = WORLD_COMMAND_NONE;
             slot += 1;
         }
     }
@@ -3625,7 +3879,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let mut slot = 0;
         while slot < OT_DEPTH {
-            let mut command_index = self.slot_heads[slot];
+            let mut command_index = self.slot_heads()[slot];
             while command_index != WORLD_COMMAND_NONE {
                 let command = self.commands[command_index as usize];
                 if !command.packet_ptr.is_null() {
@@ -4212,6 +4466,295 @@ fn textured_model_part_gte_transform_with_view(
     (rotation, translation)
 }
 
+fn textured_model_part_gte_transform_with_view_gte_compose(
+    view: Mat3I16,
+    view_instance: Mat3I16,
+    camera_position: WorldVertex,
+    pose: JointPose,
+    instance_rotation: Mat3I16,
+    local_to_world: LocalToWorldScale,
+    origin: WorldVertex,
+) -> (Mat3I16, Vec3I32) {
+    let model = scaled_pose_matrix(pose, local_to_world);
+    let rotation = gte_compose_joint_rotation(view_instance, model);
+
+    // Keep translation on the CPU for now. Cooked pose translations are
+    // i32 model-local values, while MVMVA takes i16 vector inputs.
+    let scaled_pose_translation = Vec3I32::new(
+        local_to_world.apply(pose.translation.x),
+        local_to_world.apply(pose.translation.y),
+        local_to_world.apply(pose.translation.z),
+    );
+    let rotated_pose_translation =
+        rotate_translation_q12(&instance_rotation, scaled_pose_translation);
+
+    let world_translation = WorldVertex::new(
+        origin.x.saturating_add(rotated_pose_translation.x),
+        origin.y.saturating_add(rotated_pose_translation.y),
+        origin.z.saturating_add(rotated_pose_translation.z),
+    );
+    let delta = WorldVertex::new(
+        world_translation.x.saturating_sub(camera_position.x),
+        world_translation.y.saturating_sub(camera_position.y),
+        world_translation.z.saturating_sub(camera_position.z),
+    );
+    let translation = Vec3I32::new(
+        dot_world_q12(view.m[0], delta),
+        dot_world_q12(view.m[1], delta),
+        dot_world_q12(view.m[2], delta),
+    );
+
+    (rotation, translation)
+}
+
+fn textured_model_part_gte_transform_with_view_gte_translation(
+    view_instance: Mat3I16,
+    view_origin_translation: Vec3I32,
+    pose: JointPose,
+    local_to_world: LocalToWorldScale,
+) -> (Mat3I16, Vec3I32) {
+    let model = scaled_pose_matrix(pose, local_to_world);
+    let scaled_pose_translation = Vec3I32::new(
+        local_to_world.apply(pose.translation.x),
+        local_to_world.apply(pose.translation.y),
+        local_to_world.apply(pose.translation.z),
+    );
+    let (pose_translation, pose_translation_shift) =
+        quantize_pose_translation_for_gte(scaled_pose_translation);
+    let (rotation, view_pose_translation) =
+        gte_compose_joint_rotation_and_translation(view_instance, model, pose_translation);
+    let translation = Vec3I32::new(
+        view_origin_translation
+            .x
+            .saturating_add(rescale_gte_pose_translation(
+                view_pose_translation.x,
+                pose_translation_shift,
+            )),
+        view_origin_translation
+            .y
+            .saturating_add(rescale_gte_pose_translation(
+                view_pose_translation.y,
+                pose_translation_shift,
+            )),
+        view_origin_translation
+            .z
+            .saturating_add(rescale_gte_pose_translation(
+                view_pose_translation.z,
+                pose_translation_shift,
+            )),
+    );
+
+    (rotation, translation)
+}
+
+fn textured_model_part_gte_transform_with_view_gte_packed_translation(
+    view_instance: Mat3I16,
+    view_origin_translation: Vec3I32,
+    pose: GteJointPose,
+    pose_translation: ModelPoseTranslation,
+    local_to_world: LocalToWorldScale,
+) -> Option<(Mat3I16, Vec3I32)> {
+    if local_to_world != LocalToWorldScale::IDENTITY {
+        return None;
+    }
+    let pose_translation = add_model_pose_translation_to_packed(
+        pose.translation,
+        pose_translation,
+        pose.translation_shift,
+    )?;
+    let (rotation, view_pose_translation) = gte_compose_joint_rotation_and_translation(
+        view_instance,
+        Mat3I16 { m: pose.matrix },
+        pose_translation,
+    );
+    let translation = Vec3I32::new(
+        view_origin_translation
+            .x
+            .saturating_add(rescale_gte_pose_translation(
+                view_pose_translation.x,
+                pose.translation_shift,
+            )),
+        view_origin_translation
+            .y
+            .saturating_add(rescale_gte_pose_translation(
+                view_pose_translation.y,
+                pose.translation_shift,
+            )),
+        view_origin_translation
+            .z
+            .saturating_add(rescale_gte_pose_translation(
+                view_pose_translation.z,
+                pose.translation_shift,
+            )),
+    );
+
+    Some((rotation, translation))
+}
+
+fn gte_compose_joint_rotation(view_instance: Mat3I16, model: Mat3I16) -> Mat3I16 {
+    scene::load_rotation(&view_instance);
+    scene::load_translation(Vec3I32::ZERO);
+
+    let c0 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][0],
+        model.m[1][0],
+        model.m[2][0],
+    ));
+    let c1 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][1],
+        model.m[1][1],
+        model.m[2][1],
+    ));
+    let c2 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][2],
+        model.m[1][2],
+        model.m[2][2],
+    ));
+
+    Mat3I16 {
+        m: [
+            [clamp_i16(c0.x), clamp_i16(c1.x), clamp_i16(c2.x)],
+            [clamp_i16(c0.y), clamp_i16(c1.y), clamp_i16(c2.y)],
+            [clamp_i16(c0.z), clamp_i16(c1.z), clamp_i16(c2.z)],
+        ],
+    }
+}
+
+fn gte_compose_joint_rotation_and_translation(
+    view_instance: Mat3I16,
+    model: Mat3I16,
+    pose_translation: Vec3I16,
+) -> (Mat3I16, Vec3I32) {
+    scene::load_rotation(&view_instance);
+    scene::load_translation(Vec3I32::ZERO);
+
+    let c0 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][0],
+        model.m[1][0],
+        model.m[2][0],
+    ));
+    let c1 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][1],
+        model.m[1][1],
+        model.m[2][1],
+    ));
+    let c2 = scene::transform_vertex_scheduled(Vec3I16::new(
+        model.m[0][2],
+        model.m[1][2],
+        model.m[2][2],
+    ));
+    let translation = scene::transform_vertex_scheduled(pose_translation);
+
+    (
+        Mat3I16 {
+            m: [
+                [clamp_i16(c0.x), clamp_i16(c1.x), clamp_i16(c2.x)],
+                [clamp_i16(c0.y), clamp_i16(c1.y), clamp_i16(c2.y)],
+                [clamp_i16(c0.z), clamp_i16(c1.z), clamp_i16(c2.z)],
+            ],
+        },
+        translation,
+    )
+}
+
+fn compute_view_origin_translation(
+    view: Mat3I16,
+    origin: WorldVertex,
+    camera_position: WorldVertex,
+) -> Vec3I32 {
+    let delta = WorldVertex::new(
+        origin.x.saturating_sub(camera_position.x),
+        origin.y.saturating_sub(camera_position.y),
+        origin.z.saturating_sub(camera_position.z),
+    );
+    Vec3I32::new(
+        dot_world_q12(view.m[0], delta),
+        dot_world_q12(view.m[1], delta),
+        dot_world_q12(view.m[2], delta),
+    )
+}
+
+fn quantize_pose_translation_for_gte(translation: Vec3I32) -> (Vec3I16, u8) {
+    let mut max_abs = abs_i32_saturating(translation.x)
+        .max(abs_i32_saturating(translation.y))
+        .max(abs_i32_saturating(translation.z));
+    let mut shift = 0u8;
+    while max_abs > i16::MAX as i32 && shift < 15 {
+        max_abs = (max_abs + 1) >> 1;
+        shift += 1;
+    }
+
+    (
+        Vec3I16::new(
+            clamp_i16(round_shift_i32(translation.x, shift)),
+            clamp_i16(round_shift_i32(translation.y, shift)),
+            clamp_i16(round_shift_i32(translation.z, shift)),
+        ),
+        shift,
+    )
+}
+
+fn add_model_pose_translation_to_packed(
+    base: Vec3I16,
+    offset: ModelPoseTranslation,
+    shift: u8,
+) -> Option<Vec3I16> {
+    Some(Vec3I16::new(
+        checked_add_packed_translation(base.x, offset.x, shift)?,
+        checked_add_packed_translation(base.y, offset.y, shift)?,
+        checked_add_packed_translation(base.z, offset.z, shift)?,
+    ))
+}
+
+fn checked_add_packed_translation(base: i16, offset: i32, shift: u8) -> Option<i16> {
+    let packed_offset = exact_shift_i32(offset, shift)?;
+    let value = base as i32 + packed_offset;
+    if value < i16::MIN as i32 || value > i16::MAX as i32 {
+        None
+    } else {
+        Some(value as i16)
+    }
+}
+
+fn exact_shift_i32(value: i32, shift: u8) -> Option<i32> {
+    if shift == 0 {
+        return Some(value);
+    }
+    let mask = (1i32 << shift) - 1;
+    if value & mask == 0 {
+        Some(value >> shift)
+    } else {
+        None
+    }
+}
+
+fn abs_i32_saturating(value: i32) -> i32 {
+    if value == i32::MIN {
+        i32::MAX
+    } else if value < 0 {
+        -value
+    } else {
+        value
+    }
+}
+
+fn round_shift_i32(value: i32, shift: u8) -> i32 {
+    if shift == 0 {
+        return value;
+    }
+    let value = value as i64;
+    let half = 1i64 << (shift - 1);
+    if value >= 0 {
+        ((value + half) >> shift) as i32
+    } else {
+        -(((-value + half) >> shift) as i32)
+    }
+}
+
+fn rescale_gte_pose_translation(value: i32, shift: u8) -> i32 {
+    value.saturating_mul(1i32 << shift)
+}
+
 /// Apply a Q12 rotation matrix to an i32 translation vector.
 /// Runtime pose translations are model-local and bounded by cooked
 /// asset scale, so keep this on the PS1's native 32-bit fast path.
@@ -4361,6 +4904,15 @@ fn project_gte_model_vertex(vertex: ModelVertex) -> ProjectedVertex {
 #[inline]
 fn projected_from_gte(projected: scene::Projected) -> ProjectedVertex {
     ProjectedVertex::new(projected.sx, projected.sy, projected.sz as i32)
+}
+
+#[inline]
+fn projected_option_from_gte(projected: scene::Projected, near_z: i32) -> Option<ProjectedVertex> {
+    if (projected.sz as i32) >= near_z {
+        Some(projected_from_gte(projected))
+    } else {
+        None
+    }
 }
 
 #[inline]
@@ -4758,6 +5310,13 @@ fn emit_textured_model_detail_counters(
     part_count: u16,
     project_count: usize,
     faces_considered: u32,
+    blend_vertices: bool,
+    all_projected_vertices_in_front: bool,
+    all_projected_vertices_inside_hw_bounds: bool,
+    packed_back_average_unclamped_faces: bool,
+    packed_back_in_front_faces: bool,
+    packed_fast_faces: bool,
+    stats: &TexturedModelRenderStats,
 ) {
     crate::telemetry::counter(
         crate::telemetry::counter::TEXTURED_MODEL_JOINTS,
@@ -4775,6 +5334,106 @@ fn emit_textured_model_detail_counters(
         crate::telemetry::counter::TEXTURED_MODEL_FACES,
         faces_considered,
     );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_CPU_BLEND_VERTICES,
+        stats.cpu_blended_vertices as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PACKED_FACE_CALLS,
+        stats.packed_face_calls as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PACKED_UNCLAMPED_CALLS,
+        stats.packed_unclamped_face_calls as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PACKED_CLAMPED_CALLS,
+        stats.packed_clamped_face_calls as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PACKED_GENERAL_CALLS,
+        stats.packed_general_face_calls as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_FALLBACK_FACE_CALLS,
+        stats.fallback_face_calls as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_HW_EXTENT_FALLBACKS,
+        stats.hw_extent_fallbacks as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_NEAR_DROPS,
+        stats.near_plane_dropped_faces as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_HW_UNSAFE_DROPS,
+        stats.hw_unsafe_dropped_faces as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_FAST_SUBMITTED_TRIS,
+        stats.fast_submitted_triangles as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_SPLIT_TRIS,
+        stats.split_triangles as u32,
+    );
+    emit_nonzero_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_SKIPPED_TRIS,
+        stats.skipped_triangles as u32,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_CPU_BLEND_SUBMITS,
+        blend_vertices,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PRIMARY_JOINT_SUBMITS,
+        !blend_vertices,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_ALL_FRONT_SUBMITS,
+        all_projected_vertices_in_front,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_ALL_HW_BOUNDS_SUBMITS,
+        all_projected_vertices_inside_hw_bounds,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PACKED_UNCLAMPED_ELIGIBLE_SUBMITS,
+        packed_back_average_unclamped_faces,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PACKED_CLAMPED_ELIGIBLE_SUBMITS,
+        packed_back_in_front_faces && !packed_back_average_unclamped_faces,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PACKED_GENERAL_ELIGIBLE_SUBMITS,
+        packed_fast_faces && !packed_back_in_front_faces,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS,
+        stats.vertex_overflow,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS,
+        stats.primitive_overflow,
+    );
+    emit_bool_counter(
+        crate::telemetry::counter::TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS,
+        stats.command_overflow,
+    );
+}
+
+fn emit_nonzero_counter(counter_id: u16, value: u32) {
+    if value != 0 {
+        crate::telemetry::counter(counter_id, value);
+    }
+}
+
+fn emit_bool_counter(counter_id: u16, value: bool) {
+    if value {
+        crate::telemetry::counter(counter_id, 1);
+    }
 }
 
 fn clamp_i16(value: i32) -> i16 {
@@ -4996,10 +5655,35 @@ mod tests {
         );
 
         assert_eq!(pass.command_len, 3);
-        assert_eq!(pass.slot_heads[4], WORLD_COMMAND_NONE);
+        assert!(!pass.ordering.uses_slot_heads());
+        assert!(!pass.ordering.uses_slot_tails());
         assert_eq!(pass.commands[0].next, WORLD_COMMAND_NONE);
         assert_eq!(pass.commands[1].next, WORLD_COMMAND_NONE);
         assert_eq!(pass.commands[2].next, WORLD_COMMAND_NONE);
+    }
+
+    #[test]
+    fn deferred_world_pass_does_not_use_slot_links() {
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 1];
+        let pass = WorldRenderPass::new_deferred_sorted(&mut ot, &mut commands);
+
+        assert!(!pass.ordering.uses_slot_heads());
+        assert!(!pass.ordering.uses_slot_tails());
+    }
+
+    #[test]
+    fn slot_sorted_world_pass_initializes_slot_links() {
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 1];
+        let pass = WorldRenderPass::new_deferred_slot_sorted(&mut ot, &mut commands);
+
+        assert!(pass.ordering.uses_slot_heads());
+        assert!(pass.ordering.uses_slot_tails());
+        assert_eq!(pass.slot_heads()[4], WORLD_COMMAND_NONE);
+        assert_eq!(pass.slot_tails()[4], WORLD_COMMAND_NONE);
     }
 
     /// The canonical quad split must always share the `0`–`2`
@@ -5380,6 +6064,30 @@ mod tests {
     }
 
     #[test]
+    fn loaded_world_camera_gte_projects_quad_like_cpu() {
+        let projection = WorldProjection::new(160, 118, 320, 48);
+        let target = WorldVertex::new(0, 128, 0);
+        let camera = WorldCamera::orbit_yaw(projection, target, 512, 1536, Angle::from_q12(170));
+        let quad = [
+            WorldVertex::new(-128, 320, 64),
+            WorldVertex::new(128, 320, 64),
+            WorldVertex::new(128, 64, 64),
+            WorldVertex::new(-128, 64, 64),
+        ];
+
+        let cpu = camera.project_world_quad(quad).expect("quad in front");
+        let gte = LoadedWorldCameraGte::load(camera)
+            .project_world_quad(quad)
+            .expect("quad in front");
+
+        for i in 0..4 {
+            assert!((gte[i].sx - cpu[i].sx).abs() <= 2);
+            assert!((gte[i].sy - cpu[i].sy).abs() <= 2);
+            assert!((gte[i].sz - cpu[i].sz).abs() <= 2);
+        }
+    }
+
+    #[test]
     fn textured_model_gte_transform_matches_world_camera_projection() {
         let projection = WorldProjection::new(160, 118, 320, 48);
         let target = WorldVertex::new(0, 512, 0);
@@ -5458,6 +6166,110 @@ mod tests {
         let gte_sy = projection.screen_y as i32 + (gte_y * projection.focal_length) / gte_z;
         assert_close_i32(gte_sx, cpu_projected.sx as i32, 1);
         assert_close_i32(gte_sy, cpu_projected.sy as i32, 1);
+    }
+
+    #[test]
+    fn gte_joint_compose_matches_cpu_joint_rotation_path() {
+        let projection = WorldProjection::new(160, 118, 320, 48);
+        let target = WorldVertex::new(80, 256, -48);
+        let camera = WorldCamera::orbit_yaw(projection, target, 960, 1536, Angle::from_q12(337));
+        let view = camera_gte_view_matrix(camera);
+        let instance_rotation = Mat3I16::rotate_y(704).mul(&Mat3I16::rotate_x(192));
+        let view_instance = mat3_mul_q12(&view, &instance_rotation);
+        let pose = JointPose {
+            matrix: Mat3I16::rotate_z(384).mul(&Mat3I16::rotate_y(256)).m,
+            translation: Vec3I32::new(320, -128, 512),
+        };
+        let origin = WorldVertex::new(384, 768, -256);
+
+        let (cpu_rotation, cpu_translation) = textured_model_part_gte_transform_with_view(
+            view,
+            camera.position,
+            pose,
+            instance_rotation,
+            LocalToWorldScale::IDENTITY,
+            origin,
+        );
+        let (gte_rotation, gte_translation) =
+            textured_model_part_gte_transform_with_view_gte_compose(
+                view,
+                view_instance,
+                camera.position,
+                pose,
+                instance_rotation,
+                LocalToWorldScale::IDENTITY,
+                origin,
+            );
+
+        let mut row = 0usize;
+        while row < 3 {
+            let mut col = 0usize;
+            while col < 3 {
+                assert_close_i32(
+                    gte_rotation.m[row][col] as i32,
+                    cpu_rotation.m[row][col] as i32,
+                    1,
+                );
+                col += 1;
+            }
+            row += 1;
+        }
+        assert_close_i32(gte_translation.x, cpu_translation.x, 0);
+        assert_close_i32(gte_translation.y, cpu_translation.y, 0);
+        assert_close_i32(gte_translation.z, cpu_translation.z, 0);
+    }
+
+    #[test]
+    fn gte_joint_translation_matches_cpu_path_with_quantized_large_pose_offset() {
+        let projection = WorldProjection::new(160, 118, 320, 48);
+        let target = WorldVertex::new(80, 256, -48);
+        let camera = WorldCamera::orbit_yaw(projection, target, 960, 1536, Angle::from_q12(337));
+        let view = camera_gte_view_matrix(camera);
+        let instance_rotation = Mat3I16::rotate_y(704).mul(&Mat3I16::rotate_x(192));
+        let view_instance = mat3_mul_q12(&view, &instance_rotation);
+        let pose = JointPose {
+            matrix: Mat3I16::rotate_z(384).mul(&Mat3I16::rotate_y(256)).m,
+            translation: Vec3I32::new(4307, -7019, 40882),
+        };
+        let origin = WorldVertex::new(384, 768, -256);
+        let view_origin = compute_view_origin_translation(view, origin, camera.position);
+
+        let (quantized, shift) = quantize_pose_translation_for_gte(pose.translation);
+        assert_eq!(shift, 1);
+        assert_eq!(quantized, Vec3I16::new(2154, -3510, 20441));
+
+        let (cpu_rotation, cpu_translation) = textured_model_part_gte_transform_with_view(
+            view,
+            camera.position,
+            pose,
+            instance_rotation,
+            LocalToWorldScale::IDENTITY,
+            origin,
+        );
+        let (gte_rotation, gte_translation) =
+            textured_model_part_gte_transform_with_view_gte_translation(
+                view_instance,
+                view_origin,
+                pose,
+                LocalToWorldScale::IDENTITY,
+            );
+
+        let mut row = 0usize;
+        while row < 3 {
+            let mut col = 0usize;
+            while col < 3 {
+                assert_close_i32(
+                    gte_rotation.m[row][col] as i32,
+                    cpu_rotation.m[row][col] as i32,
+                    1,
+                );
+                col += 1;
+            }
+            row += 1;
+        }
+        assert_close_i32(gte_translation.x, cpu_translation.x, 4);
+        assert_close_i32(gte_translation.y, cpu_translation.y, 4);
+        assert_close_i32(gte_translation.z, cpu_translation.z, 4);
     }
 
     #[test]

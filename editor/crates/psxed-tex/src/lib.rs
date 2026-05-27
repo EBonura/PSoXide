@@ -755,10 +755,7 @@ mod tests {
     #[test]
     fn indexed_multi_clut_rows_concatenate_palettes() {
         let indices = vec![1, 2, 3, 4, 4, 3, 2, 1];
-        let rows = vec![
-            vec![[0, 0, 0], [255, 0, 0]],
-            vec![[0, 0, 0], [0, 0, 255]],
-        ];
+        let rows = vec![vec![[0, 0, 0], [255, 0, 0]], vec![[0, 0, 0], [0, 0, 255]]];
         let psxt =
             encode_indexed_psxt_with_clut_rows(4, 2, Depth::Bit4, &indices, &rows, false).unwrap();
 
