@@ -16,6 +16,7 @@ use crate::render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, OtFrame, PrimitiveArena, PrimitiveSink,
 };
 use crate::{Angle, WorldVertex, Q12};
+use core::mem::MaybeUninit;
 use psx_asset::{Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelVertex};
 use psx_gpu::{
     material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
@@ -50,6 +51,18 @@ enum WorldCommandOrdering {
     DeferredSorted,
     DeferredSlotSorted,
     Bucketed,
+}
+
+impl WorldCommandOrdering {
+    #[inline(always)]
+    const fn uses_slot_heads(self) -> bool {
+        matches!(self, Self::LinkedSorted | Self::DeferredSlotSorted)
+    }
+
+    #[inline(always)]
+    const fn uses_slot_tails(self) -> bool {
+        matches!(self, Self::DeferredSlotSorted)
+    }
 }
 
 /// Aggregated micro-profile for cached textured-Gouraud triangle submission.
@@ -725,6 +738,72 @@ impl WorldCamera {
     }
 }
 
+/// GTE-backed projector for repeated world-space projections from one camera.
+///
+/// Constructing this loads the camera's world-to-view transform and projection
+/// registers. Callers that project many independent points or quads can then
+/// reuse that loaded state instead of doing the same fixed-point matrix work on
+/// the CPU for every vertex.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LoadedWorldCameraGte {
+    camera: WorldCamera,
+}
+
+impl LoadedWorldCameraGte {
+    /// Load `camera` into the GTE and return a projector bound to that state.
+    #[inline]
+    pub fn load(camera: WorldCamera) -> Self {
+        load_world_camera_gte(camera);
+        Self { camera }
+    }
+
+    /// Return the camera this projector was loaded from.
+    #[inline(always)]
+    pub const fn camera(self) -> WorldCamera {
+        self.camera
+    }
+
+    /// Transform and project one world-space vertex through the loaded GTE.
+    ///
+    /// Vertices outside the GTE's signed 16-bit input range fall back to the
+    /// CPU path, preserving behaviour for very large authored worlds.
+    #[inline]
+    pub fn project_world(self, vertex: WorldVertex) -> Option<ProjectedVertex> {
+        let Some(input) = world_vertex_gte_input(vertex) else {
+            return self.camera.project_world(vertex);
+        };
+        projected_option_from_gte(
+            scene::project_vertex_scheduled(input),
+            self.camera.projection.near_z,
+        )
+    }
+
+    /// Transform and project a world-space quad through the loaded GTE.
+    ///
+    /// The first three vertices are projected with `RTPT`; the fourth uses
+    /// `RTPS`. If any vertex is behind the near plane this returns `None`,
+    /// matching [`WorldCamera::project_world_quad`].
+    #[inline]
+    pub fn project_world_quad(self, verts: [WorldVertex; 4]) -> Option<[ProjectedVertex; 4]> {
+        let a = world_vertex_gte_input(verts[0]);
+        let b = world_vertex_gte_input(verts[1]);
+        let c = world_vertex_gte_input(verts[2]);
+        let d = world_vertex_gte_input(verts[3]);
+        let near_z = self.camera.projection.near_z;
+        if let (Some(a), Some(b), Some(c), Some(d)) = (a, b, c, d) {
+            let tri = scene::project_triangle_scheduled(a, b, c);
+            let fourth = scene::project_vertex_scheduled(d);
+            return Some([
+                projected_option_from_gte(tri[0], near_z)?,
+                projected_option_from_gte(tri[1], near_z)?,
+                projected_option_from_gte(tri[2], near_z)?,
+                projected_option_from_gte(fourth, near_z)?,
+            ]);
+        }
+        self.camera.project_world_quad(verts)
+    }
+}
+
 pub(crate) fn project_world_vertex_indices_gte(
     camera: WorldCamera,
     vertices: &[WorldVertex],
@@ -1042,8 +1121,8 @@ pub struct TexturedModelRenderStats {
 pub struct WorldRenderPass<'a, 'ot, const OT_DEPTH: usize> {
     ot: &'a mut OtFrame<'ot, OT_DEPTH>,
     commands: &'a mut [WorldTriCommand],
-    slot_heads: [u16; OT_DEPTH],
-    slot_tails: [u16; OT_DEPTH],
+    slot_heads: MaybeUninit<[u16; OT_DEPTH]>,
+    slot_tails: MaybeUninit<[u16; OT_DEPTH]>,
     command_len: usize,
     next_order: usize,
     ordering: WorldCommandOrdering,
@@ -1055,8 +1134,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
+            slot_tails: MaybeUninit::uninit(),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::LinkedSorted,
@@ -1075,8 +1154,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::uninit(),
+            slot_tails: MaybeUninit::uninit(),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::DeferredSorted,
@@ -1096,8 +1175,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
+            slot_tails: MaybeUninit::new([WORLD_COMMAND_NONE; OT_DEPTH]),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::DeferredSlotSorted,
@@ -1117,8 +1196,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         Self {
             ot,
             commands,
-            slot_heads: [WORLD_COMMAND_NONE; OT_DEPTH],
-            slot_tails: [WORLD_COMMAND_NONE; OT_DEPTH],
+            slot_heads: MaybeUninit::uninit(),
+            slot_tails: MaybeUninit::uninit(),
             command_len: 0,
             next_order: 0,
             ordering: WorldCommandOrdering::Bucketed,
@@ -1128,6 +1207,38 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Number of world/model triangle commands queued in this pass.
     pub const fn command_len(&self) -> usize {
         self.command_len
+    }
+
+    #[inline(always)]
+    fn slot_heads(&self) -> &[u16; OT_DEPTH] {
+        debug_assert!(self.ordering.uses_slot_heads());
+        // SAFETY: constructors initialize `slot_heads` exactly for ordering
+        // modes that access per-slot linked lists.
+        unsafe { self.slot_heads.assume_init_ref() }
+    }
+
+    #[inline(always)]
+    fn slot_heads_mut(&mut self) -> &mut [u16; OT_DEPTH] {
+        debug_assert!(self.ordering.uses_slot_heads());
+        // SAFETY: constructors initialize `slot_heads` exactly for ordering
+        // modes that access per-slot linked lists.
+        unsafe { self.slot_heads.assume_init_mut() }
+    }
+
+    #[inline(always)]
+    fn slot_tails(&self) -> &[u16; OT_DEPTH] {
+        debug_assert!(self.ordering.uses_slot_tails());
+        // SAFETY: constructors initialize `slot_tails` exactly for ordering
+        // modes that append commands into per-slot linked lists.
+        unsafe { self.slot_tails.assume_init_ref() }
+    }
+
+    #[inline(always)]
+    fn slot_tails_mut(&mut self) -> &mut [u16; OT_DEPTH] {
+        debug_assert!(self.ordering.uses_slot_tails());
+        // SAFETY: constructors initialize `slot_tails` exactly for ordering
+        // modes that append commands into per-slot linked lists.
+        unsafe { self.slot_tails.assume_init_mut() }
     }
 
     /// Submit a projected textured triangle.
@@ -3587,13 +3698,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
         let command_link = command_index as u16;
-        let tail = self.slot_tails[slot];
+        let tail = self.slot_tails()[slot];
         if tail == WORLD_COMMAND_NONE {
-            self.slot_heads[slot] = command_link;
+            self.slot_heads_mut()[slot] = command_link;
         } else {
             self.commands[tail as usize].next = command_link;
         }
-        self.slot_tails[slot] = command_link;
+        self.slot_tails_mut()[slot] = command_link;
     }
 
     fn insert_command_in_slot(&mut self, command_index: usize) {
@@ -3603,7 +3714,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
         let command_link = command_index as u16;
-        let head = self.slot_heads[slot];
+        let head = self.slot_heads()[slot];
         if head == WORLD_COMMAND_NONE
             || should_insert_world_before(
                 self.commands[command_index],
@@ -3611,7 +3722,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             )
         {
             self.commands[command_index].next = head;
-            self.slot_heads[slot] = command_link;
+            self.slot_heads_mut()[slot] = command_link;
             return;
         }
 
@@ -3635,8 +3746,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     fn sort_slot_links(&mut self) {
         let mut slot = 0;
         while slot < OT_DEPTH {
-            self.slot_heads[slot] = self.merge_sort_slot_links(self.slot_heads[slot]);
-            self.slot_tails[slot] = WORLD_COMMAND_NONE;
+            let head = self.slot_heads()[slot];
+            let sorted = self.merge_sort_slot_links(head);
+            self.slot_heads_mut()[slot] = sorted;
+            self.slot_tails_mut()[slot] = WORLD_COMMAND_NONE;
             slot += 1;
         }
     }
@@ -3766,7 +3879,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let mut slot = 0;
         while slot < OT_DEPTH {
-            let mut command_index = self.slot_heads[slot];
+            let mut command_index = self.slot_heads()[slot];
             while command_index != WORLD_COMMAND_NONE {
                 let command = self.commands[command_index as usize];
                 if !command.packet_ptr.is_null() {
@@ -4794,6 +4907,15 @@ fn projected_from_gte(projected: scene::Projected) -> ProjectedVertex {
 }
 
 #[inline]
+fn projected_option_from_gte(projected: scene::Projected, near_z: i32) -> Option<ProjectedVertex> {
+    if (projected.sz as i32) >= near_z {
+        Some(projected_from_gte(projected))
+    } else {
+        None
+    }
+}
+
+#[inline]
 fn valid_projected_from_gte(projected: scene::Projected, near_z: i32) -> ProjectedVertex {
     if (projected.sz as i32) >= near_z {
         projected_from_gte(projected)
@@ -5533,10 +5655,35 @@ mod tests {
         );
 
         assert_eq!(pass.command_len, 3);
-        assert_eq!(pass.slot_heads[4], WORLD_COMMAND_NONE);
+        assert!(!pass.ordering.uses_slot_heads());
+        assert!(!pass.ordering.uses_slot_tails());
         assert_eq!(pass.commands[0].next, WORLD_COMMAND_NONE);
         assert_eq!(pass.commands[1].next, WORLD_COMMAND_NONE);
         assert_eq!(pass.commands[2].next, WORLD_COMMAND_NONE);
+    }
+
+    #[test]
+    fn deferred_world_pass_does_not_use_slot_links() {
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 1];
+        let pass = WorldRenderPass::new_deferred_sorted(&mut ot, &mut commands);
+
+        assert!(!pass.ordering.uses_slot_heads());
+        assert!(!pass.ordering.uses_slot_tails());
+    }
+
+    #[test]
+    fn slot_sorted_world_pass_initializes_slot_links() {
+        let mut ot_storage = OrderingTable::<8>::new();
+        let mut ot = OtFrame::begin(&mut ot_storage);
+        let mut commands = [WorldTriCommand::EMPTY; 1];
+        let pass = WorldRenderPass::new_deferred_slot_sorted(&mut ot, &mut commands);
+
+        assert!(pass.ordering.uses_slot_heads());
+        assert!(pass.ordering.uses_slot_tails());
+        assert_eq!(pass.slot_heads()[4], WORLD_COMMAND_NONE);
+        assert_eq!(pass.slot_tails()[4], WORLD_COMMAND_NONE);
     }
 
     /// The canonical quad split must always share the `0`–`2`
@@ -5914,6 +6061,30 @@ mod tests {
         ]);
 
         assert!(projected.is_some());
+    }
+
+    #[test]
+    fn loaded_world_camera_gte_projects_quad_like_cpu() {
+        let projection = WorldProjection::new(160, 118, 320, 48);
+        let target = WorldVertex::new(0, 128, 0);
+        let camera = WorldCamera::orbit_yaw(projection, target, 512, 1536, Angle::from_q12(170));
+        let quad = [
+            WorldVertex::new(-128, 320, 64),
+            WorldVertex::new(128, 320, 64),
+            WorldVertex::new(128, 64, 64),
+            WorldVertex::new(-128, 64, 64),
+        ];
+
+        let cpu = camera.project_world_quad(quad).expect("quad in front");
+        let gte = LoadedWorldCameraGte::load(camera)
+            .project_world_quad(quad)
+            .expect("quad in front");
+
+        for i in 0..4 {
+            assert!((gte[i].sx - cpu[i].sx).abs() <= 2);
+            assert!((gte[i].sy - cpu[i].sy).abs() <= 2);
+            assert!((gte[i].sz - cpu[i].sz).abs() <= 2);
+        }
     }
 
     #[test]
