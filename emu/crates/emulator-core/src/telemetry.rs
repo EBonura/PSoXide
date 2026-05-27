@@ -505,10 +505,54 @@ pub mod counter {
     pub const ROOM_CAMERA_GLOBAL_Y_BIASED: u16 = 193;
     /// Render camera absolute level Z used by portal traversal, biased for unsigned transport.
     pub const ROOM_CAMERA_GLOBAL_Z_BIASED: u16 = 194;
+    /// Model vertices projected through CPU blend skinning.
+    pub const TEXTURED_MODEL_CPU_BLEND_VERTICES: u16 = 195;
+    /// Model faces handled by any packed fast-path helper.
+    pub const TEXTURED_MODEL_PACKED_FACE_CALLS: u16 = 196;
+    /// Model faces handled by the packed all-front/all-HW-bounds helper.
+    pub const TEXTURED_MODEL_PACKED_UNCLAMPED_CALLS: u16 = 197;
+    /// Model faces handled by packed all-front helpers that still clamp screen coordinates.
+    pub const TEXTURED_MODEL_PACKED_CLAMPED_CALLS: u16 = 198;
+    /// Model faces handled by the generic packed helper.
+    pub const TEXTURED_MODEL_PACKED_GENERAL_CALLS: u16 = 199;
+    /// Model faces handled by the fully general face path.
+    pub const TEXTURED_MODEL_FALLBACK_FACE_CALLS: u16 = 200;
+    /// Packed model faces that fell back to split/general submission due hardware extents.
+    pub const TEXTURED_MODEL_HW_EXTENT_FALLBACKS: u16 = 201;
+    /// Model faces dropped because they crossed or sat behind the near plane.
+    pub const TEXTURED_MODEL_NEAR_DROPS: u16 = 202;
+    /// Model faces dropped because the projected triangle was not hardware-safe.
+    pub const TEXTURED_MODEL_HW_UNSAFE_DROPS: u16 = 203;
+    /// Model triangles submitted through packed fast paths.
+    pub const TEXTURED_MODEL_FAST_SUBMITTED_TRIS: u16 = 204;
+    /// Model submits that required CPU blended vertices.
+    pub const TEXTURED_MODEL_CPU_BLEND_SUBMITS: u16 = 205;
+    /// Model submits that used primary-joint-only projection.
+    pub const TEXTURED_MODEL_PRIMARY_JOINT_SUBMITS: u16 = 206;
+    /// Model submits where all projected vertices were in front of the near plane.
+    pub const TEXTURED_MODEL_ALL_FRONT_SUBMITS: u16 = 207;
+    /// Model submits where all projected vertices were inside PS1 hardware bounds.
+    pub const TEXTURED_MODEL_ALL_HW_BOUNDS_SUBMITS: u16 = 208;
+    /// Model submits eligible for the fastest packed-unclamped face path.
+    pub const TEXTURED_MODEL_PACKED_UNCLAMPED_ELIGIBLE_SUBMITS: u16 = 209;
+    /// Model submits eligible for packed all-front helpers.
+    pub const TEXTURED_MODEL_PACKED_CLAMPED_ELIGIBLE_SUBMITS: u16 = 210;
+    /// Model submits eligible for the generic packed helper only.
+    pub const TEXTURED_MODEL_PACKED_GENERAL_ELIGIBLE_SUBMITS: u16 = 211;
+    /// Model triangles emitted by split/general fallback submission.
+    pub const TEXTURED_MODEL_SPLIT_TRIS: u16 = 212;
+    /// Model triangles skipped because face indices exceeded projected vertex ranges.
+    pub const TEXTURED_MODEL_SKIPPED_TRIS: u16 = 213;
+    /// Model submits that exceeded the projected vertex scratch buffer.
+    pub const TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS: u16 = 214;
+    /// Model submits that exceeded primitive packet storage.
+    pub const TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS: u16 = 215;
+    /// Model submits that exceeded world-command storage.
+    pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 195;
+pub const COUNTER_COUNT: usize = 217;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1146,6 +1190,30 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::ROOM_CAMERA_GLOBAL_X_BIASED => "camera global x",
         counter::ROOM_CAMERA_GLOBAL_Y_BIASED => "camera global y",
         counter::ROOM_CAMERA_GLOBAL_Z_BIASED => "camera global z",
+        counter::TEXTURED_MODEL_CPU_BLEND_VERTICES => "mdl cpu blend verts",
+        counter::TEXTURED_MODEL_PACKED_FACE_CALLS => "mdl packed faces",
+        counter::TEXTURED_MODEL_PACKED_UNCLAMPED_CALLS => "mdl packed unclamped faces",
+        counter::TEXTURED_MODEL_PACKED_CLAMPED_CALLS => "mdl packed clamped faces",
+        counter::TEXTURED_MODEL_PACKED_GENERAL_CALLS => "mdl packed general faces",
+        counter::TEXTURED_MODEL_FALLBACK_FACE_CALLS => "mdl fallback faces",
+        counter::TEXTURED_MODEL_HW_EXTENT_FALLBACKS => "mdl hw extent fallbacks",
+        counter::TEXTURED_MODEL_NEAR_DROPS => "mdl near drops",
+        counter::TEXTURED_MODEL_HW_UNSAFE_DROPS => "mdl hw unsafe drops",
+        counter::TEXTURED_MODEL_FAST_SUBMITTED_TRIS => "mdl fast tris",
+        counter::TEXTURED_MODEL_CPU_BLEND_SUBMITS => "mdl cpu blend submits",
+        counter::TEXTURED_MODEL_PRIMARY_JOINT_SUBMITS => "mdl primary joint submits",
+        counter::TEXTURED_MODEL_ALL_FRONT_SUBMITS => "mdl all front submits",
+        counter::TEXTURED_MODEL_ALL_HW_BOUNDS_SUBMITS => "mdl all hw bounds submits",
+        counter::TEXTURED_MODEL_PACKED_UNCLAMPED_ELIGIBLE_SUBMITS => {
+            "mdl packed unclamped eligible"
+        }
+        counter::TEXTURED_MODEL_PACKED_CLAMPED_ELIGIBLE_SUBMITS => "mdl packed clamped eligible",
+        counter::TEXTURED_MODEL_PACKED_GENERAL_ELIGIBLE_SUBMITS => "mdl packed general eligible",
+        counter::TEXTURED_MODEL_SPLIT_TRIS => "mdl split tris",
+        counter::TEXTURED_MODEL_SKIPPED_TRIS => "mdl skipped tris",
+        counter::TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS => "mdl vertex overflow submits",
+        counter::TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS => "mdl primitive overflow submits",
+        counter::TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS => "mdl command overflow submits",
         _ => "unknown",
     }
 }
