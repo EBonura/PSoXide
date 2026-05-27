@@ -62,6 +62,7 @@ pub mod movement;
 pub mod render;
 pub mod render3d;
 pub mod scene;
+pub mod scheduler;
 pub mod sfx;
 pub mod telemetry;
 pub mod third_person_camera;
@@ -100,6 +101,11 @@ pub use render3d::{
     ProjectedVertex, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
     TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer,
     WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+};
+pub use scheduler::{
+    collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,
+    SchedulerConfig, TaskBudget, TaskCadence, TaskDescriptor, TaskId, TaskLane, TASK_FIXED_UPDATE,
+    TASK_VISUAL_RENDER,
 };
 // Re-export the GTE math types callers need to construct model render
 // arguments (instance rotation, joint transforms) without pulling in

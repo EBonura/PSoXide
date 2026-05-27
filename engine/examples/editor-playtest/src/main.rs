@@ -53,11 +53,12 @@ use psx_engine::{
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
     LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame, PointLightSample,
     PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
-    RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SimTick, TexturedModelGeometry,
-    TexturedModelRenderFace, TexturedModelRenderStats, ThirdPersonCameraConfig,
-    ThirdPersonCameraInput, ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing,
-    WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
-    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
+    RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SchedulerConfig, SimTick,
+    TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
+    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
+    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -227,6 +228,8 @@ const SKY_PANORAMA_PALETTE_BANDS: usize = 8;
 const SKY_PANORAMA_WIDTH: u16 = 512;
 const SKY_PANORAMA_HEIGHT: u16 = 256;
 const SKY_PANORAMA_PAGE_WIDTH: u16 = 256;
+const SKY_CYCLORAMA_GRID_POINTS_MAX: usize =
+    (SKY_CYCLORAMA_COLUMNS_MAX as usize + 1) * (SKY_PANORAMA_PALETTE_BANDS + 1);
 /// Model atlases pack left-to-right until the reserved sky page.
 const MODEL_TPAGE_LIMIT_X: u16 = SKY_PANORAMA_LEFT_TPAGE.x();
 const SKY_CYCLORAMA_COLUMNS_MIN: u8 = 8;
@@ -1443,6 +1446,7 @@ const BOX_PROP_BREAK_FRAMES: u8 = 24;
 const BOX_PROP_BREAK_MOTION_FRAMES: u8 = 20;
 const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
 const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
+const BOX_PROP_FACE_NORMAL_SHIFT: u32 = 10;
 /// Cap on attached weapon/equipment visuals rendered per frame.
 const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// Runtime model cache capacity. The current playtest package only
@@ -7294,20 +7298,27 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
     if columns % 2 != 0 {
         columns += 1;
     }
-    let rows = SKY_PANORAMA_PALETTE_BANDS;
+    let rows = sky_panorama_runtime_rows(sky);
     let horizon_pitch = sky_horizon_pitch_degrees_i32(sky.horizon_percent);
     let top_pitch = (horizon_pitch + 58).min(78);
     let bottom_pitch = (horizon_pitch - 46).max(-72);
+    let mut projected_grid: [Option<(i16, i16)>; SKY_CYCLORAMA_GRID_POINTS_MAX] =
+        [None; SKY_CYCLORAMA_GRID_POINTS_MAX];
+
+    for row in 0..=rows {
+        let pitch = sky_lerp_i32(top_pitch, bottom_pitch, row, rows);
+        for column in 0..=columns {
+            let yaw = sky_yaw_degrees_for_column(column, columns);
+            projected_grid[sky_grid_index(row, column, columns)] =
+                project_sky_direction(sky_direction_q12(yaw, pitch), camera);
+        }
+    }
 
     for row in 0..rows {
-        let pitch_top = sky_lerp_i32(top_pitch, bottom_pitch, row, rows);
-        let pitch_bottom = sky_lerp_i32(top_pitch, bottom_pitch, row + 1, rows);
         let v0 = sky_uv_for_step(row, rows, SKY_PANORAMA_HEIGHT);
         let v1 = sky_uv_for_step(row + 1, rows, SKY_PANORAMA_HEIGHT);
-        let clut_word = sky_panorama_clut_word(row);
+        let clut_word = sky_panorama_clut_word(sky_panorama_clut_band_for_row(row, rows));
         for column in 0..columns {
-            let yaw0 = sky_yaw_degrees_for_column(column, columns);
-            let yaw1 = sky_yaw_degrees_for_column(column + 1, columns);
             let page = sky_panorama_page_for_column(column, columns);
             let material = TextureMaterial::opaque(
                 clut_word,
@@ -7324,43 +7335,35 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
                 sky_coord_for_step(column + 1, columns, SKY_PANORAMA_WIDTH),
                 page,
             );
-            draw_sky_cyclorama_quad(
-                camera,
-                material,
-                [
-                    sky_direction_q12(yaw0, pitch_top),
-                    sky_direction_q12(yaw1, pitch_top),
-                    sky_direction_q12(yaw0, pitch_bottom),
-                    sky_direction_q12(yaw1, pitch_bottom),
-                ],
+            let Some(p0) = projected_grid[sky_grid_index(row, column, columns)] else {
+                continue;
+            };
+            let Some(p1) = projected_grid[sky_grid_index(row, column + 1, columns)] else {
+                continue;
+            };
+            let Some(p2) = projected_grid[sky_grid_index(row + 1, column, columns)] else {
+                continue;
+            };
+            let Some(p3) = projected_grid[sky_grid_index(row + 1, column + 1, columns)] else {
+                continue;
+            };
+            let projected = [p0, p1, p2, p3];
+            if sky_quad_outside_screen(projected) {
+                continue;
+            }
+            draw_quad_textured_material(
+                projected,
                 [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
+                material,
             );
         }
     }
 }
 
-fn draw_sky_cyclorama_quad(
-    camera: WorldCamera,
-    material: TextureMaterial,
-    dirs: [[i16; 3]; 4],
-    uvs: [(u8, u8); 4],
-) {
-    let Some(projected) = project_sky_quad(dirs, camera) else {
-        return;
-    };
-    if sky_quad_outside_screen(projected) {
-        return;
-    }
-    draw_quad_textured_material(projected, uvs, material);
-}
-
-fn project_sky_quad(dirs: [[i16; 3]; 4], camera: WorldCamera) -> Option<[(i16, i16); 4]> {
-    Some([
-        project_sky_direction(dirs[0], camera)?,
-        project_sky_direction(dirs[1], camera)?,
-        project_sky_direction(dirs[2], camera)?,
-        project_sky_direction(dirs[3], camera)?,
-    ])
+fn sky_grid_index(row: usize, column: usize, columns: usize) -> usize {
+    row.saturating_mul(columns.saturating_add(1))
+        .saturating_add(column)
+        .min(SKY_CYCLORAMA_GRID_POINTS_MAX - 1)
 }
 
 fn project_sky_direction(dir: [i16; 3], camera: WorldCamera) -> Option<(i16, i16)> {
@@ -7435,6 +7438,16 @@ fn sky_coord_for_step(step: usize, steps: usize, size: u16) -> u16 {
 
 fn sky_uv_for_step(step: usize, steps: usize, size: u16) -> u8 {
     sky_coord_for_step(step, steps, size).min(255) as u8
+}
+
+fn sky_panorama_runtime_rows(sky: LevelSkyRecord) -> usize {
+    sky.skybox_rows.clamp(1, SKY_PANORAMA_PALETTE_BANDS as u8) as usize
+}
+
+fn sky_panorama_clut_band_for_row(row: usize, rows: usize) -> usize {
+    let rows = rows.max(1);
+    ((row.saturating_mul(2).saturating_add(1)) * SKY_PANORAMA_PALETTE_BANDS / (rows * 2))
+        .min(SKY_PANORAMA_PALETTE_BANDS - 1)
 }
 
 fn sky_panorama_page_for_column(column: usize, columns: usize) -> usize {
@@ -11109,16 +11122,6 @@ fn draw_image_props<T>(
         if prop.room != current_room {
             continue;
         }
-        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
-            continue;
-        };
-        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-            asset.id,
-            asset.bytes,
-            VramSlotClutMode::TransparentZero,
-        ) else {
-            continue;
-        };
         let origin = WorldVertex::new(prop.x, prop.y, prop.z);
         let verts = image_prop_vertices(
             origin,
@@ -11134,7 +11137,16 @@ fn draw_image_props<T>(
         if !sphere_visible_to_camera(camera, options, center, radius, 96) {
             continue;
         }
-        let sort_depth = image_prop_sort_depth(camera, verts);
+        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
+            continue;
+        };
+        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
+            asset.id,
+            asset.bytes,
+            VramSlotClutMode::TransparentZero,
+        ) else {
+            continue;
+        };
         let colors = [
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[0], verts[0]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[1], verts[1]),
@@ -11146,6 +11158,7 @@ fn draw_image_props<T>(
         let u_max = model_render_uv_max(slot.texture_width);
         let v_max = model_render_uv_max(slot.texture_height);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+        let sort_depth = image_prop_sort_depth(camera, verts);
         let depth_bias = options
             .depth_bias
             .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
@@ -11964,6 +11977,10 @@ fn draw_box_prop_faces<T>(
     T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
 {
     for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        let face_vertices = faces[face];
+        if !box_prop_face_front_facing(camera, face_vertices) {
+            continue;
+        }
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
@@ -11982,7 +11999,6 @@ fn draw_box_prop_faces<T>(
         let u_max = model_render_uv_max(slot.texture_width);
         let v_max = model_render_uv_max(slot.texture_height);
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-        let face_vertices = faces[face];
         let colors = [
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][0], face_vertices[0]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][1], face_vertices[1]),
@@ -12027,6 +12043,39 @@ fn draw_box_prop_faces<T>(
             );
         }
     }
+}
+
+fn box_prop_face_front_facing(camera: &WorldCamera, face: [WorldVertex; 4]) -> bool {
+    let abx = face[1].x.saturating_sub(face[0].x);
+    let aby = face[1].y.saturating_sub(face[0].y);
+    let abz = face[1].z.saturating_sub(face[0].z);
+    let acx = face[2].x.saturating_sub(face[0].x);
+    let acy = face[2].y.saturating_sub(face[0].y);
+    let acz = face[2].z.saturating_sub(face[0].z);
+    let nx = aby
+        .saturating_mul(acz)
+        .saturating_sub(abz.saturating_mul(acy))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    let ny = abz
+        .saturating_mul(acx)
+        .saturating_sub(abx.saturating_mul(acz))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    let nz = abx
+        .saturating_mul(acy)
+        .saturating_sub(aby.saturating_mul(acx))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    let center = WorldVertex::new(
+        average4_i32(face[0].x, face[1].x, face[2].x, face[3].x),
+        average4_i32(face[0].y, face[1].y, face[2].y, face[3].y),
+        average4_i32(face[0].z, face[1].z, face[2].z, face[3].z),
+    );
+    let vx = camera.position.x.saturating_sub(center.x);
+    let vy = camera.position.y.saturating_sub(center.y);
+    let vz = camera.position.z.saturating_sub(center.z);
+    nx.saturating_mul(vx)
+        .saturating_add(ny.saturating_mul(vy))
+        .saturating_add(nz.saturating_mul(vz))
+        > 0
 }
 
 fn box_prop_break_shard_quad(
@@ -13105,6 +13154,8 @@ fn main() -> ! {
         clear_color: (5, 7, 12),
         video_mode,
         visual_pacing: playtest_visual_pacing(video_mode),
+        scheduler: SchedulerConfig::new()
+            .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual),
         ..Config::default()
     };
     App::run(config, &mut scene);
