@@ -81,12 +81,12 @@ fn ui_node_absolute_rect_inner(
     let (anchor_x, anchor_y) = ui_anchor_factors(node.flags);
     let x = parent_x as i32 + (parent_w as i32 * anchor_x) / 2 + node.x as i32;
     let y = parent_y as i32 + (parent_h as i32 * anchor_y) / 2 + node.y as i32;
-    (
+    Some((
         x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
         y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
         node.width.max(1),
         node.height.max(1),
-    )
+    ))
 }
 
 fn ui_anchor_factors(flags: u16) -> (i32, i32) {
@@ -143,7 +143,9 @@ fn wrapped_line_end(font: &FontAtlas, text: &str, start: usize, width: u16) -> u
             last_space = Some(end);
         }
         if next > start && font.text_width(&text[start..next]) > width {
-            return last_space.filter(|space| *space > start).unwrap_or(end.max(start + 1));
+            return last_space
+                .filter(|space| *space > start)
+                .unwrap_or(end.max(start + 1));
         }
         end = next;
     }
