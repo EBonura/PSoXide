@@ -29,6 +29,12 @@ use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState};
 /// registers side panel vertically.
 pub const EXEC_HISTORY_CAP: usize = 16;
 
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        !matches!(value.as_str(), "" | "0" | "false" | "FALSE" | "off" | "OFF")
+    })
+}
+
 /// Panels that can be shown/hidden via the Menu. The Menu *is* the
 /// library browser (Games / Examples columns), so we don't have
 /// a separate "library" panel -- it's integrated into the shell
@@ -264,6 +270,7 @@ impl AppState {
         // synthetic/HLE BIOS path as the Menu and editor Play flows.
         let mut cpu = Cpu::new();
         let bus = load_initial_bus(&settings, &mut cpu);
+        let autorun = bus.is_some() && env_flag("PSOXIDE_AUTORUN");
 
         let initial_gpu_resync_generation = if bus.is_some() { 1 } else { 0 };
         let editor_project_dir_seen = editor.project_dir().to_path_buf();
@@ -281,11 +288,11 @@ impl AppState {
             cpu,
             bus,
             gpu_resync_generation: initial_gpu_resync_generation,
-            menu: MenuState::new(),
+            menu: MenuState::with_running(autorun),
             hud: HudState::default(),
             profiler: ui::profiler::FrameProfiler::default(),
             memory_view: MemoryView::default(),
-            running: false,
+            running: autorun,
             run_steps_per_frame: 1_000_000,
             exec_history: VecDeque::with_capacity(EXEC_HISTORY_CAP),
             breakpoints: BTreeSet::new(),
@@ -378,6 +385,9 @@ impl AppState {
                 // table calls are intercepted by HLE dispatch.
                 bus.enable_hle_bios();
                 bus.attach_digital_pad_port1();
+                if let Some(disc) = load_sidecar_disc_for_exe(&entry.path)? {
+                    bus.cdrom.insert_disc(Some(disc));
+                }
                 bus
             }
             GameKind::DiscBin | GameKind::DiscIso => {
@@ -1849,7 +1859,7 @@ fn maybe_fast_boot_disc_path(
 }
 
 fn load_initial_bus(settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
-    if let Some(exe) = load_exe() {
+    if let Some((exe, exe_path)) = load_exe() {
         let mut bus = Bus::new_without_bios();
         bus.load_exe_payload(exe.load_addr, &exe.payload);
         bus.clear_exe_bss(exe.bss_addr, exe.bss_size);
@@ -1858,6 +1868,12 @@ fn load_initial_bus(settings: &Settings, cpu: &mut Cpu) -> Option<Bus> {
         bus.attach_digital_pad_port1();
         if let Some(disc) = load_disc() {
             bus.cdrom.insert_disc(Some(disc));
+        } else {
+            match load_sidecar_disc_for_exe(&exe_path) {
+                Ok(Some(disc)) => bus.cdrom.insert_disc(Some(disc)),
+                Ok(None) => {}
+                Err(e) => eprintln!("[frontend] sidecar disc load failed: {e}"),
+            }
         }
         eprintln!(
             "[frontend] side-loaded EXE: entry=0x{:08x} payload={}B (hle-bios + pad1)",
@@ -1904,7 +1920,7 @@ fn load_bus(settings: &Settings) -> Option<Bus> {
 
 /// Read `PSOXIDE_EXE` → PSX-EXE file → parsed `Exe`. Logs and returns
 /// `None` on any trouble so a misconfigured path doesn't wedge boot.
-fn load_exe() -> Option<Exe> {
+fn load_exe() -> Option<(Exe, PathBuf)> {
     let var = std::env::var("PSOXIDE_EXE").ok()?;
     let path = PathBuf::from(&var);
     let bytes = match std::fs::read(&path) {
@@ -1915,7 +1931,7 @@ fn load_exe() -> Option<Exe> {
         }
     };
     match Exe::parse(&bytes) {
-        Ok(exe) => Some(exe),
+        Ok(exe) => Some((exe, path)),
         Err(e) => {
             eprintln!("[frontend] PSOXIDE_EXE={} malformed: {e:?}", path.display());
             None
@@ -2224,6 +2240,34 @@ fn load_disc() -> Option<Disc> {
         disc.sector_count()
     );
     Some(disc)
+}
+
+fn load_sidecar_disc_for_exe(exe_path: &Path) -> Result<Option<Disc>, String> {
+    let cue_path = exe_path.with_extension("cue");
+    if cue_path.is_file() {
+        let disc = psoxide_settings::library::load_disc_from_cue(&cue_path)
+            .map_err(|e| format!("{}: {e}", cue_path.display()))?;
+        eprintln!(
+            "[frontend] mounted sidecar CUE {} ({} sectors)",
+            cue_path.display(),
+            disc.sector_count()
+        );
+        return Ok(Some(disc));
+    }
+
+    let ccd_path = exe_path.with_extension("ccd");
+    if ccd_path.is_file() {
+        let disc = psoxide_settings::library::load_disc_from_ccd(&ccd_path)
+            .map_err(|e| format!("{}: {e}", ccd_path.display()))?;
+        eprintln!(
+            "[frontend] mounted sidecar CCD {} ({} sectors)",
+            ccd_path.display(),
+            disc.sector_count()
+        );
+        return Ok(Some(disc));
+    }
+
+    Ok(None)
 }
 
 /// Build all panels/overlays for one frame. Called from `gfx::Graphics::render`
