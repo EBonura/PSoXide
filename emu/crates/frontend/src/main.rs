@@ -12,6 +12,7 @@
 mod app;
 mod app_icon;
 mod audio;
+mod burn;
 mod cli;
 mod disasm;
 mod editor_assets;
@@ -526,6 +527,7 @@ impl ApplicationHandler for Shell {
                         .join(" · ");
                     self.state.status_message_set(msg);
                 }
+                self.state.poll_burner_hotplug();
                 if pad_frame.toggle_menu {
                     // Select+Start is the gamepad equivalent of
                     // Escape -- route it into the same `toggle_open`
