@@ -15,7 +15,9 @@
 //! Both flavours contain the same ISO 9660 filesystem: `SYSTEM.CNF`
 //! (points the BIOS at `PSX.EXE`) and the EXE itself, both in the
 //! root directory. Pass `--cdtest-sectors N` to insert deterministic
-//! `CDTEST.BIN` stream-benchmark data before `PSX.EXE`.
+//! `CDTEST.BIN` stream-benchmark data before `PSX.EXE`. Pass one or
+//! more `--cdda-track <raw-pcm>` paths to copy sector-aligned raw
+//! CD-DA track files beside the data image and emit a sibling `.cue`.
 //!
 //! The tool is deliberately a tiny CLI -- actual encoding lives in
 //! `psx-iso::iso9660` so it's reusable from build scripts, test
@@ -28,7 +30,7 @@ use psx_iso::{
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 struct Args {
@@ -39,6 +41,7 @@ struct Args {
     cdtest_sectors: Option<usize>,
     world_pack_rooms_dir: Option<PathBuf>,
     world_pack_order_file: Option<PathBuf>,
+    cdda_tracks: Vec<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -49,6 +52,7 @@ fn parse_args() -> Result<Args, String> {
     let mut cdtest_sectors = None;
     let mut world_pack_rooms_dir = None;
     let mut world_pack_order_file = None;
+    let mut cdda_tracks = Vec::new();
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -94,6 +98,12 @@ fn parse_args() -> Result<Args, String> {
                         "--world-pack-order-file takes a path".to_string()
                     })?));
             }
+            "--cdda-track" => {
+                cdda_tracks.push(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--cdda-track takes a path".to_string())?,
+                ));
+            }
             "--help" | "-h" => {
                 return Err(String::from("help"));
             }
@@ -110,6 +120,7 @@ fn parse_args() -> Result<Args, String> {
         cdtest_sectors,
         world_pack_rooms_dir,
         world_pack_order_file,
+        cdda_tracks,
     })
 }
 
@@ -132,6 +143,9 @@ fn print_usage() {
          --world-pack-order-file PATH\n\
                          Optional newline-delimited room id order for\n\
                          WORLD.PAK payload placement.\n\
+         --cdda-track PATH\n\
+                         Add a sector-aligned raw CD-DA track and emit\n\
+                         a sibling .cue. May be repeated.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );
@@ -150,6 +164,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.cooked_iso && !args.cdda_tracks.is_empty() {
+        eprintln!("--cdda-track requires raw .bin output; .iso cannot carry audio tracks");
+        return ExitCode::from(2);
+    }
 
     let exe_bytes = match fs::read(&args.exe) {
         Ok(b) => b,
@@ -198,6 +216,26 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
+    let cue_tracks = if args.cdda_tracks.is_empty() {
+        Vec::new()
+    } else {
+        match copy_cdda_tracks_next_to_image(&args.out, &args.cdda_tracks) {
+            Ok(tracks) => tracks,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(1);
+            }
+        }
+    };
+    if !cue_tracks.is_empty() {
+        let cue_path = args.out.with_extension("cue");
+        if let Err(e) = write_mixed_mode_cue(&cue_path, &args.out, &cue_tracks) {
+            eprintln!("{e}");
+            return ExitCode::from(1);
+        }
+        println!("wrote {}", cue_path.display());
+    }
+
     println!(
         "wrote {} ({} bytes = {} sectors, {format_label}) from {}",
         args.out.display(),
@@ -206,6 +244,67 @@ fn main() -> ExitCode {
         args.exe.display(),
     );
     ExitCode::SUCCESS
+}
+
+fn copy_cdda_tracks_next_to_image(
+    image_path: &Path,
+    tracks: &[PathBuf],
+) -> Result<Vec<String>, String> {
+    let out_dir = image_path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", image_path.display()))?;
+    let mut cue_names = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let bytes = fs::read(track).map_err(|e| format!("read {}: {e}", track.display()))?;
+        if bytes.is_empty() || bytes.len() % psx_iso::SECTOR_BYTES != 0 {
+            return Err(format!(
+                "{} is not a non-empty whole number of 2352-byte CDDA sectors",
+                track.display()
+            ));
+        }
+        let name = cue_file_name(track)?;
+        let dest = out_dir.join(&name);
+        if track != &dest {
+            fs::write(&dest, bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
+        }
+        cue_names.push(name);
+    }
+    Ok(cue_names)
+}
+
+fn write_mixed_mode_cue(
+    cue_path: &Path,
+    image_path: &Path,
+    cdda_track_names: &[String],
+) -> Result<(), String> {
+    let data_name = cue_file_name(image_path)?;
+    let mut text = String::new();
+    text.push_str(&format!(
+        "FILE \"{}\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n",
+        data_name
+    ));
+    for (i, name) in cdda_track_names.iter().enumerate() {
+        let track_number = i + 2;
+        text.push_str(&format!(
+            "FILE \"{}\" BINARY\n  TRACK {:02} AUDIO\n    PREGAP 00:02:00\n    INDEX 01 00:00:00\n",
+            name, track_number
+        ));
+    }
+    fs::write(cue_path, text).map_err(|e| format!("write {}: {e}", cue_path.display()))
+}
+
+fn cue_file_name(path: &Path) -> Result<String, String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{} has no UTF-8 file name", path.display()))?;
+    if name.contains('"') || name.contains('\n') || name.contains('\r') {
+        return Err(format!(
+            "{} is not safe for a CUE FILE line",
+            path.display()
+        ));
+    }
+    Ok(name.to_string())
 }
 
 fn build_world_pack_from_rooms_dir(
@@ -352,5 +451,14 @@ mod tests {
             rooms.iter().map(|(room, _)| *room).collect::<Vec<_>>(),
             vec![2, 0, 1]
         );
+    }
+
+    #[test]
+    fn cue_file_name_rejects_unsafe_names() {
+        assert_eq!(
+            cue_file_name(std::path::Path::new("song.bin")).unwrap(),
+            "song.bin"
+        );
+        assert!(cue_file_name(std::path::Path::new("bad\"name.bin")).is_err());
     }
 }

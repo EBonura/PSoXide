@@ -126,6 +126,8 @@ pub mod drive_status_bit {
 /// for parameter / response, 2352 bytes for the sector data buffer.
 const PARAM_FIFO_DEPTH: usize = 16;
 const RESPONSE_FIFO_DEPTH: usize = 16;
+const CDDA_BYTES_PER_SAMPLE: usize = 4;
+const CDDA_SAMPLES_PER_SECTOR: usize = psx_iso::SECTOR_BYTES / CDDA_BYTES_PER_SAMPLE;
 
 // Sector-read cycles are derived per-instance from the current mode
 // byte. The first sector after ReadN/ReadS is slower than the
@@ -342,6 +344,8 @@ pub struct CdRom {
     read_rescheduled: bool,
     /// Next sector LBA to deliver during an active read.
     read_lba: u32,
+    /// Sample cursor inside the current CD-DA sector.
+    cdda_sample_index: usize,
     /// Redux tracks whether the drive has already completed a seek and
     /// uses that to pick the short 0x800-cycle SeekL/SeekP follow-up
     /// path on subsequent seeks.
@@ -460,6 +464,7 @@ impl CdRom {
             reading: false,
             read_rescheduled: false,
             read_lba: 0,
+            cdda_sample_index: 0,
             seek_done: false,
             location_changed: false,
             // Power-on mode: double-speed, no XA, data-only 2048-byte
@@ -495,6 +500,34 @@ impl CdRom {
     /// drain.
     pub fn drain_cd_audio(&mut self) -> Vec<(i16, i16)> {
         self.cd_audio.drain(..).collect()
+    }
+
+    /// Decode `sample_count` CD-DA samples from the current Play head.
+    ///
+    /// The bus calls this with the same count it is about to run
+    /// through the SPU, so Red Book audio stays locked to the SPU's
+    /// 44.1 kHz output clock without a second timing source.
+    pub fn pump_cdda_samples(&mut self, mut sample_count: usize) {
+        if self.drive_status & drive_status_bit::PLAYING == 0 {
+            return;
+        }
+        while sample_count != 0 {
+            let count = sample_count.min(CDDA_SAMPLES_PER_SECTOR - self.cdda_sample_index);
+            let Some(mut samples) = self.decode_cdda_chunk(count) else {
+                self.finish_cdda_playback();
+                break;
+            };
+            if !self.muted {
+                self.attenuate_cd_samples(&mut samples);
+                self.append_cd_audio_samples(&samples);
+            }
+            self.cdda_sample_index += count;
+            if self.cdda_sample_index == CDDA_SAMPLES_PER_SECTOR {
+                self.cdda_sample_index = 0;
+                self.read_lba = self.read_lba.wrapping_add(1);
+            }
+            sample_count -= count;
+        }
     }
 
     /// Queue depth of the CD audio buffer -- diagnostic.
@@ -538,6 +571,11 @@ impl CdRom {
         self.cd_audio.clear();
     }
 
+    fn finish_cdda_playback(&mut self) {
+        self.drive_status &= !drive_status_bit::PLAYING;
+        self.cdda_sample_index = 0;
+    }
+
     fn suppress_data_ready(&mut self) -> bool {
         self.data_ready_suppressed = self.data_ready_suppressed.saturating_add(1);
         false
@@ -563,7 +601,30 @@ impl CdRom {
         byte
     }
 
-    fn attenuate_xa_samples(&self, samples: &mut [(i16, i16)]) {
+    fn append_cd_audio_samples(&mut self, samples: &[(i16, i16)]) {
+        let cap = 44_100; // ~1 s at SPU rate
+        let overflow = (self.cd_audio.len() + samples.len()).saturating_sub(cap);
+        for _ in 0..overflow {
+            self.cd_audio.pop_front();
+        }
+        self.cd_audio.extend(samples.iter().copied());
+    }
+
+    fn decode_cdda_chunk(&self, count: usize) -> Option<Vec<(i16, i16)>> {
+        let raw = self.disc.as_ref()?.read_cdda_sector(self.read_lba)?;
+        let start = self.cdda_sample_index * CDDA_BYTES_PER_SAMPLE;
+        let end = start + count * CDDA_BYTES_PER_SAMPLE;
+        let bytes = raw.get(start..end)?;
+        let mut out = Vec::with_capacity(count);
+        for frame in bytes.chunks_exact(CDDA_BYTES_PER_SAMPLE) {
+            let left = i16::from_le_bytes([frame[0], frame[1]]);
+            let right = i16::from_le_bytes([frame[2], frame[3]]);
+            out.push((left, right));
+        }
+        Some(out)
+    }
+
+    fn attenuate_cd_samples(&self, samples: &mut [(i16, i16)]) {
         let ll = self.attenuator_left_to_left as i32;
         let lr = self.attenuator_left_to_right as i32;
         let rl = self.attenuator_right_to_left as i32;
@@ -609,6 +670,7 @@ impl CdRom {
         self.reading = false;
         self.read_rescheduled = false;
         self.drive_status &= !drive_status_bit::PLAYING;
+        self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.cd_audio.clear();
         self.last_sector_header = [0; 4];
@@ -1129,6 +1191,7 @@ impl CdRom {
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.drive_status &= !drive_status_bit::PLAYING;
+        self.cdda_sample_index = 0;
         self.reset_xa_stream();
         self.schedule_first_response(vec![self.stat_byte()]);
         let stat = self.stat_byte();
@@ -1147,6 +1210,7 @@ impl CdRom {
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.drive_status &= !drive_status_bit::PLAYING;
+        self.cdda_sample_index = 0;
         self.reset_xa_stream();
         let ack_stat = self.stat_byte();
         self.schedule_first_response(vec![ack_stat]);
@@ -1203,6 +1267,7 @@ impl CdRom {
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
         self.drive_status &= !drive_status_bit::PLAYING;
+        self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.reset_xa_stream();
         self.muted = false;
@@ -1245,6 +1310,7 @@ impl CdRom {
             | drive_status_bit::SEEKING
             | drive_status_bit::ERROR
             | drive_status_bit::SEEK_ERROR);
+        self.cdda_sample_index = 0;
         self.clear_data_fifo();
         self.reset_xa_stream();
         self.last_sector_header = [0; 4];
@@ -1277,6 +1343,8 @@ impl CdRom {
         self.reading = false;
         self.cancel_pending_data_ready_events();
         self.location_changed = false;
+        self.drive_status &= !drive_status_bit::PLAYING;
+        self.cdda_sample_index = 0;
         self.schedule_first_response(vec![self.stat_byte()]);
         // Redux's seek-complete interrupt clears STATUS_SEEK before
         // publishing the second response (`playInterrupt`), so the
@@ -1308,6 +1376,7 @@ impl CdRom {
         }
         self.cancel_pending_data_ready_events();
         self.drive_status &= !drive_status_bit::PLAYING;
+        self.cdda_sample_index = 0;
         self.reading = true;
         self.read_rescheduled = false;
         self.seek_done = true;
@@ -1407,14 +1476,8 @@ impl CdRom {
                             &mut self.xa_left,
                             &mut self.xa_right,
                         ) {
-                            self.attenuate_xa_samples(&mut samples);
-                            let cap = 44_100; // ~1 s at SPU rate
-                            let overflow =
-                                (self.cd_audio.len() + samples.len()).saturating_sub(cap);
-                            for _ in 0..overflow {
-                                self.cd_audio.pop_front();
-                            }
-                            self.cd_audio.extend(samples.iter().copied());
+                            self.attenuate_cd_samples(&mut samples);
+                            self.append_cd_audio_samples(&samples);
                             self.xa_first_sector = 0;
                             self.data_fifo.clear();
                             self.data_fifo_ready = false;
@@ -1620,10 +1683,12 @@ impl CdRom {
                     return;
                 };
                 self.read_lba = start_lba;
+                self.setloc_pending = false;
             }
-        } else if self.setloc_msf != (0, 0, 0) {
+        } else if self.setloc_pending || self.setloc_msf != (0, 0, 0) {
             let (m, s, f) = self.setloc_msf;
             self.read_lba = msf_to_lba(m, s, f);
+            self.setloc_pending = false;
         } else if self.read_lba == 0 {
             self.read_lba = disc
                 .track_start_lba(disc.first_track_number().unwrap_or(1))
@@ -1632,6 +1697,10 @@ impl CdRom {
         self.motor_on = true;
         self.reading = false;
         self.read_rescheduled = false;
+        self.cancel_pending_data_ready_events();
+        self.clear_data_fifo();
+        self.reset_xa_stream();
+        self.cdda_sample_index = 0;
         self.drive_status |= drive_status_bit::PLAYING;
         self.schedule_first_response(vec![self.stat_byte()]);
     }
@@ -2240,6 +2309,38 @@ mod tests {
                 pregap: 2,
                 file_pregap: 0,
                 bytes: vec![0u8; psx_iso::SECTOR_BYTES * 4],
+            },
+        ])
+    }
+
+    fn cdda_disc() -> Disc {
+        let mut audio = vec![0u8; psx_iso::SECTOR_BYTES * 2];
+        for sample in 0..(CDDA_SAMPLES_PER_SECTOR * 2) {
+            let left = 1000i16.saturating_add(sample as i16);
+            let right = (-1000i16).saturating_sub(sample as i16);
+            let off = sample * CDDA_BYTES_PER_SAMPLE;
+            audio[off..off + 2].copy_from_slice(&left.to_le_bytes());
+            audio[off + 2..off + 4].copy_from_slice(&right.to_le_bytes());
+        }
+
+        Disc::from_tracks(vec![
+            psx_iso::Track {
+                number: 1,
+                track_type: psx_iso::TrackType::Data,
+                start_lba: 0,
+                sector_count: 10,
+                pregap: 0,
+                file_pregap: 0,
+                bytes: vec![0u8; psx_iso::SECTOR_BYTES * 10],
+            },
+            psx_iso::Track {
+                number: 2,
+                track_type: psx_iso::TrackType::Audio,
+                start_lba: 12,
+                sector_count: 2,
+                pregap: 2,
+                file_pregap: 0,
+                bytes: audio,
             },
         ])
     }
@@ -2950,6 +3051,45 @@ mod tests {
             cd.read8(BASE + 1) & drive_status_bit::PLAYING,
             drive_status_bit::PLAYING
         );
+    }
+
+    #[test]
+    fn cdda_play_streams_pcm_samples() {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(cdda_disc()));
+
+        cd.cmd_play(&[0x02]);
+        cd.pump_cdda_samples(2);
+
+        assert_eq!(cd.read_lba, 12);
+        assert_eq!(cd.cdda_sample_index, 2);
+        assert_eq!(cd.drain_cd_audio(), vec![(1000, -1000), (1001, -1001)]);
+    }
+
+    #[test]
+    fn cdda_play_advances_one_lba_per_sector_frame() {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(cdda_disc()));
+
+        cd.cmd_play(&[0x02]);
+        cd.pump_cdda_samples(CDDA_SAMPLES_PER_SECTOR);
+
+        assert_eq!(cd.read_lba, 13);
+        assert_eq!(cd.cdda_sample_index, 0);
+        assert_eq!(cd.cd_audio_queue_len(), CDDA_SAMPLES_PER_SECTOR);
+    }
+
+    #[test]
+    fn cdda_play_stops_at_audio_track_end() {
+        let mut cd = CdRom::new();
+        cd.insert_disc(Some(cdda_disc()));
+
+        cd.cmd_play(&[0x02]);
+        cd.pump_cdda_samples(CDDA_SAMPLES_PER_SECTOR * 2 + 1);
+
+        assert_eq!(cd.read_lba, 14);
+        assert_eq!(cd.cdda_sample_index, 0);
+        assert_eq!(cd.drive_status & drive_status_bit::PLAYING, 0);
     }
 
     #[test]

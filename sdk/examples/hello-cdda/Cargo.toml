@@ -1,0 +1,25 @@
+[package]
+name    = "hello-cdda"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "hello-cdda"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-font = { path = "../../crates/psx-font" }
+psx-gpu  = { path = "../../crates/psx-gpu" }
+psx-io   = { path = "../../crates/psx-io" }
+psx-pad  = { path = "../../crates/psx-pad" }
+psx-rt   = { path = "../../crates/psx-rt" }
+psx-spu  = { path = "../../crates/psx-spu" }
+psx-vram = { path = "../../crates/psx-vram" }
