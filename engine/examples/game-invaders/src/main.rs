@@ -32,6 +32,14 @@ use psx_gpu::prim::{QuadGouraud, RectFlat};
 use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
 
+#[cfg(target_arch = "mips")]
+fn game_trace(message: &str) {
+    psx_rt::tty::println(message);
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn game_trace(_message: &str) {}
+
 // ----------------------------------------------------------------------
 // Layout
 // ----------------------------------------------------------------------
@@ -485,12 +493,17 @@ static mut BG_QUAD: QuadGouraud = QuadGouraud {
 
 impl Scene for Invaders {
     fn init(&mut self, _ctx: &mut Ctx) {
+        game_trace("invaders: init");
         spu::init();
+        game_trace("invaders: spu ok");
         sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
+        game_trace("invaders: sfx ok");
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
+        game_trace("invaders: font ok");
 
         self.reset_wave(true);
+        game_trace("invaders: init ok");
     }
 
     fn update(&mut self, ctx: &mut Ctx) {

@@ -237,7 +237,7 @@ make assets        # cook shared source assets via psxed
 make hello-tri     # build one SDK example
 make showcase-model # build one engine showcase
 make game-pong     # build one mini-game
-make game-magikaaaaaarp-pong # build the magikAAAAArp Pong mini-game
+make game-magikaaaaaarp-pong-disc # build magikAAAAArp Pong with CD-DA
 make run-tri       # build and side-load an example into the frontend
 ```
 
@@ -324,7 +324,7 @@ end-to-end through the emulator frontend (`make <name>` to build,
 | Example | What it demonstrates |
 | --- | --- |
 | `game-pong` | Two-paddle Pong, first full game ported to the engine framework. Left = D-pad, right = AI with hysteresis band, first to 7 wins. |
-| `game-magikaaaaaarp-pong` | magikAAAAArp-themed Pong with a comically large rotating album cube as the ball. Left = D-pad, right = AI, first to 5 wins. |
+| `game-magikaaaaaarp-pong` | magikAAAAArp-themed Pong with a comically large rotating album cube as the ball, a baked GONCHAROV spectrum visualizer, and "GONCHAROV" streamed as CD-DA track 2. Left = D-pad, right = AI, first to 5 wins. |
 | `game-breakout` | Brick-buster. 40-brick rainbow wall, gradient background, particle bursts on break, ball trail, screen shake. |
 | `game-invaders` | Space Invaders. 5×10 marching alien grid that speeds up as the formation thins, player bullet + up to 4 enemy bombs, wave progression. |
 

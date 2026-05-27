@@ -562,11 +562,13 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
     write_gp0(pack_xy(rect.x, rect.y));
     write_gp0(pack_xy(rect.w, rect.h));
     // Two halfwords per 32-bit FIFO word, low half first.
+    // During GP0(0xA0) image transfer the GPU is waiting for data,
+    // not normal commands; DuckStation clears READY_CMD in this
+    // state, so stream payload words without polling command-ready.
     let mut i = 0;
     while i + 1 < pixels.len() {
         let lo = pixels[i] as u32;
         let hi = pixels[i + 1] as u32;
-        wait_cmd_ready();
         write_gp0(lo | (hi << 16));
         i += 2;
     }
@@ -601,10 +603,11 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
     write_gp0(pack_xy(rect.w, rect.h));
     // Two halfwords per FIFO word, low half first -- matches
     // upload_16bpp's packing convention.
+    // See upload_16bpp: image payload writes must not wait on the
+    // normal command-ready bit.
     let mut i = 0;
     while i + 3 < bytes.len() {
         let w = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
-        wait_cmd_ready();
         write_gp0(w);
         i += 4;
     }
