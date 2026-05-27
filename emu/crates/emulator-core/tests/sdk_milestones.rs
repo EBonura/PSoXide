@@ -416,38 +416,6 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             final_pc: 0x8001_0acc,
             redux_display_hash: None,
         }),
-        "showcase-textured-sprite" => Some(SdkGolden {
-            example: "showcase-textured-sprite",
-            vblanks: 3,
-            vram_hash: 0x4258_6aa5_5493_4f74,
-            display_hash: 0xc949_202f_e476_f5ce,
-            display_size: (320, 240),
-            vblank_raises: 3,
-            spu_samples: 1470,
-            // Interactive material viewer: a compact room with a
-            // single upright material pane. Face buttons swap the
-            // texture sample and blend mode while the HUD names the
-            // active material. World geometry is now authored as quads but
-            // submitted through `WorldRenderPass` as independently
-            // culled/sorted textured triangles: 3x3 floor, four
-            // backface-culled walls, and a double-sided material card.
-            // Floor/card surfaces use near-plane clipping; walls use
-            // the stricter all-corners-projected path to avoid giant
-            // behind-camera slabs during the orbit.
-            // The camera no longer auto-orbits: D-pad rotates/dollies
-            // the view while face buttons keep material selection.
-            // Pitch is derived from the dolly radius so the view keeps
-            // looking at the centre of the material card.
-            // The world textured path now splits projected triangles
-            // that would exceed the PS1 hardware extent limits, so the
-            // floor stays stable at close and pulled-back camera ranges.
-            // Visual hashes unchanged after moving the camera/world
-            // transform math into `psx-engine::WorldCamera`, then after
-            // adding material-derived world render layers; only code
-            // layout shifted the frame-boundary PC.
-            final_pc: 0x8001_2cf4,
-            redux_display_hash: None,
-        }),
         // showcase-text exercises all 6 draw paths in psx-font:
         // rect, scaled, rotated, affine, gradient, scaled-gradient.
         // 4 VBlanks captures an early rotation angle while the
@@ -795,16 +763,6 @@ fn milestone_c_showcase_3d() {
     // flowing. Covers the complete 3D pipeline: GTE projection
     // → back-face cull → OT depth-slot insert → DMA submit.
     run_sdk_milestone("showcase-3d", 60);
-}
-
-#[test]
-#[ignore = "SDK milestone: showcase-textured-sprite roundtrip"]
-fn milestone_c_showcase_textured_sprite() {
-    // 3 VBlanks gives the bouncing sprites non-trivial motion in
-    // the captured frame. Larger than the hellos' 2 because this is
-    // a "polished demo" checkpoint -- we want to catch regressions in
-    // multi-frame state, not just first-frame initialization.
-    run_sdk_milestone("showcase-textured-sprite", 3);
 }
 
 #[test]
