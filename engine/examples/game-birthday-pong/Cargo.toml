@@ -1,0 +1,25 @@
+[package]
+name    = "game-birthday-pong"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "game-birthday-pong"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-asset  = { path = "../../../sdk/crates/psx-asset" }
+psx-engine = { path = "../../crates/psx-engine" }
+psx-font   = { path = "../../../sdk/crates/psx-font" }
+psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
+psx-rt     = { path = "../../../sdk/crates/psx-rt" }
+psx-spu    = { path = "../../../sdk/crates/psx-spu" }
+psx-vram   = { path = "../../../sdk/crates/psx-vram" }
