@@ -16,8 +16,8 @@
 .PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run \
         test-sdk \
         psxed assets \
-        examples hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
-        run-tri run-input run-ot run-tex run-gte run-audio \
+        examples hello-tri hello-input hello-ot hello-tex hello-gte hello-audio hello-cdda hello-cdda-disc \
+        run-tri run-input run-ot run-tex run-gte run-audio run-cdda probe-cdda-audio \
         showcase-textured-sprite run-showcase-textured-sprite \
         showcase-text run-showcase-text \
         game-pong run-game-pong \
@@ -76,7 +76,8 @@ help:
 	@echo "    make hello-ot     - build the DMA linked-list demo"
 	@echo "    make hello-tex    - build the textured-sprite demo"
 	@echo "    make hello-gte    - build the GTE perspective-transform demo"
-	@echo "    make hello-audio  - build the SPU-tone-per-button demo"
+	@echo "    make hello-audio  - build the imported SPU sample demo"
+	@echo "    make hello-cdda   - build the CD-DA playback demo"
 	@echo "    make showcase-textured-sprite"
 	@echo "                      - build the polished textured-sprite showcase"
 	@echo "    make showcase-text"
@@ -95,6 +96,8 @@ help:
 	@echo "    make run-tex      - build + side-load hello-tex into the frontend"
 	@echo "    make run-gte      - build + side-load hello-gte into the frontend"
 	@echo "    make run-audio    - build + side-load hello-audio into the frontend"
+	@echo "    make run-cdda     - build + side-load hello-cdda with a mixed-mode disc"
+	@echo "    make probe-cdda-audio - render hello-cdda audio to a WAV + silence check"
 	@echo "    make run-showcase-textured-sprite"
 	@echo "                      - build + side-load the textured-sprite showcase"
 	@echo "    make run-showcase-text"
@@ -221,6 +224,7 @@ test-sdk: examples
 # --- SDK examples ---------------------------------------------------------
 
 EXAMPLE_OUT := build/examples/mipsel-sony-psx/release
+CDDA_DEMO_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
 PROFILE_DEMO3_FRAMES ?= 60
 PROFILE_DEMO3_STEPS ?= 120000000
 PROFILE_DEMO3_HW ?= /tmp/psoxide-demo3-hw-$(PROFILE_DEMO3_FRAMES).ppm
@@ -271,6 +275,16 @@ hello-gte:
 
 hello-audio:
 	cd sdk/examples/hello-audio && cargo build --release
+
+hello-cdda:
+	cd sdk/examples/hello-cdda && cargo build --release
+
+hello-cdda-disc: hello-cdda
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/hello-cdda.exe \
+		--out ../../$(EXAMPLE_OUT)/hello-cdda.bin \
+		--volume PSOXIDE \
+		--cdda-track ../../$(CDDA_DEMO_TRACK)
 
 showcase-textured-sprite:
 	cd engine/examples/showcase-textured-sprite && cargo build --release
@@ -445,7 +459,7 @@ assets: psxed
 	$(call cook_texture,$(HELLO_TEX)/vendor/brick-wall.jpg,$(TEXTURE_ASSETS)/brick-wall.psxt,64x64,4)
 	$(call cook_texture,$(HELLO_TEX)/vendor/floor.jpg,$(TEXTURE_ASSETS)/floor.psxt,64x64,4)
 
-examples: hello-tri hello-input hello-ot hello-tex hello-gte hello-audio showcase-textured-sprite showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles showcase-room hello-engine
+examples: hello-tri hello-input hello-ot hello-tex hello-gte hello-audio hello-cdda showcase-textured-sprite showcase-text game-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles showcase-room hello-engine
 	@echo ""
 	@echo "Built public examples:"
 	@find $(EXAMPLE_OUT) -maxdepth 1 -type f -name '*.exe' ! -name 'editor-playtest.exe' -print | sort | while IFS= read -r exe; do ls -la "$$exe"; done
@@ -471,6 +485,12 @@ run-gte: hello-gte
 
 run-audio: hello-audio
 	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-audio.exe cargo run -p frontend --release
+
+run-cdda: hello-cdda-disc
+	cd emu && PSOXIDE_AUTORUN=1 PSOXIDE_AUDIO_TRACE=1 PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.exe PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.cue cargo run -p frontend --release
+
+probe-cdda-audio: hello-cdda-disc
+	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.exe PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-cdda.cue cargo run -p emulator-core --example probe_cdda_wav --release
 
 run-showcase-textured-sprite: showcase-textured-sprite
 	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/showcase-textured-sprite.exe cargo run -p frontend --release
