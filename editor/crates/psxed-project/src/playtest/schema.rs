@@ -669,6 +669,8 @@ pub struct PlaytestUiNode {
     pub max: UiValueBinding,
     /// Text for `Label`.
     pub text: String,
+    /// Runtime lookup tag for dynamic labels. Empty means untagged.
+    pub tag: String,
     /// Runtime flags.
     pub flags: u16,
 }
