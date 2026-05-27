@@ -1257,16 +1257,16 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
     let Some(scene) = project.active_ui_scene() else {
         return Vec::new();
     };
-    let id_to_index: HashMap<UiNodeId, u16> = scene
-        .nodes()
+    let ordered_ids = scene.hierarchy_node_ids();
+    let id_to_index: HashMap<UiNodeId, u16> = ordered_ids
         .iter()
         .enumerate()
-        .map(|(index, node)| (node.id, index.min(u16::MAX as usize) as u16))
+        .map(|(index, id)| (*id, index.min(u16::MAX as usize) as u16))
         .collect();
 
-    scene
-        .nodes()
+    ordered_ids
         .iter()
+        .filter_map(|id| scene.node(*id))
         .map(|node| {
             let parent = node.parent.and_then(|id| id_to_index.get(&id).copied());
             let (x, y, width, height, color, background, value, max, text) = match &node.kind {
@@ -4864,7 +4864,7 @@ fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NodeKind, ProjectDocument};
+    use crate::{NodeKind, ProjectDocument, UiRect};
 
     fn starter_project_root() -> PathBuf {
         crate::default_project_dir()
@@ -7027,6 +7027,47 @@ mod tests {
             assert_eq!((cached.x, cached.z), (cell.x, cell.z));
         }
         assert!(package.spawn.is_some());
+    }
+
+    #[test]
+    fn ui_nodes_cook_in_hierarchy_order_with_local_offsets() {
+        let mut project = ProjectDocument::new("ui");
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        let group = scene.add_node(
+            scene.root,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(40, 30, 100, 50),
+            },
+        );
+        scene.add_node(
+            group,
+            "Prompt",
+            UiNodeKind::Label {
+                rect: UiRect::new(8, 6, 48, 12),
+                text: "Open".to_string(),
+                color: [220, 226, 240],
+            },
+        );
+
+        let nodes = cook_ui_nodes(&project);
+        let group_index = nodes
+            .iter()
+            .position(|node| {
+                matches!(
+                    &node.kind,
+                    UiNodeKind::Group { rect } if *rect == UiRect::new(40, 30, 100, 50)
+                )
+            })
+            .expect("group cooked");
+        let label_index = nodes
+            .iter()
+            .position(|node| node.text == "Open")
+            .expect("label cooked");
+
+        assert!(group_index < label_index);
+        assert_eq!(nodes[label_index].parent, Some(group_index as u16));
+        assert_eq!((nodes[label_index].x, nodes[label_index].y), (8, 6));
     }
 
     #[test]
