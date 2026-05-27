@@ -22,7 +22,7 @@
 //! Sector map produced:
 //!
 //! ```text
-//!   0..=15    zero-filled system area
+//!   0..=15    system area, zero-filled unless supplied by caller
 //!   16        Primary Volume Descriptor (PVD)
 //!   17        Volume Descriptor Set Terminator (VDST)
 //!   18        L-path table (little-endian LBA fields)
@@ -73,6 +73,7 @@ pub struct IsoFile {
 pub struct IsoBuilder {
     volume_id: String,
     system_id: String,
+    system_area: Option<Vec<u8>>,
     files: Vec<IsoFile>,
 }
 
@@ -89,6 +90,7 @@ impl IsoBuilder {
         Self {
             volume_id: String::from("UNTITLED"),
             system_id: String::from("PLAYSTATION"),
+            system_area: None,
             files: Vec::new(),
         }
     }
@@ -104,6 +106,17 @@ impl IsoBuilder {
     pub fn system_id(mut self, id: &str) -> Self {
         self.system_id = id.to_ascii_uppercase();
         self
+    }
+
+    /// Override the first 16 cooked ISO sectors. Real PlayStation
+    /// boot media uses this area for the region/license/logo payload.
+    /// The data must be exactly 16 * 2048 bytes.
+    pub fn system_area(mut self, bytes: Vec<u8>) -> Result<Self, Vec<u8>> {
+        if bytes.len() != 16 * SECTOR_SIZE {
+            return Err(bytes);
+        }
+        self.system_area = Some(bytes);
+        Ok(self)
     }
 
     /// Add a file to the root directory. Name is normalised later.
@@ -223,7 +236,9 @@ impl IsoBuilder {
 
         // ---------- Stitch it all together --------------------------
         let mut out = vec![0u8; (total_sectors as usize) * SECTOR_SIZE];
-        // Sectors 0..=15 are the 32 KiB system area (already zeroed).
+        if let Some(system_area) = &self.system_area {
+            out[..16 * SECTOR_SIZE].copy_from_slice(system_area);
+        }
         out[16 * SECTOR_SIZE..17 * SECTOR_SIZE].copy_from_slice(&pvd);
         out[17 * SECTOR_SIZE..18 * SECTOR_SIZE].copy_from_slice(&vdst);
         out[18 * SECTOR_SIZE..19 * SECTOR_SIZE].copy_from_slice(&l_path);
@@ -241,10 +256,8 @@ impl IsoBuilder {
     }
 
     /// Serialise as a raw .bin image -- 2352-byte Mode-2 Form-1 sectors
-    /// with sync pattern, BCD MSF header, and subheader set. EDC/ECC
-    /// bytes are left zero: PSoXide's CDROM emulation and most
-    /// desktop emulators don't verify them, and a real PS1 lens
-    /// hardware re-computes ECC on the fly.
+    /// with sync pattern, BCD MSF header, subheader, and valid
+    /// Mode-2/Form-1 EDC/ECC.
     ///
     /// Use this output for PSoXide's disc loader (`Disc::from_bin`)
     /// and for emulators expecting .bin/.cue.
@@ -252,6 +265,8 @@ impl IsoBuilder {
         let cooked = self.build();
         let total_sectors = cooked.len() / SECTOR_SIZE;
         let mut bin = vec![0u8; total_sectors * RAW_SECTOR_SIZE];
+        let edc_table = build_edc_table();
+        let gf8_product = build_gf8_product_table();
         for lba in 0..total_sectors {
             let cooked_start = lba * SECTOR_SIZE;
             let raw_start = lba * RAW_SECTOR_SIZE;
@@ -285,9 +300,134 @@ impl IsoBuilder {
             // User data -- copy the cooked sector's 2048 bytes.
             sector[24..24 + SECTOR_SIZE]
                 .copy_from_slice(&cooked[cooked_start..cooked_start + SECTOR_SIZE]);
-            // EDC (2072..2076) + ECC (2076..2352) left zero.
+            encode_mode2_form1_edc_ecc(sector, &edc_table, &gf8_product);
         }
         bin
+    }
+}
+
+fn encode_mode2_form1_edc_ecc(
+    sector: &mut [u8],
+    edc_table: &[u32; 256],
+    gf8_product: &[[u16; 256]; 43],
+) {
+    let edc = compute_edc(&sector[0x10..0x818], edc_table);
+    sector[0x818..0x81C].copy_from_slice(&edc.to_le_bytes());
+
+    let header = [sector[0x0C], sector[0x0D], sector[0x0E], sector[0x0F]];
+    sector[0x0C..0x10].fill(0);
+    calc_parity(sector, 0, 43, 19, 2 * 43, 2, gf8_product);
+    calc_parity(sector, 43 * 4, 26, 0, 2 * 44, 2 * 43, gf8_product);
+    sector[0x0C..0x10].copy_from_slice(&header);
+}
+
+fn compute_edc(bytes: &[u8], table: &[u32; 256]) -> u32 {
+    let mut edc = 0u32;
+    for &byte in bytes {
+        edc = (edc >> 8) ^ table[((edc as u8) ^ byte) as usize];
+    }
+    edc
+}
+
+fn build_edc_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    for (i, entry) in table.iter_mut().enumerate() {
+        let mut x = i as u32;
+        for _ in 0..8 {
+            let carry = x & 1 != 0;
+            x >>= 1;
+            if carry {
+                x ^= 0xD801_8001;
+            }
+        }
+        *entry = x;
+    }
+    table
+}
+
+fn build_gf8_product_table() -> [[u16; 256]; 43] {
+    let mut gf8_log = [0u8; 256];
+    let mut gf8_ilog = [0u8; 256];
+    gf8_ilog[0xFF] = 0;
+    let mut x = 1u16;
+    for i in 0..=0xFE {
+        gf8_log[x as usize] = i as u8;
+        gf8_ilog[i] = x as u8;
+        x <<= 1;
+        if x & 0x100 != 0 {
+            x ^= 0x11D;
+        }
+    }
+
+    let mut product = [[0u16; 256]; 43];
+    for j in 0..43 {
+        let base = gf8_ilog[44 - j];
+        let yy = gf8_subfunc(base ^ 1, 0x19, &gf8_log, &gf8_ilog);
+        let xx = gf8_subfunc(
+            gf8_subfunc(base, 0x01, &gf8_log, &gf8_ilog) ^ 1,
+            0x18,
+            &gf8_log,
+            &gf8_ilog,
+        );
+        let xx = gf8_log[xx as usize] as u16;
+        let yy = gf8_log[yy as usize] as u16;
+        for i in 1..256 {
+            let log = gf8_log[i] as u16;
+            let mut px = xx + log;
+            let mut py = yy + log;
+            if px >= 255 {
+                px -= 255;
+            }
+            if py >= 255 {
+                py -= 255;
+            }
+            product[j][i] = gf8_ilog[px as usize] as u16 | ((gf8_ilog[py as usize] as u16) << 8);
+        }
+    }
+    product
+}
+
+fn gf8_subfunc(mut a: u8, b: u8, gf8_log: &[u8; 256], gf8_ilog: &[u8; 256]) -> u8 {
+    if a > 0 {
+        let mut value = gf8_log[a as usize] as i16 - b as i16;
+        if value < 0 {
+            value += 255;
+        }
+        a = gf8_ilog[value as usize];
+    }
+    a
+}
+
+fn calc_parity(
+    sector: &mut [u8],
+    offs: usize,
+    len: usize,
+    j0: usize,
+    step1: usize,
+    step2: usize,
+    gf8_product: &[[u16; 256]; 43],
+) {
+    let mut src = 0x0C;
+    let mut dst = 0x81C + offs;
+    let srcmax = dst;
+    for _ in 0..len {
+        let base = src;
+        let mut x = 0u16;
+        let mut y = 0u16;
+        for row in gf8_product.iter().take(43).skip(j0) {
+            x ^= row[sector[src] as usize];
+            y ^= row[sector[src + 1] as usize];
+            src += step1;
+            if step1 == 2 * 44 && src >= srcmax {
+                src -= 2 * 1118;
+            }
+        }
+        sector[dst + 2 * len] = (x & 0xFF) as u8;
+        sector[dst] = (x >> 8) as u8;
+        sector[dst + 2 * len + 1] = (y & 0xFF) as u8;
+        sector[dst + 1] = (y >> 8) as u8;
+        dst += 2;
+        src = base + step2;
     }
 }
 
@@ -450,6 +590,15 @@ mod tests {
     }
 
     #[test]
+    fn system_area_overrides_initial_sectors() {
+        let mut area = vec![0u8; 16 * SECTOR_SIZE];
+        area[4 * SECTOR_SIZE] = 0xAB;
+        let img = IsoBuilder::new().system_area(area).unwrap().build();
+        assert_eq!(img[4 * SECTOR_SIZE], 0xAB);
+        assert_eq!(&img[16 * SECTOR_SIZE + 1..16 * SECTOR_SIZE + 6], b"CD001");
+    }
+
+    #[test]
     fn multi_file_adds_sectors_per_file() {
         let mut b = IsoBuilder::new();
         b.add_file("SMALL.TXT", vec![b'A'; 100]);
@@ -535,6 +684,18 @@ mod tests {
                 "user data differs at LBA {lba}"
             );
         }
+    }
+
+    #[test]
+    fn raw_bin_has_mode2_form1_edc_ecc() {
+        let mut b = IsoBuilder::new();
+        b.add_file("X.DAT", b"PAYLOAD-BYTES".to_vec());
+        let raw = b.build_bin();
+        let edc_table = build_edc_table();
+        let sector = &raw[16 * RAW_SECTOR_SIZE..17 * RAW_SECTOR_SIZE];
+        let expected_edc = compute_edc(&sector[0x10..0x818], &edc_table).to_le_bytes();
+        assert_eq!(&sector[0x818..0x81C], &expected_edc);
+        assert!(sector[0x81C..].iter().any(|&byte| byte != 0));
     }
 
     #[test]
