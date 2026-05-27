@@ -189,17 +189,154 @@ impl UiNodeId {
     }
 }
 
+/// Anchor point used to resolve a UI rectangle against its parent
+/// rectangle or the root canvas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiAnchor {
+    /// Parent top-left corner.
+    #[default]
+    TopLeft,
+    /// Parent top edge midpoint.
+    Top,
+    /// Parent top-right corner.
+    TopRight,
+    /// Parent left edge midpoint.
+    Left,
+    /// Parent center.
+    Center,
+    /// Parent right edge midpoint.
+    Right,
+    /// Parent bottom-left corner.
+    BottomLeft,
+    /// Parent bottom edge midpoint.
+    Bottom,
+    /// Parent bottom-right corner.
+    BottomRight,
+}
+
+impl UiAnchor {
+    /// Stable list used by editor controls.
+    pub const ALL: [Self; 9] = [
+        Self::TopLeft,
+        Self::Top,
+        Self::TopRight,
+        Self::Left,
+        Self::Center,
+        Self::Right,
+        Self::BottomLeft,
+        Self::Bottom,
+        Self::BottomRight,
+    ];
+
+    /// Compact display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top Left",
+            Self::Top => "Top",
+            Self::TopRight => "Top Right",
+            Self::Left => "Left",
+            Self::Center => "Center",
+            Self::Right => "Right",
+            Self::BottomLeft => "Bottom Left",
+            Self::Bottom => "Bottom",
+            Self::BottomRight => "Bottom Right",
+        }
+    }
+
+    /// Tiny grid label for dense editor controls.
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "TL",
+            Self::Top => "T",
+            Self::TopRight => "TR",
+            Self::Left => "L",
+            Self::Center => "C",
+            Self::Right => "R",
+            Self::BottomLeft => "BL",
+            Self::Bottom => "B",
+            Self::BottomRight => "BR",
+        }
+    }
+
+    /// Runtime flag value. Kept stable for cooked manifests.
+    pub const fn runtime_bits(self) -> u16 {
+        match self {
+            Self::TopLeft => 0,
+            Self::Top => 1,
+            Self::TopRight => 2,
+            Self::Left => 3,
+            Self::Center => 4,
+            Self::Right => 5,
+            Self::BottomLeft => 6,
+            Self::Bottom => 7,
+            Self::BottomRight => 8,
+        }
+    }
+
+    const fn factors(self) -> (i32, i32) {
+        match self {
+            Self::TopLeft => (0, 0),
+            Self::Top => (1, 0),
+            Self::TopRight => (2, 0),
+            Self::Left => (0, 1),
+            Self::Center => (1, 1),
+            Self::Right => (2, 1),
+            Self::BottomLeft => (0, 2),
+            Self::Bottom => (1, 2),
+            Self::BottomRight => (2, 2),
+        }
+    }
+}
+
+/// Text alignment for authored UI labels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiTextAlign {
+    /// Align text to the left edge.
+    #[default]
+    Left,
+    /// Center text within the label rectangle.
+    Center,
+    /// Align text to the right edge.
+    Right,
+}
+
+impl UiTextAlign {
+    /// Stable list used by editor controls.
+    pub const ALL: [Self; 3] = [Self::Left, Self::Center, Self::Right];
+
+    /// Compact display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Center => "Center",
+            Self::Right => "Right",
+        }
+    }
+
+    /// Runtime flag value. Kept stable for cooked manifests.
+    pub const fn runtime_bits(self) -> u16 {
+        match self {
+            Self::Left => 0,
+            Self::Center => 1,
+            Self::Right => 2,
+        }
+    }
+}
+
 /// Screen-space rectangle in authored PSX framebuffer pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiRect {
-    /// Left edge in canvas pixels.
+    /// Local X offset from the selected anchor.
     pub x: i16,
-    /// Top edge in canvas pixels.
+    /// Local Y offset from the selected anchor.
     pub y: i16,
     /// Width in canvas pixels.
     pub width: u16,
     /// Height in canvas pixels.
     pub height: u16,
+    /// Parent/canvas anchor used to resolve `x` and `y`.
+    #[serde(default)]
+    pub anchor: UiAnchor,
 }
 
 impl UiRect {
@@ -210,7 +347,14 @@ impl UiRect {
             y,
             width,
             height,
+            anchor: UiAnchor::TopLeft,
         }
+    }
+
+    /// Return a copy using a different anchor.
+    pub const fn with_anchor(mut self, anchor: UiAnchor) -> Self {
+        self.anchor = anchor;
+        self
     }
 }
 
@@ -279,8 +423,25 @@ pub enum UiNodeKind {
         /// Optional runtime lookup tag for game-controlled text.
         #[serde(default)]
         tag: String,
+        /// Text alignment inside `rect`.
+        #[serde(default)]
+        align: UiTextAlign,
+        /// Wrap words inside the label rectangle.
+        #[serde(default)]
+        wrap: bool,
         /// Text tint.
         color: [u8; 3],
+    },
+    /// Screen-space textured image.
+    Image {
+        /// Image bounds in canvas pixels.
+        rect: UiRect,
+        /// Optional Texture resource.
+        #[serde(default)]
+        texture: Option<ResourceId>,
+        /// Texture tint.
+        #[serde(default = "default_ui_image_tint")]
+        tint: [u8; 3],
     },
     /// Horizontal status bar backed by a runtime value binding.
     Bar {
@@ -305,6 +466,7 @@ impl UiNodeKind {
             Self::Group { .. } => "Group",
             Self::Rect { .. } => "Rect",
             Self::Label { .. } => "Label",
+            Self::Image { .. } => "Image",
             Self::Bar { .. } => "Bar",
         }
     }
@@ -316,6 +478,7 @@ impl UiNodeKind {
             Self::Group { rect }
             | Self::Rect { rect, .. }
             | Self::Label { rect, .. }
+            | Self::Image { rect, .. }
             | Self::Bar { rect, .. } => Some(rect),
         }
     }
@@ -327,9 +490,14 @@ impl UiNodeKind {
             Self::Group { rect }
             | Self::Rect { rect, .. }
             | Self::Label { rect, .. }
+            | Self::Image { rect, .. }
             | Self::Bar { rect, .. } => Some(*rect),
         }
     }
+}
+
+fn default_ui_image_tint() -> [u8; 3] {
+    [128, 128, 128]
 }
 
 /// One node in an authored UI scene tree.
@@ -583,29 +751,36 @@ impl UiScene {
         }
     }
 
-    /// Bounds resolved into canvas space by accumulating parent UI
-    /// rectangles. Child `x/y` values are local to their parent.
+    /// Bounds resolved into canvas space. Child `x/y` values are
+    /// local offsets from their selected anchor on the parent rect.
     pub fn absolute_rect(&self, id: UiNodeId) -> Option<UiRect> {
-        let node = self.node(id)?;
-        let mut rect = match &node.kind {
-            UiNodeKind::Canvas { width, height } => UiRect::new(0, 0, *width, *height),
-            _ => node.kind.rect()?,
-        };
-        let mut current = node.parent;
-        let mut guard = 0usize;
-        while let Some(parent_id) = current {
-            if guard >= self.nodes.len() {
-                return None;
-            }
-            let parent = self.node(parent_id)?;
-            if let Some(parent_rect) = parent.kind.rect() {
-                rect.x = clamp_ui_rect_coord(rect.x as i32 + parent_rect.x as i32);
-                rect.y = clamp_ui_rect_coord(rect.y as i32 + parent_rect.y as i32);
-            }
-            current = parent.parent;
-            guard += 1;
+        self.absolute_rect_inner(id, 0)
+    }
+
+    fn absolute_rect_inner(&self, id: UiNodeId, depth: usize) -> Option<UiRect> {
+        if depth > self.nodes.len() {
+            return None;
         }
-        Some(rect)
+        let node = self.node(id)?;
+        match &node.kind {
+            UiNodeKind::Canvas { width, height } => Some(UiRect::new(0, 0, *width, *height)),
+            _ => {
+                let local = node.kind.rect()?;
+                let parent = node
+                    .parent
+                    .and_then(|parent_id| self.absolute_rect_inner(parent_id, depth + 1))
+                    .unwrap_or_else(|| UiRect::new(0, 0, 0, 0));
+                let (anchor_x, anchor_y) = local.anchor.factors();
+                let x = parent.x as i32 + (parent.width as i32 * anchor_x) / 2 + local.x as i32;
+                let y = parent.y as i32 + (parent.height as i32 * anchor_y) / 2 + local.y as i32;
+                Some(UiRect::new(
+                    clamp_ui_rect_coord(x),
+                    clamp_ui_rect_coord(y),
+                    local.width,
+                    local.height,
+                ))
+            }
+        }
     }
 
     /// Normalize loaded UI data.
@@ -11505,6 +11680,8 @@ mod tests {
                 rect: UiRect::new(52, 184, 96, 12),
                 text: "Open".to_string(),
                 tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
                 color: [220, 226, 240],
             },
         );
@@ -11537,6 +11714,8 @@ mod tests {
                 rect: UiRect::new(8, 6, 48, 12),
                 text: "Open".to_string(),
                 tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
                 color: [220, 226, 240],
             },
         );
@@ -11579,6 +11758,8 @@ mod tests {
                 rect: UiRect::new(2, 3, 8, 8),
                 text: "x".to_string(),
                 tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
                 color: [255, 255, 255],
             },
         );
