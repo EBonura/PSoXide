@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
@@ -16,6 +16,7 @@ use psx_iso::{build_world_pack, default_system_cnf, Disc, Exe, IsoBuilder, SECTO
 use psx_trace::InstructionRecord;
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
+use crate::burn::BurnState;
 use crate::embedded_playtest::EmbeddedPlaytestState;
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
 use crate::ui;
@@ -96,10 +97,10 @@ impl Workspace {
 /// Work to perform after the shared editor-playtest MIPS build exits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorBuildCompletion {
-    /// Wrap the built EXE into a disc image and load it into the
+    /// Wrap the built runtime into a CUE/BIN disc and load it into the
     /// embedded editor viewport.
     RunEmbedded,
-    /// Copy the built disc image into the active project's baked output folder.
+    /// Copy the built CUE/BIN disc into the active project's baked output folder.
     ExportProject { dest_path: PathBuf },
 }
 
@@ -125,6 +126,8 @@ pub struct AppState {
     editor_build_completion: Option<EditorBuildCompletion>,
     /// Background `make examples` job launched from the Examples menu.
     examples_build_child: Option<Child>,
+    /// CD burning submenu state and burner hotplug watcher.
+    pub(crate) burn: BurnState,
     pub panels: PanelVisibility,
     /// Framebuffer mode -- shared HW renderer at native scale vs
     /// window-fitted high resolution. Toggled via the debug toolbar.
@@ -266,8 +269,8 @@ impl AppState {
         // Legacy env-var side-load path: if PSOXIDE_EXE or
         // PSOXIDE_DISC is set, honour it so existing developer
         // workflows keep working. The library UI is the forward path
-        // for everyone else. Homebrew EXE side-loads use the same
-        // synthetic/HLE BIOS path as the Menu and editor Play flows.
+        // for everyone else; authored builds should normally launch
+        // through CUE/BIN discs.
         let mut cpu = Cpu::new();
         let bus = load_initial_bus(&settings, &mut cpu);
         let autorun = bus.is_some() && env_flag("PSOXIDE_AUTORUN");
@@ -282,6 +285,7 @@ impl AppState {
             editor_project_dir_seen,
             editor_build_completion: None,
             examples_build_child: None,
+            burn: BurnState::default(),
             panels: PanelVisibility::default(),
             scale_mode: ScaleMode::default(),
             framebuffer_present_size_px: (320, 240),
@@ -352,11 +356,11 @@ impl AppState {
     }
 
     /// Rebuild the emulator state around `entry`. Same flow the
-    /// headless `launch` CLI runs: mount the disc or side-load the
-    /// EXE, plug a pad into port 1, and use a real BIOS only for
-    /// retail disc paths. On success the
-    /// emulator is paused at the reset vector (or the EXE entry
-    /// point); the user clicks Run to start stepping.
+    /// headless `launch` CLI runs: mount the disc or legacy EXE,
+    /// plug a pad into port 1, and use a real BIOS only for retail
+    /// disc paths. On success the emulator is paused at the reset
+    /// vector (or the legacy EXE entry point); the user clicks Run
+    /// to start stepping.
     pub fn launch_entry(&mut self, entry: &LibraryEntry) -> Result<(), String> {
         // Flush the outgoing game's memcard before we discard its
         // Bus state. Silently log on failure -- we'd rather launch
@@ -487,13 +491,38 @@ impl AppState {
         self.launch_entry(&entry)
     }
 
+    /// Open the burn settings submenu for a launchable library entry.
+    pub fn open_burn_menu_by_id(&mut self, id: &str) -> Result<(), String> {
+        let Some(entry) = library_entry_for_launch_id(&self.library.entries, id).cloned() else {
+            return Err(format!("no library entry with id={id}"));
+        };
+        self.burn.open_for(&entry);
+        match self.burn.scan_now() {
+            Ok(Some(notice)) => self.status_message_set(notice),
+            Ok(None) => {}
+            Err(error) => self.status_message_set(format!("Burner scan failed: {error}")),
+        }
+        Ok(())
+    }
+
+    /// Poll CD burner hotplug in the same lightweight style as controller notices.
+    pub fn poll_burner_hotplug(&mut self) {
+        match self.burn.tick() {
+            Ok(Some(notice)) => self.status_message_set(notice),
+            Ok(None) => {}
+            Err(error) => {
+                self.burn.status = format!("Burner scan failed: {error}");
+            }
+        }
+    }
+
     /// Walk the configured library root(s) and update the cache.
     /// Scans roots in one pass:
     ///
     /// 1. `settings.paths.game_library` -- user's retail-disc folder.
     /// 2. `settings.paths.sdk_examples` (or auto-detected
     ///    `build/examples/mipsel-sony-psx/release/` under the repo
-    ///    root) -- `.exe` homebrew built by `make examples`.
+    ///    root) -- `.cue` homebrew discs built by `make examples`.
     /// 3. Auto-detected `editor/projects/` under the repo root --
     ///    project-baked disc images surfaced in the Projects category.
     ///
@@ -562,8 +591,11 @@ impl AppState {
     /// Examples menu can populate a fresh clone without blocking UI
     /// frames. Completion is handled by [`Self::poll_examples_build`].
     pub fn start_examples_build(&mut self) {
+        if self.finish_completed_examples_build() {
+            return;
+        }
         if self.examples_build_child.is_some() {
-            self.status_message_set("Examples build already running");
+            self.status_message_set("Examples build still running");
             return;
         }
 
@@ -588,24 +620,33 @@ impl AppState {
     }
 
     /// Poll a background examples build. On success, rescan the
-    /// library so the newly-created `.exe` files appear immediately.
+    /// library so the newly-created CUE/BIN discs appear immediately.
     pub fn poll_examples_build(&mut self) {
+        self.finish_completed_examples_build();
+    }
+
+    fn finish_completed_examples_build(&mut self) -> bool {
         let Some(child) = self.examples_build_child.as_mut() else {
-            return;
+            return false;
         };
         let status = match child.try_wait() {
             Ok(Some(status)) => status,
-            Ok(None) => return,
+            Ok(None) => return false,
             Err(error) => {
                 self.examples_build_child = None;
                 let message = format!("Examples build poll failed: {error}");
                 eprintln!("[frontend] {message}");
                 self.status_message_set(message);
-                return;
+                return true;
             }
         };
 
         self.examples_build_child = None;
+        self.finish_examples_build(status);
+        true
+    }
+
+    fn finish_examples_build(&mut self, status: ExitStatus) {
         if !status.success() {
             let message = format!("Examples build failed: {status}");
             eprintln!("[frontend] {message}; run `make examples` for full logs");
@@ -669,28 +710,22 @@ impl AppState {
     ///    the raw PVD ID "SCUS-94900"), and under the CUE's stable
     ///    game ID so savestates key off the disc identity rather
     ///    than the BIN byte hash alone.
-    /// 2. Walk every entry. For BIN entries: drop multi-track
-    ///    audio rips (Track 2..N), prefer the CUE-linked title if
-    ///    one exists, and skip BINs that map to the *same* CUE as
-    ///    an earlier BIN (dedup). For CUE entries: hidden from the
-    ///    games list because the owning BIN already appears there
-    ///    under the CUE's title/ID. For EXE entries: into Examples,
-    ///    except internal runtime templates owned by editor Play.
+    /// 2. Walk every entry. SDK examples and project builds launch
+    ///    from their CUEs; their EXE/BIN siblings are intermediates.
+    ///    Retail BIN entries still use a CUE title/id when one owns
+    ///    them, and retail CUE entries remain hidden from Games.
     /// 3. Alphabetise each column.
     ///
     /// Result: Crash Bandicoot shows once, under its friendly
     /// title, and clicking it launches the BIN.
     pub fn refresh_menu_library(&mut self) {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         let sdk_examples_root = self.resolve_sdk_examples_dir().filter(|p| p.exists());
 
         // Pass 1: map "BIN path" → (CUE-derived title, CUE id).
         let mut cue_owns_bin: HashMap<PathBuf, (String, String)> = HashMap::new();
         for e in &self.library.entries {
-            if is_sdk_examples_disc_artifact(&e.path, e.kind, sdk_examples_root.as_deref()) {
-                continue;
-            }
             if e.kind != GameKind::DiscCue {
                 continue;
             }
@@ -699,7 +734,7 @@ impl AppState {
             }
         }
 
-        // Pass 2: project entries, applying dedup + title overrides.
+        // Pass 2: project menu entries, applying dedup + title overrides.
         let mut games: Vec<MenuLibraryItem> = Vec::new();
         let mut examples: Vec<MenuLibraryItem> = Vec::new();
         let mut projects: Vec<MenuLibraryItem> = Vec::new();
@@ -713,6 +748,9 @@ impl AppState {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("<unknown>");
+            let is_sdk_example = sdk_examples_root
+                .as_ref()
+                .is_some_and(|root| path_is_under(&e.path, root));
 
             // Audio tracks: any "(Track N)" filename where N != 1.
             // Multi-track CUE rips leave each audio track as a
@@ -723,36 +761,54 @@ impl AppState {
             {
                 continue;
             }
-            if is_sdk_examples_disc_artifact(&e.path, e.kind, sdk_examples_root.as_deref()) {
+            if is_sdk_example {
+                match e.kind {
+                    GameKind::DiscCue => examples.push(MenuLibraryItem {
+                        id: path_launch_id(&e.path),
+                        title: e.title.clone(),
+                        subtitle: format_subtitle(e),
+                        burnable: true,
+                        launchable: true,
+                    }),
+                    GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd | GameKind::Exe => {
+                        continue;
+                    }
+                    GameKind::Unknown => {}
+                }
                 continue;
             }
 
             match e.kind {
-                // CUEs are never shown directly -- their BIN is.
+                _ if is_internal_example_artifact(&e.path) => continue,
+                GameKind::DiscCue
+                    if project_root
+                        .as_ref()
+                        .is_some_and(|root| path_is_under(&e.path, root)) =>
+                {
+                    let root = project_root.as_ref().expect("checked above");
+                    if let Some(metadata) = project_build_menu_metadata(&e.path, root) {
+                        if !metadata.current {
+                            continue;
+                        }
+                        projects.push(MenuLibraryItem {
+                            id: project_build_launch_id(&e.path),
+                            title: metadata.title,
+                            subtitle: metadata.subtitle,
+                            burnable: true,
+                            launchable: true,
+                        });
+                    }
+                }
+                // Retail CUEs are not shown directly -- their BIN is.
                 // CCDs are shown directly because their `.img`
                 // sidecar is not a separate library entry.
                 GameKind::DiscCue => continue,
-                GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd
-                    if is_internal_example_artifact(&e.path) =>
-                {
-                    continue;
-                }
                 GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCcd => {
-                    if let Some(root) = project_root
+                    if project_root
                         .as_ref()
-                        .filter(|root| path_is_under(&e.path, root))
+                        .is_some_and(|root| path_is_under(&e.path, root))
                     {
-                        if let Some(metadata) = project_build_menu_metadata(&e.path, root) {
-                            if !metadata.current {
-                                continue;
-                            }
-                            projects.push(MenuLibraryItem {
-                                id: project_build_launch_id(&e.path),
-                                title: metadata.title,
-                                subtitle: metadata.subtitle,
-                            });
-                            continue;
-                        }
+                        continue;
                     }
                     // If a CUE owns this BIN, use the CUE's
                     // friendly title + stable ID. Also dedup: the
@@ -771,41 +827,33 @@ impl AppState {
                         id,
                         title,
                         subtitle: format_subtitle(e),
+                        burnable: false,
+                        launchable: true,
                     });
                 }
-                GameKind::Exe if is_internal_example_artifact(&e.path) => continue,
                 GameKind::Exe => {
-                    if let Some(root) = project_root
+                    if project_root
                         .as_ref()
-                        .filter(|root| path_is_under(&e.path, root))
+                        .is_some_and(|root| path_is_under(&e.path, root))
                     {
-                        if let Some(metadata) = project_build_menu_metadata(&e.path, root) {
-                            if !metadata.current {
-                                continue;
-                            }
-                            projects.push(MenuLibraryItem {
-                                id: project_build_launch_id(&e.path),
-                                title: metadata.title,
-                                subtitle: metadata.subtitle,
-                            });
-                        } else {
-                            projects.push(MenuLibraryItem {
-                                id: project_build_launch_id(&e.path),
-                                title: e.title.clone(),
-                                subtitle: format_subtitle(e),
-                            });
-                        }
+                        continue;
                     } else {
                         examples.push(MenuLibraryItem {
                             id: e.id.clone(),
                             title: e.title.clone(),
                             subtitle: format_subtitle(e),
+                            burnable: false,
+                            launchable: true,
                         });
                     }
                 }
                 GameKind::Unknown => {}
             }
         }
+
+        let built_examples: HashSet<String> =
+            examples.iter().map(|entry| example_key(&entry.title)).collect();
+        examples.extend(public_example_source_items(&built_examples));
 
         // Pass 3: stable alphabetical order per column.
         games.sort_by_key(|a| a.title.to_lowercase());
@@ -1083,8 +1131,8 @@ impl AppState {
     }
 
     /// Build the active project by cooking assets, compiling the runtime,
-    /// and copying the resulting PSX EXE into the project folder so the
-    /// launcher Projects category can run it without opening the editor.
+    /// and exporting a CUE/BIN disc into the project folder so Projects
+    /// can launch it without opening the editor.
     pub fn build_current_project_for_launcher(&mut self) {
         self.stop_embedded_playtest();
         self.editor
@@ -1142,8 +1190,8 @@ impl AppState {
         Ok(())
     }
 
-    /// Poll the background build child, then either side-load the
-    /// resulting editor-playtest EXE or export it as a project build.
+    /// Poll the background build child, then either launch the wrapped
+    /// CUE/BIN playtest disc or export that disc as a project build.
     pub fn poll_embedded_playtest_build(&mut self) {
         let Some(child) = self.embedded_playtest.building_child_mut() else {
             return;
@@ -1431,15 +1479,7 @@ impl AppState {
         let mut cpu = Cpu::new();
 
         let disc_path = build_embedded_playtest_disc()?;
-        let disc_bytes =
-            std::fs::read(&disc_path).map_err(|e| format!("{}: {e}", disc_path.display()))?;
-        if disc_bytes.len() < SECTOR_BYTES {
-            return Err(format!(
-                "{} is too small to be a valid disc image",
-                disc_path.display()
-            ));
-        }
-        let disc = Disc::from_bin(disc_bytes);
+        let disc = load_authored_disc(&disc_path)?;
         // Embedded Play is PSoXide-authored homebrew: no user BIOS is
         // required. The runtime fast-boots with HLE BIOS dispatch, while
         // still mounting a real disc image so CD streaming exercises the
@@ -1460,25 +1500,13 @@ impl AppState {
 
     fn export_project_build(&mut self, dest_path: PathBuf) -> Result<String, String> {
         let source_path = build_embedded_playtest_disc()?;
-        let dest_dir = dest_path
-            .parent()
-            .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
-        std::fs::create_dir_all(dest_dir)
-            .map_err(|error| format!("mkdir {}: {error}", dest_dir.display()))?;
-        remove_stale_project_builds(&dest_path)?;
-        let bytes = std::fs::copy(&source_path, &dest_path).map_err(|error| {
-            format!(
-                "copy {} to {}: {error}",
-                source_path.display(),
-                dest_path.display()
-            )
-        })?;
+        let build_bytes = copy_project_disc(&source_path, &dest_path)?;
 
         let rescan_error = self.rescan_library().err();
         let mut message = format!(
             "Project disc exported -> {} ({} KiB)",
             dest_path.display(),
-            bytes / 1024
+            build_bytes / 1024
         );
         if let Some(error) = rescan_error {
             message.push_str(&format!("; launcher rescan failed: {error}"));
@@ -1555,7 +1583,8 @@ fn format_subtitle(e: &LibraryEntry) -> String {
         Region::NtscJ => "NTSC-J",
         Region::Unknown => "",
     };
-    let size_mib = e.size / (1024 * 1024);
+    let size = display_size_bytes(e);
+    let size_mib = size / (1024 * 1024);
     match (region.is_empty(), e.kind) {
         (false, GameKind::DiscBin | GameKind::DiscIso | GameKind::DiscCue | GameKind::DiscCcd) => {
             format!("{region} · {size_mib} MiB")
@@ -1564,10 +1593,10 @@ fn format_subtitle(e: &LibraryEntry) -> String {
             format!("{size_mib} MiB")
         }
         (_, GameKind::Exe) => {
-            if e.size < 1024 {
-                format!("{} B", e.size)
-            } else if e.size < 1024 * 1024 {
-                format!("{} KiB", e.size / 1024)
+            if size < 1024 {
+                format!("{size} B")
+            } else if size < 1024 * 1024 {
+                format!("{} KiB", size / 1024)
             } else {
                 format!("{size_mib} MiB")
             }
@@ -1576,7 +1605,24 @@ fn format_subtitle(e: &LibraryEntry) -> String {
     }
 }
 
+fn display_size_bytes(e: &LibraryEntry) -> u64 {
+    if e.kind == GameKind::DiscCue {
+        if let Some(bin) = psoxide_settings::library::primary_bin_from_cue(&e.path) {
+            if let Ok(metadata) = std::fs::metadata(bin) {
+                return metadata.len();
+            }
+        }
+    }
+    e.size
+}
+
+const PATH_LAUNCH_ID_PREFIX: &str = "path:";
 const PROJECT_LAUNCH_ID_PREFIX: &str = "project-path:";
+
+fn path_launch_id(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    format!("{PATH_LAUNCH_ID_PREFIX}{}", canonical.to_string_lossy())
+}
 
 fn project_build_launch_id(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -1587,6 +1633,12 @@ fn library_entry_for_launch_id<'a>(
     entries: &'a [LibraryEntry],
     launch_id: &str,
 ) -> Option<&'a LibraryEntry> {
+    if let Some(path) = launch_id.strip_prefix(PATH_LAUNCH_ID_PREFIX) {
+        let path = Path::new(path);
+        return entries
+            .iter()
+            .find(|entry| paths_equivalent(&entry.path, path));
+    }
     if let Some(path) = launch_id.strip_prefix(PROJECT_LAUNCH_ID_PREFIX) {
         let path = Path::new(path);
         return entries
@@ -1636,25 +1688,47 @@ fn is_internal_example_artifact(path: &Path) -> bool {
     )
 }
 
-fn is_sdk_examples_disc_artifact(
-    path: &Path,
-    kind: GameKind,
-    sdk_examples_root: Option<&Path>,
-) -> bool {
-    if matches!(kind, GameKind::Exe | GameKind::Unknown) {
-        return false;
-    }
-    let Some(root) = sdk_examples_root else {
-        return false;
-    };
-    path_is_under(path, root)
-}
-
 fn path_is_under(path: &Path, root: &Path) -> bool {
     match (path.canonicalize(), root.canonicalize()) {
         (Ok(path), Ok(root)) => path.starts_with(root),
         _ => path.starts_with(root),
     }
+}
+
+fn public_example_source_items(
+    built_examples: &std::collections::HashSet<String>,
+) -> Vec<MenuLibraryItem> {
+    let mut items = Vec::new();
+    let root = repo_root_dir();
+    for examples_root in [root.join("sdk/examples"), root.join("engine/examples")] {
+        let Ok(entries) = std::fs::read_dir(&examples_root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.join("Cargo.toml").is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name == "editor-playtest" || built_examples.contains(&example_key(name)) {
+                continue;
+            }
+            items.push(MenuLibraryItem {
+                id: format!("example-source:{name}"),
+                title: name.to_string(),
+                subtitle: "not built".to_string(),
+                burnable: false,
+                launchable: false,
+            });
+        }
+    }
+    items
+}
+
+fn example_key(name: &str) -> String {
+    name.to_ascii_lowercase()
 }
 
 fn paths_equivalent(path: &Path, other: &Path) -> bool {
@@ -1984,7 +2058,7 @@ fn editor_playtest_disc_path() -> PathBuf {
         .join("examples")
         .join("mipsel-sony-psx")
         .join("release")
-        .join("editor-playtest.bin")
+        .join("editor-playtest.cue")
 }
 
 /// Wrap the current editor-playtest executable and generated world pack into
@@ -1995,13 +2069,26 @@ pub(crate) fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
     let world_pack = embedded_world_pack_payload()?;
     let image = embedded_playtest_disc_image(exe_bytes, world_pack)?;
 
-    let disc_path = editor_playtest_disc_path();
-    let dir = disc_path
+    let cue_path = editor_playtest_disc_path();
+    let bin_path = cue_path.with_extension("bin");
+    let dir = cue_path
         .parent()
-        .ok_or_else(|| format!("invalid playtest disc path: {}", disc_path.display()))?;
+        .ok_or_else(|| format!("invalid playtest disc path: {}", cue_path.display()))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    std::fs::write(&disc_path, image).map_err(|e| format!("write {}: {e}", disc_path.display()))?;
-    Ok(disc_path)
+    std::fs::write(&bin_path, image).map_err(|e| format!("write {}: {e}", bin_path.display()))?;
+    write_single_data_track_cue(&cue_path, &bin_path)?;
+    Ok(cue_path)
+}
+
+fn write_single_data_track_cue(cue_path: &Path, bin_path: &Path) -> Result<(), String> {
+    let file_name = bin_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid BIN path for CUE: {}", bin_path.display()))?
+        .replace('"', "'");
+    let cue =
+        format!("FILE \"{file_name}\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+    std::fs::write(cue_path, cue).map_err(|e| format!("write {}: {e}", cue_path.display()))
 }
 
 fn embedded_playtest_disc_image(
@@ -2133,7 +2220,7 @@ fn apply_embedded_world_pack_order(
 fn project_baked_disc_path(project_dir: &Path, project_name: &str) -> PathBuf {
     project_dir
         .join("baked")
-        .join(format!("{}.bin", safe_project_build_stem(project_name)))
+        .join(format!("{}.cue", safe_project_build_stem(project_name)))
 }
 
 fn safe_project_build_stem(name: &str) -> String {
@@ -2146,6 +2233,9 @@ fn remove_stale_project_builds(dest_path: &Path) -> Result<usize, String> {
         .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
     let dest_name = dest_path
         .file_name()
+        .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
+    let dest_stem = dest_path
+        .file_stem()
         .ok_or_else(|| format!("invalid build output path: {}", dest_path.display()))?;
     if !dest_dir.exists() {
         return Ok(0);
@@ -2162,10 +2252,13 @@ fn remove_stale_project_builds(dest_path: &Path) -> Result<usize, String> {
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| {
                 extension.eq_ignore_ascii_case("bin")
+                    || extension.eq_ignore_ascii_case("cue")
                     || extension.eq_ignore_ascii_case("exe")
                     || extension.eq_ignore_ascii_case("iso")
             });
-        if !is_build_artifact || path.file_name().is_some_and(|name| name == dest_name) {
+        let is_current_build = path.file_name().is_some_and(|name| name == dest_name)
+            || path.file_stem().is_some_and(|stem| stem == dest_stem);
+        if !is_build_artifact || is_current_build {
             continue;
         }
         std::fs::remove_file(&path)
@@ -2173,6 +2266,32 @@ fn remove_stale_project_builds(dest_path: &Path) -> Result<usize, String> {
         removed += 1;
     }
     Ok(removed)
+}
+
+pub(crate) fn copy_project_disc(
+    source_cue_path: &Path,
+    dest_cue_path: &Path,
+) -> Result<u64, String> {
+    let source_bin_path = source_cue_path.with_extension("bin");
+    let dest_bin_path = dest_cue_path.with_extension("bin");
+    let dest_dir = dest_cue_path
+        .parent()
+        .ok_or_else(|| format!("invalid build output path: {}", dest_cue_path.display()))?;
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|error| format!("mkdir {}: {error}", dest_dir.display()))?;
+    remove_stale_project_builds(dest_cue_path)?;
+    let bin_bytes = std::fs::copy(&source_bin_path, &dest_bin_path).map_err(|error| {
+        format!(
+            "copy {} to {}: {error}",
+            source_bin_path.display(),
+            dest_bin_path.display()
+        )
+    })?;
+    write_single_data_track_cue(dest_cue_path, &dest_bin_path)?;
+    let cue_bytes = std::fs::metadata(dest_cue_path)
+        .map_err(|error| format!("stat {}: {error}", dest_cue_path.display()))?
+        .len();
+    Ok(bin_bytes + cue_bytes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2223,46 +2342,43 @@ fn project_dir_for_build(path: &Path, project_root: &Path) -> Option<PathBuf> {
 fn load_disc() -> Option<Disc> {
     let var = std::env::var("PSOXIDE_DISC").ok()?;
     let path = PathBuf::from(&var);
+    match load_authored_disc(&path) {
+        Ok(disc) => {
+            eprintln!(
+                "[frontend] mounted disc {} ({} sectors)",
+                path.display(),
+                disc.sector_count()
+            );
+            Some(disc)
+        }
+        Err(error) => {
+            eprintln!(
+                "[frontend] PSOXIDE_DISC={} unreadable: {error}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+fn load_authored_disc(path: &Path) -> Result<Disc, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
-    let disc = if ext == "cue" {
-        match psoxide_settings::library::load_disc_from_cue(&path) {
-            Ok(disc) => disc,
-            Err(e) => {
-                eprintln!(
-                    "[frontend] PSOXIDE_DISC={} unreadable CUE: {e}",
-                    path.display()
-                );
-                return None;
-            }
-        }
+    if ext == "cue" {
+        psoxide_settings::library::load_disc_from_cue(path).map_err(|error| error.to_string())
     } else {
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("[frontend] PSOXIDE_DISC={} unreadable: {e}", path.display());
-                return None;
-            }
-        };
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
         if bytes.len() < SECTOR_BYTES {
-            eprintln!(
-                "[frontend] PSOXIDE_DISC={} too small ({} bytes, need at least {SECTOR_BYTES})",
-                path.display(),
+            return Err(format!(
+                "too small ({} bytes, need at least {SECTOR_BYTES})",
                 bytes.len()
-            );
-            return None;
+            ));
         }
-        Disc::from_bin(bytes)
-    };
-    eprintln!(
-        "[frontend] mounted disc {} ({} sectors)",
-        path.display(),
-        disc.sector_count()
-    );
-    Some(disc)
+        Ok(Disc::from_bin(bytes))
+    }
 }
 
 fn load_sidecar_disc_for_exe(exe_path: &Path) -> Result<Option<Disc>, String> {
@@ -2345,36 +2461,6 @@ mod tests {
     }
 
     #[test]
-    fn sdk_example_disc_artifacts_are_hidden_from_games() {
-        let sdk_root = Path::new("build/examples/mipsel-sony-psx/release");
-        assert!(is_sdk_examples_disc_artifact(
-            Path::new("build/examples/mipsel-sony-psx/release/hello-cdda.bin"),
-            GameKind::DiscBin,
-            Some(sdk_root)
-        ));
-        assert!(is_sdk_examples_disc_artifact(
-            Path::new("build/examples/mipsel-sony-psx/release/hello-cdda.cue"),
-            GameKind::DiscCue,
-            Some(sdk_root)
-        ));
-        assert!(is_sdk_examples_disc_artifact(
-            Path::new("build/examples/mipsel-sony-psx/release/editor-playtest-demo10.bin"),
-            GameKind::DiscBin,
-            Some(sdk_root)
-        ));
-        assert!(!is_sdk_examples_disc_artifact(
-            Path::new("build/examples/mipsel-sony-psx/release/hello-cdda.exe"),
-            GameKind::Exe,
-            Some(sdk_root)
-        ));
-        assert!(!is_sdk_examples_disc_artifact(
-            Path::new("/games/Crash Bandicoot (USA).bin"),
-            GameKind::DiscBin,
-            Some(sdk_root)
-        ));
-    }
-
-    #[test]
     fn project_build_disc_name_is_filesystem_safe() {
         assert_eq!(
             safe_project_build_stem("Stone Room: Vertical Slice!"),
@@ -2385,7 +2471,7 @@ mod tests {
             project_baked_disc_path(Path::new("editor/projects/default"), "Demo Project"),
             Path::new("editor/projects/default")
                 .join("baked")
-                .join("demo_project.bin")
+                .join("demo_project.cue")
         );
     }
 
@@ -2423,24 +2509,64 @@ mod tests {
     }
 
     #[test]
+    fn public_example_placeholders_are_discovered_from_source_dirs() {
+        let built = std::collections::HashSet::from([example_key("hello-tri")]);
+        let examples = public_example_source_items(&built);
+        assert!(examples
+            .iter()
+            .any(|entry| entry.title == "game-pong" && !entry.launchable));
+        assert!(examples.iter().all(|entry| entry.title != "editor-playtest"));
+        assert!(examples.iter().all(|entry| entry.title != "hello-tri"));
+    }
+
+    #[test]
     fn project_build_export_removes_stale_sibling_builds() {
         let root = frontend_test_temp_dir("stale-project-build-exes");
         let baked = root.join("baked");
         std::fs::create_dir_all(&baked).unwrap();
         let stale = baked.join("untitled_ps1_project.exe");
         let stale_bin = baked.join("old_demo.bin");
-        let current = baked.join("demo2.bin");
+        let stale_cue = baked.join("old_demo.cue");
+        let current = baked.join("demo2.cue");
+        let current_bin = baked.join("demo2.bin");
         let notes = baked.join("notes.txt");
         std::fs::write(&stale, b"old").unwrap();
         std::fs::write(&stale_bin, b"old bin").unwrap();
+        std::fs::write(&stale_cue, b"old cue").unwrap();
         std::fs::write(&current, b"new").unwrap();
+        std::fs::write(&current_bin, b"new bin").unwrap();
         std::fs::write(&notes, b"keep").unwrap();
 
-        assert_eq!(remove_stale_project_builds(&current).unwrap(), 2);
+        assert_eq!(remove_stale_project_builds(&current).unwrap(), 3);
         assert!(!stale.exists());
         assert!(!stale_bin.exists());
+        assert!(!stale_cue.exists());
         assert!(current.exists());
+        assert!(current_bin.exists());
         assert!(notes.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_build_export_rewrites_cue_for_renamed_bin() {
+        let root = frontend_test_temp_dir("project-build-export-cue");
+        let source_dir = root.join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_cue = source_dir.join("editor-playtest.cue");
+        let source_bin = source_dir.join("editor-playtest.bin");
+        std::fs::write(&source_bin, b"disc image bytes").unwrap();
+        write_single_data_track_cue(&source_cue, &source_bin).unwrap();
+
+        let dest_cue = root.join("demo10").join("baked").join("demo10.cue");
+        let copied_bytes = copy_project_disc(&source_cue, &dest_cue).unwrap();
+        let dest_bin = dest_cue.with_extension("bin");
+        let cue = std::fs::read_to_string(&dest_cue).unwrap();
+
+        assert!(copied_bytes > 0);
+        assert_eq!(std::fs::read(&dest_bin).unwrap(), b"disc image bytes");
+        assert!(cue.contains("FILE \"demo10.bin\" BINARY"));
+        assert!(!cue.contains("editor-playtest.bin"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2455,8 +2581,8 @@ mod tests {
             .save_to_path(project_dir.join("project.ron"))
             .unwrap();
 
-        let current = baked.join("demo_two.bin");
-        let stale = baked.join("untitled_ps1_project.bin");
+        let current = baked.join("demo_two.cue");
+        let stale = baked.join("untitled_ps1_project.cue");
         std::fs::write(&current, b"current").unwrap();
         std::fs::write(&stale, b"stale").unwrap();
 
@@ -2475,8 +2601,8 @@ mod tests {
     #[test]
     fn project_build_launch_ids_resolve_by_path_when_disc_ids_collide() {
         let root = frontend_test_temp_dir("project-build-launch-ids");
-        let a_path = root.join("demo4").join("baked").join("demo4.bin");
-        let b_path = root.join("demo10").join("baked").join("demo10.bin");
+        let a_path = root.join("demo4").join("baked").join("demo4.cue");
+        let b_path = root.join("demo10").join("baked").join("demo10.cue");
         std::fs::create_dir_all(a_path.parent().unwrap()).unwrap();
         std::fs::create_dir_all(b_path.parent().unwrap()).unwrap();
         std::fs::write(&a_path, b"disc a").unwrap();
@@ -2486,7 +2612,7 @@ mod tests {
             LibraryEntry {
                 id: "same-disc-id".to_string(),
                 path: a_path.clone(),
-                kind: GameKind::DiscBin,
+                kind: GameKind::DiscCue,
                 title: "PSOXIDE".to_string(),
                 region: Region::Unknown,
                 size: 6,
@@ -2496,7 +2622,7 @@ mod tests {
             LibraryEntry {
                 id: "same-disc-id".to_string(),
                 path: b_path.clone(),
-                kind: GameKind::DiscBin,
+                kind: GameKind::DiscCue,
                 title: "PSOXIDE".to_string(),
                 region: Region::Unknown,
                 size: 6,
@@ -2513,6 +2639,53 @@ mod tests {
         );
         assert_eq!(
             library_entry_for_launch_id(&entries, &project_build_launch_id(&b_path))
+                .unwrap()
+                .path,
+            b_path
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn path_launch_ids_resolve_duplicate_disc_ids_by_path() {
+        let root = frontend_test_temp_dir("example-launch-ids");
+        let a_path = root.join("hello-tex.cue");
+        let b_path = root.join("hello-tri.cue");
+        std::fs::write(&a_path, b"disc a").unwrap();
+        std::fs::write(&b_path, b"disc b").unwrap();
+
+        let entries = vec![
+            LibraryEntry {
+                id: "same-disc-id".to_string(),
+                path: a_path.clone(),
+                kind: GameKind::DiscCue,
+                title: "hello-tex".to_string(),
+                region: Region::Unknown,
+                size: 6,
+                mtime: 0,
+                diagnostic: None,
+            },
+            LibraryEntry {
+                id: "same-disc-id".to_string(),
+                path: b_path.clone(),
+                kind: GameKind::DiscCue,
+                title: "hello-tri".to_string(),
+                region: Region::Unknown,
+                size: 6,
+                mtime: 0,
+                diagnostic: None,
+            },
+        ];
+
+        assert_eq!(
+            library_entry_for_launch_id(&entries, "same-disc-id")
+                .unwrap()
+                .path,
+            a_path
+        );
+        assert_eq!(
+            library_entry_for_launch_id(&entries, &path_launch_id(&b_path))
                 .unwrap()
                 .path,
             b_path
