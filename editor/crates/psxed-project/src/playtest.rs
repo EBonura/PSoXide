@@ -49,8 +49,8 @@ use crate::world_cook::{
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
     NodeKind, ParticleEmitterSettings, ProjectDocument, PsxBlendMode, ResourceData, ResourceId,
-    SceneNode, UiNodeId, UiNodeKind, UiValueBinding, WorldGrid, WorldStreamingSettings,
-    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    SceneNode, UiAnchor, UiNodeId, UiNodeKind, UiTextAlign, UiValueBinding, WorldGrid,
+    WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -1192,7 +1192,16 @@ pub fn build_package(
     }
 
     let room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
-    let ui_nodes = cook_ui_nodes(project);
+    let ui_nodes = cook_ui_nodes(
+        project,
+        project_root,
+        &mut texture_asset_for_resource,
+        &mut assets,
+        &mut report,
+    );
+    if !report.is_ok() {
+        return (None, report);
+    }
 
     (
         Some(PlaytestPackage {
@@ -1253,7 +1262,13 @@ fn active_far_vista_panel_count(
         .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
 }
 
-fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
+fn cook_ui_nodes(
+    project: &ProjectDocument,
+    project_root: &Path,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Vec<PlaytestUiNode> {
     let Some(scene) = project.active_ui_scene() else {
         return Vec::new();
     };
@@ -1269,7 +1284,20 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
         .filter_map(|id| scene.node(*id))
         .map(|node| {
             let parent = node.parent.and_then(|id| id_to_index.get(&id).copied());
-            let (x, y, width, height, color, background, value, max, text, tag) = match &node.kind {
+            let (
+                x,
+                y,
+                width,
+                height,
+                color,
+                background,
+                value,
+                max,
+                texture_asset,
+                text,
+                tag,
+                flags,
+            ) = match &node.kind {
                 UiNodeKind::Canvas { width, height } => (
                     0,
                     0,
@@ -1279,8 +1307,10 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
+                    None,
                     String::new(),
                     String::new(),
+                    0,
                 ),
                 UiNodeKind::Group { rect } => (
                     rect.x,
@@ -1291,8 +1321,10 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
+                    None,
                     String::new(),
                     String::new(),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Rect { rect, color } => (
                     rect.x,
@@ -1303,13 +1335,17 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
+                    None,
                     String::new(),
                     String::new(),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Label {
                     rect,
                     text,
                     tag,
+                    align,
+                    wrap,
                     color,
                 } => (
                     rect.x,
@@ -1320,8 +1356,38 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
+                    None,
                     text.clone(),
                     tag.clone(),
+                    ui_node_flags(rect.anchor, *align, *wrap),
+                ),
+                UiNodeKind::Image {
+                    rect,
+                    texture,
+                    tint,
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *tint,
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    texture.and_then(|texture_id| {
+                        cook_far_vista_texture_asset(
+                            project,
+                            project_root,
+                            texture_id,
+                            &format!("UI image '{}'", node.name),
+                            texture_asset_for_resource,
+                            assets,
+                            report,
+                        )
+                    }),
+                    String::new(),
+                    String::new(),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Bar {
                     rect,
@@ -1338,8 +1404,10 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     *background,
                     *value,
                     *max,
+                    None,
                     String::new(),
                     String::new(),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
             };
             PlaytestUiNode {
@@ -1353,12 +1421,23 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                 background,
                 value,
                 max,
+                texture_asset,
                 text,
                 tag,
-                flags: 0,
+                flags,
             }
         })
         .collect()
+}
+
+fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
+    let mut flags = anchor.runtime_bits() & psx_level::ui_node_flags::ANCHOR_MASK;
+    flags |= (align.runtime_bits() << psx_level::ui_node_flags::TEXT_ALIGN_SHIFT)
+        & psx_level::ui_node_flags::TEXT_ALIGN_MASK;
+    if wrap {
+        flags |= psx_level::ui_node_flags::TEXT_WRAP;
+    }
+    flags
 }
 
 fn cook_sky_panorama_texture_asset(
@@ -7058,11 +7137,22 @@ mod tests {
                 rect: UiRect::new(8, 6, 48, 12),
                 text: "Open".to_string(),
                 tag: "prompt".to_string(),
+                align: crate::UiTextAlign::Left,
+                wrap: false,
                 color: [220, 226, 240],
             },
         );
 
-        let nodes = cook_ui_nodes(&project);
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let nodes = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
         let group_index = nodes
             .iter()
             .position(|node| {
