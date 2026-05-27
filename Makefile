@@ -20,7 +20,7 @@
 	run-tri run-input run-ot run-tex run-gte run-audio run-cdda probe-cdda-audio \
 	showcase-text run-showcase-text \
 	game-pong run-game-pong \
-	game-birthday-pong run-game-birthday-pong \
+	game-magikaaaaaarp-pong run-game-magikaaaaaarp-pong \
 	game-breakout run-game-breakout \
         game-invaders run-game-invaders \
         showcase-3d run-showcase-3d \
@@ -80,8 +80,8 @@ help:
 	@echo "    make showcase-text"
 	@echo "                      - build the text / font capabilities showcase"
 	@echo "    make game-pong     - build the Pong mini-game"
-	@echo "    make game-birthday-pong"
-	@echo "                      - build the birthday Pong mini-game"
+	@echo "    make game-magikaaaaaarp-pong"
+	@echo "                      - build the magikAAAAArp Pong mini-game"
 	@echo "    make game-breakout - build the Breakout mini-game"
 	@echo "    make game-invaders - build the Space Invaders mini-game"
 	@echo "    make showcase-3d    - build the 3D geometry showcase"
@@ -100,8 +100,8 @@ help:
 	@echo "    make run-showcase-text"
 	@echo "                      - build + side-load the text capabilities showcase"
 	@echo "    make run-game-pong     - build + side-load the Pong mini-game"
-	@echo "    make run-game-birthday-pong"
-	@echo "                      - build + side-load the birthday Pong mini-game"
+	@echo "    make run-game-magikaaaaaarp-pong"
+	@echo "                      - build + side-load the magikAAAAArp Pong mini-game"
 	@echo "    make run-game-breakout - build + side-load the Breakout mini-game"
 	@echo "    make run-game-invaders - build + side-load the Space Invaders mini-game"
 	@echo "    make run-showcase-3d - build + side-load the 3D geometry showcase"
@@ -291,8 +291,8 @@ showcase-text:
 game-pong:
 	cd engine/examples/game-pong && cargo build --release
 
-game-birthday-pong:
-	cd engine/examples/game-birthday-pong && cargo build --release
+game-magikaaaaaarp-pong:
+	cd engine/examples/game-magikaaaaaarp-pong && cargo build --release
 
 game-breakout:
 	cd engine/examples/game-breakout && cargo build --release
@@ -426,7 +426,7 @@ SHOWCASE_3D := engine/examples/showcase-3d
 SHOWCASE_LIGHTS := engine/examples/showcase-lights
 HELLO_TEX := sdk/examples/hello-tex
 TEXTURE_ASSETS := assets/textures
-BIRTHDAY_PONG := engine/examples/game-birthday-pong
+MAGIKAAAAARP_PONG := engine/examples/game-magikaaaaaarp-pong
 
 # Texture sources committed under example `vendor/` directories are
 # small pre-cropped JPGs. Larger originals are intentionally not
@@ -455,9 +455,9 @@ assets: psxed
 	    --compute-normals --no-colors
 	$(call cook_texture,$(HELLO_TEX)/vendor/brick-wall.jpg,$(TEXTURE_ASSETS)/brick-wall.psxt,64x64,4)
 	$(call cook_texture,$(HELLO_TEX)/vendor/floor.jpg,$(TEXTURE_ASSETS)/floor.psxt,64x64,4)
-	$(call cook_texture,$(BIRTHDAY_PONG)/vendor/magikaaaaaarp_album.jpg,$(BIRTHDAY_PONG)/assets/magikaaaaaarp_album.psxt,64x64,4)
+	$(call cook_texture,$(MAGIKAAAAARP_PONG)/vendor/magikaaaaaarp_album.jpg,$(MAGIKAAAAARP_PONG)/assets/magikaaaaaarp_album.psxt,64x64,4)
 
-examples: hello-tri hello-input hello-ot hello-tex hello-gte hello-audio hello-cdda showcase-text game-pong game-birthday-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles hello-engine
+examples: hello-tri hello-input hello-ot hello-tex hello-gte hello-audio hello-cdda showcase-text game-pong game-magikaaaaaarp-pong game-breakout game-invaders showcase-3d showcase-model showcase-lights showcase-fog showcase-particles hello-engine
 	@echo ""
 	@echo "Built public examples:"
 	@find $(EXAMPLE_OUT) -maxdepth 1 -type f -name '*.exe' ! -name 'editor-playtest.exe' -print | sort | while IFS= read -r exe; do ls -la "$$exe"; done
@@ -496,8 +496,8 @@ run-showcase-text: showcase-text
 run-game-pong: game-pong
 	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-pong.exe cargo run -p frontend --release
 
-run-game-birthday-pong: game-birthday-pong
-	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-birthday-pong.exe cargo run -p frontend --release
+run-game-magikaaaaaarp-pong: game-magikaaaaaarp-pong
+	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.exe cargo run -p frontend --release
 
 run-game-breakout: game-breakout
 	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-breakout.exe cargo run -p frontend --release
