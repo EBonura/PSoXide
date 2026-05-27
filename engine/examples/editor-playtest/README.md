@@ -159,6 +159,3 @@ What it *does* render:
   validation, writer.
 - `editor/crates/psxed-project/src/bin/cook_playtest.rs` -- CLI.
 - `engine/crates/psx-engine/src/world_render.rs` -- `draw_room`.
-- `engine/examples/showcase-room/` -- sister example that cooks
-  the starter at build time and renders it directly (no editor
-  generated/ step).
