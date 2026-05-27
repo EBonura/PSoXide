@@ -71,6 +71,131 @@ typed_index! {
     pub struct RoomIndex;
 }
 
+/// Small fixed-width debug bitset for runtime room/portal telemetry.
+///
+/// This deliberately stores two 32-bit words instead of a `u64`: it preserves
+/// the old 64-bit mask surface for host tooling while keeping PS1 runtime code
+/// on native-width integer operations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeDebugMask {
+    lo: u32,
+    hi: u32,
+}
+
+impl RuntimeDebugMask {
+    /// Empty mask.
+    pub const EMPTY: Self = Self { lo: 0, hi: 0 };
+
+    /// Build from low/high 32-bit words.
+    pub const fn from_words(lo: u32, hi: u32) -> Self {
+        Self { lo, hi }
+    }
+
+    /// Build a mask with `index` set when it fits inside 64 debug bits.
+    pub const fn from_index(index: usize) -> Self {
+        if index < 32 {
+            Self {
+                lo: 1u32 << index,
+                hi: 0,
+            }
+        } else if index < 64 {
+            Self {
+                lo: 0,
+                hi: 1u32 << (index - 32),
+            }
+        } else {
+            Self::EMPTY
+        }
+    }
+
+    /// Build a room-index mask.
+    pub const fn from_room(room: RoomIndex) -> Self {
+        Self::from_index(room.to_usize())
+    }
+
+    /// Low 32 mask bits.
+    pub const fn lo(self) -> u32 {
+        self.lo
+    }
+
+    /// High 32 mask bits.
+    pub const fn hi(self) -> u32 {
+        self.hi
+    }
+
+    /// True when no bits are set.
+    pub const fn is_empty(self) -> bool {
+        self.lo == 0 && self.hi == 0
+    }
+
+    /// Return a copy with `index` set when it fits inside 64 debug bits.
+    pub const fn with_index(self, index: usize) -> Self {
+        let bit = Self::from_index(index);
+        Self {
+            lo: self.lo | bit.lo,
+            hi: self.hi | bit.hi,
+        }
+    }
+
+    /// Return a copy with `room` set.
+    pub const fn with_room(self, room: RoomIndex) -> Self {
+        self.with_index(room.to_usize())
+    }
+
+    /// Set `index` when it fits inside 64 debug bits.
+    pub fn insert_index(&mut self, index: usize) {
+        *self = self.with_index(index);
+    }
+
+    /// Set `room`.
+    pub fn insert_room(&mut self, room: RoomIndex) {
+        *self = self.with_room(room);
+    }
+
+    /// Test `index`.
+    pub const fn contains_index(self, index: usize) -> bool {
+        if index < 32 {
+            (self.lo & (1u32 << index)) != 0
+        } else if index < 64 {
+            (self.hi & (1u32 << (index - 32))) != 0
+        } else {
+            false
+        }
+    }
+}
+
+impl core::ops::BitOr for RuntimeDebugMask {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            lo: self.lo | rhs.lo,
+            hi: self.hi | rhs.hi,
+        }
+    }
+}
+
+impl core::ops::BitOrAssign for RuntimeDebugMask {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.lo |= rhs.lo;
+        self.hi |= rhs.hi;
+    }
+}
+
+impl core::ops::BitAnd<u32> for RuntimeDebugMask {
+    type Output = u32;
+
+    fn bitand(self, rhs: u32) -> Self::Output {
+        self.lo & rhs
+    }
+}
+
+impl PartialEq<u32> for RuntimeDebugMask {
+    fn eq(&self, other: &u32) -> bool {
+        self.lo == *other && self.hi == 0
+    }
+}
+
 typed_index! {
     /// Index into the generated `MATERIALS` table.
     pub struct MaterialIndex;
@@ -203,6 +328,23 @@ typed_index! {
 typed_index! {
     /// Index into the generated `WEAPON_HITBOXES` table.
     pub struct WeaponHitboxIndex;
+}
+
+typed_index! {
+    /// Index into the generated `UI_NODES` table.
+    pub struct UiNodeIndex;
+}
+
+/// Bit layout for [`LevelUiNodeRecord::flags`].
+pub mod ui_node_flags {
+    /// Low nibble stores the anchor id.
+    pub const ANCHOR_MASK: u16 = 0x000f;
+    /// Text alignment bit shift.
+    pub const TEXT_ALIGN_SHIFT: u16 = 4;
+    /// Text alignment mask.
+    pub const TEXT_ALIGN_MASK: u16 = 0x0030;
+    /// Label text wraps inside its rectangle.
+    pub const TEXT_WRAP: u16 = 1 << 6;
 }
 
 typed_index! {
@@ -953,7 +1095,7 @@ pub struct LevelCachedRoomSurfaceRecord {
     pub uv_words: [u16; 4],
     /// Cached baked RGB values.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
-    /// Packed surface kind plus baked-light flag.
+    /// Packed surface kind plus cached render flags.
     pub kind_flags: u8,
     /// Runtime wall direction when this is a wall surface.
     pub wall_direction: u8,
@@ -1305,6 +1447,71 @@ pub struct LevelBoxPropRecord {
     pub flags: u16,
 }
 
+/// Screen-space UI node kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiNodeKind {
+    /// Fixed-resolution root canvas.
+    Canvas,
+    /// Organizational group.
+    Group,
+    /// Solid rectangle.
+    Rect,
+    /// Text label.
+    Label,
+    /// Textured screen-space image.
+    Image,
+    /// Horizontal value bar.
+    Bar,
+}
+
+/// Runtime value source for data-bound UI elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiValueBinding {
+    /// Literal Q12 fixed-point value.
+    ConstantQ12(i32),
+    /// Player health value.
+    PlayerHealth,
+    /// Player health maximum.
+    PlayerHealthMax,
+    /// Player stamina value.
+    PlayerStamina,
+    /// Player stamina maximum.
+    PlayerStaminaMax,
+}
+
+/// One cooked screen-space UI node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiNodeRecord {
+    /// Parent UI node index, or `None` for the root canvas.
+    pub parent: Option<UiNodeIndex>,
+    /// Node kind.
+    pub kind: LevelUiNodeKind,
+    /// Left edge in canvas pixels.
+    pub x: i16,
+    /// Top edge in canvas pixels.
+    pub y: i16,
+    /// Width in canvas pixels.
+    pub width: u16,
+    /// Height in canvas pixels.
+    pub height: u16,
+    /// Primary colour: fill for `Rect`/`Bar`, text tint for `Label`.
+    pub color: [u8; 3],
+    /// Secondary colour, currently the `Bar` background.
+    pub background: [u8; 3],
+    /// Current value binding for `Bar`.
+    pub value: LevelUiValueBinding,
+    /// Maximum value binding for `Bar`.
+    pub max: LevelUiValueBinding,
+    /// Texture asset for `Image`, or `AssetId(u16::MAX)`.
+    pub texture_asset: AssetId,
+    /// Text for `Label`.
+    pub text: &'static str,
+    /// Runtime lookup tag for dynamic labels. Empty means untagged.
+    pub tag: &'static str,
+    /// Runtime flags.
+    pub flags: u16,
+}
+
 /// Cooked weapon-local hit shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeaponHitShapeRecord {
@@ -1420,6 +1627,54 @@ pub struct PointLightRecord {
     /// attenuation weight.
     pub color: [u8; 3],
     /// Reserved.
+    pub flags: u16,
+}
+
+/// Runtime flags for [`ParticleEmitterRecord`].
+pub mod particle_emitter_flags {
+    /// Emitter is enabled in playtest/runtime.
+    pub const ENABLED: u16 = 1 << 0;
+}
+
+/// One cheap world-space particle emitter. Coordinates are
+/// room-local engine units. Runtime projection is intentionally
+/// point-based: particles advance in 3D, project one centre point,
+/// then draw a small screen-aligned sprite/marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParticleEmitterRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Hard live-particle cap.
+    pub max_particles: u16,
+    /// Spawn rate in particles/second, Q8 fixed point.
+    pub spawn_rate_q8: u16,
+    /// Particle lifetime in 60 Hz frames.
+    pub lifetime_frames: u8,
+    /// Particle size at birth, in engine units before projection.
+    pub start_size: u16,
+    /// Particle size at death, in engine units before projection.
+    pub end_size: u16,
+    /// 8-bit RGB tint at birth.
+    pub start_color: [u8; 3],
+    /// 8-bit RGB tint at death.
+    pub end_color: [u8; 3],
+    /// PS1 semi-transparency mode code: 0 average, 1 add, 2 subtract, 3 add-quarter.
+    pub blend_mode: u8,
+    /// Base velocity in Q4.4 engine units per 60 Hz frame.
+    pub base_velocity_q4: [i16; 3],
+    /// Random velocity spread in Q4.4 engine units per 60 Hz frame.
+    pub random_velocity_q4: [u16; 3],
+    /// Constant acceleration in Q4.4 engine units per 60 Hz frame.
+    pub acceleration_q4: [i16; 3],
+    /// Random spawn offset radius, in engine units.
+    pub spawn_radius: u16,
+    /// Runtime flags.
     pub flags: u16,
 }
 
