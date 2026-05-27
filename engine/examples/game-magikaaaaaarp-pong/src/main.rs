@@ -157,6 +157,7 @@ struct MagikaaaaaarpPong {
     spin_z: Angle,
     cdda_started: bool,
     cdda_start_step: CddaStartStep,
+    cdda_started_tick: u32,
     cdda_next_retry_tick: u32,
     cdda_wait_logged: bool,
     font: Option<FontAtlas>,
@@ -180,6 +181,7 @@ impl MagikaaaaaarpPong {
             spin_z: Angle::ZERO,
             cdda_started: false,
             cdda_start_step: CddaStartStep::SetMode,
+            cdda_started_tick: 0,
             cdda_next_retry_tick: GONCHAROV_START_DELAY_TICKS,
             cdda_wait_logged: false,
             font: None,
@@ -201,7 +203,7 @@ impl MagikaaaaaarpPong {
 
     fn maybe_start_goncharov(&mut self, tick: u32) {
         if self.cdda_started {
-            if tick != 0 && tick % GONCHAROV_LOOP_TICKS == 0 {
+            if tick.saturating_sub(self.cdda_started_tick) >= GONCHAROV_LOOP_TICKS {
                 self.cdda_started = false;
                 self.cdda_start_step = CddaStartStep::SetMode;
                 self.cdda_next_retry_tick = tick;
@@ -229,6 +231,7 @@ impl MagikaaaaaarpPong {
                 }
                 CddaStartStep::Play => {
                     self.cdda_started = true;
+                    self.cdda_started_tick = tick;
                     self.cdda_start_step = CddaStartStep::SetMode;
                     game_trace("magikarp: cdda ok");
                 }
@@ -471,13 +474,24 @@ impl MagikaaaaaarpPong {
     }
 
     fn add_spectrum_to_ot(&self, ot: &mut OrderingTable<16>, tick: u32) {
-        let frame = ((tick % GONCHAROV_LOOP_TICKS) / SPECTRUM_TICKS_PER_FRAME) as usize;
-        let offset = (frame % SPECTRUM_FRAME_COUNT) * SPECTRUM_BANDS;
+        let elapsed = if self.cdda_started {
+            Some(tick.saturating_sub(self.cdda_started_tick))
+        } else {
+            None
+        };
+        let offset = elapsed
+            .map(|tick| {
+                let frame = ((tick % GONCHAROV_LOOP_TICKS) / SPECTRUM_TICKS_PER_FRAME) as usize;
+                (frame % SPECTRUM_FRAME_COUNT) * SPECTRUM_BANDS
+            })
+            .unwrap_or(0);
         let quads = unsafe { &mut SPECTRUM_QUADS };
 
         let mut band = 0;
         while band < SPECTRUM_BANDS {
-            let amp = SPECTRUM_DATA[offset + band] as u16;
+            let amp = elapsed
+                .map(|_| SPECTRUM_DATA[offset + band] as u16)
+                .unwrap_or(0);
             let h = 2 + ((amp * SPECTRUM_MAX_H) / 255);
             let x = SPECTRUM_X0 + (band as i16 * SPECTRUM_BAR_PITCH);
             let y = SPECTRUM_BASE_Y - h as i16;
