@@ -63,9 +63,15 @@
 //!   --resample nearest|triangle|lanczos3  (default lanczos3)
 //! ```
 //!
+//! ## `audio-pack` -- WAV zip manifest → `.psau`
+//!
+//! ```bash
+//! psxed audio-pack assets/audio/freesfx.selection.json \
+//!     --zip ~/Downloads/FreeSFX.zip --out-dir build/audio
+//! ```
+//!
 //! ## Future subcommands
 //!
-//! - `vag`   -- WAV → PSX VAG ADPCM audio
 //! - `font`  -- TTF or bitmap → psx-font atlas
 //! - `scene` -- edit a .pscene JSON and cook it into runtime format
 
@@ -83,6 +89,7 @@ fn main() -> ExitCode {
         "glb-model" | "gltf-model" | "fbx-model" => run_glb_model(&args[2..]),
         "obj" => run_obj(&args[2..]),
         "tex" => run_tex(&args[2..]),
+        "audio-pack" | "audio" => run_audio_pack(&args[2..]),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -110,6 +117,8 @@ SUBCOMMANDS:
             Convert a skinned GLB/glTF/FBX model to .psxmdl/.psxanim/.psxt
     obj     Convert a Wavefront .obj mesh to .psxm format
     tex     Convert a PNG/JPG/BMP image to .psxt format
+    audio-pack
+            Cook WAV entries from a source zip manifest to .psau
     help    Show this message
 
 OBJ SUBCOMMAND:
@@ -152,6 +161,10 @@ TEX SUBCOMMAND:
     aspect distortion on arbitrary-aspect photographs. Pass
     --crop X,Y,W,H for manual control, or --no-crop to disable.
 
+AUDIO-PACK SUBCOMMAND:
+    psxed audio-pack <manifest.json> --zip <source.zip> --out-dir <directory>
+                          [--no-preview]
+
 EXAMPLES:
     psxed glb ~/Downloads/model.glb -o assets/model.psxm \\
         --decimate-grid 6
@@ -161,6 +174,8 @@ EXAMPLES:
     psxed obj vendor/teapot.obj -o build/teapot.psxm --palette cool
     psxed tex ~/Downloads/brick.jpg -o assets/brick.psxt \\
         --size 128x128 --depth 4 --resample lanczos3
+    psxed audio-pack assets/audio/freesfx.selection.json \\
+        --zip ~/Downloads/FreeSFX.zip --out-dir build/audio
 ";
 
 fn run_glb(args: &[String]) -> Result<(), String> {
@@ -732,6 +747,67 @@ fn run_tex(args: &[String]) -> Result<(), String> {
         height,
         depth as u8,
         psxt.len(),
+    );
+    Ok(())
+}
+
+fn run_audio_pack(args: &[String]) -> Result<(), String> {
+    let mut manifest: Option<PathBuf> = None;
+    let mut archive: Option<PathBuf> = None;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut write_preview_wav = true;
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        match a.as_str() {
+            "--zip" | "--archive" => {
+                i += 1;
+                archive = Some(PathBuf::from(
+                    args.get(i)
+                        .ok_or_else(|| "expected path after --zip".to_string())?,
+                ));
+            }
+            "--out-dir" | "--output-dir" => {
+                i += 1;
+                out_dir =
+                    Some(PathBuf::from(args.get(i).ok_or_else(|| {
+                        "expected directory after --out-dir".to_string()
+                    })?));
+            }
+            "--no-preview" => {
+                write_preview_wav = false;
+            }
+            "-h" | "--help" => {
+                return Err(USAGE.to_string());
+            }
+            a if a.starts_with('-') => {
+                return Err(format!("unknown flag: {a}\n\n{USAGE}"));
+            }
+            _ => {
+                if manifest.is_none() {
+                    manifest = Some(PathBuf::from(a));
+                } else {
+                    return Err(format!("unexpected positional argument: {a}"));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let manifest = manifest.ok_or("missing manifest.json path")?;
+    let archive = archive.ok_or("missing --zip source archive")?;
+    let out_dir = out_dir.ok_or("missing --out-dir directory")?;
+    let options = psxed_audio::PackOptions { write_preview_wav };
+    let report = psxed_audio::import_pack(&manifest, &archive, &out_dir, &options)
+        .map_err(|e| format!("audio-pack: {e}"))?;
+
+    eprintln!(
+        "[psxed audio] {} sounds -> {} ({} Hz, peak {:.2})",
+        report.sounds.len(),
+        out_dir.display(),
+        report.target_sample_rate_hz,
+        report.normalize_peak,
     );
     Ok(())
 }
