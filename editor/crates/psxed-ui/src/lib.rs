@@ -4457,6 +4457,7 @@ impl EditorWorkspace {
     }
 
     fn draw_ui_workspace_body(&mut self, ui: &mut egui::Ui) {
+        self.refresh_texture_thumbs(ui.ctx());
         let Some(scene) = self.project.active_ui_scene().cloned() else {
             ui.centered_and_justified(|ui| {
                 ui.weak("No UI scene");
@@ -4469,9 +4470,10 @@ impl EditorWorkspace {
         let container_size = Vec2::new(avail.x.max(1.0), avail.y.max(1.0));
         let (container, _) = ui.allocate_exact_size(container_size, Sense::hover());
         let canvas_rect = centered_aspect_rect(container, aspect);
+        let canvas_interact_rect = canvas_rect.expand(UI_RESIZE_HANDLE_HIT_SIZE);
         let canvas_size = [canvas_w, canvas_h];
         let response = ui.interact(
-            canvas_rect,
+            canvas_interact_rect,
             ui.id().with("ui_canvas_preview"),
             Sense::click_and_drag(),
         );
@@ -4544,7 +4546,7 @@ impl EditorWorkspace {
             self.ui_canvas_drag = None;
         }
 
-        let painter = ui.painter_at(container);
+        let painter = ui.painter_at(container.expand(UI_RESIZE_HANDLE_SIZE));
         painter.rect_filled(container, 0.0, STUDIO_VIEWPORT);
         painter.rect_filled(canvas_rect, 0.0, Color32::from_rgb(10, 12, 18));
         painter.rect_stroke(
@@ -4556,6 +4558,8 @@ impl EditorWorkspace {
         let preview_scene = self.project.active_ui_scene().cloned().unwrap_or(scene);
         draw_ui_scene_preview(
             &painter,
+            &self.project,
+            &self.texture_thumbs,
             &preview_scene,
             canvas_rect,
             canvas_size,
@@ -27265,6 +27269,8 @@ fn ui_scene_canvas_size(scene: &psxed_project::UiScene) -> (u16, u16) {
 
 fn draw_ui_scene_preview(
     painter: &egui::Painter,
+    project: &ProjectDocument,
+    texture_thumbs: &HashMap<ResourceId, ThumbnailEntry>,
     scene: &psxed_project::UiScene,
     canvas: Rect,
     canvas_size: [u16; 2],
@@ -27293,23 +27299,49 @@ fn draw_ui_scene_preview(
                 painter.rect_filled(screen, 0.0, Color32::from_rgb(color[0], color[1], color[2]));
             }
             UiNodeKind::Label {
-                rect, text, color, ..
+                rect,
+                text,
+                color,
+                align,
+                wrap,
+                ..
             } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
                 let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
-                painter.text(
-                    screen.left_top(),
-                    Align2::LEFT_TOP,
+                draw_ui_preview_text(
+                    painter,
+                    screen,
                     text,
+                    *align,
+                    *wrap,
                     FontId::monospace((8.0 * scale).clamp(8.0, 22.0)),
                     Color32::from_rgb(color[0], color[1], color[2]),
                 );
             }
-            UiNodeKind::Image { rect, tint, .. } => {
+            UiNodeKind::Image {
+                rect,
+                texture,
+                tint,
+            } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
-                painter.rect_filled(screen, 0.0, Color32::from_rgb(tint[0], tint[1], tint[2]));
+                if let Some(thumb) = texture
+                    .and_then(|id| project.resource(id).map(|resource| resource.id))
+                    .and_then(|id| texture_thumbs.get(&id))
+                {
+                    if thumb.stats.index_zero_transparent {
+                        draw_checker_preview(painter, screen, Color32::from_rgb(20, 26, 32));
+                    }
+                    painter.image(
+                        thumb.handle.id(),
+                        screen,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        ui_psx_tint_to_egui(*tint),
+                    );
+                } else {
+                    painter.rect_filled(screen, 0.0, Color32::from_rgb(tint[0], tint[1], tint[2]));
+                }
                 painter.rect_stroke(
                     screen,
                     0.0,
@@ -27345,26 +27377,119 @@ fn draw_ui_scene_preview(
                 }
             }
         }
-        if node.id == selected {
-            let selected_rect = match &node.kind {
-                UiNodeKind::Canvas { .. } => Some(canvas),
-                _ => scene
-                    .absolute_rect(node.id)
-                    .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size)),
-            };
-            if let Some(rect) = selected_rect {
-                painter.rect_stroke(
-                    rect.expand(2.0),
-                    0.0,
-                    Stroke::new(2.0, STUDIO_ACCENT),
-                    StrokeKind::Outside,
-                );
-                if !matches!(node.kind, UiNodeKind::Canvas { .. }) {
-                    draw_ui_resize_handles(painter, rect, hovered_handle);
-                }
+    }
+
+    if let Some(selected_node) = scene.node(selected) {
+        let selected_rect = match &selected_node.kind {
+            UiNodeKind::Canvas { .. } => Some(canvas),
+            _ => scene
+                .absolute_rect(selected_node.id)
+                .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size)),
+        };
+        if let Some(rect) = selected_rect {
+            painter.rect_stroke(
+                rect.expand(2.0),
+                0.0,
+                Stroke::new(2.0, STUDIO_ACCENT),
+                StrokeKind::Outside,
+            );
+            if !matches!(selected_node.kind, UiNodeKind::Canvas { .. }) {
+                draw_ui_resize_handles(painter, rect, hovered_handle);
             }
         }
     }
+}
+
+fn ui_psx_tint_to_egui(tint: [u8; 3]) -> Color32 {
+    Color32::from_rgb(
+        tint[0].saturating_mul(2),
+        tint[1].saturating_mul(2),
+        tint[2].saturating_mul(2),
+    )
+}
+
+fn draw_ui_preview_text(
+    painter: &egui::Painter,
+    rect: Rect,
+    text: &str,
+    align: UiTextAlign,
+    wrap: bool,
+    font: FontId,
+    color: Color32,
+) {
+    let approx_char_width = (font.size * 0.62).max(1.0);
+    let max_chars = (rect.width() / approx_char_width).floor().max(1.0) as usize;
+    let line_height = (font.size * 1.15).max(1.0);
+    let mut y = rect.top();
+    if wrap {
+        for line in wrap_preview_text_lines(text, max_chars) {
+            if y > rect.bottom() {
+                break;
+            }
+            draw_ui_preview_text_line(painter, rect, y, line, align, font.clone(), color);
+            y += line_height;
+        }
+    } else {
+        for line in text.lines() {
+            if y > rect.bottom() {
+                break;
+            }
+            draw_ui_preview_text_line(painter, rect, y, line, align, font.clone(), color);
+            y += line_height;
+        }
+    }
+}
+
+fn draw_ui_preview_text_line(
+    painter: &egui::Painter,
+    rect: Rect,
+    y: f32,
+    line: &str,
+    align: UiTextAlign,
+    font: FontId,
+    color: Color32,
+) {
+    let (x, align2) = match align {
+        UiTextAlign::Left => (rect.left(), Align2::LEFT_TOP),
+        UiTextAlign::Center => (rect.center().x, Align2::CENTER_TOP),
+        UiTextAlign::Right => (rect.right(), Align2::RIGHT_TOP),
+    };
+    painter.text(Pos2::new(x, y), align2, line, font, color);
+}
+
+fn wrap_preview_text_lines(text: &str, max_chars: usize) -> Vec<&str> {
+    let mut out = Vec::new();
+    for source_line in text.lines() {
+        let mut start = 0usize;
+        while start < source_line.len() {
+            let remaining = &source_line[start..];
+            if remaining.chars().count() <= max_chars {
+                out.push(remaining);
+                break;
+            }
+            let hard_split = preview_wrap_hard_split(remaining, max_chars);
+            let split = remaining[..hard_split]
+                .rfind(' ')
+                .filter(|idx| *idx > 0)
+                .unwrap_or(hard_split);
+            out.push(remaining[..split].trim_end());
+            start += split;
+            while source_line.as_bytes().get(start) == Some(&b' ') {
+                start += 1;
+            }
+        }
+        if source_line.is_empty() {
+            out.push("");
+        }
+    }
+    out
+}
+
+fn preview_wrap_hard_split(text: &str, max_chars: usize) -> usize {
+    text.char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
 }
 
 fn draw_ui_resize_handles(painter: &egui::Painter, rect: Rect, hovered: Option<UiResizeHandle>) {
@@ -34683,6 +34808,26 @@ mod tests {
     fn assert_size_approx(actual: Vec2, expected: Vec2) {
         assert!((actual.x - expected.x).abs() < 0.001);
         assert!((actual.y - expected.y).abs() < 0.001);
+    }
+
+    #[test]
+    fn ui_resize_handles_remain_hittable_outside_canvas_for_border_images() {
+        let mut scene = psxed_project::UiScene::default_hud();
+        let image = scene.add_node(
+            scene.root,
+            "Image".to_string(),
+            UiNodeKind::Image {
+                rect: UiRect::new(0, 0, 64, 64),
+                texture: None,
+                tint: [128, 128, 128],
+            },
+        );
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 240.0));
+
+        assert_eq!(
+            ui_scene_resize_handle_target(&scene, image, canvas, [320, 240], Pos2::new(-4.0, -4.0)),
+            Some((image, UiResizeHandle::TopLeft))
+        );
     }
 
     fn test_node_preview_origin(project: &ProjectDocument, room: NodeId, node: NodeId) -> [i32; 3] {
