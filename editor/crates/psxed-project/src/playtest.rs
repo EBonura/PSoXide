@@ -1269,7 +1269,7 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
         .filter_map(|id| scene.node(*id))
         .map(|node| {
             let parent = node.parent.and_then(|id| id_to_index.get(&id).copied());
-            let (x, y, width, height, color, background, value, max, text) = match &node.kind {
+            let (x, y, width, height, color, background, value, max, text, tag) = match &node.kind {
                 UiNodeKind::Canvas { width, height } => (
                     0,
                     0,
@@ -1279,6 +1279,7 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
+                    String::new(),
                     String::new(),
                 ),
                 UiNodeKind::Group { rect } => (
@@ -1291,6 +1292,7 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     String::new(),
+                    String::new(),
                 ),
                 UiNodeKind::Rect { rect, color } => (
                     rect.x,
@@ -1302,8 +1304,14 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     String::new(),
+                    String::new(),
                 ),
-                UiNodeKind::Label { rect, text, color } => (
+                UiNodeKind::Label {
+                    rect,
+                    text,
+                    tag,
+                    color,
+                } => (
                     rect.x,
                     rect.y,
                     rect.width.max(1),
@@ -1313,6 +1321,7 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     text.clone(),
+                    tag.clone(),
                 ),
                 UiNodeKind::Bar {
                     rect,
@@ -1330,6 +1339,7 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                     *value,
                     *max,
                     String::new(),
+                    String::new(),
                 ),
             };
             PlaytestUiNode {
@@ -1344,6 +1354,7 @@ fn cook_ui_nodes(project: &ProjectDocument) -> Vec<PlaytestUiNode> {
                 value,
                 max,
                 text,
+                tag,
                 flags: 0,
             }
         })
@@ -7046,6 +7057,7 @@ mod tests {
             UiNodeKind::Label {
                 rect: UiRect::new(8, 6, 48, 12),
                 text: "Open".to_string(),
+                tag: "prompt".to_string(),
                 color: [220, 226, 240],
             },
         );
@@ -7068,6 +7080,7 @@ mod tests {
         assert!(group_index < label_index);
         assert_eq!(nodes[label_index].parent, Some(group_index as u16));
         assert_eq!((nodes[label_index].x, nodes[label_index].y), (8, 6));
+        assert_eq!(nodes[label_index].tag, "prompt");
     }
 
     #[test]

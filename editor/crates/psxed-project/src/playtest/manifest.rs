@@ -903,7 +903,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let max = render_ui_value_binding(node.max);
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], value: {value}, max: {max}, text: {:?}, flags: {} }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], value: {value}, max: {max}, text: {:?}, tag: {:?}, flags: {} }},",
             node.x,
             node.y,
             node.width,
@@ -915,6 +915,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             node.background[1],
             node.background[2],
             node.text,
+            node.tag,
             node.flags,
         );
     }
