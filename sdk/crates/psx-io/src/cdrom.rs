@@ -274,8 +274,8 @@ fn irq_flag() -> u8 {
 }
 
 fn irq_enable() -> u8 {
-    select_index(1);
-    let enable = read_byte(REG_PARAMETER) & IRQ_ACK_ALL;
+    select_index(0);
+    let enable = read_byte(REG_REQUEST_IRQ) & IRQ_ACK_ALL;
     select_index(0);
     enable
 }

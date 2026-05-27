@@ -530,13 +530,13 @@ const EVENT_KIND_COUNTER: u8 = 4;
 const EVENT_KIND_TASK_BEGIN: u8 = 5;
 const EVENT_KIND_TASK_END: u8 = 6;
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const EVENT_ADDR: *mut u32 = 0xBF80_2F00 as *mut u32;
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const VALUE_ADDR: *mut u32 = 0xBF80_2F04 as *mut u32;
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const CYCLE_ADDR: *const u32 = 0xBF80_2F08 as *const u32;
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 const LOG_ADDR: *mut u32 = 0xBF80_2F0C as *mut u32;
 
 /// Mark the start of a guest frame.
@@ -579,9 +579,9 @@ pub fn task_end(task_id: u16) {
 
 /// Read the emulator-observed guest cycle counter.
 ///
-/// This is only meaningful under PSoXide's emulator telemetry port. On
-/// hardware, and on host builds, it is a profiling-only helper and returns
-/// zero unless the emulator provides the Expansion 2 cycle register.
+/// This is only meaningful under PSoXide's emulator telemetry port. It
+/// returns zero unless the `emulator-telemetry` feature is enabled and the
+/// emulator provides the Expansion 2 cycle register.
 #[inline(always)]
 pub fn cycle_counter() -> u32 {
     read_cycle_counter()
@@ -590,8 +590,9 @@ pub fn cycle_counter() -> u32 {
 /// Emit one complete debug line to the PSoXide host terminal.
 ///
 /// This is an emulator-only diagnostic path. On host builds it compiles to a
-/// no-op; on PS1/MIPS it writes ASCII bytes through the same Expansion 2
-/// telemetry page as stage/counter profiling.
+/// no-op unless the `emulator-telemetry` feature is enabled, in which
+/// case PS1/MIPS builds write ASCII bytes through the Expansion 2
+/// telemetry page.
 #[inline(always)]
 pub fn debug_log(message: &str) {
     debug_bytes(message.as_bytes());
@@ -613,13 +614,13 @@ pub fn debug_bytes(bytes: &[u8]) {
     }
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn encode_event(kind: u8, id: u16) -> u32 {
     ((kind as u32) << 24) | id as u32
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn emit_value(value: u32) {
     unsafe {
@@ -627,23 +628,23 @@ fn emit_value(value: u32) {
     }
 }
 
-#[cfg(not(target_arch = "mips"))]
+#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
 #[inline(always)]
 fn emit_value(_value: u32) {}
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn read_cycle_counter() -> u32 {
     unsafe { core::ptr::read_volatile(CYCLE_ADDR) }
 }
 
-#[cfg(not(target_arch = "mips"))]
+#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
 #[inline(always)]
 fn read_cycle_counter() -> u32 {
     0
 }
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn debug_byte(byte: u8) {
     unsafe {
@@ -651,11 +652,11 @@ fn debug_byte(byte: u8) {
     }
 }
 
-#[cfg(not(target_arch = "mips"))]
+#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
 #[inline(always)]
 fn debug_byte(_byte: u8) {}
 
-#[cfg(target_arch = "mips")]
+#[cfg(all(target_arch = "mips", feature = "emulator-telemetry"))]
 #[inline(always)]
 fn emit_event(kind: u8, id: u16) {
     unsafe {
@@ -663,7 +664,7 @@ fn emit_event(kind: u8, id: u16) {
     }
 }
 
-#[cfg(not(target_arch = "mips"))]
+#[cfg(not(all(target_arch = "mips", feature = "emulator-telemetry")))]
 #[inline(always)]
 fn emit_event(_kind: u8, _id: u16) {}
 
