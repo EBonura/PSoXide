@@ -58,6 +58,33 @@ pub struct AudioOut {
     /// Host-output gain. Stored atomically so the UI can adjust it
     /// without locking the CPAL callback.
     volume: VolumeControl,
+    trace: bool,
+    trace_stats: Mutex<AudioTraceStats>,
+}
+
+#[derive(Default)]
+struct AudioTraceStats {
+    samples: usize,
+    nonzero: usize,
+    peak_l: u16,
+    peak_r: u16,
+}
+
+impl AudioTraceStats {
+    fn add(&mut self, samples: &[(i16, i16)]) {
+        self.samples += samples.len();
+        for &(l, r) in samples {
+            self.peak_l = self.peak_l.max(l.unsigned_abs());
+            self.peak_r = self.peak_r.max(r.unsigned_abs());
+            if l != 0 || r != 0 {
+                self.nonzero += 1;
+            }
+        }
+    }
+
+    fn take(&mut self) -> Self {
+        std::mem::take(self)
+    }
 }
 
 impl AudioOut {
@@ -95,6 +122,10 @@ impl AudioOut {
             16_384,
         )));
         let volume: VolumeControl = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let trace = env_flag("PSOXIDE_AUDIO_TRACE");
+        if trace {
+            eprintln!("[audio] trace enabled");
+        }
 
         // Ratio between PSX 44.1 kHz and the host's actual rate.
         // E.g. host @ 48 kHz, PSX @ 44.1 kHz → ratio = 44100/48000 ≈ 0.919,
@@ -163,6 +194,8 @@ impl AudioOut {
             _stream: stream,
             host_sample_rate,
             volume,
+            trace,
+            trace_stats: Mutex::new(AudioTraceStats::default()),
         })
     }
 
@@ -181,6 +214,21 @@ impl AudioOut {
             q.pop_front();
         }
         q.extend(samples.iter().copied());
+        let queue_len = q.len();
+        drop(q);
+
+        if self.trace {
+            let mut stats = self.trace_stats.lock().unwrap();
+            stats.add(samples);
+            if stats.samples >= TARGET_SAMPLE_RATE as usize {
+                let stats = stats.take();
+                let gain = f32::from_bits(self.volume.load(Ordering::Relaxed));
+                eprintln!(
+                    "[audio] pushed={} nonzero={} peak=({},{}) queue={} gain={:.2}",
+                    stats.samples, stats.nonzero, stats.peak_l, stats.peak_r, queue_len, gain
+                );
+            }
+        }
     }
 
     /// Host's negotiated sample rate. Diagnostic -- shown in the
@@ -263,4 +311,10 @@ fn apply_gain_i16(sample: i16, gain: f32) -> i16 {
     ((sample as f32) * gain)
         .round()
         .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        !matches!(value.as_str(), "" | "0" | "false" | "FALSE" | "off" | "OFF")
+    })
 }

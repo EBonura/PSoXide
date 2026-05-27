@@ -37,7 +37,8 @@ use psx_engine::{
 };
 use psx_level::{
     box_prop_flags, character_action_flags, cloud_layer_flags, far_vista_flags, image_prop_flags,
-    model_clip_flags, room_flags, sky_flags, visibility_cell_flags, visibility_edge_flags,
+    model_clip_flags, particle_emitter_flags, room_flags, sky_flags, visibility_cell_flags,
+    visibility_edge_flags,
 };
 use psxed_format::world as psxw;
 
@@ -47,7 +48,8 @@ use crate::world_cook::{
 };
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
-    NodeKind, ProjectDocument, ResourceData, ResourceId, SceneNode, WorldGrid,
+    NodeKind, ParticleEmitterSettings, ProjectDocument, PsxBlendMode, ResourceData, ResourceId,
+    SceneNode, UiAnchor, UiNodeId, UiNodeKind, UiTextAlign, UiValueBinding, WorldGrid,
     WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
@@ -586,6 +588,7 @@ pub fn build_package(
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
     let mut lights: Vec<PlaytestLight> = Vec::new();
+    let mut particle_emitters: Vec<PlaytestParticleEmitter> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
     let runtime_model_clips = collect_runtime_model_clip_requirements(project, scene);
     let mut model_for_resource: HashMap<ResourceId, u16> = HashMap::new();
@@ -958,6 +961,18 @@ pub fn build_package(
                         .warn("Portal markers define runtime-room seams; not emitted as entities");
                 }
             }
+            NodeKind::ParticleEmitter { settings } => {
+                if !push_particle_emitter(
+                    node.name.as_str(),
+                    room_index,
+                    raw_pos,
+                    settings,
+                    &mut particle_emitters,
+                    &mut report,
+                ) {
+                    return (None, report);
+                }
+            }
             NodeKind::Node
             | NodeKind::Node3D
             | NodeKind::World { .. }
@@ -1177,6 +1192,16 @@ pub fn build_package(
     }
 
     let room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
+    let ui_nodes = cook_ui_nodes(
+        project,
+        project_root,
+        &mut texture_asset_for_resource,
+        &mut assets,
+        &mut report,
+    );
+    if !report.is_ok() {
+        return (None, report);
+    }
 
     (
         Some(PlaytestPackage {
@@ -1209,10 +1234,12 @@ pub fn build_package(
             model_instances,
             image_props,
             box_props,
+            ui_nodes,
             weapon_hitboxes,
             weapons,
             equipment,
             lights,
+            particle_emitters,
             spawn,
             characters,
             player_controller,
@@ -1233,6 +1260,184 @@ fn active_far_vista_panel_count(
         .unwrap_or(0)
         .min(segments as usize)
         .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
+}
+
+fn cook_ui_nodes(
+    project: &ProjectDocument,
+    project_root: &Path,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Vec<PlaytestUiNode> {
+    let Some(scene) = project.active_ui_scene() else {
+        return Vec::new();
+    };
+    let ordered_ids = scene.hierarchy_node_ids();
+    let id_to_index: HashMap<UiNodeId, u16> = ordered_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index.min(u16::MAX as usize) as u16))
+        .collect();
+
+    ordered_ids
+        .iter()
+        .filter_map(|id| scene.node(*id))
+        .map(|node| {
+            let parent = node.parent.and_then(|id| id_to_index.get(&id).copied());
+            let (
+                x,
+                y,
+                width,
+                height,
+                color,
+                background,
+                value,
+                max,
+                texture_asset,
+                text,
+                tag,
+                flags,
+            ) = match &node.kind {
+                UiNodeKind::Canvas { width, height } => (
+                    0,
+                    0,
+                    (*width).max(1),
+                    (*height).max(1),
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    String::new(),
+                    String::new(),
+                    0,
+                ),
+                UiNodeKind::Group { rect } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    String::new(),
+                    String::new(),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                ),
+                UiNodeKind::Rect { rect, color } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *color,
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    String::new(),
+                    String::new(),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                ),
+                UiNodeKind::Label {
+                    rect,
+                    text,
+                    tag,
+                    align,
+                    wrap,
+                    color,
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *color,
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    text.clone(),
+                    tag.clone(),
+                    ui_node_flags(rect.anchor, *align, *wrap),
+                ),
+                UiNodeKind::Image {
+                    rect,
+                    texture,
+                    tint,
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *tint,
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    texture.and_then(|texture_id| {
+                        cook_far_vista_texture_asset(
+                            project,
+                            project_root,
+                            texture_id,
+                            &format!("UI image '{}'", node.name),
+                            texture_asset_for_resource,
+                            assets,
+                            report,
+                        )
+                    }),
+                    String::new(),
+                    String::new(),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                ),
+                UiNodeKind::Bar {
+                    rect,
+                    value,
+                    max,
+                    fill,
+                    background,
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *fill,
+                    *background,
+                    *value,
+                    *max,
+                    None,
+                    String::new(),
+                    String::new(),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                ),
+            };
+            PlaytestUiNode {
+                parent,
+                kind: node.kind.clone(),
+                x,
+                y,
+                width,
+                height,
+                color,
+                background,
+                value,
+                max,
+                texture_asset,
+                text,
+                tag,
+                flags,
+            }
+        })
+        .collect()
+}
+
+fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
+    let mut flags = anchor.runtime_bits() & psx_level::ui_node_flags::ANCHOR_MASK;
+    flags |= (align.runtime_bits() << psx_level::ui_node_flags::TEXT_ALIGN_SHIFT)
+        & psx_level::ui_node_flags::TEXT_ALIGN_MASK;
+    if wrap {
+        flags |= psx_level::ui_node_flags::TEXT_WRAP;
+    }
+    flags
 }
 
 fn cook_sky_panorama_texture_asset(
@@ -2120,6 +2325,7 @@ fn register_model_for_instance(
             }
         };
         let baked_bounds = bake_model_clip_frame_bounds(&parsed_model, &parsed_anim);
+        let animation_bytes = compact_animation_bytes(&parsed_anim);
         let frame_count = match u16::try_from(baked_bounds.len()) {
             Ok(count) => count,
             Err(_) => {
@@ -2152,7 +2358,7 @@ fn register_model_for_instance(
         let safe_clip = sanitise_model_dirname(&clip.name);
         assets.push(PlaytestAsset {
             kind: PlaytestAssetKind::ModelAnimation,
-            bytes,
+            bytes: animation_bytes,
             filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
             source_label: format!("{} / {}", resource.name, clip.name),
         });
@@ -2242,6 +2448,98 @@ fn register_model_for_instance(
 }
 
 const MODEL_FRAME_BOUNDS_PAD_UNITS: i32 = 64;
+
+fn compact_animation_bytes(animation: &psx_asset::Animation<'_>) -> Vec<u8> {
+    let joint_count = animation.joint_count();
+    let frame_count = animation.frame_count();
+    let sample_rate_hz = animation.sample_rate_hz();
+    let mut translations_max_abs = 0i32;
+    let mut frame = 0u16;
+    while frame < frame_count {
+        let mut joint = 0u16;
+        while joint < joint_count {
+            if let Some(pose) = animation.pose(frame, joint) {
+                translations_max_abs =
+                    translations_max_abs.max(abs_i32_saturating(pose.translation.x));
+                translations_max_abs =
+                    translations_max_abs.max(abs_i32_saturating(pose.translation.y));
+                translations_max_abs =
+                    translations_max_abs.max(abs_i32_saturating(pose.translation.z));
+            }
+            joint += 1;
+        }
+        frame += 1;
+    }
+
+    let mut translation_shift = 0u16;
+    while translations_max_abs > i16::MAX as i32 && translation_shift < 15 {
+        translations_max_abs = (translations_max_abs + 1) >> 1;
+        translation_shift += 1;
+    }
+
+    let pose_count = frame_count as usize * joint_count as usize;
+    let payload_len = psxed_format::animation::AnimationHeader::SIZE
+        + pose_count * psxed_format::animation::POSE_RECORD_SIZE;
+    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
+    out.extend_from_slice(&psxed_format::animation::MAGIC);
+    out.extend_from_slice(&psxed_format::animation::VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    out.extend_from_slice(&joint_count.to_le_bytes());
+    out.extend_from_slice(&frame_count.to_le_bytes());
+    out.extend_from_slice(&sample_rate_hz.to_le_bytes());
+    out.extend_from_slice(&translation_shift.to_le_bytes());
+
+    let shift = translation_shift as u8;
+    let mut frame = 0u16;
+    while frame < frame_count {
+        let mut joint = 0u16;
+        while joint < joint_count {
+            let pose = animation
+                .pose(frame, joint)
+                .expect("validated animation frame/joint indices");
+            for column in pose.matrix {
+                for value in column {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            for value in [pose.translation.x, pose.translation.y, pose.translation.z] {
+                out.extend_from_slice(&quantize_animation_translation(value, shift).to_le_bytes());
+            }
+            joint += 1;
+        }
+        frame += 1;
+    }
+
+    out
+}
+
+fn quantize_animation_translation(value: i32, shift: u8) -> i16 {
+    round_shift_i32(value, shift).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn round_shift_i32(value: i32, shift: u8) -> i32 {
+    if shift == 0 {
+        return value;
+    }
+    let value = value as i64;
+    let half = 1i64 << (shift - 1);
+    if value >= 0 {
+        ((value + half) >> shift) as i32
+    } else {
+        -(((-value + half) >> shift) as i32)
+    }
+}
+
+fn abs_i32_saturating(value: i32) -> i32 {
+    if value == i32::MIN {
+        i32::MAX
+    } else if value < 0 {
+        -value
+    } else {
+        value
+    }
+}
 
 #[derive(Clone, Copy)]
 struct ModelBoundsJointTransform {
@@ -3183,6 +3481,60 @@ fn push_point_light(
         color,
     });
     true
+}
+
+fn push_particle_emitter(
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    settings: &ParticleEmitterSettings,
+    particle_emitters: &mut Vec<PlaytestParticleEmitter>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    if !settings.enabled {
+        return true;
+    }
+    if settings.max_particles == 0 {
+        report.warn(format!(
+            "Particle Emitter '{node_name}' has max_particles=0 -- skipped"
+        ));
+        return true;
+    }
+    if settings.lifetime_frames == 0 {
+        report.warn(format!(
+            "Particle Emitter '{node_name}' has lifetime_frames=0 -- skipped"
+        ));
+        return true;
+    }
+    particle_emitters.push(PlaytestParticleEmitter {
+        room: room_index,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        max_particles: settings.max_particles,
+        spawn_rate_q8: settings.spawn_rate_q8,
+        lifetime_frames: settings.lifetime_frames,
+        start_size: settings.start_size,
+        end_size: settings.end_size,
+        start_color: settings.start_color,
+        end_color: settings.end_color,
+        blend_mode: particle_blend_mode_code(settings.blend_mode),
+        base_velocity_q4: settings.base_velocity_q4,
+        random_velocity_q4: settings.random_velocity_q4,
+        acceleration_q4: settings.acceleration_q4,
+        spawn_radius: settings.spawn_radius,
+        flags: particle_emitter_flags::ENABLED,
+    });
+    true
+}
+
+const fn particle_blend_mode_code(mode: PsxBlendMode) -> u8 {
+    match mode {
+        PsxBlendMode::Opaque | PsxBlendMode::Average => 0,
+        PsxBlendMode::Add => 1,
+        PsxBlendMode::Subtract => 2,
+        PsxBlendMode::AddQuarter => 3,
+    }
 }
 
 fn expand_lights_across_chunks(
@@ -4602,7 +4954,7 @@ fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NodeKind, ProjectDocument};
+    use crate::{NodeKind, ProjectDocument, UiRect};
 
     fn starter_project_root() -> PathBuf {
         crate::default_project_dir()
@@ -6695,6 +7047,7 @@ mod tests {
         assert!(manifest
             .contains("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];"));
         assert!(manifest.contains("pub static MODEL_SOCKETS: &[LevelModelSocketRecord] = &[];"));
+        assert!(manifest.contains("pub static UI_NODES: &[LevelUiNodeRecord] = &[];"));
         assert!(manifest.contains("pub static WEAPONS: &[LevelWeaponRecord] = &[];"));
         assert!(manifest.contains("pub static EQUIPMENT: &[EquipmentRecord] = &[];"));
         assert!(manifest.contains("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[];"));
@@ -6764,6 +7117,60 @@ mod tests {
             assert_eq!((cached.x, cached.z), (cell.x, cell.z));
         }
         assert!(package.spawn.is_some());
+    }
+
+    #[test]
+    fn ui_nodes_cook_in_hierarchy_order_with_local_offsets() {
+        let mut project = ProjectDocument::new("ui");
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        let group = scene.add_node(
+            scene.root,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(40, 30, 100, 50),
+            },
+        );
+        scene.add_node(
+            group,
+            "Prompt",
+            UiNodeKind::Label {
+                rect: UiRect::new(8, 6, 48, 12),
+                text: "Open".to_string(),
+                tag: "prompt".to_string(),
+                align: crate::UiTextAlign::Left,
+                wrap: false,
+                color: [220, 226, 240],
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let nodes = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+        let group_index = nodes
+            .iter()
+            .position(|node| {
+                matches!(
+                    &node.kind,
+                    UiNodeKind::Group { rect } if *rect == UiRect::new(40, 30, 100, 50)
+                )
+            })
+            .expect("group cooked");
+        let label_index = nodes
+            .iter()
+            .position(|node| node.text == "Open")
+            .expect("label cooked");
+
+        assert!(group_index < label_index);
+        assert_eq!(nodes[label_index].parent, Some(group_index as u16));
+        assert_eq!((nodes[label_index].x, nodes[label_index].y), (8, 6));
+        assert_eq!(nodes[label_index].tag, "prompt");
     }
 
     #[test]
@@ -9347,6 +9754,7 @@ mod tests {
         assert!(src
             .contains("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[\n];"));
+        assert!(src.contains("pub static UI_NODES: &[LevelUiNodeRecord] = &[\n];"));
         assert!(src.contains("pub static ENTITIES: &[EntityRecord] = &[\n];"));
         assert!(src.contains("pub static PLAYER_SPAWN"));
     }

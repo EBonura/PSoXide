@@ -237,6 +237,7 @@ make assets        # cook shared source assets via psxed
 make hello-tri     # build one SDK example
 make showcase-model # build one engine showcase
 make game-pong     # build one mini-game
+make game-magikaaaaaarp-pong-disc # build magikAAAAArp Pong with CD-DA
 make run-tri       # build and side-load an example into the frontend
 ```
 
@@ -287,17 +288,13 @@ end-to-end through the emulator frontend (`make <name>` to build,
 | --- | --- | --- |
 | ![showcase-fog screenshot](assets/media/readme/examples/showcase-fog.png) | ![showcase-lights screenshot](assets/media/readme/examples/showcase-lights.png) | ![showcase-model screenshot](assets/media/readme/examples/showcase-model.png) |
 
-| `showcase-particles` | `showcase-room` | `showcase-text` |
-| --- | --- | --- |
-| ![showcase-particles screenshot](assets/media/readme/examples/showcase-particles.png) | ![showcase-room screenshot](assets/media/readme/examples/showcase-room.png) | ![showcase-text screenshot](assets/media/readme/examples/showcase-text.png) |
+| `showcase-particles` | `showcase-text` |
+| --- | --- |
+| ![showcase-particles screenshot](assets/media/readme/examples/showcase-particles.png) | ![showcase-text screenshot](assets/media/readme/examples/showcase-text.png) |
 
-| `showcase-textured-sprite` | `game-pong` | `game-breakout` |
-| --- | --- | --- |
-| ![showcase-textured-sprite screenshot](assets/media/readme/examples/showcase-textured-sprite.png) | ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) |
-
-| `game-invaders` |
-| --- |
-| ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
+| `game-pong` | `game-magikaaaaaarp-pong` | `game-breakout` | `game-invaders` |
+| --- | --- | --- | --- |
+| ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-magikaaaaaarp-pong screenshot](assets/media/readme/examples/game-magikaaaaaarp-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) | ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
 
 ### SDK examples - bare-metal MIPS, no engine framework
 
@@ -320,15 +317,14 @@ end-to-end through the emulator frontend (`make <name>` to build,
 | `showcase-lights` | Four coloured moving point lights illuminating scaled cubes. Complementary to `showcase-3d`, point-light path vs. directional. |
 | `showcase-model` | Animated-model demo. Two characters sharing a 24-joint biped rig; D-pad orbits the camera, Square/Circle steps through animation clips, Select swaps character. |
 | `showcase-particles` | Fixed-pool particle effects through the engine's ordering-table helpers. Routes `psx-fx` simulations through the same render path as the GTE-heavy showcases. |
-| `showcase-room` | Renders a cooked `.psxw` room on PS1 hardware. End-to-end validation of cooker → asset → runtime: `build.rs` cooks the editor's starter room, the binary parses it through `RuntimeRoom`, and `draw_room` walks every sector. |
 | `showcase-text` | Tour of every text-rendering capability of the `psx-font` crate: 8×8 and 8×16 IBM VGA fonts, gradient title, multi-font comparison, palette tricks. |
-| `showcase-textured-sprite` | Compact interactive material room. Dark brick walls + cobblestone floor with a central pane cycling through textured materials. |
 
 **Mini-games**
 
 | Example | What it demonstrates |
 | --- | --- |
 | `game-pong` | Two-paddle Pong, first full game ported to the engine framework. Left = D-pad, right = AI with hysteresis band, first to 7 wins. |
+| `game-magikaaaaaarp-pong` | magikAAAAArp-themed Pong with a comically large rotating album cube as the ball, a baked GONCHAROV spectrum visualizer, and "GONCHAROV" streamed as CD-DA track 2. Left = D-pad, right = AI, first to 5 wins. |
 | `game-breakout` | Brick-buster. 40-brick rainbow wall, gradient background, particle bursts on break, ball trail, screen shake. |
 | `game-invaders` | Space Invaders. 5×10 marching alien grid that speeds up as the formation thins, player bullet + up to 4 enemy bombs, wave progression. |
 

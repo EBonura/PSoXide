@@ -5,7 +5,8 @@
 //! - [`Voice`] -- typed voice index in `0..24`.
 //! - [`Pitch`] -- Q5.12 sample-rate multiplier; `Pitch::UNITY` =
 //!   44100 Hz (one sample per SPU tick).
-//! - [`Volume`] -- per-voice / main-output 15-bit signed linear gain.
+//! - [`Volume`] -- per-voice / main-output signed linear gain.
+//! - [`CdVolume`] -- CD-DA / XA input signed Q15 gain.
 //! - [`Adsr`] -- typed envelope descriptor; builds the two-word SPU
 //!   envelope register pair.
 //! - [`SpuAddr`] -- 8-byte-aligned SPU RAM pointer (the only shape
@@ -31,9 +32,9 @@
 //!   byte-stream upload path, ADSR encoding helpers, sample-start
 //!   address alignment.
 //! - **Doesn't own (yet)**: ADPCM encoder (ship pre-baked samples
-//!   instead -- see `vendor/tone_*.adpcm`), XA-ADPCM / CD-audio
-//!   streaming, reverb preset tables, DMA-based sample upload.
-//!   Those land as the ladder pulls them in.
+//!   instead -- see `vendor/tone_*.adpcm`, or cook `.psau` with
+//!   `psxed audio-pack`), reverb preset tables, DMA-based sample
+//!   upload. Those land as the ladder pulls them in.
 //!
 //! ## Q-format conventions
 //!
@@ -45,6 +46,8 @@
 //!   output is `0x3FFF` (= 1.0); `Volume::MAX` already uses this.
 //!   Negative means "phase-inverted," used for stereo tricks we
 //!   don't wire up here yet.
+//! - **CD volumes**: signed Q15. Max input gain is `0x7FFF`, exposed
+//!   as `CdVolume::MAX`.
 //! - **SPU RAM addresses**: stored in registers as `addr / 8`,
 //!   [`SpuAddr`] does the divide so the caller passes byte offsets.
 
@@ -111,6 +114,9 @@ const REVERB_ENABLE_HI: u32 = 0x1F80_1D9A;
 const TRANSFER_ADDR: u32 = 0x1F80_1DA6;
 const TRANSFER_DATA: u32 = 0x1F80_1DA8;
 const TRANSFER_CTRL: u32 = 0x1F80_1DAC;
+const CD_VOL_LEFT: u32 = 0x1F80_1DB0;
+const CD_VOL_RIGHT: u32 = 0x1F80_1DB2;
+const SPUCNT_CD_AUDIO_ENABLE: u16 = 1 << 0;
 
 // ======================================================================
 // Initialisation
@@ -155,6 +161,8 @@ pub fn init() {
     // Main volume to max -- per-voice volume still controls the mix.
     write_reg16(MAIN_VOL_LEFT, Volume::MAX.0 as u16);
     write_reg16(MAIN_VOL_RIGHT, Volume::MAX.0 as u16);
+    write_reg16(CD_VOL_LEFT, CdVolume::SILENCE.0 as u16);
+    write_reg16(CD_VOL_RIGHT, CdVolume::SILENCE.0 as u16);
 
     // SPUCNT: bit 15 = SPU enable, bit 14 = mute OFF (i.e. audible),
     // everything else zero. Writing in that order matches PSX-SPX's
@@ -183,9 +191,10 @@ fn wait_spu_status(want: u16) {
 // Typed primitives
 // ======================================================================
 
-/// A 16-bit signed SPU volume, `-0x8000..=0x7FFF` on the wire;
-/// `-0x4000..=0x3FFF` is the linear-usable range. Positive
-/// magnitudes are the normal "louder" direction.
+/// A 16-bit signed SPU voice/main volume.
+///
+/// Static voice/main volume uses `-0x4000..=0x3FFF` as its practical
+/// linear range. Positive magnitudes are the normal "louder" direction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Volume(pub i16);
@@ -208,6 +217,36 @@ impl Volume {
 }
 
 impl Default for Volume {
+    fn default() -> Self {
+        Self::SILENCE
+    }
+}
+
+/// CD-DA / XA input volume.
+///
+/// CD input volumes are plain signed Q15 values on hardware, so full
+/// positive gain is `0x7FFF`. Use this instead of [`Volume`], whose
+/// `0x3FFF` maximum is for voice/main registers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct CdVolume(pub i16);
+
+impl CdVolume {
+    /// Silence.
+    pub const SILENCE: Self = Self(0);
+    /// Maximum positive CD input gain.
+    pub const MAX: Self = Self(0x7FFF);
+    /// Half-scale CD input gain.
+    pub const HALF: Self = Self(0x4000);
+
+    /// Build from a normalized `0.0..=1.0` ratio without floats.
+    pub const fn linear(num: u16, den: u16) -> Self {
+        let v = ((Self::MAX.0 as u32) * (num as u32)) / (den as u32);
+        Self(v as i16)
+    }
+}
+
+impl Default for CdVolume {
     fn default() -> Self {
         Self::SILENCE
     }
@@ -242,6 +281,22 @@ impl Pitch {
         let raw = ((0x1000u32) * target_hz) / base_hz;
         if raw > 0x3FFF {
             Self(0x3FFF)
+        } else {
+            Self(raw as u16)
+        }
+    }
+
+    /// Pitch that plays a decoded sample stream at its declared
+    /// source rate. `44100` maps to [`Pitch::UNITY`].
+    pub const fn for_sample_rate(sample_rate_hz: u32) -> Self {
+        if sample_rate_hz == 0 {
+            return Self::UNITY;
+        }
+        let raw = ((0x1000u32) * sample_rate_hz + 22_050) / 44_100;
+        if raw > 0x3FFF {
+            Self(0x3FFF)
+        } else if raw == 0 {
+            Self(1)
         } else {
             Self(raw as u16)
         }
@@ -350,6 +405,15 @@ impl Adsr {
         }
     }
 
+    /// Full-level envelope for one-shot sampled SFX. The ADPCM end
+    /// flag stops playback; the envelope stays open for the sample.
+    pub const fn sample() -> Self {
+        Self {
+            lower: 0x000F,
+            upper: 0x001F,
+        }
+    }
+
     /// Silent / "no envelope" -- voice stays at key-on volume until
     /// key-off. Useful as a placeholder while iterating.
     pub const fn passthrough() -> Self {
@@ -438,6 +502,14 @@ impl Voice {
         write_reg16(self.reg_base() + VOICE_ADSR_HI, adsr.upper);
     }
 
+    /// Configure this voice to play a sample already uploaded at `addr`.
+    pub fn configure_sample(self, addr: SpuAddr, sample_rate_hz: u32, volume: Volume, adsr: Adsr) {
+        self.set_volume(volume, volume);
+        self.set_pitch(Pitch::for_sample_rate(sample_rate_hz));
+        self.set_start_addr(addr);
+        self.set_adsr(adsr);
+    }
+
     /// Trigger the voices whose bits are set in `mask`. The SPU
     /// begins playing each voice from its configured start address,
     /// applying its ADSR attack phase.
@@ -464,6 +536,26 @@ impl Voice {
 pub fn set_main_volume(left: Volume, right: Volume) {
     write_reg16(MAIN_VOL_LEFT, left.0 as u16);
     write_reg16(MAIN_VOL_RIGHT, right.0 as u16);
+}
+
+/// Set the SPU CD input volume.
+///
+/// CD-DA and XA samples first leave the CD-ROM controller, then enter
+/// the SPU's CD input where these gains are applied before main mix.
+pub fn set_cd_volume(left: CdVolume, right: CdVolume) {
+    write_reg16(CD_VOL_LEFT, left.0 as u16);
+    write_reg16(CD_VOL_RIGHT, right.0 as u16);
+}
+
+/// Enable or disable routing CD-DA/XA input into the SPU mixer.
+pub fn enable_cd_audio(enabled: bool) {
+    let mut control = read_reg16(SPUCNT);
+    if enabled {
+        control |= SPUCNT_CD_AUDIO_ENABLE;
+    } else {
+        control &= !SPUCNT_CD_AUDIO_ENABLE;
+    }
+    write_reg16(SPUCNT, control);
 }
 
 // ======================================================================
@@ -532,6 +624,13 @@ mod tests {
     }
 
     #[test]
+    fn cd_volume_uses_q15_full_scale() {
+        assert_eq!(CdVolume::linear(0, 1), CdVolume::SILENCE);
+        assert_eq!(CdVolume::linear(1, 1), CdVolume::MAX);
+        assert_eq!(CdVolume::HALF.0, 0x4000);
+    }
+
+    #[test]
     fn pitch_for_frequency() {
         // Play a 440 Hz native sample at 880 Hz → pitch 0x2000.
         let p = Pitch::for_frequency(880, 440);
@@ -542,6 +641,13 @@ mod tests {
         // Very high multiplier clamps to MAX.
         let p = Pitch::for_frequency(100_000, 440);
         assert_eq!(p, Pitch::MAX);
+    }
+
+    #[test]
+    fn pitch_for_sample_rate_maps_to_spu_step() {
+        assert_eq!(Pitch::for_sample_rate(44_100), Pitch::UNITY);
+        assert_eq!(Pitch::for_sample_rate(22_050).as_u16(), 0x0800);
+        assert_eq!(Pitch::for_sample_rate(88_200).as_u16(), 0x2000);
     }
 
     #[test]

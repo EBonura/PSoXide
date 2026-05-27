@@ -230,6 +230,9 @@ const CTRL_JOYN: u16 = 1 << 1;
 const CTRL_RXEN: u16 = 1 << 2;
 const CTRL_ACK: u16 = 1 << 4;
 const CTRL_SLOT_PORT2: u16 = 1 << 13;
+const MODE_8N1: u16 = 0x000D;
+const BAUD_PAD: u16 = 0x0088;
+const EXCHANGE_WAIT_SPINS: u32 = 32_768;
 
 /// Poll the controller in port 1 once.
 ///
@@ -353,6 +356,8 @@ fn decode_buttons(b0: u8, b1: u8) -> ButtonState {
 unsafe fn select(port2: bool) {
     unsafe {
         let slot = if port2 { CTRL_SLOT_PORT2 } else { 0 };
+        psx_io::write16(sio::MODE, MODE_8N1);
+        psx_io::write16(sio::BAUD, BAUD_PAD);
         psx_io::write16(sio::CTRL, CTRL_ACK);
         psx_io::write16(sio::CTRL, slot | CTRL_TXEN | CTRL_RXEN | CTRL_JOYN);
     }
@@ -393,11 +398,30 @@ unsafe fn deselect() {
 #[inline]
 unsafe fn exchange(tx: u8) -> u8 {
     unsafe {
-        while psx_io::read32(sio::STAT) & 0x1 == 0 {}
+        if !wait_stat(0x1) {
+            return 0xFF;
+        }
         psx_io::write8(sio::DATA, tx);
-        while psx_io::read32(sio::STAT) & 0x2 == 0 {}
+        if !wait_stat(0x2) {
+            return 0xFF;
+        }
         psx_io::read8(sio::DATA)
     }
+}
+
+#[inline]
+unsafe fn wait_stat(mask: u32) -> bool {
+    let mut spins = EXCHANGE_WAIT_SPINS;
+    unsafe {
+        while psx_io::read32(sio::STAT) & mask == 0 {
+            if spins == 0 {
+                return false;
+            }
+            spins -= 1;
+            core::hint::spin_loop();
+        }
+    }
+    true
 }
 
 #[cfg(test)]

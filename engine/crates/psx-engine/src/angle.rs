@@ -34,15 +34,16 @@
 //!   build compile-time values. [`Angle::ZERO`], [`Angle::QUARTER`],
 //!   [`Angle::HALF`] cover the common ones.
 //! - **Per-frame orbits**: [`Angle::per_frames`] computes the
-//!   per-frame delta so a full rotation takes N frames. Typical
-//!   use is `angle = Angle::per_frames(256).mul_frame(s.frame)`
-//!   for a once-every-256-frames rotation.
+//!   per-frame delta so a full rotation takes N frames. Use
+//!   [`Angle::mul_tick`] for simulation-driven animation and
+//!   [`Angle::mul_frame`] only for render-frame-driven visuals.
 //! - **Feeding the SDK**: [`Angle::rotate_y_arg`] gives the u16
 //!   `rotate_y` expects; [`Angle::sin_q12_arg`] gives the u16
 //!   `sin_q12` expects. Converting explicitly at the call site
 //!   makes the unit hop visible in reviews.
 
 use crate::fixed::Q12;
+use crate::frames::{SimTick, VisualFrame};
 
 use psx_math::{cos_q12, sin_q12};
 
@@ -137,12 +138,21 @@ impl Angle {
         Angle(((self.0 as i32 + ((delta_q12 as i32) << 4)) & 0xFFFF) as u16)
     }
 
-    /// Multiply this per-frame delta by an integer frame count.
-    /// Typical use: `Angle::per_frames(256).mul_frame(s.frame)` to
-    /// get the current rotation angle from a monotonic frame
-    /// counter.
-    pub const fn mul_frame(self, frame: u32) -> Angle {
-        Angle((self.0 as u32).wrapping_mul(frame) as u16)
+    /// Multiply this per-frame delta by a fixed simulation tick.
+    ///
+    /// This is the correct choice for gameplay, animation, particles,
+    /// and any motion that must keep the same speed when visual frames
+    /// are skipped.
+    pub const fn mul_tick(self, tick: SimTick) -> Angle {
+        Angle((self.0 as u32).wrapping_mul(tick.as_u32()) as u16)
+    }
+
+    /// Multiply this per-frame delta by a visible-frame count.
+    ///
+    /// This is only for render-frame-driven effects. Gameplay and
+    /// animation should prefer [`Angle::mul_tick`].
+    pub const fn mul_frame(self, frame: VisualFrame) -> Angle {
+        Angle((self.0 as u32).wrapping_mul(frame.as_u32()) as u16)
     }
 
     /// Convert to the u16 that [`psx_gte::math::Mat3I16::rotate_y`]
@@ -254,11 +264,11 @@ mod tests {
     fn per_frames_round_trip() {
         // 256-frame rotation → per-frame delta × 256 = full turn (= 0).
         let d = Angle::per_frames(256);
-        assert_eq!(d.mul_frame(256), Angle::ZERO);
+        assert_eq!(d.mul_tick(SimTick::from_u32(256)), Angle::ZERO);
         // Halfway → half turn.
-        assert_eq!(d.mul_frame(128), Angle::HALF);
+        assert_eq!(d.mul_tick(SimTick::from_u32(128)), Angle::HALF);
         // Quarter-way → quarter turn.
-        assert_eq!(d.mul_frame(64), Angle::QUARTER);
+        assert_eq!(d.mul_frame(VisualFrame::from_u32(64)), Angle::QUARTER);
     }
 
     #[test]

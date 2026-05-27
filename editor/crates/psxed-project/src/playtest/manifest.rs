@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 
 use super::*;
+use crate::{UiNodeKind, UiValueBinding};
 
 const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 
@@ -890,6 +891,40 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Cooked screen-space UI nodes.\n");
+    out.push_str("pub static UI_NODES: &[LevelUiNodeRecord] = &[\n");
+    for node in &package.ui_nodes {
+        let parent = node
+            .parent
+            .map(|index| format!("Some(UiNodeIndex({index}))"))
+            .unwrap_or_else(|| "None".to_string());
+        let kind = render_ui_node_kind(&node.kind);
+        let value = render_ui_value_binding(node.value);
+        let max = render_ui_value_binding(node.max);
+        let texture_asset = node
+            .texture_asset
+            .map(|index| format!("AssetId({index})"))
+            .unwrap_or_else(|| "AssetId(u16::MAX)".to_string());
+        let _ = writeln!(
+            out,
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, flags: {} }},",
+            node.x,
+            node.y,
+            node.width,
+            node.height,
+            node.color[0],
+            node.color[1],
+            node.color[2],
+            node.background[0],
+            node.background[1],
+            node.background[2],
+            node.text,
+            node.tag,
+            node.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Weapon hitboxes, local to weapon grips.\n");
     out.push_str("pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[\n");
     for hitbox in &package.weapon_hitboxes {
@@ -961,6 +996,43 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             light.color[0],
             light.color[1],
             light.color[2],
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Placed point-projected particle emitters, room-local coordinates.\n");
+    out.push_str("pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[\n");
+    for emitter in &package.particle_emitters {
+        let _ = writeln!(
+            out,
+            "    ParticleEmitterRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, max_particles: {}, spawn_rate_q8: {}, lifetime_frames: {}, start_size: {}, end_size: {}, start_color: [{}, {}, {}], end_color: [{}, {}, {}], blend_mode: {}, base_velocity_q4: [{}, {}, {}], random_velocity_q4: [{}, {}, {}], acceleration_q4: [{}, {}, {}], spawn_radius: {}, flags: {} }},",
+            emitter.room,
+            emitter.x,
+            emitter.y,
+            emitter.z,
+            emitter.max_particles,
+            emitter.spawn_rate_q8,
+            emitter.lifetime_frames,
+            emitter.start_size,
+            emitter.end_size,
+            emitter.start_color[0],
+            emitter.start_color[1],
+            emitter.start_color[2],
+            emitter.end_color[0],
+            emitter.end_color[1],
+            emitter.end_color[2],
+            emitter.blend_mode,
+            emitter.base_velocity_q4[0],
+            emitter.base_velocity_q4[1],
+            emitter.base_velocity_q4[2],
+            emitter.random_velocity_q4[0],
+            emitter.random_velocity_q4[1],
+            emitter.random_velocity_q4[2],
+            emitter.acceleration_q4[0],
+            emitter.acceleration_q4[1],
+            emitter.acceleration_q4[2],
+            emitter.spawn_radius,
+            emitter.flags,
         );
     }
     out.push_str("];\n\n");
@@ -2031,6 +2103,29 @@ fn render_weapon_hit_shape(shape: PlaytestWeaponHitShape) -> String {
     }
 }
 
+fn render_ui_node_kind(kind: &UiNodeKind) -> &'static str {
+    match kind {
+        UiNodeKind::Canvas { .. } => "LevelUiNodeKind::Canvas",
+        UiNodeKind::Group { .. } => "LevelUiNodeKind::Group",
+        UiNodeKind::Rect { .. } => "LevelUiNodeKind::Rect",
+        UiNodeKind::Label { .. } => "LevelUiNodeKind::Label",
+        UiNodeKind::Image { .. } => "LevelUiNodeKind::Image",
+        UiNodeKind::Bar { .. } => "LevelUiNodeKind::Bar",
+    }
+}
+
+fn render_ui_value_binding(binding: UiValueBinding) -> String {
+    match binding {
+        UiValueBinding::ConstantQ12(value) => {
+            format!("LevelUiValueBinding::ConstantQ12({value})")
+        }
+        UiValueBinding::PlayerHealth => "LevelUiValueBinding::PlayerHealth".to_string(),
+        UiValueBinding::PlayerHealthMax => "LevelUiValueBinding::PlayerHealthMax".to_string(),
+        UiValueBinding::PlayerStamina => "LevelUiValueBinding::PlayerStamina".to_string(),
+        UiValueBinding::PlayerStaminaMax => "LevelUiValueBinding::PlayerStaminaMax".to_string(),
+    }
+}
+
 fn render_box_prop_texture_assets(
     texture_assets: &[Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
 ) -> String {
@@ -2961,6 +3056,9 @@ use psx_level::{
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,
     LevelSkyRecord,
+    LevelUiNodeKind,
+    LevelUiNodeRecord,
+    LevelUiValueBinding,
     LevelVisibilityCellRecord,
     LevelVisibilityPvsRecord,
     LevelWeaponRecord,
@@ -2973,6 +3071,7 @@ use psx_level::{
     ModelFrameBoundsIndex,
     ModelIndex,
     ModelSocketIndex,
+    ParticleEmitterRecord,
     PlayerControllerRecord,
     PlayerSpawnRecord,
     PointLightRecord,
@@ -2980,6 +3079,7 @@ use psx_level::{
     ResourceSlot,
     RoomIndex,
     RoomResidencyRecord,
+    UiNodeIndex,
     VisibilityCellIndex,
     WeaponHitboxIndex,
     WeaponHitboxRecord,
