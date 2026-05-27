@@ -102,6 +102,8 @@ pub enum ParseError {
     InvalidModelLayout,
     /// Animation header/table fields are inconsistent.
     InvalidAnimationLayout,
+    /// Audio header/table fields are inconsistent.
+    InvalidAudioLayout,
 }
 
 /// A parsed 3D mesh backed by slices into the caller's cooked blob.
@@ -969,6 +971,134 @@ pub struct JointPose {
     pub matrix: [[i16; 3]; 3],
     /// Q3.12 translation vector.
     pub translation: Vec3I32,
+}
+
+/// A parsed `.psau` SPU audio sample backed by the caller's cooked blob.
+#[derive(Copy, Clone, Debug)]
+pub struct Audio<'a> {
+    adpcm: &'a [u8],
+    flags: u16,
+    sample_rate_hz: u32,
+    sample_count: u32,
+    adpcm_block_count: u32,
+    loop_start_block: u32,
+}
+
+impl<'a> Audio<'a> {
+    /// Parse a cooked `.psau` blob.
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ParseError> {
+        use psxed_format::audio::{self, AudioHeader};
+
+        if bytes.len() < psxed_format::AssetHeader::SIZE {
+            return Err(ParseError::Truncated);
+        }
+        let magic = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        if magic != audio::MAGIC {
+            return Err(ParseError::WrongMagic);
+        }
+        let version = read_u16(bytes, 4);
+        if version != audio::VERSION {
+            return Err(ParseError::UnsupportedVersion(version));
+        }
+        let flags = read_u16(bytes, 6);
+        let payload_len = read_u32(bytes, 8);
+        let payload_start = psxed_format::AssetHeader::SIZE;
+        let actual_payload = bytes.len().saturating_sub(payload_start);
+        if payload_len as usize != actual_payload {
+            return Err(ParseError::InvalidPayloadLen {
+                declared: payload_len,
+                actual: actual_payload,
+            });
+        }
+        if actual_payload < AudioHeader::SIZE {
+            return Err(ParseError::Truncated);
+        }
+
+        let ah = &bytes[payload_start..payload_start + AudioHeader::SIZE];
+        let codec = ah[0];
+        let channel_count = ah[1];
+        let sample_rate_hz = read_u32(ah, 4);
+        let sample_count = read_u32(ah, 8);
+        let adpcm_block_count = read_u32(ah, 12);
+        let loop_start_block = read_u32(ah, 16);
+        let decoded_capacity = adpcm_block_count
+            .checked_mul(28)
+            .ok_or(ParseError::TableOverflow)?;
+        let min_samples_for_blocks = adpcm_block_count.saturating_sub(1) * 28 + 1;
+        if codec != audio::CODEC_SPU_ADPCM
+            || channel_count != 1
+            || flags & audio::flags::MONO == 0
+            || flags & audio::flags::ONE_SHOT == 0
+            || sample_rate_hz == 0
+            || sample_count == 0
+            || adpcm_block_count == 0
+            || sample_count > decoded_capacity
+            || sample_count < min_samples_for_blocks
+            || loop_start_block != AudioHeader::NO_LOOP
+        {
+            return Err(ParseError::InvalidAudioLayout);
+        }
+
+        let adpcm_bytes = (adpcm_block_count as usize)
+            .checked_mul(16)
+            .ok_or(ParseError::TableOverflow)?;
+        let adpcm_start = payload_start + AudioHeader::SIZE;
+        let adpcm_end = adpcm_start
+            .checked_add(adpcm_bytes)
+            .ok_or(ParseError::TableOverflow)?;
+        if adpcm_end != bytes.len() {
+            return Err(ParseError::InvalidAudioLayout);
+        }
+
+        Ok(Self {
+            adpcm: &bytes[adpcm_start..adpcm_end],
+            flags,
+            sample_rate_hz,
+            sample_count,
+            adpcm_block_count,
+            loop_start_block,
+        })
+    }
+
+    /// Playback sample rate in Hz.
+    #[inline]
+    pub fn sample_rate_hz(&self) -> u32 {
+        self.sample_rate_hz
+    }
+
+    /// Audible mono sample count before encoder padding.
+    #[inline]
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
+    }
+
+    /// Number of 16-byte SPU ADPCM blocks.
+    #[inline]
+    pub fn adpcm_block_count(&self) -> u32 {
+        self.adpcm_block_count
+    }
+
+    /// Loop-start block, or `None` for one-shot samples.
+    #[inline]
+    pub fn loop_start_block(&self) -> Option<u32> {
+        if self.loop_start_block == psxed_format::audio::AudioHeader::NO_LOOP {
+            None
+        } else {
+            Some(self.loop_start_block)
+        }
+    }
+
+    /// Raw SPU ADPCM bytes ready for upload.
+    #[inline]
+    pub fn adpcm_bytes(&self) -> &'a [u8] {
+        self.adpcm
+    }
+
+    /// Whether this sample is a non-looping one-shot.
+    #[inline]
+    pub fn is_one_shot(&self) -> bool {
+        self.flags & psxed_format::audio::flags::ONE_SHOT != 0
+    }
 }
 
 #[inline]
@@ -2147,6 +2277,16 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 }
 
 #[inline]
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+#[inline]
 fn read_i16(bytes: &[u8], offset: usize) -> i16 {
     i16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
@@ -2405,6 +2545,57 @@ mod tests {
         assert!(matches!(
             Texture::from_bytes(&bad),
             Err(ParseError::WrongMagic)
+        ));
+    }
+
+    #[test]
+    fn audio_round_trip_one_shot() {
+        use psxed_format::audio;
+
+        let adpcm = [0x08u8, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let payload_len = audio::AudioHeader::SIZE + adpcm.len();
+        let mut buf = std::vec::Vec::new();
+        buf.extend_from_slice(&audio::MAGIC);
+        buf.extend_from_slice(&audio::VERSION.to_le_bytes());
+        buf.extend_from_slice(&(audio::flags::MONO | audio::flags::ONE_SHOT).to_le_bytes());
+        buf.extend_from_slice(&(payload_len as u32).to_le_bytes());
+        buf.push(audio::CODEC_SPU_ADPCM);
+        buf.push(1);
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&44_100u32.to_le_bytes());
+        buf.extend_from_slice(&28u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&audio::AudioHeader::NO_LOOP.to_le_bytes());
+        buf.extend_from_slice(&adpcm);
+
+        let sample = Audio::from_bytes(&buf).expect("parse audio");
+        assert_eq!(sample.sample_rate_hz(), 44_100);
+        assert_eq!(sample.sample_count(), 28);
+        assert_eq!(sample.adpcm_block_count(), 1);
+        assert_eq!(sample.loop_start_block(), None);
+        assert_eq!(sample.adpcm_bytes(), adpcm);
+        assert!(sample.is_one_shot());
+    }
+
+    #[test]
+    fn audio_rejects_bad_block_count() {
+        use psxed_format::audio;
+
+        let mut buf = [0u8; psxed_format::AssetHeader::SIZE + audio::AudioHeader::SIZE];
+        buf[0..4].copy_from_slice(&audio::MAGIC);
+        buf[4..6].copy_from_slice(&audio::VERSION.to_le_bytes());
+        buf[6..8].copy_from_slice(&(audio::flags::MONO | audio::flags::ONE_SHOT).to_le_bytes());
+        buf[8..12].copy_from_slice(&(audio::AudioHeader::SIZE as u32).to_le_bytes());
+        buf[12] = audio::CODEC_SPU_ADPCM;
+        buf[13] = 1;
+        buf[16..20].copy_from_slice(&44_100u32.to_le_bytes());
+        buf[20..24].copy_from_slice(&28u32.to_le_bytes());
+        buf[24..28].copy_from_slice(&1u32.to_le_bytes());
+        buf[28..32].copy_from_slice(&audio::AudioHeader::NO_LOOP.to_le_bytes());
+
+        assert!(matches!(
+            Audio::from_bytes(&buf),
+            Err(ParseError::InvalidAudioLayout)
         ));
     }
 
