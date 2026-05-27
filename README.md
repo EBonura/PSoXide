@@ -287,17 +287,13 @@ end-to-end through the emulator frontend (`make <name>` to build,
 | --- | --- | --- |
 | ![showcase-fog screenshot](assets/media/readme/examples/showcase-fog.png) | ![showcase-lights screenshot](assets/media/readme/examples/showcase-lights.png) | ![showcase-model screenshot](assets/media/readme/examples/showcase-model.png) |
 
-| `showcase-particles` | `showcase-room` | `showcase-text` |
-| --- | --- | --- |
-| ![showcase-particles screenshot](assets/media/readme/examples/showcase-particles.png) | ![showcase-room screenshot](assets/media/readme/examples/showcase-room.png) | ![showcase-text screenshot](assets/media/readme/examples/showcase-text.png) |
+| `showcase-particles` | `showcase-text` |
+| --- | --- |
+| ![showcase-particles screenshot](assets/media/readme/examples/showcase-particles.png) | ![showcase-text screenshot](assets/media/readme/examples/showcase-text.png) |
 
-| `showcase-textured-sprite` | `game-pong` | `game-breakout` |
+| `game-pong` | `game-breakout` | `game-invaders` |
 | --- | --- | --- |
-| ![showcase-textured-sprite screenshot](assets/media/readme/examples/showcase-textured-sprite.png) | ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) |
-
-| `game-invaders` |
-| --- |
-| ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
+| ![game-pong screenshot](assets/media/readme/examples/game-pong.png) | ![game-breakout screenshot](assets/media/readme/examples/game-breakout.png) | ![game-invaders screenshot](assets/media/readme/examples/game-invaders.png) |
 
 ### SDK examples - bare-metal MIPS, no engine framework
 
@@ -320,9 +316,7 @@ end-to-end through the emulator frontend (`make <name>` to build,
 | `showcase-lights` | Four coloured moving point lights illuminating scaled cubes. Complementary to `showcase-3d`, point-light path vs. directional. |
 | `showcase-model` | Animated-model demo. Two characters sharing a 24-joint biped rig; D-pad orbits the camera, Square/Circle steps through animation clips, Select swaps character. |
 | `showcase-particles` | Fixed-pool particle effects through the engine's ordering-table helpers. Routes `psx-fx` simulations through the same render path as the GTE-heavy showcases. |
-| `showcase-room` | Renders a cooked `.psxw` room on PS1 hardware. End-to-end validation of cooker → asset → runtime: `build.rs` cooks the editor's starter room, the binary parses it through `RuntimeRoom`, and `draw_room` walks every sector. |
 | `showcase-text` | Tour of every text-rendering capability of the `psx-font` crate: 8×8 and 8×16 IBM VGA fonts, gradient title, multi-font comparison, palette tricks. |
-| `showcase-textured-sprite` | Compact interactive material room. Dark brick walls + cobblestone floor with a central pane cycling through textured materials. |
 
 **Mini-games**
 
