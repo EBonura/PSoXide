@@ -26848,11 +26848,15 @@ fn draw_ui_scene_preview(
     selected: UiNodeId,
     hovered_handle: Option<UiResizeHandle>,
 ) {
-    for node in scene.nodes() {
+    for id in scene.hierarchy_node_ids() {
+        let Some(node) = scene.node(id) else {
+            continue;
+        };
         match &node.kind {
             UiNodeKind::Canvas { .. } => {}
             UiNodeKind::Group { rect } => {
-                let screen = ui_rect_to_screen(*rect, canvas, canvas_size);
+                let rect = scene.absolute_rect(node.id).unwrap_or(*rect);
+                let screen = ui_rect_to_screen(rect, canvas, canvas_size);
                 painter.rect_stroke(
                     screen,
                     0.0,
@@ -26861,11 +26865,13 @@ fn draw_ui_scene_preview(
                 );
             }
             UiNodeKind::Rect { rect, color } => {
-                let screen = ui_rect_to_screen(*rect, canvas, canvas_size);
+                let rect = scene.absolute_rect(node.id).unwrap_or(*rect);
+                let screen = ui_rect_to_screen(rect, canvas, canvas_size);
                 painter.rect_filled(screen, 0.0, Color32::from_rgb(color[0], color[1], color[2]));
             }
             UiNodeKind::Label { rect, text, color } => {
-                let screen = ui_rect_to_screen(*rect, canvas, canvas_size);
+                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
+                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
                 let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
                 painter.text(
                     screen.left_top(),
@@ -26882,7 +26888,8 @@ fn draw_ui_scene_preview(
                 fill,
                 background,
             } => {
-                let screen = ui_rect_to_screen(*rect, canvas, canvas_size);
+                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
+                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
                 painter.rect_filled(
                     screen,
                     0.0,
@@ -26905,9 +26912,8 @@ fn draw_ui_scene_preview(
         if node.id == selected {
             let selected_rect = match &node.kind {
                 UiNodeKind::Canvas { .. } => Some(canvas),
-                _ => node
-                    .kind
-                    .rect()
+                _ => scene
+                    .absolute_rect(node.id)
                     .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size)),
             };
             if let Some(rect) = selected_rect {
@@ -26949,9 +26955,9 @@ fn ui_scene_resize_handle_hit(
     canvas_size: [u16; 2],
     pos: Pos2,
 ) -> Option<UiResizeHandle> {
+    scene.node(selected).and_then(|node| node.kind.rect())?;
     let rect = scene
-        .node(selected)
-        .and_then(|node| node.kind.rect())
+        .absolute_rect(selected)
         .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size))?;
     ui_resize_handle_rects(rect)
         .into_iter()
@@ -26987,11 +26993,13 @@ fn ui_scene_hit_test(
     canvas_size: [u16; 2],
     pos: Pos2,
 ) -> Option<UiNodeId> {
-    scene.nodes().iter().rev().find_map(|node| {
-        let rect = node.kind.rect()?;
+    scene.hierarchy_node_ids().into_iter().rev().find_map(|id| {
+        let node = scene.node(id)?;
+        node.kind.rect()?;
+        let rect = scene.absolute_rect(id)?;
         ui_rect_to_screen(rect, canvas, canvas_size)
             .contains(pos)
-            .then_some(node.id)
+            .then_some(id)
     })
 }
 
