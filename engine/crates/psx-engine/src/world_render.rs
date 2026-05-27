@@ -754,7 +754,7 @@ pub struct CachedRoomSurface {
     /// Cached baked RGB values. Valid when `kind_flags` carries
     /// [`CACHED_SURFACE_HAS_BAKED_RGB`].
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
-    /// Packed surface kind + optional baked-light flag.
+    /// Packed surface kind plus cached render flags.
     pub kind_flags: u8,
     /// Runtime wall direction when this is a wall surface.
     pub wall_direction: u8,
@@ -853,6 +853,14 @@ impl CachedRoomSurface {
         self.kind_flags & CACHED_SURFACE_HAS_BAKED_RGB != 0
     }
 
+    #[inline(always)]
+    fn with_horizontal_non_flat(mut self, non_flat: bool) -> Self {
+        if non_flat {
+            self.kind_flags |= CACHED_SURFACE_HORIZONTAL_NON_FLAT;
+        }
+        self
+    }
+
     #[cfg(test)]
     const fn uvs(self) -> [(u8, u8); 4] {
         [
@@ -886,6 +894,7 @@ const CACHED_SURFACE_KIND_MASK: u8 = 0b0000_0011;
 const CACHED_SURFACE_KIND_FLOOR: u8 = 0;
 const CACHED_SURFACE_KIND_CEILING: u8 = 1;
 const CACHED_SURFACE_KIND_WALL: u8 = 2;
+const CACHED_SURFACE_HORIZONTAL_NON_FLAT: u8 = 0b0100_0000;
 const CACHED_SURFACE_HAS_BAKED_RGB: u8 = 0b1000_0000;
 
 const _: () = assert!(
@@ -1618,7 +1627,8 @@ pub fn cache_room_vertex_lit_surfaces(
                             sample,
                             split,
                             WHOLE_QUAD_TRIANGLE_INDEX,
-                        ),
+                        )
+                        .with_horizontal_non_flat(horizontal_heights_non_flat4(heights)),
                     ) {
                         return CachedRoomSurfaceCacheStats {
                             cell_count,
@@ -1689,6 +1699,9 @@ pub fn cache_room_vertex_lit_surfaces(
                                 sample,
                                 split,
                                 triangle_index as u8,
+                            )
+                            .with_horizontal_non_flat(
+                                horizontal_heights_non_flat3(triangle_heights),
                             ),
                         ) {
                             return CachedRoomSurfaceCacheStats {
@@ -1735,7 +1748,8 @@ pub fn cache_room_vertex_lit_surfaces(
                             sample,
                             split,
                             WHOLE_QUAD_TRIANGLE_INDEX,
-                        ),
+                        )
+                        .with_horizontal_non_flat(horizontal_heights_non_flat4(heights)),
                     ) {
                         return CachedRoomSurfaceCacheStats {
                             cell_count,
@@ -1806,6 +1820,9 @@ pub fn cache_room_vertex_lit_surfaces(
                                 sample,
                                 split,
                                 triangle_index as u8,
+                            )
+                            .with_horizontal_non_flat(
+                                horizontal_heights_non_flat3(triangle_heights),
                             ),
                         ) {
                             return CachedRoomSurfaceCacheStats {
@@ -2580,14 +2597,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     match kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
             let is_ceiling = matches!(kind, WorldSurfaceKind::Ceiling);
-            let use_triangle_depth = cached_surface_uses_triangle_depth(
-                depth_mode,
-                kind,
-                surface,
-                cached_vertices,
-                ids,
-                projected,
-            );
+            let use_triangle_depth =
+                cached_surface_uses_triangle_depth(depth_mode, kind, surface, projected);
             let (surface_options, prepared_depth) = if use_triangle_depth {
                 (triangle_depth_options(options), None)
             } else {
@@ -2599,8 +2610,6 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 use_triangle_depth,
                 kind,
                 surface,
-                cached_vertices,
-                ids,
                 projected,
             );
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
@@ -2713,14 +2722,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
         }
         WorldSurfaceKind::Wall { direction } => {
             let wall_material = wall_material_for_direction(material, direction);
-            let use_triangle_depth = cached_surface_uses_triangle_depth(
-                depth_mode,
-                kind,
-                surface,
-                cached_vertices,
-                ids,
-                projected,
-            );
+            let use_triangle_depth =
+                cached_surface_uses_triangle_depth(depth_mode, kind, surface, projected);
             let (surface_options, prepared_depth) = if use_triangle_depth {
                 (triangle_depth_options(options), None)
             } else {
@@ -2732,8 +2735,6 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 use_triangle_depth,
                 kind,
                 surface,
-                cached_vertices,
-                ids,
                 projected,
             );
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
@@ -2859,8 +2860,6 @@ fn cached_surface_uses_triangle_depth(
     mode: CachedRoomDepthMode,
     kind: WorldSurfaceKind,
     surface: CachedRoomSurface,
-    vertices: &[WorldVertex],
-    ids: [u16; 4],
     projected: [ProjectedVertex; 4],
 ) -> bool {
     match mode {
@@ -2868,13 +2867,11 @@ fn cached_surface_uses_triangle_depth(
         CachedRoomDepthMode::PerTriangle => true,
         CachedRoomDepthMode::Hybrid => match kind {
             WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
-                cached_horizontal_surface_is_risky(surface, vertices, ids, projected)
+                cached_horizontal_surface_is_risky(surface, projected)
             }
             WorldSurfaceKind::Wall { .. } => false,
         },
-        CachedRoomDepthMode::HybridWalls => {
-            cached_surface_is_risky(kind, surface, vertices, ids, projected)
-        }
+        CachedRoomDepthMode::HybridWalls => cached_surface_is_risky(kind, surface, projected),
     }
 }
 
@@ -2884,16 +2881,12 @@ fn cached_surface_subdivision_options(
     use_triangle_depth: bool,
     kind: WorldSurfaceKind,
     surface: CachedRoomSurface,
-    vertices: &[WorldVertex],
-    ids: [u16; 4],
     projected: [ProjectedVertex; 4],
 ) -> WorldSurfaceOptions {
     let allow_visual_subdivision = match mode {
         CachedRoomSubdivisionMode::All => true,
         CachedRoomSubdivisionMode::DepthSorted => use_triangle_depth,
-        CachedRoomSubdivisionMode::Risky => {
-            cached_surface_is_risky(kind, surface, vertices, ids, projected)
-        }
+        CachedRoomSubdivisionMode::Risky => cached_surface_is_risky(kind, surface, projected),
     };
     if allow_visual_subdivision {
         options
@@ -2905,13 +2898,11 @@ fn cached_surface_subdivision_options(
 fn cached_surface_is_risky(
     kind: WorldSurfaceKind,
     surface: CachedRoomSurface,
-    vertices: &[WorldVertex],
-    ids: [u16; 4],
     projected: [ProjectedVertex; 4],
 ) -> bool {
     match kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
-            cached_horizontal_surface_is_risky(surface, vertices, ids, projected)
+            cached_horizontal_surface_is_risky(surface, projected)
         }
         WorldSurfaceKind::Wall { .. } => {
             cached_surface_projected_depth_span(surface, projected) >= HYBRID_HORIZONTAL_DEPTH_SPAN
@@ -2921,16 +2912,9 @@ fn cached_surface_is_risky(
 
 fn cached_horizontal_surface_is_risky(
     surface: CachedRoomSurface,
-    vertices: &[WorldVertex],
-    ids: [u16; 4],
     projected: [ProjectedVertex; 4],
 ) -> bool {
-    let Some(world) = indexed_world_quad(vertices, ids) else {
-        return true;
-    };
-    let min_y = world[0].y.min(world[1].y).min(world[2].y).min(world[3].y);
-    let max_y = world[0].y.max(world[1].y).max(world[2].y).max(world[3].y);
-    if max_y != min_y {
+    if surface.kind_flags & CACHED_SURFACE_HORIZONTAL_NON_FLAT != 0 {
         return true;
     }
     cached_surface_projected_depth_span(surface, projected) >= HYBRID_HORIZONTAL_DEPTH_SPAN
@@ -4728,6 +4712,16 @@ fn horizontal_vertices(sx: u16, sz: u16, sector_size: i32, heights: [i32; 4]) ->
     ]
 }
 
+#[inline(always)]
+fn horizontal_heights_non_flat4(heights: [i32; 4]) -> bool {
+    heights[0] != heights[1] || heights[0] != heights[2] || heights[0] != heights[3]
+}
+
+#[inline(always)]
+fn horizontal_heights_non_flat3(heights: [i32; 3]) -> bool {
+    heights[0] != heights[1] || heights[0] != heights[2]
+}
+
 fn horizontal_triangle_vertices(
     sx: u16,
     sz: u16,
@@ -5446,18 +5440,6 @@ mod tests {
 
     #[test]
     fn hybrid_depth_uses_triangle_depth_for_sloped_horizontal_surfaces() {
-        let flat_vertices = [
-            WorldVertex::new(0, 0, 0),
-            WorldVertex::new(1024, 0, 0),
-            WorldVertex::new(1024, 0, 1024),
-            WorldVertex::new(0, 0, 1024),
-        ];
-        let sloped_vertices = [
-            WorldVertex::new(0, 0, 0),
-            WorldVertex::new(1024, 0, 0),
-            WorldVertex::new(1024, 512, 1024),
-            WorldVertex::new(0, 512, 1024),
-        ];
         let projected = [
             ProjectedVertex::new(0, 0, 1024),
             ProjectedVertex::new(64, 0, 1056),
@@ -5479,21 +5461,18 @@ mod tests {
             SPLIT_NW_SE,
             WHOLE_QUAD_TRIANGLE_INDEX,
         );
+        let sloped_surface = surface.with_horizontal_non_flat(true);
 
         assert!(!cached_surface_uses_triangle_depth(
             CachedRoomDepthMode::Hybrid,
             WorldSurfaceKind::Floor,
             surface,
-            &flat_vertices,
-            surface.vertex_indices,
             projected,
         ));
         assert!(cached_surface_uses_triangle_depth(
             CachedRoomDepthMode::Hybrid,
             WorldSurfaceKind::Floor,
-            surface,
-            &sloped_vertices,
-            surface.vertex_indices,
+            sloped_surface,
             projected,
         ));
         assert!(cached_surface_uses_triangle_depth(
@@ -5502,8 +5481,6 @@ mod tests {
                 direction: DIR_EAST,
             },
             surface,
-            &flat_vertices,
-            surface.vertex_indices,
             projected,
         ));
         assert!(!cached_surface_uses_triangle_depth(
@@ -5512,8 +5489,6 @@ mod tests {
                 direction: DIR_EAST,
             },
             surface,
-            &flat_vertices,
-            surface.vertex_indices,
             [
                 ProjectedVertex::new(0, 0, 1024),
                 ProjectedVertex::new(64, 0, 2048),
@@ -5527,8 +5502,6 @@ mod tests {
                 direction: DIR_EAST,
             },
             surface,
-            &flat_vertices,
-            surface.vertex_indices,
             [
                 ProjectedVertex::new(0, 0, 1024),
                 ProjectedVertex::new(64, 0, 2048),
