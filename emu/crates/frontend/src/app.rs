@@ -16,7 +16,7 @@ use psx_iso::{build_world_pack, default_system_cnf, Disc, Exe, IsoBuilder, SECTO
 use psx_trace::InstructionRecord;
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
-use crate::burn::BurnState;
+use crate::burn::{validate_burn_target_path, BurnState};
 use crate::embedded_playtest::EmbeddedPlaytestState;
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
 use crate::ui;
@@ -496,6 +496,12 @@ impl AppState {
         let Some(entry) = library_entry_for_launch_id(&self.library.entries, id).cloned() else {
             return Err(format!("no library entry with id={id}"));
         };
+        if !self.entry_can_open_burn_menu(&entry) {
+            return Err(
+                "disc burning is only available for built examples and projects".to_string(),
+            );
+        }
+        validate_burn_target_path(&entry.path)?;
         self.burn.open_for(&entry);
         match self.burn.scan_now() {
             Ok(Some(notice)) => self.status_message_set(notice),
@@ -503,6 +509,21 @@ impl AppState {
             Err(error) => self.status_message_set(format!("Burner scan failed: {error}")),
         }
         Ok(())
+    }
+
+    fn entry_can_open_burn_menu(&self, entry: &LibraryEntry) -> bool {
+        if entry.kind != GameKind::DiscCue {
+            return false;
+        }
+        let in_examples = self
+            .resolve_sdk_examples_dir()
+            .filter(|root| root.exists())
+            .is_some_and(|root| path_is_under(&entry.path, &root));
+        let in_projects = self
+            .resolve_editor_projects_dir()
+            .filter(|root| root.exists())
+            .is_some_and(|root| path_is_under(&entry.path, &root));
+        in_examples || in_projects
     }
 
     /// Poll CD burner hotplug in the same lightweight style as controller notices.
@@ -851,8 +872,10 @@ impl AppState {
             }
         }
 
-        let built_examples: HashSet<String> =
-            examples.iter().map(|entry| example_key(&entry.title)).collect();
+        let built_examples: HashSet<String> = examples
+            .iter()
+            .map(|entry| example_key(&entry.title))
+            .collect();
         examples.extend(public_example_source_items(&built_examples));
 
         // Pass 3: stable alphabetical order per column.
@@ -2515,7 +2538,9 @@ mod tests {
         assert!(examples
             .iter()
             .any(|entry| entry.title == "game-pong" && !entry.launchable));
-        assert!(examples.iter().all(|entry| entry.title != "editor-playtest"));
+        assert!(examples
+            .iter()
+            .all(|entry| entry.title != "editor-playtest"));
         assert!(examples.iter().all(|entry| entry.title != "hello-tri"));
     }
 
