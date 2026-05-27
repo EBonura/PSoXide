@@ -27,6 +27,7 @@ trybuild = "1"
 
 [features]
 default = []
+boot-trace = ["psx-rt/boot-trace"]
 room-surface-profile = []
 
 [lints]

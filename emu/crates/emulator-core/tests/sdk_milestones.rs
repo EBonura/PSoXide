@@ -485,12 +485,12 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
         "game-magikaaaaaarp-pong" => Some(SdkGolden {
             example: "game-magikaaaaaarp-pong",
             vblanks: 8,
-            vram_hash: 0x3f97_7b8b_8989_c84b,
-            display_hash: 0x8e40_523f_bfd2_b11b,
+            vram_hash: 0xb323_e31d_b521_c81f,
+            display_hash: 0xced2_01f8_e849_0dea,
             display_size: (320, 240),
             vblank_raises: 8,
             spu_samples: 5145,
-            final_pc: 0x8000_0080,
+            final_pc: 0x8001_1ab8,
             redux_display_hash: None,
         }),
         // Second mini-game. 60 VBlanks captures one serve-arc +
@@ -549,7 +549,7 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             display_size: (320, 240),
             vblank_raises: 120,
             spu_samples: 88200,
-            final_pc: 0x8001_5964,
+            final_pc: 0x8001_1540,
             redux_display_hash: None,
         }),
         // Flagship 3D showcase. Starfield + Suzanne (Blender

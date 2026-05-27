@@ -6,7 +6,7 @@ is licensed under GPL-2.0-or-later (see [`LICENSE`](../LICENSE)), but
 binary assets each carry their own provenance and license, recorded
 here.
 
-Last updated: 2026-04-30.
+Last updated: 2026-05-27.
 
 ## Branding
 
@@ -69,6 +69,9 @@ via the editor's texture cooker (`make assets`).
 | `editor/projects/default/assets/textures/floor.psxt` | Cooked copy of `floor.jpg` for the default editor project | (derived) | Pexels License (inherited) |
 | `editor/projects/default/assets/textures/torment_*.psxt` | Cooked/downsampled from Torment Textures v1.1 true-colour PNGs (`str_stonebrk1..4`, `str_stoneflr1..4`, `str_stonegen1..6`, `str_stonewall1..4`, `str_stonerubble`, `str_rotwoodgen1..3`, `{str_grating1..3`, `str_wasteland1..6`) | Torment Textures by Bradley D. ([Strideh](https://strideh.itch.io)) | Torment Textures license: commercial/free use, modification, and open-source distribution permitted with attribution; standalone asset resale and generative AI training use prohibited |
 | `assets/models/*/*.psxt` (model textures) | See "3D Models" above | (Meshy) | User-owned per Meshy premium plan terms; distributed here under GPL-2.0-or-later |
+| `engine/examples/game-magikaaaaaarp-pong/vendor/magikaaaaaarp_album.jpg` | magikAAAAArp album image provided locally by the project owner | magikAAAAArp / project owner | Project-local demo asset; distribution rights to be confirmed before public release |
+| `engine/examples/game-magikaaaaaarp-pong/assets/magikaaaaaarp_album.psxt` | Cooked from `magikaaaaaarp_album.jpg` | (derived) | Same as source |
+| `engine/examples/game-magikaaaaaarp-pong/assets/goncharov_spectrum_16x30hz.bin` | Baked 16-band, 30 Hz visualizer table from `assets/audio/cdda/GONCHAROV.wav` via `tools/bake_spectrum.py` | (derived) | Same as source |
 
 The Pexels License (https://www.pexels.com/license/) permits free
 commercial and non-commercial use, modification, and redistribution;
@@ -111,6 +114,13 @@ work doesn't pick them up, delete them rather than ship non-working
 audio data.
 
 See [`sdk/crates/psx-spu/vendor/PROVENANCE.md`](../sdk/crates/psx-spu/vendor/PROVENANCE.md).
+
+## CD-DA Music
+
+| File | Source | Author | License |
+| --- | --- | --- | --- |
+| `assets/audio/cdda/GONCHAROV.wav` | Cooked from `~/Downloads/YTDown_YouTube_GONCHAROV-Karaoke-Version-Official-Video_Media_GFJip2tEPsI_007_128k.mp3` | magikAAAAArp / project owner | Project-local demo asset; distribution rights to be confirmed before public release |
+| `assets/audio/cdda/GONCHAROV.track02.cdda` | Cooked from `GONCHAROV.wav` as 44.1 kHz stereo signed 16-bit PCM, sector-padded for CD-DA track 2 | (derived) | Same as source |
 
 ## OBJ Reference Models
 
