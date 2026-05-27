@@ -1,5 +1,5 @@
 [package]
-name    = "game-birthday-pong"
+name    = "game-magikaaaaaarp-pong"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
@@ -7,7 +7,7 @@ license = "GPL-2.0-or-later"
 [workspace]
 
 [[bin]]
-name = "game-birthday-pong"
+name = "game-magikaaaaaarp-pong"
 path = "src/main.rs"
 
 [profile.release]
