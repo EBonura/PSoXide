@@ -17,9 +17,9 @@
 //! ```
 //!
 //! The scheduler keeps fixed update and visual render as separate tasks.
-//! Rendering can drop visual intervals when the machine is busy, but fixed
-//! update catch-up is bounded by the project schedule so a late visual cannot
-//! be starved by an unbounded simulation burst.
+//! Rendering can drop visual intervals when the machine is busy. Fixed update
+//! is the critical clock and catches up before optional visuals unless a
+//! project explicitly sets an emergency burst cap.
 //!
 //! This mirrors every `sdk/examples/game-*/src/main.rs` file's
 //! inner loop by eye -- the engine just factors the shared cadence
