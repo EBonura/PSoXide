@@ -1490,6 +1490,8 @@ pub struct LevelUiNodeRecord {
     pub max: LevelUiValueBinding,
     /// Text for `Label`.
     pub text: &'static str,
+    /// Runtime lookup tag for dynamic labels. Empty means untagged.
+    pub tag: &'static str,
     /// Runtime flags.
     pub flags: u16,
 }
