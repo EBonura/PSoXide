@@ -44,6 +44,7 @@ struct Args {
     world_pack_rooms_dir: Option<PathBuf>,
     world_pack_order_file: Option<PathBuf>,
     cdda_tracks: Vec<PathBuf>,
+    system_area: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -55,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
     let mut world_pack_rooms_dir = None;
     let mut world_pack_order_file = None;
     let mut cdda_tracks = Vec::new();
+    let mut system_area = env::var_os("PSOXIDE_SYSTEM_AREA").map(PathBuf::from);
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -106,6 +108,12 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| "--cdda-track takes a path".to_string())?,
                 ));
             }
+            "--system-area" => {
+                system_area = Some(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--system-area takes a path".to_string())?,
+                ));
+            }
             "--help" | "-h" => {
                 return Err(String::from("help"));
             }
@@ -123,6 +131,7 @@ fn parse_args() -> Result<Args, String> {
         world_pack_rooms_dir,
         world_pack_order_file,
         cdda_tracks,
+        system_area,
     })
 }
 
@@ -149,6 +158,10 @@ fn print_usage() {
                          Append a sector-aligned raw CD-DA track to\n\
                          the output .bin and emit a sibling .cue. May\n\
                          be repeated.\n\
+         --system-area PATH\n\
+                         Inject the first 16 sectors from a local PS1\n\
+                         system-area file or disc image. May also be\n\
+                         supplied by PSOXIDE_SYSTEM_AREA.\n\
          --iso           Emit a cooked 2048-byte-per-sector .iso\n\
                          instead of the default raw 2352-byte .bin.\n"
     );
@@ -189,6 +202,29 @@ fn main() -> ExitCode {
     }
 
     let mut builder = IsoBuilder::new().volume_id(&args.volume);
+    if let Some(path) = args.system_area.as_deref() {
+        let bytes = match read_system_area(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(1);
+            }
+        };
+        builder = match builder.system_area(bytes) {
+            Ok(builder) => builder,
+            Err(_) => {
+                eprintln!(
+                    "{} did not decode to exactly 16 cooked sectors",
+                    path.display()
+                );
+                return ExitCode::from(1);
+            }
+        };
+    } else {
+        eprintln!(
+            "warning: no PS1 system area supplied; emulators may boot this, real hardware may not"
+        );
+    }
     builder.add_file("SYSTEM.CNF", default_system_cnf());
     if let Some(sectors) = args.cdtest_sectors {
         builder.add_file(CD_STREAM_BENCH_FILE_NAME, cd_stream_bench_payload(sectors));
@@ -330,6 +366,39 @@ fn cue_file_name(path: &Path) -> Result<String, String> {
         ));
     }
     Ok(name.to_string())
+}
+
+fn read_system_area(path: &Path) -> Result<Vec<u8>, String> {
+    let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    extract_system_area(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn extract_system_area(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    const COOKED_BYTES: usize = 16 * psx_iso::iso9660::SECTOR_SIZE;
+    const RAW_BYTES: usize = 16 * psx_iso::iso9660::RAW_SECTOR_SIZE;
+
+    if bytes.len() >= RAW_BYTES && looks_like_raw_sector(&bytes[..psx_iso::SECTOR_BYTES]) {
+        let mut out = Vec::with_capacity(COOKED_BYTES);
+        for sector in bytes[..RAW_BYTES].chunks_exact(psx_iso::SECTOR_BYTES) {
+            out.extend_from_slice(&sector[24..24 + psx_iso::iso9660::SECTOR_SIZE]);
+        }
+        return Ok(out);
+    }
+
+    if bytes.len() >= COOKED_BYTES {
+        return Ok(bytes[..COOKED_BYTES].to_vec());
+    }
+
+    Err(format!(
+        "system area needs at least {COOKED_BYTES} cooked bytes or {RAW_BYTES} raw bytes"
+    ))
+}
+
+fn looks_like_raw_sector(sector: &[u8]) -> bool {
+    sector.len() >= psx_iso::SECTOR_BYTES
+        && sector[0] == 0x00
+        && sector[11] == 0x00
+        && sector[1..11] == [0xFF; 10]
 }
 
 fn build_world_pack_from_rooms_dir(
@@ -493,6 +562,30 @@ mod tests {
         assert_eq!(cue_msf(74), "00:00:74");
         assert_eq!(cue_msf(75), "00:01:00");
         assert_eq!(cue_msf(150), "00:02:00");
+    }
+
+    #[test]
+    fn extract_system_area_accepts_cooked_bytes() {
+        let mut bytes = vec![0u8; 16 * psx_iso::iso9660::SECTOR_SIZE + 1];
+        bytes[4 * psx_iso::iso9660::SECTOR_SIZE] = 0xA5;
+        let area = extract_system_area(&bytes).unwrap();
+        assert_eq!(area.len(), 16 * psx_iso::iso9660::SECTOR_SIZE);
+        assert_eq!(area[4 * psx_iso::iso9660::SECTOR_SIZE], 0xA5);
+    }
+
+    #[test]
+    fn extract_system_area_accepts_raw_bytes() {
+        let mut bytes = vec![0u8; 16 * psx_iso::SECTOR_BYTES];
+        for lba in 0..16 {
+            let sector = &mut bytes[lba * psx_iso::SECTOR_BYTES..(lba + 1) * psx_iso::SECTOR_BYTES];
+            sector[0] = 0;
+            sector[1..11].fill(0xFF);
+            sector[11] = 0;
+        }
+        bytes[4 * psx_iso::SECTOR_BYTES + 24] = 0x5A;
+        let area = extract_system_area(&bytes).unwrap();
+        assert_eq!(area.len(), 16 * psx_iso::iso9660::SECTOR_SIZE);
+        assert_eq!(area[4 * psx_iso::iso9660::SECTOR_SIZE], 0x5A);
     }
 
     #[test]
