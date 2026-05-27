@@ -34,8 +34,13 @@ const PSX_TRI_MAX_DY: i32 = 511;
 const MAX_TEXTURED_HW_SPLIT_DEPTH: u8 = 5;
 const WORLD_COMMAND_NONE: u16 = u16::MAX;
 const GOURAUD_COMMAND_NONE: u16 = u16::MAX;
-const MODEL_GTE_JOINT_COMPOSE: bool = option_env!("PSXO_GTE_JOINT_COMPOSE").is_some();
-const MODEL_GTE_JOINT_TRANSLATION: bool = option_env!("PSXO_GTE_JOINT_TRANSLATION").is_some();
+/// Compose animated joint matrices on the GTE by default. The CPU path is
+/// retained as a build-time escape hatch for regression testing.
+const MODEL_GTE_JOINT_COMPOSE: bool = option_env!("PSXO_DISABLE_GTE_JOINT_COMPOSE").is_none();
+/// Rotate joint translations on the GTE by default. This keeps the hot
+/// animated-model path on the same coprocessor used for vertex projection.
+const MODEL_GTE_JOINT_TRANSLATION: bool =
+    MODEL_GTE_JOINT_COMPOSE && option_env!("PSXO_DISABLE_GTE_JOINT_TRANSLATION").is_none();
 const MODEL_GTE_JOINT_PACKED_TRANSLATION: bool =
     option_env!("PSXO_GTE_JOINT_PACKED_TRANSLATION").is_some();
 
