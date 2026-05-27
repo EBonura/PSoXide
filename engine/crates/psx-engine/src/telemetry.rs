@@ -79,6 +79,14 @@ pub mod stage {
     pub const OT_SUBMIT: u16 = 11;
 }
 
+/// Runtime task ids. Keep in sync with `emulator_core::telemetry::task`.
+pub mod task {
+    /// Built-in fixed simulation/update task.
+    pub const FIXED_UPDATE: u16 = 0;
+    /// Built-in visual render/present task.
+    pub const VISUAL_RENDER: u16 = 1;
+}
+
 /// Runtime counter ids. Keep in sync with `emulator_core::telemetry::counter`.
 pub mod counter {
     /// Textured primitive packets allocated this frame.
@@ -475,6 +483,8 @@ const EVENT_KIND_FRAME_BEGIN: u8 = 1;
 const EVENT_KIND_STAGE_BEGIN: u8 = 2;
 const EVENT_KIND_STAGE_END: u8 = 3;
 const EVENT_KIND_COUNTER: u8 = 4;
+const EVENT_KIND_TASK_BEGIN: u8 = 5;
+const EVENT_KIND_TASK_END: u8 = 6;
 
 #[cfg(target_arch = "mips")]
 const EVENT_ADDR: *mut u32 = 0xBF80_2F00 as *mut u32;
@@ -509,6 +519,18 @@ pub fn stage_end(stage_id: u16) {
 pub fn counter(counter_id: u16, value: u32) {
     emit_value(value);
     emit_event(EVENT_KIND_COUNTER, counter_id);
+}
+
+/// Mark the start of a scheduled task.
+#[inline(always)]
+pub fn task_begin(task_id: u16) {
+    emit_event(EVENT_KIND_TASK_BEGIN, task_id);
+}
+
+/// Mark the end of a scheduled task.
+#[inline(always)]
+pub fn task_end(task_id: u16) {
+    emit_event(EVENT_KIND_TASK_END, task_id);
 }
 
 /// Read the emulator-observed guest cycle counter.
