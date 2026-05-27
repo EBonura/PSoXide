@@ -51,9 +51,10 @@ use psx_engine::{
     CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
     CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame, PointLightSample,
-    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
-    RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SchedulerConfig, SimTick,
+    LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame,
+    PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink,
+    ProjectedVertex, Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene,
+    SchedulerConfig, SimTick,
     TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
     ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
     ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
@@ -1460,6 +1461,8 @@ const MAX_RUNTIME_MODEL_CLIPS: usize = 128;
 const MODEL_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_MODELS").is_some();
 const MODEL_BOUNDS_CULLING_ENABLED: bool =
     option_env!("PSXO_BENCH_DISABLE_MODEL_BOUNDS_CULL").is_none();
+const PROP_PARTICLE_GTE_PROJECT_ENABLED: bool =
+    option_env!("PSXO_GTE_PROP_PARTICLE_PROJECT").is_some();
 
 /// Marker visualization tuning. Markers are debug stubs -- keep
 /// them visible at orbit-camera scales without dominating the
@@ -4973,13 +4976,27 @@ impl Playtest {
                 .get(active.index.to_usize())
                 .map(room_depth_range)
                 .unwrap_or(WORLD_DEPTH_RANGE);
+            let mut projector = None;
             for emitter in PARTICLE_EMITTERS {
                 if emitter.room != active.index {
                     continue;
                 }
+                let projector = match projector {
+                    Some(projector) => Some(projector),
+                    None => {
+                        if !PROP_PARTICLE_GTE_PROJECT_ENABLED {
+                            None
+                        } else {
+                            let loaded = LoadedWorldCameraGte::load(room_camera);
+                            projector = Some(loaded);
+                            Some(loaded)
+                        }
+                    }
+                };
                 submitted += draw_particle_emitter(
                     *emitter,
                     room_camera,
+                    projector,
                     depth_range,
                     particle_material,
                     elapsed_tick,
@@ -10839,6 +10856,36 @@ fn accumulate_model_stats(total: &mut TexturedModelRenderStats, next: TexturedMo
     total.dropped_triangles = total
         .dropped_triangles
         .saturating_add(next.dropped_triangles);
+    total.cpu_blended_vertices = total
+        .cpu_blended_vertices
+        .saturating_add(next.cpu_blended_vertices);
+    total.packed_face_calls = total
+        .packed_face_calls
+        .saturating_add(next.packed_face_calls);
+    total.packed_unclamped_face_calls = total
+        .packed_unclamped_face_calls
+        .saturating_add(next.packed_unclamped_face_calls);
+    total.packed_clamped_face_calls = total
+        .packed_clamped_face_calls
+        .saturating_add(next.packed_clamped_face_calls);
+    total.packed_general_face_calls = total
+        .packed_general_face_calls
+        .saturating_add(next.packed_general_face_calls);
+    total.fallback_face_calls = total
+        .fallback_face_calls
+        .saturating_add(next.fallback_face_calls);
+    total.hw_extent_fallbacks = total
+        .hw_extent_fallbacks
+        .saturating_add(next.hw_extent_fallbacks);
+    total.near_plane_dropped_faces = total
+        .near_plane_dropped_faces
+        .saturating_add(next.near_plane_dropped_faces);
+    total.hw_unsafe_dropped_faces = total
+        .hw_unsafe_dropped_faces
+        .saturating_add(next.hw_unsafe_dropped_faces);
+    total.fast_submitted_triangles = total
+        .fast_submitted_triangles
+        .saturating_add(next.fast_submitted_triangles);
     total.vertex_overflow |= next.vertex_overflow;
     total.primitive_overflow |= next.primitive_overflow;
     total.command_overflow |= next.command_overflow;
@@ -11118,6 +11165,7 @@ fn draw_image_props<T>(
 ) where
     T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
 {
+    let mut projector = None;
     for prop in props {
         if prop.room != current_room {
             continue;
@@ -11147,29 +11195,88 @@ fn draw_image_props<T>(
         ) else {
             continue;
         };
+        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
+            .with_texture_window(slot.texture_window);
+        let u_max = model_render_uv_max(slot.texture_width);
+        let v_max = model_render_uv_max(slot.texture_height);
+        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+        if PROP_PARTICLE_GTE_PROJECT_ENABLED {
+            let projector = match projector {
+                Some(projector) => projector,
+                None => {
+                    let loaded = LoadedWorldCameraGte::load(*camera);
+                    projector = Some(loaded);
+                    loaded
+                }
+            };
+            if let Some(projected) = projector.project_world_quad(verts) {
+                let colors = [
+                    lighting.apply_vertex_fog_weight(
+                        prop.baked_vertex_rgb[0],
+                        lighting.fog_weight_at_depth(projected[0].sz),
+                    ),
+                    lighting.apply_vertex_fog_weight(
+                        prop.baked_vertex_rgb[1],
+                        lighting.fog_weight_at_depth(projected[1].sz),
+                    ),
+                    lighting.apply_vertex_fog_weight(
+                        prop.baked_vertex_rgb[2],
+                        lighting.fog_weight_at_depth(projected[2].sz),
+                    ),
+                    lighting.apply_vertex_fog_weight(
+                        prop.baked_vertex_rgb[3],
+                        lighting.fog_weight_at_depth(projected[3].sz),
+                    ),
+                ];
+                let sort_depth =
+                    image_prop_sort_depth_projected(projected, camera.projection.near_z);
+                let depth_bias = options
+                    .depth_bias
+                    .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
+                let opts = options
+                    .with_depth_policy(DepthPolicy::Fixed(sort_depth))
+                    .with_depth_bias(depth_bias)
+                    .with_cull_mode(CullMode::None)
+                    .with_material_layer(material)
+                    .with_textured_triangle_splitting(true)
+                    .with_textured_triangle_max_edge(0);
+                let _ = world.submit_textured_gouraud_triangle(
+                    triangles,
+                    [projected[0], projected[1], projected[2]],
+                    [uvs[0], uvs[1], uvs[2]],
+                    [colors[0], colors[1], colors[2]],
+                    material,
+                    opts,
+                );
+                let _ = world.submit_textured_gouraud_triangle(
+                    triangles,
+                    [projected[0], projected[2], projected[3]],
+                    [uvs[0], uvs[2], uvs[3]],
+                    [colors[0], colors[2], colors[3]],
+                    material,
+                    opts,
+                );
+                continue;
+            }
+        }
         let colors = [
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[0], verts[0]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[1], verts[1]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[2], verts[2]),
             lighting.apply_vertex_fog(prop.baked_vertex_rgb[3], verts[3]),
         ];
-        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
-            .with_texture_window(slot.texture_window);
-        let u_max = model_render_uv_max(slot.texture_width);
-        let v_max = model_render_uv_max(slot.texture_height);
-        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-        let sort_depth = image_prop_sort_depth(camera, verts);
-        let depth_bias = options
-            .depth_bias
-            .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
-        let opts = options
-            .with_depth_policy(DepthPolicy::Fixed(sort_depth))
-            .with_depth_bias(depth_bias)
-            .with_cull_mode(CullMode::None)
-            .with_material_layer(material)
-            .with_textured_triangle_splitting(true)
-            .with_textured_triangle_max_edge(0);
         if let Some(projected) = camera.project_world_quad(verts) {
+            let sort_depth = image_prop_sort_depth_projected(projected, camera.projection.near_z);
+            let depth_bias = options
+                .depth_bias
+                .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
+            let opts = options
+                .with_depth_policy(DepthPolicy::Fixed(sort_depth))
+                .with_depth_bias(depth_bias)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(material)
+                .with_textured_triangle_splitting(true)
+                .with_textured_triangle_max_edge(0);
             let _ = world.submit_textured_gouraud_triangle(
                 triangles,
                 [projected[0], projected[1], projected[2]],
@@ -11190,7 +11297,17 @@ fn draw_image_props<T>(
             let tint = average_vertex_rgb(colors);
             let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
                 .with_texture_window(slot.texture_window);
-            let opts = opts.with_material_layer(material);
+            let sort_depth = image_prop_sort_depth(camera, verts);
+            let depth_bias = options
+                .depth_bias
+                .saturating_sub(image_prop_depth_bias(prop.width, prop.height));
+            let opts = options
+                .with_depth_policy(DepthPolicy::Fixed(sort_depth))
+                .with_depth_bias(depth_bias)
+                .with_cull_mode(CullMode::None)
+                .with_material_layer(material)
+                .with_textured_triangle_splitting(true)
+                .with_textured_triangle_max_edge(0);
             let _ =
                 world.submit_textured_world_quad(triangles, *camera, verts, uvs, material, opts);
         }
@@ -12381,6 +12498,14 @@ fn image_prop_sort_depth(camera: &WorldCamera, verts: [WorldVertex; 4]) -> i32 {
     nearest.max(camera.projection.near_z)
 }
 
+fn image_prop_sort_depth_projected(verts: [ProjectedVertex; 4], near_z: i32) -> i32 {
+    let mut nearest = i32::MAX;
+    for vertex in verts {
+        nearest = nearest.min(vertex.sz);
+    }
+    nearest.max(near_z)
+}
+
 fn image_prop_vertices(
     origin: WorldVertex,
     width: u16,
@@ -12836,6 +12961,7 @@ fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle)
 fn draw_particle_emitter(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
     elapsed_tick: SimTick,
@@ -12875,6 +13001,7 @@ fn draw_particle_emitter(
         submitted += draw_particle_sample(
             emitter,
             camera,
+            projector,
             depth_range,
             particle_material,
             seed,
@@ -12891,6 +13018,7 @@ fn draw_particle_emitter(
 fn draw_particle_sample(
     emitter: ParticleEmitterRecord,
     camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
     depth_range: DepthRange,
     particle_material: TextureMaterial,
     seed: u32,
@@ -12934,7 +13062,13 @@ fn draw_particle_sample(
         age,
         seed.rotate_left(21),
     );
-    let Some(center) = camera.project_world(WorldVertex::new(x, y, z)) else {
+    let position = WorldVertex::new(x, y, z);
+    let center = if let Some(projector) = projector {
+        projector.project_world(position)
+    } else {
+        camera.project_world(position)
+    };
+    let Some(center) = center else {
         return 0;
     };
 
