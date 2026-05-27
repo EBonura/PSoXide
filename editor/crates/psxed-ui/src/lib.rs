@@ -46,13 +46,14 @@ use psxed_project::{
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ParticleEmitterSettings,
     ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
     RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings,
-    UiNodeId, UiNodeKind, UiRect, UiValueBinding, WorldCameraSettings, WorldCullingSettings,
-    WorldGrid, WorldGridBudget, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
-    MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
-    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
-    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE, MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MAX_WORLD_STREAMING_VISIBLE_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
+    UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiValueBinding, WorldCameraSettings,
+    WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
+    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
+    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
+    MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
+    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE,
+    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+    MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
     MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE, MIN_WORLD_SECTOR_SIZE,
     MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
     MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
@@ -200,6 +201,21 @@ enum TreeAction {
     Reparent {
         source: NodeId,
         target_parent: NodeId,
+        position: usize,
+    },
+}
+
+enum UiTreeAction {
+    Select(UiNodeId),
+    Delete(UiNodeId),
+    AddChild {
+        parent: UiNodeId,
+        kind: UiNodeKind,
+        name: &'static str,
+    },
+    Reparent {
+        source: UiNodeId,
+        target_parent: UiNodeId,
         position: usize,
     },
 }
@@ -10528,6 +10544,48 @@ impl EditorWorkspace {
         }
     }
 
+    fn apply_ui_tree_action(&mut self, action: UiTreeAction) {
+        match action {
+            UiTreeAction::Select(id) => {
+                self.select_ui_node(id);
+            }
+            UiTreeAction::Delete(id) => {
+                self.selected_ui_node = id;
+                self.delete_selected_ui_node();
+            }
+            UiTreeAction::AddChild { parent, kind, name } => {
+                self.selected_ui_node = parent;
+                self.add_ui_child(kind, name);
+            }
+            UiTreeAction::Reparent {
+                source,
+                target_parent,
+                position,
+            } => {
+                if source == target_parent {
+                    return;
+                }
+                let Some(scene) = self.project.active_ui_scene() else {
+                    return;
+                };
+                if scene.is_descendant_of(target_parent, source) {
+                    self.status = "Cannot reparent UI node: would create a cycle".to_string();
+                    return;
+                }
+                self.push_undo();
+                let Some(scene) = self.project.active_ui_scene_mut() else {
+                    return;
+                };
+                if scene.move_node(source, target_parent, position) {
+                    self.select_ui_node(source);
+                    self.ui_canvas_drag = None;
+                    self.status = "Moved UI node".to_string();
+                    self.mark_dirty();
+                }
+            }
+        }
+    }
+
     fn request_play_or_rebuild(&mut self, playtest_status: EditorPlaytestStatus) {
         self.resources_open = true;
         self.content_browser_view = ContentBrowserView::Debug;
@@ -11564,7 +11622,7 @@ impl EditorWorkspace {
         };
         let rows = scene.hierarchy_rows();
         let selected = self.selected_ui_node;
-        let mut clicked = None;
+        let mut actions = Vec::new();
         let tree_scroll_height = (ui.available_height() - 30.0).max(24.0);
         egui::ScrollArea::vertical()
             .id_salt("psxed_ui_tree")
@@ -11572,25 +11630,11 @@ impl EditorWorkspace {
             .max_height(tree_scroll_height)
             .show(ui, |ui| {
                 for row in rows {
-                    ui.horizontal(|ui| {
-                        ui.add_space((row.depth as f32) * 14.0);
-                        let icon = ui_node_kind_icon(row.kind);
-                        let label = if row.child_count == 0 {
-                            format!("{}  {}", icon, row.name)
-                        } else {
-                            format!("{}  {} ({})", icon, row.name, row.child_count)
-                        };
-                        if ui.selectable_label(selected == row.id, label).clicked() {
-                            clicked = Some(row.id);
-                        }
-                    });
+                    draw_ui_node_row(ui, &row, selected == row.id, &mut actions);
                 }
             });
-        if let Some(id) = clicked {
-            self.selected_ui_node = id;
-            self.clear_resource_selection_state();
-            self.clear_primitive_selection_state();
-            self.clear_sector_selection();
+        for action in actions {
+            self.apply_ui_tree_action(action);
         }
         ui.horizontal(|ui| {
             if ui.button(icons::label(icons::FOCUS, "Canvas")).clicked() {
@@ -11681,16 +11725,32 @@ impl EditorWorkspace {
     }
 
     fn draw_ui_inspector(&mut self, ui: &mut egui::Ui) {
-        let selected = self.selected_ui_node;
+        let requested = self.selected_ui_node;
         let mut changed = false;
+        let Some(scene) = self.project.active_ui_scene() else {
+            ui.weak("No UI scene");
+            return;
+        };
+        let selected = if scene.node(requested).is_some() {
+            requested
+        } else {
+            scene.root
+        };
+        let absolute_rect = scene.absolute_rect(selected);
+        let parent_name = scene
+            .node(selected)
+            .and_then(|node| node.parent)
+            .and_then(|parent| scene.node(parent))
+            .map(|parent| parent.name.clone())
+            .unwrap_or_else(|| "None".to_string());
+        if selected != self.selected_ui_node {
+            self.selected_ui_node = selected;
+        }
+
         let Some(scene) = self.project.active_ui_scene_mut() else {
             ui.weak("No UI scene");
             return;
         };
-        if scene.node(selected).is_none() {
-            self.selected_ui_node = scene.root;
-        }
-        let selected = self.selected_ui_node;
         let Some(node) = scene.node_mut(selected) else {
             ui.weak("No UI node selected");
             return;
@@ -11704,6 +11764,28 @@ impl EditorWorkspace {
             ui.label("Name");
             changed |= ui.text_edit_singleline(&mut node.name).changed();
         });
+        ui.horizontal(|ui| {
+            ui.label("Parent");
+            ui.weak(parent_name);
+        });
+        if let Some(rect) = node.kind.rect() {
+            ui.horizontal(|ui| {
+                ui.label("Local");
+                ui.weak(format!(
+                    "x {}  y {}  w {}  h {}",
+                    rect.x, rect.y, rect.width, rect.height
+                ));
+            });
+        }
+        if let Some(rect) = absolute_rect {
+            ui.horizontal(|ui| {
+                ui.label("Absolute");
+                ui.weak(format!(
+                    "x {}  y {}  w {}  h {}",
+                    rect.x, rect.y, rect.width, rect.height
+                ));
+            });
+        }
         ui.separator();
 
         match &mut node.kind {
@@ -11720,11 +11802,20 @@ impl EditorWorkspace {
                 changed |= draw_ui_rect_editor(ui, rect);
                 changed |= color_editor(ui, "Color", color);
             }
-            UiNodeKind::Label { rect, text, color } => {
+            UiNodeKind::Label {
+                rect,
+                text,
+                tag,
+                color,
+            } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 ui.horizontal(|ui| {
                     ui.label("Text");
                     changed |= ui.text_edit_singleline(text).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Tag");
+                    changed |= ui.text_edit_singleline(tag).changed();
                 });
                 changed |= color_editor(ui, "Color", color);
             }
@@ -26095,6 +26186,198 @@ fn room_connection_tooltip(scene: &psxed_project::Scene, connection: &RoomConnec
     out
 }
 
+fn draw_ui_node_row(
+    ui: &mut egui::Ui,
+    row: &UiNodeRow,
+    selected: bool,
+    actions: &mut Vec<UiTreeAction>,
+) {
+    let row_height = 24.0;
+    let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
+
+    if dnd_active && row.id != UiNodeId::ROOT {
+        let (insert_rect, insert_response) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
+        if let Some(payload) = insert_response.dnd_release_payload::<UiNodeId>() {
+            actions.push(UiTreeAction::Reparent {
+                source: *payload,
+                target_parent: row.parent.unwrap_or(UiNodeId::ROOT),
+                position: row.sibling_index,
+            });
+        }
+        if insert_response.contains_pointer() {
+            ui.painter().line_segment(
+                [
+                    Pos2::new(insert_rect.left() + 4.0, insert_rect.center().y),
+                    Pos2::new(insert_rect.right() - 4.0, insert_rect.center().y),
+                ],
+                Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
+            );
+        }
+    }
+
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), row_height),
+        Sense::click_and_drag(),
+    );
+    let painter = ui.painter_at(rect);
+    let hovered = response.hovered();
+
+    if selected {
+        painter.rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 3.0, STUDIO_ACCENT_DIM);
+    } else if hovered {
+        painter.rect_filled(
+            rect.shrink2(Vec2::new(0.0, 1.0)),
+            3.0,
+            Color32::from_rgba_unmultiplied(42, 58, 70, 120),
+        );
+    }
+
+    let indent = row.depth as f32 * 16.0;
+    let content_left = rect.left() + 4.0 + indent;
+    if row.depth > 0 {
+        let line_x = rect.left() + 10.0 + (row.depth.saturating_sub(1) as f32 * 16.0);
+        painter.line_segment(
+            [
+                Pos2::new(line_x, rect.top()),
+                Pos2::new(line_x, rect.bottom()),
+            ],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 86, 102, 92)),
+        );
+    }
+
+    let icon_rect = Rect::from_min_size(
+        Pos2::new(content_left + 14.0, rect.center().y - 8.0),
+        Vec2::splat(16.0),
+    );
+    painter.text(
+        icon_rect.center(),
+        Align2::CENTER_CENTER,
+        ui_node_kind_icon(row.kind).to_string(),
+        icons::font(15.0),
+        if selected {
+            STUDIO_ACCENT
+        } else {
+            Color32::from_rgb(160, 174, 188)
+        },
+    );
+
+    let text_left = icon_rect.right() + 7.0;
+    let label = compact_middle(&row.name, dock_label_limit(row.depth));
+    painter
+        .with_clip_rect(Rect::from_min_max(
+            Pos2::new(text_left, rect.top()),
+            Pos2::new((rect.right() - 118.0).max(text_left + 56.0), rect.bottom()),
+        ))
+        .text(
+            Pos2::new(text_left, rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(13.0),
+            if selected {
+                Color32::WHITE
+            } else {
+                STUDIO_TEXT
+            },
+        );
+
+    if row.id != UiNodeId::ROOT {
+        let detail = row
+            .tag
+            .as_ref()
+            .map(|tag| format!("{}  #{}", row.kind, compact_middle(tag, 18)))
+            .unwrap_or_else(|| row.kind.to_string());
+        painter.text(
+            Pos2::new(
+                (rect.right() - 112.0).max(text_left + 72.0),
+                rect.center().y,
+            ),
+            Align2::LEFT_CENTER,
+            detail,
+            FontId::proportional(11.0),
+            if selected {
+                Color32::from_rgb(204, 229, 236)
+            } else {
+                STUDIO_TEXT_WEAK
+            },
+        );
+    }
+
+    if row.child_count > 0 {
+        let pill = Rect::from_min_size(
+            Pos2::new(rect.right() - 34.0, rect.center().y - 8.0),
+            Vec2::new(24.0, 16.0),
+        );
+        painter.rect_filled(pill, 8.0, Color32::from_rgba_unmultiplied(9, 14, 18, 138));
+        painter.text(
+            pill.center(),
+            Align2::CENTER_CENTER,
+            row.child_count.to_string(),
+            FontId::monospace(10.0),
+            STUDIO_TEXT_WEAK,
+        );
+    }
+
+    if row.id != UiNodeId::ROOT && response.dragged() {
+        response.dnd_set_drag_payload::<UiNodeId>(row.id);
+        let pointer_pos = ui
+            .ctx()
+            .input(|i| i.pointer.interact_pos())
+            .unwrap_or_else(|| rect.center());
+        ui.painter().text(
+            pointer_pos + Vec2::new(12.0, 0.0),
+            Align2::LEFT_CENTER,
+            ui_label_for_drag(row),
+            FontId::proportional(12.0),
+            STUDIO_ACCENT,
+        );
+    }
+
+    if let Some(payload) = response.dnd_hover_payload::<UiNodeId>() {
+        if *payload != row.id {
+            ui.painter().rect_stroke(
+                rect.shrink2(Vec2::new(2.0, 1.0)),
+                3.0,
+                Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
+                StrokeKind::Inside,
+            );
+        }
+    }
+    if let Some(payload) = response.dnd_release_payload::<UiNodeId>() {
+        actions.push(UiTreeAction::Reparent {
+            source: *payload,
+            target_parent: row.id,
+            position: row.child_count,
+        });
+    }
+
+    if response.clicked() {
+        actions.push(UiTreeAction::Select(row.id));
+    }
+
+    response.context_menu(|ui| {
+        ui.menu_button(icons::label(icons::PLUS, "Add Child"), |ui| {
+            for (label, kind) in default_addable_ui_kinds() {
+                if ui.button(label).clicked() {
+                    actions.push(UiTreeAction::AddChild {
+                        parent: row.id,
+                        kind,
+                        name: label,
+                    });
+                    ui.close_menu();
+                }
+            }
+        });
+        if row.id != UiNodeId::ROOT {
+            ui.separator();
+            if ui.button(icons::label(icons::TRASH, "Delete")).clicked() {
+                actions.push(UiTreeAction::Delete(row.id));
+                ui.close_menu();
+            }
+        }
+    });
+}
+
 fn room_connection_status_color(status: RoomConnectionStatus) -> Color32 {
     match status {
         RoomConnectionStatus::Paired => Color32::from_rgb(110, 218, 148),
@@ -26655,6 +26938,19 @@ fn label_for_drag(row: &NodeRow) -> String {
     }
 }
 
+fn ui_label_for_drag(row: &UiNodeRow) -> String {
+    let base = if row.name.is_empty() {
+        row.kind.to_string()
+    } else {
+        row.name.clone()
+    };
+    if let Some(tag) = row.tag.as_ref().filter(|tag| !tag.is_empty()) {
+        format!("{base}  #{tag}")
+    } else {
+        base
+    }
+}
+
 fn scene_tree_kind_label(kind: &'static str) -> &'static str {
     match kind {
         other => other,
@@ -26803,6 +27099,7 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
             UiNodeKind::Label {
                 rect: UiRect::new(24, 24, 96, 12),
                 text: "Label".to_string(),
+                tag: String::new(),
                 color: [220, 226, 240],
             },
         ),
@@ -26869,7 +27166,9 @@ fn draw_ui_scene_preview(
                 let screen = ui_rect_to_screen(rect, canvas, canvas_size);
                 painter.rect_filled(screen, 0.0, Color32::from_rgb(color[0], color[1], color[2]));
             }
-            UiNodeKind::Label { rect, text, color } => {
+            UiNodeKind::Label {
+                rect, text, color, ..
+            } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
                 let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
