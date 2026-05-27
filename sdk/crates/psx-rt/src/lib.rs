@@ -60,6 +60,9 @@ extern "Rust" {
 #[no_mangle]
 #[link_section = ".text._start"]
 pub unsafe extern "C" fn _start() -> ! {
+    #[cfg(feature = "boot-trace")]
+    tty::println("psx-rt: start");
+
     // Zero BSS.
     let bss_start = &raw mut __bss_start as *mut u8;
     let bss_end = &raw const __bss_end as *const u8;
@@ -67,6 +70,8 @@ pub unsafe extern "C" fn _start() -> ! {
     if bss_len > 0 {
         unsafe { core::ptr::write_bytes(bss_start, 0, bss_len) };
     }
+    #[cfg(feature = "boot-trace")]
+    tty::println("psx-rt: bss ok");
 
     #[cfg(feature = "alloc")]
     {
@@ -75,7 +80,11 @@ pub unsafe extern "C" fn _start() -> ! {
         unsafe { heap::init(heap_start, heap_end - heap_start) };
     }
 
+    #[cfg(feature = "boot-trace")]
+    tty::println("psx-rt: main");
     unsafe { main() };
+    #[cfg(feature = "boot-trace")]
+    tty::println("psx-rt: main returned");
     halt();
 }
 
