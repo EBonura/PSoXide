@@ -5,6 +5,7 @@
 //! (bottom/side get clipped to remaining space), then the central area,
 //! then free-floating overlays (Menu, HUD) on top.
 
+pub mod burn;
 pub mod debug_sidebar;
 pub mod framebuffer;
 pub mod hud;
@@ -36,6 +37,7 @@ pub fn draw_layout(
         state.sync_embedded_playtest_with_editor_project();
         let menu_warning = state.menu_setup_warning();
         state.menu.draw(ctx, dt, menu_warning);
+        burn::draw(ctx, state);
         draw_status_toast(ctx, state);
         return;
     }
@@ -60,6 +62,7 @@ pub fn draw_layout(
 
     let menu_warning = state.menu_setup_warning();
     state.menu.draw(ctx, dt, menu_warning);
+    burn::draw(ctx, state);
     draw_status_toast(ctx, state);
 }
 
@@ -121,6 +124,13 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
                     }
                     state.status_message_set(format!("Launch failed: {e}"));
                 }
+            }
+            MenuOutcome::None
+        }
+        OpenBurnMenu(id) => {
+            if let Err(e) = state.open_burn_menu_by_id(&id) {
+                eprintln!("[frontend] burn menu failed: {e}");
+                state.status_message_set(format!("Burn menu failed: {e}"));
             }
             MenuOutcome::None
         }

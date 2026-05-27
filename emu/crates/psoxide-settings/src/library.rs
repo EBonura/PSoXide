@@ -28,6 +28,7 @@
 //! recorded in [`LibraryEntry::diagnostic`]. A malformed BIN
 //! doesn't derail the whole scan.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -672,6 +673,8 @@ struct CueTrackSpec {
     pregap: u32,
     /// Pregap sectors physically present at the start of the track file.
     file_pregap: u32,
+    /// File-relative sector where this track's physical data begins.
+    file_start_sector: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -740,7 +743,7 @@ fn parse_ccd_int(s: &str) -> Option<i32> {
 fn parse_ccd_toc(ccd_path: &Path) -> Result<CcdToc, String> {
     let contents =
         fs::read_to_string(ccd_path).map_err(|e| format!("{}: {e}", ccd_path.display()))?;
-    let mut tracks = Vec::new();
+    let mut tracks: Vec<CcdTrackSpec> = Vec::new();
     let mut leadout_lba = None;
     let mut current: Option<CcdEntry> = None;
 
@@ -838,10 +841,11 @@ fn parse_cue_tracks(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", cue_path.display()))?;
 
-    let mut tracks = Vec::new();
+    let mut tracks: Vec<CueTrackSpec> = Vec::new();
     let mut current_file: Option<PathBuf> = None;
     let mut current_track_num: Option<u8> = None;
     let mut current_track_type = psx_iso::TrackType::Data;
+    let mut current_index0: Option<u32> = None;
     let mut cue_pregap = 0u32;
 
     for line in contents.lines() {
@@ -861,6 +865,7 @@ fn parse_cue_tracks(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
                 } else {
                     psx_iso::TrackType::Data
                 };
+                current_index0 = None;
                 cue_pregap = 0;
             }
         } else if starts_with_keyword(trimmed, "PREGAP") {
@@ -868,22 +873,39 @@ fn parse_cue_tracks(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
             if let Some(msf) = parts.get(1) {
                 cue_pregap = parse_cue_msf(msf);
             }
+        } else if starts_with_keyword(trimmed, "INDEX 00") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if let Some(msf) = parts.get(2) {
+                current_index0 = Some(parse_cue_msf(msf));
+            }
         } else if starts_with_keyword(trimmed, "INDEX 01") {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            let file_pregap = parts.get(2).map(|msf| parse_cue_msf(msf)).unwrap_or(0);
+            let file_index1_sector = parts.get(2).map(|msf| parse_cue_msf(msf)).unwrap_or(0);
             let Some(path) = current_file.clone() else {
                 continue;
             };
             let Some(number) = current_track_num else {
                 continue;
             };
+            let new_file_for_track = match tracks.last() {
+                Some(track) => track.path != path,
+                None => true,
+            };
+            let file_start_sector = current_index0.unwrap_or(if new_file_for_track {
+                0
+            } else {
+                file_index1_sector
+            });
+            let file_pregap = file_index1_sector.saturating_sub(file_start_sector);
             tracks.push(CueTrackSpec {
                 number,
                 track_type: current_track_type,
                 path,
                 pregap: cue_pregap.saturating_add(file_pregap),
                 file_pregap,
+                file_start_sector,
             });
+            current_index0 = None;
             cue_pregap = 0;
         }
     }
@@ -903,9 +925,21 @@ fn parse_cue_tracks(cue_path: &Path) -> Result<Vec<CueTrackSpec>, String> {
 pub fn load_disc_from_cue(cue_path: &Path) -> Result<psx_iso::Disc, String> {
     let specs = parse_cue_tracks(cue_path)?;
     let mut tracks = Vec::with_capacity(specs.len());
+    let mut file_cache: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 
-    for spec in specs {
-        let bytes = fs::read(&spec.path).map_err(|e| format!("{}: {e}", spec.path.display()))?;
+    for (index, spec) in specs.iter().enumerate() {
+        if !file_cache.contains_key(&spec.path) {
+            let bytes =
+                fs::read(&spec.path).map_err(|e| format!("{}: {e}", spec.path.display()))?;
+            file_cache.insert(spec.path.clone(), bytes);
+        }
+        let bytes = file_cache.get(&spec.path).expect("cached cue file bytes");
+        if bytes.len() % psx_iso::SECTOR_BYTES != 0 {
+            return Err(format!(
+                "{} is not a whole number of raw 2352-byte sectors",
+                spec.path.display()
+            ));
+        }
         let file_sectors = bytes.len() / psx_iso::SECTOR_BYTES;
         if file_sectors == 0 {
             return Err(format!(
@@ -913,14 +947,48 @@ pub fn load_disc_from_cue(cue_path: &Path) -> Result<psx_iso::Disc, String> {
                 spec.path.display()
             ));
         }
+        if spec.file_start_sector as usize >= file_sectors {
+            return Err(format!(
+                "{} track {} points outside {} sectors",
+                spec.path.display(),
+                spec.number,
+                file_sectors
+            ));
+        }
+
+        let next_file_start_sector = specs
+            .iter()
+            .skip(index + 1)
+            .find(|next| next.path == spec.path)
+            .map(|next| next.file_start_sector)
+            .unwrap_or(file_sectors as u32)
+            .min(file_sectors as u32);
+        if next_file_start_sector <= spec.file_start_sector {
+            return Err(format!(
+                "{} track {} has an invalid CUE extent",
+                spec.path.display(),
+                spec.number
+            ));
+        }
+        let file_start_byte = spec.file_start_sector as usize * psx_iso::SECTOR_BYTES;
+        let file_end_byte = next_file_start_sector as usize * psx_iso::SECTOR_BYTES;
+        let track_bytes = &bytes[file_start_byte..file_end_byte];
 
         let mut file_pregap = spec.file_pregap;
         let mut pregap = spec.pregap;
         if spec.number == 1 && file_pregap == 0 {
-            file_pregap = detect_track1_embedded_pregap(&bytes);
+            file_pregap = detect_track1_embedded_pregap(track_bytes);
             pregap = pregap.max(file_pregap);
         }
-        let sector_count = file_sectors.saturating_sub(file_pregap as usize) as u32;
+        let track_file_sectors = track_bytes.len() / psx_iso::SECTOR_BYTES;
+        if file_pregap as usize >= track_file_sectors {
+            return Err(format!(
+                "{} track {} has no INDEX 01 sectors",
+                spec.path.display(),
+                spec.number
+            ));
+        }
+        let sector_count = track_file_sectors.saturating_sub(file_pregap as usize) as u32;
         let start_lba = tracks
             .last()
             .map(|prev: &psx_iso::Track| prev.start_lba + prev.sector_count + pregap)
@@ -932,7 +1000,7 @@ pub fn load_disc_from_cue(cue_path: &Path) -> Result<psx_iso::Disc, String> {
             sector_count,
             pregap,
             file_pregap,
-            bytes,
+            bytes: track_bytes.to_vec(),
         });
     }
 
@@ -1506,6 +1574,68 @@ mod tests {
         assert_eq!(pos.relative_msf, (0, 0, 1));
         assert!(disc.read_sector_raw(10).is_none());
         assert_eq!(disc.read_sector_raw(12).unwrap()[0], 0xAB);
+    }
+
+    #[test]
+    fn load_disc_from_cue_treats_new_file_index1_as_embedded_pregap() {
+        let tmp = TempDir::new().unwrap();
+        let cue_path = tmp.path().join("disc.cue");
+        let track1_path = tmp.path().join("track1.bin");
+        let track2_path = tmp.path().join("track2.bin");
+        std::fs::write(&track1_path, vec![0u8; psx_iso::SECTOR_BYTES * 10]).unwrap();
+        let mut track2 = vec![0u8; psx_iso::SECTOR_BYTES * (150 + 4)];
+        track2[150 * psx_iso::SECTOR_BYTES] = 0xAB;
+        std::fs::write(&track2_path, track2).unwrap();
+        std::fs::write(
+            &cue_path,
+            concat!(
+                "FILE \"track1.bin\" BINARY\n",
+                "  TRACK 01 MODE2/2352\n",
+                "    INDEX 01 00:00:00\n",
+                "FILE \"track2.bin\" BINARY\n",
+                "  TRACK 02 AUDIO\n",
+                "    INDEX 01 00:02:00\n",
+            ),
+        )
+        .unwrap();
+
+        let disc = load_disc_from_cue(&cue_path).unwrap();
+        assert_eq!(disc.track(2).unwrap().start_lba, 160);
+        assert_eq!(disc.track(2).unwrap().sector_count, 4);
+        assert!(disc.read_cdda_sector(10).is_none());
+        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xAB);
+    }
+
+    #[test]
+    fn load_disc_from_cue_slices_single_bin_multitrack_layout() {
+        let tmp = TempDir::new().unwrap();
+        let cue_path = tmp.path().join("disc.cue");
+        let bin_path = tmp.path().join("disc.bin");
+        let mut image = vec![0u8; psx_iso::SECTOR_BYTES * (10 + 150 + 4)];
+        image[9 * psx_iso::SECTOR_BYTES] = 0x11;
+        image[160 * psx_iso::SECTOR_BYTES] = 0xAB;
+        std::fs::write(&bin_path, image).unwrap();
+        std::fs::write(
+            &cue_path,
+            concat!(
+                "FILE \"disc.bin\" BINARY\n",
+                "  TRACK 01 MODE2/2352\n",
+                "    INDEX 01 00:00:00\n",
+                "  TRACK 02 AUDIO\n",
+                "    INDEX 00 00:00:10\n",
+                "    INDEX 01 00:02:10\n",
+            ),
+        )
+        .unwrap();
+
+        let disc = load_disc_from_cue(&cue_path).unwrap();
+        assert_eq!(disc.track_count(), 2);
+        assert_eq!(disc.track(1).unwrap().sector_count, 10);
+        assert_eq!(disc.track(2).unwrap().start_lba, 160);
+        assert_eq!(disc.track(2).unwrap().sector_count, 4);
+        assert_eq!(disc.read_sector_raw(9).unwrap()[0], 0x11);
+        assert!(disc.read_cdda_sector(10).is_none());
+        assert_eq!(disc.read_cdda_sector(160).unwrap()[0], 0xAB);
     }
 
     #[test]
