@@ -11,7 +11,7 @@
 //! rolled main loop, replace `static mut GAME` with a scene
 //! struct, delegate the per-frame cadence to [`App::run`]. The
 //! per-game `frame` counter that invaders tracked by hand
-//! collapses into [`Ctx::frame`].
+//! collapses into [`Ctx::sim_tick`].
 //!
 //! What stays in `static mut`: the DMA arena (OT + RECTS +
 //! BG_QUAD). Fixed bus addresses the walker can follow.
@@ -24,13 +24,21 @@
 
 extern crate psx_rt;
 
-use psx_engine::{App, Config, Ctx, Scene, button, sfx};
-use psx_font::{FontAtlas, fonts::BASIC_8X16};
+use psx_engine::{button, sfx, App, Config, Ctx, Scene, SimTick};
+use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
-use psx_spu::{self as spu, Pitch, SpuAddr, Voice, tones};
+use psx_spu::{self as spu, SpuAddr, Voice, Volume};
 use psx_vram::{Clut, TexDepth, Tpage};
+
+#[cfg(target_arch = "mips")]
+fn game_trace(message: &str) {
+    psx_rt::tty::println(message);
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn game_trace(_message: &str) {}
 
 // ----------------------------------------------------------------------
 // Layout
@@ -85,15 +93,35 @@ const START_AUTO_FRAMES: u16 = 30;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
-const SPU_SHOOT: SpuAddr = SpuAddr::new(0x1010);
-const SPU_KILL: SpuAddr = SpuAddr::new(0x1020);
-const SPU_MARCH: SpuAddr = SpuAddr::new(0x1030);
-const SPU_LOSE: SpuAddr = SpuAddr::new(0x1040);
+const SPU_SAMPLE_BASE: SpuAddr = SpuAddr::new(0x1010);
 
 const VOICE_SHOOT: Voice = Voice::V0;
 const VOICE_KILL: Voice = Voice::V1;
 const VOICE_MARCH: Voice = Voice::V2;
 const VOICE_LOSE: Voice = Voice::V3;
+
+const SFX_BANK: [sfx::Sample<'static>; 4] = [
+    sfx::Sample {
+        voice: VOICE_SHOOT,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/swoosh.psau"),
+        volume: Volume::linear(1, 20),
+    },
+    sfx::Sample {
+        voice: VOICE_KILL,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/explosion_short.psau"),
+        volume: Volume::linear(1, 22),
+    },
+    sfx::Sample {
+        voice: VOICE_MARCH,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/ui_beep.psau"),
+        volume: Volume::linear(1, 24),
+    },
+    sfx::Sample {
+        voice: VOICE_LOSE,
+        bytes: include_bytes!("../../../../assets/audio/freesfx/psau/hit_metal.psau"),
+        volume: Volume::linear(1, 26),
+    },
+];
 
 // ----------------------------------------------------------------------
 // Effects tunables
@@ -195,8 +223,8 @@ impl Invaders {
         self.grid_offset_y = (self.wave as i16).saturating_sub(1) * MARCH_STEP_DOWN;
         self.march_direction = 1;
         self.march_frames_until_step = MOVE_INTERVAL_INITIAL;
-        self.march_tempo = MOVE_INTERVAL_INITIAL
-            .saturating_sub((self.wave as u16).saturating_sub(1) * 4);
+        self.march_tempo =
+            MOVE_INTERVAL_INITIAL.saturating_sub((self.wave as u16).saturating_sub(1) * 4);
         if full {
             self.score = 0;
             self.lives = 3;
@@ -212,12 +240,8 @@ impl Invaders {
     }
 
     fn alien_bbox(&self, row: usize, col: usize) -> (i16, i16, i16, i16) {
-        let x = GRID_LEFT
-            + self.grid_offset_x
-            + (col as i16) * (ALIEN_W as i16 + ALIEN_H_SPACING);
-        let y = GRID_TOP
-            + self.grid_offset_y
-            + (row as i16) * (ALIEN_H as i16 + ALIEN_V_SPACING);
+        let x = GRID_LEFT + self.grid_offset_x + (col as i16) * (ALIEN_W as i16 + ALIEN_H_SPACING);
+        let y = GRID_TOP + self.grid_offset_y + (row as i16) * (ALIEN_H as i16 + ALIEN_V_SPACING);
         (x, y, x + ALIEN_W as i16, y + ALIEN_H as i16)
     }
 
@@ -298,9 +322,8 @@ impl Invaders {
             return;
         }
 
-        let leftmost_x = GRID_LEFT
-            + self.grid_offset_x
-            + (leftmost as i16) * (ALIEN_W as i16 + ALIEN_H_SPACING);
+        let leftmost_x =
+            GRID_LEFT + self.grid_offset_x + (leftmost as i16) * (ALIEN_W as i16 + ALIEN_H_SPACING);
         let rightmost_x = GRID_LEFT
             + self.grid_offset_x
             + (rightmost as i16) * (ALIEN_W as i16 + ALIEN_H_SPACING)
@@ -319,7 +342,8 @@ impl Invaders {
 
     /// Every 40 frames, a random surviving column's lowest alien
     /// drops a bomb (if a free bomb slot exists).
-    fn maybe_drop_enemy_bomb(&mut self, frame: u32) {
+    fn maybe_drop_enemy_bomb(&mut self, tick: SimTick) {
+        let frame = tick.as_u32();
         if (frame % 40) != 0 {
             return;
         }
@@ -469,19 +493,17 @@ static mut BG_QUAD: QuadGouraud = QuadGouraud {
 
 impl Scene for Invaders {
     fn init(&mut self, _ctx: &mut Ctx) {
+        game_trace("invaders: init");
         spu::init();
-        spu::upload_adpcm(SPU_SHOOT, tones::SAWTOOTH);
-        spu::upload_adpcm(SPU_KILL, tones::SQUARE);
-        spu::upload_adpcm(SPU_MARCH, tones::TRIANGLE);
-        spu::upload_adpcm(SPU_LOSE, tones::SINE);
-        sfx::configure_voice(VOICE_SHOOT, SPU_SHOOT, Pitch::raw(0x1800));
-        sfx::configure_voice(VOICE_KILL, SPU_KILL, Pitch::raw(0x1200));
-        sfx::configure_voice(VOICE_MARCH, SPU_MARCH, Pitch::raw(0x0A00));
-        sfx::configure_voice(VOICE_LOSE, SPU_LOSE, Pitch::raw(0x0500));
+        game_trace("invaders: spu ok");
+        sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
+        game_trace("invaders: sfx ok");
 
         self.font = Some(FontAtlas::upload(&BASIC_8X16, FONT_TPAGE, FONT_CLUT));
+        game_trace("invaders: font ok");
 
         self.reset_wave(true);
+        game_trace("invaders: init ok");
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
@@ -514,7 +536,7 @@ impl Scene for Invaders {
         self.handle_player_shot(ctx);
         self.advance_bullets();
         self.advance_alien_march();
-        self.maybe_drop_enemy_bomb(ctx.frame);
+        self.maybe_drop_enemy_bomb(ctx.sim_tick);
         self.resolve_player_bullet();
         self.resolve_enemy_bombs();
         self.check_invasion();
@@ -525,14 +547,15 @@ impl Scene for Invaders {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        self.build_frame_ot(ctx.frame);
+        self.build_frame_ot(ctx.sim_tick);
         unsafe { OT.submit() };
         self.draw_hud();
     }
 }
 
 impl Invaders {
-    fn build_frame_ot(&mut self, frame: u32) {
+    fn build_frame_ot(&mut self, tick: SimTick) {
+        let frame = tick.as_u32();
         let ot = unsafe { &mut OT };
         let rects = unsafe { &mut RECTS };
         let bg = unsafe { &mut BG_QUAD };
@@ -542,12 +565,7 @@ impl Invaders {
 
         // Slot 7 (back) -- gradient background.
         *bg = QuadGouraud::new(
-            [
-                (0, 0),
-                (SCREEN_W, 0),
-                (0, SCREEN_H),
-                (SCREEN_W, SCREEN_H),
-            ],
+            [(0, 0), (SCREEN_W, 0), (0, SCREEN_H), (SCREEN_W, SCREEN_H)],
             [(20, 10, 50), (20, 10, 50), (2, 2, 10), (2, 2, 10)],
         );
         ot.add(7, bg, QuadGouraud::WORDS);
@@ -561,15 +579,8 @@ impl Invaders {
                     continue;
                 }
                 let (ax, ay, _, _) = self.alien_bbox(row, col);
-                rects[idx] = RectFlat::new(
-                    ax + shake_dx,
-                    ay + shake_dy,
-                    ALIEN_W,
-                    ALIEN_H,
-                    r,
-                    gc,
-                    b,
-                );
+                rects[idx] =
+                    RectFlat::new(ax + shake_dx, ay + shake_dy, ALIEN_W, ALIEN_H, r, gc, b);
                 ot.add(5, &mut rects[idx], RectFlat::WORDS);
                 idx += 1;
             }
@@ -639,7 +650,9 @@ impl Invaders {
     }
 
     fn draw_hud(&self) {
-        let Some(font) = self.font.as_ref() else { return };
+        let Some(font) = self.font.as_ref() else {
+            return;
+        };
         font.draw_text(4, 4, "SCORE", (180, 220, 255));
         let score = u16_hex(self.score);
         font.draw_text(4 + 8 * 6, 4, score.as_str(), (240, 240, 140));
@@ -660,12 +673,7 @@ impl Invaders {
                 );
             }
             Phase::Lost => {
-                font.draw_text(
-                    (SCREEN_W - 8 * 9) / 2,
-                    100,
-                    "GAME OVER",
-                    (255, 120, 120),
-                );
+                font.draw_text((SCREEN_W - 8 * 9) / 2, 100, "GAME OVER", (255, 120, 120));
                 font.draw_text(
                     (SCREEN_W - 8 * 17) / 2,
                     130,

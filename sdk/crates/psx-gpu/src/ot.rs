@@ -24,6 +24,10 @@
 
 use core::ptr;
 
+const OT_ADDR_MASK: u32 = 0x00FF_FFFF;
+const OT_END: u32 = OT_ADDR_MASK;
+const OT_MAX_EXTRA_HOPS: usize = 131_072;
+
 /// Fixed-size OT. `N` depth slots. Typical values: 256, 1024, 4096.
 #[repr(C, align(4))]
 pub struct OrderingTable<const N: usize> {
@@ -90,10 +94,10 @@ impl<const N: usize> OrderingTable<N> {
     #[inline(always)]
     pub unsafe fn insert_unchecked(&mut self, z: usize, packet_ptr: *mut u32, words: u8) {
         debug_assert!(z < N);
-        let old_head = self.entries[z] & 0x00FF_FFFF;
+        let old_head = self.entries[z] & OT_ADDR_MASK;
         let tag = ((words as u32) << 24) | old_head;
         unsafe { ptr::write_volatile(packet_ptr, tag) };
-        let pkt_addr = packet_ptr as u32 & 0x00FF_FFFF;
+        let pkt_addr = packet_ptr as u32 & OT_ADDR_MASK;
         self.entries[z] = pkt_addr;
     }
 
@@ -142,8 +146,10 @@ impl<const N: usize> OrderingTable<N> {
         // whose pointer fits in 24 bits relative to a stable base --
         // [`PrimitiveArena`] enforces that.
         OtPacketIter {
-            next: self.entries[N - 1] & 0x00FF_FFFF,
-            base_high: (self.submit_head() as usize) & !0x00FF_FFFF,
+            next: self.entries[N - 1] & OT_ADDR_MASK,
+            base_high: (self.submit_head() as usize) & !(OT_ADDR_MASK as usize),
+            last_packet: OT_END,
+            remaining_hops: N.saturating_add(OT_MAX_EXTRA_HOPS),
         }
     }
 }
@@ -157,6 +163,8 @@ impl<const N: usize> OrderingTable<N> {
 pub struct OtPacketIter {
     next: u32,
     base_high: usize,
+    last_packet: u32,
+    remaining_hops: usize,
 }
 
 impl Iterator for OtPacketIter {
@@ -169,17 +177,23 @@ impl Iterator for OtPacketIter {
         // and only forwards entries with actual packet data, so this
         // iterator presents the same view to the cmd-log adapter.
         loop {
-            if self.next == 0x00FF_FFFF {
+            if self.next == OT_END {
                 return None;
             }
+            if self.remaining_hops == 0 || self.next == self.last_packet {
+                self.next = OT_END;
+                return None;
+            }
+            self.remaining_hops -= 1;
             let ptr = (self.base_high | self.next as usize) as *const u32;
             // SAFETY: ptr was reached by walking the chain that
             // `iter_packets`'s caller swore was live; tag word is
             // always present in any chained slot.
             let tag = unsafe { ptr::read_volatile(ptr) };
             let words = ((tag >> 24) & 0xFF) as u8;
-            self.next = tag & 0x00FF_FFFF;
+            self.next = tag & OT_ADDR_MASK;
             if words > 0 {
+                self.last_packet = ptr as u32 & OT_ADDR_MASK;
                 return Some((ptr, words));
             }
         }
@@ -266,5 +280,47 @@ mod tests {
         assert!(iter.next().is_none());
         assert_eq!(head, second.as_ptr() as usize);
         assert_eq!(tail, first.as_ptr() as usize);
+    }
+
+    /// Re-inserting the same packet is an invalid OT chain because
+    /// the packet only has one tag word to store its next pointer.
+    /// The host iterator should fail closed instead of spinning
+    /// forever while previewing a malformed frame.
+    #[test]
+    fn iter_packets_stops_on_duplicate_packet_in_same_slot() {
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        ot.clear();
+        let mut packet: [u32; 2] = [0, 0xAA00_0000];
+        unsafe {
+            ot.insert(1, packet.as_mut_ptr(), 1);
+            ot.insert(1, packet.as_mut_ptr(), 1);
+        }
+
+        let mut iter = unsafe { ot.iter_packets() };
+        let entry = iter.next().expect("first duplicate packet");
+        assert_eq!(entry.0 as usize, packet.as_ptr() as usize);
+        assert_eq!(entry.1, 1);
+        assert!(iter.next().is_none());
+    }
+
+    /// A duplicate packet can also form a two-hop cycle through an
+    /// empty OT slot when it is inserted into different slots. This
+    /// catches the editor-preview failure mode where the cmd-log walk
+    /// could peg the host thread.
+    #[test]
+    fn iter_packets_stops_on_duplicate_packet_through_empty_slot() {
+        let mut ot: OrderingTable<4> = OrderingTable::new();
+        ot.clear();
+        let mut packet: [u32; 2] = [0, 0xBB00_0000];
+        unsafe {
+            ot.insert(1, packet.as_mut_ptr(), 1);
+            ot.insert(2, packet.as_mut_ptr(), 1);
+        }
+
+        let mut iter = unsafe { ot.iter_packets() };
+        let entry = iter.next().expect("first duplicate packet");
+        assert_eq!(entry.0 as usize, packet.as_ptr() as usize);
+        assert_eq!(entry.1, 1);
+        assert!(iter.next().is_none());
     }
 }

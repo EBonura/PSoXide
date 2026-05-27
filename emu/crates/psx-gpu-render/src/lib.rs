@@ -768,4 +768,25 @@ mod tests {
             vec![bgr15_to_rgba8(color); 4]
         );
     }
+
+    #[test]
+    fn render_frame_fill_rect_writes_target() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW fill test: no headless wgpu adapter");
+            return;
+        };
+        assert!(renderer.set_internal_scale(2, None));
+        let log = [GpuCmdLogEntry {
+            index: 0,
+            opcode: 0x02,
+            fifo: vec![0x0210_2030, 0, (8 << 16) | 8],
+        }];
+        let vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        renderer.render_frame(&Gpu::new(), &log, &vram_words);
+
+        assert_eq!(
+            pixel_block(&renderer, 4, 4),
+            vec![[0x30, 0x20, 0x10, 0xFF]; 4]
+        );
+    }
 }

@@ -23,7 +23,7 @@
 //! Ported to `psx-engine` in Phase 3e. The `Scene` struct
 //! (renamed to `Showcase3D` to avoid colliding with the engine
 //! trait) now holds per-frame state inline; GTE + font setup
-//! live in `Scene::init`; geometry driven by `ctx.frame`.
+//! live in `Scene::init`; geometry driven by `ctx.sim_tick`.
 
 #![no_std]
 #![no_main]
@@ -34,7 +34,8 @@ extern crate psx_rt;
 use psx_asset::Mesh;
 use psx_engine::{
     ActorTransform, App, Config, Ctx, DepthBand, DepthPolicy, DepthRange, GouraudMeshOptions,
-    GouraudRenderPass, GouraudTriCommand, OtDepth, OtFrame, PrimitiveArena, Scene, Vec3World,
+    GouraudRenderPass, GouraudTriCommand, OtDepth, OtFrame, PrimitiveArena, Scene, SimTick,
+    Vec3World,
 };
 use psx_font::{fonts::BASIC_8X16, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
@@ -252,13 +253,13 @@ impl Scene for Showcase3D {
             }
         }
 
-        // Spark emitter -- 12-frame cadence reads `ctx.frame` via
+        // Spark emitter -- 12-frame cadence reads `ctx.sim_tick` via
         // our own counter (see comment in `update` below for why
-        // we don't just use `ctx.frame` directly). Actually we
+        // we don't just use `ctx.sim_tick` directly). Actually we
         // *do* -- keep this in sync with the pre-engine cadence by
         // reading `frame % 12` on the raw counter.
         //
-        // We take `ctx.frame` as the spawn clock. The pre-engine
+        // We take `ctx.sim_tick` as the spawn clock. The pre-engine
         // demo incremented at start-of-update so its modulo hit
         // one frame earlier, but the sparks are random-seeded
         // anyway -- the cadence is what matters, and that's
@@ -267,10 +268,10 @@ impl Scene for Showcase3D {
 
     fn render(&mut self, ctx: &mut Ctx) {
         // Spark emission lives here (rather than in update) to
-        // read `ctx.frame` without duplicating the spawn logic in
+        // read `ctx.sim_tick` without duplicating the spawn logic in
         // update -- keeps the scene code compact and the frame-
         // counter-driven cadence explicit.
-        if ctx.frame % 12 == 0 {
+        if ctx.sim_tick.every(12) {
             let x = SCREEN_W / 2 + self.rng.signed(SCREEN_W / 2 - 20);
             let y = SCREEN_H / 2 + self.rng.signed(SCREEN_H / 2 - 30);
             let color = (
@@ -283,9 +284,9 @@ impl Scene for Showcase3D {
         }
         self.sparks.update(1);
 
-        self.build_frame_ot(ctx.frame);
+        self.build_frame_ot(ctx.sim_tick);
         let font = self.font.as_ref().expect("font uploaded in init");
-        self.draw_hud(font, ctx.frame);
+        self.draw_hud(font, ctx.sim_tick);
     }
 }
 
@@ -314,7 +315,8 @@ impl Showcase3D {
         }
     }
 
-    fn build_frame_ot(&mut self, frame: u32) {
+    fn build_frame_ot(&mut self, tick: SimTick) {
+        let frame = tick.as_u32();
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut rects = unsafe { PrimitiveArena::new(&mut SCENE_RECTS) };
         let mut gouraud = unsafe { PrimitiveArena::new(&mut GOURAUD_TRIS) };
@@ -434,7 +436,7 @@ impl Showcase3D {
         ot.submit();
     }
 
-    fn draw_hud(&self, font: &FontAtlas, frame: u32) {
+    fn draw_hud(&self, font: &FontAtlas, tick: SimTick) {
         font.draw_text(4, 4, "SHOWCASE-3D", (220, 220, 250));
         // Right side lists the two hero models on two lines -- clean
         // attribution without crowding the top bar.
@@ -442,7 +444,7 @@ impl Showcase3D {
         font.draw_text(SCREEN_W - 64, 20, "teapot", (120, 200, 240));
 
         font.draw_text(4, SCREEN_H - 20, "frame", (160, 160, 200));
-        let frame_hex = u16_hex((frame & 0xFFFF) as u16);
+        let frame_hex = u16_hex((tick.as_u32() & 0xFFFF) as u16);
         font.draw_text(
             4 + 8 * 6,
             SCREEN_H - 20,

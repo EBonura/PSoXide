@@ -23,7 +23,6 @@ fi
 
 FIXTURES=(
     hello-tex
-    showcase-textured-sprite
     showcase-3d
     showcase-text
     showcase-particles

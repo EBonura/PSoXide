@@ -10,16 +10,16 @@
 //!   loop:
 //!     ctx.pad_prev ← ctx.pad           (one-frame input history)
 //!     ctx.pad      ← poll_port1()
-//!     ctx.time     ← elapsed display-time snapshot
-//!     scene.update(&mut ctx)
-//!     if a visual frame is due:
-//!       ctx.fb.clear(config.clear_color)
-//!       scene.render(&mut ctx)
-//!       display-clock wait + draw_sync + fb.swap
-//!       ctx.frame += 1
-//!     else:
-//!       wait for the next display VBlank, leaving the last framebuffer visible
+//!     ask FrameScheduler for the next task:
+//!       fixed update  -> poll pad + scene.update(&mut ctx)
+//!       visual render -> clear + scene.render(&mut ctx) + present
+//!       wait          -> wait for the next display VBlank
 //! ```
+//!
+//! The scheduler keeps fixed update and visual render as separate tasks.
+//! Rendering can drop visual intervals when the machine is busy. Fixed update
+//! is the critical clock and catches up before optional visuals unless a
+//! project explicitly sets an emergency burst cap.
 //!
 //! This mirrors every `sdk/examples/game-*/src/main.rs` file's
 //! inner loop by eye -- the engine just factors the shared cadence
@@ -40,8 +40,20 @@ use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_pad::{poll_port1, PadState};
 
 use crate::scene::{Ctx, Scene};
+use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
-use crate::time::{EngineClock, EngineTime};
+use crate::time::EngineClock;
+use crate::{SimTick, VideoHz, VisualFrame};
+
+#[cfg(all(target_arch = "mips", feature = "boot-trace"))]
+#[inline(always)]
+fn boot_trace(message: &str) {
+    psx_rt::tty::println(message);
+}
+
+#[cfg(not(all(target_arch = "mips", feature = "boot-trace")))]
+#[inline(always)]
+fn boot_trace(_message: &str) {}
 
 /// Configuration passed to [`App::run`]. Sensible defaults via
 /// [`Config::default`] so simple games can just write
@@ -67,6 +79,8 @@ pub struct Config {
     /// VBlank; paced modes keep update/control ticking every VBlank
     /// while rendering only on selected VBlanks.
     pub visual_pacing: VisualPacing,
+    /// Manual frame/task scheduler tuning.
+    pub scheduler: SchedulerConfig,
 }
 
 /// Engine-level visual render cadence.
@@ -83,10 +97,10 @@ pub enum VisualPacing {
 impl Config {
     /// Display cadence in whole frames per second.
     #[inline]
-    pub const fn video_hz(self) -> u16 {
+    pub const fn video_hz(self) -> VideoHz {
         match self.video_mode {
-            VideoMode::Ntsc => 60,
-            VideoMode::Pal => 50,
+            VideoMode::Ntsc => VideoHz::NTSC,
+            VideoMode::Pal => VideoHz::PAL,
         }
     }
 }
@@ -100,6 +114,7 @@ impl Default for Config {
             resolution: Resolution::R320X240,
             clear_color: (0, 0, 0),
             visual_pacing: VisualPacing::EveryVBlank,
+            scheduler: SchedulerConfig::new(),
         }
     }
 }
@@ -112,37 +127,6 @@ impl VisualPacing {
             Self::EveryNVBlanks(n) if n > 1 => n,
             Self::EveryNVBlanks(_) => 1,
         }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-struct VisualPacer {
-    interval: u16,
-    next_visual_tick: u32,
-}
-
-impl VisualPacer {
-    const fn new(interval: u16) -> Self {
-        Self {
-            interval,
-            next_visual_tick: 0,
-        }
-    }
-
-    fn mark_due_intervals(&mut self, simulation_tick: u32) -> u16 {
-        if simulation_tick < self.next_visual_tick {
-            return 0;
-        }
-        let interval = self.interval.max(1) as u32;
-        let due = simulation_tick
-            .wrapping_sub(self.next_visual_tick)
-            .checked_div(interval)
-            .unwrap_or(0)
-            .saturating_add(1);
-        self.next_visual_tick = self
-            .next_visual_tick
-            .saturating_add(due.saturating_mul(interval));
-        due.min(u16::MAX as u32) as u16
     }
 }
 
@@ -189,8 +173,11 @@ impl App {
     /// }
     /// ```
     pub fn run<S: Scene>(config: Config, scene: &mut S) -> ! {
+        boot_trace("psx-engine: run");
         gpu::init(config.video_mode, config.resolution);
-        let clock = EngineClock::new(config.video_hz());
+        boot_trace("psx-engine: gpu ok");
+        let clock = EngineClock::new();
+        boot_trace("psx-engine: clock ok");
         let fb = FrameBuffer::new(config.screen_w, config.screen_h);
         gpu::set_draw_area(
             0,
@@ -199,151 +186,126 @@ impl App {
             config.screen_h.saturating_sub(1),
         );
         gpu::set_draw_offset(0, 0);
+        boot_trace("psx-engine: framebuffer ok");
 
         let mut ctx = Ctx {
-            frame: 0,
-            simulation_tick: 0,
-            missed_visual_intervals: 0,
-            time: EngineTime::start(config.video_hz()),
+            sim_tick: SimTick::ZERO,
+            visual_frame: VisualFrame::ZERO,
+            video_hz: config.video_hz(),
             pad: PadState::NONE,
             pad_prev: PadState::NONE,
             fb,
         };
 
+        boot_trace("psx-engine: scene init");
         scene.init(&mut ctx);
+        boot_trace("psx-engine: scene init ok");
 
         let visual_interval = config.visual_pacing.interval_vblanks();
-        if visual_interval <= 1 {
-            Self::run_every_vblank(config, scene, clock, ctx);
-        }
-        Self::run_paced_visuals(config, scene, clock, ctx, visual_interval);
+        boot_trace("psx-engine: loop");
+        Self::run_scheduled(config, scene, clock, ctx, visual_interval);
     }
 
-    fn run_every_vblank<S: Scene>(
-        config: Config,
-        scene: &mut S,
-        mut clock: EngineClock,
-        mut ctx: Ctx,
-    ) -> ! {
-        loop {
-            telemetry::frame_begin(ctx.frame);
-            ctx.time = clock.begin_frame(ctx.frame, ctx.simulation_tick);
-            ctx.missed_visual_intervals = 0;
-            emit_sim_tick_counters(1);
-            ctx.pad_prev = ctx.pad;
-            ctx.pad = poll_port1();
-
-            telemetry::stage_begin(telemetry::stage::UPDATE);
-            scene.update(&mut ctx);
-            telemetry::stage_end(telemetry::stage::UPDATE);
-
-            telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
-            ctx.fb.clear(
-                config.clear_color.0,
-                config.clear_color.1,
-                config.clear_color.2,
-            );
-            telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
-
-            telemetry::stage_begin(telemetry::stage::RENDER);
-            scene.render(&mut ctx);
-            telemetry::stage_end(telemetry::stage::RENDER);
-
-            telemetry::stage_begin(telemetry::stage::PRESENT);
-            clock.wait_next_vblank();
-            gpu::draw_sync();
-            ctx.fb.swap();
-            telemetry::stage_end(telemetry::stage::PRESENT);
-            emit_visual_frame_counters(ctx.time.delta_vblanks().saturating_sub(1));
-            ctx.frame = ctx.frame.wrapping_add(1);
-            ctx.simulation_tick = ctx.frame;
-        }
-    }
-
-    fn run_paced_visuals<S: Scene>(
+    fn run_scheduled<S: Scene>(
         config: Config,
         scene: &mut S,
         mut clock: EngineClock,
         mut ctx: Ctx,
         visual_interval: u16,
     ) -> ! {
-        let mut pacer = VisualPacer::new(visual_interval);
-        let mut next_simulation_tick = 0u32;
+        let mut scheduler = FrameScheduler::new(config.scheduler, visual_interval);
+        let mut traced_wait = false;
+        let mut traced_update = false;
+        let mut traced_render = false;
+        let mut traced_present = false;
 
         loop {
-            let elapsed_vblanks = clock.elapsed_vblanks();
-            if next_simulation_tick > elapsed_vblanks {
-                clock.wait_next_vblank();
-                continue;
-            }
-
-            let mut due_visual_intervals = 0u16;
-            // Simulation owns real time: drain every elapsed VBlank before
-            // drawing. If rendering is too expensive, VIS drops, but controls
-            // and movement still advance at the display clock.
-            while next_simulation_tick <= elapsed_vblanks {
-                telemetry::frame_begin(next_simulation_tick);
-                ctx.simulation_tick = next_simulation_tick;
-                ctx.time = EngineTime::fixed_simulation_tick(
-                    ctx.frame,
-                    next_simulation_tick,
-                    config.video_hz(),
-                );
-                ctx.missed_visual_intervals = 0;
-                emit_sim_tick_counters(visual_interval);
-                ctx.pad_prev = ctx.pad;
-                ctx.pad = poll_port1();
-
-                telemetry::stage_begin(telemetry::stage::UPDATE);
-                scene.update(&mut ctx);
-                telemetry::stage_end(telemetry::stage::UPDATE);
-
-                let tick_visual_intervals = pacer.mark_due_intervals(next_simulation_tick);
-                if tick_visual_intervals == 0 {
-                    telemetry::counter(telemetry::counter::VISUAL_SKIPPED_VBLANKS, 1);
-                } else {
-                    due_visual_intervals =
-                        due_visual_intervals.saturating_add(tick_visual_intervals);
+            let elapsed_sim_ticks = clock.elapsed_sim_ticks();
+            match scheduler.next_action(elapsed_sim_ticks) {
+                SchedulerAction::WaitForVBlank => {
+                    if !traced_wait {
+                        boot_trace("psx-engine: wait vblank");
+                    }
+                    clock.wait_next_vblank();
+                    if !traced_wait {
+                        boot_trace("psx-engine: vblank ok");
+                        traced_wait = true;
+                    }
                 }
-                next_simulation_tick = next_simulation_tick.wrapping_add(1);
+                SchedulerAction::RunFixedUpdate { tick } => {
+                    if !traced_update {
+                        boot_trace("psx-engine: update begin");
+                    }
+                    telemetry::task_begin(telemetry::task::FIXED_UPDATE);
+                    telemetry::frame_begin(tick.as_u32());
+                    ctx.sim_tick = tick;
+                    emit_sim_tick_counters(visual_interval);
+                    ctx.pad_prev = ctx.pad;
+                    if !traced_update {
+                        boot_trace("psx-engine: pad poll begin");
+                    }
+                    ctx.pad = poll_port1();
+                    if !traced_update {
+                        boot_trace("psx-engine: pad poll ok");
+                    }
+
+                    telemetry::stage_begin(telemetry::stage::UPDATE);
+                    scene.update(&mut ctx);
+                    telemetry::stage_end(telemetry::stage::UPDATE);
+                    if !traced_update {
+                        boot_trace("psx-engine: update ok");
+                        traced_update = true;
+                    }
+
+                    let outcome = scheduler.complete_fixed_update();
+                    if outcome.visual_intervals_due == 0 {
+                        telemetry::counter(telemetry::counter::VISUAL_SKIPPED_VBLANKS, 1);
+                    }
+                    telemetry::task_end(telemetry::task::FIXED_UPDATE);
+                }
+                SchedulerAction::RunVisualFrame {
+                    missed_visual_intervals,
+                    fixed_update_clamped: _,
+                } => {
+                    if !traced_render {
+                        boot_trace("psx-engine: render begin");
+                    }
+                    telemetry::task_begin(telemetry::task::VISUAL_RENDER);
+                    telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+                    ctx.fb.clear(
+                        config.clear_color.0,
+                        config.clear_color.1,
+                        config.clear_color.2,
+                    );
+                    telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
+
+                    telemetry::stage_begin(telemetry::stage::RENDER);
+                    scene.render(&mut ctx);
+                    telemetry::stage_end(telemetry::stage::RENDER);
+                    if !traced_render {
+                        boot_trace("psx-engine: render ok");
+                        traced_render = true;
+                    }
+                    telemetry::task_end(telemetry::task::VISUAL_RENDER);
+
+                    if !traced_present {
+                        boot_trace("psx-engine: present begin");
+                    }
+                    telemetry::stage_begin(telemetry::stage::PRESENT);
+                    clock.wait_next_vblank();
+                    gpu::draw_sync();
+                    ctx.fb.swap();
+                    telemetry::stage_end(telemetry::stage::PRESENT);
+                    if !traced_present {
+                        boot_trace("psx-engine: present ok");
+                        traced_present = true;
+                    }
+
+                    scheduler.complete_visual_frame();
+                    emit_visual_frame_counters(missed_visual_intervals);
+                    ctx.visual_frame = ctx.visual_frame.advance();
+                }
             }
-
-            if due_visual_intervals == 0 {
-                continue;
-            }
-
-            let pending_vblanks = if next_simulation_tick <= elapsed_vblanks {
-                elapsed_vblanks
-                    .wrapping_sub(next_simulation_tick)
-                    .saturating_add(1)
-            } else {
-                0
-            };
-            let pending_visual_intervals =
-                pending_vblanks / visual_interval.max(1) as u32;
-            ctx.missed_visual_intervals = due_visual_intervals
-                .saturating_sub(1)
-                .saturating_add(pending_visual_intervals.min(u16::MAX as u32) as u16);
-
-            telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
-            ctx.fb.clear(
-                config.clear_color.0,
-                config.clear_color.1,
-                config.clear_color.2,
-            );
-            telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
-
-            telemetry::stage_begin(telemetry::stage::RENDER);
-            scene.render(&mut ctx);
-            telemetry::stage_end(telemetry::stage::RENDER);
-
-            telemetry::stage_begin(telemetry::stage::PRESENT);
-            clock.wait_next_vblank();
-            gpu::draw_sync();
-            ctx.fb.swap();
-            telemetry::stage_end(telemetry::stage::PRESENT);
-            emit_visual_frame_counters(ctx.missed_visual_intervals);
-            ctx.frame = ctx.frame.wrapping_add(1);
         }
     }
 }
@@ -358,15 +320,5 @@ mod tests {
         assert_eq!(VisualPacing::EveryNVBlanks(0).interval_vblanks(), 1);
         assert_eq!(VisualPacing::EveryNVBlanks(1).interval_vblanks(), 1);
         assert_eq!(VisualPacing::EveryNVBlanks(3).interval_vblanks(), 3);
-    }
-
-    #[test]
-    fn visual_pacer_marks_due_and_collapses_missed_intervals() {
-        let mut pacer = VisualPacer::new(3);
-        assert_eq!(pacer.mark_due_intervals(0), 1);
-        assert_eq!(pacer.mark_due_intervals(1), 0);
-        assert_eq!(pacer.mark_due_intervals(2), 0);
-        assert_eq!(pacer.mark_due_intervals(3), 1);
-        assert_eq!(pacer.mark_due_intervals(10), 2);
     }
 }

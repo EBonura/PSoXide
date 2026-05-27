@@ -39,7 +39,8 @@ use psxed_project::{NodeId, ProjectDocument};
 use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
 use crate::app::{
-    build_embedded_playtest_disc, bus_from_configured_bios, fast_boot_embedded_playtest_disc,
+    build_embedded_playtest_disc, bus_from_configured_bios, copy_project_disc,
+    fast_boot_embedded_playtest_disc,
 };
 use crate::playtest_input::read_input_tape;
 
@@ -107,6 +108,8 @@ pub enum Command {
     Launch(LaunchArgs),
     /// Build the in-editor Play disc image from the current generated package.
     BuildEditorPlaytestDisc,
+    /// Cook, build, and export a project CUE/BIN disc without opening the GUI.
+    BuildProjectDisc(BuildProjectDiscArgs),
     /// Render an editor 3D preview screenshot without opening the GUI.
     DumpEditorPreview(DumpEditorPreviewArgs),
 }
@@ -123,7 +126,7 @@ pub struct ScanArgs {
 /// Arguments for `launch`.
 #[derive(Debug, Args)]
 pub struct LaunchArgs {
-    /// Path to a `.bin` (disc image) or `.exe` (homebrew) to run.
+    /// Path to a `.cue`, `.bin`, `.iso`, `.ccd`, or `.exe` to run.
     /// Either this or `--game-id` must be provided.
     #[arg(long)]
     pub path: Option<PathBuf>,
@@ -147,7 +150,7 @@ pub struct LaunchArgs {
     /// emitted guest frame-begin marker.
     #[arg(long)]
     pub input_tape: Option<PathBuf>,
-    /// Treat a `.bin` or `.iso` as an embedded editor Play disc and boot it
+    /// Treat an authored disc as an embedded editor Play disc and boot it
     /// through the same no-BIOS HLE path used by the editor viewport.
     #[arg(long)]
     pub embedded_playtest: bool,
@@ -199,6 +202,14 @@ pub struct LaunchArgs {
     pub hold_run: bool,
 }
 
+/// Arguments for `build-project-disc`.
+#[derive(Debug, Args)]
+pub struct BuildProjectDiscArgs {
+    /// Project directory containing `project.ron`, or a direct path to a project file.
+    #[arg(long, default_value = "editor/projects/default")]
+    pub project: PathBuf,
+}
+
 /// Arguments for `dump-editor-preview`.
 #[derive(Debug, Args)]
 pub struct DumpEditorPreviewArgs {
@@ -242,6 +253,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::List => cmd_list(&paths),
         Command::Launch(args) => cmd_launch(&paths, args),
         Command::BuildEditorPlaytestDisc => cmd_build_editor_playtest_disc(),
+        Command::BuildProjectDisc(args) => cmd_build_project_disc(args),
         Command::DumpEditorPreview(args) => cmd_dump_editor_preview(args),
     }
 }
@@ -414,7 +426,8 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
 
     let mut cpu = Cpu::new();
 
-    // Dispatch on extension: .bin = disc, .exe = homebrew side-load.
+    // Dispatch on extension: discs boot through the CD path, EXEs use
+    // the legacy homebrew side-load path.
     let ext = game_path
         .extension()
         .and_then(|e| e.to_str())
@@ -473,21 +486,26 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             bus
         }
         "cue" => {
-            if args.embedded_playtest {
-                return Err("--embedded-playtest supports .bin/.iso only".to_string());
-            }
-            let mut bus = bus_from_configured_bios(&settings)?;
+            let mut bus = if args.embedded_playtest {
+                Bus::new_without_bios()
+            } else {
+                bus_from_configured_bios(&settings)?
+            };
             if args.dump_hw.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_cue(&game_path)?;
-            maybe_fast_boot_disc(
-                &mut bus,
-                &mut cpu,
-                &disc,
-                &game_path,
-                settings.emulator.fast_boot_disc && !args.bios_boot,
-            );
+            if args.embedded_playtest {
+                fast_boot_embedded_playtest_disc(&mut bus, &mut cpu, &disc, &game_path);
+            } else {
+                maybe_fast_boot_disc(
+                    &mut bus,
+                    &mut cpu,
+                    &disc,
+                    &game_path,
+                    settings.emulator.fast_boot_disc && !args.bios_boot,
+                );
+            }
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus);
             eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
@@ -495,7 +513,7 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
         }
         "ccd" => {
             if args.embedded_playtest {
-                return Err("--embedded-playtest supports .bin/.iso only".to_string());
+                return Err("--embedded-playtest does not support .ccd".to_string());
             }
             let mut bus = bus_from_configured_bios(&settings)?;
             if args.dump_hw.is_some() {
@@ -709,6 +727,59 @@ fn cmd_build_editor_playtest_disc() -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_build_project_disc(args: BuildProjectDiscArgs) -> Result<(), String> {
+    let (project_root, project_file) = resolve_project_arg(&args.project);
+    let project_root = std::fs::canonicalize(&project_root)
+        .map_err(|e| format!("project root {}: {e}", project_root.display()))?;
+    let project_file = std::fs::canonicalize(&project_file)
+        .map_err(|e| format!("project file {}: {e}", project_file.display()))?;
+    let project = ProjectDocument::load_from_path(&project_file)
+        .map_err(|e| format!("load {}: {e}", project_file.display()))?;
+
+    let repo_root = cli_repo_root();
+    run_make(
+        &repo_root,
+        "cook-playtest",
+        &[format!("PROJECT={}", project_file.display())],
+    )?;
+    run_make(&repo_root, "build-editor-playtest", &[])?;
+
+    let source_cue = build_embedded_playtest_disc()?;
+    let dest_cue = project_root.join("baked").join(format!(
+        "{}.cue",
+        psxed_project::project_file_stem(&project.name)
+    ));
+    let bytes = copy_project_disc(&source_cue, &dest_cue)?;
+    eprintln!(
+        "[cli] project disc -> {} ({} KiB)",
+        dest_cue.display(),
+        bytes / 1024
+    );
+    println!("{}", dest_cue.display());
+    Ok(())
+}
+
+fn run_make(repo_root: &Path, target: &str, extra_args: &[String]) -> Result<(), String> {
+    let status = std::process::Command::new("make")
+        .arg(target)
+        .args(extra_args)
+        .current_dir(repo_root)
+        .status()
+        .map_err(|e| format!("spawn make {target}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("make {target} failed: {status}"))
+    }
+}
+
+fn cli_repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+}
+
 fn attach_headless_playtest_pad(bus: &mut Bus) {
     bus.attach_digital_pad_port1();
     let _ = bus.force_port1_analog_mode();
@@ -848,14 +919,24 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
 }
 
 fn resolve_project_arg(path: &Path) -> (PathBuf, PathBuf) {
+    let path = if path.is_absolute() || path.exists() {
+        path.to_path_buf()
+    } else {
+        let repo_path = cli_repo_root().join(path);
+        if repo_path.exists() {
+            repo_path
+        } else {
+            path.to_path_buf()
+        }
+    };
     if path.is_dir() {
-        (path.to_path_buf(), path.join("project.ron"))
+        (path.clone(), path.join("project.ron"))
     } else {
         let root = path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        (root, path.to_path_buf())
+        (root, path)
     }
 }
 
@@ -926,6 +1007,21 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
     println!("guest_profile_frame_meaning=frame_begin_markers");
     print_guest_pacing_profile(summary);
     print_guest_render_breakdown(summary);
+    println!("guest_profile_tasks:");
+    for id in 0..telemetry::TASK_COUNT {
+        let cycles = summary.task_cycles[id];
+        if cycles == 0 {
+            continue;
+        }
+        println!(
+            "  {:<18} total={:<10} per_hit={:.0} max_hit={} hits={}",
+            telemetry::task_name(id as u16),
+            cycles,
+            cycles as f32 / (summary.task_hits[id].max(1) as f32),
+            summary.task_max_cycles[id],
+            summary.task_hits[id],
+        );
+    }
     println!("guest_profile_stages:");
     for id in 1..telemetry::STAGE_COUNT {
         let cycles = summary.stage_cycles[id];

@@ -11,6 +11,7 @@ name = "psxed"
 path = "src/main.rs"
 
 [dependencies]
+psxed-audio  = { workspace = true }
 psxed-format = { workspace = true }
 psxed-gltf   = { workspace = true }
 psxed-obj    = { workspace = true }

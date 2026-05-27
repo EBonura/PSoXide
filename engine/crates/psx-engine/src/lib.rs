@@ -6,8 +6,8 @@
 //!
 //! - a [`Scene`] trait and an [`App::run`] entry point so games
 //!   don't each reinvent the main loop;
-//! - a [`Ctx`] carrying per-frame state (pad, frame counter,
-//!   engine time, framebuffer) to the scene;
+//! - a [`Ctx`] carrying per-frame state (pad, simulation tick,
+//!   visual frame counter, framebuffer) to the scene;
 //! - a canonical [`Angle`] unit so we stop hitting the recurring
 //!   "256-per-revolution vs 4096-per-revolution" angle-mismatch bug
 //!   that cost an afternoon on showcase-fog's light orbit;
@@ -62,10 +62,11 @@ pub mod movement;
 pub mod render;
 pub mod render3d;
 pub mod scene;
+pub mod scheduler;
 pub mod sfx;
 pub mod telemetry;
 pub mod third_person_camera;
-pub mod time;
+mod time;
 pub mod transform;
 pub mod world;
 pub mod world_render;
@@ -78,7 +79,7 @@ pub use character_motor::{
     CharacterMotorInput, CharacterMotorState,
 };
 pub use fixed::{Q12, Q8};
-pub use frames::{Frames, Ticks};
+pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};
 pub use lighting::{
     accumulate_point_lights, accumulate_point_lights_rgb, modulate_material_tint, modulate_tint,
     shade_material_tint_with_lights, shade_tint_with_lights, LightingRgb, MaterialTint,
@@ -96,10 +97,15 @@ pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_transform,
     project_model_vertex_with_joint_transforms, CullMode, DepthPolicy, GouraudMeshOptions,
     GouraudRenderPass, GouraudTriCommand, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ProjectedTexturedVertex,
-    ProjectedVertex, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
-    TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer,
-    WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+    LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation,
+    ProjectedTexturedVertex, ProjectedVertex, TexturedModelGeometry, TexturedModelRenderFace,
+    TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection,
+    WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+};
+pub use scheduler::{
+    collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,
+    SchedulerConfig, TaskBudget, TaskCadence, TaskDescriptor, TaskId, TaskLane, TASK_FIXED_UPDATE,
+    TASK_VISUAL_RENDER,
 };
 // Re-export the GTE math types callers need to construct model render
 // arguments (instance rotation, joint transforms) without pulling in
@@ -110,7 +116,6 @@ pub use third_person_camera::{
     ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget,
 };
-pub use time::EngineTime;
 pub use transform::{ActorTransform, RoomPoint, Vec3World, WorldVertex};
 pub use world::{
     CompactCollisionParseError, CompactCollisionRoom, GridCoord, GridDirection, GridFloorSample,

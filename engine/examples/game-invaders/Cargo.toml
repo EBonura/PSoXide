@@ -16,10 +16,10 @@ codegen-units = 1
 lto = true
 
 [dependencies]
-psx-engine = { path = "../../crates/psx-engine" }
+psx-engine = { path = "../../crates/psx-engine", features = ["boot-trace"] }
 psx-font   = { path = "../../../sdk/crates/psx-font" }
 psx-fx     = { path = "../../../sdk/crates/psx-fx" }
 psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
-psx-rt     = { path = "../../../sdk/crates/psx-rt" }
+psx-rt     = { path = "../../../sdk/crates/psx-rt", features = ["boot-trace"] }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
