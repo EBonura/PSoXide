@@ -97,10 +97,10 @@ pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_transform,
     project_model_vertex_with_joint_transforms, CullMode, DepthPolicy, GouraudMeshOptions,
     GouraudRenderPass, GouraudTriCommand, JointViewTransform, JointWorldTransform,
-    LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ProjectedTexturedVertex,
-    ProjectedVertex, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
-    TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer,
-    WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+    LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation,
+    ProjectedTexturedVertex, ProjectedVertex, TexturedModelGeometry, TexturedModelRenderFace,
+    TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection,
+    WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
 };
 pub use scheduler::{
     collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,
