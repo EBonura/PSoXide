@@ -901,9 +901,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let kind = render_ui_node_kind(&node.kind);
         let value = render_ui_value_binding(node.value);
         let max = render_ui_value_binding(node.max);
+        let texture_asset = node
+            .texture_asset
+            .map(|index| format!("AssetId({index})"))
+            .unwrap_or_else(|| "AssetId(u16::MAX)".to_string());
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], value: {value}, max: {max}, text: {:?}, tag: {:?}, flags: {} }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, flags: {} }},",
             node.x,
             node.y,
             node.width,
@@ -2105,6 +2109,7 @@ fn render_ui_node_kind(kind: &UiNodeKind) -> &'static str {
         UiNodeKind::Group { .. } => "LevelUiNodeKind::Group",
         UiNodeKind::Rect { .. } => "LevelUiNodeKind::Rect",
         UiNodeKind::Label { .. } => "LevelUiNodeKind::Label",
+        UiNodeKind::Image { .. } => "LevelUiNodeKind::Image",
         UiNodeKind::Bar { .. } => "LevelUiNodeKind::Bar",
     }
 }
