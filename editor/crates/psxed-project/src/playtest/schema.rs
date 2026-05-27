@@ -418,7 +418,7 @@ pub struct PlaytestCachedRoomSurface {
     pub uv_words: [u16; 4],
     /// Cached baked RGB values.
     pub baked_vertex_rgb: [(u8, u8, u8); 4],
-    /// Packed surface kind plus baked-light flag.
+    /// Packed surface kind plus cached render flags.
     pub kind_flags: u8,
     /// Runtime wall direction when this is a wall surface.
     pub wall_direction: u8,
