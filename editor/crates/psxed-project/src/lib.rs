@@ -276,6 +276,9 @@ pub enum UiNodeKind {
         rect: UiRect,
         /// Authored text.
         text: String,
+        /// Optional runtime lookup tag for game-controlled text.
+        #[serde(default)]
+        tag: String,
         /// Text tint.
         color: [u8; 3],
     },
@@ -367,12 +370,18 @@ impl UiNode {
 pub struct UiNodeRow {
     /// Node id.
     pub id: UiNodeId,
+    /// Parent node id. `None` only for the root canvas.
+    pub parent: Option<UiNodeId>,
+    /// Index inside the parent's child list.
+    pub sibling_index: usize,
     /// Nesting depth.
     pub depth: usize,
     /// Display name.
     pub name: String,
     /// Node kind label.
     pub kind: &'static str,
+    /// Optional authored lookup tag, currently used by labels.
+    pub tag: Option<String>,
     /// Number of direct children.
     pub child_count: usize,
 }
@@ -715,23 +724,36 @@ impl UiScene {
     /// Flatten the hierarchy into display rows.
     pub fn hierarchy_rows(&self) -> Vec<UiNodeRow> {
         let mut rows = Vec::new();
-        self.push_hierarchy_row(self.root, 0, &mut rows);
+        self.push_hierarchy_row(self.root, 0, None, 0, &mut rows);
         rows
     }
 
-    fn push_hierarchy_row(&self, id: UiNodeId, depth: usize, rows: &mut Vec<UiNodeRow>) {
+    fn push_hierarchy_row(
+        &self,
+        id: UiNodeId,
+        depth: usize,
+        parent: Option<UiNodeId>,
+        sibling_index: usize,
+        rows: &mut Vec<UiNodeRow>,
+    ) {
         let Some(node) = self.node(id) else {
             return;
         };
         rows.push(UiNodeRow {
             id,
+            parent,
+            sibling_index,
             depth,
             name: node.name.clone(),
             kind: node.kind.label(),
+            tag: match &node.kind {
+                UiNodeKind::Label { tag, .. } if !tag.trim().is_empty() => Some(tag.clone()),
+                _ => None,
+            },
             child_count: node.children.len(),
         });
-        for &child in &node.children {
-            self.push_hierarchy_row(child, depth.saturating_add(1), rows);
+        for (index, &child) in node.children.iter().enumerate() {
+            self.push_hierarchy_row(child, depth.saturating_add(1), Some(id), index, rows);
         }
     }
 }
@@ -11482,6 +11504,7 @@ mod tests {
             UiNodeKind::Label {
                 rect: UiRect::new(52, 184, 96, 12),
                 text: "Open".to_string(),
+                tag: String::new(),
                 color: [220, 226, 240],
             },
         );
@@ -11513,6 +11536,7 @@ mod tests {
             UiNodeKind::Label {
                 rect: UiRect::new(8, 6, 48, 12),
                 text: "Open".to_string(),
+                tag: String::new(),
                 color: [220, 226, 240],
             },
         );
@@ -11554,6 +11578,7 @@ mod tests {
             UiNodeKind::Label {
                 rect: UiRect::new(2, 3, 8, 8),
                 text: "x".to_string(),
+                tag: String::new(),
                 color: [255, 255, 255],
             },
         );
