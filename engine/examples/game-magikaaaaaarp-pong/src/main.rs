@@ -1,5 +1,5 @@
-//! `game-birthday-pong` -- a birthday Pong variant where the ball is
-//! a large rotating textured cube.
+//! `game-magikaaaaaarp-pong` -- magikAAAAArp-themed Pong with a
+//! large rotating album cube.
 
 #![no_std]
 #![no_main]
@@ -80,7 +80,7 @@ static mut CUBE_QUADS: [QuadTexturedMaterial; 6] = [const {
     )
 }; 6];
 
-struct BirthdayPong {
+struct MagikaaaaaarpPong {
     p1_y: i16,
     p2_y: i16,
     p1_score: u8,
@@ -97,7 +97,7 @@ struct BirthdayPong {
     font: Option<FontAtlas>,
 }
 
-impl BirthdayPong {
+impl MagikaaaaaarpPong {
     const fn new() -> Self {
         Self {
             p1_y: 0,
@@ -153,7 +153,7 @@ impl BirthdayPong {
     }
 }
 
-impl Scene for BirthdayPong {
+impl Scene for MagikaaaaaarpPong {
     fn init(&mut self, _ctx: &mut Ctx) {
         spu::init();
         sfx::upload_samples(SPU_SAMPLE_BASE, &SFX_BANK);
@@ -250,7 +250,7 @@ impl Scene for BirthdayPong {
     }
 }
 
-impl BirthdayPong {
+impl MagikaaaaaarpPong {
     fn build_frame_ot(&self) {
         let ot = unsafe { &mut OT };
         let rects = unsafe { &mut RECTS };
@@ -349,7 +349,7 @@ impl BirthdayPong {
         let p1 = digit_str(self.p1_score);
         let p2 = digit_str(self.p2_score);
 
-        font.draw_text(88, 6, "HAPPY BIRTHDAY!", (255, 226, 112));
+        font.draw_text(92, 6, "magikAAAAArp PONG", (255, 226, 112));
         font.draw_text(24, 24, "P1", (150, 196, 255));
         font.draw_text(60, 24, p1.as_str(), (226, 230, 248));
         font.draw_text(SCREEN_W - 24 - 8 * 2, 24, "P2", (255, 174, 150));
@@ -578,6 +578,6 @@ fn main() -> ! {
         clear_color: (7, 9, 22),
         ..Config::default()
     };
-    let mut game = BirthdayPong::new();
+    let mut game = MagikaaaaaarpPong::new();
     App::run(config, &mut game);
 }

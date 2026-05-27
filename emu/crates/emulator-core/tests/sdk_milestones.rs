@@ -478,19 +478,19 @@ fn golden_for(example: &str) -> Option<SdkGolden> {
             final_pc: 0x8001_17c8,
             redux_display_hash: None,
         }),
-        // Birthday Pong variant. 8 VBlanks captures the textured
+        // magikAAAAArp Pong variant. 8 VBlanks captures the textured
         // cube ball early in its rotation with the first rally still
         // centred, while also pinning the texture upload and SPU
         // sample-bank setup.
-        "game-birthday-pong" => Some(SdkGolden {
-            example: "game-birthday-pong",
+        "game-magikaaaaaarp-pong" => Some(SdkGolden {
+            example: "game-magikaaaaaarp-pong",
             vblanks: 8,
-            vram_hash: 0xfd71_b4f1_a45b_0307,
-            display_hash: 0xaf3a_c8d0_80f0_77cb,
+            vram_hash: 0x3f97_7b8b_8989_c84b,
+            display_hash: 0x8e40_523f_bfd2_b11b,
             display_size: (320, 240),
             vblank_raises: 8,
             spu_samples: 5145,
-            final_pc: 0x8001_10e0,
+            final_pc: 0x8000_0080,
             redux_display_hash: None,
         }),
         // Second mini-game. 60 VBlanks captures one serve-arc +
@@ -741,9 +741,9 @@ fn milestone_c_game_pong() {
 }
 
 #[test]
-#[ignore = "SDK milestone: birthday pong roundtrip"]
-fn milestone_c_game_birthday_pong() {
-    run_sdk_milestone("game-birthday-pong", 8);
+#[ignore = "SDK milestone: magikAAAAArp pong roundtrip"]
+fn milestone_c_game_magikaaaaaarp_pong() {
+    run_sdk_milestone("game-magikaaaaaarp-pong", 8);
 }
 
 #[test]
