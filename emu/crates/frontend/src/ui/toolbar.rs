@@ -296,7 +296,10 @@ fn draw_metrics(ui: &mut egui::Ui, state: &AppState, available_width: f32) {
     let ms = state.hud.average_dt() * 1000.0;
     let mips = state.hud.ips() / 1_000_000.0;
     let audio = state.hud.audio_queue_len();
-    let profile_avg = state.profiler.average();
+    let profile_avg = state
+        .profiler
+        .live_average()
+        .or_else(|| state.profiler.average());
     let emu_hz = profile_avg
         .map(|sample| sample.emulated_vblank_hz())
         .unwrap_or(0.0);

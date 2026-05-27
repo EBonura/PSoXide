@@ -926,6 +926,21 @@ fn print_guest_profile(summary: &telemetry::GuestTelemetrySummary) {
     println!("guest_profile_frame_meaning=frame_begin_markers");
     print_guest_pacing_profile(summary);
     print_guest_render_breakdown(summary);
+    println!("guest_profile_tasks:");
+    for id in 0..telemetry::TASK_COUNT {
+        let cycles = summary.task_cycles[id];
+        if cycles == 0 {
+            continue;
+        }
+        println!(
+            "  {:<18} total={:<10} per_hit={:.0} max_hit={} hits={}",
+            telemetry::task_name(id as u16),
+            cycles,
+            cycles as f32 / (summary.task_hits[id].max(1) as f32),
+            summary.task_max_cycles[id],
+            summary.task_hits[id],
+        );
+    }
     println!("guest_profile_stages:");
     for id in 1..telemetry::STAGE_COUNT {
         let cycles = summary.stage_cycles[id];

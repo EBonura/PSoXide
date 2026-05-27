@@ -22,7 +22,6 @@ default = [
     "world-grid-visible",
     "ot-2048",
     "vis-coarse-yaw",
-    "vis-full-active-chunks",
     "vis-static-active-turn",
 ]
 cd-stream-bench = ["dep:psx-io"]
