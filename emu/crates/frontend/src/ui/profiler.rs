@@ -11,13 +11,15 @@ use std::{collections::VecDeque, fmt::Write as _};
 
 use egui::{Color32, RichText};
 use emulator_core::telemetry::{
-    counter, counter_name, stage, stage_name, GuestTelemetryEvent, COUNTER_COUNT, STAGE_COUNT,
+    counter, counter_name, stage, stage_name, task_name, GuestTelemetryEvent, COUNTER_COUNT,
+    STAGE_COUNT, TASK_COUNT,
 };
 
 use crate::theme;
 
 const HISTORY_CAP: usize = 500;
 const LOG_INTERVAL_MS: f32 = 1000.0;
+const LIVE_AVERAGE_WINDOW_MS: f32 = 100.0;
 const BUDGET_60_MS: f32 = 1000.0 / 60.0;
 const BUDGET_30_MS: f32 = 1000.0 / 30.0;
 const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
@@ -69,6 +71,16 @@ const PROFILE_LOG_STAGE_PER_HIT_FIELDS: &[(u16, &str)] = &[
     (stage::TEXTURED_MODEL_JOINTS, "guest_mdl_joints_hit"),
     (stage::TEXTURED_MODEL_PROJECT, "guest_mdl_project_hit"),
     (stage::TEXTURED_MODEL_FACES, "guest_mdl_faces_hit"),
+];
+const PROFILE_LOG_TASK_PER_HIT_FIELDS: &[(u16, &str)] = &[
+    (
+        emulator_core::telemetry::task::FIXED_UPDATE,
+        "task_fixed_hit",
+    ),
+    (
+        emulator_core::telemetry::task::VISUAL_RENDER,
+        "task_visual_hit",
+    ),
 ];
 const PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
     (counter::ROOM_ACTIVE_CHUNKS, "room_chunks_v"),
@@ -181,6 +193,12 @@ pub struct GuestRuntimeProfile {
     pub stage_cycles: [f32; STAGE_COUNT],
     /// Completed span count per guest stage id.
     pub stage_hits: [f32; STAGE_COUNT],
+    /// Total cycle spans per scheduled guest task id.
+    pub task_cycles: [f32; TASK_COUNT],
+    /// Completed span count per scheduled guest task id.
+    pub task_hits: [f32; TASK_COUNT],
+    /// Largest single completed scheduled-task span per id.
+    pub task_max_cycles: [f32; TASK_COUNT],
     /// Summed counter values per guest counter id.
     pub counters: [f32; COUNTER_COUNT],
     /// Largest single value observed per guest counter id.
@@ -195,6 +213,9 @@ impl Default for GuestRuntimeProfile {
             frames: 0.0,
             stage_cycles: [0.0; STAGE_COUNT],
             stage_hits: [0.0; STAGE_COUNT],
+            task_cycles: [0.0; TASK_COUNT],
+            task_hits: [0.0; TASK_COUNT],
+            task_max_cycles: [0.0; TASK_COUNT],
             counters: [0.0; COUNTER_COUNT],
             counter_max_values: [0.0; COUNTER_COUNT],
             counter_latest_values: [0; COUNTER_COUNT],
@@ -210,6 +231,14 @@ impl GuestRuntimeProfile {
             self.stage_cycles[i] += other.stage_cycles[i];
             self.stage_hits[i] += other.stage_hits[i];
             i += 1;
+        }
+        let mut task_index = 0;
+        while task_index < TASK_COUNT {
+            self.task_cycles[task_index] += other.task_cycles[task_index];
+            self.task_hits[task_index] += other.task_hits[task_index];
+            self.task_max_cycles[task_index] =
+                self.task_max_cycles[task_index].max(other.task_max_cycles[task_index]);
+            task_index += 1;
         }
         let mut j = 0;
         while j < COUNTER_COUNT {
@@ -234,6 +263,12 @@ impl GuestRuntimeProfile {
             self.stage_hits[i] /= n;
             i += 1;
         }
+        let mut task_index = 0;
+        while task_index < TASK_COUNT {
+            self.task_cycles[task_index] /= n;
+            self.task_hits[task_index] /= n;
+            task_index += 1;
+        }
         let mut j = 0;
         while j < COUNTER_COUNT {
             self.counters[j] /= n;
@@ -244,6 +279,7 @@ impl GuestRuntimeProfile {
     fn has_data(self) -> bool {
         self.frames > 0.0
             || self.stage_cycles.iter().any(|&cycles| cycles > 0.0)
+            || self.task_cycles.iter().any(|&cycles| cycles > 0.0)
             || self.counters.iter().any(|&value| value > 0.0)
     }
 
@@ -262,6 +298,14 @@ impl GuestRuntimeProfile {
     fn stage_cycles_per_hit(self, stage_id: usize) -> f32 {
         if self.stage_hits[stage_id] > 0.0 {
             self.stage_cycles[stage_id] / self.stage_hits[stage_id]
+        } else {
+            0.0
+        }
+    }
+
+    fn task_cycles_per_hit(self, task_id: usize) -> f32 {
+        if self.task_hits[task_id] > 0.0 {
+            self.task_cycles[task_id] / self.task_hits[task_id]
         } else {
             0.0
         }
@@ -656,6 +700,7 @@ pub struct FrameProfiler {
     log_mode: LogMode,
     log_accum_ms: f32,
     guest_stage_starts: [Option<u64>; STAGE_COUNT],
+    guest_task_starts: [Option<u64>; TASK_COUNT],
 }
 
 impl Default for FrameProfiler {
@@ -671,6 +716,7 @@ impl Default for FrameProfiler {
             log_mode,
             log_accum_ms: 0.0,
             guest_stage_starts: [None; STAGE_COUNT],
+            guest_task_starts: [None; TASK_COUNT],
         }
     }
 }
@@ -740,11 +786,38 @@ impl FrameProfiler {
         Some(avg)
     }
 
+    /// Short moving average for live HUD numbers.
+    pub fn live_average(&self) -> Option<FrameProfileSample> {
+        self.average_recent_ms(LIVE_AVERAGE_WINDOW_MS)
+    }
+
+    /// Average across the newest samples that cover roughly `window_ms`.
+    pub fn average_recent_ms(&self, window_ms: f32) -> Option<FrameProfileSample> {
+        let mut avg = FrameProfileSample::default();
+        let mut n = 0usize;
+        let mut elapsed_ms = 0.0f32;
+        let target_ms = window_ms.max(0.0);
+        for sample in self.samples.iter().rev() {
+            avg.accumulate(*sample);
+            n += 1;
+            elapsed_ms += sample.host_dt_ms.max(sample.total_ms).max(0.0);
+            if elapsed_ms >= target_ms {
+                break;
+            }
+        }
+        if n == 0 {
+            return None;
+        }
+        avg.divide(n as f32);
+        Some(avg)
+    }
+
     /// Clear the rolling window.
     pub fn clear(&mut self) {
         self.samples.clear();
         self.log_accum_ms = 0.0;
         self.guest_stage_starts = [None; STAGE_COUNT];
+        self.guest_task_starts = [None; TASK_COUNT];
     }
 
     /// Number of samples currently retained in the rolling history.
@@ -787,6 +860,24 @@ impl FrameProfiler {
                     out.stage_cycles[idx] += event.cycles.saturating_sub(start) as f32;
                     out.stage_hits[idx] += 1.0;
                 }
+                emulator_core::telemetry::GuestTelemetryKind::TaskBegin => {
+                    if let Some(slot) = self.guest_task_starts.get_mut(event.id as usize) {
+                        *slot = Some(event.cycles);
+                    }
+                }
+                emulator_core::telemetry::GuestTelemetryKind::TaskEnd => {
+                    let Some(slot) = self.guest_task_starts.get_mut(event.id as usize) else {
+                        continue;
+                    };
+                    let Some(start) = slot.take() else {
+                        continue;
+                    };
+                    let idx = event.id as usize;
+                    let cycles = event.cycles.saturating_sub(start) as f32;
+                    out.task_cycles[idx] += cycles;
+                    out.task_hits[idx] += 1.0;
+                    out.task_max_cycles[idx] = out.task_max_cycles[idx].max(cycles);
+                }
                 emulator_core::telemetry::GuestTelemetryKind::Counter => {
                     if let Some(counter) = out.counters.get_mut(event.id as usize) {
                         *counter += event.value as f32;
@@ -808,7 +899,7 @@ impl FrameProfiler {
 
 /// Paint profiler contents inside an existing container.
 pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
-    let Some(avg) = profiler.average() else {
+    let Some(avg) = profiler.live_average().or_else(|| profiler.average()) else {
         ui.monospace("(no frame samples yet)");
         return;
     };
@@ -989,6 +1080,7 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
                 );
             });
         }
+        draw_guest_scheduler_tasks(ui, avg.guest);
         draw_guest_render_breakdown(ui, avg.guest);
         draw_guest_runtime(ui, avg.guest);
     }
@@ -1041,6 +1133,83 @@ fn stage_row(ui: &mut egui::Ui, label: &str, ms: f32, max_ms: f32) {
     ui.label(
         RichText::new(format!("{ms:6.2}"))
             .color(theme::TEXT)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+    ui.end_row();
+}
+
+fn draw_guest_scheduler_tasks(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
+    let has_tasks = guest.task_cycles.iter().any(|&cycles| cycles > 0.0);
+    if !has_tasks {
+        return;
+    }
+
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("Scheduler Tasks")
+            .color(theme::ACCENT)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+
+    let max_cycles = (0..TASK_COUNT)
+        .map(|id| guest.task_cycles_per_hit(id))
+        .fold(NTSC_CPU_CYCLES_PER_VBLANK / 4.0, f32::max)
+        .max(1.0);
+
+    egui::Grid::new("guest-scheduler-task-grid")
+        .num_columns(5)
+        .spacing(egui::vec2(8.0, 3.0))
+        .striped(false)
+        .show(ui, |ui| {
+            for id in 0..TASK_COUNT {
+                let cycles = guest.task_cycles_per_hit(id);
+                if cycles <= 0.0 {
+                    continue;
+                }
+                guest_task_row(
+                    ui,
+                    task_name(id as u16),
+                    cycles,
+                    guest.task_max_cycles[id],
+                    max_cycles,
+                );
+            }
+        });
+}
+
+fn guest_task_row(ui: &mut egui::Ui, label: &str, cycles: f32, max_hit: f32, max_cycles: f32) {
+    ui.label(
+        RichText::new(label)
+            .color(theme::TEXT)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+
+    let width = ui.available_width().clamp(80.0, 240.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, theme::WIDGET_BG);
+    let fill_width = (rect.width() * (cycles / max_cycles).clamp(0.0, 1.0)).max(1.0);
+    let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
+    painter.rect_filled(fill_rect, 2.0, theme::ACCENT_HOVER);
+
+    ui.label(
+        RichText::new(format!("{cycles:7.0} cyc"))
+            .color(theme::TEXT)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+    ui.label(
+        RichText::new(format!("worst {max_hit:.0}"))
+            .color(theme::TEXT_DIM)
+            .monospace()
+            .size(theme::FONT_SIZE_SMALL),
+    );
+    ui.label(
+        RichText::new(format!("{:.3} ms", cycles / PSX_CYCLES_PER_MS))
+            .color(theme::TEXT_DIM)
             .monospace()
             .size(theme::FONT_SIZE_SMALL),
     );
@@ -1288,6 +1457,11 @@ fn push_history_csv_header(out: &mut String) {
         push_csv_metric_header(out, "stage", id, stage_name(id as u16), "cycles");
         push_csv_metric_header(out, "stage", id, stage_name(id as u16), "hits");
     }
+    for id in 0..TASK_COUNT {
+        push_csv_metric_header(out, "task", id, task_name(id as u16), "cycles");
+        push_csv_metric_header(out, "task", id, task_name(id as u16), "hits");
+        push_csv_metric_header(out, "task", id, task_name(id as u16), "max");
+    }
     for id in 0..COUNTER_COUNT {
         push_csv_metric_header(out, "counter", id, counter_name(id as u16), "total");
         push_csv_metric_header(out, "counter", id, counter_name(id as u16), "max");
@@ -1378,6 +1552,15 @@ fn push_history_csv_sample(out: &mut String, index: usize, sample: FrameProfileS
             out,
             ",{:.0},{:.0}",
             sample.guest.stage_cycles[id], sample.guest.stage_hits[id]
+        );
+    }
+    for id in 0..TASK_COUNT {
+        let _ = write!(
+            out,
+            ",{:.0},{:.0},{:.0}",
+            sample.guest.task_cycles[id],
+            sample.guest.task_hits[id],
+            sample.guest.task_max_cycles[id]
         );
     }
     for id in 0..COUNTER_COUNT {
@@ -1522,6 +1705,10 @@ fn append_guest_profile_log_fields(line: &mut String, guest: GuestRuntimeProfile
         let cycles = guest.stage_cycles_per_hit(stage_id as usize);
         let _ = write!(line, " {label}={cycles:.0}");
     }
+    for &(task_id, label) in PROFILE_LOG_TASK_PER_HIT_FIELDS {
+        let cycles = guest.task_cycles_per_hit(task_id as usize);
+        let _ = write!(line, " {label}={cycles:.0}");
+    }
     for &(counter_id, label) in PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS {
         let value = guest.counter_per_visual_frame(counter_id as usize);
         let _ = write!(line, " {label}={value:.0}");
@@ -1540,6 +1727,7 @@ mod tests {
             log_mode: LogMode::Off,
             log_accum_ms: 0.0,
             guest_stage_starts: [None; STAGE_COUNT],
+            guest_task_starts: [None; TASK_COUNT],
         };
         profiler.record(FrameProfileSample {
             total_ms: 10.0,
@@ -1586,6 +1774,38 @@ mod tests {
     }
 
     #[test]
+    fn recent_average_uses_newest_time_window() {
+        let mut profiler = FrameProfiler::default();
+        profiler.record(FrameProfileSample {
+            host_dt_ms: 60.0,
+            total_ms: 60.0,
+            emu_ms: 1.0,
+            gpu_cmds: 10.0,
+            ..FrameProfileSample::default()
+        });
+        profiler.record(FrameProfileSample {
+            host_dt_ms: 60.0,
+            total_ms: 60.0,
+            emu_ms: 3.0,
+            gpu_cmds: 30.0,
+            ..FrameProfileSample::default()
+        });
+        profiler.record(FrameProfileSample {
+            host_dt_ms: 60.0,
+            total_ms: 60.0,
+            emu_ms: 9.0,
+            gpu_cmds: 90.0,
+            ..FrameProfileSample::default()
+        });
+
+        let avg = profiler.average_recent_ms(100.0).unwrap();
+
+        assert_eq!(avg.emu_ms, 6.0);
+        assert_eq!(avg.gpu_cmds, 60.0);
+        assert_eq!(profiler.live_average().unwrap().emu_ms, 6.0);
+    }
+
+    #[test]
     fn guest_stage_spans_can_cross_samples() {
         let mut profiler = FrameProfiler::default();
         let first = [GuestTelemetryEvent {
@@ -1612,6 +1832,45 @@ mod tests {
             b.stage_cycles[emulator_core::telemetry::stage::RENDER as usize],
             150.0
         );
+    }
+
+    #[test]
+    fn guest_task_spans_track_average_and_worst_hit() {
+        let mut profiler = FrameProfiler::default();
+        let task_id = emulator_core::telemetry::task::FIXED_UPDATE;
+        let events = [
+            GuestTelemetryEvent {
+                cycles: 100,
+                kind: emulator_core::telemetry::GuestTelemetryKind::TaskBegin,
+                id: task_id,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 180,
+                kind: emulator_core::telemetry::GuestTelemetryKind::TaskEnd,
+                id: task_id,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 200,
+                kind: emulator_core::telemetry::GuestTelemetryKind::TaskBegin,
+                id: task_id,
+                value: 0,
+            },
+            GuestTelemetryEvent {
+                cycles: 340,
+                kind: emulator_core::telemetry::GuestTelemetryKind::TaskEnd,
+                id: task_id,
+                value: 0,
+            },
+        ];
+
+        let guest = profiler.consume_guest_events(&events);
+
+        assert_eq!(guest.task_cycles[task_id as usize], 220.0);
+        assert_eq!(guest.task_hits[task_id as usize], 2.0);
+        assert_eq!(guest.task_cycles_per_hit(task_id as usize), 110.0);
+        assert_eq!(guest.task_max_cycles[task_id as usize], 140.0);
     }
 
     #[test]
