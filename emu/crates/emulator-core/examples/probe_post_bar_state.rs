@@ -9,9 +9,9 @@ use emulator_core::{Bus, Cpu};
 use psx_iso::Disc;
 
 fn main() {
-    let bios = std::fs::read("/home/user/Downloads/bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let disc = std::fs::read(
-        "/home/user/Downloads/<rom-path>",
+        "<rom-path>",
     )
     .expect("disc");
     let mut bus = Bus::new(bios).expect("bus");

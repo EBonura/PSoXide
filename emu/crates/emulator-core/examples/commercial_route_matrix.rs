@@ -8,7 +8,7 @@
 //! ```bash
 //! cargo run --manifest-path emu/Cargo.toml -p emulator-core \
 //!   --example commercial_route_matrix --release -- \
-//!   --root "/home/user/Downloads/discs" \
+//!   --root "discs" \
 //!   --steps 300000000 \
 //!   --report-dir target/commercial-route-matrix/local-300m
 //! ```
@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use emulator_core::{button, Bus, ButtonState, Cpu};
 use pad_support::{effective_mask, PadPulse};
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
-const DEFAULT_GAMES_ROOT: &str = "/home/user/Downloads/discs";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_GAMES_ROOT: &str = "discs";
 const DEFAULT_STEPS: u64 = 300_000_000;
 const DEFAULT_SOAK_STEPS: u64 = 30_000_000;
 const DEFAULT_INTERVAL: u64 = 25_000_000;

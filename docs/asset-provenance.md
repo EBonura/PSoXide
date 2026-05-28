@@ -122,7 +122,7 @@ See [`sdk/crates/psx-spu/vendor/PROVENANCE.md`](../sdk/crates/psx-spu/vendor/PRO
 
 | File | Source | Author | License |
 | --- | --- | --- | --- |
-| `assets/audio/cdda/GONCHAROV.wav` | Cooked from `~/Downloads/YTDown_YouTube_GONCHAROV-Karaoke-Version-Official-Video_Media_GFJip2tEPsI_007_128k.mp3` | magikAAAAArp / project owner | Project-local demo asset; distribution rights to be confirmed before public release |
+| `assets/audio/cdda/GONCHAROV.wav` | Cooked from `local-assets/audio/goncharov-source.mp3` | magikAAAAArp / project owner | Project-local demo asset; distribution rights to be confirmed before public release |
 | `assets/audio/cdda/GONCHAROV.track02.cdda` | Cooked from `GONCHAROV.wav` as 44.1 kHz stereo signed 16-bit PCM, sector-padded for CD-DA track 2 | (derived) | Same as source |
 
 ## OBJ Reference Models
@@ -157,7 +157,7 @@ The following categories are deliberately not tracked or distributed:
   — golden-image PNGs were removed from `emu/crates/emulator-core/tests/milestones/`
   on 2026-04-30; tests now rely on hashes only.
 - Mednafen / DuckStation source — used only as behavioural references
-  (see [`NOTICE.md`](../NOTICE.md)).
+  (see [`LICENSE`](../LICENSE)).
 
 ## Pre-Publish Action Items
 
