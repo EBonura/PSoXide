@@ -34,6 +34,9 @@ use psoxide_settings::{
     library::{GameKind, LibraryEntry},
     ConfigPaths, Library, Settings,
 };
+use psoxide_validation::{
+    format_hash, ActualHashes, PixelHash, ValidationArtifact, ValidationRunner, ValidationSuite,
+};
 use psx_iso::{Disc, Exe};
 use psxed_project::{NodeId, ProjectDocument};
 use psxed_ui::{ViewportCameraMode, ViewportCameraState};
@@ -112,6 +115,8 @@ pub enum Command {
     BuildProjectDisc(BuildProjectDiscArgs),
     /// Render an editor 3D preview screenshot without opening the GUI.
     DumpEditorPreview(DumpEditorPreviewArgs),
+    /// Run exact-hash validation checkpoints from a manifest.
+    Validate(ValidateArgs),
 }
 
 /// Arguments for `scan`.
@@ -124,7 +129,7 @@ pub struct ScanArgs {
 }
 
 /// Arguments for `launch`.
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct LaunchArgs {
     /// Path to a `.cue`, `.bin`, `.iso`, `.ccd`, or `.exe` to run.
     /// Either this or `--game-id` must be provided.
@@ -242,6 +247,36 @@ pub struct DumpEditorPreviewArgs {
     pub no_grid: bool,
 }
 
+/// Arguments for `validate`.
+#[derive(Debug, Args)]
+pub struct ValidateArgs {
+    /// RON validation suite manifest.
+    #[arg(long, default_value = "validation/suite.ron")]
+    pub manifest: PathBuf,
+    /// Runner to execute. Currently `psoxide`; manifest room is reserved for
+    /// `redux` and `duckstation`.
+    #[arg(long, default_value = "psoxide")]
+    pub runner: ValidationRunner,
+    /// Optional target-name filter.
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Optional checkpoint-name filter.
+    #[arg(long)]
+    pub checkpoint: Option<String>,
+    /// Run each selected checkpoint N times against the same baseline. Useful
+    /// for catching nondeterministic hashes without recooking the target.
+    #[arg(long, default_value_t = 1)]
+    pub repeat: u32,
+    /// Directory where failed validation runs write display/VRAM images and
+    /// metadata.
+    #[arg(long, default_value = "validation/artifacts")]
+    pub artifact_dir: PathBuf,
+    /// Write observed hashes back into the manifest instead of failing on
+    /// missing or changed baselines.
+    #[arg(long)]
+    pub bless: bool,
+}
+
 /// Entry point. Dispatches on `cli.command`; returns `Ok(())` on
 /// success, `Err` with a user-visible message on failure. `main()`
 /// prints the error and exits non-zero.
@@ -255,6 +290,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::BuildEditorPlaytestDisc => cmd_build_editor_playtest_disc(),
         Command::BuildProjectDisc(args) => cmd_build_project_disc(args),
         Command::DumpEditorPreview(args) => cmd_dump_editor_preview(args),
+        Command::Validate(args) => cmd_validate(&paths, args),
     }
 }
 
@@ -383,6 +419,34 @@ fn cmd_list(paths: &ConfigPaths) -> Result<(), String> {
 }
 
 fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
+    let _ = run_headless_launch(paths, args, true)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct HeadlessLaunchResult {
+    tick: u64,
+    cycles: u64,
+    pc: u32,
+    stopped_at: Option<u64>,
+    vram_hash: u64,
+    display_hash: u64,
+    display_width: u32,
+    display_height: u32,
+    display_byte_len: u64,
+    guest_frames: u64,
+    visual_frames: u64,
+    display_rgba: Vec<u8>,
+    display_rgba_width: u32,
+    display_rgba_height: u32,
+    vram_words: Vec<u16>,
+}
+
+fn run_headless_launch(
+    paths: &ConfigPaths,
+    args: LaunchArgs,
+    emit_summary: bool,
+) -> Result<HeadlessLaunchResult, String> {
     let settings = Settings::load(&paths.settings_file()).unwrap_or_default();
     if args.input_tape.is_some() && (args.hold_forward || args.hold_run) {
         return Err(
@@ -411,11 +475,13 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             if samples.is_empty() {
                 return Err(format!("input tape has no frames: {}", path.display()));
             }
-            eprintln!(
-                "[cli] loaded input tape {} ({} frames)",
-                path.display(),
-                samples.len()
-            );
+            if emit_summary {
+                eprintln!(
+                    "[cli] loaded input tape {} ({} frames)",
+                    path.display(),
+                    samples.len()
+                );
+            }
             Some(samples)
         }
         None => None,
@@ -450,12 +516,14 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             // intercepted by HLE dispatch.
             bus.enable_hle_bios();
             attach_headless_playtest_pad(&mut bus);
-            eprintln!(
-                "[cli] side-loaded {} — entry=0x{:08x} payload={}B",
-                game_path.display(),
-                exe.initial_pc,
-                exe.payload.len()
-            );
+            if emit_summary {
+                eprintln!(
+                    "[cli] side-loaded {} — entry=0x{:08x} payload={}B",
+                    game_path.display(),
+                    exe.initial_pc,
+                    exe.payload.len()
+                );
+            }
             bus
         }
         "bin" | "iso" => {
@@ -482,7 +550,9 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             }
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus);
-            eprintln!("[cli] mounted disc {}", game_path.display());
+            if emit_summary {
+                eprintln!("[cli] mounted disc {}", game_path.display());
+            }
             bus
         }
         "cue" => {
@@ -508,7 +578,9 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             }
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus);
-            eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
+            if emit_summary {
+                eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
+            }
             bus
         }
         "ccd" => {
@@ -529,7 +601,9 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
             );
             bus.cdrom.insert_disc(Some(disc));
             attach_headless_playtest_pad(&mut bus);
-            eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
+            if emit_summary {
+                eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
+            }
             bus
         }
         other => {
@@ -654,26 +728,22 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
     visual_hash_log.flush()?;
     guest_hash_log.flush()?;
 
-    println!(
-        "tick={}  cycles={}  pc=0x{:08x}{}",
-        cpu.tick(),
-        bus.cycles(),
-        cpu.pc(),
-        match stopped_at {
-            Some(i) => format!("  stopped-at={i}"),
-            None => String::new(),
-        }
-    );
+    if emit_summary {
+        println!(
+            "tick={}  cycles={}  pc=0x{:08x}{}",
+            cpu.tick(),
+            bus.cycles(),
+            cpu.pc(),
+            match stopped_at {
+                Some(i) => format!("  stopped-at={i}"),
+                None => String::new(),
+            }
+        );
+    }
     let gte_profile_after = cpu.cop2().profile_snapshot();
 
     if args.dump_hash {
-        let mut h = 0xCBF2_9CE4_8422_2325u64;
-        for &w in bus.gpu.vram.words() {
-            for b in w.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x0100_0000_01B3);
-            }
-        }
+        let h = hash_vram(&bus);
         let (dh, dw, dhi, _) = bus.gpu.display_hash();
         println!("vram_fnv1a_64=0x{h:016x}");
         println!("display_fnv1a_64=0x{dh:016x}  w={dw}  h={dhi}");
@@ -699,26 +769,50 @@ fn cmd_launch(paths: &ConfigPaths, args: LaunchArgs) -> Result<(), String> {
 
     if let Some(path) = args.dump_vram {
         dump_vram_ppm(&bus, &path)?;
-        eprintln!("[cli] VRAM → {}", path.display());
+        if emit_summary {
+            eprintln!("[cli] VRAM → {}", path.display());
+        }
     }
 
     if let Some(path) = args.dump_hw {
         let used_24bpp_fallback = dump_hw_ppm(&bus, &path)?;
-        if used_24bpp_fallback {
-            eprintln!(
-                "[cli] HW renderer → {} (24bpp display fallback)",
-                path.display()
-            );
-        } else {
-            eprintln!(
-                "[cli] HW renderer → {} ({} cmd_log entries replayed)",
-                path.display(),
-                bus.gpu.cmd_log.len()
-            );
+        if emit_summary {
+            if used_24bpp_fallback {
+                eprintln!(
+                    "[cli] HW renderer → {} (24bpp display fallback)",
+                    path.display()
+                );
+            } else {
+                eprintln!(
+                    "[cli] HW renderer → {} ({} cmd_log entries replayed)",
+                    path.display(),
+                    bus.gpu.cmd_log.len()
+                );
+            }
         }
     }
 
-    Ok(())
+    let (display_hash, display_width, display_height, display_byte_len) = bus.gpu.display_hash();
+    let (display_rgba, display_rgba_width, display_rgba_height) = bus.gpu.display_rgba8();
+    Ok(HeadlessLaunchResult {
+        tick: cpu.tick(),
+        cycles: bus.cycles(),
+        pc: cpu.pc(),
+        stopped_at,
+        vram_hash: hash_vram(&bus),
+        display_hash,
+        display_width,
+        display_height,
+        display_byte_len: display_byte_len as u64,
+        guest_frames: bus.telemetry.frames_seen(),
+        visual_frames: bus
+            .telemetry
+            .counter_total(telemetry::counter::VISUAL_FRAMES),
+        display_rgba,
+        display_rgba_width,
+        display_rgba_height,
+        vram_words: bus.gpu.vram.words().to_vec(),
+    })
 }
 
 fn cmd_build_editor_playtest_disc() -> Result<(), String> {
@@ -728,7 +822,13 @@ fn cmd_build_editor_playtest_disc() -> Result<(), String> {
 }
 
 fn cmd_build_project_disc(args: BuildProjectDiscArgs) -> Result<(), String> {
-    let (project_root, project_file) = resolve_project_arg(&args.project);
+    let dest_cue = build_project_disc_path(&args.project)?;
+    println!("{}", dest_cue.display());
+    Ok(())
+}
+
+fn build_project_disc_path(project_path: &Path) -> Result<PathBuf, String> {
+    let (project_root, project_file) = resolve_project_arg(project_path);
     let project_root = std::fs::canonicalize(&project_root)
         .map_err(|e| format!("project root {}: {e}", project_root.display()))?;
     let project_file = std::fs::canonicalize(&project_file)
@@ -755,8 +855,323 @@ fn cmd_build_project_disc(args: BuildProjectDiscArgs) -> Result<(), String> {
         dest_cue.display(),
         bytes / 1024
     );
-    println!("{}", dest_cue.display());
-    Ok(())
+    Ok(dest_cue)
+}
+
+fn cmd_validate(paths: &ConfigPaths, args: ValidateArgs) -> Result<(), String> {
+    if args.repeat == 0 {
+        return Err("--repeat must be at least 1".to_string());
+    }
+    if args.bless && args.repeat != 1 {
+        return Err("--bless cannot be combined with --repeat > 1".to_string());
+    }
+
+    let repo_root = cli_repo_root();
+    let manifest_path = resolve_cli_path(&repo_root, &args.manifest);
+    let manifest_dir = manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let artifact_dir = resolve_cli_path(&repo_root, &args.artifact_dir);
+    let mut suite = ValidationSuite::load(&manifest_path).map_err(|e| e.to_string())?;
+
+    let mut selected_checkpoints = 0usize;
+    let mut selected_runs = 0usize;
+    let mut failed = 0usize;
+    let mut blessed = false;
+    for target in &mut suite.targets {
+        if !matches_filter(&args.target, &target.name) {
+            continue;
+        }
+        let has_selected_checkpoint = target.checkpoints.iter().any(|checkpoint| {
+            matches_filter(&args.checkpoint, &checkpoint.name) && checkpoint.runner == args.runner
+        });
+        if !has_selected_checkpoint {
+            continue;
+        }
+        let target_name = target.name.clone();
+        let artifact = resolve_validation_artifact(&repo_root, &manifest_dir, &target.artifact)?;
+        for checkpoint in &mut target.checkpoints {
+            if !matches_filter(&args.checkpoint, &checkpoint.name)
+                || checkpoint.runner != args.runner
+            {
+                continue;
+            }
+            selected_checkpoints += 1;
+            if args.runner != ValidationRunner::Psoxide {
+                return Err(format!(
+                    "validation runner `{}` is present in the manifest but is not wired yet",
+                    args.runner
+                ));
+            }
+            let launch_args =
+                validation_launch_args(&repo_root, &manifest_dir, &artifact, checkpoint);
+            for repeat_index in 1..=args.repeat {
+                selected_runs += 1;
+                let result = run_headless_launch(paths, launch_args.clone(), false)?;
+                let actual = ActualHashes {
+                    display: PixelHash::from_u64(
+                        result.display_hash,
+                        result.display_width,
+                        result.display_height,
+                        result.display_byte_len,
+                    ),
+                    vram: format_hash(result.vram_hash),
+                };
+                let label =
+                    validation_run_label(&target_name, &checkpoint.name, repeat_index, args.repeat);
+
+                if args.bless {
+                    checkpoint.expected.bless(&actual);
+                    blessed = true;
+                    println!(
+                        "BLESS {label} display={} vram={} tick={} frames={}/{}",
+                        actual.display.hash,
+                        actual.vram,
+                        result.tick,
+                        result.guest_frames,
+                        result.visual_frames
+                    );
+                    continue;
+                }
+
+                let report = checkpoint.expected.compare(&actual);
+                if report.passed() {
+                    println!(
+                        "PASS  {label} display={} vram={} tick={} frames={}/{}",
+                        actual.display.hash,
+                        actual.vram,
+                        result.tick,
+                        result.guest_frames,
+                        result.visual_frames
+                    );
+                } else {
+                    failed += 1;
+                    let artifact_path = write_validation_failure_artifacts(
+                        &artifact_dir,
+                        &target_name,
+                        &checkpoint.name,
+                        repeat_index,
+                        args.repeat,
+                        &actual,
+                        &result,
+                    )?;
+                    println!(
+                        "FAIL  {label} display={} vram={} tick={} cycles={} pc=0x{:08x}{} frames={}/{} artifacts={}",
+                        actual.display.hash,
+                        actual.vram,
+                        result.tick,
+                        result.cycles,
+                        result.pc,
+                        match result.stopped_at {
+                            Some(step) => format!(" stopped-at={step}"),
+                            None => String::new(),
+                        },
+                        result.guest_frames,
+                        result.visual_frames,
+                        artifact_path.display()
+                    );
+                    for mismatch in report.mismatches {
+                        println!("      - {mismatch}");
+                    }
+                }
+            }
+        }
+    }
+
+    if selected_checkpoints == 0 {
+        return Err(format!(
+            "validation selected no checkpoints in {}",
+            manifest_path.display()
+        ));
+    }
+    if blessed {
+        suite
+            .save_pretty(&manifest_path)
+            .map_err(|e| e.to_string())?;
+        println!("updated {}", manifest_path.display());
+    }
+    if failed > 0 {
+        Err(format!(
+            "{failed}/{selected_runs} validation run(s) failed across {selected_checkpoints} checkpoint(s)"
+        ))
+    } else {
+        println!(
+            "{selected_runs} validation run(s) passed across {selected_checkpoints} checkpoint(s)"
+        );
+        Ok(())
+    }
+}
+
+fn validation_run_label(target: &str, checkpoint: &str, repeat_index: u32, repeat: u32) -> String {
+    if repeat > 1 {
+        format!("{target}:{checkpoint}#{repeat_index}/{repeat}")
+    } else {
+        format!("{target}:{checkpoint}")
+    }
+}
+
+fn write_validation_failure_artifacts(
+    artifact_root: &Path,
+    target: &str,
+    checkpoint: &str,
+    repeat_index: u32,
+    repeat: u32,
+    actual: &ActualHashes,
+    result: &HeadlessLaunchResult,
+) -> Result<PathBuf, String> {
+    let mut dir_name = format!(
+        "{}__{}",
+        sanitize_artifact_segment(target),
+        sanitize_artifact_segment(checkpoint)
+    );
+    if repeat > 1 {
+        dir_name.push_str(&format!("__run_{repeat_index:02}_of_{repeat:02}"));
+    }
+    let dir = artifact_root.join(dir_name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+
+    write_rgb_ppm_from_rgba(
+        &dir.join("display.ppm"),
+        result.display_rgba_width,
+        result.display_rgba_height,
+        &result.display_rgba,
+    )?;
+    write_vram_words_ppm(&dir.join("vram.ppm"), &result.vram_words)?;
+
+    let mut metadata = std::fs::File::create(dir.join("metadata.txt"))
+        .map_err(|e| format!("create metadata for {}: {e}", dir.display()))?;
+    writeln!(metadata, "target={target}").map_err(|e| e.to_string())?;
+    writeln!(metadata, "checkpoint={checkpoint}").map_err(|e| e.to_string())?;
+    writeln!(metadata, "repeat_index={repeat_index}").map_err(|e| e.to_string())?;
+    writeln!(metadata, "repeat_total={repeat}").map_err(|e| e.to_string())?;
+    writeln!(metadata, "display_hash={}", actual.display.hash).map_err(|e| e.to_string())?;
+    writeln!(metadata, "display_width={}", actual.display.width).map_err(|e| e.to_string())?;
+    writeln!(metadata, "display_height={}", actual.display.height).map_err(|e| e.to_string())?;
+    writeln!(metadata, "display_byte_len={}", actual.display.byte_len)
+        .map_err(|e| e.to_string())?;
+    writeln!(metadata, "vram_hash={}", actual.vram).map_err(|e| e.to_string())?;
+    writeln!(metadata, "tick={}", result.tick).map_err(|e| e.to_string())?;
+    writeln!(metadata, "cycles={}", result.cycles).map_err(|e| e.to_string())?;
+    writeln!(metadata, "pc=0x{:08x}", result.pc).map_err(|e| e.to_string())?;
+    if let Some(stopped_at) = result.stopped_at {
+        writeln!(metadata, "stopped_at={stopped_at}").map_err(|e| e.to_string())?;
+    }
+    writeln!(metadata, "guest_frames={}", result.guest_frames).map_err(|e| e.to_string())?;
+    writeln!(metadata, "visual_frames={}", result.visual_frames).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn sanitize_artifact_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unnamed".to_string()
+    } else {
+        out
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedValidationArtifact {
+    path: PathBuf,
+    embedded_playtest: bool,
+    bios_boot: bool,
+}
+
+fn resolve_validation_artifact(
+    repo_root: &Path,
+    manifest_dir: &Path,
+    artifact: &ValidationArtifact,
+) -> Result<ResolvedValidationArtifact, String> {
+    let (path, embedded_playtest, bios_boot) = match artifact {
+        ValidationArtifact::Project { project } => {
+            let project = resolve_manifest_path(repo_root, manifest_dir, project);
+            (build_project_disc_path(&project)?, true, false)
+        }
+        ValidationArtifact::Disc {
+            path,
+            embedded_playtest,
+            bios_boot,
+        } => (
+            resolve_manifest_path(repo_root, manifest_dir, path),
+            *embedded_playtest,
+            *bios_boot,
+        ),
+        ValidationArtifact::Example { path } | ValidationArtifact::Commercial { path } => (
+            resolve_manifest_path(repo_root, manifest_dir, path),
+            false,
+            false,
+        ),
+    };
+    Ok(ResolvedValidationArtifact {
+        path,
+        embedded_playtest,
+        bios_boot,
+    })
+}
+
+fn validation_launch_args(
+    repo_root: &Path,
+    manifest_dir: &Path,
+    artifact: &ResolvedValidationArtifact,
+    checkpoint: &psoxide_validation::ValidationCheckpoint,
+) -> LaunchArgs {
+    let input_tape = checkpoint
+        .input_tape
+        .as_ref()
+        .map(|path| resolve_manifest_path(repo_root, manifest_dir, path));
+    LaunchArgs {
+        path: Some(artifact.path.clone()),
+        game_id: None,
+        steps: checkpoint.stop.steps,
+        guest_frames: checkpoint.stop.guest_frames,
+        guest_visual_frames: checkpoint.stop.guest_visual_frames,
+        input_tape,
+        embedded_playtest: artifact.embedded_playtest,
+        bios_boot: artifact.bios_boot,
+        dump_hash: false,
+        visual_hash_log: None,
+        visual_hash_interval: 1,
+        guest_hash_log: None,
+        guest_hash_interval: 60,
+        dump_vram: None,
+        dump_hw: None,
+        dump_guest_profile: false,
+        hold_forward: checkpoint.hold_forward,
+        hold_run: checkpoint.hold_run,
+    }
+}
+
+fn matches_filter(filter: &Option<String>, value: &str) -> bool {
+    filter.as_ref().map_or(true, |filter| filter == value)
+}
+
+fn resolve_cli_path(repo_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() || path.exists() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    }
+}
+
+fn resolve_manifest_path(repo_root: &Path, manifest_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let local = manifest_dir.join(path);
+    if local.exists() {
+        local
+    } else {
+        repo_root.join(path)
+    }
 }
 
 fn run_make(repo_root: &Path, target: &str, extra_args: &[String]) -> Result<(), String> {
@@ -783,6 +1198,17 @@ fn cli_repo_root() -> PathBuf {
 fn attach_headless_playtest_pad(bus: &mut Bus) {
     bus.attach_digital_pad_port1();
     let _ = bus.force_port1_analog_mode();
+}
+
+fn hash_vram(bus: &Bus) -> u64 {
+    let mut hash = 0xCBF2_9CE4_8422_2325u64;
+    for &word in bus.gpu.vram.words() {
+        for byte in word.to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0100_0000_01B3);
+        }
+    }
+    hash
 }
 
 struct DisplayHashLog {
@@ -1356,13 +1782,16 @@ fn write_rgb_ppm_from_rgba(
 }
 
 fn dump_vram_ppm(bus: &Bus, path: &std::path::Path) -> Result<(), String> {
-    use std::io::Write;
+    write_vram_words_ppm(path, bus.gpu.vram.words())
+}
+
+fn write_vram_words_ppm(path: &std::path::Path, words: &[u16]) -> Result<(), String> {
     let w = emulator_core::VRAM_WIDTH;
     let h = emulator_core::VRAM_HEIGHT;
     let mut f = std::fs::File::create(path).map_err(|e| e.to_string())?;
     writeln!(f, "P6\n{w} {h}\n255").map_err(|e| e.to_string())?;
     let mut rgb = Vec::with_capacity(w * h * 3);
-    for &pix in bus.gpu.vram.words() {
+    for &pix in words {
         let r5 = (pix & 0x1F) as u8;
         let g5 = ((pix >> 5) & 0x1F) as u8;
         let b5 = ((pix >> 10) & 0x1F) as u8;
