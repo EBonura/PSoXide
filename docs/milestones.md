@@ -54,5 +54,3 @@ As of 2026-04-19 (see `emu/crates/emulator-core/tests/milestones.rs` for the fro
 **Active investigation threads**:
 - Closing the Crash cycle-accuracy gap (currently -6% at 900M) needs identifying why our BIOS issues 5 DMA schedules in a window Redux issues 3 -- the extra schedules overwrite scheduler targets and delay IRQ fire. `probe_dma_schedules` + `probe_dma_timeline` + `probe_isr_trace` are the tools for this.
 - Redux-verified 500M / D display hashes are pending fresh capture (oracle is slow; not blocking).
-
-See [../PROGRESS.md](../PROGRESS.md) for the chronological log.

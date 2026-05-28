@@ -8,7 +8,7 @@
 //! `--dump-every` cycles so a human can scrub through them.
 //!
 //! ```bash
-//! PSOXIDE_DISC="/home/user/Downloads/<rom-path>" \
+//! PSOXIDE_DISC="<rom-path>" \
 //! cargo run -p emulator-core --example probe_tekken_charsel --release -- \
 //!   --steps 3000000000 --dump-every 100000000 --out-dir /tmp/tekken
 //! ```
@@ -96,9 +96,9 @@ fn main() {
 
     let bios_path = std::env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/home/user/Downloads/bios/SCPH1001.BIN"));
+        .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
     let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "/home/user/Downloads/<rom-path>".into()
+        "<rom-path>".into()
     });
 
     std::fs::create_dir_all(&out_dir).expect("create out dir");

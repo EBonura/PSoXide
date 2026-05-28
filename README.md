@@ -10,21 +10,35 @@
   <img alt="Platforms: macOS · Linux" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux-lightgrey.svg">
 </p>
 
-PSoXide is a Rust-native PlayStation 1 platform. It is deliberately
-all three pieces in one repository:
+PSoXide is an open-source PlayStation 1 development stack written in
+Rust. It is deliberately all of these pieces in one repository:
 
-- a PS1 emulator and debugger frontend,
-- a PS1 homebrew SDK and runtime engine,
-- an editor plus a playable PSX game prototype.
+- a PS1 emulator and debugger frontend;
+- a Rust-based PS1 homebrew SDK;
+- a runtime engine for actual PS1 hardware;
+- an asset pipeline and editor for rooms, entities, models, textures,
+  animations, and playtesting;
+- CUE/BIN disc-image builders for examples and authored projects.
 
-The through-line is consistency. The editor cooks the same asset
-formats that the runtime reads, Play builds the same PSX executable
-and streamed disc image that headless tests boot, and the emulator
-frontend is both the development debugger and the game test harness.
+The goal is not just "PS1-style" output. PSoXide builds real
+PlayStation-compatible homebrew artifacts. Public examples and editor
+projects can be exported as disc images that run in emulators or on
+original hardware, while the same emulator frontend is used for
+development, debugging, validation, and in-editor Play.
 
-This is research-grade software. It is useful, hackable, and moving
-fast, but it is not a polished emulator release, not a stable public
-SDK, and not a finished game editor yet.
+The current engine/editor direction is focused on the game being built
+with it: a dark, third-person PS1 action-adventure / souls-like vertical
+slice with room-grid worlds, low-poly characters, low-resolution
+textures, and hardware-conscious runtime data. Broader engine features
+may come later, but the immediate priority is shipping that vertical
+slice and proving the full PS1 pipeline end to end.
+
+This is still early software. It is useful, hackable, and moving fast,
+but it is not a stable public SDK, not a general-purpose commercial game
+engine, not a Godot fork, and not a tool for importing/editing existing
+PS1 games.
+
+Project page: <https://bonnie-games.itch.io/psoxide>
 
 ## Media
 
@@ -48,12 +62,13 @@ What works today:
   timers, MDEC, and SPU paths needed by the current canaries.
 - Desktop frontend built with winit, wgpu, egui, cpal, and gilrs.
 - Debugger-style panels for registers, memory, VRAM, execution history,
-  profiler data, and game/example launching.
+  profiler data, savestates, library scanning, and game/example launching.
 - BIOS boot canaries for logo/shell paths and commercial-disc boot
   canaries used as ignored regression tests.
-- MIPS Rust SDK examples targeting `mipsel-sony-psx`.
+- MIPS Rust SDK examples targeting `mipsel-sony-psx`, exported as
+  PS1-compatible CUE/BIN discs.
 - Runtime engine examples for sprites, text, 3D meshes, lighting, fog,
-  particles, rooms, and small games.
+  particles, rooms, CD-DA playback, and small games.
 - A streamed room runtime for editor playtests: compact collision
   payloads, prebuilt room render caches, room-chunk residency,
   CD-sector packing, and 60 Hz simulation with paced visual frames.
@@ -67,6 +82,10 @@ What works today:
   raw disc image with streamed room chunks, boots that disc through the
   HLE BIOS path without requiring a user BIOS, and displays the live
   game framebuffer inside the editor's 3D viewport.
+- Headless project export with `frontend build-project-disc`, producing
+  a project-local `baked/*.cue` + `.bin` pair.
+- Exact-hash validation manifests for repeatable display/VRAM regression
+  checks.
 - Headless profiling and screenshot capture for geometry-heavy
   playtests, including streamed demo3 frame pacing and CD-room-load
   telemetry.
@@ -75,15 +94,20 @@ What is not done:
 
 - General commercial-game compatibility is incomplete. Timing drift and
   long-tail peripheral behavior are still active emulator research.
-- CD-DA, SPU reverb, more peripherals, memory cards, and edge-case GPU
-  behavior need more completeness work.
+- Audio is still comparatively immature. CD-DA works in targeted demos,
+  but SPU reverb, broader SPU edge cases, and richer runtime audio APIs
+  need more completeness work.
+- More peripherals, memory cards, and edge-case GPU behavior need more
+  coverage.
 - The editor is a prototype. It has real project/cook/play flow, but
   needs project templates, import UX, richer validation, undo depth,
   packaging, and more stable authoring ergonomics.
 - The SDK and engine APIs are not semver-stable.
-- No release binaries are published. Build from source.
+- Data formats are still changing while the runtime is optimized around
+  real PS1 constraints.
+- No stable release binaries are published yet. Build from source.
 
-## First Clone Path
+## Quick Start
 
 ### 1. Install dependencies
 
@@ -122,7 +146,30 @@ make test
 The fast defaults do not require commercial games or PCSX-Redux.
 Canaries and parity tests are ignored by default.
 
-### 3. Configure a BIOS For Retail Discs
+### 3. Build and boot a homebrew example
+
+Homebrew examples do not require a retail BIOS. They build through the
+Rust PSX target, package a PS1-compatible disc image, and boot through
+PSoXide's HLE BIOS path:
+
+```bash
+make hello-tri-disc
+make run-tri
+```
+
+To build the public example set:
+
+```bash
+make examples
+```
+
+The generated CUE/BIN/EXE artifacts live under:
+
+```text
+build/examples/mipsel-sony-psx/release/
+```
+
+### 4. Configure a BIOS for retail discs
 
 PSoXide does not include a PlayStation BIOS and will not download one
 for you. The bundled homebrew examples and editor Play flow do not need
@@ -144,7 +191,9 @@ export PSOXIDE_BIOS=/absolute/path/to/SCPH1001.BIN
 When both are set, the saved `settings.ron` path takes precedence over
 the environment variable.
 
-### 4. Launch the frontend
+Only use BIOS images and game disc images you legally own.
+
+### 5. Launch the frontend
 
 ```bash
 make run
@@ -160,7 +209,7 @@ cargo run -p frontend -- scan --root /path/to/games
 cargo run -p frontend -- list
 ```
 
-### 5. Open the editor
+### 6. Open the editor
 
 Launch the frontend, then use the Menu Create column to open the editor
 workspace. The default project lives at:
@@ -203,6 +252,24 @@ Default keyboard pad bindings:
 For the editor-playtest third-person movement work, press F9 to toggle
 DualShock analog mode. Circle is run.
 
+### 7. Export an authored project disc
+
+The headless frontend can cook an editor project, build the PSX runtime,
+package the streamed room data, and copy the resulting CUE/BIN pair into
+the project's ignored `baked/` directory:
+
+```bash
+cargo run --manifest-path emu/Cargo.toml -p frontend --release -- \
+  build-project-disc --project editor/projects/default
+```
+
+For a quick editor-preview render without opening the GUI:
+
+```bash
+cargo run --manifest-path emu/Cargo.toml -p frontend --release -- \
+  dump-editor-preview --project editor/projects/default --out /tmp/psoxide-preview.ppm
+```
+
 ## Build Targets
 
 The Makefile is the source of truth; run `make help` for the exhaustive
@@ -214,6 +281,7 @@ make test       # fast non-ignored tests
 make fmt        # rustfmt across every workspace/tool
 make lint       # clippy -D warnings across every workspace/tool
 make clean      # cargo clean across workspaces/tools and remove build/
+make validate   # exact-hash validation matrix
 ```
 
 Optional emulator parity and compatibility checks:
@@ -225,12 +293,14 @@ make parity                   # compare trace output against the oracle path
 make oracle-smoke             # verify the parity oracle can run
 make oracle-side-load         # compare SDK side-loaded EXEs against oracle
 make oracle-disc-smoke        # compare a local disc checkpoint against oracle
+make validate-repeat          # run validation repeatedly for determinism
+make validate-bless           # update validation baselines
 ```
 
 SDK, engine, and demo builds:
 
 ```bash
-make examples      # build every SDK/engine example
+make examples      # build every public SDK/engine/game example disc
 make test-sdk      # build SDK examples and run SDK regression coverage
 make psxed         # build the content-pipeline CLI
 make assets        # cook shared source assets via psxed
@@ -238,13 +308,23 @@ make hello-tri     # build one SDK example
 make showcase-model # build one engine showcase
 make game-pong     # build one mini-game
 make game-magikaaaaaarp-pong-disc # build magikAAAAArp Pong with CD-DA
-make run-tri       # build and side-load an example into the frontend
+make run-tri       # build and boot an example disc in the frontend
 ```
 
-The frontend's Examples menu lists built `.exe` files from
+The frontend's Examples menu uses artifacts from
 `build/examples/mipsel-sony-psx/release/`. On a fresh clone, use
 `make examples` or choose **Build public examples** in the Examples
 menu, then the launcher will rescan and populate the list.
+
+Headless frontend commands:
+
+```bash
+cargo run --manifest-path emu/Cargo.toml -p frontend --release -- info
+cargo run --manifest-path emu/Cargo.toml -p frontend --release -- scan --root discs
+cargo run --manifest-path emu/Cargo.toml -p frontend --release -- launch --path build/examples/mipsel-sony-psx/release/hello-tri.cue
+cargo run --manifest-path emu/Cargo.toml -p frontend --release -- build-project-disc --project editor/projects/default
+cargo run --manifest-path emu/Cargo.toml -p frontend --release -- validate --manifest validation/suite.ron
+```
 
 Editor/playtest internals:
 
@@ -273,8 +353,8 @@ breakdown, a final hardware-render PPM, and visual-frame hashes under
 
 The repo ships runnable examples that double as the de-facto test suite
 for the SDK and engine. Each builds for `mipsel-sony-psx` and runs
-end-to-end through the emulator frontend (`make <name>` to build,
-`make run-<name>` where supported).
+end-to-end through the emulator frontend (`make <name>-disc` to build a
+disc, `make run-<name>` where supported).
 
 | `hello-tri` | `hello-tex` | `hello-input` |
 | --- | --- | --- |
@@ -348,18 +428,22 @@ Generated contract:
   tracked placeholder so the runtime template builds from a clean tree.
 - Cooked generated manifests, rooms, textures, models, and built EXEs
   are ignored and regenerated by editor Play or `make cook-playtest`.
+- PSX target/linker flags for examples are owned by the top-level
+  `Makefile`; local `.cargo/` config directories are intentionally
+  ignored.
 - `/build/` is an output directory, not source.
 
 ## External Files
 
-Not included:
+Not included and intentionally ignored:
 
-- PlayStation BIOS images, required only for retail/commercial disc boot
-  and BIOS/parity canaries.
-- Commercial game disc images.
+- PlayStation BIOS images. Put local dumps under `bios/` or configure
+  an absolute path in the frontend settings.
+- Commercial game disc images. Put local owned dumps under `discs/` or
+  scan another path from the frontend/CLI.
 - PCSX-Redux binaries or source trees.
-- Large original texture/model sources beyond the small committed demo
-  inputs.
+- Large original texture/model/audio sources beyond the small committed
+  demo inputs. Keep import experiments under `local-assets/`.
 
 Ignored tests and parity tools may require:
 
@@ -368,16 +452,21 @@ Ignored tests and parity tools may require:
 - a local PCSX-Redux build from the PSoXide oracle branch,
 - local game images you legally own.
 
+PSoXide does not include or download Sony BIOS files or commercial game
+data. Do not redistribute BIOS images or game dumps with projects built
+from this repo.
+
 ## License
 
 PSoXide is licensed under the **GNU General Public License, version 2
 or (at your option) any later version**. The full license text is in
-[LICENSE](LICENSE); third-party references and provenance are in
-[NOTICE.md](NOTICE.md).
+[LICENSE](LICENSE); third-party references and provenance notes are in
+the same file.
 
 The GPL choice is deliberate: the emulator core builds on PCSX-Redux
 as a parity oracle and reference, and PCSX-Redux is GPL-2.0-or-later.
 Releasing PSoXide under the same license keeps the lineage clean.
 
-Outstanding non-license release items (asset provenance, BIOS-output
-goldens, and public packaging) are still in progress.
+Asset provenance is tracked in
+[`docs/asset-provenance.md`](docs/asset-provenance.md). Third-party
+reference notes and non-redistribution notices live in `LICENSE`.

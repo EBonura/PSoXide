@@ -16,10 +16,10 @@ use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
-const DEFAULT_CTR_DISC: &str = "/home/user/Downloads/<rom-path>";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_CTR_DISC: &str = "<rom-path>";
 const DEFAULT_METAL_SLUG_X_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 
 const SPU_PUMP_CYCLES: u64 = 560_000;
 const SPU_FRAME_SAMPLES: usize = 735;

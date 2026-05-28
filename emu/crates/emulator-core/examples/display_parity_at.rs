@@ -30,7 +30,7 @@ fn main() {
 
     let bios_path = env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/home/user/Downloads/bios/SCPH1001.BIN"));
+        .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
 
     // --- Capture Redux side ---
     // Redux accepts the disc via `-iso PATH`; OracleConfig threads it

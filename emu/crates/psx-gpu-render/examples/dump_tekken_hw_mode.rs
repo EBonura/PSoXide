@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
-const DEFAULT_DISC: &str = "/home/user/Downloads/<rom-path>";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_DISC: &str = "<rom-path>";
 const DEFAULT_OUT_DIR: &str = "/tmp/tekken-hw-mode";
 const DEFAULT_STEPS: u64 = 220_000_000;
 const TEKKEN_MENU_PULSES: &str = "0x0008@100+30,0x0008@500+30,0x0008@850+30,\
