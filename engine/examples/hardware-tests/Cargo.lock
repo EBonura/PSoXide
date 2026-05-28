@@ -17,6 +17,7 @@ dependencies = [
  "psx-gpu",
  "psx-gte",
  "psx-io",
+ "psx-pad",
  "psx-rt",
  "psx-spu",
  "psx-vram",
