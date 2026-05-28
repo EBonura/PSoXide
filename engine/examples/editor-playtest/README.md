@@ -141,7 +141,7 @@ What it *does* render:
 
 - `src/main.rs` -- Scene impl, camera, input, draw call, residency wiring.
 - `Cargo.toml` -- standalone PSX-target crate (its own `[workspace]`).
-- `.cargo/config.toml` -- pins `target = "mipsel-sony-psx"`.
+- `Makefile` -- passes the PSX target, build-std, target-dir, and linker flags.
 - `generated/level_manifest.rs` -- tracked placeholder; keep free of `include_bytes!`.
 - `generated/level_manifest.cooked.rs` -- generated; do not edit; gitignored.
 - `generated/world_pack_order.txt` -- generated CD streaming order hint; do not edit; gitignored.

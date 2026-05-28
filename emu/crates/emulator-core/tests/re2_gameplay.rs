@@ -17,8 +17,8 @@ use emulator_core::{
     DISC_FAST_BOOT_WARMUP_STEPS,
 };
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
-const DEFAULT_RE2_DISC: &str = "/home/user/Downloads/<rom-path>";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_RE2_DISC: &str = "<rom-path>";
 const GAMEPLAY_STEPS: u64 = 1_200_000_000;
 const SPU_PUMP_CYCLES: u64 = 560_000;
 const SPU_FRAME_SAMPLES: usize = 735;

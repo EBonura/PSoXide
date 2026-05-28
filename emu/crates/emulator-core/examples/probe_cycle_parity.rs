@@ -46,7 +46,7 @@ fn main() {
         ),
         (
             "crash",
-            Some("/home/user/Downloads/<rom-path>"),
+            Some("<rom-path>"),
             &[
                 (100_000_000, 235_279_073),
                 // Print just this one -- we'll run with different step
@@ -68,8 +68,8 @@ fn main() {
             .collect();
         println!("(override) running crash at {steps:?}");
         let disc =
-            "/home/user/Downloads/<rom-path>";
-        let bios = std::fs::read("/home/user/Downloads/bios/SCPH1001.BIN").expect("BIOS");
+            "<rom-path>";
+        let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
         let mut bus = Bus::new(bios).expect("bus");
         let disc_bytes = std::fs::read(disc).expect("disc");
         bus.cdrom.insert_disc(Some(Disc::from_bin(disc_bytes)));
@@ -92,7 +92,7 @@ fn main() {
         return;
     }
 
-    let bios = std::fs::read("/home/user/Downloads/bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     println!(
         "{:<8} {:>12} {:>14} {:>14} {:>10} {:>10}",
         "scenario", "steps", "our_cycles", "redux_tick", "delta", "pct_off"

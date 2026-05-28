@@ -31,7 +31,7 @@ fn main() {
 
     let bios_path = std::env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/home/user/Downloads/bios/SCPH1001.BIN"));
+        .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
     let bios = std::fs::read(&bios_path).expect("BIOS readable");
     let mut bus = Bus::new(bios).expect("bus");
     if let Ok(disc_path) = std::env::var("PSOXIDE_DISC") {

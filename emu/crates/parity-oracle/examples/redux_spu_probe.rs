@@ -11,9 +11,9 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
