@@ -48,6 +48,8 @@ const TIMER_MODE_IRQ_INACTIVE: u16 = 1 << 10;
 const TIMER_MODE_REACHED_TARGET: u16 = 1 << 11;
 const TIMER_MODE_REACHED_WRAP: u16 = 1 << 12;
 
+static SPIN_SINK: u32 = 0;
+
 const fn mips_r(rs: u32, rt: u32, rd: u32, shamt: u32, funct: u32) -> u32 {
     (rs << 21) | (rt << 16) | (rd << 11) | (shamt << 6) | funct
 }
@@ -2137,7 +2139,9 @@ fn expect_eq(expected: u32, observed: u32, note: &'static str) -> TestResult {
 
 fn spin(count: u32) {
     for _ in 0..count {
-        core::hint::spin_loop();
+        unsafe {
+            ptr::read_volatile(&raw const SPIN_SINK);
+        }
     }
 }
 

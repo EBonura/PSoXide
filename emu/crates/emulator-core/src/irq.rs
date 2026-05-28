@@ -112,6 +112,14 @@ impl Irq {
         self.peak_stat |= self.stat;
     }
 
+    /// Clear one pending source bit directly. Most software uses the
+    /// `I_STAT` AND-acknowledge register path, but a few peripherals
+    /// also expose their own acknowledge command that drops the same
+    /// latched interrupt source.
+    pub fn clear(&mut self, source: IrqSource) {
+        self.stat &= !(1u32 << (source as u32));
+    }
+
     /// `true` when some source is both pending and enabled -- drives the
     /// single CPU IP[2] pin.
     pub fn pending(&self) -> bool {
