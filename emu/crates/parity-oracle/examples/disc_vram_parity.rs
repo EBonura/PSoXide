@@ -36,7 +36,7 @@ use emulator_core::{Bus, Cpu};
 use parity_oracle::{OracleConfig, ReduxProcess};
 use psx_iso::Disc;
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HASH_TIMEOUT: Duration = Duration::from_secs(60);
 

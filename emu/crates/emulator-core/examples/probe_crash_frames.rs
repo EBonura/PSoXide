@@ -19,7 +19,7 @@ mod frame_probe;
 fn main() {
     let bios = frame_probe::read_bios();
     let disc = fs::read(
-        "/home/user/Downloads/<rom-path>",
+        "<rom-path>",
     )
     .expect("disc");
     let mut bus = Bus::new(bios).expect("bus");

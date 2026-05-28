@@ -11,7 +11,7 @@
 //!   (Redux can SIGSEGV mid-run; we must not block forever on a dead
 //!   process).
 //! - The run directory lives under `std::env::temp_dir()`, which on
-//!   macOS is `/var/folders/.../T/`, **not** `/tmp`.
+//!   macOS may use a platform-specific temporary directory, not `/tmp`.
 //!
 //! The public surface is intentionally minimal right now: configure,
 //! launch, wait for a stdout marker, terminate. HTTP/stepping APIs

@@ -69,9 +69,9 @@ fn main() {
 
     let bios_path = std::env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/home/user/Downloads/bios/SCPH1001.BIN"));
+        .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
     let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "/home/user/Downloads/<rom-path>".into()
+        "<rom-path>".into()
     });
     let held_buttons = std::env::var("PSOXIDE_PAD1")
         .ok()

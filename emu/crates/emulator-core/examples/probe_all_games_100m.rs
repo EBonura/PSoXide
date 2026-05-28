@@ -27,39 +27,39 @@ fn main() {
         ("bios_no_disc", ""),
         (
             "crash",
-            "/home/user/Downloads/<rom-path>",
+            "<rom-path>",
         ),
         (
             "tekken",
-            "/home/user/Downloads/<rom-path>",
+            "<rom-path>",
         ),
         (
             "gt2",
-            "/home/user/Downloads/<rom-path>",
+            "<rom-path>",
         ),
         (
             "mgs",
-            "/home/user/Downloads/<rom-path>",
+            "<rom-path>",
         ),
         (
             "re2",
-            "/home/user/Downloads/<rom-path>",
+            "<rom-path>",
         ),
         (
             "wipeout1",
-            "/home/user/Downloads/<rom-path>",
+            "<rom-path>",
         ),
         (
             "wipeout2097",
-            "/home/user/Downloads/<rom-path>",
+            "<rom-path>",
         ),
         (
             "wipeout3",
-            "/home/user/Downloads/<rom-path>",
+            "<rom-path>",
         ),
     ];
 
-    let bios = std::fs::read("/home/user/Downloads/bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     println!(
         "Expected Sony-logo hash (Redux-verified): 0x{:016x}",
         EXPECTED_SONY_LOGO_HASH,
