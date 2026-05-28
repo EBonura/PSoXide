@@ -1,6 +1,6 @@
 {
   "name": "GONCHAROV",
-  "source_path": "~/Downloads/YTDown_YouTube_GONCHAROV-Karaoke-Version-Official-Video_Media_GFJip2tEPsI_007_128k.mp3",
+  "source_path": "local-assets/audio/goncharov-source.mp3",
   "source_format": {
     "codec": "mp3",
     "sample_rate_hz": 44100,

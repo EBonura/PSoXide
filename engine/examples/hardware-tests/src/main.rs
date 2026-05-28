@@ -13,16 +13,16 @@
 
 extern crate psx_rt;
 
-use core::{mem, ptr};
+use core::ptr;
 
 use psx_engine::{button, App, Config, Ctx, Scene};
 use psx_font::{fonts::BASIC, FontAtlas};
-use psx_gpu::{self as gpu, Resolution, VideoMode};
+use psx_gpu::{self as gpu, prim, Resolution, VideoMode};
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::ops as gte_ops;
 use psx_gte::regs::pack_xy as pack_gte_xy;
 use psx_gte::{cfc2, ctc2, mfc2, mtc2, scene as gte_scene};
-use psx_io::{cdrom, dma, gpu as gpu_io, timers};
+use psx_io::{cdrom, dma, gpu as gpu_io, irq, sio, timers};
 use psx_rt::tty;
 use psx_vram::{Clut, TexDepth, Tpage};
 
@@ -33,9 +33,22 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 7;
-const TEST_COUNT: usize = 36;
-const PAD_POLL_TEST_INDEX: usize = 19;
-const MODE_COUNT: u8 = 14;
+const TEST_COUNT: usize = 49;
+const PAD_POLL_TEST_INDEX: usize = 26;
+const MODE_COUNT: u8 = 15;
+const CHECK_MODES: [Mode; 11] = [
+    Mode::AllChecks,
+    Mode::CpuChecks,
+    Mode::MemoryChecks,
+    Mode::IrqChecks,
+    Mode::DmaChecks,
+    Mode::TimerChecks,
+    Mode::GpuChecks,
+    Mode::GteChecks,
+    Mode::SpuChecks,
+    Mode::CdromChecks,
+    Mode::SioChecks,
+];
 
 const TIMER_MODE_SYNC_ENABLE: u16 = 1 << 0;
 const TIMER_MODE_SYNC_MODE_1: u16 = 1 << 1;
@@ -72,6 +85,7 @@ enum Mode {
     AllChecks,
     CpuChecks,
     MemoryChecks,
+    IrqChecks,
     DmaChecks,
     TimerChecks,
     GpuChecks,
@@ -91,6 +105,7 @@ impl Mode {
             Self::AllChecks => "ALL CHECKS",
             Self::CpuChecks => "CPU CHECKS",
             Self::MemoryChecks => "RAM CHECKS",
+            Self::IrqChecks => "IRQ CHECKS",
             Self::DmaChecks => "DMA CHECKS",
             Self::TimerChecks => "TIMER CHECKS",
             Self::GpuChecks => "GPU CHECKS",
@@ -110,6 +125,7 @@ impl Mode {
             Self::AllChecks
             | Self::CpuChecks
             | Self::MemoryChecks
+            | Self::IrqChecks
             | Self::DmaChecks
             | Self::TimerChecks
             | Self::GpuChecks
@@ -129,6 +145,7 @@ impl Mode {
             Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
             Self::CpuChecks => "CPU INSTRUCTIONS AND MEMORY ACCESS",
             Self::MemoryChecks => "RAM KSEG AND SCRATCHPAD CHECKS",
+            Self::IrqChecks => "INTERRUPT MASK STATUS ACK CHECKS",
             Self::DmaChecks => "DMA CHANNEL AND OTC BEHAVIOUR",
             Self::TimerChecks => "ROOT COUNTER TIMING AND IRQS",
             Self::GpuChecks => "GPU STATUS COMMAND AND IRQ CHECKS",
@@ -148,6 +165,7 @@ impl Mode {
             Self::AllChecks
             | Self::CpuChecks
             | Self::MemoryChecks
+            | Self::IrqChecks
             | Self::DmaChecks
             | Self::TimerChecks
             | Self::GpuChecks
@@ -167,17 +185,18 @@ impl Mode {
             Self::AllChecks => 0,
             Self::CpuChecks => 1,
             Self::MemoryChecks => 2,
-            Self::DmaChecks => 3,
-            Self::TimerChecks => 4,
-            Self::GpuChecks => 5,
-            Self::GteChecks => 6,
-            Self::SpuChecks => 7,
-            Self::CdromChecks => 8,
-            Self::SioChecks => 9,
-            Self::CpuScan => 10,
-            Self::GteScan => 11,
-            Self::SpuScan => 12,
-            Self::TimingScan => 13,
+            Self::IrqChecks => 3,
+            Self::DmaChecks => 4,
+            Self::TimerChecks => 5,
+            Self::GpuChecks => 6,
+            Self::GteChecks => 7,
+            Self::SpuChecks => 8,
+            Self::CdromChecks => 9,
+            Self::SioChecks => 10,
+            Self::CpuScan => 11,
+            Self::GteScan => 12,
+            Self::SpuScan => 13,
+            Self::TimingScan => 14,
         }
     }
 
@@ -186,16 +205,17 @@ impl Mode {
             0 => Self::AllChecks,
             1 => Self::CpuChecks,
             2 => Self::MemoryChecks,
-            3 => Self::DmaChecks,
-            4 => Self::TimerChecks,
-            5 => Self::GpuChecks,
-            6 => Self::GteChecks,
-            7 => Self::SpuChecks,
-            8 => Self::CdromChecks,
-            9 => Self::SioChecks,
-            10 => Self::CpuScan,
-            11 => Self::GteScan,
-            12 => Self::SpuScan,
+            3 => Self::IrqChecks,
+            4 => Self::DmaChecks,
+            5 => Self::TimerChecks,
+            6 => Self::GpuChecks,
+            7 => Self::GteChecks,
+            8 => Self::SpuChecks,
+            9 => Self::CdromChecks,
+            10 => Self::SioChecks,
+            11 => Self::CpuScan,
+            12 => Self::GteScan,
+            13 => Self::SpuScan,
             _ => Self::TimingScan,
         }
     }
@@ -206,6 +226,7 @@ impl Mode {
             Self::AllChecks
                 | Self::CpuChecks
                 | Self::MemoryChecks
+                | Self::IrqChecks
                 | Self::DmaChecks
                 | Self::TimerChecks
                 | Self::GpuChecks
@@ -221,6 +242,7 @@ impl Mode {
             Self::AllChecks => true,
             Self::CpuChecks => spec.group == "CPU",
             Self::MemoryChecks => spec.group == "RAM",
+            Self::IrqChecks => spec.group == "IRQ",
             Self::DmaChecks => spec.group == "DMA",
             Self::TimerChecks => spec.group == "TMR",
             Self::GpuChecks => spec.group == "GPU",
@@ -242,6 +264,16 @@ impl Mode {
 }
 
 impl Status {
+    const fn code(self) -> u32 {
+        match self {
+            Self::Pass => 1,
+            Self::Fail => 2,
+            Self::Warn => 3,
+            Self::Info => 4,
+            Self::Pending => 0,
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::Pass => "PASS",
@@ -364,6 +396,17 @@ impl ScanReport {
     }
 }
 
+#[derive(Copy, Clone)]
+struct SectionReport {
+    cases: u16,
+    pass: u16,
+    fail: u16,
+    warn: u16,
+    info: u16,
+    pending: u16,
+    hash: u32,
+}
+
 const TESTS: [TestSpec; TEST_COUNT] = [
     TestSpec {
         group: "CPU",
@@ -411,9 +454,29 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         run: test_kseg1_alias,
     },
     TestSpec {
+        group: "IRQ",
+        name: "I_MASK register roundtrip",
+        run: test_irq_mask_roundtrip,
+    },
+    TestSpec {
+        group: "IRQ",
+        name: "GPU IRQ visible through I_STAT",
+        run: test_irq_gpu_ack_path,
+    },
+    TestSpec {
         group: "DMA",
         name: "OTC reverse linked-list clear",
         run: test_dma_otc_clear,
+    },
+    TestSpec {
+        group: "DMA",
+        name: "channel register roundtrip",
+        run: test_dma_channel_register_roundtrip,
+    },
+    TestSpec {
+        group: "DMA",
+        name: "DPCR priority enable latch",
+        run: test_dma_dpcr_roundtrip,
     },
     TestSpec {
         group: "TMR",
@@ -436,6 +499,11 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         run: test_gpu_irq_ack,
     },
     TestSpec {
+        group: "GPU",
+        name: "primitive packet encoding",
+        run: test_gpu_primitive_packet_encoding,
+    },
+    TestSpec {
         group: "GTE",
         name: "data/control register roundtrip",
         run: test_gte_register_roundtrip,
@@ -451,6 +519,11 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         run: test_gte_all_ops_digest,
     },
     TestSpec {
+        group: "GTE",
+        name: "NCLIP MAC0 winding sign",
+        run: test_gte_nclip_mac0,
+    },
+    TestSpec {
         group: "SPU",
         name: "SPUSTAT readable",
         run: test_spu_status_readable,
@@ -461,9 +534,19 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         run: test_spu_voice_registers,
     },
     TestSpec {
+        group: "SPU",
+        name: "main volume register roundtrip",
+        run: test_spu_main_volume_roundtrip,
+    },
+    TestSpec {
         group: "SIO",
         name: "port 1 pad poll",
         run: test_pad_poll,
+    },
+    TestSpec {
+        group: "SIO",
+        name: "mode control baud latches",
+        run: test_sio_register_latches,
     },
     TestSpec {
         group: "GPU",
@@ -541,9 +624,34 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         run: test_cdrom_getstat_response,
     },
     TestSpec {
+        group: "CD",
+        name: "CD-ROM register index latch",
+        run: test_cdrom_index_latch,
+    },
+    TestSpec {
         group: "SIO",
         name: "direct port 1 pad poll stability",
         run: test_pad_direct_stability,
+    },
+    TestSpec {
+        group: "CPU",
+        name: "MIPS-I unaligned load/store pairs",
+        run: test_cpu_unaligned_load_store_pairs,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "DMA direction mode latch",
+        run: test_gpu_dma_direction_mode_latch,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "GP1 info environment readback",
+        run: test_gpu_gp1_info_environment_readback,
+    },
+    TestSpec {
+        group: "TMR",
+        name: "target register roundtrip",
+        run: test_timer_target_register_roundtrip,
     },
 ];
 
@@ -562,6 +670,26 @@ struct HardwareTests {
     page: usize,
     rerun_count: u8,
 }
+
+#[cfg(target_arch = "mips")]
+fn enable_cop2_for_diagnostics() {
+    let mut sr: u32;
+    unsafe {
+        core::arch::asm!("mfc0 $8, $12", lateout("$8") sr);
+        sr |= 0x4000_0000;
+        core::arch::asm!(
+            "mtc0 $8, $12",
+            "nop",
+            "nop",
+            "nop",
+            in("$8") sr,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn enable_cop2_for_diagnostics() {}
 
 impl HardwareTests {
     const fn new() -> Self {
@@ -589,6 +717,19 @@ impl HardwareTests {
         self.recount();
         self.rerun_count = self.rerun_count.wrapping_add(1);
         print_conformance_report(self);
+        print_all_section_reports(&self.results);
+        print_case_reports(Mode::AllChecks, &self.results);
+    }
+
+    fn run_startup_scans(&mut self) {
+        self.cpu_scan = run_cpu_scan();
+        print_scan_report(Mode::CpuScan, self.cpu_scan);
+        self.gte_scan = run_gte_scan();
+        print_scan_report(Mode::GteScan, self.gte_scan);
+        self.spu_scan = run_spu_scan();
+        print_scan_report(Mode::SpuScan, self.spu_scan);
+        self.timing_scan = run_timing_scan();
+        print_scan_report(Mode::TimingScan, self.timing_scan);
     }
 
     fn run_section(&mut self, mode: Mode) {
@@ -600,6 +741,8 @@ impl HardwareTests {
         self.recount();
         self.rerun_count = self.rerun_count.wrapping_add(1);
         print_conformance_report(self);
+        print_section_report(mode, section_report(mode, &self.results));
+        print_case_reports(mode, &self.results);
     }
 
     fn run_active(&mut self) {
@@ -656,8 +799,10 @@ impl HardwareTests {
 
 impl Scene for HardwareTests {
     fn init(&mut self, _ctx: &mut Ctx) {
+        enable_cop2_for_diagnostics();
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
         self.run_all();
+        self.run_startup_scans();
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
@@ -840,8 +985,10 @@ fn draw_scan_report(font: &FontAtlas, mode: Mode, report: ScanReport) {
     font.draw_text(80, 134, hex8(report.aux).as_str(), (220, 224, 230));
     font.draw_text(8, 148, "RUN", (140, 160, 190));
     font.draw_text(80, 148, dec3(report.runs as u16).as_str(), (220, 224, 230));
-    font.draw_text(8, 174, "NOTE", (140, 160, 190));
-    font.draw_text(80, 174, report.note, color);
+    font.draw_text(8, 162, "FIELDS", (140, 160, 190));
+    font.draw_text(80, 162, scan_field_hint(mode), (180, 190, 210));
+    font.draw_text(8, 176, "NOTE", (140, 160, 190));
+    font.draw_text(80, 176, report.note, color);
     font.draw_text(8, 198, "COMPARE DIGESTS ACROSS EMUS/PS1", (112, 136, 170));
     font.draw_text(
         8,
@@ -857,13 +1004,23 @@ fn draw_scan_report(font: &FontAtlas, mode: Mode, report: ScanReport) {
     );
 }
 
+const fn scan_field_hint(mode: Mode) -> &'static str {
+    match mode {
+        Mode::CpuScan => "ITEMS=OP SAMPLES HASH=OUTPUT DIGEST",
+        Mode::GteScan => "ITEMS=COP2 OPS AUX=FLAG HITS",
+        Mode::SpuScan => "ITEMS=SPU REGS AUX=CHANGED READBACKS",
+        Mode::TimingScan => "ITEMS=PROBES AUX=TIMER/DMA PACK",
+        _ => "ITEMS=CASES HASH=DIGEST AUX=EXTRA",
+    }
+}
+
 fn draw_problem_detail(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
-    let y = 198;
+    let y = 184;
     match suite.first_problem(mode) {
         Some(index) => {
             let result = suite.results[index];
             font.draw_text(8, y, "DETAIL", result.status.color());
-            font.draw_text(64, y, TESTS[index].name, (230, 230, 230));
+            font.draw_text(64, y, clipped_text(TESTS[index].name, 32), (230, 230, 230));
             font.draw_text(8, y + 10, "EXP", (150, 170, 200));
             font.draw_text(40, y + 10, hex8(result.expected).as_str(), (220, 220, 220));
             font.draw_text(128, y + 10, "GOT", (150, 170, 200));
@@ -874,17 +1031,69 @@ fn draw_problem_detail(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
                 result.status.color(),
             );
             font.draw_text(248, y + 10, result.note, (180, 190, 210));
+            draw_case_diagnostics(font, y + 22, index, result);
         }
         None => {
-            font.draw_text(8, y, "ALL HARD FAILURES CLEAR", Status::Pass.color());
+            font.draw_text(8, 198, "ALL HARD FAILURES CLEAR", Status::Pass.color());
             font.draw_text(
                 8,
-                y + 10,
+                208,
                 "NEXT: RUN IN REDUX DUCKSTATION REAL PS1",
                 (150, 170, 200),
             );
         }
     }
+}
+
+fn draw_case_diagnostics(font: &FontAtlas, y: i16, index: usize, result: TestResult) {
+    let details = diagnostic_lines_for_case(index);
+    if details.is_empty() {
+        return;
+    }
+
+    let mut drawn = 0usize;
+    drawn = draw_case_diagnostic_pass(font, y, result, details, drawn, false);
+    draw_case_diagnostic_pass(font, y, result, details, drawn, true);
+}
+
+fn draw_case_diagnostic_pass(
+    font: &FontAtlas,
+    y: i16,
+    result: TestResult,
+    details: &'static [&'static str],
+    mut drawn: usize,
+    matching: bool,
+) -> usize {
+    for (bit, label) in details.iter().enumerate() {
+        let expected = (result.expected >> bit) & 1;
+        let observed = (result.observed >> bit) & 1;
+        if (expected == observed) != matching {
+            continue;
+        }
+        if drawn >= 3 {
+            return drawn;
+        }
+
+        let line_y = y + drawn as i16 * 10;
+        let color = if expected == observed {
+            Status::Pass.color()
+        } else {
+            Status::Fail.color()
+        };
+        font.draw_text(
+            8,
+            line_y,
+            if expected == observed { "OK" } else { "BAD" },
+            color,
+        );
+        font.draw_text(40, line_y, clipped_text(label, 25), (220, 224, 230));
+        font.draw_text(248, line_y, "E", (140, 160, 190));
+        font.draw_text(264, line_y, if expected != 0 { "1" } else { "0" }, color);
+        font.draw_text(280, line_y, "G", (140, 160, 190));
+        font.draw_text(296, line_y, if observed != 0 { "1" } else { "0" }, color);
+        drawn += 1;
+    }
+    drawn
 }
 
 fn test_count_for_mode(mode: Mode) -> usize {
@@ -906,6 +1115,109 @@ fn page_count_for_mode(mode: Mode) -> usize {
     }
 }
 
+fn section_report(mode: Mode, results: &[TestResult; TEST_COUNT]) -> SectionReport {
+    let mut report = SectionReport {
+        cases: 0,
+        pass: 0,
+        fail: 0,
+        warn: 0,
+        info: 0,
+        pending: 0,
+        hash: 0x4857_5445,
+    };
+
+    report.hash = mix32(report.hash, mode.index() as u32);
+    for (index, spec) in TESTS.iter().enumerate() {
+        if !mode.includes_test(*spec) {
+            continue;
+        }
+        let result = results[index];
+        report.cases = report.cases.wrapping_add(1);
+        report.hash = mix32(report.hash, index as u32);
+        report.hash = mix_str(report.hash, spec.group);
+        report.hash = mix_str(report.hash, spec.name);
+        report.hash = mix32(report.hash, result.status.code());
+        report.hash = mix32(report.hash, result.expected);
+        report.hash = mix32(report.hash, result.observed);
+
+        match result.status {
+            Status::Pass => report.pass = report.pass.wrapping_add(1),
+            Status::Fail => report.fail = report.fail.wrapping_add(1),
+            Status::Warn => report.warn = report.warn.wrapping_add(1),
+            Status::Info => report.info = report.info.wrapping_add(1),
+            Status::Pending => report.pending = report.pending.wrapping_add(1),
+        }
+    }
+
+    report.hash = mix32(report.hash, report.cases as u32);
+    report.hash = mix32(report.hash, report.pass as u32);
+    report.hash = mix32(report.hash, report.fail as u32);
+    report.hash = mix32(report.hash, report.warn as u32);
+    report.hash = mix32(report.hash, report.info as u32);
+    report.hash = mix32(report.hash, report.pending as u32);
+    report
+}
+
+fn test_case_hash(index: usize, spec: TestSpec, result: TestResult) -> u32 {
+    let mut hash = 0x4341_5345;
+    hash = mix32(hash, index as u32);
+    hash = mix_str(hash, spec.group);
+    hash = mix_str(hash, spec.name);
+    hash = mix32(hash, result.status.code());
+    hash = mix32(hash, result.expected);
+    hash = mix32(hash, result.observed);
+    hash
+}
+
+fn print_case_reports(mode: Mode, results: &[TestResult; TEST_COUNT]) {
+    for (index, spec) in TESTS.iter().enumerate() {
+        if !mode.includes_test(*spec) {
+            continue;
+        }
+        let result = results[index];
+        tty::print("hardware-tests: case ");
+        tty_print_dec_u16(index as u16);
+        tty::print(" ");
+        tty::print(spec.group);
+        tty::print(" status=");
+        tty::print(result.status.label());
+        tty::print(" exp=0x");
+        tty::print_hex_u32(result.expected);
+        tty::print(" got=0x");
+        tty::print_hex_u32(result.observed);
+        tty::print(" hash=0x");
+        tty::print_hex_u32(test_case_hash(index, *spec, result));
+        tty::print(" name=");
+        tty::println(spec.name);
+    }
+}
+
+fn print_all_section_reports(results: &[TestResult; TEST_COUNT]) {
+    for mode in CHECK_MODES {
+        print_section_report(mode, section_report(mode, results));
+    }
+}
+
+fn print_section_report(mode: Mode, report: SectionReport) {
+    tty::print("hardware-tests: section ");
+    tty::print(mode.label());
+    tty::print(" cases=");
+    tty_print_dec_u16(report.cases);
+    tty::print(" pass=");
+    tty_print_dec_u16(report.pass);
+    tty::print(" fail=");
+    tty_print_dec_u16(report.fail);
+    tty::print(" warn=");
+    tty_print_dec_u16(report.warn);
+    tty::print(" info=");
+    tty_print_dec_u16(report.info);
+    tty::print(" pending=");
+    tty_print_dec_u16(report.pending);
+    tty::print(" hash=0x");
+    tty::print_hex_u32(report.hash);
+    tty::print("\n");
+}
+
 fn clipped_text(text: &'static str, max_chars: usize) -> &'static str {
     let mut count = 0usize;
     for (index, _) in text.char_indices() {
@@ -915,6 +1227,126 @@ fn clipped_text(text: &'static str, max_chars: usize) -> &'static str {
         count += 1;
     }
     text
+}
+
+fn diagnostic_lines_for_case(index: usize) -> &'static [&'static str] {
+    match index {
+        1 => &["wrapping add", "arithmetic shift", "wrapping multiply"],
+        2 => &[
+            "ADDU", "SUBU", "AND", "OR", "XOR", "NOR", "SLT", "SLTU", "SLL", "SRL", "SRA", "SLLV",
+            "SRLV", "SRAV",
+        ],
+        3 => &["ADDIU", "ANDI", "ORI", "XORI", "SLTI", "SLTIU", "LUI"],
+        4 => &["MULT", "MULTU", "DIV", "DIVU", "MTHI MTLO"],
+        5 => &[
+            "BEQ delay",
+            "BNE delay",
+            "BNE fallthrough",
+            "BEQ always delay",
+            "BLEZ delay",
+            "BGTZ delay",
+            "BGTZ fallthrough",
+            "BLTZ delay",
+            "BGEZ delay",
+        ],
+        6 => &[
+            "LW result",
+            "SW byte order",
+            "LH sign extend",
+            "LHU zero extend",
+            "SH byte order",
+            "LB sign extend",
+            "LBU zero extend",
+            "SB byte store",
+            "load delay slot",
+        ],
+        10 => &[
+            "mask restored",
+            "GPU IRQ raised",
+            "I_STAT visible",
+            "GPU IRQ acked",
+        ],
+        11 => &[
+            "OT terminator",
+            "OT link 1",
+            "OT link 2",
+            "OT link 3",
+            "OT link 4",
+            "OT link 5",
+            "OT link 6",
+            "OT link 7",
+        ],
+        12 => &["MADR", "BCR", "CHCR"],
+        16 => &[
+            "horizontal res",
+            "vertical res",
+            "DMA direction",
+            "ready cmd",
+            "ready DMA",
+        ],
+        17 => &["GP0 IRQ raised", "GP1 IRQ ack clears"],
+        18 => &[
+            "TriFlat layout",
+            "TriFlat words",
+            "LineMono words",
+            "RectFlat words",
+        ],
+        19 => &["data register", "control register"],
+        21 => &[
+            "RTPS", "RTPT", "NCLIP", "OP", "AVSZ3", "AVSZ4", "SQR", "NCDS", "NCCS", "NCS", "NCDT",
+            "NCT", "NCCT", "DPCS", "DPCT", "INTPL", "DCPL", "CC", "CDP", "GPF", "GPL", "MVMVA",
+        ],
+        22 => &[
+            "positive MAC0",
+            "negative MAC0",
+            "positive FLAG",
+            "negative FLAG",
+        ],
+        24 => &[
+            "voice volume L",
+            "voice volume R",
+            "ADSR low",
+            "ADSR high",
+            "repeat addr",
+            "pitch",
+        ],
+        25 => &["main volume L", "main volume R"],
+        27 => &["SIO mode", "SIO baud", "SIO ctrl"],
+        30 => &["target sticky", "counter reset"],
+        32 => &["target before read", "target cleared by read"],
+        33 => &["sync stop holds", "sync free-runs"],
+        34 => &["system ticks", "div8 ticks", "ratio min", "ratio max"],
+        35 => &["wrap sticky", "counter wrapped"],
+        36 => &["target sticky", "IRQ active low"],
+        37 => &["wrap sticky", "IRQ active low"],
+        39 => &["system ticks", "dot ticks", "ratio min", "ratio max"],
+        41 => &[
+            "scratch word",
+            "scratch half",
+            "scratch byte",
+            "scratch second word",
+        ],
+        43 => &["index 0", "index 1", "index 2", "index 3"],
+        45 => &[
+            "LWL/LWR result",
+            "load pre byte",
+            "store pre byte",
+            "SWL/SWR byte 0",
+            "SWL/SWR byte 1",
+            "SWL/SWR byte 2",
+            "SWL/SWR byte 3",
+            "store post byte",
+        ],
+        46 => &["DMA off", "DMA fifo", "DMA CPU->GP0", "DMA GPUREAD->CPU"],
+        47 => &[
+            "texture window",
+            "draw area TL",
+            "draw area BR",
+            "draw offset",
+        ],
+        48 => &["timer0 target", "timer1 target", "timer2 target"],
+        _ => &[],
+    }
 }
 
 fn print_conformance_report(suite: &HardwareTests) {
@@ -945,10 +1377,43 @@ fn print_conformance_report(suite: &HardwareTests) {
             tty::print_hex_u32(result.observed);
             tty::print(" note=");
             tty::println(result.note);
+            print_case_diagnostics(index, *result);
         }
     }
     if suite.fail_count == 0 && suite.warn_count == 0 {
         tty::println("hardware-tests: all hard failures clear");
+    }
+}
+
+fn print_case_diagnostics(index: usize, result: TestResult) {
+    let details = diagnostic_lines_for_case(index);
+    if details.is_empty() {
+        return;
+    }
+
+    let mut mismatches = 0u16;
+    for (bit, label) in details.iter().enumerate() {
+        let expected = (result.expected >> bit) & 1;
+        let observed = (result.observed >> bit) & 1;
+        if expected == observed {
+            continue;
+        }
+        mismatches = mismatches.wrapping_add(1);
+        tty::print("hardware-tests: detail case=");
+        tty_print_dec_u16(index as u16);
+        tty::print(" bit=");
+        tty_print_dec_u16(bit as u16);
+        tty::print(" exp=");
+        tty_print_dec_u16(expected as u16);
+        tty::print(" got=");
+        tty_print_dec_u16(observed as u16);
+        tty::print(" ");
+        tty::println(label);
+    }
+    if mismatches == 0 {
+        tty::print("hardware-tests: detail case=");
+        tty_print_dec_u16(index as u16);
+        tty::println(" no sub-bit mismatch; inspect raw expected/observed");
     }
 }
 
@@ -961,6 +1426,8 @@ fn print_scan_report(mode: Mode, report: ScanReport) {
     tty::print_hex_u32(report.hash);
     tty::print(" aux=0x");
     tty::print_hex_u32(report.aux);
+    tty::print(" fields=");
+    tty::print(scan_field_hint(mode));
     tty::print(" note=");
     tty::println(report.note);
 }
@@ -970,16 +1437,16 @@ fn tty_print_dec_u8(value: u8) {
 }
 
 fn tty_print_dec_u16(value: u16) {
-    let hundreds = value / 100;
-    let tens = (value / 10) % 10;
-    let ones = value % 10;
-    if hundreds != 0 {
-        tty_print_digit(hundreds as u8);
-        tty_print_digit(tens as u8);
-    } else if tens != 0 {
-        tty_print_digit(tens as u8);
+    let mut divisor = 10000u16;
+    let mut started = false;
+    while divisor > 0 {
+        let digit = value / divisor % 10;
+        if digit != 0 || started || divisor == 1 {
+            tty_print_digit(digit as u8);
+            started = true;
+        }
+        divisor /= 10;
     }
-    tty_print_digit(ones as u8);
 }
 
 fn tty_print_digit(value: u8) {
@@ -1002,6 +1469,13 @@ fn mix32(mut hash: u32, value: u32) -> u32 {
     hash ^= value;
     hash = hash.wrapping_mul(0x0100_0193);
     hash.rotate_left(5)
+}
+
+fn mix_str(mut hash: u32, value: &str) -> u32 {
+    for byte in value.bytes() {
+        hash = mix32(hash, byte as u32);
+    }
+    hash
 }
 
 fn run_cpu_scan() -> ScanReport {
@@ -1076,7 +1550,8 @@ fn run_cpu_scan() -> ScanReport {
 
     hash = mix32(hash, cpu_branch_delay_battery());
     hash = mix32(hash, cpu_load_store_battery());
-    items = items.wrapping_add(2);
+    hash = mix32(hash, cpu_unaligned_load_store_battery());
+    items = items.wrapping_add(3);
 
     ScanReport::info(items, hash, 0, "safe mips-i forms")
 }
@@ -1086,38 +1561,44 @@ fn run_gte_scan() -> ScanReport {
     let mut items = 0u16;
     let mut flag_master_hits = 0u32;
 
-    for opcode in 0..64u32 {
-        for sf in 0..2u32 {
-            for lm in 0..2u32 {
-                for mx in 0..4u32 {
-                    for vx in 0..4u32 {
-                        for cv in 0..4u32 {
-                            let instr = 0x4A00_0000
-                                | (sf << 19)
-                                | (mx << 17)
-                                | (vx << 15)
-                                | (cv << 13)
-                                | (lm << 10)
-                                | opcode;
-                            seed_gte_state();
-                            unsafe {
-                                execute_raw_gte(instr);
-                            }
-                            let snapshot = gte_snapshot_hash();
-                            if cfc2!(31) & 0x8000_0000 != 0 {
-                                flag_master_hits = flag_master_hits.wrapping_add(1);
-                            }
-                            hash = mix32(hash, instr);
-                            hash = mix32(hash, snapshot);
-                            items = items.wrapping_add(1);
-                        }
-                    }
-                }
+    macro_rules! sample {
+        ($instr:expr, $call:expr) => {{
+            seed_gte_state();
+            unsafe { $call };
+            let snapshot = gte_snapshot_hash();
+            if cfc2!(31) & 0x8000_0000 != 0 {
+                flag_master_hits = flag_master_hits.wrapping_add(1);
             }
-        }
+            hash = mix32(hash, $instr);
+            hash = mix32(hash, snapshot);
+            items = items.wrapping_add(1);
+        }};
     }
 
-    ScanReport::info(items, hash, flag_master_hits, "cop2 command matrix")
+    sample!(0x4A08_0001, gte_ops::rtps());
+    sample!(0x4A08_0030, gte_ops::rtpt());
+    sample!(0x4A00_0006, gte_ops::nclip());
+    sample!(0x4A08_000C, gte_ops::op_sf1());
+    sample!(0x4A00_002D, gte_ops::avsz3());
+    sample!(0x4A00_002E, gte_ops::avsz4());
+    sample!(0x4A08_0028, gte_ops::sqr());
+    sample!(0x4A08_0013, gte_ops::ncds());
+    sample!(0x4A08_001B, gte_ops::nccs());
+    sample!(0x4A08_001E, gte_ops::ncs());
+    sample!(0x4A08_0016, gte_ops::ncdt());
+    sample!(0x4A08_0020, gte_ops::nct());
+    sample!(0x4A08_003F, gte_ops::ncct());
+    sample!(0x4A08_0010, gte_ops::dpcs());
+    sample!(0x4A08_002A, gte_ops::dpct());
+    sample!(0x4A08_0011, gte_ops::intpl());
+    sample!(0x4A08_0029, gte_ops::dcpl());
+    sample!(0x4A08_001C, gte_ops::cc());
+    sample!(0x4A08_0014, gte_ops::cdp());
+    sample!(0x4A08_003D, gte_ops::gpf());
+    sample!(0x4A08_003E, gte_ops::gpl());
+    sample!(0x4A08_0012, gte_ops::mvmva_rt_v0_tr_sf1());
+
+    ScanReport::info(items, hash, flag_master_hits, "documented cop2 ops")
 }
 
 fn run_spu_scan() -> ScanReport {
@@ -1216,29 +1697,6 @@ fn gte_snapshot_hash() -> u32 {
     hash = mix32(hash, mfc2!(26));
     hash = mix32(hash, mfc2!(27));
     mix32(hash, cfc2!(31))
-}
-
-#[repr(align(16))]
-struct CodeStub([u32; 4]);
-
-static mut GTE_SCAN_STUB: CodeStub = CodeStub([0; 4]);
-
-unsafe fn execute_raw_gte(instr: u32) {
-    #[cfg(target_arch = "mips")]
-    unsafe {
-        let cached = (&raw mut GTE_SCAN_STUB.0) as u32;
-        let uncached = (0xA000_0000 | (cached & 0x001F_FFFF)) as *mut u32;
-        ptr::write_volatile(uncached.add(0), instr);
-        ptr::write_volatile(uncached.add(1), 0x03E0_0008); // jr ra
-        ptr::write_volatile(uncached.add(2), 0x0000_0000); // delay slot
-        ptr::write_volatile(uncached.add(3), 0x0000_0000);
-        let func: extern "C" fn() = mem::transmute(uncached);
-        func();
-    }
-    #[cfg(not(target_arch = "mips"))]
-    {
-        psx_gte::host::execute(instr);
-    }
 }
 
 fn test_cpu_endian() -> TestResult {
@@ -1376,6 +1834,11 @@ fn test_cpu_branch_delay_opcodes() -> TestResult {
 fn test_cpu_load_store_opcodes() -> TestResult {
     let observed = cpu_load_store_battery();
     expect_eq(0x1FF, observed, "load/store")
+}
+
+fn test_cpu_unaligned_load_store_pairs() -> TestResult {
+    let observed = cpu_unaligned_load_store_battery();
+    expect_eq(0xFF, observed, "lwl/lwr")
 }
 
 #[inline(never)]
@@ -1680,6 +2143,96 @@ unsafe fn cpu_load_store_observed(
     observed
 }
 
+#[inline(never)]
+fn cpu_unaligned_load_store_battery() -> u32 {
+    static mut BUF: AlignedBytes = AlignedBytes([0; 16]);
+
+    #[cfg(target_arch = "mips")]
+    unsafe {
+        let base = (&raw mut BUF.0) as *mut u8;
+        const SEED: [u8; 16] = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
+            0xEE, 0xEE,
+        ];
+        for (index, byte) in SEED.iter().enumerate() {
+            ptr::write_volatile(base.add(index), *byte);
+        }
+
+        let loaded: u32;
+        core::arch::asm!(
+            ".word {set_old}",
+            ".word {lwl}",
+            ".word 0",
+            ".word {lwr}",
+            ".word 0",
+            set_old = const mips_i(0x0F, 0, 10, 0xDEAD),
+            lwl = const mips_i(0x22, 8, 10, 4),
+            lwr = const mips_i(0x26, 8, 10, 1),
+            in("$8") base as u32,
+            lateout("$10") loaded,
+            options(nostack, preserves_flags),
+        );
+
+        core::arch::asm!(
+            ".word {swl}",
+            ".word {swr}",
+            swl = const mips_i(0x2A, 8, 9, 12),
+            swr = const mips_i(0x2E, 8, 9, 9),
+            in("$8") base as u32,
+            in("$9") 0xAABB_CCDDu32,
+            options(nostack, preserves_flags),
+        );
+
+        cpu_unaligned_observed(base, loaded)
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    unsafe {
+        let base = (&raw mut BUF.0) as *mut u8;
+        const SEED: [u8; 16] = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE,
+            0xEE, 0xEE,
+        ];
+        for (index, byte) in SEED.iter().enumerate() {
+            ptr::write_volatile(base.add(index), *byte);
+        }
+        ptr::write_volatile(base.add(9), 0xDD);
+        ptr::write_volatile(base.add(10), 0xCC);
+        ptr::write_volatile(base.add(11), 0xBB);
+        ptr::write_volatile(base.add(12), 0xAA);
+        cpu_unaligned_observed(base, 0x5544_3322)
+    }
+}
+
+unsafe fn cpu_unaligned_observed(base: *mut u8, loaded: u32) -> u32 {
+    let mut observed = 0u32;
+    if loaded == 0x5544_3322 {
+        observed |= 1 << 0;
+    }
+    if ptr::read_volatile(base.add(0)) == 0x11 {
+        observed |= 1 << 1;
+    }
+    if ptr::read_volatile(base.add(8)) == 0xEE {
+        observed |= 1 << 2;
+    }
+    if ptr::read_volatile(base.add(9)) == 0xDD {
+        observed |= 1 << 3;
+    }
+    if ptr::read_volatile(base.add(10)) == 0xCC {
+        observed |= 1 << 4;
+    }
+    if ptr::read_volatile(base.add(11)) == 0xBB {
+        observed |= 1 << 5;
+    }
+    if ptr::read_volatile(base.add(12)) == 0xAA {
+        observed |= 1 << 6;
+    }
+    if ptr::read_volatile(base.add(13)) == 0xEE {
+        observed |= 1 << 7;
+    }
+    observed
+}
+
 #[cfg(not(target_arch = "mips"))]
 fn emulate_cpu_r(instr: u32, rs_value: u32, rt_value: u32) -> u32 {
     let shamt = (instr >> 6) & 0x1F;
@@ -1764,6 +2317,38 @@ fn test_kseg1_alias() -> TestResult {
     }
 }
 
+fn test_irq_mask_roundtrip() -> TestResult {
+    let old_mask = irq::mask();
+    let pattern = 0x0555;
+    irq::set_mask(pattern);
+    let readback = irq::mask() & 0x07FF;
+    irq::set_mask(old_mask);
+    expect_eq(pattern, readback, "i_mask")
+}
+
+fn test_irq_gpu_ack_path() -> TestResult {
+    let old_mask = irq::mask();
+    irq::set_mask(old_mask & !(1 << irq::source::GPU));
+    irq::ack(1 << irq::source::GPU);
+    gpu_io::write_gp1(0x0200_0000);
+
+    gpu_io::write_gp0(0x1F00_0000);
+    let raised_gpu = gpu_io::gpustat().bits() & (1 << 24) != 0;
+    let raised_irq = irq::stat() & (1 << irq::source::GPU) != 0;
+
+    gpu_io::write_gp1(0x0200_0000);
+    irq::ack(1 << irq::source::GPU);
+    let cleared_gpu = gpu_io::gpustat().bits() & (1 << 24) == 0;
+    let cleared_irq = irq::stat() & (1 << irq::source::GPU) == 0;
+    irq::set_mask(old_mask);
+
+    let observed = (raised_gpu as u32)
+        | ((raised_irq as u32) << 1)
+        | ((cleared_gpu as u32) << 2)
+        | ((cleared_irq as u32) << 3);
+    expect_eq(0x0F, observed, "gpu irq")
+}
+
 fn test_dma_otc_clear() -> TestResult {
     static mut OT: [u32; 8] = [0; 8];
     unsafe {
@@ -1780,6 +2365,52 @@ fn test_dma_otc_clear() -> TestResult {
             }
         }
         expect_eq(0xFF, observed, "otc")
+    }
+}
+
+fn test_dma_channel_register_roundtrip() -> TestResult {
+    let ch = dma::Channel::Pio;
+    let base = ch.base();
+    unsafe {
+        let old_madr = psx_io::read32(base);
+        let old_bcr = psx_io::read32(base + 4);
+        let old_chcr = psx_io::read32(base + 8);
+
+        psx_io::write32(base, 0x0012_3400);
+        psx_io::write32(base + 4, 0x0002_0034);
+        psx_io::write32(
+            base + 8,
+            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_CHOPPING_ENABLE,
+        );
+
+        let mut observed = 0u32;
+        if psx_io::read32(base) == 0x0012_3400 {
+            observed |= 1 << 0;
+        }
+        if psx_io::read32(base + 4) == 0x0002_0034 {
+            observed |= 1 << 1;
+        }
+        if psx_io::read32(base + 8)
+            == (dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_CHOPPING_ENABLE)
+        {
+            observed |= 1 << 2;
+        }
+
+        psx_io::write32(base, old_madr);
+        psx_io::write32(base + 4, old_bcr);
+        psx_io::write32(base + 8, old_chcr);
+
+        expect_eq(0x07, observed, "dma regs")
+    }
+}
+
+fn test_dma_dpcr_roundtrip() -> TestResult {
+    unsafe {
+        let old = psx_io::read32(dma::DPCR);
+        psx_io::write32(dma::DPCR, 0x0765_4321);
+        let readback = psx_io::read32(dma::DPCR) & 0x0FFF_FFFF;
+        psx_io::write32(dma::DPCR, old);
+        expect_eq(0x0765_4321, readback, "dpcr")
     }
 }
 
@@ -1834,6 +2465,36 @@ fn test_gpu_irq_ack() -> TestResult {
     let cleared = gpu_io::gpustat().bits() & (1 << 24) == 0;
     let observed = (raised as u32) | ((cleared as u32) << 1);
     expect_eq(0x3, observed, "irq")
+}
+
+fn test_gpu_primitive_packet_encoding() -> TestResult {
+    let tri = prim::TriFlat::new([(1, 2), (3, 4), (5, 6)], 7, 8, 9);
+    let line = prim::LineMono::new(-1, -2, 3, 4, 5, 6, 7);
+    let rect = prim::RectFlat::new(8, 9, 10, 11, 12, 13, 14);
+    let mut observed = 0u32;
+
+    if prim::TriFlat::WORDS == 4 && core::mem::size_of::<prim::TriFlat>() == 20 {
+        observed |= 1 << 0;
+    }
+    if tri.tag == 0 && tri.color_cmd == 0x2009_0807 && tri.v2 == 0x0006_0005 {
+        observed |= 1 << 1;
+    }
+    if prim::LineMono::WORDS == 3
+        && line.color_cmd == 0x4007_0605
+        && line.v0 == 0xFFFE_FFFF
+        && line.v1 == 0x0004_0003
+    {
+        observed |= 1 << 2;
+    }
+    if prim::RectFlat::WORDS == 3
+        && rect.color_cmd == 0x600E_0D0C
+        && rect.xy == 0x0009_0008
+        && rect.wh == 0x000B_000A
+    {
+        observed |= 1 << 3;
+    }
+
+    expect_eq(0x0F, observed, "packets")
 }
 
 fn test_gte_register_roundtrip() -> TestResult {
@@ -1993,6 +2654,30 @@ fn test_gte_all_ops_digest() -> TestResult {
     expect_eq(0x003F_FFFF, observed, "gte ops")
 }
 
+fn test_gte_nclip_mac0() -> TestResult {
+    ctc2!(31, 0);
+    mtc2!(12, pack_gte_xy(0, 0));
+    mtc2!(13, pack_gte_xy(10, 0));
+    mtc2!(14, pack_gte_xy(0, 10));
+    unsafe { gte_ops::nclip() };
+    let positive = mfc2!(24) as i32;
+    let positive_flag_clear = gte_flag_master_clear();
+
+    ctc2!(31, 0);
+    mtc2!(12, pack_gte_xy(0, 0));
+    mtc2!(13, pack_gte_xy(0, 10));
+    mtc2!(14, pack_gte_xy(10, 0));
+    unsafe { gte_ops::nclip() };
+    let negative = mfc2!(24) as i32;
+    let negative_flag_clear = gte_flag_master_clear();
+
+    let observed = ((positive == 100) as u32)
+        | (((negative == -100) as u32) << 1)
+        | ((positive_flag_clear as u32) << 2)
+        | ((negative_flag_clear as u32) << 3);
+    expect_eq(0x0F, observed, "nclip")
+}
+
 fn seed_gte_state() {
     ctc2!(31, 0);
 
@@ -2095,6 +2780,32 @@ fn test_spu_voice_registers() -> TestResult {
     expect_eq(0x3F, observed, "voice")
 }
 
+fn test_spu_main_volume_roundtrip() -> TestResult {
+    const MAIN_VOL_LEFT: u32 = psx_io::spu::SPU_BASE + 0x180;
+    const MAIN_VOL_RIGHT: u32 = psx_io::spu::SPU_BASE + 0x182;
+
+    unsafe {
+        let old_left = psx_io::read16(MAIN_VOL_LEFT);
+        let old_right = psx_io::read16(MAIN_VOL_RIGHT);
+
+        psx_io::write16(MAIN_VOL_LEFT, 0x1234);
+        psx_io::write16(MAIN_VOL_RIGHT, 0x2345);
+
+        let mut observed = 0u32;
+        if psx_io::read16(MAIN_VOL_LEFT) == 0x1234 {
+            observed |= 1 << 0;
+        }
+        if psx_io::read16(MAIN_VOL_RIGHT) == 0x2345 {
+            observed |= 1 << 1;
+        }
+
+        psx_io::write16(MAIN_VOL_LEFT, old_left);
+        psx_io::write16(MAIN_VOL_RIGHT, old_right);
+
+        expect_eq(0x03, observed, "main vol")
+    }
+}
+
 fn test_pad_poll() -> TestResult {
     pad_poll_result(psx_engine::PadState::NONE)
 }
@@ -2104,6 +2815,35 @@ fn pad_poll_result(pad: psx_engine::PadState) -> TestResult {
         TestResult::info(1, pad.id_low as u32, "connected")
     } else {
         TestResult::info(0, 0, "optional")
+    }
+}
+
+fn test_sio_register_latches() -> TestResult {
+    unsafe {
+        let old_mode = psx_io::read16(sio::MODE);
+        let old_ctrl = psx_io::read16(sio::CTRL);
+        let old_baud = psx_io::read16(sio::BAUD);
+
+        psx_io::write16(sio::MODE, 0x000D);
+        psx_io::write16(sio::BAUD, 0x0088);
+        psx_io::write16(sio::CTRL, 0x0003);
+
+        let mut observed = 0u32;
+        if psx_io::read16(sio::MODE) == 0x000D {
+            observed |= 1 << 0;
+        }
+        if psx_io::read16(sio::BAUD) == 0x0088 {
+            observed |= 1 << 1;
+        }
+        if psx_io::read16(sio::CTRL) & 0x0003 == 0x0003 {
+            observed |= 1 << 2;
+        }
+
+        psx_io::write16(sio::MODE, old_mode);
+        psx_io::write16(sio::BAUD, old_baud);
+        psx_io::write16(sio::CTRL, old_ctrl);
+
+        expect_eq(0x07, observed, "sio regs")
     }
 }
 
@@ -2121,6 +2861,58 @@ fn test_gpu_dma_direction_after_otc() -> TestResult {
     gpu_io::write_gp1(0x0400_0000 | 2);
     let observed = (gpu_io::gpustat().bits() >> 29) & 0b11;
     expect_eq(2, observed, "dma dir")
+}
+
+fn test_gpu_dma_direction_mode_latch() -> TestResult {
+    let mut observed = 0u32;
+    for direction in 0..4u32 {
+        gpu_io::write_gp1(0x0400_0000 | direction);
+        if ((gpu_io::gpustat().bits() >> 29) & 0b11) == direction {
+            observed |= 1 << direction;
+        }
+    }
+    gpu_io::write_gp1(0x0400_0000 | 2);
+    expect_eq(0x0F, observed, "gp1 dma")
+}
+
+fn test_gpu_gp1_info_environment_readback() -> TestResult {
+    let texture_window = 0xE200_0000 | 0x0003 | (0x0005 << 5) | (0x0007 << 10) | (0x0009 << 15);
+    let draw_area_top_left = 0xE300_0000 | 8 | (16 << 10);
+    let draw_area_bottom_right = 0xE400_0000 | 300 | (220 << 10);
+    let draw_offset = 0xE500_0000 | ((-12i32 as u32) & 0x7FF) | (34 << 11);
+
+    gpu_io::write_gp0(texture_window);
+    gpu_io::write_gp0(draw_area_top_left);
+    gpu_io::write_gp0(draw_area_bottom_right);
+    gpu_io::write_gp0(draw_offset);
+
+    gpu_io::write_gp1(0x1000_0002);
+    let texture_window_read = gpu_io::gpuread();
+    gpu_io::write_gp1(0x1000_0003);
+    let top_left_read = gpu_io::gpuread();
+    gpu_io::write_gp1(0x1000_0004);
+    let bottom_right_read = gpu_io::gpuread();
+    gpu_io::write_gp1(0x1000_0005);
+    let offset_read = gpu_io::gpuread();
+
+    gpu_io::write_gp0(0xE200_0000);
+    gpu::set_draw_area(0, 0, 319, 239);
+    gpu::set_draw_offset(0, 0);
+
+    let mut observed = 0u32;
+    if texture_window_read == (texture_window & 0x000F_FFFF) {
+        observed |= 1 << 0;
+    }
+    if top_left_read == (draw_area_top_left & 0x000F_FFFF) {
+        observed |= 1 << 1;
+    }
+    if bottom_right_read == (draw_area_bottom_right & 0x000F_FFFF) {
+        observed |= 1 << 2;
+    }
+    if offset_read == (draw_offset & 0x003F_FFFF) {
+        observed |= 1 << 3;
+    }
+    expect_eq(0x0F, observed, "gp1 info")
 }
 
 fn test_timer2_target_sticky() -> TestResult {
@@ -2295,6 +3087,21 @@ fn test_cdrom_getstat_response() -> TestResult {
     }
 }
 
+fn test_cdrom_index_latch() -> TestResult {
+    unsafe {
+        let mut observed = 0u32;
+        for index in 0..4u8 {
+            psx_io::write8(cdrom::BASE, index);
+            let status_index = psx_io::read8(cdrom::BASE) & 0x03;
+            if status_index == index {
+                observed |= 1 << index;
+            }
+        }
+        psx_io::write8(cdrom::BASE, 0);
+        expect_eq(0x0F, observed, "cd index")
+    }
+}
+
 fn test_pad_direct_stability() -> TestResult {
     let first = psx_pad::poll_port1();
     spin(512);
@@ -2316,6 +3123,37 @@ fn test_pad_direct_stability() -> TestResult {
     } else {
         TestResult::warn(1, observed, "unstable")
     }
+}
+
+fn test_timer_target_register_roundtrip() -> TestResult {
+    const PATTERNS: [u16; 3] = [0x0123, 0x4567, 0x89AB];
+    const TIMERS: [timers::Timer; 3] = [
+        timers::Timer::Timer0,
+        timers::Timer::Timer1,
+        timers::Timer::Timer2,
+    ];
+
+    let old0 = timer_target(timers::Timer::Timer0);
+    let old1 = timer_target(timers::Timer::Timer1);
+    let old2 = timer_target(timers::Timer::Timer2);
+    let mut observed = 0u32;
+
+    for index in 0..3 {
+        timers::set_target(TIMERS[index], PATTERNS[index]);
+        if timer_target(TIMERS[index]) == PATTERNS[index] {
+            observed |= 1 << index;
+        }
+    }
+
+    timers::set_target(timers::Timer::Timer0, old0);
+    timers::set_target(timers::Timer::Timer1, old1);
+    timers::set_target(timers::Timer::Timer2, old2);
+
+    expect_eq(0x07, observed, "target reg")
+}
+
+fn timer_target(timer: timers::Timer) -> u16 {
+    unsafe { psx_io::read32(0x1F80_1108 + 0x10 * (timer as u32)) as u16 }
 }
 
 fn timer_delta(timer: timers::Timer, mode: u16, spin_count: u32) -> u16 {
