@@ -32,7 +32,7 @@ const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
-const ROWS_PER_PAGE: usize = 13;
+const ROWS_PER_PAGE: usize = 7;
 const TEST_COUNT: usize = 36;
 const PAGE_COUNT: usize = (TEST_COUNT + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE;
 const PAD_POLL_TEST_INDEX: usize = 19;
@@ -681,17 +681,18 @@ fn draw_rows(font: &FontAtlas, suite: &HardwareTests) {
         if index >= TEST_COUNT {
             break;
         }
-        let y = 52 + row as i16 * 11;
+        let y = 52 + row as i16 * 20;
         let spec = TESTS[index];
         let result = suite.results[index];
         let color = result.status.color();
 
         font.draw_text(8, y, result.status.label(), color);
         font.draw_text(48, y, spec.group, (140, 170, 210));
-        font.draw_text(80, y, spec.name, (220, 224, 230));
         if matches!(result.status, Status::Fail | Status::Warn | Status::Info) {
-            font.draw_text(232, y, hex8(result.observed).as_str(), color);
+            font.draw_text(216, y, "OBS", (140, 160, 190));
+            font.draw_text(248, y, hex8(result.observed).as_str(), color);
         }
+        font.draw_text(16, y + 10, clipped_text(spec.name, 37), (220, 224, 230));
     }
 }
 
@@ -760,11 +761,22 @@ fn draw_problem_detail(font: &FontAtlas, suite: &HardwareTests) {
 
 fn page_description(page: usize) -> &'static str {
     match page {
-        0 => "BASIC CPU/RAM/DMA/TIMER/GPU/GTE/SPU CHECKS",
-        1 => "EDGE CASES: DRAW AREA, DMA DIRECTION, TIMER LATCH",
-        2 => "TIMING/PREFLIGHT: ROOT COUNTERS, DMA, CD, SIO",
+        0 => "BASIC CPU RAM DMA GPU GTE SPU",
+        1 => "EDGE CASES DRAW AREA DMA TIMERS",
+        2 => "TIMING PREFLIGHT ROOT CTRS DMA CD SIO",
         _ => "ADDITIONAL HARDWARE CHECKS",
     }
+}
+
+fn clipped_text(text: &'static str, max_chars: usize) -> &'static str {
+    let mut count = 0usize;
+    for (index, _) in text.char_indices() {
+        if count == max_chars {
+            return &text[..index];
+        }
+        count += 1;
+    }
+    text
 }
 
 fn print_conformance_report(suite: &HardwareTests) {
