@@ -6,15 +6,18 @@ is licensed under GPL-2.0-or-later (see [`LICENSE`](../LICENSE)), but
 binary assets each carry their own provenance and license, recorded
 here.
 
-Last updated: 2026-05-27.
+Last updated: 2026-05-28.
 
 ## Branding
 
 | File | Source | Author | License |
 | --- | --- | --- | --- |
-| `assets/branding/logo-wordmark.svg` | Original work | Emanuele Bonura | GPL-2.0-or-later |
-| `assets/branding/logo-icon-player.svg` | Original work | Emanuele Bonura | GPL-2.0-or-later |
-| `assets/branding/logo-icon-player.png` | Original work | Emanuele Bonura | GPL-2.0-or-later |
+| `assets/branding/psoxide-logo.svg` | Original work | Emanuele Bonura | GPL-2.0-or-later |
+| `assets/branding/psoxide-logo.png` | Rendered from `psoxide-logo.svg` | Emanuele Bonura | GPL-2.0-or-later |
+| `assets/branding/psoxide-app-icon.svg` | Original work | Emanuele Bonura | GPL-2.0-or-later |
+| `assets/branding/psoxide-app-icon.png` | Rendered from `psoxide-app-icon.svg` | Emanuele Bonura | GPL-2.0-or-later |
+| `assets/branding/psoxide-itch-cover.svg` | Original work | Emanuele Bonura | GPL-2.0-or-later |
+| `assets/branding/psoxide-itch-cover.png` | Rendered from `psoxide-itch-cover.svg` | Emanuele Bonura | GPL-2.0-or-later |
 
 ## 3D Models
 
