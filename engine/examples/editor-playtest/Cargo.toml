@@ -18,6 +18,7 @@ lto           = true
 [features]
 default = [
     "cd-stream-bench",
+    "emulator-telemetry",
     "world-order-bucketed",
     "world-grid-visible",
     "ot-2048",
@@ -26,6 +27,7 @@ default = [
 ]
 cd-stream-bench = ["dep:psx-io"]
 cd-stream-benchmark = ["cd-stream-bench"]
+emulator-telemetry = ["psx-engine/emulator-telemetry"]
 world-order-global = []
 world-order-slot = []
 world-order-linked = []
