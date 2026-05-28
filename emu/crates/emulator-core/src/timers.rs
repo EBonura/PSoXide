@@ -491,4 +491,18 @@ mod tests {
         );
         assert_eq!(t.timers[1].mode, MODE_IRQ_ACTIVE_LOW);
     }
+
+    #[test]
+    fn reset_at_target_sets_sticky_reached_target() {
+        let mut t = Timers::new();
+        t.write32(0x1F80_1128, 32, 0);
+        t.write32(0x1F80_1120, 0, 0);
+        t.write32(0x1F80_1124, MODE_RESET_AT_TARGET, 0);
+
+        t.advance_to(8192, 2146, 8);
+
+        let mode = t.read32(0x1F80_1124);
+        assert_ne!(mode & MODE_REACHED_TARGET, 0);
+        assert_eq!(t.read32(0x1F80_1120), 0);
+    }
 }
