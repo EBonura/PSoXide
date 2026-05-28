@@ -41,27 +41,27 @@ use emulator_core::{Bus, Cpu};
 use parity_oracle::{OracleConfig, ReduxProcess};
 use psx_iso::Disc;
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const CRASH_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 const TEKKEN_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 const GT2_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 const MGS_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 const RE2_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 // The a commercial title rips have a quirky double-nested directory layout
 // from their CDRomance source -- the inner `(v1.1) (Track 01).bin`
 // is the data track. Keeping the full path here (rather than
 // resolving via `.cue`) because our oracle reads raw BIN.
 const WIPEOUT1_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 const WIPEOUT2097_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 const WIPEOUT3_DISC: &str =
-    "/home/user/Downloads/<rom-path>";
+    "<rom-path>";
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 

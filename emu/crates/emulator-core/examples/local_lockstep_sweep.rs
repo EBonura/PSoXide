@@ -31,8 +31,8 @@ use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask, PadPulse};
 use parity_oracle::{OracleConfig, OracleError, ReduxProcess, StateCheckpoint};
 use psx_trace::InstructionRecord;
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
-const DEFAULT_GAMES_ROOT: &str = "/home/user/Downloads/discs";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_GAMES_ROOT: &str = "discs";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 const FAST_FORWARD_CHECKPOINT_INTERVAL: u64 = 1_000_000;

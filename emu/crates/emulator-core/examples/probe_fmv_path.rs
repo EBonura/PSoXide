@@ -22,8 +22,8 @@ use emulator_core::{
 };
 use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
 
-const DEFAULT_BIOS: &str = "/home/user/Downloads/bios/SCPH1001.BIN";
-const DEFAULT_DISC: &str = "/home/user/Downloads/<rom-path>";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_DISC: &str = "<rom-path>";
 const DEFAULT_STEPS: u64 = 300_000_000;
 const SAMPLE_EVERY: u64 = 25_000_000;
 const SPU_PUMP_CYCLES: u64 = 560_000;
