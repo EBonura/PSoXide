@@ -22,17 +22,18 @@ use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::ops as gte_ops;
 use psx_gte::regs::pack_xy as pack_gte_xy;
 use psx_gte::{cfc2, ctc2, mfc2, mtc2, scene as gte_scene};
-use psx_io::{dma, gpu as gpu_io, timers};
+use psx_io::{cdrom, dma, gpu as gpu_io, timers};
 use psx_rt::tty;
 use psx_vram::{Clut, TexDepth, Tpage};
 
+const SUITE_VERSION: &str = "HWTEST v0.2";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 13;
-const TEST_COUNT: usize = 33;
+const TEST_COUNT: usize = 36;
 const PAGE_COUNT: usize = (TEST_COUNT + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE;
 const PAD_POLL_TEST_INDEX: usize = 19;
 const MODE_COUNT: u8 = 5;
@@ -415,6 +416,21 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         name: "OTC DMA completes within bounded poll",
         run: test_dma_otc_bounded_completion,
     },
+    TestSpec {
+        group: "RAM",
+        name: "scratchpad byte/half/word roundtrip",
+        run: test_scratchpad_roundtrip,
+    },
+    TestSpec {
+        group: "CD",
+        name: "CD-ROM GetStat command response",
+        run: test_cdrom_getstat_response,
+    },
+    TestSpec {
+        group: "SIO",
+        name: "direct port 1 pad poll stability",
+        run: test_pad_direct_stability,
+    },
 ];
 
 struct HardwareTests {
@@ -630,6 +646,7 @@ fn draw_summary(font: &FontAtlas, suite: &HardwareTests) {
 
 fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 8, "PS1 HARDWARE TESTS", (232, 236, 244));
+    font.draw_text(224, 8, SUITE_VERSION, (112, 136, 170));
     font.draw_text(8, 20, "MODE", (140, 160, 190));
     font.draw_text(48, 20, suite.mode.label(), (255, 232, 128));
     font.draw_text(176, 20, "UP/DN SELECT", (140, 160, 190));
@@ -719,12 +736,14 @@ fn page_description(page: usize) -> &'static str {
     match page {
         0 => "BASIC CPU/RAM/DMA/TIMER/GPU/GTE/SPU CHECKS",
         1 => "EDGE CASES: DRAW AREA, DMA DIRECTION, TIMER LATCH",
-        2 => "TIMING: ROOT COUNTERS, IRQ LATCHES, DMA CADENCE",
+        2 => "TIMING/PREFLIGHT: ROOT COUNTERS, DMA, CD, SIO",
         _ => "ADDITIONAL HARDWARE CHECKS",
     }
 }
 
 fn print_conformance_report(suite: &HardwareTests) {
+    tty::print("hardware-tests: ");
+    tty::println(SUITE_VERSION);
     tty::print("hardware-tests: conformance pass=");
     tty_print_dec_u8(suite.pass_count);
     tty::print(" fail=");
@@ -2062,6 +2081,71 @@ fn test_dma_otc_bounded_completion() -> TestResult {
         TestResult::pass(0xFFFF, wait as u32, "otc wait")
     } else {
         TestResult::fail(0xFFFF, wait as u32, "otc wait")
+    }
+}
+
+fn test_scratchpad_roundtrip() -> TestResult {
+    const SCRATCH0: u32 = 0x1F80_03F0;
+    const SCRATCH1: u32 = 0x1F80_03F4;
+
+    unsafe {
+        let old0 = psx_io::read32(SCRATCH0);
+        let old1 = psx_io::read32(SCRATCH1);
+
+        psx_io::write32(SCRATCH0, 0xA55A_C33C);
+        psx_io::write32(SCRATCH1, 0x1122_3344);
+
+        let mut observed = 0u32;
+        if psx_io::read32(SCRATCH0) == 0xA55A_C33C {
+            observed |= 1 << 0;
+        }
+        if psx_io::read16(SCRATCH0) == 0xC33C {
+            observed |= 1 << 1;
+        }
+        if psx_io::read8(SCRATCH0) == 0x3C {
+            observed |= 1 << 2;
+        }
+        if psx_io::read32(SCRATCH1) == 0x1122_3344 {
+            observed |= 1 << 3;
+        }
+
+        psx_io::write32(SCRATCH0, old0);
+        psx_io::write32(SCRATCH1, old1);
+
+        expect_eq(0x0F, observed, "scratch")
+    }
+}
+
+fn test_cdrom_getstat_response() -> TestResult {
+    match cdrom::try_get_stat(200_000) {
+        Some(response) if !response.is_empty() => {
+            TestResult::info(1, response.bytes()[0] as u32, "getstat")
+        }
+        Some(response) => TestResult::info(2, response.len() as u32, "empty"),
+        None => TestResult::info(0, 0, "timeout"),
+    }
+}
+
+fn test_pad_direct_stability() -> TestResult {
+    let first = psx_pad::poll_port1();
+    spin(512);
+    let second = psx_pad::poll_port1();
+    spin(512);
+    let third = psx_pad::poll_port1();
+
+    let observed =
+        ((first.id_low as u32) << 16) | ((second.id_low as u32) << 8) | third.id_low as u32;
+
+    if !first.is_connected() && !second.is_connected() && !third.is_connected() {
+        TestResult::info(0, observed, "optional")
+    } else if first.mode == second.mode
+        && second.mode == third.mode
+        && first.id_low == second.id_low
+        && second.id_low == third.id_low
+    {
+        TestResult::info(1, observed, "stable")
+    } else {
+        TestResult::warn(1, observed, "unstable")
     }
 }
 
