@@ -943,6 +943,15 @@ impl Bus {
         }
     }
 
+    fn service_gpu_irq(&mut self) {
+        if self.gpu.take_irq_acknowledged() {
+            self.irq.clear(IrqSource::Gpu);
+        }
+        if self.gpu.take_irq_requested() {
+            self.irq.raise(IrqSource::Gpu);
+        }
+    }
+
     /// Cumulative cycles since reset.
     pub fn cycles(&self) -> u64 {
         self.cycles
@@ -1480,6 +1489,7 @@ impl Bus {
             _ => 0, // Manual (0) + prohibited (3) -- nothing standard uses
                     // them for the GPU channel. Drop the trigger silently.
         };
+        self.service_gpu_irq();
         // Start bit stays set until the scheduled completion event
         // fires -- Redux's `gpuInterrupt` is where `clearDMABusy<2>()`
         // is called. BIOS polling of CHCR bit 24 during the transfer
@@ -1938,6 +1948,7 @@ impl Bus {
             return;
         }
         if self.gpu.write32(phys, value) {
+            self.service_gpu_irq();
             if phys == crate::gpu::GP1_ADDR && (value >> 24) == 0x08 {
                 if value & (1 << 3) != 0 {
                     self.set_pal_mode();
@@ -2285,6 +2296,44 @@ mod tests {
                 .target(crate::scheduler::EventSlot::VBlank)
                 .unwrap(),
             FIRST_VBLANK_CYCLE_NTSC,
+        );
+    }
+
+    #[test]
+    fn gpu_irq_command_latches_and_acknowledges_i_stat() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+
+        bus.write32(crate::gpu::GP0_ADDR, 0x1F00_0000);
+        assert_ne!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
+        assert_ne!(bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)), 0);
+
+        bus.write32(crate::gpu::GP1_ADDR, 0x0200_0000);
+        assert_eq!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
+        assert_eq!(bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)), 0);
+    }
+
+    #[test]
+    fn timer2_target_sticky_survives_lazy_bus_service() {
+        const TIMER2_COUNTER: u32 = 0x1F80_1120;
+        const TIMER2_MODE: u32 = 0x1F80_1124;
+        const TIMER2_TARGET: u32 = 0x1F80_1128;
+        const MODE_RESET_AT_TARGET: u32 = 1 << 3;
+        const MODE_REACHED_TARGET: u32 = 1 << 11;
+
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+
+        bus.write32(TIMER2_TARGET, 32);
+        bus.write32(TIMER2_COUNTER, 0);
+        bus.write32(TIMER2_MODE, MODE_RESET_AT_TARGET);
+        bus.tick(8192);
+
+        let mode = bus.read32(TIMER2_MODE);
+        let counter = bus.read32(TIMER2_COUNTER);
+
+        assert_ne!(mode & MODE_REACHED_TARGET, 0);
+        assert!(
+            counter < 32,
+            "reset-at-target should wrap the counter below target, got {counter}"
         );
     }
 
