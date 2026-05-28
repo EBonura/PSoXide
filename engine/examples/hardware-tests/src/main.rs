@@ -81,20 +81,40 @@ impl Mode {
     const fn label(self) -> &'static str {
         match self {
             Self::Conformance => "CONFORMANCE",
-            Self::CpuScan => "CPU SCAN",
-            Self::GteScan => "GTE SCAN",
-            Self::SpuScan => "SPU SCAN",
-            Self::TimingScan => "TIMING SCAN",
+            Self::CpuScan => "ADV CPU SWEEP",
+            Self::GteScan => "ADV GTE MATRIX",
+            Self::SpuScan => "ADV SPU MAP",
+            Self::TimingScan => "ADV TIMING",
         }
     }
 
     const fn hint(self) -> &'static str {
         match self {
             Self::Conformance => "L/R PAGE  X RERUN",
-            Self::CpuScan => "X SCAN SAFE CPU FORMS",
-            Self::GteScan => "X SCAN RAW COP2 COMMANDS",
-            Self::SpuScan => "X SCAN SPU REGISTERS",
-            Self::TimingScan => "X SAMPLE TIMER/DMA/GTE COSTS",
+            Self::CpuScan => "X FINGERPRINT SAFE MIPS-I FORMS",
+            Self::GteScan => "X FINGERPRINT COP2 COMMAND MATRIX",
+            Self::SpuScan => "X MAP SPU VOICE REG READBACK",
+            Self::TimingScan => "X SAMPLE TIMER DMA GTE COSTS",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Conformance => "STABLE PASS/FAIL HARDWARE CHECKS",
+            Self::CpuScan => "DETERMINISTIC CPU OPCODE FINGERPRINT",
+            Self::GteScan => "EXPLORATORY RAW GTE COMMAND MATRIX",
+            Self::SpuScan => "SPU REGISTER BEHAVIOUR FINGERPRINT",
+            Self::TimingScan => "RELATIVE HARDWARE TIMING PROBE",
+        }
+    }
+
+    const fn aux_label(self) -> &'static str {
+        match self {
+            Self::Conformance => "DETAIL",
+            Self::CpuScan => "EXTRA",
+            Self::GteScan => "FLAG HITS",
+            Self::SpuScan => "CHANGED",
+            Self::TimingScan => "TIMER SUM",
         }
     }
 
@@ -455,10 +475,10 @@ impl HardwareTests {
             font: None,
             mode: Mode::Conformance,
             results: [TestResult::pending(); TEST_COUNT],
-            cpu_scan: ScanReport::pending("press x"),
-            gte_scan: ScanReport::pending("press x"),
-            spu_scan: ScanReport::pending("press x"),
-            timing_scan: ScanReport::pending("press x"),
+            cpu_scan: ScanReport::pending("press x to sweep"),
+            gte_scan: ScanReport::pending("press x to sweep"),
+            spu_scan: ScanReport::pending("press x to map"),
+            timing_scan: ScanReport::pending("press x to sample"),
             pass_count: 0,
             fail_count: 0,
             warn_count: 0,
@@ -677,27 +697,33 @@ fn draw_rows(font: &FontAtlas, suite: &HardwareTests) {
 
 fn draw_scan_report(font: &FontAtlas, mode: Mode, report: ScanReport) {
     let color = report.status.color();
-    font.draw_text(8, 52, mode.label(), (232, 236, 244));
+    font.draw_text(8, 40, "ADVANCED DIAGNOSTIC", (255, 232, 128));
+    font.draw_text(8, 52, mode.description(), (232, 236, 244));
     font.draw_text(8, 66, mode.hint(), (150, 170, 200));
 
     font.draw_text(8, 92, "STATUS", (140, 160, 190));
     font.draw_text(80, 92, report.status.label(), color);
-    font.draw_text(8, 106, "ITEMS", (140, 160, 190));
+    font.draw_text(8, 106, "CASES", (140, 160, 190));
     font.draw_text(80, 106, hex8(report.items as u32).as_str(), (220, 224, 230));
-    font.draw_text(8, 120, "HASH", (140, 160, 190));
+    font.draw_text(8, 120, "DIGEST", (140, 160, 190));
     font.draw_text(80, 120, hex8(report.hash).as_str(), (220, 224, 230));
-    font.draw_text(8, 134, "AUX", (140, 160, 190));
+    font.draw_text(8, 134, mode.aux_label(), (140, 160, 190));
     font.draw_text(80, 134, hex8(report.aux).as_str(), (220, 224, 230));
     font.draw_text(8, 148, "RUN", (140, 160, 190));
     font.draw_text(80, 148, dec3(report.runs as u16).as_str(), (220, 224, 230));
     font.draw_text(8, 174, "NOTE", (140, 160, 190));
     font.draw_text(80, 174, report.note, color);
-    font.draw_text(8, 198, "ITEMS = CASES EXECUTED", (112, 136, 170));
-    font.draw_text(8, 208, "HASH = COMPACT RESULT FINGERPRINT", (112, 136, 170));
+    font.draw_text(8, 198, "COMPARE DIGESTS ACROSS EMUS/PS1", (112, 136, 170));
+    font.draw_text(
+        8,
+        208,
+        "DIFFERENCE = INVESTIGATE THIS MODE",
+        (112, 136, 170),
+    );
     font.draw_text(
         8,
         218,
-        "AUX   = MODE-SPECIFIC EXTRA COUNTER",
+        "EXPLORATORY: NOT PASS/FAIL BY ITSELF",
         (112, 136, 170),
     );
 }
@@ -902,7 +928,7 @@ fn run_cpu_scan() -> ScanReport {
     hash = mix32(hash, cpu_load_store_battery());
     items = items.wrapping_add(2);
 
-    ScanReport::info(items, hash, 0, "safe cpu forms")
+    ScanReport::info(items, hash, 0, "safe mips-i forms")
 }
 
 fn run_gte_scan() -> ScanReport {
@@ -941,7 +967,7 @@ fn run_gte_scan() -> ScanReport {
         }
     }
 
-    ScanReport::info(items, hash, flag_master_hits, "raw cop2 matrix")
+    ScanReport::info(items, hash, flag_master_hits, "cop2 command matrix")
 }
 
 fn run_spu_scan() -> ScanReport {
@@ -975,7 +1001,7 @@ fn run_spu_scan() -> ScanReport {
         }
     }
 
-    ScanReport::info(items, hash, changed, "voice reg map")
+    ScanReport::info(items, hash, changed, "spu voice regs")
 }
 
 fn run_timing_scan() -> ScanReport {
@@ -1015,7 +1041,7 @@ fn run_timing_scan() -> ScanReport {
     aux ^= (otc_wait as u32) << 24;
     items = items.wrapping_add(1);
 
-    ScanReport::info(items, hash, aux, "timer/dma/gte costs")
+    ScanReport::info(items, hash, aux, "timer dma gte costs")
 }
 
 fn gte_snapshot_hash() -> u32 {
