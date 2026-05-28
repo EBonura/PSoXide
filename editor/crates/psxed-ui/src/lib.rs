@@ -25537,7 +25537,9 @@ fn draw_play_chunk_debug_map(
                 let left = rotate_vec2(forward, -cone_half_angle) * cone_len;
                 let right = rotate_vec2(forward, cone_half_angle) * cone_len;
                 let clipped = painter.with_clip_rect(plot);
-                if metrics.camera_map_valid && player_pos.distance(camera_pos) > 2.0 {
+                if (metrics.camera_map_valid || metrics.camera_global_valid)
+                    && player_pos.distance(camera_pos) > 2.0
+                {
                     clipped.line_segment(
                         [player_pos, camera_pos],
                         Stroke::new(1.0, Color32::from_rgba_unmultiplied(232, 240, 252, 160)),
