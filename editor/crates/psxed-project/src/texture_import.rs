@@ -604,7 +604,7 @@ mod tests {
             .join("..")
             .join("assets")
             .join("branding")
-            .join("logo-icon-player.png")
+            .join("psoxide-app-icon.png")
     }
 
     fn temp_project(tag: &str) -> PathBuf {
@@ -652,7 +652,7 @@ mod tests {
         let id = import_texture(
             &mut project,
             &logo_source(),
-            "Logo Icon",
+            "App Icon",
             &root,
             &test_config(),
         )
@@ -662,8 +662,8 @@ mod tests {
         let ResourceData::Texture { psxt_path } = &resource.data else {
             panic!("expected Texture resource, got {:?}", resource.data);
         };
-        assert_eq!(resource.name, "Logo Icon");
-        assert_eq!(psxt_path, "assets/textures/logo_icon.psxt");
+        assert_eq!(resource.name, "App Icon");
+        assert_eq!(psxt_path, "assets/textures/app_icon.psxt");
 
         let bytes = std::fs::read(root.join(psxt_path)).expect("psxt written");
         let stats = texture_stats_from_bytes(&bytes).expect("written psxt parses");
