@@ -18,6 +18,8 @@ pub const MODE_DOUBLE_SPEED: u8 = 1 << 7;
 
 /// CdlPlay command.
 pub const CMD_PLAY: u8 = 0x03;
+/// CdlGetStat command.
+pub const CMD_GETSTAT: u8 = 0x01;
 /// CdlStop command.
 pub const CMD_STOP: u8 = 0x08;
 /// CdlPause command.
@@ -99,6 +101,16 @@ pub fn try_command(command: u8, params: &[u8], spin_limit: u32) -> Option<Respon
     write_byte(REG_COMMAND_RESPONSE, command);
     let irq = wait_irq_bounded(IRQ_ACK, spin_limit)?;
     Some(finish_polled_command(irq_enable, irq))
+}
+
+/// Get the CD-ROM drive status byte.
+pub fn get_stat() -> Response {
+    command(CMD_GETSTAT, &[])
+}
+
+/// Try to get the CD-ROM drive status byte.
+pub fn try_get_stat(spin_limit: u32) -> Option<Response> {
+    try_command(CMD_GETSTAT, &[], spin_limit)
 }
 
 /// Set the CD-ROM controller mode byte.
