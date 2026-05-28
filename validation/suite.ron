@@ -1,0 +1,45 @@
+(
+    targets: [
+        (
+            name: "demo10",
+            category: Project,
+            artifact: Project(
+                project: "editor/projects/demo10",
+            ),
+            checkpoints: [
+                (
+                    name: "boot_visual_120",
+                    runner: Psoxide,
+                    stop: (
+                        steps: 200000000,
+                        guest_frames: Some(600),
+                        guest_visual_frames: Some(120),
+                    ),
+                    input_tape: None,
+                    hold_forward: false,
+                    hold_run: false,
+                    expected: (
+                        display: Some((hash: "0x413932ddb97fc77f", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0x8e184e9f57db4293"),
+                    ),
+                ),
+                (
+                    name: "forward_visual_120",
+                    runner: Psoxide,
+                    stop: (
+                        steps: 200000000,
+                        guest_frames: Some(600),
+                        guest_visual_frames: Some(120),
+                    ),
+                    input_tape: None,
+                    hold_forward: true,
+                    hold_run: false,
+                    expected: (
+                        display: Some((hash: "0xf02c4cfd1053085d", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0x94d7d95fce3b951f"),
+                    ),
+                ),
+            ],
+        ),
+    ],
+)

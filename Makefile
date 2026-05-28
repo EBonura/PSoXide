@@ -9,11 +9,10 @@
 #
 # Standalone tool crates live under tools/* and are gated explicitly.
 #
-# SDK examples live under sdk/examples/ and are compiled individually
-# with cargo build in their own directory so they can use their own
-# .cargo/config.toml for the mipsel-sony-psx target.
+# SDK and engine examples are compiled individually with explicit PSX
+# cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -30,6 +29,7 @@
         showcase-lights showcase-lights-disc run-showcase-lights \
 	showcase-fog showcase-fog-disc run-showcase-fog \
 	showcase-particles showcase-particles-disc run-showcase-particles \
+	hardware-tests hardware-tests-disc run-hardware-tests \
 	hello-engine hello-engine-disc run-hello-engine \
 	cook-playtest build-editor-playtest profile-demo3 profile-demo3-forward \
 	profile-demo3-paced20 profile-demo3-paced20-forward profile-demo3-disc-stream \
@@ -50,6 +50,11 @@ help:
 	@echo "                      - reject floats/wide ints in PS1 runtime code"
 	@echo "    make clean        - cargo clean all workspaces"
 	@echo "    make run          - launch the desktop frontend (no EXE)"
+	@echo "    make validate     - run exact-hash validation matrix"
+	@echo "    make validate-repeat"
+	@echo "                      - run exact-hash validation 3 times for determinism"
+	@echo "    make validate-bless"
+	@echo "                      - update exact-hash validation baselines"
 	@echo "    make parity       - step both emulators and assert bit-identical traces"
 	@echo "    make oracle-smoke - smoke: launch headless Redux and verify Lua runs"
 	@echo "    make oracle-side-load - compare side-loaded SDK EXEs against Redux"
@@ -95,6 +100,7 @@ help:
 	@echo "    make showcase-lights-disc - build the 4-point-light demo disc"
 	@echo "    make showcase-fog-disc   - build the fog / full-GTE-pipeline demo disc"
 	@echo "    make showcase-particles-disc - build the particle-pool demo disc"
+	@echo "    make hardware-tests-disc - build the visual PS1 hardware test suite"
 	@echo "    make run-tri      - build + boot hello-tri as a disc"
 	@echo "    make run-input    - build + boot hello-input as a disc"
 	@echo "    make run-ot       - build + boot hello-ot as a disc"
@@ -119,9 +125,19 @@ help:
 	@echo "    make run-showcase-lights - build + boot the 4-point-light demo disc"
 	@echo "    make run-showcase-fog - build + boot the fog demo disc"
 	@echo "    make run-showcase-particles - build + boot the particle demo disc"
+	@echo "    make run-hardware-tests - build + boot the visual hardware test suite"
 
 run:
 	cd emu && cargo run -p frontend --release
+
+validate:
+	cd emu && cargo run -p frontend --release -- validate --manifest ../validation/suite.ron
+
+validate-repeat:
+	cd emu && cargo run -p frontend --release -- validate --manifest ../validation/suite.ron --repeat 3
+
+validate-bless:
+	cd emu && cargo run -p frontend --release -- validate --manifest ../validation/suite.ron --bless
 
 check:
 	cargo check --workspace --all-features
@@ -232,7 +248,13 @@ test-sdk: examples
 
 # --- SDK examples ---------------------------------------------------------
 
-EXAMPLE_OUT := build/examples/mipsel-sony-psx/release
+PSX_TARGET := mipsel-sony-psx
+EXAMPLE_TARGET_DIR := $(CURDIR)/build/examples
+EXAMPLE_OUT := build/examples/$(PSX_TARGET)/release
+PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem
+SDK_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../psoxide.ld -Clink-arg=--oformat=binary"
+ENGINE_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
+EDITOR_PLAYTEST_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 CDDA_DEMO_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
 GONCHAROV_WAV ?= assets/audio/cdda/GONCHAROV.wav
 MAGIKAAAAARP_PONG_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
@@ -271,7 +293,7 @@ DATA_DISC_EXAMPLES := \
 	hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
 	showcase-text game-pong game-breakout game-invaders \
 	showcase-3d showcase-model showcase-lights showcase-fog showcase-particles \
-	hello-engine
+	hardware-tests hello-engine
 PUBLIC_EXAMPLE_DISCS := $(addsuffix -disc,$(DATA_DISC_EXAMPLES)) hello-cdda-disc game-magikaaaaaarp-pong-disc
 
 define build_data_disc
@@ -283,30 +305,30 @@ $(1)-disc: $(1)
 endef
 
 hello-tri:
-	cd sdk/examples/hello-tri && cargo build --release
+	cd sdk/examples/hello-tri && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 hello-input:
-	cd sdk/examples/hello-input && cargo build --release
+	cd sdk/examples/hello-input && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 hello-ot:
-	cd sdk/examples/hello-ot && cargo build --release
+	cd sdk/examples/hello-ot && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 # engine/ examples live outside sdk/examples/ — the engine is its
 # own domain and its demos exercise the engine framework.
 hello-engine:
-	cd engine/examples/hello-engine && cargo build --release
+	cd engine/examples/hello-engine && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 hello-tex: assets
-	cd sdk/examples/hello-tex && cargo build --release
+	cd sdk/examples/hello-tex && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 hello-gte:
-	cd sdk/examples/hello-gte && cargo build --release
+	cd sdk/examples/hello-gte && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 hello-audio:
-	cd sdk/examples/hello-audio && cargo build --release
+	cd sdk/examples/hello-audio && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 hello-cdda:
-	cd sdk/examples/hello-cdda && cargo build --release
+	cd sdk/examples/hello-cdda && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 hello-cdda-disc: hello-cdda
 	cd tools/mkisopsx && cargo run --release -- \
@@ -316,13 +338,13 @@ hello-cdda-disc: hello-cdda
 		--cdda-track ../../$(CDDA_DEMO_TRACK)
 
 showcase-text:
-	cd engine/examples/showcase-text && cargo build --release
+	cd engine/examples/showcase-text && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 game-pong:
-	cd engine/examples/game-pong && cargo build --release
+	cd engine/examples/game-pong && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 game-magikaaaaaarp-pong:
-	cd engine/examples/game-magikaaaaaarp-pong && cargo build --release
+	cd engine/examples/game-magikaaaaaarp-pong && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 magikaaaaaarp-pong-spectrum:
 	$(PYTHON) tools/bake_spectrum.py $(GONCHAROV_WAV) \
@@ -337,27 +359,30 @@ game-magikaaaaaarp-pong-disc: game-magikaaaaaarp-pong
 		--cdda-track ../../$(MAGIKAAAAARP_PONG_TRACK)
 
 game-breakout:
-	cd engine/examples/game-breakout && cargo build --release
+	cd engine/examples/game-breakout && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 game-invaders:
-	cd engine/examples/game-invaders && cargo build --release
+	cd engine/examples/game-invaders && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 showcase-3d: assets
-	cd engine/examples/showcase-3d && cargo build --release
+	cd engine/examples/showcase-3d && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 showcase-model:
-	cd engine/examples/showcase-model && cargo build --release
+	cd engine/examples/showcase-model && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 showcase-lights: assets
-	cd engine/examples/showcase-lights && cargo build --release
+	cd engine/examples/showcase-lights && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 # showcase-fog uses two cooked textures (brick wall + cobblestone
 # floor) on its corridor walls + floor, plus procedural geometry.
 showcase-fog: assets
-	cd engine/examples/showcase-fog && cargo build --release
+	cd engine/examples/showcase-fog && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 showcase-particles:
-	cd engine/examples/showcase-particles && cargo build --release
+	cd engine/examples/showcase-particles && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+
+hardware-tests:
+	cd engine/examples/hardware-tests && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 $(foreach example,$(DATA_DISC_EXAMPLES),$(eval $(call build_data_disc,$(example))))
 
@@ -379,7 +404,7 @@ cook-playtest:
 EDITOR_PLAYTEST_FEATURES ?= cd-stream-bench
 
 build-editor-playtest:
-	cd engine/examples/editor-playtest && cargo build --release --features "$(EDITOR_PLAYTEST_FEATURES)"
+	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS) --features "$(EDITOR_PLAYTEST_FEATURES)"
 
 profile-demo3:
 	$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(PROFILE_DEMO3_HW)
@@ -576,6 +601,9 @@ run-showcase-fog: showcase-fog-disc
 
 run-showcase-particles: showcase-particles-disc
 	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/showcase-particles.cue cargo run -p frontend --release
+
+run-hardware-tests: hardware-tests-disc
+	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hardware-tests.cue cargo run -p frontend --release
 
 run-hello-engine: hello-engine-disc
 	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/hello-engine.cue cargo run -p frontend --release
