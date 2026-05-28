@@ -56,7 +56,7 @@ fn main() {
         .unwrap_or_default();
     let wants_pad = held_buttons != 0 || !pad_pulses.is_empty();
 
-    let bios_path = PathBuf::from("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN");
+    let bios_path = PathBuf::from("bios/SCPH1001.BIN");
 
     // --- Ours ---
     eprintln!("[ours] fast-forwarding {start} steps...");

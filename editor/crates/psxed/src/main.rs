@@ -67,7 +67,7 @@
 //!
 //! ```bash
 //! psxed audio-pack assets/audio/freesfx.selection.json \
-//!     --zip ~/Downloads/FreeSFX.zip --out-dir build/audio
+//!     --zip /path/to/FreeSFX.zip --out-dir build/audio
 //! ```
 //!
 //! ## Future subcommands
@@ -166,16 +166,16 @@ AUDIO-PACK SUBCOMMAND:
                           [--no-preview]
 
 EXAMPLES:
-    psxed glb ~/Downloads/model.glb -o assets/model.psxm \\
+    psxed glb /path/to/model.glb -o assets/model.psxm \\
         --decimate-grid 6
-    psxed glb-model ~/Downloads/character.glb --out-dir assets/models/character \\
+    psxed glb-model /path/to/character.glb --out-dir assets/models/character \\
         --name character --texture-size 128x128 --texture-depth 8 --anim-fps 15 \\
         --world-height 1024
     psxed obj vendor/teapot.obj -o build/teapot.psxm --palette cool
-    psxed tex ~/Downloads/brick.jpg -o assets/brick.psxt \\
+    psxed tex /path/to/brick.jpg -o assets/brick.psxt \\
         --size 128x128 --depth 4 --resample lanczos3
     psxed audio-pack assets/audio/freesfx.selection.json \\
-        --zip ~/Downloads/FreeSFX.zip --out-dir build/audio
+        --zip /path/to/FreeSFX.zip --out-dir build/audio
 ";
 
 fn run_glb(args: &[String]) -> Result<(), String> {

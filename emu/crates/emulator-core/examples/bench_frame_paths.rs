@@ -86,9 +86,9 @@ fn bench_display_rgba8_with_real_disc_state() {
     // Boot a disc enough to have a 320x240 display configured + content.
     let bios_path = std::env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN"));
+        .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
     let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "/Users/ebonura/Downloads/ps1 games/Tekken 3 (USA)/Tekken 3 (USA).cue".into()
+        "discs/Tekken 3 (USA)/Tekken 3 (USA).cue".into()
     });
     let bios = match std::fs::read(&bios_path) {
         Ok(b) => b,

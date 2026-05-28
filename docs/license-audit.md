@@ -18,8 +18,8 @@ assets, docs, canaries, and generated outputs all need a coherent story.
 ## Current Position
 
 PSoXide is licensed under **GPL-2.0-or-later**. The full license text
-is at [`LICENSE`](../LICENSE) at the repo root; third-party references
-and credit are in [`NOTICE.md`](../NOTICE.md).
+is at [`LICENSE`](../LICENSE) at the repo root, alongside the project
+notice, third-party references, and credit.
 
 The choice is deliberate: the emulator core uses PCSX-Redux
 (GPL-2.0-or-later) as a parity oracle and reference for several
@@ -30,8 +30,9 @@ the derivative-work question entirely.
 
 ### Root license files (resolved 2026-04-30)
 
-`LICENSE` (GPL-2.0 canonical text) and `NOTICE.md` are now at the repo
-root. All `Cargo.toml` `license` fields declare `GPL-2.0-or-later`.
+`LICENSE` now contains the GPL-2.0 canonical text plus the project
+notice and third-party reference notes. All `Cargo.toml` `license`
+fields declare `GPL-2.0-or-later`.
 
 ### PCSX-Redux derivation risk (resolved 2026-04-30)
 

@@ -38,9 +38,9 @@ struct QueueStats {
 
 fn main() {
     let bios_path = std::env::var("PSOXIDE_BIOS")
-        .unwrap_or_else(|_| "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN".into());
+        .unwrap_or_else(|_| "bios/SCPH1001.BIN".into());
     let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "/Users/ebonura/Downloads/ps1 games/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin".into()
+        "discs/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin".into()
     });
     let out_path = std::env::var("PSOXIDE_WAV").unwrap_or_else(|_| "/tmp/crash_audio.wav".into());
     let seconds = std::env::var("PSOXIDE_AUDIO_SECONDS")

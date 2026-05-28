@@ -15,7 +15,7 @@ fn main() {
         .unwrap_or(usize::MAX);
 
     let bios_path = env::var("PSOXIDE_BIOS")
-        .unwrap_or_else(|_| "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN".into());
+        .unwrap_or_else(|_| "bios/SCPH1001.BIN".into());
     let bios = fs::read(&bios_path).expect("BIOS readable");
     let dir = cache::default_dir();
     let want = if max == usize::MAX { 50_000_000 } else { max };

@@ -20,7 +20,7 @@ fn main() {
         .nth(2)
         .expect("usage: probe_irq_sources_at <step> <disc.bin>");
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     let disc = disc_support::load_disc_path(&PathBuf::from(disc_path)).expect("disc readable");
     bus.cdrom.insert_disc(Some(disc));

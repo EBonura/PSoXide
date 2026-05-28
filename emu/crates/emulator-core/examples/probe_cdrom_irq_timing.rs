@@ -34,7 +34,7 @@ fn main() {
         .unwrap_or(50);
     let disc_path = std::env::args().nth(3);
 
-    let bios_path = PathBuf::from("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN");
+    let bios_path = PathBuf::from("bios/SCPH1001.BIN");
 
     // --- Ours ---
     eprintln!("[ours] running {n} steps with irq_log enabled (max {max_log})...");

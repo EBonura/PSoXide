@@ -34,7 +34,7 @@ fn main() {
     let count: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(16);
     let disc_path = args.get(3).cloned();
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     let mut cpu = Cpu::new();
     if let Some(ref p) = disc_path {

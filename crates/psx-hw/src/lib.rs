@@ -12,7 +12,7 @@
 //!
 //! Hardware references used throughout:
 //! - nocash PSX-SPX (<https://psx-spx.consoledev.net/>)
-//! - PCSX-Redux source tree at `/Users/ebonura/Desktop/repos/pcsx-redux`
+//! - PCSX-Redux source tree at `../pcsx-redux`
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]

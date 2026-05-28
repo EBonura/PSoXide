@@ -2,8 +2,8 @@
 //!
 //! Binary discovery order (first match wins):
 //! 1. `PSOXIDE_REDUX_BIN` environment variable
-//! 2. `/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux`
-//! 3. `/Users/ebonura/Desktop/repos/pcsx-redux/bins/Release/pcsx-redux`
+//! 2. a `pcsx-redux` checkout next to the PSoXide repo root
+//! 3. that checkout's `bins/Release/pcsx-redux`
 //!
 //! The `.app` bundle path is deliberately not tried -- it launches the
 //! GUI even when `-no-ui` is passed.
@@ -64,11 +64,17 @@ fn resolve_binary() -> Result<PathBuf, OracleError> {
         tried.push(p);
     }
 
-    for fallback in [
-        "/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux",
-        "/Users/ebonura/Desktop/repos/pcsx-redux/bins/Release/pcsx-redux",
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let repo_parent = repo_root.parent().unwrap_or(&repo_root);
+
+    for p in [
+        repo_parent.join("pcsx-redux/pcsx-redux"),
+        repo_parent.join("pcsx-redux/bins/Release/pcsx-redux"),
     ] {
-        let p = PathBuf::from(fallback);
         if is_executable(&p) {
             return Ok(p);
         }

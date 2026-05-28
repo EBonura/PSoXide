@@ -21,14 +21,14 @@ Redux run at the first mismatch, so long route sweeps should now produce
 bounded first-break evidence instead of waiting for the full route.
 
 ```bash
-export PSOXIDE_BIOS="/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN"
-export PSOXIDE_REDUX_BIN="/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux"
+export PSOXIDE_BIOS="bios/SCPH1001.BIN"
+export PSOXIDE_REDUX_BIN="../pcsx-redux/pcsx-redux"
 
 cargo run --manifest-path emu/Cargo.toml \
   -p emulator-core \
   --example local_lockstep_sweep \
   --release -- \
-  --root "/Users/ebonura/Downloads/ps1 games" \
+  --root "discs" \
   --steps 100000000 \
   --interval 10000 \
   --report-dir target/local-lockstep/top25-20260505
@@ -57,7 +57,7 @@ cargo run --manifest-path emu/Cargo.toml \
   --release \
   -p emulator-core \
   --example probe_local_games_boot -- \
-  0 "/Users/ebonura/Downloads/ps1 games"
+  0 "discs"
 ```
 
 Use `commercial_route_matrix` as the route-progress ratchet. It BIOS
@@ -71,7 +71,7 @@ cargo run --manifest-path emu/Cargo.toml \
   -p emulator-core \
   --example commercial_route_matrix \
   --release -- \
-  --root "/Users/ebonura/Downloads/ps1 games" \
+  --root "discs" \
   --steps 300000000 \
   --report-dir target/commercial-route-matrix/local-300m
 ```
@@ -141,13 +141,13 @@ the shared issue instead of inventing a per-game bug.
 
 | Date | Scope | Command shape | Result | Evidence |
 |---|---|---|---|---|
-| 2026-05-05 | Full local library, 16 discovered sheets. | `local_lockstep_sweep --root ~/Downloads/ps1 games --steps 20000000 --interval 10000 --no-visual` | 15 mountable images matched Redux CPU checkpoints through 20M user steps. Tomb Raider was loader-blocked by missing ECM conversion. | `target/local-lockstep/local-20m-20260505/SUMMARY.txt` |
+| 2026-05-05 | Full local library, 16 discovered sheets. | `local_lockstep_sweep --root discs --steps 20000000 --interval 10000 --no-visual` | 15 mountable images matched Redux CPU checkpoints through 20M user steps. Tomb Raider was loader-blocked by missing ECM conversion. | `target/local-lockstep/local-20m-20260505/SUMMARY.txt` |
 | 2026-05-05 | Top-25 local subset, 11 legally local targets. | `local_lockstep_sweep --disc ... --steps 50000000 --interval 10000 --no-visual` | All 11 matched Redux CPU checkpoints through 50M user steps. Framebuffer parity was intentionally skipped. | `target/local-lockstep/top25-local-50m-20260505/SUMMARY.txt` |
 | 2026-05-05 | Top-25 local subset, 11 legally local targets. | `local_lockstep_sweep --disc ... --steps 100000000 --interval 10000` | All 11 matched Redux CPU checkpoints through 100M user steps and BIOS/Sony-logo visible framebuffer parity at `640x478` with `diff=0/611840`. This is not gameplay validation. | `target/local-lockstep/crash-100m-visual-20260505/SUMMARY.txt`; `target/local-lockstep/top25-local-rest-100m-visual-20260505/SUMMARY.txt` |
 | 2026-05-05 | Resident Evil 2 route toward "Original Game" / no-load path. | `local_lockstep_sweep --disc RE2.cue --steps 300000000 --interval 1000000 --no-visual --pad-pulses 0x0008@3150+30,0x4000@3250+20,0x0040@5120+12,0x0040@5160+12,0x4000@5200+30` | First route-level CPU checkpoint break is tick-only in `(266M, 267M]`: PC and GPR/COP2 state hash still match, but PSoXide is 402 cycles ahead of Redux. | `target/local-lockstep/re2-route-300m-20260505/SUMMARY.txt` |
 | 2026-05-05 | Route-progress spot checks for CTR, Marvel vs. Capcom, and Metal Slug X. | `probe_fmv_path ...` and `probe_fmv_path --fastboot ...`; reproduced by ignored tests in `emu/crates/emulator-core/tests/commercial_disc_progress.rs`. | CTR is blocked on the SCEA splash through 300M in BIOS and direct-EXE modes (`0xbfb9bb04fb7042d8`); Metal Slug X reports no game data by 300M in BIOS mode and by 100M in direct-EXE mode (`0x09369767b12fc5f2`); Marvel vs. Capcom reaches the Capcom movie/logo path but no gameplay route is pinned. | Local repro logs/screenshots; use `commercial_disc_progress` as the red guard. |
 | 2026-05-05 | Route matrix canaries for CTR and Metal Slug X. | `commercial_route_matrix --disc CTR.cue --disc MetalSlugX.cue --steps 300000000 --report-dir target/commercial-route-matrix/canaries-20260505` | CTR remains `boot/license` at the SCEA splash (`0xbfb9bb04fb7042d8`). Metal Slug X becomes `route-progress` with generic input, reaches a loading screen (`0x36cb4b8cb6c42d59`), and still needs gameplay confirmation plus Redux parity. | `target/commercial-route-matrix/canaries-20260505/SUMMARY.md`; `target/commercial-route-matrix/canaries-20260505/matrix.csv` |
-| 2026-05-05 | Full local route matrix, 16 discovered sheets. | `commercial_route_matrix --root ~/Downloads/ps1 games --steps 300000000 --wall-timeout-secs 120 --report-dir target/commercial-route-matrix/local-300m-20260505` | No title is playable yet. Buckets: `render/gpu=4`, `fmv/mdec=4`, `unknown=3`, `boot/license=2`, `route-progress=1`, `menu-input=1`, `loader=1`. Every row includes the next `local_lockstep_sweep` parity command. | `target/commercial-route-matrix/local-300m-20260505/SUMMARY.md`; `target/commercial-route-matrix/local-300m-20260505/matrix.csv` |
+| 2026-05-05 | Full local route matrix, 16 discovered sheets. | `commercial_route_matrix --root discs --steps 300000000 --wall-timeout-secs 120 --report-dir target/commercial-route-matrix/local-300m-20260505` | No title is playable yet. Buckets: `render/gpu=4`, `fmv/mdec=4`, `unknown=3`, `boot/license=2`, `route-progress=1`, `menu-input=1`, `loader=1`. Every row includes the next `local_lockstep_sweep` parity command. | `target/commercial-route-matrix/local-300m-20260505/SUMMARY.md`; `target/commercial-route-matrix/local-300m-20260505/matrix.csv` |
 | 2026-05-05 | CTR routed parity harness smoke. | `local_lockstep_sweep --disc CTR.cue --steps 10000000 --interval 1000000 --no-visual --pad-pulses ...` followed by streaming-harness regression smokes with `--redux-timeout-secs 60 --redux-wall-timeout-secs 120`. | CTR route CPU state matches Redux through 10M routed user steps. This does not reach gameplay; it validates the route/parity plumbing before longer SCEA-splash first-break sweeps. | `target/local-lockstep/ctr-smoke-10m-20260505/SUMMARY.txt`; `target/local-lockstep/ctr-stream-wall-smoke-1m-20260505/SUMMARY.txt` |
 | 2026-05-06 | Resident Evil 2 exact route drift probe. | `probe_raw_irq_trace 266946809 RE2.cue` plus dense `local_lockstep_sweep --steps 267500000 --interval 50000 --no-visual --pad-pulses ...` | The old `(266M, 267M]` tick-only drift is fixed. The next first break is now exact: checkpoint window `(267150000, 267200000]`, exact step `267175364`, ours `tick=608965378`, Redux `tick=608965346`, same `pc=0x8008602c` and instruction. Local folded-step evidence shows a VBlank IRQ entry with `I_STAT=0x001`, `raw_isr=10362`, delta `22849`, and `2123` memory-access cycles. | `target/re2-diagnostics/re2-local-fold-after-no-dsr-timeout.trace`; `target/re2-diagnostics/re2-redux-fold.trace`; `target/re2-diagnostics/re2-local-vblank-267175364.trace`; `target/local-lockstep/re2-route-267m-single-after-sio-20260506/`; `target/local-lockstep/re2-route-267_5m-50k-after-sio-20260506/` |
 | 2026-05-06 | CTR and Metal Slug X canaries after SIO IRQ fix. | `commercial_route_matrix --disc CTR.cue --disc MetalSlugX.cue --steps 300000000 --report-dir target/commercial-route-matrix/canaries-after-sio-20260506` | No route promotion. CTR remains `boot/license` at the SCEA splash (`0xbfb9bb04fb7042d8`). Metal Slug X remains `route-progress` at the loading-screen state (`0x36cb4b8cb6c42d59`) and still needs gameplay confirmation plus Redux parity. | `target/commercial-route-matrix/canaries-after-sio-20260506/SUMMARY.md`; `target/commercial-route-matrix/canaries-after-sio-20260506/matrix.csv` |
@@ -204,13 +204,13 @@ Append dated findings here when a sweep produces new evidence.
 ### 2026-05-05 - Resident Evil 2 route timing drift
 
 Disc:
-`/Users/ebonura/Downloads/ps1 games/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue`
+`discs/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue`
 
 BIOS:
-`/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN`
+`bios/SCPH1001.BIN`
 
 Redux:
-`/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux`
+`../pcsx-redux/pcsx-redux`
 
 Command:
 `local_lockstep_sweep --disc RE2.cue --steps 300000000 --interval 1000000 --no-visual --pad-pulses 0x0008@3150+30,0x4000@3250+20,0x0040@5120+12,0x0040@5160+12,0x4000@5200+30`
@@ -244,13 +244,13 @@ Superseded by the 2026-05-06 exact SIO fix below.
 ### 2026-05-06 - Resident Evil 2 SIO IRQ timing drift fixed at exact step
 
 Disc:
-`/Users/ebonura/Downloads/ps1 games/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue`
+`discs/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue`
 
 BIOS:
-`/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN`
+`bios/SCPH1001.BIN`
 
 Redux:
-`/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux`
+`../pcsx-redux/pcsx-redux`
 
 Commands:
 `probe_raw_irq_trace 266946809 RE2.cue`
@@ -324,13 +324,13 @@ Capture the equivalent Redux raw VBlank trace for cycles `608942529..608965346` 
 ### 2026-05-06 - Metal Slug X route/render target
 
 Disc:
-`/Users/ebonura/Downloads/ps1 games/Metal Slug X (USA)/Metal Slug X (USA).cue`
+`discs/Metal Slug X (USA)/Metal Slug X (USA).cue`
 
 BIOS:
-`/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN`
+`bios/SCPH1001.BIN`
 
 Redux:
-`/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux`
+`../pcsx-redux/pcsx-redux`
 
 Commands:
 `commercial_route_matrix --disc MetalSlugX.cue --steps 530000000 --wall-timeout-secs 120 --dump-visible --report-dir target/commercial-route-matrix/metal-slug-x-530m-after-rect-span-20260506`

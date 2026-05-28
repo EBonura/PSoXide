@@ -19,7 +19,7 @@ use parity_oracle::{OracleConfig, ReduxProcess};
 use psx_iso::Exe;
 use psx_trace::InstructionRecord;
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const EXAMPLE_OUT: &str = "build/examples/mipsel-sony-psx/release";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(15);

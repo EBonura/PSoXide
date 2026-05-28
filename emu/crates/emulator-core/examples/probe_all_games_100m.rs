@@ -27,39 +27,39 @@ fn main() {
         ("bios_no_disc", ""),
         (
             "crash",
-            "/Users/ebonura/Downloads/ps1 games/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin",
+            "discs/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin",
         ),
         (
             "tekken",
-            "/Users/ebonura/Downloads/ps1 games/Tekken 3 (USA)/Tekken 3 (USA) (Track 1).bin",
+            "discs/Tekken 3 (USA)/Tekken 3 (USA) (Track 1).bin",
         ),
         (
             "gt2",
-            "/Users/ebonura/Downloads/ps1 games/Gran Turismo 2 (USA) (Arcade Mode) (Rev 1)/Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).bin",
+            "discs/Gran Turismo 2 (USA) (Arcade Mode) (Rev 1)/Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).bin",
         ),
         (
             "mgs",
-            "/Users/ebonura/Downloads/ps1 games/Metal Gear Solid (USA) (Disc 1) (Rev 1)/Metal Gear Solid (USA) (Disc 1) (Rev 1).bin",
+            "discs/Metal Gear Solid (USA) (Disc 1) (Rev 1)/Metal Gear Solid (USA) (Disc 1) (Rev 1).bin",
         ),
         (
             "re2",
-            "/Users/ebonura/Downloads/ps1 games/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1) (Track 1).bin",
+            "discs/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1) (Track 1).bin",
         ),
         (
             "wipeout1",
-            "/Users/ebonura/Downloads/ps1 games/WipEout (Europe) (v1.1)/WipEout (Europe) (v1.1)/WipEout (Europe) (v1.1) (Track 01).bin",
+            "discs/WipEout (Europe) (v1.1)/WipEout (Europe) (v1.1)/WipEout (Europe) (v1.1) (Track 01).bin",
         ),
         (
             "wipeout2097",
-            "/Users/ebonura/Downloads/ps1 games/WipEout 2097 (Europe)/WipEout 2097 (Europe)/WipEout 2097 (Europe) (Track 01).bin",
+            "discs/WipEout 2097 (Europe)/WipEout 2097 (Europe)/WipEout 2097 (Europe) (Track 01).bin",
         ),
         (
             "wipeout3",
-            "/Users/ebonura/Downloads/ps1 games/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It)/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It)/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It) (Track 01).bin",
+            "discs/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It)/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It)/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It) (Track 01).bin",
         ),
     ];
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     println!(
         "Expected Sony-logo hash (Redux-verified): 0x{:016x}",
         EXPECTED_SONY_LOGO_HASH,

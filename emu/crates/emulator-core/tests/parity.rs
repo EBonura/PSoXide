@@ -16,7 +16,7 @@ use emulator_core::{Bus, Cpu};
 use parity_oracle::{cache, OracleConfig, ReduxProcess};
 use psx_trace::InstructionRecord;
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 

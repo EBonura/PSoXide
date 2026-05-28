@@ -41,27 +41,27 @@ use emulator_core::{Bus, Cpu};
 use parity_oracle::{OracleConfig, ReduxProcess};
 use psx_iso::Disc;
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const CRASH_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin";
+    "discs/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin";
 const TEKKEN_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/Tekken 3 (USA)/Tekken 3 (USA) (Track 1).bin";
+    "discs/Tekken 3 (USA)/Tekken 3 (USA) (Track 1).bin";
 const GT2_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/Gran Turismo 2 (USA) (Arcade Mode) (Rev 1)/Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).bin";
+    "discs/Gran Turismo 2 (USA) (Arcade Mode) (Rev 1)/Gran Turismo 2 (USA) (Arcade Mode) (Rev 1).bin";
 const MGS_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/Metal Gear Solid (USA) (Disc 1) (Rev 1)/Metal Gear Solid (USA) (Disc 1) (Rev 1).bin";
+    "discs/Metal Gear Solid (USA) (Disc 1) (Rev 1)/Metal Gear Solid (USA) (Disc 1) (Rev 1).bin";
 const RE2_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1) (Track 1).bin";
+    "discs/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1) (Track 1).bin";
 // The WipEout rips have a quirky double-nested directory layout
 // from their CDRomance source -- the inner `(v1.1) (Track 01).bin`
 // is the data track. Keeping the full path here (rather than
 // resolving via `.cue`) because our oracle reads raw BIN.
 const WIPEOUT1_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/WipEout (Europe) (v1.1)/WipEout (Europe) (v1.1)/WipEout (Europe) (v1.1) (Track 01).bin";
+    "discs/WipEout (Europe) (v1.1)/WipEout (Europe) (v1.1)/WipEout (Europe) (v1.1) (Track 01).bin";
 const WIPEOUT2097_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/WipEout 2097 (Europe)/WipEout 2097 (Europe)/WipEout 2097 (Europe) (Track 01).bin";
+    "discs/WipEout 2097 (Europe)/WipEout 2097 (Europe)/WipEout 2097 (Europe) (Track 01).bin";
 const WIPEOUT3_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It)/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It)/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It) (Track 01).bin";
+    "discs/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It)/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It)/WipEout 3 - Special Edition (Europe) (En,Fr,De,Es,It) (Track 01).bin";
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 

@@ -18,7 +18,7 @@ fn main() {
         .nth(3)
         .expect("usage: probe_disc_next_irq <start_step> <max_steps> <disc.bin>");
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let disc_bytes = std::fs::read(&disc_path).expect("disc readable");
     let mut bus = Bus::new(bios).expect("bus");
     bus.cdrom

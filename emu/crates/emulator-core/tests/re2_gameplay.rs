@@ -17,8 +17,8 @@ use emulator_core::{
     DISC_FAST_BOOT_WARMUP_STEPS,
 };
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
-const DEFAULT_RE2_DISC: &str = "/Users/ebonura/Downloads/ps1 games/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_RE2_DISC: &str = "discs/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1)/Resident Evil 2 - Dual Shock Ver. (USA) (Disc 1).cue";
 const GAMEPLAY_STEPS: u64 = 1_200_000_000;
 const SPU_PUMP_CYCLES: u64 = 560_000;
 const SPU_FRAME_SAMPLES: usize = 735;

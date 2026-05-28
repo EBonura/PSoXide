@@ -8,7 +8,7 @@ use emulator_core::{Bus, Cpu};
 
 fn main() {
     let bios_path = std::env::var("PSOXIDE_BIOS")
-        .unwrap_or_else(|_| "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN".into());
+        .unwrap_or_else(|_| "bios/SCPH1001.BIN".into());
     let bios = std::fs::read(&bios_path).expect("BIOS readable");
     let mut bus = Bus::new(bios).expect("BIOS size");
     let mut cpu = Cpu::new();

@@ -28,7 +28,7 @@ fn main() {
         .unwrap_or(30);
     let disc_path = std::env::args().nth(3);
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     if let Some(ref p) = disc_path {
         let disc_bytes = std::fs::read(p).expect("disc readable");

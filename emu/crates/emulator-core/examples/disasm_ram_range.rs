@@ -18,7 +18,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5_000_000); // plenty to fold BIOS into RAM
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     let mut cpu = Cpu::new();
 

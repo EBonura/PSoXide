@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 /// Default BIOS for side-load runs. The EXE side-load bypasses BIOS
 /// execution, but `Bus::new` still requires a valid BIOS image for
 /// its memory map -- any SCPH image of the right size will do.
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 
 /// Resolve the repo-root path from `CARGO_MANIFEST_DIR`. We're at
 /// `emu/crates/emulator-core/` so three `..`s land at the root.

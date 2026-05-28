@@ -18,7 +18,7 @@ fn main() {
         .unwrap_or(90_146_543);
     let disc_path = std::env::args().nth(2);
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     let irq_log_cap = std::env::var("PSOXIDE_CDROM_IRQ_LOG_CAP")
         .ok()

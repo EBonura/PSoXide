@@ -49,7 +49,7 @@ fn main() {
         .map(|s| parse_addr_list(&s))
         .unwrap_or_default();
 
-    let bios_path = PathBuf::from("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN");
+    let bios_path = PathBuf::from("bios/SCPH1001.BIN");
 
     // --- Ours ---
     eprintln!("[ours] running {n} steps...");

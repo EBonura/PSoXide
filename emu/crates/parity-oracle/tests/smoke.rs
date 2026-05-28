@@ -20,7 +20,7 @@ use std::time::Duration;
 use parity_oracle::{OracleConfig, ReduxProcess};
 use psx_iso::Exe;
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_EXE_NAME: &str = "hello-tri";
 const EXAMPLE_OUT: &str = "build/examples/mipsel-sony-psx/release";
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);

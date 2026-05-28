@@ -16,7 +16,7 @@ use emulator_core::{Bus, Cpu};
 use psx_iso::Disc;
 
 fn main() {
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     let disc_tag = if let Ok(disc_path) = std::env::var("PSOXIDE_DISC") {
         let bytes = std::fs::read(&disc_path).expect("disc");

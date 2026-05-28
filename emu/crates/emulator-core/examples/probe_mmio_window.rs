@@ -21,7 +21,7 @@ fn main() {
     let disc_path = std::env::args().nth(3);
     let quiet_steps = std::env::var_os("PSOXIDE_MMIO_QUIET_STEPS").is_some();
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     if let Some(ref p) = disc_path {
         let disc = disc_support::load_disc_path(std::path::Path::new(p)).expect("disc");

@@ -22,8 +22,8 @@ use emulator_core::{
 };
 use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
-const DEFAULT_DISC: &str = "/Users/ebonura/Downloads/ps1 games/Metal Gear Solid (USA) (Disc 1) (Rev 1)/Metal Gear Solid (USA) (Disc 1) (Rev 1).cue";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_DISC: &str = "discs/Metal Gear Solid (USA) (Disc 1) (Rev 1)/Metal Gear Solid (USA) (Disc 1) (Rev 1).cue";
 const DEFAULT_STEPS: u64 = 300_000_000;
 const SAMPLE_EVERY: u64 = 25_000_000;
 const SPU_PUMP_CYCLES: u64 = 560_000;

@@ -37,7 +37,7 @@ fn main() {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(9);
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let disc = disc_support::load_disc_path(Path::new(disc_path)).expect("disc");
     let mut bus = Bus::new(bios).expect("bus");
     bus.cdrom.insert_disc(Some(disc));

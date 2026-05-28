@@ -41,7 +41,7 @@ fn main() {
 
     let bios_path = env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN"));
+        .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
     let bios = fs::read(&bios_path).expect("BIOS readable");
 
     // Redux: load cached trace (prefix-matched).

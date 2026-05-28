@@ -53,7 +53,7 @@ fn main() {
         .map(|s| parse_pad_pulses(&s).expect("valid PSOXIDE_PAD1_PULSES"))
         .unwrap_or_default();
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     if let Some(ref p) = disc_path {
         let disc = disc_support::load_disc_path(Path::new(p)).expect("disc");

@@ -30,9 +30,9 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(50_000_000);
     let bios_path = std::env::var("PSOXIDE_BIOS")
-        .unwrap_or_else(|_| "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN".into());
+        .unwrap_or_else(|_| "bios/SCPH1001.BIN".into());
     let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "/Users/ebonura/Downloads/ps1 games/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin".into()
+        "discs/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin".into()
     });
     let held_buttons = std::env::var("PSOXIDE_PAD1")
         .ok()

@@ -16,10 +16,10 @@ use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
-const DEFAULT_CTR_DISC: &str = "/Users/ebonura/Downloads/ps1 games/CTR - Crash Team Racing (USA)/CTR - Crash Team Racing (USA).cue";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_CTR_DISC: &str = "discs/CTR - Crash Team Racing (USA)/CTR - Crash Team Racing (USA).cue";
 const DEFAULT_METAL_SLUG_X_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/Metal Slug X (USA)/Metal Slug X (USA).cue";
+    "discs/Metal Slug X (USA)/Metal Slug X (USA).cue";
 
 const SPU_PUMP_CYCLES: u64 = 560_000;
 const SPU_FRAME_SAMPLES: usize = 735;

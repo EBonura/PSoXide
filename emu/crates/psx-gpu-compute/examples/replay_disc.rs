@@ -30,9 +30,9 @@ use psx_gpu_compute::ComputeBackend;
 use psx_iso::Disc;
 
 fn parse_args() -> (PathBuf, PathBuf, u64, u64) {
-    let mut bios = PathBuf::from("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN");
+    let mut bios = PathBuf::from("bios/SCPH1001.BIN");
     let mut disc = PathBuf::from(std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "/Users/ebonura/Downloads/ps1 games/Tekken 3 (USA)/Tekken 3 (USA).cue".into()
+        "discs/Tekken 3 (USA)/Tekken 3 (USA).cue".into()
     }));
     let mut steps: u64 = 50_000_000;
     let mut chunk: u64 = 5_000_000;

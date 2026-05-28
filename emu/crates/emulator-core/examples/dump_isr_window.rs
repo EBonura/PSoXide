@@ -26,7 +26,7 @@ fn main() {
         .expect("usage: dump_isr_window <trigger_user_step> [disc.cue|disc.bin]");
     let disc_path = std::env::args().nth(2);
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     if let Some(ref p) = disc_path {
         let disc = disc_support::load_disc_path(Path::new(p)).expect("disc");

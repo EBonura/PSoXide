@@ -27,10 +27,10 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_OUT_ROOT: &str = "/tmp/psoxide-commercial-guards";
 const DEFAULT_TEKKEN3_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/Tekken 3 (USA)/Tekken 3 (USA).cue";
+    "discs/Tekken 3 (USA)/Tekken 3 (USA).cue";
 const DEFAULT_GUARD: &str = "tekken3-vs-portrait";
 
 const TEKKEN_MENU_PULSES: &str = "0x0008@100+30,0x0008@500+30,0x0008@850+30,\

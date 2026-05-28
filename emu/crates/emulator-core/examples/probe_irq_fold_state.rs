@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use emulator_core::{Bus, Cpu};
 use parity_oracle::{OracleConfig, ReduxProcess};
 
-const BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const BIOS: &str = "bios/SCPH1001.BIN";
 const PEEK_ADDRS: [u32; 8] = [
     0x1f80_1070, // I_STAT
     0x1f80_1074, // I_MASK

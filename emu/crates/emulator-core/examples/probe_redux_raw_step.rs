@@ -28,7 +28,7 @@ fn main() {
         .map(PathBuf::from)
         .expect("usage: probe_redux_raw_step <completed_steps> <disc>");
 
-    let bios_path = PathBuf::from("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN");
+    let bios_path = PathBuf::from("bios/SCPH1001.BIN");
     let lua = OracleConfig::default_lua_dir().join("oracle.lua");
     let config = OracleConfig::new(bios_path, lua)
         .expect("Redux resolves")

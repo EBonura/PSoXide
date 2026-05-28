@@ -42,14 +42,14 @@ fn main() {
         .expect("usage: probe_pixel_trace <steps> <x> <y> [disc]");
     let disc_path = args.get(4).map(PathBuf::from);
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     if let Some(path) = disc_path {
         let disc = disc_support::load_disc_path(&path).expect("disc");
         bus.cdrom.insert_disc(Some(disc));
     } else {
         let fallback =
-            "/Users/ebonura/Downloads/ps1 games/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin";
+            "discs/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin";
         let disc = disc_support::load_disc_path(std::path::Path::new(fallback)).expect("disc");
         bus.cdrom.insert_disc(Some(disc));
     }

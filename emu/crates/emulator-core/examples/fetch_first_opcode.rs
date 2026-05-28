@@ -3,7 +3,7 @@
 //!
 //! ```bash
 //! cargo run -p emulator-core --example fetch_first_opcode -- \
-//!     "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN"
+//!     "bios/SCPH1001.BIN"
 //! ```
 //!
 //! Expected first opcode of stock BIOS images: `0x3C08_1F80`

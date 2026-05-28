@@ -17,7 +17,7 @@ use emulator_core::{Bus, ButtonState, Cpu};
 use emulator_core::{MmioKind, Sio0};
 use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask, PadPulse};
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 
 fn main() {
     let start: u64 = std::env::args()

@@ -5,7 +5,7 @@ use psx_iso::Exe;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const EXAMPLE_OUT: &str = "build/examples/mipsel-sony-psx/release";
 const SPU_PUMP_CYCLES: u64 = 560_000;
 const SPU_SAMPLES_PER_PUMP: usize = 735;

@@ -21,8 +21,8 @@ use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
-const DEFAULT_GAMES_DIR: &str = "/Users/ebonura/Downloads/ps1 games";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
+const DEFAULT_GAMES_DIR: &str = "discs";
 const DEFAULT_STEPS: u64 = 300_000_000;
 const SAMPLE_STEPS: u64 = 10_000_000;
 const SPU_PUMP_CYCLES: u64 = 560_000;

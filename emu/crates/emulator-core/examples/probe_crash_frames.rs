@@ -19,7 +19,7 @@ mod frame_probe;
 fn main() {
     let bios = frame_probe::read_bios();
     let disc = fs::read(
-        "/Users/ebonura/Downloads/ps1 games/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin",
+        "discs/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin",
     )
     .expect("disc");
     let mut bus = Bus::new(bios).expect("bus");

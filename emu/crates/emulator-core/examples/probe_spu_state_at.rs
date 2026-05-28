@@ -19,7 +19,7 @@ fn main() {
         .expect("usage: probe_spu_state_at <step> <disc.bin>");
     let pump_spu = std::env::var_os("PSOXIDE_PUMP_SPU").is_some();
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let disc_bytes = std::fs::read(disc_path).expect("disc readable");
     let mut bus = Bus::new(bios).expect("bus");
     bus.cdrom

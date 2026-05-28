@@ -70,7 +70,7 @@ Suggested done state:
   GPU opcode histogram, or pad poll evidence;
 - failures are categorized by subsystem before adding more games.
 
-Current local inventory in `~/Downloads/ps1 games`: 11 present, 14
+Current local inventory in the local discs directory: 11 present, 14
 missing from the top-25 target set.
 
 | Status | Target | Local image |

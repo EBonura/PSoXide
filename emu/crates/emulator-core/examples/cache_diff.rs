@@ -38,7 +38,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .expect("need step B");
     let path = PathBuf::from(
-        "/Users/ebonura/Desktop/repos/psoxide/emu/crates/emulator-core/target/parity-cache/redux-32b1a0fa4db70c8f-50000000.bin",
+        "target/parity-cache/redux-32b1a0fa4db70c8f-50000000.bin",
     );
     let mut r = BufReader::new(File::open(&path).expect("open cache"));
     let (ta, pca, ia, ga) = read_record(&mut r, a);

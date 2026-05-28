@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use emulator_core::{Bus, Cpu};
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 
 fn main() {
     let steps: u64 = std::env::args()

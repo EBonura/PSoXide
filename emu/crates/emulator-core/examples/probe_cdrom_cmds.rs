@@ -28,7 +28,7 @@ fn main() {
         .unwrap_or(89_198_894);
     let disc_path = positional.get(1);
 
-    let bios = std::fs::read("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN").expect("BIOS");
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
     let mut bus = Bus::new(bios).expect("bus");
     let mut cpu = Cpu::new();
     if warmup_steps > 0 {

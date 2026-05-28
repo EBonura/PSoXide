@@ -11,7 +11,7 @@ fn main() {
     let lua = OracleConfig::default_lua_dir().join("oracle.lua");
     let bios = env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN"));
+        .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
     let config = OracleConfig::new(bios, lua).expect("Redux binary resolves");
     let mut redux = ReduxProcess::launch(&config).expect("Redux launches");
     redux.handshake(Duration::from_secs(10)).expect("handshake");

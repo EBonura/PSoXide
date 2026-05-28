@@ -11,9 +11,9 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const DEFAULT_BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_DISC: &str =
-    "/Users/ebonura/Downloads/ps1 games/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin";
+    "discs/Crash Bandicoot (USA)/Crash Bandicoot (USA).bin";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 

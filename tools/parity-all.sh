@@ -10,7 +10,7 @@
 set -u
 STEPS="${1:-5000000}"
 TOL="${2:-8}"
-BIOS="/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN"
+BIOS="bios/SCPH1001.BIN"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="$ROOT/build/examples/mipsel-sony-psx/release"
 OUT_ROOT="/tmp/psx-parity"

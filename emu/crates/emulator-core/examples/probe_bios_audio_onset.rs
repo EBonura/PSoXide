@@ -7,7 +7,7 @@ use emulator_core::{
     Bus, Cpu,
 };
 
-const BIOS: &str = "/Users/ebonura/Downloads/ps1 bios/SCPH1001.BIN";
+const BIOS: &str = "bios/SCPH1001.BIN";
 
 fn main() {
     let bios = std::fs::read(BIOS).expect("BIOS");

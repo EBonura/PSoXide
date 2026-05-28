@@ -13,12 +13,12 @@ The current expected Redux line is:
 Set the binary explicitly when possible:
 
 ```bash
-export PSOXIDE_REDUX_BIN=/Users/ebonura/Desktop/repos/pcsx-redux/pcsx-redux
+export PSOXIDE_REDUX_BIN=../pcsx-redux/pcsx-redux
 export PSOXIDE_BIOS=/absolute/path/to/SCPH1001.BIN
 ```
 
 If `PSOXIDE_REDUX_BIN` is not set, `OracleConfig` tries the local
-`/Users/ebonura/Desktop/repos/pcsx-redux` fallback paths.
+fallback paths for a `pcsx-redux` checkout next to the PSoXide repo.
 
 ## Required bindings
 
