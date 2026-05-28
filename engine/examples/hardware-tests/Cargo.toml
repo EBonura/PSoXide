@@ -21,6 +21,7 @@ psx-font   = { path = "../../../sdk/crates/psx-font" }
 psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte    = { path = "../../../sdk/crates/psx-gte" }
 psx-io     = { path = "../../../sdk/crates/psx-io" }
+psx-pad    = { path = "../../../sdk/crates/psx-pad" }
 psx-rt     = { path = "../../../sdk/crates/psx-rt" }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
