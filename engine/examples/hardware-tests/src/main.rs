@@ -34,9 +34,8 @@ const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 7;
 const TEST_COUNT: usize = 36;
-const PAGE_COUNT: usize = (TEST_COUNT + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE;
 const PAD_POLL_TEST_INDEX: usize = 19;
-const MODE_COUNT: u8 = 5;
+const MODE_COUNT: u8 = 14;
 
 const TIMER_MODE_SYNC_ENABLE: u16 = 1 << 0;
 const TIMER_MODE_SYNC_MODE_1: u16 = 1 << 1;
@@ -70,7 +69,16 @@ enum Status {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Mode {
-    Conformance,
+    AllChecks,
+    CpuChecks,
+    MemoryChecks,
+    DmaChecks,
+    TimerChecks,
+    GpuChecks,
+    GteChecks,
+    SpuChecks,
+    CdromChecks,
+    SioChecks,
     CpuScan,
     GteScan,
     SpuScan,
@@ -80,17 +88,35 @@ enum Mode {
 impl Mode {
     const fn label(self) -> &'static str {
         match self {
-            Self::Conformance => "CONFORMANCE",
-            Self::CpuScan => "ADV CPU SWEEP",
-            Self::GteScan => "ADV GTE MATRIX",
-            Self::SpuScan => "ADV SPU MAP",
-            Self::TimingScan => "ADV TIMING",
+            Self::AllChecks => "ALL CHECKS",
+            Self::CpuChecks => "CPU CHECKS",
+            Self::MemoryChecks => "RAM CHECKS",
+            Self::DmaChecks => "DMA CHECKS",
+            Self::TimerChecks => "TIMER CHECKS",
+            Self::GpuChecks => "GPU CHECKS",
+            Self::GteChecks => "GTE CHECKS",
+            Self::SpuChecks => "SPU CHECKS",
+            Self::CdromChecks => "CD-ROM CHECKS",
+            Self::SioChecks => "SIO CHECKS",
+            Self::CpuScan => "CPU SWEEP",
+            Self::GteScan => "GTE MATRIX",
+            Self::SpuScan => "SPU MAP",
+            Self::TimingScan => "TIMING MAP",
         }
     }
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Conformance => "L/R PAGE  X RERUN",
+            Self::AllChecks
+            | Self::CpuChecks
+            | Self::MemoryChecks
+            | Self::DmaChecks
+            | Self::TimerChecks
+            | Self::GpuChecks
+            | Self::GteChecks
+            | Self::SpuChecks
+            | Self::CdromChecks
+            | Self::SioChecks => "L/R PAGE  X RERUN SECTION",
             Self::CpuScan => "X FINGERPRINT SAFE MIPS-I FORMS",
             Self::GteScan => "X FINGERPRINT COP2 COMMAND MATRIX",
             Self::SpuScan => "X MAP SPU VOICE REG READBACK",
@@ -100,7 +126,16 @@ impl Mode {
 
     const fn description(self) -> &'static str {
         match self {
-            Self::Conformance => "STABLE PASS/FAIL HARDWARE CHECKS",
+            Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
+            Self::CpuChecks => "CPU INSTRUCTIONS AND MEMORY ACCESS",
+            Self::MemoryChecks => "RAM KSEG AND SCRATCHPAD CHECKS",
+            Self::DmaChecks => "DMA CHANNEL AND OTC BEHAVIOUR",
+            Self::TimerChecks => "ROOT COUNTER TIMING AND IRQS",
+            Self::GpuChecks => "GPU STATUS COMMAND AND IRQ CHECKS",
+            Self::GteChecks => "GTE REGISTERS PROJECTION OPCODES",
+            Self::SpuChecks => "SPU STATUS AND VOICE REGISTERS",
+            Self::CdromChecks => "CD-ROM COMMAND RESPONSE CHECKS",
+            Self::SioChecks => "CONTROLLER SIO PORT CHECKS",
             Self::CpuScan => "DETERMINISTIC CPU OPCODE FINGERPRINT",
             Self::GteScan => "EXPLORATORY RAW GTE COMMAND MATRIX",
             Self::SpuScan => "SPU REGISTER BEHAVIOUR FINGERPRINT",
@@ -110,7 +145,16 @@ impl Mode {
 
     const fn aux_label(self) -> &'static str {
         match self {
-            Self::Conformance => "DETAIL",
+            Self::AllChecks
+            | Self::CpuChecks
+            | Self::MemoryChecks
+            | Self::DmaChecks
+            | Self::TimerChecks
+            | Self::GpuChecks
+            | Self::GteChecks
+            | Self::SpuChecks
+            | Self::CdromChecks
+            | Self::SioChecks => "DETAIL",
             Self::CpuScan => "EXTRA",
             Self::GteScan => "FLAG HITS",
             Self::SpuScan => "CHANGED",
@@ -120,21 +164,71 @@ impl Mode {
 
     const fn index(self) -> u8 {
         match self {
-            Self::Conformance => 0,
-            Self::CpuScan => 1,
-            Self::GteScan => 2,
-            Self::SpuScan => 3,
-            Self::TimingScan => 4,
+            Self::AllChecks => 0,
+            Self::CpuChecks => 1,
+            Self::MemoryChecks => 2,
+            Self::DmaChecks => 3,
+            Self::TimerChecks => 4,
+            Self::GpuChecks => 5,
+            Self::GteChecks => 6,
+            Self::SpuChecks => 7,
+            Self::CdromChecks => 8,
+            Self::SioChecks => 9,
+            Self::CpuScan => 10,
+            Self::GteScan => 11,
+            Self::SpuScan => 12,
+            Self::TimingScan => 13,
         }
     }
 
     const fn from_index(index: u8) -> Self {
         match index % MODE_COUNT {
-            0 => Self::Conformance,
-            1 => Self::CpuScan,
-            2 => Self::GteScan,
-            3 => Self::SpuScan,
+            0 => Self::AllChecks,
+            1 => Self::CpuChecks,
+            2 => Self::MemoryChecks,
+            3 => Self::DmaChecks,
+            4 => Self::TimerChecks,
+            5 => Self::GpuChecks,
+            6 => Self::GteChecks,
+            7 => Self::SpuChecks,
+            8 => Self::CdromChecks,
+            9 => Self::SioChecks,
+            10 => Self::CpuScan,
+            11 => Self::GteScan,
+            12 => Self::SpuScan,
             _ => Self::TimingScan,
+        }
+    }
+
+    const fn is_check_section(self) -> bool {
+        matches!(
+            self,
+            Self::AllChecks
+                | Self::CpuChecks
+                | Self::MemoryChecks
+                | Self::DmaChecks
+                | Self::TimerChecks
+                | Self::GpuChecks
+                | Self::GteChecks
+                | Self::SpuChecks
+                | Self::CdromChecks
+                | Self::SioChecks
+        )
+    }
+
+    fn includes_test(self, spec: TestSpec) -> bool {
+        match self {
+            Self::AllChecks => true,
+            Self::CpuChecks => spec.group == "CPU",
+            Self::MemoryChecks => spec.group == "RAM",
+            Self::DmaChecks => spec.group == "DMA",
+            Self::TimerChecks => spec.group == "TMR",
+            Self::GpuChecks => spec.group == "GPU",
+            Self::GteChecks => spec.group == "GTE",
+            Self::SpuChecks => spec.group == "SPU",
+            Self::CdromChecks => spec.group == "CD",
+            Self::SioChecks => spec.group == "SIO",
+            _ => false,
         }
     }
 
@@ -473,7 +567,7 @@ impl HardwareTests {
     const fn new() -> Self {
         Self {
             font: None,
-            mode: Mode::Conformance,
+            mode: Mode::AllChecks,
             results: [TestResult::pending(); TEST_COUNT],
             cpu_scan: ScanReport::pending("press x to sweep"),
             gte_scan: ScanReport::pending("press x to sweep"),
@@ -497,9 +591,20 @@ impl HardwareTests {
         print_conformance_report(self);
     }
 
+    fn run_section(&mut self, mode: Mode) {
+        for (index, spec) in TESTS.iter().enumerate() {
+            if mode.includes_test(*spec) {
+                self.results[index] = (spec.run)();
+            }
+        }
+        self.recount();
+        self.rerun_count = self.rerun_count.wrapping_add(1);
+        print_conformance_report(self);
+    }
+
     fn run_active(&mut self) {
         match self.mode {
-            Mode::Conformance => self.run_all(),
+            mode if mode.is_check_section() => self.run_section(mode),
             Mode::CpuScan => {
                 self.cpu_scan = run_cpu_scan().with_run(self.cpu_scan);
                 print_scan_report(self.mode, self.cpu_scan);
@@ -516,6 +621,7 @@ impl HardwareTests {
                 self.timing_scan = run_timing_scan().with_run(self.timing_scan);
                 print_scan_report(self.mode, self.timing_scan);
             }
+            _ => self.run_section(self.mode),
         }
     }
 
@@ -536,9 +642,11 @@ impl HardwareTests {
         }
     }
 
-    fn first_problem(&self) -> Option<usize> {
+    fn first_problem(&self, mode: Mode) -> Option<usize> {
         for (index, result) in self.results.iter().enumerate() {
-            if matches!(result.status, Status::Fail | Status::Warn) {
+            if mode.includes_test(TESTS[index])
+                && matches!(result.status, Status::Fail | Status::Warn)
+            {
                 return Some(index);
             }
         }
@@ -558,20 +666,22 @@ impl Scene for HardwareTests {
 
         if ctx.just_pressed(button::UP) {
             self.mode = self.mode.previous();
+            self.page = 0;
         }
         if ctx.just_pressed(button::DOWN) {
             self.mode = self.mode.next();
+            self.page = 0;
         }
 
-        if self.mode == Mode::Conformance && ctx.just_pressed(button::LEFT) {
+        if self.mode.is_check_section() && ctx.just_pressed(button::LEFT) {
             self.page = if self.page == 0 {
-                PAGE_COUNT - 1
+                page_count_for_mode(self.mode) - 1
             } else {
                 self.page - 1
             };
         }
-        if self.mode == Mode::Conformance && ctx.just_pressed(button::RIGHT) {
-            self.page = (self.page + 1) % PAGE_COUNT;
+        if self.mode.is_check_section() && ctx.just_pressed(button::RIGHT) {
+            self.page = (self.page + 1) % page_count_for_mode(self.mode);
         }
         if ctx.just_pressed(button::CROSS) {
             self.run_active();
@@ -587,16 +697,18 @@ impl Scene for HardwareTests {
 
         draw_mode_menu(font, self);
 
-        match self.mode {
-            Mode::Conformance => {
-                draw_summary(font, self);
-                draw_rows(font, self);
-                draw_problem_detail(font, self);
+        if self.mode.is_check_section() {
+            draw_summary(font, self);
+            draw_rows(font, self, self.mode);
+            draw_problem_detail(font, self, self.mode);
+        } else {
+            match self.mode {
+                Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
+                Mode::GteScan => draw_scan_report(font, self.mode, self.gte_scan),
+                Mode::SpuScan => draw_scan_report(font, self.mode, self.spu_scan),
+                Mode::TimingScan => draw_scan_report(font, self.mode, self.timing_scan),
+                _ => {}
             }
-            Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
-            Mode::GteScan => draw_scan_report(font, self.mode, self.gte_scan),
-            Mode::SpuScan => draw_scan_report(font, self.mode, self.spu_scan),
-            Mode::TimingScan => draw_scan_report(font, self.mode, self.timing_scan),
         }
     }
 }
@@ -653,7 +765,12 @@ fn draw_summary(font: &FontAtlas, suite: &HardwareTests) {
         (220, 220, 220),
     );
     font.draw_text(80, 220, "OF", (140, 160, 190));
-    font.draw_text(104, 220, dec3(PAGE_COUNT as u16).as_str(), (220, 220, 220));
+    font.draw_text(
+        104,
+        220,
+        dec3(page_count_for_mode(suite.mode) as u16).as_str(),
+        (220, 220, 220),
+    );
     font.draw_text(232, 220, "RUN", (140, 160, 190));
     font.draw_text(
         264,
@@ -667,22 +784,31 @@ fn draw_summary(font: &FontAtlas, suite: &HardwareTests) {
 fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 8, "PS1 HARDWARE TESTS", (232, 236, 244));
     font.draw_text(224, 8, SUITE_VERSION, (112, 136, 170));
-    font.draw_text(8, 20, "MODE", (140, 160, 190));
-    font.draw_text(48, 20, suite.mode.label(), (255, 232, 128));
-    font.draw_text(176, 20, "UP/DN SELECT", (140, 160, 190));
+    font.draw_text(8, 20, "SECTION", (140, 160, 190));
+    font.draw_text(72, 20, suite.mode.label(), (255, 232, 128));
+    font.draw_text(184, 20, "UP/DN NEXT", (140, 160, 190));
     font.draw_text(272, 20, "X RUN", (140, 160, 190));
 }
 
-fn draw_rows(font: &FontAtlas, suite: &HardwareTests) {
-    font.draw_text(8, 44, page_description(suite.page), (112, 136, 170));
+fn draw_rows(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
+    font.draw_text(8, 44, mode.description(), (112, 136, 170));
     let first = suite.page * ROWS_PER_PAGE;
-    for row in 0..ROWS_PER_PAGE {
-        let index = first + row;
-        if index >= TEST_COUNT {
+    let mut visible_index = 0usize;
+    let mut row = 0usize;
+
+    for index in 0..TEST_COUNT {
+        let spec = TESTS[index];
+        if !mode.includes_test(spec) {
+            continue;
+        }
+        if visible_index < first {
+            visible_index += 1;
+            continue;
+        }
+        if row >= ROWS_PER_PAGE {
             break;
         }
         let y = 52 + row as i16 * 20;
-        let spec = TESTS[index];
         let result = suite.results[index];
         let color = result.status.color();
 
@@ -693,6 +819,8 @@ fn draw_rows(font: &FontAtlas, suite: &HardwareTests) {
             font.draw_text(248, y, hex8(result.observed).as_str(), color);
         }
         font.draw_text(16, y + 10, clipped_text(spec.name, 37), (220, 224, 230));
+        visible_index += 1;
+        row += 1;
     }
 }
 
@@ -729,9 +857,9 @@ fn draw_scan_report(font: &FontAtlas, mode: Mode, report: ScanReport) {
     );
 }
 
-fn draw_problem_detail(font: &FontAtlas, suite: &HardwareTests) {
+fn draw_problem_detail(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
     let y = 198;
-    match suite.first_problem() {
+    match suite.first_problem(mode) {
         Some(index) => {
             let result = suite.results[index];
             font.draw_text(8, y, "DETAIL", result.status.color());
@@ -759,12 +887,22 @@ fn draw_problem_detail(font: &FontAtlas, suite: &HardwareTests) {
     }
 }
 
-fn page_description(page: usize) -> &'static str {
-    match page {
-        0 => "BASIC CPU RAM DMA GPU GTE SPU",
-        1 => "EDGE CASES DRAW AREA DMA TIMERS",
-        2 => "TIMING PREFLIGHT ROOT CTRS DMA CD SIO",
-        _ => "ADDITIONAL HARDWARE CHECKS",
+fn test_count_for_mode(mode: Mode) -> usize {
+    let mut count = 0usize;
+    for spec in TESTS {
+        if mode.includes_test(spec) {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn page_count_for_mode(mode: Mode) -> usize {
+    let count = test_count_for_mode(mode);
+    if count == 0 {
+        1
+    } else {
+        (count + ROWS_PER_PAGE - 1) / ROWS_PER_PAGE
     }
 }
 
