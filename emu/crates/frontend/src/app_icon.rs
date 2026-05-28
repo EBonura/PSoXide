@@ -2,7 +2,7 @@
 
 use winit::window::Icon;
 
-const APP_ICON_PNG: &[u8] = include_bytes!("../../../../assets/branding/logo-icon-player.png");
+const APP_ICON_PNG: &[u8] = include_bytes!("../../../../assets/branding/psoxide-app-icon.png");
 
 /// Decode the tracked PSoXide application icon for use by winit.
 pub(crate) fn load_window_icon() -> Option<Icon> {

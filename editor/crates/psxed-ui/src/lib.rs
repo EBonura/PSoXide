@@ -123,8 +123,8 @@ const PLAY_FRAME_HISTORY_CAP: usize = 150;
 const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
 const PLAY_NTSC_VBLANK_MS: f32 = 1000.0 / 60.0;
-const PSOXIDE_LOGO_ICON_PNG: &[u8] =
-    include_bytes!("../../../../assets/branding/logo-icon-player.png");
+const PSOXIDE_APP_ICON_PNG: &[u8] =
+    include_bytes!("../../../../assets/branding/psoxide-app-icon.png");
 const PLAY_PORTAL_DEBUG_SCREEN_CX: i32 = 160;
 const PLAY_PORTAL_DEBUG_SCREEN_CY: i32 = 120;
 const PLAY_PORTAL_DEBUG_FOCAL: i32 = 320;
@@ -10710,9 +10710,9 @@ impl EditorWorkspace {
 
     fn psoxide_logo_texture_id(&mut self, ctx: &egui::Context) -> Option<egui::TextureId> {
         if self.psoxide_logo_texture.is_none() {
-            let logo = decode_embedded_png(PSOXIDE_LOGO_ICON_PNG)?;
+            let logo = decode_embedded_png(PSOXIDE_APP_ICON_PNG)?;
             self.psoxide_logo_texture =
-                Some(ctx.load_texture("psoxide-logo-icon", logo, egui::TextureOptions::LINEAR));
+                Some(ctx.load_texture("psoxide-app-icon", logo, egui::TextureOptions::LINEAR));
         }
         self.psoxide_logo_texture.as_ref().map(|handle| handle.id())
     }
