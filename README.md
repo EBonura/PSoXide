@@ -1,7 +1,7 @@
 # PSoXide
 
 <p align="center">
-  <img src="assets/branding/logo-wordmark.svg" alt="PSoXide" width="420">
+  <img src="assets/branding/psoxide-logo.svg" alt="PSoXide" width="520">
 </p>
 
 <p align="center">
