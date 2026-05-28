@@ -813,20 +813,13 @@ fn tty_print_digit(value: u8) {
     tty::print(text);
 }
 
-fn draw_test_pattern(tick: u32) {
-    let pulse = ((tick & 31) as u8).saturating_mul(2);
+fn draw_test_pattern(_tick: u32) {
     gpu::draw_quad_flat([(0, 0), (320, 0), (0, 47), (320, 47)], 12, 18, 36);
     gpu::draw_quad_flat([(0, 188), (320, 188), (0, 240), (320, 240)], 8, 12, 28);
     gpu::draw_line_mono(0, 48, 319, 48, 60, 80, 110);
     gpu::draw_line_mono(0, 187, 319, 187, 60, 80, 110);
     gpu::draw_line_mono(272, 50, 312, 90, 255, 80, 80);
     gpu::draw_line_mono(312, 50, 272, 90, 80, 180, 255);
-    gpu::draw_quad_flat(
-        [(276, 94), (308, 94), (276, 126), (308, 126)],
-        40 + pulse,
-        100,
-        180,
-    );
 }
 
 fn mix32(mut hash: u32, value: u32) -> u32 {
