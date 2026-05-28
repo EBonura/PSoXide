@@ -1204,73 +1204,68 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
         counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
     ];
-    const RENDER_MAP_REQUIRED_COUNTERS: &[u16] = &[
+    const RENDER_MAP_POSE_COUNTERS: &[u16] = &[
         counter::ROOM_PLAYER_LOCAL_X_BIASED,
         counter::ROOM_PLAYER_LOCAL_Z_BIASED,
         counter::ROOM_CAMERA_GLOBAL_X_BIASED,
-        counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
         counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
-        counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED,
-        counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED,
     ];
+    let pose_sample = state
+        .profiler
+        .latest_with_all_guest_counters(RENDER_MAP_POSE_COUNTERS);
     let chunk_sample = state
         .profiler
-        .latest_with_all_guest_counters(RENDER_MAP_REQUIRED_COUNTERS)
-        .or_else(|| {
-            state
-                .profiler
-                .latest_with_guest_counters(RENDER_MAP_COUNTERS)
-        })
+        .latest_with_guest_counters(RENDER_MAP_COUNTERS)
         .or_else(|| {
             state
                 .profiler
                 .latest_with_guest_counters(CHUNK_MAP_COUNTERS)
         })
         .unwrap_or(sample);
+    let pose_counter_sample = pose_sample.unwrap_or(chunk_sample);
     let recent_counter = |id: u16| profile_counter_u32(sample.guest.counter_max_value(id as usize));
     let chunk_mask = |lo: u16, hi: u16| {
         let lo = chunk_sample.guest.counter_latest_value(lo as usize) as u64;
         let hi = chunk_sample.guest.counter_latest_value(hi as usize) as u64;
         lo | (hi << 32)
     };
-    let player_x_biased = chunk_sample
+    let player_x_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_PLAYER_LOCAL_X_BIASED as usize);
-    let player_z_biased = chunk_sample
+    let player_z_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_PLAYER_LOCAL_Z_BIASED as usize);
-    let camera_x_biased = chunk_sample
+    let camera_x_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_LOCAL_X_BIASED as usize);
-    let camera_y_biased = chunk_sample
+    let camera_y_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Y_BIASED as usize);
-    let camera_z_biased = chunk_sample
+    let camera_z_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_LOCAL_Z_BIASED as usize);
-    let camera_global_x_biased = chunk_sample
+    let camera_global_x_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_X_BIASED as usize);
-    let camera_global_y_biased = chunk_sample
+    let camera_global_y_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_Y_BIASED as usize);
-    let camera_global_z_biased = chunk_sample
+    let camera_global_z_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_GLOBAL_Z_BIASED as usize);
-    let camera_view_sin_yaw_biased = chunk_sample
+    let camera_view_sin_yaw_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_YAW_Q12_BIASED as usize);
-    let camera_view_cos_yaw_biased = chunk_sample
+    let camera_view_cos_yaw_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_YAW_Q12_BIASED as usize);
-    let camera_view_sin_pitch_biased = chunk_sample
+    let camera_view_sin_pitch_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_VIEW_SIN_PITCH_Q12_BIASED as usize);
-    let camera_view_cos_pitch_biased = chunk_sample
+    let camera_view_cos_pitch_biased = pose_counter_sample
         .guest
         .counter_latest_value(counter::ROOM_CAMERA_VIEW_COS_PITCH_Q12_BIASED as usize);
+    let pose_valid = pose_sample.is_some();
     Some(psxed_ui::EditorPlaytestMetrics {
         sample_serial: latest.sample_serial,
         host_fps: sample.host_fps(),
@@ -1393,23 +1388,24 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_LO,
             counter::PORTAL_VIS_BOUNDS_FALLBACK_PORTAL_MASK_HI,
         ),
-        player_map_valid: player_x_biased > 0 || player_z_biased > 0,
-        player_room_index: chunk_sample
+        player_map_valid: pose_valid,
+        player_room_index: pose_counter_sample
             .guest
             .counter_latest_value(counter::ROOM_PLAYER_ROOM_INDEX as usize),
-        portal_current_room_index: chunk_sample
+        portal_current_room_index: pose_counter_sample
             .guest
             .counter_latest_value(counter::PORTAL_VIS_CURRENT_ROOM as usize),
         player_local_x: profile_counter_i32_biased(player_x_biased, DEBUG_MAP_POSITION_BIAS),
         player_local_z: profile_counter_i32_biased(player_z_biased, DEBUG_MAP_POSITION_BIAS),
-        player_view_yaw_q12: chunk_sample
+        player_view_yaw_q12: pose_counter_sample
             .guest
             .counter_latest_value(counter::ROOM_PLAYER_VIEW_YAW_Q12 as usize)
             .min(u16::MAX as u32) as u16,
-        camera_view_basis_valid: camera_view_sin_yaw_biased > 0
-            || camera_view_cos_yaw_biased > 0
-            || camera_view_sin_pitch_biased > 0
-            || camera_view_cos_pitch_biased > 0,
+        camera_view_basis_valid: pose_valid
+            && (camera_view_sin_yaw_biased > 0
+                || camera_view_cos_yaw_biased > 0
+                || camera_view_sin_pitch_biased > 0
+                || camera_view_cos_pitch_biased > 0),
         camera_view_sin_yaw_q12: profile_counter_i32_biased(camera_view_sin_yaw_biased, 4096)
             .clamp(-4096, 4096),
         camera_view_cos_yaw_q12: profile_counter_i32_biased(camera_view_cos_yaw_biased, 4096)
@@ -1418,10 +1414,12 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             .clamp(-4096, 4096),
         camera_view_cos_pitch_q12: profile_counter_i32_biased(camera_view_cos_pitch_biased, 4096)
             .clamp(-4096, 4096),
-        camera_map_valid: camera_x_biased > 0 || camera_y_biased > 0 || camera_z_biased > 0,
-        camera_global_valid: camera_global_x_biased > 0
-            || camera_global_y_biased > 0
-            || camera_global_z_biased > 0,
+        camera_map_valid: pose_valid
+            && (camera_x_biased > 0 || camera_y_biased > 0 || camera_z_biased > 0),
+        camera_global_valid: pose_valid
+            && (camera_global_x_biased > 0
+                || camera_global_y_biased > 0
+                || camera_global_z_biased > 0),
         camera_local_x: profile_counter_i32_biased(camera_x_biased, DEBUG_MAP_POSITION_BIAS),
         camera_local_y: profile_counter_i32_biased(camera_y_biased, DEBUG_MAP_POSITION_BIAS),
         camera_local_z: profile_counter_i32_biased(camera_z_biased, DEBUG_MAP_POSITION_BIAS),
