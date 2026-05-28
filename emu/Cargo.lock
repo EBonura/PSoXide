@@ -1281,6 +1281,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "pollster 0.3.0",
  "psoxide-settings",
+ "psoxide-validation",
  "psx-asset",
  "psx-engine",
  "psx-gpu",
@@ -2848,6 +2849,16 @@ dependencies = [
  "directories",
  "postcard",
  "psx-iso",
+ "ron",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "psoxide-validation"
+version = "0.1.0"
+dependencies = [
  "ron",
  "serde",
  "tempfile",
