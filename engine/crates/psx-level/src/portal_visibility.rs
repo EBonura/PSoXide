@@ -125,6 +125,13 @@ pub struct PortalVisibleRoom {
     pub frustum_count: u8,
     /// Portal depth from the current room.
     pub depth: u8,
+    /// Whether at least one portal reaching this room is within the camera's
+    /// draw distance. Rooms are kept visible (and resident) even when beyond
+    /// it -- that intentional over-reach is what lets streaming prefetch the
+    /// rooms ahead -- but a room that is *only* reachable through portals past
+    /// `far_z` renders nothing and should not be drawn. The draw gate uses
+    /// this; residency/prefetch uses the full visible set.
+    pub within_far: bool,
 }
 
 impl PortalVisibleRoom {
@@ -134,6 +141,7 @@ impl PortalVisibleRoom {
         frustum_first: 0,
         frustum_count: 0,
         depth: 0,
+        within_far: false,
     };
 }
 
@@ -474,6 +482,7 @@ impl<const MAX_ROOMS: usize, const MAX_FRUSTUMS: usize, const MAX_FRONTIER: usiz
             frustum_first: self.frustum_count.min(u16::MAX as usize) as u16,
             frustum_count: 0,
             depth,
+            within_far: false,
         };
         self.room_count += 1;
         Some(slot)
@@ -684,6 +693,13 @@ pub fn build_portal_visibility_with_room_bounds<
                 out.push_frontier(portal.destination_room, portal.source_room);
                 continue;
             };
+            // Keep the room visible (and resident) regardless of distance, but
+            // mark whether it is close enough to actually draw. A room reached
+            // only through beyond-far portals stays resident yet renders
+            // nothing, so the draw gate skips it.
+            if portal_within_far(portal, camera) {
+                out.rooms[room_slot].within_far = true;
+            }
             if out.push_frustum(room_slot, child) {
                 out.stats.portals_accepted = out.stats.portals_accepted.saturating_add(1);
                 out.stats
@@ -893,6 +909,23 @@ struct PortalViewVertex {
 
 impl PortalViewVertex {
     const ZERO: Self = Self { x: 0, y: 0, z: 0 };
+}
+
+/// Whether the portal's nearest corner is within the camera's draw distance.
+/// A portal whose closest point is beyond `far_z` can't be seen through, so the
+/// room behind it renders nothing -- but the BFS still accepts it so streaming
+/// can prefetch the room. Only the draw gate consults this.
+fn portal_within_far(portal: LevelRoomPortalRecord, camera: PortalVisibilityCamera) -> bool {
+    let mut nearest_z = i32::MAX;
+    let mut i = 0usize;
+    while i < 4 {
+        let z = portal_view_vertex(portal, camera, i).z;
+        if z < nearest_z {
+            nearest_z = z;
+        }
+        i += 1;
+    }
+    nearest_z <= camera.far_z
 }
 
 fn portal_front_faces_camera(
@@ -1584,8 +1617,32 @@ mod tests {
 
         build_portal_visibility(&rooms, &portals, RoomIndex(0), camera, 4, &mut out);
 
+        // Beyond the far plane it stays visible and resident so streaming can
+        // prefetch it...
         assert_eq!(out.visible_room_mask(), 0b11);
         assert_eq!(out.stats.portals_accepted, 1);
+        // ...but it is not marked drawable, so the draw gate skips it (it would
+        // render nothing). Residency uses the visible set; drawing uses this.
+        let slot = out
+            .room_position(RoomIndex(1))
+            .expect("beyond-far room is visible");
+        assert!(!out.rooms[slot].within_far);
+    }
+
+    #[test]
+    fn portal_within_draw_distance_marks_room_drawable() {
+        let rooms = [room(0, 0, 1), room(1, 1, 0)];
+        let portals = [wall_portal(0, 1, -1024, 1024, 1024)];
+        let camera =
+            PortalVisibilityCamera::new(0, 1024, 0, 0, -4096, 0, 4096, 64, 8192, 4096, 3072, 4);
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        build_portal_visibility(&rooms, &portals, RoomIndex(0), camera, 4, &mut out);
+
+        let slot = out
+            .room_position(RoomIndex(1))
+            .expect("near room is visible");
+        assert!(out.rooms[slot].within_far);
     }
 
     #[test]
