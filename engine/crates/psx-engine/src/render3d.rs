@@ -4845,21 +4845,6 @@ fn dot_world_q12(row: [i16; 3], v: WorldVertex) -> i32 {
 /// view-space position twice on the CPU, lerp, and project on the CPU
 /// using `WorldProjection::project_view`.
 #[inline]
-fn cpu_view_transform(transform: &JointViewTransform, position: Vec3I16) -> ViewVertex {
-    let vx = position.x as i32;
-    let vy = position.y as i32;
-    let vz = position.z as i32;
-    let m = &transform.rotation.m;
-    let x = ((m[0][0] as i32) * vx + (m[0][1] as i32) * vy + (m[0][2] as i32) * vz) >> 12;
-    let y = ((m[1][0] as i32) * vx + (m[1][1] as i32) * vy + (m[1][2] as i32) * vz) >> 12;
-    let z = ((m[2][0] as i32) * vx + (m[2][1] as i32) * vy + (m[2][2] as i32) * vz) >> 12;
-    ViewVertex::new(
-        x + transform.translation.x,
-        y + transform.translation.y,
-        z + transform.translation.z,
-    )
-}
-
 fn project_textured_model_vertex(
     vertex: ModelVertex,
     primary: JointViewTransform,
@@ -4882,8 +4867,18 @@ fn project_blended_textured_model_vertex(
     projection: WorldProjection,
 ) -> ProjectedVertex {
     let secondary = joint_view_transforms[vertex.joint1 as usize];
-    let view_a = cpu_view_transform(&primary, vertex.position);
-    let view_b = cpu_view_transform(&secondary, vertex.position);
+    // The part's primary joint is already loaded in the GTE by the caller's
+    // project loop, so transform view_a there instead of by hand on the CPU.
+    let a = scene::transform_vertex_scheduled(vertex.position);
+    let view_a = ViewVertex::new(a.x, a.y, a.z);
+    // view_b needs the secondary joint: load it, transform, then restore the
+    // primary so the caller's GTE batch state is preserved on return.
+    scene::load_rotation(&secondary.rotation);
+    scene::load_translation(secondary.translation);
+    let b = scene::transform_vertex_scheduled(vertex.position);
+    let view_b = ViewVertex::new(b.x, b.y, b.z);
+    scene::load_rotation(&primary.rotation);
+    scene::load_translation(primary.translation);
     let view_blend = lerp_view_vertex(view_a, view_b, vertex.blend);
     match cpu_project_gte_view(view_blend, projection) {
         Some(proj) => proj,
@@ -4891,9 +4886,17 @@ fn project_blended_textured_model_vertex(
     }
 }
 
+/// Minimum `joint1` weight (out of 255) for a vertex to take the two-bone
+/// blend path. Below it the secondary influence is under ~6%, which reads as
+/// single-bone: the vertex rides the primary-joint GTE batch instead of the
+/// per-vertex blend, dropping it off the expensive path with no visible change.
+const MODEL_BLEND_MIN_WEIGHT: u8 = 16;
+
 #[inline]
 fn model_vertex_uses_cpu_blend(vertex: ModelVertex, joint_count: usize) -> bool {
-    vertex.is_blend() && (vertex.joint1 as usize) < joint_count
+    vertex.is_blend()
+        && vertex.blend >= MODEL_BLEND_MIN_WEIGHT
+        && (vertex.joint1 as usize) < joint_count
 }
 
 #[inline]
