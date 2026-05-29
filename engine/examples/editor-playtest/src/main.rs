@@ -74,7 +74,7 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
-    draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
+    draw_line_mono, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::{QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
@@ -339,7 +339,10 @@ const OT_DEPTH: usize = 512;
 /// Room geometry, actors, and shadows share one depth band so walls can
 /// correctly overpaint the hidden parts of characters in the PS1
 /// painter's algorithm.
-const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
+// Farthest slot (OT_DEPTH - 1) is reserved for the sky cyclorama (see
+// SKY_OT_SLOT), so world geometry spans 0..=OT_DEPTH-2 and always draws in
+// front of the sky.
+const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 2);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
@@ -3658,12 +3661,19 @@ impl Scene for Playtest {
 
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut primitive_packets = unsafe { PrimitivePacketArena::new(&mut PRIMITIVE_PACKETS) };
+
+        let room_record = ROOMS.get(self.room_index.to_usize());
+        // Sky inserts into the OT background slot before the world pass borrows
+        // the OT; world geometry (slots 0..=OT_DEPTH-2) then draws in front.
+        if let Some(room_record) = room_record {
+            telemetry::stage_begin(telemetry::stage::SKY);
+            draw_sky_panorama(room_record.sky, camera, &mut primitive_packets, &mut ot);
+            telemetry::stage_end(telemetry::stage::SKY);
+        }
+
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
-        if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            telemetry::stage_begin(telemetry::stage::SKY);
-            draw_sky_panorama(room_record.sky, camera);
-            telemetry::stage_end(telemetry::stage::SKY);
+        if let Some(room_record) = room_record {
             telemetry::stage_begin(telemetry::stage::FAR_VISTA);
             draw_far_vista_ring(
                 camera,
@@ -7379,7 +7389,16 @@ fn accumulate_grid_visibility_stats(total: &mut GridVisibilityStats, stats: Grid
 /// rasterized into a panorama texture by the editor cooker; runtime
 /// wraps that texture over a small camera-centred dome so translation
 /// is ignored but yaw/pitch still feel like surrounding scenery.
-fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
+/// OT slot reserved for the sky cyclorama. It is the farthest slot, drawn
+/// behind all world geometry (which `WORLD_BAND` caps at `OT_DEPTH - 2`).
+const SKY_OT_SLOT: psx_engine::DepthSlot = psx_engine::DepthSlot::new(OT_DEPTH - 1);
+
+fn draw_sky_panorama(
+    sky: LevelSkyRecord,
+    camera: WorldCamera,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+) {
     if sky.flags & sky_flags::ENABLED == 0 {
         return;
     }
@@ -7450,11 +7469,17 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
             if sky_quad_outside_screen(projected) {
                 continue;
             }
-            draw_quad_textured_material(
+            // Same GP0 words as the old immediate `draw_quad_textured_material`,
+            // but pushed into the OT background slot so the whole sky DMAs as
+            // one chain instead of per-quad FIFO writes + wait_cmd_ready spins.
+            let quad = QuadTexturedMaterial::with_material(
                 projected,
                 [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
                 material,
             );
+            if let Some(packet) = primitive_packets.push(quad) {
+                ot.add_packet_slot(SKY_OT_SLOT, packet);
+            }
         }
     }
 }
