@@ -258,11 +258,8 @@ pub struct EditorWorkspace {
     saved_project_name: String,
     project_name_editing: bool,
     project_name_focus_pending: bool,
-    new_project_dialog_open: bool,
-    new_project_name: String,
-    new_project_error: Option<String>,
-    delete_project_dialog_open: bool,
-    delete_project_error: Option<String>,
+    /// Active centered modal dialog (New / Delete Project), if any.
+    modal: Modal,
     selected_node: NodeId,
     selected_ui_node: UiNodeId,
     selected_nodes: HashSet<NodeId>,
@@ -1891,6 +1888,29 @@ interaction_accessors! {
     UiCanvas => ui_canvas_drag, ui_canvas_drag_mut, take_ui_canvas_drag : UiCanvasDrag;
 }
 
+/// The active centered modal dialog overlaying the editor.
+///
+/// New Project and Delete Project are mutually-exclusive, menu-triggered
+/// overlays. Modelling them as one enum makes "both dialogs open at once"
+/// unrepresentable and binds each dialog's transient input/error to its open
+/// state, so neither can linger once the dialog closes. Opening one implicitly
+/// dismisses the other.
+///
+/// Inline confirmations (resource deletion, rendered inside the inspector) and
+/// inline renames are not centered overlays, so they live with their panel and
+/// selection state rather than here.
+#[derive(Debug, Clone, Default)]
+enum Modal {
+    /// No dialog open.
+    #[default]
+    None,
+    /// File → New Project. Carries the live-edited name and the last
+    /// submit error, if any.
+    NewProject { name: String, error: Option<String> },
+    /// Delete the current project. Carries the last delete error, if any.
+    DeleteProject { error: Option<String> },
+}
+
 /// Resolved physical vertex: every face-corner that currently
 /// sits at `world` and therefore moves together when the
 /// vertex's height is dragged.
@@ -2387,11 +2407,7 @@ impl EditorWorkspace {
             saved_project_name,
             project_name_editing: false,
             project_name_focus_pending: false,
-            new_project_dialog_open: false,
-            new_project_name: String::new(),
-            new_project_error: None,
-            delete_project_dialog_open: false,
-            delete_project_error: None,
+            modal: Modal::None,
             selected_node: NodeId::ROOT,
             selected_ui_node,
             selected_nodes: HashSet::new(),
@@ -3225,13 +3241,13 @@ impl EditorWorkspace {
     }
 
     /// Modal for the File → New Project flow. Pops over the editor
-    /// when `new_project_dialog_open` is true; submit calls
+    /// when the active [`Modal`] is `NewProject`; submit calls
     /// [`Self::create_and_open_project`] and re-targets the
     /// workspace at the new directory.
     fn draw_new_project_dialog(&mut self, ctx: &egui::Context) {
-        if !self.new_project_dialog_open {
+        let Modal::NewProject { name, error } = &mut self.modal else {
             return;
-        }
+        };
         let mut close = false;
         let mut submit = false;
         egui::Window::new(icons::label(icons::FILE_PLUS, "New Project"))
@@ -3241,21 +3257,19 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 ui.set_min_width(360.0);
                 ui.label("Project name");
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.new_project_name)
-                        .hint_text("e.g. Test Room"),
-                );
-                let preview_stem = if self.new_project_name.trim().is_empty() {
+                let response =
+                    ui.add(egui::TextEdit::singleline(name).hint_text("e.g. Test Room"));
+                let preview_stem = if name.trim().is_empty() {
                     "<name>".to_string()
                 } else {
-                    psxed_project::project_file_stem(self.new_project_name.trim())
+                    psxed_project::project_file_stem(name.trim())
                 };
                 ui.label(
                     RichText::new(format!("→ editor/projects/{}/", preview_stem))
                         .color(STUDIO_TEXT_WEAK)
                         .small(),
                 );
-                if let Some(error) = &self.new_project_error {
+                if let Some(error) = error.as_ref() {
                     ui.label(RichText::new(error).color(Color32::from_rgb(0xE0, 0x60, 0x60)));
                 }
                 ui.add_space(8.0);
@@ -3275,28 +3289,28 @@ impl EditorWorkspace {
                 }
             });
         if submit {
-            let name = self.new_project_name.clone();
-            match self.create_and_open_project(&name) {
-                Ok(()) => {
-                    self.new_project_dialog_open = false;
-                    self.new_project_name.clear();
-                    self.new_project_error = None;
-                }
-                Err(error) => {
-                    self.new_project_error = Some(error);
+            if let Modal::NewProject { name, .. } = &self.modal {
+                let name = name.clone();
+                match self.create_and_open_project(&name) {
+                    Ok(()) => self.modal = Modal::None,
+                    Err(error) => {
+                        if let Modal::NewProject { error: slot, .. } = &mut self.modal {
+                            *slot = Some(error);
+                        }
+                    }
                 }
             }
         }
         if close {
-            self.new_project_dialog_open = false;
-            self.new_project_error = None;
+            self.modal = Modal::None;
         }
     }
 
     fn draw_delete_project_dialog(&mut self, ctx: &egui::Context) {
-        if !self.delete_project_dialog_open {
-            return;
-        }
+        let error_text = match &self.modal {
+            Modal::DeleteProject { error } => error.clone(),
+            _ => return,
+        };
         let mut close = false;
         let mut confirm = false;
         let project_name = self.project.name.clone();
@@ -3314,7 +3328,7 @@ impl EditorWorkspace {
                         .small(),
                 );
                 ui.label(RichText::new("This cannot be undone.").color(STUDIO_TEXT_WEAK));
-                if let Some(error) = &self.delete_project_error {
+                if let Some(error) = &error_text {
                     ui.add_space(6.0);
                     ui.label(RichText::new(error).color(Color32::from_rgb(0xE0, 0x60, 0x60)));
                 }
@@ -3336,18 +3350,12 @@ impl EditorWorkspace {
             });
         if confirm {
             match self.delete_current_project() {
-                Ok(()) => {
-                    self.delete_project_dialog_open = false;
-                    self.delete_project_error = None;
-                }
-                Err(error) => {
-                    self.delete_project_error = Some(error);
-                }
+                Ok(()) => self.modal = Modal::None,
+                Err(error) => self.modal = Modal::DeleteProject { error: Some(error) },
             }
         }
         if close {
-            self.delete_project_dialog_open = false;
-            self.delete_project_error = None;
+            self.modal = Modal::None;
         }
     }
 
@@ -10655,8 +10663,7 @@ impl EditorWorkspace {
                 delete_response.on_hover_text("The default project cannot be deleted");
             }
             if delete_clicked {
-                self.delete_project_dialog_open = true;
-                self.delete_project_error = None;
+                self.modal = Modal::DeleteProject { error: None };
                 ui.close_menu();
             }
             ui.separator();
@@ -17386,9 +17393,10 @@ impl EditorWorkspace {
     }
 
     fn open_new_project_dialog(&mut self) {
-        self.new_project_dialog_open = true;
-        self.new_project_name.clear();
-        self.new_project_error = None;
+        self.modal = Modal::NewProject {
+            name: String::new(),
+            error: None,
+        };
     }
 
     fn open_texture_import_dialog(&mut self) {
