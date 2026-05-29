@@ -34,6 +34,7 @@
 extern crate psx_rt;
 
 use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
+use psx_engine::SkyDirectionProjector;
 #[cfg(feature = "vis-full-active-chunks")]
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
 #[cfg(feature = "cd-stream-bench")]
@@ -7423,12 +7424,17 @@ fn draw_sky_panorama(
     let mut projected_grid: [Option<(i16, i16)>; SKY_CYCLORAMA_GRID_POINTS_MAX] =
         [None; SKY_CYCLORAMA_GRID_POINTS_MAX];
 
+    // Project the whole grid on the GTE: load the camera rotation once, then
+    // RTPS each direction (hardware rotate + perspective divide) instead of the
+    // per-direction CPU rotate (eight muls) and two divides.
+    let sky_projector = SkyDirectionProjector::load(camera);
     for row in 0..=rows {
         let pitch = sky_lerp_i32(top_pitch, bottom_pitch, row, rows);
         for column in 0..=columns {
             let yaw = sky_yaw_degrees_for_column(column, columns);
-            projected_grid[sky_grid_index(row, column, columns)] =
-                project_sky_direction(sky_direction_q12(yaw, pitch), camera);
+            projected_grid[sky_grid_index(row, column, columns)] = sky_projector
+                .project(sky_direction_q12(yaw, pitch))
+                .map(|(sx, sy)| (sx.clamp(-512, 831), sy.clamp(-256, 495)));
         }
     }
 
@@ -7488,29 +7494,6 @@ fn sky_grid_index(row: usize, column: usize, columns: usize) -> usize {
     row.saturating_mul(columns.saturating_add(1))
         .saturating_add(column)
         .min(SKY_CYCLORAMA_GRID_POINTS_MAX - 1)
-}
-
-fn project_sky_direction(dir: [i16; 3], camera: WorldCamera) -> Option<(i16, i16)> {
-    let x = i32::from(dir[0]);
-    let y = i32::from(dir[1]);
-    let z = i32::from(dir[2]);
-    let sin_yaw = camera.sin_yaw.raw();
-    let cos_yaw = camera.cos_yaw.raw();
-    let sin_pitch = camera.sin_pitch.raw();
-    let cos_pitch = camera.cos_pitch.raw();
-    let x1 = mul_q12_i32(x, cos_yaw) - mul_q12_i32(z, sin_yaw);
-    let z1 = -mul_q12_i32(x, sin_yaw) - mul_q12_i32(z, cos_yaw);
-    let y2 = mul_q12_i32(y, cos_pitch) - mul_q12_i32(z1, sin_pitch);
-    let z2 = mul_q12_i32(y, sin_pitch) + mul_q12_i32(z1, cos_pitch);
-    if z2 <= NEAR_Z {
-        return None;
-    }
-    let sx = SCREEN_CX as i32 + (x1 * FOCAL) / z2;
-    let sy = SCREEN_CY as i32 - (y2 * FOCAL) / z2;
-    Some((
-        clamp_i16(sx.clamp(-512, 831)),
-        clamp_i16(sy.clamp(-256, 495)),
-    ))
 }
 
 fn sky_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
