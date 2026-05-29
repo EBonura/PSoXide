@@ -8860,7 +8860,9 @@ fn portal_visibility_result_draws_room(
     let mut i = 0usize;
     while i < visibility.room_count.min(MAX_ACTIVE_ROOMS) {
         if visibility.rooms[i].room == index {
-            return true;
+            // Visible (and resident for prefetch) but only drawn when within
+            // the draw distance -- a beyond-far room renders nothing.
+            return visibility.rooms[i].within_far;
         }
         i += 1;
     }
