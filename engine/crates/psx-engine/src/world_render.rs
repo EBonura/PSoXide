@@ -20,8 +20,8 @@ use crate::render3d::TexturedGouraudSubmitMicroProfile;
 
 use crate::{
     render3d::{
-        project_world_vertex_indices_gte, CullMode, DepthPolicy, PreparedTriangleDepth,
-        ProjectedVertex, ViewVertex,
+        project_world_vertex_indices_gte, CullMode, DepthPolicy, LoadedWorldCameraGte,
+        PreparedTriangleDepth, ProjectedVertex, ViewVertex,
     },
     PrimitiveSink, RoomPoint, RoomRender, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
     WorldVertex,
@@ -1989,6 +1989,10 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     let mut projected_index_count = 0usize;
     let mut accepted_cell_count = 0usize;
     let mut accepted_depths_need_sort = false;
+    // Per-cell depth/cull transforms run on the GTE (MVMVA) via the loaded
+    // camera instead of redoing the camera rotation in CPU fixed-point for
+    // every candidate cell; matches the rounding of the GTE vertex projection.
+    let loaded_camera = LoadedWorldCameraGte::load(*camera);
 
     for visible in visible_cells.iter().copied() {
         let Some(cell_index) = cached_room_cell_index_for_visible(cached_cells, visible) else {
@@ -2005,14 +2009,14 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 cell.visibility_center[1],
                 cell.visibility_center[2],
             );
-            camera.view_vertex(visibility_center).z
+            loaded_camera.view_vertex(visibility_center).z
         } else if visible.camera_depth == GridVisibleCell::CAMERA_DEPTH_UNKNOWN {
             let visibility_center = WorldVertex::new(
                 cell.visibility_center[0],
                 cell.visibility_center[1],
                 cell.visibility_center[2],
             );
-            let visibility_view = camera.view_vertex(visibility_center);
+            let visibility_view = loaded_camera.view_vertex(visibility_center);
             if !cell_visibility_view_visible_to_camera(
                 camera,
                 options,
