@@ -4810,6 +4810,41 @@ fn camera_gte_view_matrix(camera: WorldCamera) -> Mat3I16 {
     }
 }
 
+/// Projects sky directions (points at infinity) through the GTE. It installs
+/// the camera rotation with zero translation and the projection plane, so RTPS
+/// performs the yaw/pitch rotate and perspective divide in hardware, replacing
+/// the per-direction CPU rotate (eight Q12 muls) and perspective divide (two
+/// divides). Load once, project the whole sky grid, then load the world camera
+/// before world geometry -- this leaves the GTE holding the sky rotation/TR.
+pub struct SkyDirectionProjector {
+    near_z: i32,
+}
+
+impl SkyDirectionProjector {
+    /// Install the camera rotation, zero translation, and projection plane.
+    pub fn load(camera: WorldCamera) -> Self {
+        load_world_projection_gte(camera.projection);
+        scene::load_rotation(&camera_gte_view_matrix(camera));
+        scene::load_translation(Vec3I32::ZERO);
+        Self {
+            near_z: camera.projection.near_z,
+        }
+    }
+
+    /// Project a Q12 direction to screen space, or `None` when it is at or
+    /// behind the near plane (the GTE's clamped SZ reproduces the CPU
+    /// `z2 <= near_z` cull). Matches `camera_gte_view_matrix` so the result
+    /// equals the former CPU sky projection.
+    pub fn project(&self, dir: [i16; 3]) -> Option<(i16, i16)> {
+        let p = scene::project_vertex(Vec3I16::new(dir[0], dir[1], dir[2]));
+        if (p.sz as i32) > self.near_z {
+            Some((p.sx, p.sy))
+        } else {
+            None
+        }
+    }
+}
+
 fn scaled_pose_matrix(pose: JointPose, local_to_world: LocalToWorldScale) -> Mat3I16 {
     let scale = local_to_world.scale();
     let mut out = [[0i16; 3]; 3];
