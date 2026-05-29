@@ -85,6 +85,13 @@ pub struct Cpu {
     /// squash a same-register writeback when a non-load in the delay
     /// slot writes the same target -- R3000 load-delay semantics.
     committing_load: Option<(u8, u32)>,
+    /// Bus cycle at which the in-flight GTE command's result becomes
+    /// available. Reading a GTE result register (MFC2/CFC2/SWC2) or issuing
+    /// another GTE command before this point stalls the CPU, matching the
+    /// hardware load-on-result behaviour; interleaving independent work
+    /// between an op and its result read hides the latency. The emulator
+    /// computes GTE results eagerly, so this models timing only.
+    gte_busy_until: u64,
     hi: u32,
     lo: u32,
     /// When a SYSCALL/BREAK/exception fires, the post-retire PC goes
@@ -139,6 +146,7 @@ impl Cpu {
             pending_pc: None,
             pending_load: None,
             committing_load: None,
+            gte_busy_until: 0,
             hi: 0,
             lo: 0,
             pending_exception_pc: None,
@@ -207,6 +215,7 @@ impl Cpu {
         self.pending_pc = None;
         self.pending_load = None;
         self.committing_load = None;
+        self.gte_busy_until = 0;
         self.pending_exception_pc = None;
         self.set_gpr(28, initial_gp);
         if let Some(sp) = initial_sp {
@@ -544,7 +553,7 @@ impl Cpu {
             0x0E => self.op_xori(instr),
             0x0F => self.op_lui(instr),
             0x10 => self.dispatch_cop0(instr, pc),
-            0x12 => self.dispatch_cop2(instr, pc),
+            0x12 => self.dispatch_cop2(instr, pc, bus),
             0x20 => self.op_lb(instr, bus),
             0x21 => self.op_lh(instr, bus),
             0x22 => self.op_lwl(instr, bus),
@@ -583,15 +592,27 @@ impl Cpu {
     /// `0x12`). Bit 25 selects: when clear, the upper 5 bits of bits
     /// 25..=21 pick MFC2/CFC2/MTC2/CTC2; when set, the bottom 25 bits
     /// encode a GTE function (RTPS, NCLIP, MVMVA, …).
-    fn dispatch_cop2(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
+    fn dispatch_cop2(&mut self, instr: u32, pc: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
         if instr & (1 << 25) != 0 {
+            // The GTE is not pipelined: issuing a command while a previous one
+            // is still in flight stalls until it completes.
+            self.gte_sync(bus);
             self.cop2.execute(instr);
+            self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64;
             return Ok(());
         }
         let cop_op = ((instr >> 21) & 0x1F) as u8;
         match cop_op {
-            0x00 => self.op_mfc2(instr),
-            0x02 => self.op_cfc2(instr),
+            // MFC2/CFC2 read a GTE result; the CPU stalls until the in-flight
+            // command finishes. Interleaving CPU work before the read hides it.
+            0x00 => {
+                self.gte_sync(bus);
+                self.op_mfc2(instr)
+            }
+            0x02 => {
+                self.gte_sync(bus);
+                self.op_cfc2(instr)
+            }
             0x04 => self.op_mtc2(instr),
             0x06 => self.op_ctc2(instr),
             _ => Err(ExecutionError::Unimplemented {
@@ -599,6 +620,19 @@ impl Cpu {
                 pc,
                 instr,
             }),
+        }
+    }
+
+    /// Stall the CPU until any in-flight GTE command has completed. Called
+    /// before reading a GTE result register (MFC2/CFC2/SWC2) or issuing a new
+    /// command, so the modelled frametime charges the GTE latency the CPU
+    /// would actually wait on -- and rewards interleaving independent work
+    /// between an op and its result read.
+    #[inline]
+    fn gte_sync(&mut self, bus: &mut Bus) {
+        let now = bus.cycles();
+        if now < self.gte_busy_until {
+            bus.add_cycles((self.gte_busy_until - now) as u32);
         }
     }
 
@@ -674,6 +708,9 @@ impl Cpu {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
+        // SWC2 stores a GTE register, so it reads a result: stall until any
+        // in-flight GTE command has completed.
+        self.gte_sync(bus);
         bus.write32(addr, self.cop2.read_data(rt));
         Ok(())
     }
