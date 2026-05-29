@@ -378,18 +378,10 @@ pub struct EditorWorkspace {
     viewport_pan: Vec2,
     viewport_zoom: f32,
     last_viewport_size: Vec2,
-    /// Camera mode for the 3D viewport. Orbit preserves the original
-    /// target/radius camera; Free stores an explicit world position
-    /// and uses the same yaw/pitch angle convention for look.
-    viewport_3d_camera_mode: ViewportCameraMode,
-    viewport_3d_yaw: u16,
-    viewport_3d_pitch: u16,
-    viewport_3d_radius: i32,
-    viewport_3d_target: [i32; 3],
-    viewport_3d_free_yaw: u16,
-    viewport_3d_free_pitch: u16,
-    viewport_3d_free_position: [i32; 3],
-    viewport_3d_free_initialized: bool,
+    /// 3D viewport camera rig (orbit + free-fly params, mode, and all the
+    /// camera math). Orbit preserves the original target/radius camera; Free
+    /// stores an explicit world position with the same yaw/pitch convention.
+    camera_rig: CameraRig,
     /// Decoded `.psxt` thumbnails for the resources panel. Built
     /// lazily once per Texture resource (or whenever its `psxt_path`
     /// changes); the egui texture handle stays alive across frames
@@ -2044,6 +2036,149 @@ pub struct ViewportCameraState {
     pub position: [i32; 3],
 }
 
+/// 3D viewport camera rig: orbit and free-fly parameters plus the active mode.
+///
+/// Owns all camera math (rotate / pan / dolly / fly / orbit↔free sync) so it is
+/// unit-testable without a workspace or egui. Persisting the state back into the
+/// project document is the caller's responsibility, kept out of here so the rig
+/// stays a pure value type.
+#[derive(Debug, Clone)]
+struct CameraRig {
+    /// Active camera style.
+    mode: ViewportCameraMode,
+    /// Orbit yaw, 4096 per revolution.
+    yaw: u16,
+    /// Orbit pitch, clamped near the poles.
+    pitch: u16,
+    /// Orbit distance from `target`, world units.
+    radius: i32,
+    /// Orbit target, editor preview world units.
+    target: [i32; 3],
+    /// Free-camera yaw.
+    free_yaw: u16,
+    /// Free-camera pitch.
+    free_pitch: u16,
+    /// Free-camera position, editor preview world units.
+    free_position: [i32; 3],
+    /// Whether the free camera has been seeded from the orbit camera yet.
+    free_initialized: bool,
+}
+
+impl CameraRig {
+    /// Per-frame snapshot handed to the renderer.
+    fn camera(&self) -> ViewportCameraState {
+        match self.mode {
+            ViewportCameraMode::Orbit => ViewportCameraState {
+                mode: ViewportCameraMode::Orbit,
+                yaw_q12: self.yaw,
+                pitch_q12: self.pitch,
+                radius: self.radius,
+                target: self.target,
+                position: self.free_position,
+            },
+            ViewportCameraMode::Free => ViewportCameraState {
+                mode: ViewportCameraMode::Free,
+                yaw_q12: self.free_yaw,
+                pitch_q12: self.free_pitch,
+                radius: self.radius,
+                target: self.target,
+                position: self.free_position,
+            },
+        }
+    }
+
+    /// Drag-rotate the active camera. `delta` is pointer pixels.
+    fn rotate(&mut self, delta: Vec2) {
+        // 4 q12 units per pixel preserves the pre-q12-fix feel:
+        // roughly 0.35 degrees of camera rotation per dragged pixel.
+        const CAMERA_DRAG_STEP: f32 = 4.0;
+        let yaw_delta = (delta.x * CAMERA_DRAG_STEP) as i16 as u16;
+        let pitch_delta = (delta.y * CAMERA_DRAG_STEP) as i32;
+        match self.mode {
+            ViewportCameraMode::Orbit => {
+                self.yaw = self.yaw.wrapping_add(yaw_delta);
+                self.pitch = add_q12_signed_clamped(self.pitch, pitch_delta, -960, 960);
+            }
+            ViewportCameraMode::Free => {
+                self.free_yaw = self.free_yaw.wrapping_sub(yaw_delta);
+                self.free_pitch = add_q12_signed_clamped(self.free_pitch, -pitch_delta, -960, 960);
+                self.free_initialized = true;
+            }
+        }
+    }
+
+    /// Screen-space pan: dolly the orbit target, or slide the free camera.
+    fn pan(&mut self, delta: Vec2, panel_size: Vec2) {
+        let world_delta = viewport_3d_pan_delta(self.camera(), panel_size, delta);
+        match self.mode {
+            ViewportCameraMode::Orbit => {
+                for (axis, amount) in world_delta.into_iter().enumerate() {
+                    self.target[axis] = round_to_i32(self.target[axis] as f32 + amount);
+                }
+            }
+            ViewportCameraMode::Free => self.move_free_world(world_delta),
+        }
+    }
+
+    /// Mouse-wheel: dolly the orbit radius, or fly the free camera forward.
+    fn scroll(&mut self, scroll: f32) {
+        match self.mode {
+            ViewportCameraMode::Orbit => {
+                // Scroll = dolly. +/-8% of current radius per wheel notch,
+                // clamped so the camera can't pass through the target or
+                // escape the world entirely.
+                let factor = if scroll > 0.0 { 0.92 } else { 1.08 };
+                self.radius = ((self.radius as f32) * factor).clamp(512.0, 262_144.0) as i32;
+            }
+            ViewportCameraMode::Free => {
+                let amount = (scroll * 8.0).clamp(-4096.0, 4096.0);
+                self.move_free_local(amount, 0.0, 0.0);
+            }
+        }
+    }
+
+    /// Move the free camera along its own basis (forward/right/up).
+    fn move_free_local(&mut self, forward: f32, right: f32, vertical_y: f32) {
+        let basis = self.camera().basis();
+        let delta = [
+            basis.forward[0] * forward + basis.right[0] * right,
+            basis.forward[1] * forward + basis.right[1] * right + vertical_y,
+            basis.forward[2] * forward + basis.right[2] * right,
+        ];
+        self.move_free_world(delta);
+    }
+
+    /// Move the free camera by a world-space delta.
+    fn move_free_world(&mut self, delta: [f32; 3]) {
+        for (axis, amount) in delta.into_iter().enumerate() {
+            self.free_position[axis] = round_to_i32(self.free_position[axis] as f32 + amount);
+        }
+        self.free_initialized = true;
+    }
+
+    /// Switch camera mode, seeding the free camera from the orbit camera on the
+    /// first switch. Returns whether the mode actually changed.
+    fn set_mode(&mut self, mode: ViewportCameraMode) -> bool {
+        if self.mode == mode {
+            return false;
+        }
+        if mode == ViewportCameraMode::Free && !self.free_initialized {
+            self.sync_free_to_orbit();
+        }
+        self.mode = mode;
+        true
+    }
+
+    /// Copy the orbit camera's framing into the free camera.
+    fn sync_free_to_orbit(&mut self) {
+        self.free_yaw = self.yaw;
+        self.free_pitch = self.pitch;
+        self.free_position =
+            orbit_camera_position_i32(self.yaw, self.pitch, self.radius, self.target);
+        self.free_initialized = true;
+    }
+}
+
 /// Floating-point camera basis used by editor picking.
 #[derive(Debug, Clone, Copy)]
 pub struct ViewportCameraBasis {
@@ -2562,15 +2697,17 @@ impl EditorWorkspace {
             viewport_pan: Vec2::ZERO,
             viewport_zoom: DEFAULT_VIEWPORT_ZOOM,
             last_viewport_size: Vec2::new(1280.0, 720.0),
-            viewport_3d_camera_mode: camera_mode,
-            viewport_3d_yaw: editor_camera.orbit_yaw_q12,
-            viewport_3d_pitch: editor_camera.orbit_pitch_q12,
-            viewport_3d_radius: editor_camera.orbit_radius,
-            viewport_3d_target: editor_camera.orbit_target,
-            viewport_3d_free_yaw: editor_camera.free_yaw_q12,
-            viewport_3d_free_pitch: editor_camera.free_pitch_q12,
-            viewport_3d_free_position: free_position,
-            viewport_3d_free_initialized: free_initialized,
+            camera_rig: CameraRig {
+                mode: camera_mode,
+                yaw: editor_camera.orbit_yaw_q12,
+                pitch: editor_camera.orbit_pitch_q12,
+                radius: editor_camera.orbit_radius,
+                target: editor_camera.orbit_target,
+                free_yaw: editor_camera.free_yaw_q12,
+                free_pitch: editor_camera.free_pitch_q12,
+                free_position,
+                free_initialized,
+            },
             texture_thumbs: HashMap::new(),
             psoxide_logo_texture: None,
             model_resource_preview_texture: None,
@@ -2587,22 +2724,22 @@ impl EditorWorkspace {
 
     fn current_editor_camera_state(&self) -> EditorCameraState {
         EditorCameraState {
-            mode: match self.viewport_3d_camera_mode {
+            mode: match self.camera_rig.mode {
                 ViewportCameraMode::Orbit => EditorCameraMode::Orbit,
                 ViewportCameraMode::Free => EditorCameraMode::Free,
             },
-            orbit_yaw_q12: self.viewport_3d_yaw,
-            orbit_pitch_q12: self.viewport_3d_pitch,
-            orbit_radius: self.viewport_3d_radius,
-            orbit_target: self.viewport_3d_target,
-            free_yaw_q12: self.viewport_3d_free_yaw,
-            free_pitch_q12: self.viewport_3d_free_pitch,
-            free_position: if self.viewport_3d_free_initialized {
-                self.viewport_3d_free_position
+            orbit_yaw_q12: self.camera_rig.yaw,
+            orbit_pitch_q12: self.camera_rig.pitch,
+            orbit_radius: self.camera_rig.radius,
+            orbit_target: self.camera_rig.target,
+            free_yaw_q12: self.camera_rig.free_yaw,
+            free_pitch_q12: self.camera_rig.free_pitch,
+            free_position: if self.camera_rig.free_initialized {
+                self.camera_rig.free_position
             } else {
                 [0, 0, 0]
             },
-            free_initialized: self.viewport_3d_free_initialized,
+            free_initialized: self.camera_rig.free_initialized,
         }
     }
 
@@ -2618,17 +2755,17 @@ impl EditorWorkspace {
     fn apply_project_editor_camera(&mut self) {
         let mut editor_camera = self.project.editor_camera;
         editor_camera.normalize();
-        self.viewport_3d_camera_mode = match editor_camera.mode {
+        self.camera_rig.mode = match editor_camera.mode {
             EditorCameraMode::Orbit => ViewportCameraMode::Orbit,
             EditorCameraMode::Free => ViewportCameraMode::Free,
         };
-        self.viewport_3d_yaw = editor_camera.orbit_yaw_q12;
-        self.viewport_3d_pitch = editor_camera.orbit_pitch_q12;
-        self.viewport_3d_radius = editor_camera.orbit_radius;
-        self.viewport_3d_target = editor_camera.orbit_target;
-        self.viewport_3d_free_yaw = editor_camera.free_yaw_q12;
-        self.viewport_3d_free_pitch = editor_camera.free_pitch_q12;
-        self.viewport_3d_free_position = if editor_camera.free_initialized {
+        self.camera_rig.yaw = editor_camera.orbit_yaw_q12;
+        self.camera_rig.pitch = editor_camera.orbit_pitch_q12;
+        self.camera_rig.radius = editor_camera.orbit_radius;
+        self.camera_rig.target = editor_camera.orbit_target;
+        self.camera_rig.free_yaw = editor_camera.free_yaw_q12;
+        self.camera_rig.free_pitch = editor_camera.free_pitch_q12;
+        self.camera_rig.free_position = if editor_camera.free_initialized {
             editor_camera.free_position
         } else {
             orbit_camera_position_i32(
@@ -2638,7 +2775,7 @@ impl EditorWorkspace {
                 editor_camera.orbit_target,
             )
         };
-        self.viewport_3d_free_initialized =
+        self.camera_rig.free_initialized =
             editor_camera.free_initialized || editor_camera.mode == EditorCameraMode::Free;
     }
 
@@ -2945,8 +3082,8 @@ impl EditorWorkspace {
         // Default 3/4 view: yaw 8/64 turn (45° off the +Z axis),
         // pitch 4/64 (~22° looking down). Mirrors the showcase
         // demos' first-frame angle.
-        self.viewport_3d_yaw = 256;
-        self.viewport_3d_pitch = 256;
+        self.camera_rig.yaw = 256;
+        self.camera_rig.pitch = 256;
         self.fit_3d_bounds(center, half);
     }
 
@@ -2954,14 +3091,14 @@ impl EditorWorkspace {
     /// that fits `half` without changing yaw/pitch. Used for startup
     /// and explicit whole-room framing.
     fn fit_3d_bounds(&mut self, center: [f32; 3], half: [f32; 3]) {
-        self.viewport_3d_target = [
+        self.camera_rig.target = [
             round_to_i32(center[0]),
             round_to_i32(center[1]),
             round_to_i32(center[2]),
         ];
-        self.viewport_3d_radius = frame_radius_for_3d_bounds(half);
-        if self.viewport_3d_camera_mode == ViewportCameraMode::Free {
-            self.sync_free_camera_to_orbit();
+        self.camera_rig.radius = frame_radius_for_3d_bounds(half);
+        if self.camera_rig.mode == ViewportCameraMode::Free {
+            self.camera_rig.sync_free_to_orbit();
         }
     }
 
@@ -2974,21 +3111,21 @@ impl EditorWorkspace {
             round_to_i32(center[1]),
             round_to_i32(center[2]),
         ];
-        match self.viewport_3d_camera_mode {
+        match self.camera_rig.mode {
             ViewportCameraMode::Orbit => {
-                self.viewport_3d_target = target;
+                self.camera_rig.target = target;
             }
             ViewportCameraMode::Free => {
-                self.viewport_3d_target = target;
-                self.viewport_3d_radius =
-                    distance_i32(self.viewport_3d_free_position, target).clamp(512, 262_144);
+                self.camera_rig.target = target;
+                self.camera_rig.radius =
+                    distance_i32(self.camera_rig.free_position, target).clamp(512, 262_144);
                 if let Some((yaw, pitch)) =
-                    camera_angles_to_look_at(self.viewport_3d_free_position, target)
+                    camera_angles_to_look_at(self.camera_rig.free_position, target)
                 {
-                    self.viewport_3d_free_yaw = yaw;
-                    self.viewport_3d_free_pitch = pitch;
+                    self.camera_rig.free_yaw = yaw;
+                    self.camera_rig.free_pitch = pitch;
                 }
-                self.viewport_3d_free_initialized = true;
+                self.camera_rig.free_initialized = true;
             }
         }
     }
@@ -5052,63 +5189,22 @@ impl EditorWorkspace {
     }
 
     fn rotate_viewport_3d_camera(&mut self, delta: Vec2) {
-        // 4 q12 units per pixel preserves the pre-q12-fix feel:
-        // roughly 0.35 degrees of camera rotation per dragged pixel.
-        const CAMERA_DRAG_STEP: f32 = 4.0;
-        let yaw_delta = (delta.x * CAMERA_DRAG_STEP) as i16 as u16;
-        let pitch_delta = (delta.y * CAMERA_DRAG_STEP) as i32;
-        match self.viewport_3d_camera_mode {
-            ViewportCameraMode::Orbit => {
-                self.viewport_3d_yaw = self.viewport_3d_yaw.wrapping_add(yaw_delta);
-                self.viewport_3d_pitch =
-                    add_q12_signed_clamped(self.viewport_3d_pitch, pitch_delta, -960, 960);
-            }
-            ViewportCameraMode::Free => {
-                self.viewport_3d_free_yaw = self.viewport_3d_free_yaw.wrapping_sub(yaw_delta);
-                self.viewport_3d_free_pitch =
-                    add_q12_signed_clamped(self.viewport_3d_free_pitch, -pitch_delta, -960, 960);
-                self.viewport_3d_free_initialized = true;
-            }
-        }
+        self.camera_rig.rotate(delta);
         self.persist_editor_camera_state();
     }
 
     fn pan_viewport_3d_camera(&mut self, delta: Vec2, panel_size: Vec2) {
-        let world_delta = viewport_3d_pan_delta(self.viewport_3d_camera(), panel_size, delta);
-        match self.viewport_3d_camera_mode {
-            ViewportCameraMode::Orbit => {
-                for (axis, amount) in world_delta.into_iter().enumerate() {
-                    self.viewport_3d_target[axis] =
-                        round_to_i32(self.viewport_3d_target[axis] as f32 + amount);
-                }
-                self.persist_editor_camera_state();
-            }
-            ViewportCameraMode::Free => {
-                self.move_free_camera_world(world_delta);
-            }
-        }
+        self.camera_rig.pan(delta, panel_size);
+        self.persist_editor_camera_state();
     }
 
     fn scroll_viewport_3d_camera(&mut self, scroll: f32) {
-        match self.viewport_3d_camera_mode {
-            ViewportCameraMode::Orbit => {
-                // Scroll = dolly. +/-8% of current radius per wheel
-                // notch, clamped so the camera can't pass through the
-                // target or escape the world entirely.
-                let factor = if scroll > 0.0 { 0.92 } else { 1.08 };
-                self.viewport_3d_radius =
-                    ((self.viewport_3d_radius as f32) * factor).clamp(512.0, 262_144.0) as i32;
-                self.persist_editor_camera_state();
-            }
-            ViewportCameraMode::Free => {
-                let amount = (scroll * 8.0).clamp(-4096.0, 4096.0);
-                self.move_free_camera_local(amount, 0.0, 0.0);
-            }
-        }
+        self.camera_rig.scroll(scroll);
+        self.persist_editor_camera_state();
     }
 
     fn update_free_camera_keyboard(&mut self, ui: &egui::Ui) {
-        if self.viewport_3d_camera_mode != ViewportCameraMode::Free {
+        if self.camera_rig.mode != ViewportCameraMode::Free {
             return;
         }
         if ui.ctx().memory(|memory| memory.focused().is_some()) {
@@ -5134,51 +5230,17 @@ impl EditorWorkspace {
             return;
         }
 
-        self.move_free_camera_local(forward * speed, right * speed, vertical * speed);
+        self.camera_rig
+            .move_free_local(forward * speed, right * speed, vertical * speed);
+        self.persist_editor_camera_state();
         ui.ctx().request_repaint();
     }
 
-    fn move_free_camera_local(&mut self, forward: f32, right: f32, vertical_y: f32) {
-        let basis = self.viewport_3d_camera().basis();
-        let delta = [
-            basis.forward[0] * forward + basis.right[0] * right,
-            basis.forward[1] * forward + basis.right[1] * right + vertical_y,
-            basis.forward[2] * forward + basis.right[2] * right,
-        ];
-        self.move_free_camera_world(delta);
-    }
-
-    fn move_free_camera_world(&mut self, delta: [f32; 3]) {
-        for (axis, amount) in delta.into_iter().enumerate() {
-            self.viewport_3d_free_position[axis] =
-                round_to_i32(self.viewport_3d_free_position[axis] as f32 + amount);
-        }
-        self.viewport_3d_free_initialized = true;
-        self.persist_editor_camera_state();
-    }
-
     fn set_viewport_3d_camera_mode(&mut self, mode: ViewportCameraMode) {
-        if self.viewport_3d_camera_mode == mode {
-            return;
+        if self.camera_rig.set_mode(mode) {
+            self.persist_editor_camera_state();
+            self.mark_shortcut_group_changed(ShortcutGroup::Camera);
         }
-        if mode == ViewportCameraMode::Free && !self.viewport_3d_free_initialized {
-            self.sync_free_camera_to_orbit();
-        }
-        self.viewport_3d_camera_mode = mode;
-        self.persist_editor_camera_state();
-        self.mark_shortcut_group_changed(ShortcutGroup::Camera);
-    }
-
-    fn sync_free_camera_to_orbit(&mut self) {
-        self.viewport_3d_free_yaw = self.viewport_3d_yaw;
-        self.viewport_3d_free_pitch = self.viewport_3d_pitch;
-        self.viewport_3d_free_position = orbit_camera_position_i32(
-            self.viewport_3d_yaw,
-            self.viewport_3d_pitch,
-            self.viewport_3d_radius,
-            self.viewport_3d_target,
-        );
-        self.viewport_3d_free_initialized = true;
     }
 
     fn draw_viewport_3d_overlay_lines(
@@ -5534,24 +5596,7 @@ impl EditorWorkspace {
     /// Snapshot of the 3D camera the frontend needs to drive the
     /// editor's HwRenderer this frame.
     pub fn viewport_3d_camera(&self) -> ViewportCameraState {
-        match self.viewport_3d_camera_mode {
-            ViewportCameraMode::Orbit => ViewportCameraState {
-                mode: ViewportCameraMode::Orbit,
-                yaw_q12: self.viewport_3d_yaw,
-                pitch_q12: self.viewport_3d_pitch,
-                radius: self.viewport_3d_radius,
-                target: self.viewport_3d_target,
-                position: self.viewport_3d_free_position,
-            },
-            ViewportCameraMode::Free => ViewportCameraState {
-                mode: ViewportCameraMode::Free,
-                yaw_q12: self.viewport_3d_free_yaw,
-                pitch_q12: self.viewport_3d_free_pitch,
-                radius: self.viewport_3d_radius,
-                target: self.viewport_3d_target,
-                position: self.viewport_3d_free_position,
-            },
-        }
+        self.camera_rig.camera()
     }
 
     /// Whether the editor preview should visualize authored room fog.
@@ -10257,7 +10302,7 @@ impl EditorWorkspace {
     fn cycle_camera_group(&mut self, reverse: bool) {
         const VALUES: &[ViewportCameraMode] =
             &[ViewportCameraMode::Orbit, ViewportCameraMode::Free];
-        let mode = cycle_value(VALUES, self.viewport_3d_camera_mode, reverse);
+        let mode = cycle_value(VALUES, self.camera_rig.mode, reverse);
         self.set_viewport_3d_camera_mode(mode);
         self.status = match mode {
             ViewportCameraMode::Orbit => "Camera: Orbit".to_string(),
@@ -14328,7 +14373,7 @@ impl EditorWorkspace {
             ui,
             8,
             self.shortcut_group_glow(ShortcutGroup::Camera),
-            self.viewport_3d_camera_mode.icon(),
+            self.camera_rig.mode.icon(),
             "Camera",
             self.viewport_camera_mode_label(),
             |ui| self.draw_camera_group_menu(ui),
@@ -14527,7 +14572,7 @@ impl EditorWorkspace {
             if toolbar_menu_choice(
                 ui,
                 icons::label(mode.icon(), viewport_camera_mode_label(mode)),
-                self.viewport_3d_camera_mode == mode,
+                self.camera_rig.mode == mode,
             ) {
                 self.set_viewport_3d_camera_mode(mode);
                 self.status = format!("Camera: {}", viewport_camera_mode_label(mode));
@@ -14585,7 +14630,7 @@ impl EditorWorkspace {
     }
 
     fn viewport_camera_mode_label(&self) -> &'static str {
-        viewport_camera_mode_label(self.viewport_3d_camera_mode)
+        viewport_camera_mode_label(self.camera_rig.mode)
     }
 
     fn view_dimension_group_icon(&self) -> char {
@@ -34799,6 +34844,57 @@ mod tests {
         assert_eq!(anchor, Some(10));
     }
 
+    fn orbit_rig() -> CameraRig {
+        CameraRig {
+            mode: ViewportCameraMode::Orbit,
+            yaw: 0,
+            pitch: 0,
+            radius: 4096,
+            target: [0, 0, 0],
+            free_yaw: 0,
+            free_pitch: 0,
+            free_position: [0, 0, 0],
+            free_initialized: false,
+        }
+    }
+
+    /// Camera rig math runs without a workspace or egui.
+    #[test]
+    fn camera_rig_orbit_rotate_wraps_yaw_and_clamps_pitch() {
+        let mut rig = orbit_rig();
+        // 4 q12 units per pixel: a +10px horizontal drag advances yaw 40.
+        rig.rotate(Vec2::new(10.0, 0.0));
+        assert_eq!(rig.yaw, 40);
+        // A large downward drag saturates pitch at the +960 pole clamp.
+        rig.rotate(Vec2::new(0.0, 10_000.0));
+        assert_eq!(rig.pitch, 960);
+    }
+
+    #[test]
+    fn camera_rig_orbit_scroll_dollies_and_clamps_radius() {
+        let mut rig = orbit_rig();
+        rig.radius = 4096;
+        rig.scroll(1.0); // zoom in: radius *= 0.92
+        assert_eq!(rig.radius, (4096.0_f32 * 0.92) as i32);
+        rig.radius = 512;
+        rig.scroll(1.0); // 512 * 0.92 = 471, clamped back up to the 512 floor
+        assert_eq!(rig.radius, 512);
+    }
+
+    #[test]
+    fn camera_rig_switch_to_free_seeds_from_orbit_once() {
+        let mut rig = orbit_rig();
+        rig.yaw = 1024;
+        rig.pitch = 256;
+        assert!(rig.set_mode(ViewportCameraMode::Free));
+        assert_eq!(rig.mode, ViewportCameraMode::Free);
+        assert!(rig.free_initialized);
+        assert_eq!(rig.free_yaw, 1024);
+        assert_eq!(rig.free_pitch, 256);
+        // Re-selecting the active mode is a no-op.
+        assert!(!rig.set_mode(ViewportCameraMode::Free));
+    }
+
     fn test_temp_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "psxed-ui-{label}-{}-{}",
@@ -34822,11 +34918,11 @@ mod tests {
     }
 
     fn set_gizmo_test_camera(workspace: &mut EditorWorkspace) {
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_free_position = [512, 768, -2048];
-        workspace.viewport_3d_free_yaw = 2048;
-        workspace.viewport_3d_free_pitch = signed_to_q12(-160);
-        workspace.viewport_3d_free_initialized = true;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_position = [512, 768, -2048];
+        workspace.camera_rig.free_yaw = 2048;
+        workspace.camera_rig.free_pitch = signed_to_q12(-160);
+        workspace.camera_rig.free_initialized = true;
     }
 
     fn projected_gizmo_axis(
@@ -35034,36 +35130,36 @@ mod tests {
     fn focus_shortcut_preserves_orbit_distance() {
         let mut workspace =
             EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Orbit;
-        workspace.viewport_3d_radius = 12_345;
-        workspace.viewport_3d_yaw = 256;
-        workspace.viewport_3d_pitch = 256;
+        workspace.camera_rig.mode = ViewportCameraMode::Orbit;
+        workspace.camera_rig.radius = 12_345;
+        workspace.camera_rig.yaw = 256;
+        workspace.camera_rig.pitch = 256;
 
         workspace.focus_3d_on_point_preserving_distance([4096.0, 512.0, -2048.0]);
 
-        assert_eq!(workspace.viewport_3d_target, [4096, 512, -2048]);
-        assert_eq!(workspace.viewport_3d_radius, 12_345);
-        assert_eq!(workspace.viewport_3d_yaw, 256);
-        assert_eq!(workspace.viewport_3d_pitch, 256);
+        assert_eq!(workspace.camera_rig.target, [4096, 512, -2048]);
+        assert_eq!(workspace.camera_rig.radius, 12_345);
+        assert_eq!(workspace.camera_rig.yaw, 256);
+        assert_eq!(workspace.camera_rig.pitch, 256);
     }
 
     #[test]
     fn focus_shortcut_in_free_mode_keeps_position_and_points_at_target() {
         let mut workspace =
             EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_free_position = [0, 0, 0];
-        workspace.viewport_3d_free_yaw = 1024;
-        workspace.viewport_3d_free_pitch = signed_to_q12(300);
-        workspace.viewport_3d_free_initialized = true;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_position = [0, 0, 0];
+        workspace.camera_rig.free_yaw = 1024;
+        workspace.camera_rig.free_pitch = signed_to_q12(300);
+        workspace.camera_rig.free_initialized = true;
 
         workspace.focus_3d_on_point_preserving_distance([0.0, 0.0, -4096.0]);
 
-        assert_eq!(workspace.viewport_3d_free_position, [0, 0, 0]);
-        assert_eq!(workspace.viewport_3d_target, [0, 0, -4096]);
-        assert_eq!(workspace.viewport_3d_radius, 4096);
-        assert_eq!(workspace.viewport_3d_free_yaw, 0);
-        assert_eq!(workspace.viewport_3d_free_pitch, 0);
+        assert_eq!(workspace.camera_rig.free_position, [0, 0, 0]);
+        assert_eq!(workspace.camera_rig.target, [0, 0, -4096]);
+        assert_eq!(workspace.camera_rig.radius, 4096);
+        assert_eq!(workspace.camera_rig.free_yaw, 0);
+        assert_eq!(workspace.camera_rig.free_pitch, 0);
     }
 
     #[test]
@@ -35078,15 +35174,15 @@ mod tests {
             },
         );
         let mut workspace = EditorWorkspace::with_project(project_dir.clone(), project);
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_yaw = 384;
-        workspace.viewport_3d_pitch = signed_to_q12(-128);
-        workspace.viewport_3d_radius = 12_288;
-        workspace.viewport_3d_target = [1024, 512, -2048];
-        workspace.viewport_3d_free_yaw = 1536;
-        workspace.viewport_3d_free_pitch = 128;
-        workspace.viewport_3d_free_position = [-300, 700, 900];
-        workspace.viewport_3d_free_initialized = true;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.yaw = 384;
+        workspace.camera_rig.pitch = signed_to_q12(-128);
+        workspace.camera_rig.radius = 12_288;
+        workspace.camera_rig.target = [1024, 512, -2048];
+        workspace.camera_rig.free_yaw = 1536;
+        workspace.camera_rig.free_pitch = 128;
+        workspace.camera_rig.free_position = [-300, 700, 900];
+        workspace.camera_rig.free_initialized = true;
 
         workspace.save().unwrap();
 
@@ -35158,28 +35254,28 @@ mod tests {
     fn orbit_camera_rotation_uses_slow_step_and_clamps_pitch() {
         let mut workspace =
             EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
-        workspace.viewport_3d_yaw = 0;
-        workspace.viewport_3d_pitch = signed_to_q12(940);
+        workspace.camera_rig.yaw = 0;
+        workspace.camera_rig.pitch = signed_to_q12(940);
 
         workspace.rotate_viewport_3d_camera(Vec2::new(100.0, 200.0));
 
-        assert_eq!(workspace.viewport_3d_yaw, 400);
-        assert_eq!(workspace.viewport_3d_pitch, signed_to_q12(960));
+        assert_eq!(workspace.camera_rig.yaw, 400);
+        assert_eq!(workspace.camera_rig.pitch, signed_to_q12(960));
     }
 
     #[test]
     fn free_camera_rotation_uses_q12_drag_sensitivity() {
         let mut workspace =
             EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_free_yaw = 1024;
-        workspace.viewport_3d_free_pitch = 0;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_yaw = 1024;
+        workspace.camera_rig.free_pitch = 0;
 
         workspace.rotate_viewport_3d_camera(Vec2::new(100.0, 50.0));
 
-        assert_eq!(workspace.viewport_3d_free_yaw, 624);
-        assert_eq!(workspace.viewport_3d_free_pitch, signed_to_q12(-200));
-        assert!(workspace.viewport_3d_free_initialized);
+        assert_eq!(workspace.camera_rig.free_yaw, 624);
+        assert_eq!(workspace.camera_rig.free_pitch, signed_to_q12(-200));
+        assert!(workspace.camera_rig.free_initialized);
     }
 
     #[test]
@@ -35200,11 +35296,11 @@ mod tests {
 
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
         workspace.replace_node_selection(room);
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_free_initialized = true;
-        workspace.viewport_3d_free_position = [512, 512, 2048];
-        workspace.viewport_3d_free_yaw = 0;
-        workspace.viewport_3d_free_pitch = 0;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_initialized = true;
+        workspace.camera_rig.free_position = [512, 512, 2048];
+        workspace.camera_rig.free_yaw = 0;
+        workspace.camera_rig.free_pitch = 0;
 
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
         let (face, hit) = workspace
@@ -35240,11 +35336,11 @@ mod tests {
 
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
         workspace.replace_node_selection(room);
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_free_initialized = true;
-        workspace.viewport_3d_free_position = [512, 2048, 512];
-        workspace.viewport_3d_free_yaw = 0;
-        workspace.viewport_3d_free_pitch = signed_to_q12(-960);
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_initialized = true;
+        workspace.camera_rig.free_position = [512, 2048, 512];
+        workspace.camera_rig.free_yaw = 0;
+        workspace.camera_rig.free_pitch = signed_to_q12(-960);
 
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
         let (_, dir) = workspace
@@ -35308,11 +35404,11 @@ mod tests {
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
         workspace.replace_node_selection(room);
         workspace.active_tool = ViewTool::PaintCeiling;
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_free_initialized = true;
-        workspace.viewport_3d_free_position = [2048, 4096, 4096];
-        workspace.viewport_3d_free_yaw = 0;
-        workspace.viewport_3d_free_pitch = signed_to_q12(-960);
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_initialized = true;
+        workspace.camera_rig.free_position = [2048, 4096, 4096];
+        workspace.camera_rig.free_yaw = 0;
+        workspace.camera_rig.free_pitch = signed_to_q12(-960);
 
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
         let pointer = rect.center() + egui::vec2(80.0, 0.0);
@@ -37027,11 +37123,11 @@ mod tests {
                 .active_scene_mut()
                 .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
         let mut workspace = EditorWorkspace::with_project(test_temp_dir("box-select-3d"), project);
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_free_position = [512, 512, -2048];
-        workspace.viewport_3d_free_yaw = 2048;
-        workspace.viewport_3d_free_pitch = signed_to_q12(-128);
-        workspace.viewport_3d_free_initialized = true;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_position = [512, 512, -2048];
+        workspace.camera_rig.free_yaw = 2048;
+        workspace.camera_rig.free_pitch = signed_to_q12(-128);
+        workspace.camera_rig.free_initialized = true;
 
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
         let center = project_world_to_viewport_screen(
@@ -37077,11 +37173,11 @@ mod tests {
                 .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
         let mut workspace =
             EditorWorkspace::with_project(test_temp_dir("box-select-3d-additive"), project);
-        workspace.viewport_3d_camera_mode = ViewportCameraMode::Free;
-        workspace.viewport_3d_free_position = [512, 512, -2048];
-        workspace.viewport_3d_free_yaw = 2048;
-        workspace.viewport_3d_free_pitch = signed_to_q12(-128);
-        workspace.viewport_3d_free_initialized = true;
+        workspace.camera_rig.mode = ViewportCameraMode::Free;
+        workspace.camera_rig.free_position = [512, 512, -2048];
+        workspace.camera_rig.free_yaw = 2048;
+        workspace.camera_rig.free_pitch = signed_to_q12(-128);
+        workspace.camera_rig.free_initialized = true;
 
         let floor_0 = Selection::Face(FaceRef {
             room,
@@ -38044,9 +38140,9 @@ mod tests {
         let mut workspace =
             EditorWorkspace::with_project(test_temp_dir("node-gizmo-planes"), project);
         set_gizmo_test_camera(&mut workspace);
-        workspace.viewport_3d_free_position = [2048, 1024, -2048];
+        workspace.camera_rig.free_position = [2048, 1024, -2048];
         let (yaw, pitch) = camera_angles_to_look_at(
-            workspace.viewport_3d_free_position,
+            workspace.camera_rig.free_position,
             [
                 DEFAULT_WORLD_SECTOR_SIZE / 2,
                 DEFAULT_WORLD_SECTOR_SIZE / 4,
@@ -38054,8 +38150,8 @@ mod tests {
             ],
         )
         .expect("oblique gizmo test camera can face the entity");
-        workspace.viewport_3d_free_yaw = yaw;
-        workspace.viewport_3d_free_pitch = pitch;
+        workspace.camera_rig.free_yaw = yaw;
+        workspace.camera_rig.free_pitch = pitch;
         workspace.replace_node_selection(entity);
 
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
@@ -38391,7 +38487,7 @@ mod tests {
                 .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
         workspace.view_2d = false;
-        workspace.viewport_3d_target = [99_000, 99_000, 99_000];
+        workspace.camera_rig.target = [99_000, 99_000, 99_000];
 
         workspace.record_world_cook_error(
             room,
@@ -38433,7 +38529,7 @@ mod tests {
             .selected_frame_bounds_3d()
             .expect("duplicate wall faces frame in 3D");
         assert_eq!(
-            workspace.viewport_3d_target,
+            workspace.camera_rig.target,
             [
                 round_to_i32(center[0]),
                 round_to_i32(center[1]),
