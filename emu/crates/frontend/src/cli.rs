@@ -799,11 +799,7 @@ fn run_headless_launch(
         summary.counter_max_values = counter_max_values;
         summary.counter_latest_values = counter_latest_values;
         print_guest_profile(&summary);
-        print_gte_profile(
-            &gte_profile_before,
-            &gte_profile_after,
-            summary.frames.max(1),
-        );
+        print_gte_profile(&gte_profile_before, &gte_profile_after, &summary);
     }
 
     if let Some(path) = args.dump_vram {
@@ -1489,19 +1485,51 @@ fn resolve_project_arg(path: &Path) -> (PathBuf, PathBuf) {
     }
 }
 
-fn print_gte_profile(before: &GteProfileSnapshot, after: &GteProfileSnapshot, frames: u64) {
+fn print_gte_profile(
+    before: &GteProfileSnapshot,
+    after: &GteProfileSnapshot,
+    summary: &telemetry::GuestTelemetrySummary,
+) {
     let ops = after.ops.saturating_sub(before.ops);
     let cycles = after
         .estimated_cycles
         .saturating_sub(before.estimated_cycles);
-    let frames = frames.max(1);
+    let guest_frames = summary.frames.max(1);
     println!("gte_profile:");
-    println!("  ops={}  per_frame={:.0}", ops, ops as f64 / frames as f64);
     println!(
-        "  estimated_cycles={}  per_frame={:.0}",
-        cycles,
-        cycles as f64 / frames as f64
+        "  ops={}  per_guest_frame={:.0}",
+        ops,
+        ops as f64 / guest_frames as f64
     );
+    println!(
+        "  estimated_cycles={}  per_guest_frame={:.0}",
+        cycles,
+        cycles as f64 / guest_frames as f64
+    );
+    // GTE load against the render budget. NOTE: this emulator does not charge
+    // GTE op latency to the CPU frametime, so `estimated_cycles` is the real
+    // hardware GTE load; the rest of the per-frame budget is headroom available
+    // for offloading CPU geometry math (matrix-vector, perspective divide,
+    // cross-product backface) onto the otherwise-idle GTE.
+    let visual_frames = counter_total(summary, telemetry::counter::VISUAL_FRAMES).max(1);
+    let interval_total = counter_total(summary, telemetry::counter::VISUAL_INTERVAL_VBLANKS);
+    let per_render = cycles / visual_frames;
+    if interval_total > 0 && summary.frames > 0 {
+        let vblanks = interval_total as f64 / summary.frames as f64;
+        let budget = vblanks * NTSC_CPU_CYCLES_PER_VBLANK as f64;
+        let pct = if budget > 0.0 {
+            100.0 * per_render as f64 / budget
+        } else {
+            0.0
+        };
+        println!(
+            "  estimated_cycles_per_visual_frame={}  ({:.1}% of the {:.0}-cycle render budget, ~{:.1}% GTE headroom)",
+            per_render,
+            pct,
+            budget,
+            (100.0 - pct).max(0.0)
+        );
+    }
     println!("  opcodes:");
     for opcode in 0..after.opcode_counts.len() {
         let count = after.opcode_counts[opcode].saturating_sub(before.opcode_counts[opcode]);
@@ -1509,10 +1537,10 @@ fn print_gte_profile(before: &GteProfileSnapshot, after: &GteProfileSnapshot, fr
             continue;
         }
         println!(
-            "    0x{opcode:02x} {:<6} count={:<10} per_frame={:.0}",
+            "    0x{opcode:02x} {:<6} count={:<10} per_guest_frame={:.0}",
             gte_opcode_name(opcode as u8),
             count,
-            count as f64 / frames as f64
+            count as f64 / guest_frames as f64
         );
     }
 }
