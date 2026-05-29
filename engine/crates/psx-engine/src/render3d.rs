@@ -778,6 +778,21 @@ impl LoadedWorldCameraGte {
         )
     }
 
+    /// Transform one world-space vertex into *view* space through the loaded
+    /// GTE (MVMVA, no perspective divide), mirroring [`WorldCamera::view_vertex`]
+    /// but on the otherwise-idle GTE. Used for depth/cull queries (cell select,
+    /// bounds tests) so they share the same transform as `project_world` instead
+    /// of redoing the camera rotation in CPU fixed-point. Out-of-range vertices
+    /// fall back to the CPU path, matching `project_world`.
+    #[inline]
+    pub fn view_vertex(self, vertex: WorldVertex) -> ViewVertex {
+        let Some(input) = world_vertex_gte_input(vertex) else {
+            return self.camera.view_vertex(vertex);
+        };
+        let t = scene::transform_vertex_scheduled(input);
+        ViewVertex::new(t.x, t.y, t.z)
+    }
+
     /// Transform and project a world-space quad through the loaded GTE.
     ///
     /// The first three vertices are projected with `RTPT`; the fourth uses
