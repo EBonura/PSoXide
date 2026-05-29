@@ -260,23 +260,9 @@ pub struct EditorWorkspace {
     project_name_focus_pending: bool,
     /// Active centered modal dialog (New / Delete Project), if any.
     modal: Modal,
-    selected_node: NodeId,
-    selected_ui_node: UiNodeId,
-    selected_nodes: HashSet<NodeId>,
-    node_selection_anchor: Option<NodeId>,
-    selected_resource: Option<ResourceId>,
-    selected_resources: HashSet<ResourceId>,
-    resource_selection_anchor: Option<ResourceId>,
-    /// Highlighted sector cell within the active Room. Tracked so the
-    /// inspector can show per-cell properties without inflating the
-    /// scene-tree node count with a node per sector.
-    selected_sector: Option<(u16, u16)>,
-    /// Multi-cell Room tile selection. Fully qualified with Room id so
-    /// selections survive scene-tree focus changes and can span the
-    /// active Room without pretending each tile is a scene node.
-    selected_sectors: HashSet<SectorSelection>,
-    /// Anchor used by Shift-click tile range selection.
-    sector_selection_anchor: Option<SectorSelection>,
+    /// Everything currently selected or hovered across the editor
+    /// (scene tree, content browser, viewports, UI canvas).
+    selection: SelectionState,
     /// The single in-flight pointer interaction stroke: drags and
     /// screen-space marquees across the 2D/3D viewports and the UI
     /// canvas. At most one is ever active, so this is one enum
@@ -296,22 +282,6 @@ pub struct EditorWorkspace {
     /// Whether vertex edits move every coincident face-corner, or
     /// only the selected face's own corner data.
     vertex_connectivity: VertexConnectivity,
-    /// Primitive under the pointer while the Select tool is
-    /// active. Updated every frame the panel is hovered and the
-    /// tool is Select; cleared when the pointer leaves or another
-    /// tool takes over. The renderer outlines this lightly so the
-    /// user sees what the next click will pick.
-    hovered_primitive: Option<Selection>,
-    /// Primitive the user clicked with the Select tool last.
-    /// Persists across frames until the user clicks a different
-    /// one or switches tools. The renderer outlines it more
-    /// boldly than `hovered_primitive`; the inspector reads it to
-    /// surface per-primitive properties.
-    selected_primitive: Option<Selection>,
-    /// Multi primitive selection for Select mode. `selected_primitive`
-    /// remains the active/inspected item; this list is the editable
-    /// set used by overlay, delete, and drag.
-    selected_primitives: Vec<Selection>,
     /// Red authoring-error overlays populated when cook/playtest
     /// validation can map a failure back to concrete grid faces.
     validation_issue_primitives: Vec<Selection>,
@@ -323,10 +293,6 @@ pub struct EditorWorkspace {
     /// lets Escape cancel without dirtying the document and lets
     /// click commit one clean undo step.
     floating_geometry: Option<FloatingGeometryPlacement>,
-    /// Hovered entity bound under the cursor (Select tool
-    /// only). Drives the entity-bounds highlight overlay and
-    /// the click→select fast path.
-    hovered_entity_node: Option<NodeId>,
     /// What the next paint click would target. Cell variant fires
     /// for floor / ceiling / erase / place; Wall variant fires for
     /// PaintWall. World-cell coords let the preview track cells
@@ -1911,6 +1877,57 @@ enum Modal {
     DeleteProject { error: Option<String> },
 }
 
+/// What the editor currently has selected or is hovering, across the scene
+/// tree, content browser, 2D/3D viewports and UI canvas.
+///
+/// Grouping this state out of `EditorWorkspace` shrinks the god-object and lets
+/// selection logic borrow `&mut self.selection` disjointly from the document
+/// and renderer.
+#[derive(Debug, Clone)]
+struct SelectionState {
+    /// Primary selected scene node; drives the inspector.
+    selected_node: NodeId,
+    /// Primary selected node in the UI-authoring scene.
+    selected_ui_node: UiNodeId,
+    /// Multi-selection of scene nodes.
+    selected_nodes: HashSet<NodeId>,
+    /// Anchor for Shift-click scene-node range selection.
+    node_selection_anchor: Option<NodeId>,
+    /// Primary selected resource (content browser / inspector).
+    selected_resource: Option<ResourceId>,
+    /// Multi-selection of resources.
+    selected_resources: HashSet<ResourceId>,
+    /// Anchor for Shift-click resource range selection.
+    resource_selection_anchor: Option<ResourceId>,
+    /// Highlighted sector cell within the active Room. Tracked so the
+    /// inspector can show per-cell properties without inflating the
+    /// scene-tree node count with a node per sector.
+    selected_sector: Option<(u16, u16)>,
+    /// Multi-cell Room tile selection. Fully qualified with Room id so
+    /// selections survive scene-tree focus changes and can span the
+    /// active Room without pretending each tile is a scene node.
+    selected_sectors: HashSet<SectorSelection>,
+    /// Anchor used by Shift-click tile range selection.
+    sector_selection_anchor: Option<SectorSelection>,
+    /// Primitive under the pointer while the Select tool is active. Updated
+    /// every frame the panel is hovered and the tool is Select; cleared when
+    /// the pointer leaves or another tool takes over. The renderer outlines
+    /// this lightly so the user sees what the next click will pick.
+    hovered_primitive: Option<Selection>,
+    /// Primitive the user clicked with the Select tool last. Persists across
+    /// frames until the user clicks a different one or switches tools. The
+    /// renderer outlines it more boldly than `hovered_primitive`; the
+    /// inspector reads it to surface per-primitive properties.
+    selected_primitive: Option<Selection>,
+    /// Multi primitive selection for Select mode. `selected_primitive` remains
+    /// the active/inspected item; this list is the editable set used by
+    /// overlay, delete, and drag.
+    selected_primitives: Vec<Selection>,
+    /// Hovered entity bound under the cursor (Select tool only). Drives the
+    /// entity-bounds highlight overlay and the click→select fast path.
+    hovered_entity_node: Option<NodeId>,
+}
+
 /// Resolved physical vertex: every face-corner that currently
 /// sits at `world` and therefore moves together when the
 /// vertex's height is dragged.
@@ -2408,28 +2425,30 @@ impl EditorWorkspace {
             project_name_editing: false,
             project_name_focus_pending: false,
             modal: Modal::None,
-            selected_node: NodeId::ROOT,
-            selected_ui_node,
-            selected_nodes: HashSet::new(),
-            node_selection_anchor: None,
-            selected_resource: None,
-            selected_resources: HashSet::new(),
-            resource_selection_anchor: None,
-            selected_sector: None,
-            selected_sectors: HashSet::new(),
-            sector_selection_anchor: None,
+            selection: SelectionState {
+                selected_node: NodeId::ROOT,
+                selected_ui_node,
+                selected_nodes: HashSet::new(),
+                node_selection_anchor: None,
+                selected_resource: None,
+                selected_resources: HashSet::new(),
+                resource_selection_anchor: None,
+                selected_sector: None,
+                selected_sectors: HashSet::new(),
+                sector_selection_anchor: None,
+                hovered_primitive: None,
+                selected_primitive: None,
+                selected_primitives: Vec::new(),
+                hovered_entity_node: None,
+            },
             interaction: Interaction::Idle,
             selection_mode: SelectionMode::default(),
             transform_gizmo_mode: TransformGizmoMode::Move,
             horizontal_edit_mode: HorizontalEditMode::default(),
             vertex_connectivity: VertexConnectivity::default(),
-            hovered_primitive: None,
-            selected_primitive: None,
-            selected_primitives: Vec::new(),
             validation_issue_primitives: Vec::new(),
             validation_issue_rooms: HashSet::new(),
             floating_geometry: None,
-            hovered_entity_node: None,
             paint_target_preview: None,
             last_paint_stamp: None,
             wall_paint_shape: WallPaintShape::Cardinal,
@@ -2695,12 +2714,12 @@ impl EditorWorkspace {
             Ok((project, sync_status, dirty)) => {
                 self.saved_project_name = project.name.clone();
                 self.project = project;
-                self.selected_node = NodeId::ROOT;
-                self.selected_nodes.clear();
-                self.node_selection_anchor = None;
-                self.selected_resource = None;
-                self.selected_resources.clear();
-                self.resource_selection_anchor = None;
+                self.selection.selected_node = NodeId::ROOT;
+                self.selection.selected_nodes.clear();
+                self.selection.node_selection_anchor = None;
+                self.selection.selected_resource = None;
+                self.selection.selected_resources.clear();
+                self.selection.resource_selection_anchor = None;
                 self.place_resource = None;
                 self.clear_sector_selection();
                 self.resource_renaming = None;
@@ -3257,8 +3276,7 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 ui.set_min_width(360.0);
                 ui.label("Project name");
-                let response =
-                    ui.add(egui::TextEdit::singleline(name).hint_text("e.g. Test Room"));
+                let response = ui.add(egui::TextEdit::singleline(name).hint_text("e.g. Test Room"));
                 let preview_stem = if name.trim().is_empty() {
                     "<name>".to_string()
                 } else {
@@ -4395,7 +4413,7 @@ impl EditorWorkspace {
         let hovered_resize_target = pointer.and_then(|pos| {
             ui_scene_resize_handle_target(
                 &scene,
-                self.selected_ui_node,
+                self.selection.selected_ui_node,
                 canvas_rect,
                 canvas_size,
                 pos,
@@ -4415,7 +4433,7 @@ impl EditorWorkspace {
             if let Some(pos) = response.interact_pointer_pos() {
                 let resize_target = ui_scene_resize_handle_target(
                     &scene,
-                    self.selected_ui_node,
+                    self.selection.selected_ui_node,
                     canvas_rect,
                     canvas_size,
                     pos,
@@ -4475,9 +4493,10 @@ impl EditorWorkspace {
             &preview_scene,
             canvas_rect,
             canvas_size,
-            self.selected_ui_node,
-            hovered_resize_target
-                .and_then(|(node, handle)| (node == self.selected_ui_node).then_some(handle)),
+            self.selection.selected_ui_node,
+            hovered_resize_target.and_then(|(node, handle)| {
+                (node == self.selection.selected_ui_node).then_some(handle)
+            }),
         );
 
         let label = format!("{}  {}x{}", preview_scene.name, canvas_w, canvas_h);
@@ -4491,7 +4510,7 @@ impl EditorWorkspace {
     }
 
     fn select_ui_node(&mut self, id: UiNodeId) {
-        self.selected_ui_node = id;
+        self.selection.selected_ui_node = id;
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
@@ -4584,7 +4603,7 @@ impl EditorWorkspace {
         if dx == 0 && dy == 0 {
             return false;
         }
-        let selected = self.selected_ui_node;
+        let selected = self.selection.selected_ui_node;
         let Some(rect) = self
             .project
             .active_ui_scene()
@@ -4613,7 +4632,7 @@ impl EditorWorkspace {
     }
 
     fn delete_selected_ui_node(&mut self) -> bool {
-        let selected = self.selected_ui_node;
+        let selected = self.selection.selected_ui_node;
         let Some((root, parent, name)) = self.project.active_ui_scene().and_then(|scene| {
             let node = scene.node(selected)?;
             Some((
@@ -4639,7 +4658,7 @@ impl EditorWorkspace {
             self.status = "UI node no longer exists".to_string();
             return false;
         }
-        self.selected_ui_node = parent;
+        self.selection.selected_ui_node = parent;
         self.interaction.take_ui_canvas_drag();
         self.mark_dirty();
         self.status = format!("Deleted UI {name}");
@@ -4743,7 +4762,7 @@ impl EditorWorkspace {
         // Hover-track via the same target resolver used for clicks
         // and drags, so foreground gizmos/entities consume the
         // pointer before scene faces behind them can highlight.
-        self.hovered_primitive = if self.portal_place_active() {
+        self.selection.hovered_primitive = if self.portal_place_active() {
             None
         } else {
             pointer_target.and_then(|target| target.primitive_selection())
@@ -4805,9 +4824,9 @@ impl EditorWorkspace {
             // overlay can highlight the bound under the cursor
             // before the user clicks.
             if select_tool {
-                self.hovered_entity_node = hover_entity_hit.map(|hit| hit.node);
+                self.selection.hovered_entity_node = hover_entity_hit.map(|hit| hit.node);
             } else {
-                self.hovered_entity_node = None;
+                self.selection.hovered_entity_node = None;
             }
 
             // Select-tool drag-translate. Two distinct drag flows:
@@ -4871,7 +4890,8 @@ impl EditorWorkspace {
                             }
                         }
                         Interaction::BoxSelect3d(_) => {
-                            if let Some(p) = response.interact_pointer_pos().or(response.hover_pos())
+                            if let Some(p) =
+                                response.interact_pointer_pos().or(response.hover_pos())
                             {
                                 self.update_viewport_3d_box_select(p, rect);
                             }
@@ -4927,7 +4947,7 @@ impl EditorWorkspace {
                 }
             }
         } else {
-            self.hovered_entity_node = None;
+            self.selection.hovered_entity_node = None;
         }
 
         if response.hovered() {
@@ -5515,7 +5535,7 @@ impl EditorWorkspace {
     /// Currently-selected scene node. The frontend reads this so the
     /// 3D preview can highlight the selected entity.
     pub fn selected_node_id(&self) -> NodeId {
-        self.selected_node
+        self.selection.selected_node
     }
 
     /// Editor-local hidden scene nodes from the Scene tree eye toggles.
@@ -5530,14 +5550,14 @@ impl EditorWorkspace {
     /// ceiling on the active Room. Frontend reads this every
     /// frame to draw a light hover outline.
     pub fn hovered_primitive(&self) -> Option<Selection> {
-        self.hovered_primitive
+        self.selection.hovered_primitive
     }
 
     /// Primitive the user clicked with the Select tool. Frontend
     /// draws a bold outline; the inspector reads it to surface
     /// per-primitive editable fields.
     pub fn selected_primitive(&self) -> Option<Selection> {
-        self.selected_primitive
+        self.selection.selected_primitive
     }
 
     /// All selected grid primitives, excluding floor-tile sector
@@ -5563,7 +5583,7 @@ impl EditorWorkspace {
     /// 2D tile selection stores sector cells; the 3D preview,
     /// material tools, and drag code work on concrete face refs.
     pub fn selected_sector_faces(&self) -> Vec<FaceRef> {
-        let mut sectors: Vec<_> = self.selected_sectors.iter().copied().collect();
+        let mut sectors: Vec<_> = self.selection.selected_sectors.iter().copied().collect();
         sectors.sort_by_key(|(room, sx, sz)| (room.raw(), *sx, *sz));
         let mut faces = Vec::new();
         for (room, sx, sz) in sectors {
@@ -5625,7 +5645,7 @@ impl EditorWorkspace {
     /// frame so the editor preview can highlight the box and
     /// the click handler can promote it to a selection.
     pub fn hovered_entity_node(&self) -> Option<NodeId> {
-        self.hovered_entity_node
+        self.selection.hovered_entity_node
     }
 
     /// Commit the most recent hover-tracked face to `selected_face`.
@@ -5794,7 +5814,7 @@ impl EditorWorkspace {
         &mut self,
         modifiers: egui::Modifiers,
     ) -> Option<(Selection, Vec<Selection>)> {
-        let Some(target) = self.hovered_primitive else {
+        let Some(target) = self.selection.hovered_primitive else {
             return None;
         };
         let already_selected = self.primitive_is_selected(target)
@@ -5809,7 +5829,7 @@ impl EditorWorkspace {
                 self.update_primitive_resource_selection();
             }
         } else {
-            self.selected_primitive = Some(target);
+            self.selection.selected_primitive = Some(target);
         }
 
         let targets = self.primitive_drag_targets(target);
@@ -6272,7 +6292,10 @@ impl EditorWorkspace {
         if axes.is_empty() {
             return;
         }
-        let active_axis = self.interaction.primitive_gizmo_drag().map(|drag| drag.axis);
+        let active_axis = self
+            .interaction
+            .primitive_gizmo_drag()
+            .map(|drag| drag.axis);
         painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
         for screen_axis in axes {
             let highlighted =
@@ -7371,7 +7394,7 @@ impl EditorWorkspace {
     }
 
     fn commit_face_selection(&mut self, modifiers: egui::Modifiers) {
-        match self.hovered_primitive {
+        match self.selection.hovered_primitive {
             Some(selection) => {
                 self.apply_primitive_selection_modifiers(selection, modifiers);
             }
@@ -7392,7 +7415,10 @@ impl EditorWorkspace {
             return None;
         }
         let sector = (face.room, face.sx, face.sz);
-        self.selected_sectors.contains(&sector).then_some(sector)
+        self.selection
+            .selected_sectors
+            .contains(&sector)
+            .then_some(sector)
     }
 
     fn select_wall_face_span(&mut self, selection: Selection, modifiers: egui::Modifiers) -> bool {
@@ -7429,14 +7455,14 @@ impl EditorWorkspace {
         self.clear_sector_selection();
         self.clear_node_selection_state();
         if !additive {
-            self.selected_primitives.clear();
+            self.selection.selected_primitives.clear();
         }
         for span_selection in selections {
             self.push_selected_primitive_unique(span_selection);
         }
-        self.selected_primitive = Some(selection);
+        self.selection.selected_primitive = Some(selection);
         self.update_primitive_resource_selection();
-        self.status = match self.selected_primitives.len() {
+        self.status = match self.selection.selected_primitives.len() {
             0 => "Cleared primitive selection".to_string(),
             1 => format!("Selected {}", describe_selection(selection)),
             count => format!("Selected {count} walls"),
@@ -7482,14 +7508,14 @@ impl EditorWorkspace {
         self.clear_sector_selection();
         self.clear_node_selection_state();
         if !additive {
-            self.selected_primitives.clear();
+            self.selection.selected_primitives.clear();
         }
         for rect_selection in selections {
             self.push_selected_primitive_unique(rect_selection);
         }
-        self.selected_primitive = Some(selection);
+        self.selection.selected_primitive = Some(selection);
         self.update_primitive_resource_selection();
-        self.status = match self.selected_primitives.len() {
+        self.status = match self.selection.selected_primitives.len() {
             0 => "Cleared primitive selection".to_string(),
             1 => format!("Selected {}", describe_selection(selection)),
             count => format!("Selected {count} {}", horizontal_face_plural(current.kind)),
@@ -7498,12 +7524,14 @@ impl EditorWorkspace {
     }
 
     fn horizontal_face_selection_anchor(&self, kind: FaceKind) -> Option<FaceRef> {
-        self.selected_primitives
+        self.selection
+            .selected_primitives
             .iter()
             .copied()
             .find_map(|selection| selection_horizontal_face(selection, kind))
             .or_else(|| {
-                self.selected_primitive
+                self.selection
+                    .selected_primitive
                     .and_then(|selection| selection_horizontal_face(selection, kind))
             })
     }
@@ -7541,11 +7569,16 @@ impl EditorWorkspace {
     }
 
     fn wall_face_selection_anchor(&self) -> Option<FaceRef> {
-        self.selected_primitives
+        self.selection
+            .selected_primitives
             .iter()
             .copied()
             .find_map(selection_wall_face)
-            .or_else(|| self.selected_primitive.and_then(selection_wall_face))
+            .or_else(|| {
+                self.selection
+                    .selected_primitive
+                    .and_then(selection_wall_face)
+            })
     }
 
     fn existing_wall_span_faces(
@@ -7602,14 +7635,14 @@ impl EditorWorkspace {
         self.clear_sector_selection();
         self.clear_node_selection_state();
         if !additive {
-            self.selected_primitives.clear();
+            self.selection.selected_primitives.clear();
         }
         for edge in path {
             self.push_selected_primitive_unique(Selection::Edge(edge));
         }
-        self.selected_primitive = Some(selection);
+        self.selection.selected_primitive = Some(selection);
         self.update_primitive_resource_selection();
-        self.status = match self.selected_primitives.len() {
+        self.status = match self.selection.selected_primitives.len() {
             0 => "Cleared primitive selection".to_string(),
             1 => format!("Selected {}", describe_selection(selection)),
             count => format!("Selected {count} edges"),
@@ -7618,11 +7651,12 @@ impl EditorWorkspace {
     }
 
     fn edge_selection_anchor(&self) -> Option<EdgeRef> {
-        self.selected_primitives
+        self.selection
+            .selected_primitives
             .iter()
             .copied()
             .find_map(selection_edge)
-            .or_else(|| self.selected_primitive.and_then(selection_edge))
+            .or_else(|| self.selection.selected_primitive.and_then(selection_edge))
     }
 
     fn edge_path_between(&self, anchor: EdgeRef, current: EdgeRef) -> Option<Vec<EdgeRef>> {
@@ -7712,25 +7746,27 @@ impl EditorWorkspace {
         self.clear_sector_selection();
         self.clear_node_selection_state();
         if modifiers.shift {
-            if self.selected_primitives.is_empty() {
-                if let Some(current) = self.selected_primitive {
-                    self.selected_primitives.push(current);
+            if self.selection.selected_primitives.is_empty() {
+                if let Some(current) = self.selection.selected_primitive {
+                    self.selection.selected_primitives.push(current);
                 }
             }
             self.push_selected_primitive_unique(selection);
         } else if toggle {
-            if self.selected_primitives.is_empty() {
-                if let Some(current) = self.selected_primitive {
-                    self.selected_primitives.push(current);
+            if self.selection.selected_primitives.is_empty() {
+                if let Some(current) = self.selection.selected_primitive {
+                    self.selection.selected_primitives.push(current);
                 }
             }
             if let Some(index) = self
+                .selection
                 .selected_primitives
                 .iter()
                 .position(|candidate| *candidate == selection)
             {
-                self.selected_primitives.remove(index);
-                self.selected_primitive = self.selected_primitives.last().copied();
+                self.selection.selected_primitives.remove(index);
+                self.selection.selected_primitive =
+                    self.selection.selected_primitives.last().copied();
             } else {
                 self.push_selected_primitive_unique(selection);
             }
@@ -7738,7 +7774,7 @@ impl EditorWorkspace {
             self.replace_primitive_selection(selection);
         }
 
-        if self.selected_primitives.is_empty() {
+        if self.selection.selected_primitives.is_empty() {
             self.clear_primitive_selection_state();
             self.clear_resource_selection_state();
             self.status = "Cleared primitive selection".to_string();
@@ -7746,11 +7782,11 @@ impl EditorWorkspace {
         }
 
         self.update_primitive_resource_selection();
-        self.status = match self.selected_primitives.len() {
+        self.status = match self.selection.selected_primitives.len() {
             0 => "Cleared primitive selection".to_string(),
             1 => format!(
                 "Selected {}",
-                describe_selection(self.selected_primitives[0])
+                describe_selection(self.selection.selected_primitives[0])
             ),
             count => format!("Selected {count} primitives"),
         };
@@ -7811,7 +7847,7 @@ impl EditorWorkspace {
         if portal_tool {
             self.clear_sector_selection();
         } else {
-            self.selected_sector = Some((sx, sz));
+            self.selection.selected_sector = Some((sx, sz));
         }
         let tool = self.active_tool;
         self.run_paint_action(tool, room_id, sx, sz, face_hit.map(|(f, _)| f), hit_world)
@@ -7944,7 +7980,7 @@ impl EditorWorkspace {
                 );
                 self.replace_node_selection(node);
                 self.clear_resource_selection_state();
-                self.selected_primitive = None;
+                self.selection.selected_primitive = None;
                 self.status = format!("Created Weapon Entity from resource {}", resource.name);
                 self.mark_dirty();
             }
@@ -9101,7 +9137,7 @@ impl EditorWorkspace {
     }
 
     fn autotile_selected_sector_walls(&mut self) -> usize {
-        let selected_tiles = self.selected_sectors.len();
+        let selected_tiles = self.selection.selected_sectors.len();
         if selected_tiles == 0 {
             self.status = "No selected tiles to autotile".to_string();
             return 0;
@@ -9348,8 +9384,8 @@ impl EditorWorkspace {
 
         self.replace_node_selection(first.room());
         self.clear_sector_selection();
-        self.selected_primitives = selected;
-        self.selected_primitive = Some(first);
+        self.selection.selected_primitives = selected;
+        self.selection.selected_primitive = Some(first);
         self.update_primitive_resource_selection();
         self.frame_viewport();
     }
@@ -9921,21 +9957,21 @@ impl EditorWorkspace {
                 return;
             }
             let f2 = ctx.input_mut(|i| i.key_pressed(egui::Key::F2));
-            if f2 && self.selected_node != NodeId::ROOT {
-                self.apply_tree_action(TreeAction::BeginRename(self.selected_node), &[]);
+            if f2 && self.selection.selected_node != NodeId::ROOT {
+                self.apply_tree_action(TreeAction::BeginRename(self.selection.selected_node), &[]);
             }
             let del = ctx.input_mut(|i| {
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
             });
             if del && self.renaming.is_none() {
-                if !self.selected_sectors.is_empty() {
+                if !self.selection.selected_sectors.is_empty() {
                     self.delete_selected_sectors();
                 } else if !self.selected_primitive_targets().is_empty() {
                     self.delete_selected_primitives();
-                } else if self.selected_resource.is_some() {
+                } else if self.selection.selected_resource.is_some() {
                     self.begin_resource_delete_confirmation();
-                } else if self.selected_node != NodeId::ROOT {
-                    self.apply_tree_action(TreeAction::Delete(self.selected_node), &[]);
+                } else if self.selection.selected_node != NodeId::ROOT {
+                    self.apply_tree_action(TreeAction::Delete(self.selection.selected_node), &[]);
                 }
             }
         }
@@ -10068,7 +10104,7 @@ impl EditorWorkspace {
         if self.place_kind == PlaceKind::Portal {
             self.clear_sector_selection();
             self.clear_primitive_selection_state();
-            self.hovered_primitive = None;
+            self.selection.hovered_primitive = None;
         }
         self.status = if tool == ViewTool::Place {
             format!("Tool: {}", self.place_kind.label())
@@ -10186,6 +10222,7 @@ impl EditorWorkspace {
         }
         self.selection_mode = mode;
         let active = self
+            .selection
             .selected_primitive
             .and_then(|selection| Self::selection_as_mode(selection, mode));
         let mut converted = Vec::new();
@@ -10197,12 +10234,13 @@ impl EditorWorkspace {
                 converted.push(selection);
             }
         }
-        self.selected_primitives = converted;
-        self.selected_primitive = active.or_else(|| self.selected_primitives.first().copied());
+        self.selection.selected_primitives = converted;
+        self.selection.selected_primitive =
+            active.or_else(|| self.selection.selected_primitives.first().copied());
         // Clear the hover too -- its mode is the old one, and
         // the next mouse-move re-pick will repopulate under the
         // new mode anyway.
-        self.hovered_primitive = None;
+        self.selection.hovered_primitive = None;
         self.status = format!("Selection mode: {}", mode.label());
         self.mark_shortcut_group_changed(ShortcutGroup::Selection);
     }
@@ -10213,6 +10251,7 @@ impl EditorWorkspace {
         }
         self.horizontal_edit_mode = mode;
         let active = self
+            .selection
             .selected_primitive
             .and_then(|selection| self.selection_as_horizontal_mode(selection, mode));
         let mut converted = Vec::new();
@@ -10224,9 +10263,10 @@ impl EditorWorkspace {
                 converted.push(selection);
             }
         }
-        self.selected_primitives = converted;
-        self.selected_primitive = active.or_else(|| self.selected_primitives.first().copied());
-        self.hovered_primitive = None;
+        self.selection.selected_primitives = converted;
+        self.selection.selected_primitive =
+            active.or_else(|| self.selection.selected_primitives.first().copied());
+        self.selection.hovered_primitive = None;
         self.status = format!("Surface edit: {}", mode.label());
         self.mark_shortcut_group_changed(ShortcutGroup::Surface);
     }
@@ -10312,7 +10352,7 @@ impl EditorWorkspace {
     /// Entity hosts, the legacy `MeshInstance` card, and directional
     /// markers (spawn / trigger / audio / portal) are rotatable.
     fn rotate_selected_yaw_90(&mut self) {
-        let id = self.selected_node;
+        let id = self.selection.selected_node;
         if id == NodeId::ROOT {
             return;
         }
@@ -10349,7 +10389,7 @@ impl EditorWorkspace {
                 self.renaming = None;
                 // No-op when `id` isn't a Room -- keeps the camera
                 // put while the user clicks through entity nodes.
-                self.frame_3d_on_room(self.selected_node);
+                self.frame_3d_on_room(self.selection.selected_node);
                 self.persist_editor_camera_state();
             }
             TreeAction::BeginRename(id) => {
@@ -10443,8 +10483,8 @@ impl EditorWorkspace {
                         .map(|node| format!("Hiding {}", node.name))
                         .unwrap_or_else(|| "Hiding node".to_string());
                 }
-                if self.hovered_entity_node == Some(id) {
-                    self.hovered_entity_node = None;
+                if self.selection.hovered_entity_node == Some(id) {
+                    self.selection.hovered_entity_node = None;
                 }
                 self.renaming = None;
             }
@@ -10484,11 +10524,11 @@ impl EditorWorkspace {
                 self.select_ui_node(id);
             }
             UiTreeAction::Delete(id) => {
-                self.selected_ui_node = id;
+                self.selection.selected_ui_node = id;
                 self.delete_selected_ui_node();
             }
             UiTreeAction::AddChild { parent, kind, name } => {
-                self.selected_ui_node = parent;
+                self.selection.selected_ui_node = parent;
                 self.add_ui_child(kind, name);
             }
             UiTreeAction::Reparent {
@@ -10684,7 +10724,7 @@ impl EditorWorkspace {
             }
         });
         ui.menu_button("Edit", |ui| {
-            let can_node_delete = self.selected_node != NodeId::ROOT;
+            let can_node_delete = self.selection.selected_node != NodeId::ROOT;
             let has_geometry_selection = self.has_geometry_selection();
             if ui
                 .button(menu_label(
@@ -11457,8 +11497,8 @@ impl EditorWorkspace {
         let mut actions: Vec<TreeAction> = Vec::new();
         let mut connection_select: Option<NodeId> = None;
         let mut connection_repair: Option<NodeId> = None;
-        let selected_node = self.selected_node;
-        let selected_nodes = self.selected_nodes.clone();
+        let selected_node = self.selection.selected_node;
+        let selected_nodes = self.selection.selected_nodes.clone();
         let collapsed_scene_nodes = self.collapsed_scene_nodes.clone();
         let hidden_scene_nodes = self.hidden_scene_nodes.clone();
         let scene = self.project.active_scene();
@@ -11516,7 +11556,7 @@ impl EditorWorkspace {
             if ui.button(icons::label(icons::COPY, "Duplicate")).clicked() {
                 self.duplicate_selected();
             }
-            let can_delete = self.selected_node != NodeId::ROOT;
+            let can_delete = self.selection.selected_node != NodeId::ROOT;
             if ui
                 .add_enabled(
                     can_delete,
@@ -11554,7 +11594,7 @@ impl EditorWorkspace {
             return;
         };
         let rows = scene.hierarchy_rows();
-        let selected = self.selected_ui_node;
+        let selected = self.selection.selected_ui_node;
         let mut actions = Vec::new();
         let tree_scroll_height = (ui.available_height() - 30.0).max(24.0);
         egui::ScrollArea::vertical()
@@ -11572,13 +11612,13 @@ impl EditorWorkspace {
         ui.horizontal(|ui| {
             if ui.button(icons::label(icons::FOCUS, "Canvas")).clicked() {
                 if let Some(scene) = self.project.active_ui_scene() {
-                    self.selected_ui_node = scene.root;
+                    self.selection.selected_ui_node = scene.root;
                 }
             }
             let can_delete = self
                 .project
                 .active_ui_scene()
-                .is_some_and(|scene| self.selected_ui_node != scene.root);
+                .is_some_and(|scene| self.selection.selected_ui_node != scene.root);
             if ui
                 .add_enabled(
                     can_delete,
@@ -11608,8 +11648,8 @@ impl EditorWorkspace {
             visible_rows.iter().filter_map(|row| row.resource).collect();
         let mut clicked_resource = None;
         let mut toggled_folder = None;
-        let selected_resource = self.selected_resource;
-        let selected_resources = self.selected_resources.clone();
+        let selected_resource = self.selection.selected_resource;
+        let selected_resources = self.selection.selected_resources.clone();
         let collapsed_folders = self.collapsed_file_folders.clone();
         let file_scroll_height = (ui.available_height() - 28.0).max(24.0);
         egui::ScrollArea::vertical()
@@ -11659,7 +11699,7 @@ impl EditorWorkspace {
 
     fn draw_ui_inspector(&mut self, ui: &mut egui::Ui) {
         self.refresh_texture_thumbs(ui.ctx());
-        let requested = self.selected_ui_node;
+        let requested = self.selection.selected_ui_node;
         let mut changed = false;
         let Some(scene) = self.project.active_ui_scene() else {
             ui.weak("No UI scene");
@@ -11677,8 +11717,8 @@ impl EditorWorkspace {
             .and_then(|parent| scene.node(parent))
             .map(|parent| parent.name.clone())
             .unwrap_or_else(|| "None".to_string());
-        if selected != self.selected_ui_node {
-            self.selected_ui_node = selected;
+        if selected != self.selection.selected_ui_node {
+            self.selection.selected_ui_node = selected;
         }
         let texture_options: Vec<(ResourceId, String)> = self
             .project
@@ -11830,7 +11870,7 @@ impl EditorWorkspace {
                                     // tree row). The primitive branch wins because
                                     // it's the active edit target during paint and
                                     // height-edit workflows.
-                                    if let Some(selection) = self.selected_primitive {
+                                    if let Some(selection) = self.selection.selected_primitive {
                                         match selection {
                                             Selection::Face(face) => {
                                                 self.draw_face_inspector(ui, face)
@@ -11853,7 +11893,7 @@ impl EditorWorkspace {
                                     return;
                                 }
 
-                                if let Some(resource_id) = self.selected_resource {
+                                if let Some(resource_id) = self.selection.selected_resource {
                                     self.draw_resource_inspector(ui, resource_id);
                                     return;
                                 }
@@ -11874,12 +11914,12 @@ impl EditorWorkspace {
                                 let model_options = collect_model_options(&self.project);
                                 let character_options = collect_character_options(&self.project);
                                 let weapon_options = collect_weapon_options(&self.project);
-                                let selected = self.selected_node;
+                                let selected = self.selection.selected_node;
                                 let animator_clip_context =
                                     selected_animator_clip_context(&self.project, selected);
                                 let active_room = self.active_room_id();
-                                let selected_sector = self.selected_sector;
-                                let selected_sector_count = self.selected_sectors.len();
+                                let selected_sector = self.selection.selected_sector;
+                                let selected_sector_count = self.selection.selected_sectors.len();
 
                                 let mut changed = false;
                                 // Picker `→` jump-to requests bubble up here.
@@ -13838,7 +13878,7 @@ impl EditorWorkspace {
     }
 
     fn open_animation_viewer_for_current_selection(&mut self) {
-        if let Some(resource_id) = self.selected_resource {
+        if let Some(resource_id) = self.selection.selected_resource {
             if self.open_animation_viewer_for_resource(resource_id) {
                 return;
             }
@@ -13846,7 +13886,7 @@ impl EditorWorkspace {
         let character_resource = self
             .project
             .active_scene()
-            .node(self.selected_node)
+            .node(self.selection.selected_node)
             .and_then(|node| entity_character_resource_id(self, node));
         if let Some(resource_id) = character_resource {
             if self.open_animation_viewer_for_resource(resource_id) {
@@ -13988,9 +14028,9 @@ impl EditorWorkspace {
                             transform,
                             &self.project,
                             &self.hidden_scene_nodes,
-                            self.selected_node,
-                            &self.selected_nodes,
-                            &self.selected_sectors,
+                            self.selection.selected_node,
+                            &self.selection.selected_nodes,
+                            &self.selection.selected_sectors,
                             &self.validation_issue_primitives,
                             &self.validation_issue_rooms,
                             self.show_portals,
@@ -14616,7 +14656,7 @@ impl EditorWorkspace {
     }
 
     fn place_resource_candidates(&self) -> impl Iterator<Item = ResourceId> {
-        [self.place_resource, self.selected_resource]
+        [self.place_resource, self.selection.selected_resource]
             .into_iter()
             .flatten()
     }
@@ -14900,14 +14940,14 @@ impl EditorWorkspace {
     /// selection sits outside the scene tree (e.g. a face the user
     /// just picked, which clears `selected_node` to ROOT).
     pub fn active_room_id(&self) -> Option<NodeId> {
-        if let Some(selection) = self.selected_primitive {
+        if let Some(selection) = self.selection.selected_primitive {
             let room = selection.room();
             if !self.scene_node_effectively_hidden(room) {
                 return Some(room);
             }
         }
         let scene = self.project.active_scene();
-        let mut current = self.selected_node;
+        let mut current = self.selection.selected_node;
         while let Some(node) = scene.node(current) {
             if matches!(node.kind, NodeKind::Room { .. })
                 && !self.scene_node_effectively_hidden(current)
@@ -14961,7 +15001,7 @@ impl EditorWorkspace {
     }
 
     fn selected_material_resource(&self) -> Option<ResourceId> {
-        let id = self.selected_resource?;
+        let id = self.selection.selected_resource?;
         matches!(
             self.project.resource(id).map(|resource| &resource.data),
             Some(ResourceData::Material(_))
@@ -14990,7 +15030,7 @@ impl EditorWorkspace {
     fn selected_node_is_player_source(&self) -> bool {
         self.project
             .active_scene()
-            .node(self.selected_node)
+            .node(self.selection.selected_node)
             .is_some_and(|node| node_kind_is_player_source(&node.kind))
     }
 
@@ -15020,53 +15060,55 @@ impl EditorWorkspace {
     }
 
     fn replace_node_selection(&mut self, id: NodeId) {
-        self.selected_node = id;
-        self.selected_nodes.clear();
-        self.selected_nodes.insert(id);
-        self.node_selection_anchor = Some(id);
+        self.selection.selected_node = id;
+        self.selection.selected_nodes.clear();
+        self.selection.selected_nodes.insert(id);
+        self.selection.node_selection_anchor = Some(id);
     }
 
     fn clear_node_selection_state(&mut self) {
-        self.selected_node = NodeId::ROOT;
-        self.selected_nodes.clear();
-        self.node_selection_anchor = None;
+        self.selection.selected_node = NodeId::ROOT;
+        self.selection.selected_nodes.clear();
+        self.selection.node_selection_anchor = None;
     }
 
     fn replace_resource_selection(&mut self, id: ResourceId) {
-        self.selected_resource = Some(id);
-        self.selected_resources.clear();
-        self.selected_resources.insert(id);
-        self.resource_selection_anchor = Some(id);
+        self.selection.selected_resource = Some(id);
+        self.selection.selected_resources.clear();
+        self.selection.selected_resources.insert(id);
+        self.selection.resource_selection_anchor = Some(id);
         self.resource_delete_confirm = None;
     }
 
     fn clear_resource_selection_state(&mut self) {
-        self.selected_resource = None;
-        self.selected_resources.clear();
-        self.resource_selection_anchor = None;
+        self.selection.selected_resource = None;
+        self.selection.selected_resources.clear();
+        self.selection.resource_selection_anchor = None;
         self.resource_delete_confirm = None;
     }
 
     fn replace_primitive_selection(&mut self, selection: Selection) {
-        self.selected_primitive = Some(selection);
-        self.selected_primitives.clear();
-        self.selected_primitives.push(selection);
+        self.selection.selected_primitive = Some(selection);
+        self.selection.selected_primitives.clear();
+        self.selection.selected_primitives.push(selection);
     }
 
     fn clear_primitive_selection_state(&mut self) {
-        self.selected_primitive = None;
-        self.selected_primitives.clear();
+        self.selection.selected_primitive = None;
+        self.selection.selected_primitives.clear();
     }
 
     fn select_all_current_scope(&mut self) {
-        if self.selected_resource.is_some() || !self.selected_resources.is_empty() {
+        if self.selection.selected_resource.is_some()
+            || !self.selection.selected_resources.is_empty()
+        {
             self.select_all_resources();
             return;
         }
 
         if matches!(self.active_tool, ViewTool::Select)
-            || self.selected_primitive.is_some()
-            || !self.selected_primitives.is_empty()
+            || self.selection.selected_primitive.is_some()
+            || !self.selection.selected_primitives.is_empty()
         {
             if self.select_all_primitives_in_active_room() {
                 return;
@@ -15087,9 +15129,9 @@ impl EditorWorkspace {
             return;
         }
 
-        self.selected_nodes = ids.iter().copied().collect();
-        self.selected_node = ids[0];
-        self.node_selection_anchor = Some(ids[0]);
+        self.selection.selected_nodes = ids.iter().copied().collect();
+        self.selection.selected_node = ids[0];
+        self.selection.node_selection_anchor = Some(ids[0]);
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
@@ -15112,9 +15154,9 @@ impl EditorWorkspace {
             return;
         }
 
-        self.selected_resources = ids.iter().copied().collect();
-        self.selected_resource = Some(ids[0]);
-        self.resource_selection_anchor = Some(ids[0]);
+        self.selection.selected_resources = ids.iter().copied().collect();
+        self.selection.selected_resource = Some(ids[0]);
+        self.selection.resource_selection_anchor = Some(ids[0]);
         self.resource_delete_confirm = None;
         self.clear_node_selection_state();
         self.clear_primitive_selection_state();
@@ -15137,14 +15179,14 @@ impl EditorWorkspace {
             return false;
         }
 
-        self.selected_primitives = selections;
-        self.selected_primitive = self.selected_primitives.first().copied();
+        self.selection.selected_primitives = selections;
+        self.selection.selected_primitive = self.selection.selected_primitives.first().copied();
         self.clear_sector_selection();
         self.clear_node_selection_state();
         self.update_primitive_resource_selection();
         self.status = format!(
             "Selected {} {} primitives",
-            self.selected_primitives.len(),
+            self.selection.selected_primitives.len(),
             self.selection_mode.label()
         );
         true
@@ -15254,28 +15296,29 @@ impl EditorWorkspace {
     }
 
     fn selected_primitive_targets(&self) -> Vec<Selection> {
-        if self.selected_primitives.is_empty() {
-            self.selected_primitive.into_iter().collect()
+        if self.selection.selected_primitives.is_empty() {
+            self.selection.selected_primitive.into_iter().collect()
         } else {
-            self.selected_primitives.clone()
+            self.selection.selected_primitives.clone()
         }
     }
 
     fn primitive_is_selected(&self, selection: Selection) -> bool {
-        self.selected_primitives.contains(&selection)
-            || (self.selected_primitives.is_empty() && self.selected_primitive == Some(selection))
+        self.selection.selected_primitives.contains(&selection)
+            || (self.selection.selected_primitives.is_empty()
+                && self.selection.selected_primitive == Some(selection))
     }
 
     fn push_selected_primitive_unique(&mut self, selection: Selection) {
-        if !self.selected_primitives.contains(&selection) {
-            self.selected_primitives.push(selection);
+        if !self.selection.selected_primitives.contains(&selection) {
+            self.selection.selected_primitives.push(selection);
         }
-        self.selected_primitive = Some(selection);
+        self.selection.selected_primitive = Some(selection);
     }
 
     fn update_primitive_resource_selection(&mut self) {
-        if self.selected_primitives.len() == 1 {
-            let resource = match self.selected_primitives[0] {
+        if self.selection.selected_primitives.len() == 1 {
+            let resource = match self.selection.selected_primitives[0] {
                 Selection::Face(face) => self.face_material(face),
                 Selection::Triangle(triangle) => self.triangle_material(triangle),
                 Selection::Edge(_) | Selection::Vertex(_) => None,
@@ -15289,13 +15332,14 @@ impl EditorWorkspace {
     }
 
     fn node_is_selected(&self, id: NodeId) -> bool {
-        self.selected_nodes.contains(&id)
-            || (self.selected_nodes.is_empty() && self.selected_node == id)
+        self.selection.selected_nodes.contains(&id)
+            || (self.selection.selected_nodes.is_empty() && self.selection.selected_node == id)
     }
 
     fn resource_is_selected(&self, id: ResourceId) -> bool {
-        self.selected_resources.contains(&id)
-            || (self.selected_resources.is_empty() && self.selected_resource == Some(id))
+        self.selection.selected_resources.contains(&id)
+            || (self.selection.selected_resources.is_empty()
+                && self.selection.selected_resource == Some(id))
     }
 
     fn apply_node_selection_modifiers(
@@ -15306,46 +15350,54 @@ impl EditorWorkspace {
     ) {
         let toggle = modifiers.command || modifiers.ctrl;
         if modifiers.shift {
-            let anchor = self.node_selection_anchor.unwrap_or(self.selected_node);
+            let anchor = self
+                .selection
+                .node_selection_anchor
+                .unwrap_or(self.selection.selected_node);
             let range = range_between(visible_order, anchor, id).unwrap_or_else(|| vec![id]);
             if !toggle {
-                self.selected_nodes.clear();
+                self.selection.selected_nodes.clear();
             }
             for id in range {
-                self.selected_nodes.insert(id);
+                self.selection.selected_nodes.insert(id);
             }
-            self.node_selection_anchor.get_or_insert(anchor);
+            self.selection.node_selection_anchor.get_or_insert(anchor);
         } else if toggle {
-            if self.selected_nodes.is_empty() && self.selected_node != NodeId::ROOT {
-                self.selected_nodes.insert(self.selected_node);
+            if self.selection.selected_nodes.is_empty()
+                && self.selection.selected_node != NodeId::ROOT
+            {
+                self.selection
+                    .selected_nodes
+                    .insert(self.selection.selected_node);
             }
-            if !self.selected_nodes.remove(&id) {
-                self.selected_nodes.insert(id);
+            if !self.selection.selected_nodes.remove(&id) {
+                self.selection.selected_nodes.insert(id);
             }
-            self.node_selection_anchor = Some(id);
+            self.selection.node_selection_anchor = Some(id);
         } else {
-            self.selected_nodes.clear();
-            self.selected_nodes.insert(id);
-            self.node_selection_anchor = Some(id);
+            self.selection.selected_nodes.clear();
+            self.selection.selected_nodes.insert(id);
+            self.selection.node_selection_anchor = Some(id);
         }
 
-        self.selected_node = self
+        self.selection.selected_node = self
+            .selection
             .selected_nodes
             .contains(&id)
             .then_some(id)
-            .or_else(|| first_in_order(visible_order, &self.selected_nodes))
+            .or_else(|| first_in_order(visible_order, &self.selection.selected_nodes))
             .unwrap_or(NodeId::ROOT);
-        self.selected_resource = None;
-        self.selected_resources.clear();
-        self.resource_selection_anchor = None;
+        self.selection.selected_resource = None;
+        self.selection.selected_resources.clear();
+        self.selection.resource_selection_anchor = None;
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
 
-        let count = self.selected_nodes.len();
+        let count = self.selection.selected_nodes.len();
         let scene = self.project.active_scene();
         if count > 1 {
             self.status = format!("Selected {count} nodes");
-        } else if let Some(n) = scene.node(self.selected_node) {
+        } else if let Some(n) = scene.node(self.selection.selected_node) {
             self.status = format!("Selected {} '{}'", n.kind.label(), n.name);
         } else {
             self.status = "Cleared node selection".to_string();
@@ -15360,47 +15412,50 @@ impl EditorWorkspace {
     ) {
         let toggle = modifiers.command || modifiers.ctrl;
         if modifiers.shift {
-            let anchor = self.resource_selection_anchor.unwrap_or(id);
+            let anchor = self.selection.resource_selection_anchor.unwrap_or(id);
             let range = range_between(visible_order, anchor, id).unwrap_or_else(|| vec![id]);
             if !toggle {
-                self.selected_resources.clear();
+                self.selection.selected_resources.clear();
             }
             for id in range {
-                self.selected_resources.insert(id);
+                self.selection.selected_resources.insert(id);
             }
-            self.resource_selection_anchor.get_or_insert(anchor);
+            self.selection
+                .resource_selection_anchor
+                .get_or_insert(anchor);
         } else if toggle {
-            if self.selected_resources.is_empty() {
-                if let Some(current) = self.selected_resource {
-                    self.selected_resources.insert(current);
+            if self.selection.selected_resources.is_empty() {
+                if let Some(current) = self.selection.selected_resource {
+                    self.selection.selected_resources.insert(current);
                 }
             }
-            if !self.selected_resources.remove(&id) {
-                self.selected_resources.insert(id);
+            if !self.selection.selected_resources.remove(&id) {
+                self.selection.selected_resources.insert(id);
             }
-            self.resource_selection_anchor = Some(id);
+            self.selection.resource_selection_anchor = Some(id);
         } else {
-            self.selected_resources.clear();
-            self.selected_resources.insert(id);
-            self.resource_selection_anchor = Some(id);
+            self.selection.selected_resources.clear();
+            self.selection.selected_resources.insert(id);
+            self.selection.resource_selection_anchor = Some(id);
         }
 
-        self.selected_resource = self
+        self.selection.selected_resource = self
+            .selection
             .selected_resources
             .contains(&id)
             .then_some(id)
-            .or_else(|| first_in_order(visible_order, &self.selected_resources));
-        self.selected_node = NodeId::ROOT;
-        self.selected_nodes.clear();
-        self.node_selection_anchor = None;
+            .or_else(|| first_in_order(visible_order, &self.selection.selected_resources));
+        self.selection.selected_node = NodeId::ROOT;
+        self.selection.selected_nodes.clear();
+        self.selection.node_selection_anchor = None;
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
         self.resource_delete_confirm = None;
 
-        let count = self.selected_resources.len();
+        let count = self.selection.selected_resources.len();
         if count > 1 {
             self.status = format!("Selected {count} resources");
-        } else if let Some(id) = self.selected_resource {
+        } else if let Some(id) = self.selection.selected_resource {
             if let Some(name) = self.project.resource_name(id) {
                 self.status = format!("Selected {name}");
             }
@@ -15410,9 +15465,9 @@ impl EditorWorkspace {
     }
 
     fn selected_resource_ids_in_project_order(&self) -> Vec<ResourceId> {
-        let mut selected = self.selected_resources.clone();
+        let mut selected = self.selection.selected_resources.clone();
         if selected.is_empty() {
-            if let Some(id) = self.selected_resource {
+            if let Some(id) = self.selection.selected_resource {
                 selected.insert(id);
             }
         }
@@ -15435,6 +15490,7 @@ impl EditorWorkspace {
 
     fn begin_resource_delete_confirmation(&mut self) {
         let targets = self
+            .selection
             .selected_resource
             .map(|id| self.resource_delete_targets(id))
             .unwrap_or_else(|| self.selected_resource_ids_in_project_order());
@@ -15640,9 +15696,9 @@ impl EditorWorkspace {
     }
 
     fn selected_node_ids_in_hierarchy(&self) -> Vec<NodeId> {
-        let mut selected = self.selected_nodes.clone();
-        if self.selected_node != NodeId::ROOT {
-            selected.insert(self.selected_node);
+        let mut selected = self.selection.selected_nodes.clone();
+        if self.selection.selected_node != NodeId::ROOT {
+            selected.insert(self.selection.selected_node);
         }
         self.project
             .active_scene()
@@ -15701,20 +15757,26 @@ impl EditorWorkspace {
             .iter()
             .map(|node| node.id)
             .collect();
-        self.selected_nodes.retain(|id| valid_nodes.contains(id));
+        self.selection
+            .selected_nodes
+            .retain(|id| valid_nodes.contains(id));
         self.collapsed_scene_nodes
             .retain(|id| valid_nodes.contains(id));
         self.hidden_scene_nodes
             .retain(|id| valid_nodes.contains(id));
         if self
+            .selection
             .node_selection_anchor
             .is_some_and(|id| !valid_nodes.contains(&id))
         {
-            self.node_selection_anchor = None;
+            self.selection.node_selection_anchor = None;
         }
-        if self.selected_node != NodeId::ROOT && !valid_nodes.contains(&self.selected_node) {
-            self.selected_node = first_in_order(&self.scene_node_order(), &self.selected_nodes)
-                .unwrap_or(NodeId::ROOT);
+        if self.selection.selected_node != NodeId::ROOT
+            && !valid_nodes.contains(&self.selection.selected_node)
+        {
+            self.selection.selected_node =
+                first_in_order(&self.scene_node_order(), &self.selection.selected_nodes)
+                    .unwrap_or(NodeId::ROOT);
         }
 
         let valid_resources: HashSet<ResourceId> = self
@@ -15723,24 +15785,27 @@ impl EditorWorkspace {
             .iter()
             .map(|resource| resource.id)
             .collect();
-        self.selected_resources
+        self.selection
+            .selected_resources
             .retain(|id| valid_resources.contains(id));
         if self
+            .selection
             .resource_selection_anchor
             .is_some_and(|id| !valid_resources.contains(&id))
         {
-            self.resource_selection_anchor = None;
+            self.selection.resource_selection_anchor = None;
         }
         if self
+            .selection
             .selected_resource
             .is_some_and(|id| !valid_resources.contains(&id))
         {
-            self.selected_resource = self
+            self.selection.selected_resource = self
                 .project
                 .resources
                 .iter()
                 .map(|resource| resource.id)
-                .find(|id| self.selected_resources.contains(id));
+                .find(|id| self.selection.selected_resources.contains(id));
         }
         if let Some(ids) = &mut self.resource_delete_confirm {
             ids.retain(|id| valid_resources.contains(id));
@@ -15751,38 +15816,39 @@ impl EditorWorkspace {
     }
 
     fn clear_sector_selection(&mut self) {
-        self.selected_sector = None;
-        self.selected_sectors.clear();
-        self.sector_selection_anchor = None;
+        self.selection.selected_sector = None;
+        self.selection.selected_sectors.clear();
+        self.selection.sector_selection_anchor = None;
         self.interaction.take_box_select_2d();
     }
 
     fn select_sector(&mut self, selection: SectorSelection, modifiers: egui::Modifiers) {
         let toggle = modifiers.command || modifiers.ctrl;
         if modifiers.shift {
-            let anchor = self.sector_selection_anchor.unwrap_or(selection);
+            let anchor = self.selection.sector_selection_anchor.unwrap_or(selection);
             self.select_sector_rect(anchor, selection, toggle);
             return;
         }
 
         if !toggle {
-            self.selected_sectors.clear();
+            self.selection.selected_sectors.clear();
         }
-        if toggle && self.selected_sectors.remove(&selection) {
-            self.selected_sector = self
+        if toggle && self.selection.selected_sectors.remove(&selection) {
+            self.selection.selected_sector = self
+                .selection
                 .selected_sectors
                 .iter()
                 .next()
                 .map(|(_, sx, sz)| (*sx, *sz));
         } else {
-            self.selected_sectors.insert(selection);
-            self.selected_sector = Some((selection.1, selection.2));
+            self.selection.selected_sectors.insert(selection);
+            self.selection.selected_sector = Some((selection.1, selection.2));
         }
-        self.sector_selection_anchor = Some(selection);
+        self.selection.sector_selection_anchor = Some(selection);
         self.replace_node_selection(selection.0);
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
-        self.status = match self.selected_sectors.len() {
+        self.status = match self.selection.selected_sectors.len() {
             0 => "Cleared tile selection".to_string(),
             1 => format!("Selected sector {},{}", selection.1, selection.2),
             count => format!("Selected {count} sectors"),
@@ -15799,7 +15865,7 @@ impl EditorWorkspace {
             return;
         }
         if !additive {
-            self.selected_sectors.clear();
+            self.selection.selected_sectors.clear();
         }
         let min_x = anchor.1.min(current.1);
         let max_x = anchor.1.max(current.1);
@@ -15807,15 +15873,15 @@ impl EditorWorkspace {
         let max_z = anchor.2.max(current.2);
         for sx in min_x..=max_x {
             for sz in min_z..=max_z {
-                self.selected_sectors.insert((anchor.0, sx, sz));
+                self.selection.selected_sectors.insert((anchor.0, sx, sz));
             }
         }
-        self.sector_selection_anchor = Some(anchor);
+        self.selection.sector_selection_anchor = Some(anchor);
         self.replace_node_selection(anchor.0);
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
-        self.selected_sector = Some((current.1, current.2));
-        self.status = format!("Selected {} sectors", self.selected_sectors.len());
+        self.selection.selected_sector = Some((current.1, current.2));
+        self.status = format!("Selected {} sectors", self.selection.selected_sectors.len());
     }
 
     fn begin_viewport_box_select(
@@ -15831,15 +15897,15 @@ impl EditorWorkspace {
             room,
             additive,
             base_sectors: if additive {
-                self.selected_sectors.clone()
+                self.selection.selected_sectors.clone()
             } else {
                 HashSet::new()
             },
         });
         if !additive {
-            self.selected_sectors.clear();
-            self.selected_sector = None;
-            self.sector_selection_anchor = None;
+            self.selection.selected_sectors.clear();
+            self.selection.selected_sector = None;
+            self.selection.sector_selection_anchor = None;
         }
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
@@ -15883,12 +15949,12 @@ impl EditorWorkspace {
             },
         });
         if !additive {
-            self.selected_primitive = None;
-            self.selected_primitives.clear();
+            self.selection.selected_primitive = None;
+            self.selection.selected_primitives.clear();
         }
-        self.selected_sector = None;
-        self.selected_sectors.clear();
-        self.sector_selection_anchor = None;
+        self.selection.selected_sector = None;
+        self.selection.selected_sectors.clear();
+        self.selection.sector_selection_anchor = None;
         self.clear_resource_selection_state();
     }
 
@@ -15962,17 +16028,22 @@ impl EditorWorkspace {
             }
         }
 
-        self.selected_primitives = selected;
-        self.selected_primitive = self.selected_primitives.last().copied();
-        self.selected_sector = None;
-        self.selected_sectors.clear();
-        self.sector_selection_anchor = None;
+        self.selection.selected_primitives = selected;
+        self.selection.selected_primitive = self.selection.selected_primitives.last().copied();
+        self.selection.selected_sector = None;
+        self.selection.selected_sectors.clear();
+        self.selection.sector_selection_anchor = None;
         self.clear_resource_selection_state();
         self.update_primitive_resource_selection();
 
-        let selected_room = self.selected_primitives.first().map(Selection::room);
+        let selected_room = self
+            .selection
+            .selected_primitives
+            .first()
+            .map(Selection::room);
         if selected_room.is_some()
             && self
+                .selection
                 .selected_primitives
                 .iter()
                 .all(|selection| Some(selection.room()) == selected_room)
@@ -15980,15 +16051,15 @@ impl EditorWorkspace {
             if let Some(room) = selected_room {
                 self.replace_node_selection(room);
             }
-        } else if self.selected_primitives.is_empty() {
+        } else if self.selection.selected_primitives.is_empty() {
             self.clear_node_selection_state();
         }
 
-        self.status = match self.selected_primitives.len() {
+        self.status = match self.selection.selected_primitives.len() {
             0 => "Cleared primitive selection".to_string(),
             1 => format!(
                 "Selected {}",
-                describe_selection(self.selected_primitives[0])
+                describe_selection(self.selection.selected_primitives[0])
             ),
             count => format!("Selected {count} primitives"),
         };
@@ -16081,9 +16152,9 @@ impl EditorWorkspace {
 
         let mut selected_ordered: Vec<_> = selected.iter().copied().collect();
         selected_ordered.sort_by_key(|(room, sx, sz)| (room.raw(), *sx, *sz));
-        self.selected_sectors = selected;
-        self.selected_sector = selected_ordered.first().map(|(_, sx, sz)| (*sx, *sz));
-        self.sector_selection_anchor = selected_ordered.first().copied();
+        self.selection.selected_sectors = selected;
+        self.selection.selected_sector = selected_ordered.first().map(|(_, sx, sz)| (*sx, *sz));
+        self.selection.sector_selection_anchor = selected_ordered.first().copied();
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
 
@@ -16100,7 +16171,7 @@ impl EditorWorkspace {
             self.clear_node_selection_state();
         }
 
-        self.status = match self.selected_sectors.len() {
+        self.status = match self.selection.selected_sectors.len() {
             0 => "Cleared tile selection".to_string(),
             1 => "Selected 1 sector".to_string(),
             count => format!("Selected {count} sectors"),
@@ -16144,9 +16215,9 @@ impl EditorWorkspace {
                 if self.portal_place_active() {
                     self.clear_sector_selection();
                 } else {
-                    self.selected_sector = Some((x, z));
-                    self.selected_sectors.clear();
-                    self.selected_sectors.insert((room_id, x, z));
+                    self.selection.selected_sector = Some((x, z));
+                    self.selection.selected_sectors.clear();
+                    self.selection.selected_sectors.insert((room_id, x, z));
                 }
                 self.apply_paint(tool, room_id, x, z, world);
             }
@@ -16213,9 +16284,9 @@ impl EditorWorkspace {
     }
 
     fn has_geometry_selection(&self) -> bool {
-        !self.selected_sectors.is_empty()
+        !self.selection.selected_sectors.is_empty()
             || !self.selected_primitive_targets().is_empty()
-            || (self.active_room_id().is_some() && self.selected_sector.is_some())
+            || (self.active_room_id().is_some() && self.selection.selected_sector.is_some())
     }
 
     fn duplicate_current_selection(&mut self) {
@@ -16232,9 +16303,10 @@ impl EditorWorkspace {
 
     fn selected_geometry_cell_targets(&self) -> Result<(NodeId, Vec<(u16, u16)>), &'static str> {
         let mut targets = Vec::new();
-        if !self.selected_sectors.is_empty() {
+        if !self.selection.selected_sectors.is_empty() {
             targets.extend(
-                self.selected_sectors
+                self.selection
+                    .selected_sectors
                     .iter()
                     .map(|(room, sx, sz)| (*room, *sx, *sz)),
             );
@@ -16248,7 +16320,8 @@ impl EditorWorkspace {
                     }),
             );
             if targets.is_empty() {
-                if let (Some(room), Some((sx, sz))) = (self.active_room_id(), self.selected_sector)
+                if let (Some(room), Some((sx, sz))) =
+                    (self.active_room_id(), self.selection.selected_sector)
                 {
                     targets.push((room, sx, sz));
                 }
@@ -16273,7 +16346,9 @@ impl EditorWorkspace {
     }
 
     fn copy_selected_geometry(&mut self) -> Option<GeometryClipboard> {
-        if self.selected_sectors.is_empty() && !self.selected_primitive_targets().is_empty() {
+        if self.selection.selected_sectors.is_empty()
+            && !self.selected_primitive_targets().is_empty()
+        {
             return self.copy_selected_primitive_geometry();
         }
 
@@ -16766,12 +16841,12 @@ impl EditorWorkspace {
         self.replace_node_selection(room);
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
-        self.selected_sectors = cells
+        self.selection.selected_sectors = cells
             .iter()
             .map(|(sx, sz)| (room, *sx, *sz))
             .collect::<HashSet<_>>();
-        self.selected_sector = cells.first().copied();
-        self.sector_selection_anchor = cells.first().map(|(sx, sz)| (room, *sx, *sz));
+        self.selection.selected_sector = cells.first().copied();
+        self.selection.sector_selection_anchor = cells.first().map(|(sx, sz)| (room, *sx, *sz));
         self.interaction.take_box_select_2d();
     }
 
@@ -16789,7 +16864,7 @@ impl EditorWorkspace {
 
     fn add_child(&mut self, mut kind: NodeKind, name: &str) {
         self.push_undo();
-        let parent = self.selected_node;
+        let parent = self.selection.selected_node;
         let first_material = self.first_material();
         if let NodeKind::Room { grid } = &mut kind {
             *grid = starter_room_grid(
@@ -16811,13 +16886,13 @@ impl EditorWorkspace {
 
     fn add_ui_child(&mut self, kind: UiNodeKind, name: &str) {
         self.push_undo();
-        let parent = self.selected_ui_node;
+        let parent = self.selection.selected_ui_node;
         let Some(scene) = self.project.active_ui_scene_mut() else {
             self.status = "No UI scene available".to_string();
             return;
         };
         let id = scene.add_node(parent, name.to_string(), kind);
-        self.selected_ui_node = id;
+        self.selection.selected_ui_node = id;
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
@@ -16926,9 +17001,9 @@ impl EditorWorkspace {
         if duplicated.is_empty() {
             return;
         }
-        self.selected_nodes = duplicated.iter().copied().collect();
-        self.selected_node = duplicated[0];
-        self.node_selection_anchor = duplicated.last().copied();
+        self.selection.selected_nodes = duplicated.iter().copied().collect();
+        self.selection.selected_node = duplicated[0];
+        self.selection.node_selection_anchor = duplicated.last().copied();
         self.clear_resource_selection_state();
         self.clear_primitive_selection_state();
         self.clear_sector_selection();
@@ -17171,7 +17246,8 @@ impl EditorWorkspace {
     }
 
     fn delete_selected_sectors(&mut self) {
-        let targets: Vec<SectorSelection> = self.selected_sectors.iter().copied().collect();
+        let targets: Vec<SectorSelection> =
+            self.selection.selected_sectors.iter().copied().collect();
         if targets.is_empty() {
             return;
         }
@@ -17245,7 +17321,7 @@ impl EditorWorkspace {
         }
 
         self.clear_primitive_selection_state();
-        self.hovered_primitive = None;
+        self.selection.hovered_primitive = None;
         self.status = if changed == 1 {
             if removed == 1 {
                 format!("Deleted {}", first_label.unwrap_or("primitive"))
@@ -17678,7 +17754,7 @@ impl EditorWorkspace {
 
     fn selected_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {
         let mut bounds: Option<(f32, f32, f32, f32, f32, f32)> = None;
-        for &(room, sx, sz) in &self.selected_sectors {
+        for &(room, sx, sz) in &self.selection.selected_sectors {
             if let Some((center, half)) = self.sector_bounds_3d(room, sx, sz) {
                 merge_bounds_3d(&mut bounds, center, half);
             }
@@ -17698,11 +17774,11 @@ impl EditorWorkspace {
             if let Some(bounds) = bounds {
                 return Some(bounds_3d_to_center_half(bounds));
             }
-        } else if let Some(selection) = self.selected_primitive {
+        } else if let Some(selection) = self.selection.selected_primitive {
             return self.selection_bounds_3d(selection);
         }
 
-        if let Some((sx, sz)) = self.selected_sector {
+        if let Some((sx, sz)) = self.selection.selected_sector {
             if let Some(room) = self.active_room_id() {
                 return self.sector_bounds_3d(room, sx, sz);
             }
@@ -17721,7 +17797,7 @@ impl EditorWorkspace {
             }
         }
 
-        if let Some(bounds) = self.node_frame_bounds_3d(self.selected_node) {
+        if let Some(bounds) = self.node_frame_bounds_3d(self.selection.selected_node) {
             return Some(bounds);
         }
         None
@@ -17747,7 +17823,7 @@ impl EditorWorkspace {
 
     fn current_frame_bounds_2d(&self) -> Option<([f32; 2], [f32; 2])> {
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
-        for &(room, sx, sz) in &self.selected_sectors {
+        for &(room, sx, sz) in &self.selection.selected_sectors {
             if let Some((center, half)) = self.sector_bounds_2d(room, sx, sz) {
                 merge_bounds(&mut bounds, center, half);
             }
@@ -17769,7 +17845,7 @@ impl EditorWorkspace {
             }
         }
 
-        if let Some((sx, sz)) = self.selected_sector {
+        if let Some((sx, sz)) = self.selection.selected_sector {
             if let Some(room) = self.active_room_id() {
                 return self.sector_bounds_2d(room, sx, sz);
             }
@@ -17788,7 +17864,7 @@ impl EditorWorkspace {
             }
         }
 
-        self.node_frame_bounds_2d(self.selected_node)
+        self.node_frame_bounds_2d(self.selection.selected_node)
     }
 
     fn sector_bounds_2d(&self, room: NodeId, sx: u16, sz: u16) -> Option<([f32; 2], [f32; 2])> {
@@ -36137,7 +36213,7 @@ mod tests {
             .transform
             .translation;
 
-        workspace.selected_node = spawn;
+        workspace.selection.selected_node = spawn;
         workspace.drag_selected_node(Vec2::new(96.0, -48.0));
 
         let node = workspace.project.active_scene().node(spawn).unwrap();
@@ -36198,7 +36274,7 @@ mod tests {
             },
         );
         let mut workspace = EditorWorkspace::with_project(test_temp_dir("light-rotate"), project);
-        workspace.selected_node = light;
+        workspace.selection.selected_node = light;
 
         workspace.rotate_selected_yaw_90();
 
@@ -36214,7 +36290,7 @@ mod tests {
             .active_scene_mut()
             .add_node(NodeId::ROOT, "Prop", NodeKind::Entity);
         let mut workspace = EditorWorkspace::with_project(test_temp_dir("entity-rotate"), project);
-        workspace.selected_node = entity;
+        workspace.selection.selected_node = entity;
 
         workspace.rotate_selected_yaw_90();
 
@@ -36242,9 +36318,9 @@ mod tests {
             .expect("starter project has resources")
             .id;
 
-        workspace.selected_node = NodeId::ROOT;
-        workspace.selected_resource = Some(resource);
-        workspace.selected_primitive = Some(Selection::Face(FaceRef {
+        workspace.selection.selected_node = NodeId::ROOT;
+        workspace.selection.selected_resource = Some(resource);
+        workspace.selection.selected_primitive = Some(Selection::Face(FaceRef {
             room,
             sx: 0,
             sz: 0,
@@ -36259,9 +36335,9 @@ mod tests {
             &[NodeId::ROOT, room, spawn],
         );
 
-        assert_eq!(workspace.selected_node, spawn);
-        assert_eq!(workspace.selected_primitive, None);
-        assert_eq!(workspace.selected_resource, None);
+        assert_eq!(workspace.selection.selected_node, spawn);
+        assert_eq!(workspace.selection.selected_primitive, None);
+        assert_eq!(workspace.selection.selected_resource, None);
     }
 
     #[test]
@@ -36294,9 +36370,9 @@ mod tests {
             &order,
         );
 
-        assert!(workspace.selected_nodes.contains(&ids[0]));
-        assert!(workspace.selected_nodes.contains(&ids[1]));
-        assert_eq!(workspace.selected_nodes.len(), 2);
+        assert!(workspace.selection.selected_nodes.contains(&ids[0]));
+        assert!(workspace.selection.selected_nodes.contains(&ids[1]));
+        assert_eq!(workspace.selection.selected_nodes.len(), 2);
 
         workspace.apply_tree_action(
             TreeAction::Select {
@@ -36305,9 +36381,9 @@ mod tests {
             },
             &order,
         );
-        assert!(!workspace.selected_nodes.contains(&ids[0]));
-        assert!(workspace.selected_nodes.contains(&ids[1]));
-        assert_eq!(workspace.selected_node, ids[1]);
+        assert!(!workspace.selection.selected_nodes.contains(&ids[0]));
+        assert!(workspace.selection.selected_nodes.contains(&ids[1]));
+        assert_eq!(workspace.selection.selected_node, ids[1]);
     }
 
     #[test]
@@ -36341,9 +36417,9 @@ mod tests {
         );
 
         for id in &ids {
-            assert!(workspace.selected_nodes.contains(id));
+            assert!(workspace.selection.selected_nodes.contains(id));
         }
-        assert_eq!(workspace.selected_nodes.len(), 3);
+        assert_eq!(workspace.selection.selected_nodes.len(), 3);
     }
 
     #[test]
@@ -36439,17 +36515,17 @@ mod tests {
         workspace.apply_resource_selection_modifiers(order[0], egui::Modifiers::NONE, &order);
         workspace.apply_resource_selection_modifiers(order[1], ctrl, &order);
 
-        assert!(workspace.selected_resources.contains(&order[0]));
-        assert!(workspace.selected_resources.contains(&order[1]));
+        assert!(workspace.selection.selected_resources.contains(&order[0]));
+        assert!(workspace.selection.selected_resources.contains(&order[1]));
 
         let mut shift = egui::Modifiers::NONE;
         shift.shift = true;
         workspace.apply_resource_selection_modifiers(order[2], shift, &order);
 
-        assert!(workspace.selected_resources.contains(&order[1]));
-        assert!(workspace.selected_resources.contains(&order[2]));
-        assert!(!workspace.selected_resources.contains(&order[0]));
-        assert_eq!(workspace.selected_resources.len(), 2);
+        assert!(workspace.selection.selected_resources.contains(&order[1]));
+        assert!(workspace.selection.selected_resources.contains(&order[2]));
+        assert!(!workspace.selection.selected_resources.contains(&order[0]));
+        assert_eq!(workspace.selection.selected_resources.len(), 2);
     }
 
     #[test]
@@ -36464,9 +36540,9 @@ mod tests {
 
         workspace.select_all_current_scope();
 
-        assert_eq!(workspace.selected_resources.len(), 3);
-        assert_eq!(workspace.selected_resource, Some(first));
-        assert_eq!(workspace.selected_node, NodeId::ROOT);
+        assert_eq!(workspace.selection.selected_resources.len(), 3);
+        assert_eq!(workspace.selection.selected_resource, Some(first));
+        assert_eq!(workspace.selection.selected_node, NodeId::ROOT);
     }
 
     #[test]
@@ -36487,11 +36563,11 @@ mod tests {
 
         workspace.select_all_current_scope();
 
-        assert!(workspace.selected_nodes.contains(&room));
-        assert!(workspace.selected_nodes.contains(&entity));
-        assert!(!workspace.selected_nodes.contains(&NodeId::ROOT));
-        assert_eq!(workspace.selected_nodes.len(), 2);
-        assert!(workspace.selected_primitives.is_empty());
+        assert!(workspace.selection.selected_nodes.contains(&room));
+        assert!(workspace.selection.selected_nodes.contains(&entity));
+        assert!(!workspace.selection.selected_nodes.contains(&NodeId::ROOT));
+        assert_eq!(workspace.selection.selected_nodes.len(), 2);
+        assert!(workspace.selection.selected_primitives.is_empty());
     }
 
     #[test]
@@ -36541,10 +36617,10 @@ mod tests {
             },
         });
         for selection in [floor0, floor1, ceiling, wall] {
-            assert!(workspace.selected_primitives.contains(&selection));
+            assert!(workspace.selection.selected_primitives.contains(&selection));
         }
-        assert_eq!(workspace.selected_primitives.len(), 4);
-        assert_eq!(workspace.selected_node, NodeId::ROOT);
+        assert_eq!(workspace.selection.selected_primitives.len(), 4);
+        assert_eq!(workspace.selection.selected_node, NodeId::ROOT);
     }
 
     #[test]
@@ -36562,8 +36638,9 @@ mod tests {
 
         workspace.selection_mode = SelectionMode::Edge;
         workspace.select_all_current_scope();
-        assert_eq!(workspace.selected_primitives.len(), 4);
+        assert_eq!(workspace.selection.selected_primitives.len(), 4);
         assert!(workspace
+            .selection
             .selected_primitives
             .iter()
             .all(|selection| matches!(selection, Selection::Edge(_))));
@@ -36571,8 +36648,9 @@ mod tests {
         workspace.replace_node_selection(room);
         workspace.selection_mode = SelectionMode::Vertex;
         workspace.select_all_current_scope();
-        assert_eq!(workspace.selected_primitives.len(), 4);
+        assert_eq!(workspace.selection.selected_primitives.len(), 4);
         assert!(workspace
+            .selection
             .selected_primitives
             .iter()
             .all(|selection| matches!(selection, Selection::Vertex(_))));
@@ -36596,7 +36674,7 @@ mod tests {
         workspace.select_sector((room, coords[0].0, coords[0].1), egui::Modifiers::NONE);
         workspace.select_sector((room, coords[1].0, coords[1].1), ctrl);
 
-        assert_eq!(workspace.selected_sectors.len(), 2);
+        assert_eq!(workspace.selection.selected_sectors.len(), 2);
 
         workspace.delete_selected_sectors();
 
@@ -36607,7 +36685,7 @@ mod tests {
         };
         assert!(grid.sector(coords[0].0, coords[0].1).is_none());
         assert!(grid.sector(coords[1].0, coords[1].1).is_none());
-        assert!(workspace.selected_sectors.is_empty());
+        assert!(workspace.selection.selected_sectors.is_empty());
     }
 
     #[test]
@@ -36649,13 +36727,16 @@ mod tests {
         workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
         workspace.select_sector((room, 1, 1), shift);
 
-        assert_eq!(workspace.selected_sectors.len(), 4);
+        assert_eq!(workspace.selection.selected_sectors.len(), 4);
         for sx in 0..=1 {
             for sz in 0..=1 {
-                assert!(workspace.selected_sectors.contains(&(room, sx, sz)));
+                assert!(workspace
+                    .selection
+                    .selected_sectors
+                    .contains(&(room, sx, sz)));
             }
         }
-        assert_eq!(workspace.selected_sector, Some((1, 1)));
+        assert_eq!(workspace.selection.selected_sector, Some((1, 1)));
     }
 
     #[test]
@@ -36691,12 +36772,12 @@ mod tests {
         workspace.apply_primitive_selection_modifiers(floor_0, egui::Modifiers::NONE);
         workspace.apply_primitive_selection_modifiers(ceiling_1, shift);
 
-        assert!(workspace.selected_primitives.contains(&floor_0));
-        assert!(workspace.selected_primitives.contains(&ceiling_1));
-        assert_eq!(workspace.selected_primitives.len(), 2);
-        assert!(workspace.selected_sectors.is_empty());
+        assert!(workspace.selection.selected_primitives.contains(&floor_0));
+        assert!(workspace.selection.selected_primitives.contains(&ceiling_1));
+        assert_eq!(workspace.selection.selected_primitives.len(), 2);
+        assert!(workspace.selection.selected_sectors.is_empty());
         assert!(workspace.selected_sector_faces().is_empty());
-        assert_eq!(workspace.selected_primitive, Some(ceiling_1));
+        assert_eq!(workspace.selection.selected_primitive, Some(ceiling_1));
     }
 
     #[test]
@@ -36738,29 +36819,50 @@ mod tests {
         workspace.apply_primitive_selection_modifiers(floor_at(0, 0), egui::Modifiers::NONE);
         workspace.apply_primitive_selection_modifiers(floor_at(2, 1), shift);
 
-        assert_eq!(workspace.selected_primitives.len(), 6);
+        assert_eq!(workspace.selection.selected_primitives.len(), 6);
         for sx in 0..=2 {
             for sz in 0..=1 {
-                assert!(workspace.selected_primitives.contains(&floor_at(sx, sz)));
+                assert!(workspace
+                    .selection
+                    .selected_primitives
+                    .contains(&floor_at(sx, sz)));
             }
         }
-        assert!(!workspace.selected_primitives.contains(&floor_at(2, 2)));
-        assert!(!workspace.selected_primitives.contains(&ceiling_at(0, 0)));
-        assert_eq!(workspace.selected_primitive, Some(floor_at(2, 1)));
+        assert!(!workspace
+            .selection
+            .selected_primitives
+            .contains(&floor_at(2, 2)));
+        assert!(!workspace
+            .selection
+            .selected_primitives
+            .contains(&ceiling_at(0, 0)));
+        assert_eq!(workspace.selection.selected_primitive, Some(floor_at(2, 1)));
 
         workspace.apply_primitive_selection_modifiers(ceiling_at(2, 2), egui::Modifiers::NONE);
         workspace.apply_primitive_selection_modifiers(ceiling_at(1, 0), shift);
 
-        assert_eq!(workspace.selected_primitives.len(), 6);
+        assert_eq!(workspace.selection.selected_primitives.len(), 6);
         for sx in 1..=2 {
             for sz in 0..=2 {
-                assert!(workspace.selected_primitives.contains(&ceiling_at(sx, sz)));
+                assert!(workspace
+                    .selection
+                    .selected_primitives
+                    .contains(&ceiling_at(sx, sz)));
             }
         }
-        assert!(!workspace.selected_primitives.contains(&ceiling_at(0, 0)));
-        assert!(!workspace.selected_primitives.contains(&floor_at(2, 2)));
-        assert_eq!(workspace.selected_primitive, Some(ceiling_at(1, 0)));
-        assert!(workspace.selected_sectors.is_empty());
+        assert!(!workspace
+            .selection
+            .selected_primitives
+            .contains(&ceiling_at(0, 0)));
+        assert!(!workspace
+            .selection
+            .selected_primitives
+            .contains(&floor_at(2, 2)));
+        assert_eq!(
+            workspace.selection.selected_primitive,
+            Some(ceiling_at(1, 0))
+        );
+        assert!(workspace.selection.selected_sectors.is_empty());
     }
 
     #[test]
@@ -36793,14 +36895,17 @@ mod tests {
         for sx in 0..=1 {
             for sz in 0..=1 {
                 assert!(
-                    workspace.selected_sectors.contains(&(room, sx, sz)),
+                    workspace
+                        .selection
+                        .selected_sectors
+                        .contains(&(room, sx, sz)),
                     "missing selected sector {sx},{sz}"
                 );
             }
         }
-        assert_eq!(workspace.selected_sectors.len(), 4);
-        assert!(!workspace.selected_sectors.contains(&(room, 2, 0)));
-        assert_eq!(workspace.selected_node, room);
+        assert_eq!(workspace.selection.selected_sectors.len(), 4);
+        assert!(!workspace.selection.selected_sectors.contains(&(room, 2, 0)));
+        assert_eq!(workspace.selection.selected_node, room);
     }
 
     #[test]
@@ -36830,9 +36935,9 @@ mod tests {
         workspace.begin_viewport_box_select(Pos2::new(90.0, 290.0), Some(room), shift);
         assert!(workspace.update_viewport_box_select(Pos2::new(110.0, 310.0), transform));
 
-        assert!(workspace.selected_sectors.contains(&(room, 0, 0)));
-        assert!(workspace.selected_sectors.contains(&(room, 2, 2)));
-        assert_eq!(workspace.selected_sectors.len(), 2);
+        assert!(workspace.selection.selected_sectors.contains(&(room, 0, 0)));
+        assert!(workspace.selection.selected_sectors.contains(&(room, 2, 2)));
+        assert_eq!(workspace.selection.selected_sectors.len(), 2);
     }
 
     #[test]
@@ -36878,10 +36983,10 @@ mod tests {
             sz: 0,
             kind: FaceKind::Floor,
         });
-        assert!(workspace.selected_primitives.contains(&floor_0));
-        assert!(!workspace.selected_primitives.contains(&floor_1));
-        assert_eq!(workspace.selected_primitives.len(), 1);
-        assert_eq!(workspace.selected_node, room);
+        assert!(workspace.selection.selected_primitives.contains(&floor_0));
+        assert!(!workspace.selection.selected_primitives.contains(&floor_1));
+        assert_eq!(workspace.selection.selected_primitives.len(), 1);
+        assert_eq!(workspace.selection.selected_node, room);
     }
 
     #[test]
@@ -36928,9 +37033,9 @@ mod tests {
         workspace.begin_viewport_3d_box_select(center - Vec2::splat(10.0), Some(room), shift);
         assert!(workspace.update_viewport_3d_box_select(center + Vec2::splat(10.0), viewport));
 
-        assert!(workspace.selected_primitives.contains(&floor_0));
-        assert!(workspace.selected_primitives.contains(&floor_1));
-        assert_eq!(workspace.selected_primitives.len(), 2);
+        assert!(workspace.selection.selected_primitives.contains(&floor_0));
+        assert!(workspace.selection.selected_primitives.contains(&floor_1));
+        assert_eq!(workspace.selection.selected_primitives.len(), 2);
     }
 
     #[test]
@@ -36960,8 +37065,8 @@ mod tests {
             grid.sector(1, 0).unwrap().floor.as_ref().unwrap().heights,
             [0, 32, 64, 96]
         );
-        assert!(workspace.selected_sectors.contains(&(room, 1, 0)));
-        assert_eq!(workspace.selected_sector, Some((1, 0)));
+        assert!(workspace.selection.selected_sectors.contains(&(room, 1, 0)));
+        assert_eq!(workspace.selection.selected_sector, Some((1, 0)));
         assert!(!workspace.is_dirty());
 
         assert!(workspace.update_floating_geometry_origin([0, 1]));
@@ -36971,8 +37076,8 @@ mod tests {
             grid.sector(0, 1).unwrap().floor.as_ref().unwrap().heights,
             [0, 32, 64, 96]
         );
-        assert!(workspace.selected_sectors.contains(&(room, 0, 1)));
-        assert_eq!(workspace.selected_sector, Some((0, 1)));
+        assert!(workspace.selection.selected_sectors.contains(&(room, 0, 1)));
+        assert_eq!(workspace.selection.selected_sector, Some((0, 1)));
         assert!(!workspace.is_dirty());
 
         assert!(workspace.commit_floating_geometry());
@@ -37033,8 +37138,9 @@ mod tests {
         assert!(duplicate.ceiling.is_none());
         assert_eq!(duplicate.walls.get(GridDirection::North).len(), 1);
         assert!(duplicate.walls.get(GridDirection::South).is_empty());
-        assert!(workspace.selected_sectors.is_empty());
+        assert!(workspace.selection.selected_sectors.is_empty());
         assert!(workspace
+            .selection
             .selected_primitives
             .contains(&Selection::Face(FaceRef {
                 room,
@@ -37043,6 +37149,7 @@ mod tests {
                 kind: FaceKind::Floor,
             })));
         assert!(workspace
+            .selection
             .selected_primitives
             .contains(&Selection::Face(FaceRef {
                 room,
@@ -37053,7 +37160,7 @@ mod tests {
                     stack: 0,
                 },
             })));
-        assert_eq!(workspace.selected_primitives.len(), 2);
+        assert_eq!(workspace.selection.selected_primitives.len(), 2);
         assert!(!workspace.is_dirty());
     }
 
@@ -37108,8 +37215,8 @@ mod tests {
             mirrored_first.walls.get(GridDirection::North)[0].heights,
             [10, 0, 100, 110]
         );
-        assert!(workspace.selected_sectors.contains(&(room, 2, 0)));
-        assert!(workspace.selected_sectors.contains(&(room, 3, 0)));
+        assert!(workspace.selection.selected_sectors.contains(&(room, 2, 0)));
+        assert!(workspace.selection.selected_sectors.contains(&(room, 3, 0)));
         assert!(!workspace.is_dirty());
     }
 
@@ -37252,7 +37359,7 @@ mod tests {
         );
         assert!(grid.sector(0, 1).is_none());
         assert!(workspace.floating_geometry.is_none());
-        assert!(workspace.selected_sectors.is_empty());
+        assert!(workspace.selection.selected_sectors.is_empty());
         assert!(!workspace.is_dirty());
     }
 
@@ -37312,9 +37419,9 @@ mod tests {
             grid.sector(0, 0).unwrap().floor.as_ref().unwrap().heights,
             [196, 100, 132, 164]
         );
-        assert!(workspace.selected_sectors.contains(&(room, 0, 0)));
-        assert!(workspace.selected_sectors.contains(&(room, 0, 1)));
-        assert_eq!(workspace.selected_sectors.len(), 2);
+        assert!(workspace.selection.selected_sectors.contains(&(room, 0, 0)));
+        assert!(workspace.selection.selected_sectors.contains(&(room, 0, 1)));
+        assert_eq!(workspace.selection.selected_sectors.len(), 2);
         assert!(workspace.is_dirty());
     }
 
@@ -37408,11 +37515,14 @@ mod tests {
         workspace.apply_primitive_selection_modifiers(wall_at(0), egui::Modifiers::NONE);
         workspace.apply_primitive_selection_modifiers(wall_at(3), shift);
 
-        assert_eq!(workspace.selected_primitives.len(), 4);
+        assert_eq!(workspace.selection.selected_primitives.len(), 4);
         for sx in 0..4 {
-            assert!(workspace.selected_primitives.contains(&wall_at(sx)));
+            assert!(workspace
+                .selection
+                .selected_primitives
+                .contains(&wall_at(sx)));
         }
-        assert_eq!(workspace.selected_primitive, Some(wall_at(3)));
+        assert_eq!(workspace.selection.selected_primitive, Some(wall_at(3)));
     }
 
     #[test]
@@ -37445,11 +37555,14 @@ mod tests {
         workspace.apply_primitive_selection_modifiers(edge_at(0), egui::Modifiers::NONE);
         workspace.apply_primitive_selection_modifiers(edge_at(3), shift);
 
-        assert_eq!(workspace.selected_primitives.len(), 4);
+        assert_eq!(workspace.selection.selected_primitives.len(), 4);
         for sx in 0..4 {
-            assert!(workspace.selected_primitives.contains(&edge_at(sx)));
+            assert!(workspace
+                .selection
+                .selected_primitives
+                .contains(&edge_at(sx)));
         }
-        assert_eq!(workspace.selected_primitive, Some(edge_at(3)));
+        assert_eq!(workspace.selection.selected_primitive, Some(edge_at(3)));
     }
 
     #[test]
@@ -37480,11 +37593,14 @@ mod tests {
         workspace.apply_primitive_selection_modifiers(edge_at(0), egui::Modifiers::NONE);
         workspace.apply_primitive_selection_modifiers(edge_at(3), shift);
 
-        assert_eq!(workspace.selected_primitives.len(), 4);
+        assert_eq!(workspace.selection.selected_primitives.len(), 4);
         for sx in 0..4 {
-            assert!(workspace.selected_primitives.contains(&edge_at(sx)));
+            assert!(workspace
+                .selection
+                .selected_primitives
+                .contains(&edge_at(sx)));
         }
-        assert_eq!(workspace.selected_primitive, Some(edge_at(3)));
+        assert_eq!(workspace.selection.selected_primitive, Some(edge_at(3)));
     }
 
     #[test]
@@ -37530,12 +37646,12 @@ mod tests {
         workspace.apply_primitive_selection_modifiers(ceiling, ctrl);
         workspace.apply_primitive_selection_modifiers(wall, shift);
 
-        assert!(workspace.selected_primitives.contains(&floor));
-        assert!(workspace.selected_primitives.contains(&ceiling));
-        assert!(workspace.selected_primitives.contains(&wall));
-        assert_eq!(workspace.selected_primitives.len(), 3);
-        assert!(workspace.selected_sectors.is_empty());
-        assert_eq!(workspace.selected_primitive, Some(wall));
+        assert!(workspace.selection.selected_primitives.contains(&floor));
+        assert!(workspace.selection.selected_primitives.contains(&ceiling));
+        assert!(workspace.selection.selected_primitives.contains(&wall));
+        assert_eq!(workspace.selection.selected_primitives.len(), 3);
+        assert!(workspace.selection.selected_sectors.is_empty());
+        assert_eq!(workspace.selection.selected_primitive, Some(wall));
     }
 
     #[test]
@@ -37564,7 +37680,7 @@ mod tests {
             kind: FaceKind::Floor,
         });
 
-        workspace.hovered_primitive = Some(floor);
+        workspace.selection.hovered_primitive = Some(floor);
         workspace.replace_primitive_selection(floor);
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
         assert!(workspace.begin_primitive_grid_drag(rect, rect.center(), egui::Modifiers::NONE));
@@ -37585,6 +37701,7 @@ mod tests {
         assert!(moved.ceiling.is_none());
         assert!(moved.walls.get(GridDirection::North).is_empty());
         assert!(workspace
+            .selection
             .selected_primitives
             .contains(&Selection::Face(FaceRef {
                 room,
@@ -37592,7 +37709,7 @@ mod tests {
                 sz: 0,
                 kind: FaceKind::Floor,
             })));
-        assert!(workspace.selected_sectors.is_empty());
+        assert!(workspace.selection.selected_sectors.is_empty());
 
         workspace.end_primitive_grid_drag();
         assert!(workspace.is_dirty());
@@ -37770,6 +37887,7 @@ mod tests {
             [0, 32, 64, 96]
         );
         assert!(workspace
+            .selection
             .selected_primitives
             .contains(&Selection::Face(FaceRef {
                 room,
@@ -38233,8 +38351,8 @@ mod tests {
         assert!(workspace.validation_issue_primitives.contains(&south));
         assert!(workspace.validation_issue_primitives.contains(&north));
         assert!(workspace.validation_issue_rooms.is_empty());
-        assert_eq!(workspace.selected_primitive, Some(south));
-        assert_eq!(workspace.selected_primitives, vec![south, north]);
+        assert_eq!(workspace.selection.selected_primitive, Some(south));
+        assert_eq!(workspace.selection.selected_primitives, vec![south, north]);
         let (center, _) = workspace
             .selected_frame_bounds_3d()
             .expect("duplicate wall faces frame in 3D");
@@ -38490,10 +38608,10 @@ mod tests {
             })
         );
 
-        assert_eq!(workspace.selected_node, prop);
-        assert!(workspace.selected_nodes.contains(&prop));
-        assert_eq!(workspace.selected_resource, None);
-        assert!(workspace.selected_resources.is_empty());
+        assert_eq!(workspace.selection.selected_node, prop);
+        assert!(workspace.selection.selected_nodes.contains(&prop));
+        assert_eq!(workspace.selection.selected_resource, None);
+        assert!(workspace.selection.selected_resources.is_empty());
     }
 
     #[test]
@@ -38941,7 +39059,7 @@ mod tests {
             index: HorizontalTriangleIndex::A,
             corners: [Corner::NW, Corner::NE, Corner::SE],
         };
-        workspace.selected_primitive = Some(Selection::Triangle(triangle));
+        workspace.selection.selected_primitive = Some(Selection::Triangle(triangle));
 
         assert_eq!(workspace.assign_selected_faces_material(Some(target)), 1);
 
@@ -38982,14 +39100,14 @@ mod tests {
         assert_eq!(floor.triangle_material(0), Some(target));
         assert_eq!(floor.triangle_material(1), Some(original));
         assert!(matches!(
-            workspace.selected_primitive,
+            workspace.selection.selected_primitive,
             Some(Selection::Triangle(HorizontalTriangleRef {
                 surface: HorizontalSurfaceKind::Floor,
                 index: HorizontalTriangleIndex::A,
                 ..
             }))
         ));
-        assert_eq!(workspace.selected_resource, Some(target));
+        assert_eq!(workspace.selection.selected_resource, Some(target));
         assert!(workspace.is_dirty());
     }
 
@@ -39030,14 +39148,14 @@ mod tests {
         assert_eq!(ceiling.triangle_material(0), Some(original));
         assert_eq!(ceiling.triangle_material(1), Some(target));
         assert!(matches!(
-            workspace.selected_primitive,
+            workspace.selection.selected_primitive,
             Some(Selection::Triangle(HorizontalTriangleRef {
                 surface: HorizontalSurfaceKind::Ceiling,
                 index: HorizontalTriangleIndex::B,
                 ..
             }))
         ));
-        assert_eq!(workspace.selected_resource, Some(target));
+        assert_eq!(workspace.selection.selected_resource, Some(target));
         assert!(workspace.is_dirty());
     }
 
@@ -39230,7 +39348,7 @@ mod tests {
             corners: [Corner::NW, Corner::NE, Corner::SE],
         };
 
-        workspace.hovered_primitive = Some(Selection::Triangle(triangle));
+        workspace.selection.hovered_primitive = Some(Selection::Triangle(triangle));
         workspace.begin_primitive_drag(egui::Modifiers::NONE);
         workspace.update_primitive_drag(-8.0);
         workspace.end_primitive_drag();
@@ -39294,9 +39412,9 @@ mod tests {
         workspace.apply_primitive_selection_modifiers(nw, egui::Modifiers::NONE);
         workspace.apply_primitive_selection_modifiers(ne, ctrl);
 
-        assert_eq!(workspace.selected_primitives.len(), 2);
+        assert_eq!(workspace.selection.selected_primitives.len(), 2);
 
-        workspace.hovered_primitive = Some(nw);
+        workspace.selection.hovered_primitive = Some(nw);
         workspace.begin_primitive_drag(egui::Modifiers::NONE);
         workspace.update_primitive_drag(-8.0);
         workspace.end_primitive_drag();
@@ -39326,7 +39444,7 @@ mod tests {
             },
         });
 
-        workspace.hovered_primitive = Some(target);
+        workspace.selection.hovered_primitive = Some(target);
         workspace.begin_primitive_drag(egui::Modifiers::NONE);
         workspace.update_primitive_drag(-8.0);
         workspace.end_primitive_drag();
@@ -39362,7 +39480,7 @@ mod tests {
             },
         });
 
-        workspace.hovered_primitive = Some(target);
+        workspace.selection.hovered_primitive = Some(target);
         workspace.begin_primitive_drag(egui::Modifiers::NONE);
         workspace.update_primitive_drag(-8.0);
         workspace.end_primitive_drag();
@@ -39405,9 +39523,9 @@ mod tests {
         workspace.apply_primitive_selection_modifiers(north, egui::Modifiers::NONE);
         workspace.apply_primitive_selection_modifiers(east, ctrl);
 
-        assert_eq!(workspace.selected_primitives.len(), 2);
+        assert_eq!(workspace.selection.selected_primitives.len(), 2);
 
-        workspace.hovered_primitive = Some(north);
+        workspace.selection.hovered_primitive = Some(north);
         workspace.begin_primitive_drag(egui::Modifiers::NONE);
         workspace.update_primitive_drag(-8.0);
         workspace.end_primitive_drag();
@@ -39548,7 +39666,7 @@ mod tests {
 
         let scene = workspace.project.active_scene();
         let entity = scene
-            .node(workspace.selected_node)
+            .node(workspace.selection.selected_node)
             .expect("new entity is selected");
         assert!(matches!(entity.kind, NodeKind::Entity));
         assert!(entity.children.iter().any(|id| {
@@ -39587,7 +39705,7 @@ mod tests {
 
         let scene = workspace.project.active_scene();
         let entity = scene
-            .node(workspace.selected_node)
+            .node(workspace.selection.selected_node)
             .expect("new entity is selected");
         assert!(matches!(entity.kind, NodeKind::Entity));
         assert!(entity.children.iter().any(|id| {
@@ -39637,7 +39755,7 @@ mod tests {
 
         let scene = workspace.project.active_scene();
         let entity = scene
-            .node(workspace.selected_node)
+            .node(workspace.selection.selected_node)
             .expect("new entity is selected");
         assert!(matches!(entity.kind, NodeKind::Entity));
         assert!(entity.children.iter().any(|id| {
@@ -39777,7 +39895,7 @@ mod tests {
             .expect("component is added");
 
         let scene = workspace.project.active_scene();
-        assert_eq!(workspace.selected_node, controller);
+        assert_eq!(workspace.selection.selected_node, controller);
         assert!(scene.node(entity).unwrap().children.contains(&controller));
         assert!(matches!(
             scene.node(controller).unwrap().kind,
@@ -39819,7 +39937,7 @@ mod tests {
             "Room",
         );
 
-        let room = workspace.selected_node;
+        let room = workspace.selection.selected_node;
         let scene = workspace.project.active_scene();
         let node = scene.node(room).expect("new room exists");
         let NodeKind::Room { grid } = &node.kind else {
@@ -39855,7 +39973,7 @@ mod tests {
 
         workspace.drop_resource_at_room_hit(character, room, [0.0, 0.0, 0.0], None);
 
-        let entity = workspace.selected_node;
+        let entity = workspace.selection.selected_node;
         let scene = workspace.project.active_scene();
         let node = scene.node(entity).expect("character entity exists");
         assert_eq!(node.parent, Some(room));
@@ -39900,7 +40018,7 @@ mod tests {
 
         workspace.drop_resource_at_room_hit(character, room, [0.0, 0.0, 0.0], None);
 
-        let entity = workspace.selected_node;
+        let entity = workspace.selection.selected_node;
         let scene = workspace.project.active_scene();
         let controller = scene
             .node(entity)
