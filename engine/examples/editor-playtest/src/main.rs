@@ -7428,12 +7428,32 @@ fn draw_sky_panorama(
     // RTPS each direction (hardware rotate + perspective divide) instead of the
     // per-direction CPU rotate (eight muls) and two divides.
     let sky_projector = SkyDirectionProjector::load(camera);
+    // Yaw depends only on column and pitch only on row, so precompute the
+    // sin/cos of each once instead of four trig lookups per grid point.
+    let mut yaw_sin = [0i32; SKY_CYCLORAMA_COLUMNS_MAX as usize + 1];
+    let mut yaw_cos = [0i32; SKY_CYCLORAMA_COLUMNS_MAX as usize + 1];
+    for column in 0..=columns {
+        let yaw = angle_from_degrees_i32(sky_yaw_degrees_for_column(column, columns));
+        yaw_sin[column] = yaw.sin().raw();
+        yaw_cos[column] = yaw.cos().raw();
+    }
+    let mut pitch_sin = [0i32; SKY_PANORAMA_PALETTE_BANDS + 1];
+    let mut pitch_cos = [0i32; SKY_PANORAMA_PALETTE_BANDS + 1];
     for row in 0..=rows {
-        let pitch = sky_lerp_i32(top_pitch, bottom_pitch, row, rows);
+        let pitch =
+            angle_from_degrees_i32(sky_lerp_i32(top_pitch, bottom_pitch, row, rows).clamp(-82, 82));
+        pitch_sin[row] = pitch.sin().raw();
+        pitch_cos[row] = pitch.cos().raw();
+    }
+    for row in 0..=rows {
         for column in 0..=columns {
-            let yaw = sky_yaw_degrees_for_column(column, columns);
+            let dir = [
+                clamp_i16(-mul_q12_i32(yaw_sin[column], pitch_cos[row])),
+                clamp_i16(pitch_sin[row]),
+                clamp_i16(-mul_q12_i32(yaw_cos[column], pitch_cos[row])),
+            ];
             projected_grid[sky_grid_index(row, column, columns)] = sky_projector
-                .project(sky_direction_q12(yaw, pitch))
+                .project(dir)
                 .map(|(sx, sy)| (sx.clamp(-512, 831), sy.clamp(-256, 495)));
         }
     }
@@ -7502,20 +7522,6 @@ fn sky_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
     let min_y = points.iter().map(|p| p.1).min().unwrap_or(0);
     let max_y = points.iter().map(|p| p.1).max().unwrap_or(0);
     max_x < 0 || min_x >= SCREEN_W || max_y < 0 || min_y >= SCREEN_H
-}
-
-fn sky_direction_q12(yaw_degrees: i32, pitch_degrees: i32) -> [i16; 3] {
-    let yaw = angle_from_degrees_i32(yaw_degrees);
-    let pitch = angle_from_degrees_i32(pitch_degrees.clamp(-82, 82));
-    let yaw_sin = yaw.sin().raw();
-    let yaw_cos = yaw.cos().raw();
-    let pitch_sin = pitch.sin().raw();
-    let pitch_cos = pitch.cos().raw();
-    [
-        clamp_i16(-mul_q12_i32(yaw_sin, pitch_cos)),
-        clamp_i16(pitch_sin),
-        clamp_i16(-mul_q12_i32(yaw_cos, pitch_cos)),
-    ]
 }
 
 fn angle_from_degrees_i32(degrees: i32) -> Angle {
