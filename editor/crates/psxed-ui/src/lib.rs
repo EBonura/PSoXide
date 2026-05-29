@@ -1928,6 +1928,71 @@ struct SelectionState {
     hovered_entity_node: Option<NodeId>,
 }
 
+impl SelectionState {
+    /// Drop the primitive (face/edge/vertex) selection.
+    fn clear_primitives(&mut self) {
+        self.selected_primitive = None;
+        self.selected_primitives.clear();
+    }
+
+    /// Apply a scene-node click with Shift (range) / toggle (Ctrl/Cmd)
+    /// modifiers against `visible_order`. Pure selection-state mutation: it
+    /// also clears any resource and primitive selection, but leaves status
+    /// text and sector state to the caller. egui-free so it is unit-testable.
+    fn apply_node_modifiers(&mut self, id: NodeId, shift: bool, toggle: bool, order: &[NodeId]) {
+        // Toggling with nothing multi-selected promotes the current primary
+        // into the set first, so the click adds a second rather than replacing.
+        if toggle && self.selected_nodes.is_empty() && self.selected_node != NodeId::ROOT {
+            self.selected_nodes.insert(self.selected_node);
+        }
+        let fallback = self.selected_node;
+        self.selected_node = apply_range_modifiers(
+            &mut self.selected_nodes,
+            &mut self.node_selection_anchor,
+            id,
+            shift,
+            toggle,
+            order,
+            fallback,
+        )
+        .unwrap_or(NodeId::ROOT);
+        self.selected_resource = None;
+        self.selected_resources.clear();
+        self.resource_selection_anchor = None;
+        self.clear_primitives();
+    }
+
+    /// Resource counterpart to [`Self::apply_node_modifiers`]. Clears any node
+    /// and primitive selection; the caller owns status text, sector state and
+    /// the resource-delete confirmation.
+    fn apply_resource_modifiers(
+        &mut self,
+        id: ResourceId,
+        shift: bool,
+        toggle: bool,
+        order: &[ResourceId],
+    ) {
+        if toggle && self.selected_resources.is_empty() {
+            if let Some(current) = self.selected_resource {
+                self.selected_resources.insert(current);
+            }
+        }
+        self.selected_resource = apply_range_modifiers(
+            &mut self.selected_resources,
+            &mut self.resource_selection_anchor,
+            id,
+            shift,
+            toggle,
+            order,
+            id,
+        );
+        self.selected_node = NodeId::ROOT;
+        self.selected_nodes.clear();
+        self.node_selection_anchor = None;
+        self.clear_primitives();
+    }
+}
+
 /// Resolved physical vertex: every face-corner that currently
 /// sits at `world` and therefore moves together when the
 /// vertex's height is dragged.
@@ -15094,8 +15159,7 @@ impl EditorWorkspace {
     }
 
     fn clear_primitive_selection_state(&mut self) {
-        self.selection.selected_primitive = None;
-        self.selection.selected_primitives.clear();
+        self.selection.clear_primitives();
     }
 
     fn select_all_current_scope(&mut self) {
@@ -15349,48 +15413,8 @@ impl EditorWorkspace {
         visible_order: &[NodeId],
     ) {
         let toggle = modifiers.command || modifiers.ctrl;
-        if modifiers.shift {
-            let anchor = self
-                .selection
-                .node_selection_anchor
-                .unwrap_or(self.selection.selected_node);
-            let range = range_between(visible_order, anchor, id).unwrap_or_else(|| vec![id]);
-            if !toggle {
-                self.selection.selected_nodes.clear();
-            }
-            for id in range {
-                self.selection.selected_nodes.insert(id);
-            }
-            self.selection.node_selection_anchor.get_or_insert(anchor);
-        } else if toggle {
-            if self.selection.selected_nodes.is_empty()
-                && self.selection.selected_node != NodeId::ROOT
-            {
-                self.selection
-                    .selected_nodes
-                    .insert(self.selection.selected_node);
-            }
-            if !self.selection.selected_nodes.remove(&id) {
-                self.selection.selected_nodes.insert(id);
-            }
-            self.selection.node_selection_anchor = Some(id);
-        } else {
-            self.selection.selected_nodes.clear();
-            self.selection.selected_nodes.insert(id);
-            self.selection.node_selection_anchor = Some(id);
-        }
-
-        self.selection.selected_node = self
-            .selection
-            .selected_nodes
-            .contains(&id)
-            .then_some(id)
-            .or_else(|| first_in_order(visible_order, &self.selection.selected_nodes))
-            .unwrap_or(NodeId::ROOT);
-        self.selection.selected_resource = None;
-        self.selection.selected_resources.clear();
-        self.selection.resource_selection_anchor = None;
-        self.clear_primitive_selection_state();
+        self.selection
+            .apply_node_modifiers(id, modifiers.shift, toggle, visible_order);
         self.clear_sector_selection();
 
         let count = self.selection.selected_nodes.len();
@@ -15411,44 +15435,8 @@ impl EditorWorkspace {
         visible_order: &[ResourceId],
     ) {
         let toggle = modifiers.command || modifiers.ctrl;
-        if modifiers.shift {
-            let anchor = self.selection.resource_selection_anchor.unwrap_or(id);
-            let range = range_between(visible_order, anchor, id).unwrap_or_else(|| vec![id]);
-            if !toggle {
-                self.selection.selected_resources.clear();
-            }
-            for id in range {
-                self.selection.selected_resources.insert(id);
-            }
-            self.selection
-                .resource_selection_anchor
-                .get_or_insert(anchor);
-        } else if toggle {
-            if self.selection.selected_resources.is_empty() {
-                if let Some(current) = self.selection.selected_resource {
-                    self.selection.selected_resources.insert(current);
-                }
-            }
-            if !self.selection.selected_resources.remove(&id) {
-                self.selection.selected_resources.insert(id);
-            }
-            self.selection.resource_selection_anchor = Some(id);
-        } else {
-            self.selection.selected_resources.clear();
-            self.selection.selected_resources.insert(id);
-            self.selection.resource_selection_anchor = Some(id);
-        }
-
-        self.selection.selected_resource = self
-            .selection
-            .selected_resources
-            .contains(&id)
-            .then_some(id)
-            .or_else(|| first_in_order(visible_order, &self.selection.selected_resources));
-        self.selection.selected_node = NodeId::ROOT;
-        self.selection.selected_nodes.clear();
-        self.selection.node_selection_anchor = None;
-        self.clear_primitive_selection_state();
+        self.selection
+            .apply_resource_modifiers(id, modifiers.shift, toggle, visible_order);
         self.clear_sector_selection();
         self.resource_delete_confirm = None;
 
@@ -27025,6 +27013,45 @@ fn first_in_order<T: Copy + Eq + std::hash::Hash>(order: &[T], selected: &HashSe
     order.iter().copied().find(|id| selected.contains(id))
 }
 
+/// Shared Shift-range / toggle / replace multi-selection over an ordered list.
+///
+/// Mutates `set` and `anchor` in place and returns the new primary selection:
+/// the clicked `id` if it survived, otherwise the first still-selected item in
+/// `order`. Used by both scene-node and resource selection so the branching
+/// logic lives once. `shift_anchor_fallback` is the anchor to range from when
+/// none is set (the current primary for nodes, the clicked id for resources).
+fn apply_range_modifiers<T: Copy + Eq + std::hash::Hash>(
+    set: &mut HashSet<T>,
+    anchor: &mut Option<T>,
+    id: T,
+    shift: bool,
+    toggle: bool,
+    order: &[T],
+    shift_anchor_fallback: T,
+) -> Option<T> {
+    if shift {
+        let from = anchor.unwrap_or(shift_anchor_fallback);
+        let range = range_between(order, from, id).unwrap_or_else(|| vec![id]);
+        if !toggle {
+            set.clear();
+        }
+        set.extend(range);
+        anchor.get_or_insert(from);
+    } else if toggle {
+        if !set.remove(&id) {
+            set.insert(id);
+        }
+        *anchor = Some(id);
+    } else {
+        set.clear();
+        set.insert(id);
+        *anchor = Some(id);
+    }
+    set.contains(&id)
+        .then_some(id)
+        .or_else(|| first_in_order(order, set))
+}
+
 fn constrain_resizable_dock_content(ui: &mut egui::Ui, width: f32) {
     ui.set_width(width);
     ui.set_max_width(width);
@@ -34722,6 +34749,55 @@ fn material_option_label(material: Option<ResourceId>, options: &[(ResourceId, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shared multi-select math (`apply_range_modifiers`) backs both scene
+    /// node and resource selection. Exercise it directly over plain ids so the
+    /// branching is covered without a project, a workspace, or egui.
+    #[test]
+    fn range_modifiers_cover_replace_toggle_and_shift() {
+        let order = [10u64, 20, 30, 40, 50];
+        let mut set = HashSet::new();
+        let mut anchor = None;
+
+        // Plain click replaces the selection and sets the anchor.
+        let primary = apply_range_modifiers(&mut set, &mut anchor, 30, false, false, &order, 0);
+        assert_eq!(set, HashSet::from([30]));
+        assert_eq!(anchor, Some(30));
+        assert_eq!(primary, Some(30));
+
+        // Toggle adds without clearing.
+        let primary = apply_range_modifiers(&mut set, &mut anchor, 10, false, true, &order, 0);
+        assert_eq!(set, HashSet::from([10, 30]));
+        assert_eq!(anchor, Some(10));
+        assert_eq!(primary, Some(10));
+
+        // Toggling a selected id removes it; the primary falls back to the
+        // first still-selected id in order.
+        let primary = apply_range_modifiers(&mut set, &mut anchor, 30, false, true, &order, 0);
+        assert_eq!(set, HashSet::from([10]));
+        assert_eq!(primary, Some(10));
+
+        // Shift without toggle clears, then selects the inclusive range from
+        // the existing anchor; the anchor is preserved.
+        anchor = Some(20);
+        let primary = apply_range_modifiers(&mut set, &mut anchor, 50, true, false, &order, 0);
+        assert_eq!(set, HashSet::from([20, 30, 40, 50]));
+        assert_eq!(anchor, Some(20));
+        assert_eq!(primary, Some(50));
+
+        // Shift with toggle keeps the prior selection and unions the range.
+        let mut set = HashSet::from([10u64]);
+        let mut anchor = Some(20);
+        apply_range_modifiers(&mut set, &mut anchor, 40, true, true, &order, 0);
+        assert_eq!(set, HashSet::from([10, 20, 30, 40]));
+
+        // With no anchor yet, the fallback anchors the range.
+        let mut set = HashSet::new();
+        let mut anchor = None;
+        apply_range_modifiers(&mut set, &mut anchor, 30, true, false, &order, 10);
+        assert_eq!(set, HashSet::from([10, 20, 30]));
+        assert_eq!(anchor, Some(10));
+    }
 
     fn test_temp_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
