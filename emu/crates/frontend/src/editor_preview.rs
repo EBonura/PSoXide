@@ -2627,10 +2627,12 @@ fn image_prop_vertices(
 }
 
 fn rotate_image_prop_local(v: [i32; 3], rotation_q12: [u16; 3]) -> [i32; 3] {
-    // Apply X (pitch) -> Y (yaw) -> Z (roll) so the editor
-    // card, selection outline, and runtime draw path agree.
-    rotate_z_q12(
-        rotate_y_q12(rotate_x_q12(v, rotation_q12[0]), rotation_q12[1]),
+    // X (pitch) -> Y (yaw) -> Z (roll), shared with the cooker so the editor
+    // card, selection outline, cooked record, and runtime draw path agree.
+    psxed_project::spatial::rotate_euler_local_q12(
+        v,
+        rotation_q12[0],
+        rotation_q12[1],
         rotation_q12[2],
     )
 }
@@ -2702,38 +2704,10 @@ fn push_image_prop_collision_wireframe(
     push_world_box_wireframe(scratch, verts, style);
 }
 
-fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = sin_q12_turn(angle_q12);
-    let c = cos_q12_turn(angle_q12);
-    [
-        v[0],
-        mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
-        mul_q12_i32(v[1], s) + mul_q12_i32(v[2], c),
-    ]
-}
-
-fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = sin_q12_turn(angle_q12);
-    let c = cos_q12_turn(angle_q12);
-    [
-        mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
-        v[1],
-        -mul_q12_i32(v[0], s) + mul_q12_i32(v[2], c),
-    ]
-}
-
-fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let s = sin_q12_turn(angle_q12);
-    let c = cos_q12_turn(angle_q12);
-    [
-        mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
-        mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
-        v[2],
-    ]
-}
-
+/// Thin alias for the shared Q12 multiply; the editor preview uses it for
+/// camera-basis and gizmo math beyond the rotation helpers.
 fn mul_q12_i32(value: i32, q12: i32) -> i32 {
-    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    psxed_project::spatial::mul_q12(value, q12)
 }
 
 fn sin_q12_turn(angle_q12: u16) -> i32 {
@@ -3332,12 +3306,11 @@ fn rotate_visual_offset(rotation: Mat3I16, offset: [i16; 3]) -> [i32; 3] {
     [row(rotation.m[0]), row(rotation.m[1]), row(rotation.m[2])]
 }
 
-/// Convert editor-Y rotation in degrees to PSX angle units
-/// (Q12, 4096 per turn). Matches the playtest writer's
-/// `yaw_from_degrees`.
+/// Convert editor-Y rotation in degrees to PSX angle units (Q12, 4096 per
+/// turn). Delegates to the shared converter so preview and the playtest
+/// writer can't diverge.
 fn yaw_to_q12(degrees: f32) -> u16 {
-    let normalised = degrees.rem_euclid(360.0);
-    (normalised * (4096.0 / 360.0)) as i32 as u16
+    psxed_project::spatial::euler_degrees_to_q12(degrees)
 }
 
 /// Y-axis rotation matrix in Q12. Mirrors `yaw_rotation_matrix`
