@@ -185,6 +185,12 @@ pub struct LaunchArgs {
     /// Capture every Nth guest frame when `--guest-hash-log` is enabled.
     #[arg(long, default_value_t = 60)]
     pub guest_hash_interval: u64,
+    /// Write a per-guest-frame CSV of frametime (bus-cycle delta) alongside the
+    /// portal/streaming masks and camera position. Lets a streaming/visibility
+    /// change be measured frame-by-frame and a drawn-but-not-visible room be
+    /// pinned to an exact camera position over a recorded sweep.
+    #[arg(long)]
+    pub counter_log: Option<PathBuf>,
     /// Optional path to dump the final VRAM as a raw PPM image.
     /// Lets you eyeball the boot state without firing up the GUI.
     #[arg(long)]
@@ -205,6 +211,13 @@ pub struct LaunchArgs {
     /// Hold the game run button during the headless run.
     #[arg(long)]
     pub hold_run: bool,
+    /// Scripted camera sweep: alternate rotating the camera in place (right
+    /// stick) with walking forward (left stick), so a recorded window visits
+    /// several positions and full rotations. Use with `--counter-log` to
+    /// reproduce portal-visibility false-positives/flicker that a straight
+    /// `--hold-forward` walk never triggers.
+    #[arg(long)]
+    pub sweep: bool,
 }
 
 /// Arguments for `build-project-disc`.
@@ -448,6 +461,12 @@ fn run_headless_launch(
     emit_summary: bool,
 ) -> Result<HeadlessLaunchResult, String> {
     let settings = Settings::load(&paths.settings_file()).unwrap_or_default();
+    if args.sweep && (args.input_tape.is_some() || args.hold_forward || args.hold_run) {
+        return Err(
+            "--sweep cannot be combined with --input-tape, --hold-forward, or --hold-run"
+                .to_string(),
+        );
+    }
     if args.input_tape.is_some() && (args.hold_forward || args.hold_run) {
         return Err(
             "--input-tape cannot be combined with --hold-forward or --hold-run".to_string(),
@@ -621,6 +640,14 @@ fn run_headless_launch(
             bus.set_port1_sticks(0x80, 0x80, 0x80, 0x00);
         }
     }
+    if args.sweep {
+        let mut buttons = ButtonState::NONE;
+        buttons.press(button::CIRCLE);
+        bus.set_port1_buttons(buttons);
+        let (rx, ry, lx, ly) = sweep_pad(1);
+        bus.set_port1_sticks(rx, ry, lx, ly);
+    }
+    let mut sweep_frame = 0u64;
     let mut tape_cursor = 0usize;
     if let Some(samples) = tape_samples.as_ref() {
         samples[tape_cursor].apply_to_bus(&mut bus);
@@ -643,6 +670,8 @@ fn run_headless_launch(
         "guest",
     )?;
     let mut observed_guest_hash_frames = observed_guest_frames;
+    let mut counter_log = CounterLog::new(args.counter_log.as_deref())?;
+    let mut observed_counter_frames = observed_guest_frames;
 
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
@@ -674,6 +703,11 @@ fn run_headless_launch(
                     samples[tape_cursor].apply_to_bus(&mut bus);
                 }
             }
+        }
+        if args.sweep && current_guest_frames != sweep_frame {
+            sweep_frame = current_guest_frames;
+            let (rx, ry, lx, ly) = sweep_pad(current_guest_frames);
+            bus.set_port1_sticks(rx, ry, lx, ly);
         }
         if current_guest_frames != observed_guest_frames {
             if let Some(summary) = profile_summary.as_mut() {
@@ -707,6 +741,10 @@ fn run_headless_launch(
                 &bus,
             )?;
         }
+        while observed_counter_frames < current_guest_frames {
+            observed_counter_frames += 1;
+            counter_log.record(observed_counter_frames, cpu.tick(), bus.cycles(), &bus)?;
+        }
         if let Some(target) = args.guest_visual_frames {
             if target > 0
                 && bus
@@ -727,6 +765,7 @@ fn run_headless_launch(
     }
     visual_hash_log.flush()?;
     guest_hash_log.flush()?;
+    counter_log.flush()?;
 
     if emit_summary {
         println!(
@@ -1142,11 +1181,13 @@ fn validation_launch_args(
         visual_hash_interval: 1,
         guest_hash_log: None,
         guest_hash_interval: 60,
+        counter_log: None,
         dump_vram: None,
         dump_hw: None,
         dump_guest_profile: false,
         hold_forward: checkpoint.hold_forward,
         hold_run: checkpoint.hold_run,
+        sweep: false,
     }
 }
 
@@ -1198,6 +1239,20 @@ fn cli_repo_root() -> PathBuf {
 fn attach_headless_playtest_pad(bus: &mut Bus) {
     bus.attach_digital_pad_port1();
     let _ = bus.force_port1_analog_mode();
+}
+
+/// Scripted DualShock state for `--sweep`, keyed on guest frame. Alternates
+/// ~180 frames rotating the camera in place (right stick) with ~180 frames
+/// walking forward (left stick), so a recorded window visits several positions
+/// and full rotations -- exercising multi-portal viewpoints a straight walk
+/// never reaches. Returns `(right_x, right_y, left_x, left_y)` in the DualShock
+/// 0x00..=0xFF byte convention (0x80 centered; left_y 0x00 = forward).
+fn sweep_pad(frame: u64) -> (u8, u8, u8, u8) {
+    if frame % 360 < 180 {
+        (0xFF, 0x80, 0x80, 0x80)
+    } else {
+        (0x80, 0x80, 0x80, 0x00)
+    }
 }
 
 fn hash_vram(bus: &Bus) -> u64 {
@@ -1281,6 +1336,74 @@ impl DisplayHashLog {
             writer
                 .flush()
                 .map_err(|e| format!("flush visual hash log: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Per-guest-frame log of frametime + the portal/streaming masks and camera
+/// position, so a streaming/visibility change can be measured frame-by-frame
+/// and a drawn-but-not-visible room pinned to an exact camera position.
+struct CounterLog {
+    writer: Option<BufWriter<std::fs::File>>,
+}
+
+impl CounterLog {
+    fn new(path: Option<&Path>) -> Result<Self, String> {
+        let Some(path) = path else {
+            return Ok(Self { writer: None });
+        };
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let file =
+            std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        writeln!(
+            writer,
+            "guest_frame,cpu_tick,bus_cycles,resident_mask,active_mask,drawn_mask,visible_mask,cam_x_biased,cam_y_biased,cam_z_biased"
+        )
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(Self {
+            writer: Some(writer),
+        })
+    }
+
+    fn record(
+        &mut self,
+        guest_frame: u64,
+        cpu_tick: u64,
+        bus_cycles: u64,
+        bus: &Bus,
+    ) -> Result<(), String> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        use telemetry::counter as c;
+        let g = |id| bus.telemetry.counter_latest_value(id);
+        writeln!(
+            writer,
+            "{guest_frame},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{}",
+            g(c::ROOM_STREAM_RESIDENT_MASK_LO),
+            g(c::ROOM_ACTIVE_CHUNK_MASK_LO),
+            g(c::ROOM_DRAWN_CHUNK_MASK_LO),
+            g(c::PORTAL_VIS_VISIBLE_MASK_LO),
+            g(c::ROOM_CAMERA_GLOBAL_X_BIASED),
+            g(c::ROOM_CAMERA_GLOBAL_Y_BIASED),
+            g(c::ROOM_CAMERA_GLOBAL_Z_BIASED),
+        )
+        .map_err(|e| format!("write counter log: {e}"))
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        if let Some(writer) = self.writer.as_mut() {
+            writer
+                .flush()
+                .map_err(|e| format!("flush counter log: {e}"))?;
         }
         Ok(())
     }
