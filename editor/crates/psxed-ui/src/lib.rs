@@ -280,10 +280,12 @@ pub struct EditorWorkspace {
     selected_sectors: HashSet<SectorSelection>,
     /// Anchor used by Shift-click tile range selection.
     sector_selection_anchor: Option<SectorSelection>,
-    /// Active 2D viewport screen-space marquee selection.
-    viewport_box_select: Option<ViewportBoxSelect>,
-    /// Active 3D viewport screen-space marquee selection.
-    viewport_3d_box_select: Option<Viewport3dBoxSelect>,
+    /// The single in-flight pointer interaction stroke: drags and
+    /// screen-space marquees across the 2D/3D viewports and the UI
+    /// canvas. At most one is ever active, so this is one enum
+    /// rather than a bag of mutually-exclusive `Option`s. See
+    /// [`Interaction`].
+    interaction: Interaction,
     /// Selection mode the Select tool picks at: a whole face,
     /// one of its edges, or one of its corners.
     selection_mode: SelectionMode,
@@ -319,26 +321,6 @@ pub struct EditorWorkspace {
     /// Room-level validation failures that don't have a finer face
     /// target, such as budget or dimension errors.
     validation_issue_rooms: HashSet<NodeId>,
-    /// Active drag-translate stroke. Set on drag-start over a
-    /// primitive in Select mode, mutated by every drag frame, and
-    /// cleared on release. Records pre-drag heights of every
-    /// physical vertex involved so the apply step is
-    /// `snap(pre_y + delta)` -- clean snapping with no error
-    /// accumulation.
-    primitive_drag: Option<PrimitiveDrag>,
-    /// Active grid-snapped primitive move stroke. This is the
-    /// X/Z counterpart to `primitive_drag`: it previews selected
-    /// face fragments moving between cells and commits one undo
-    /// snapshot on release.
-    primitive_grid_drag: Option<PrimitiveGridDrag>,
-    /// Active axis-gizmo drag for selected world geometry. X/Z
-    /// reuse grid-snapped primitive movement; Y reuses per-vertex
-    /// height editing so every handle maps to exact authored data.
-    primitive_gizmo_drag: Option<PrimitiveGizmoDrag>,
-    /// Active axis-gizmo drag for selected scene nodes. Entity and
-    /// PointLight nodes use this so they can move on X/Y/Z from the
-    /// 3D viewport instead of only X/Z plane dragging their bounds.
-    node_gizmo_drag: Option<NodeGizmoDrag>,
     /// Floating duplicate placement created by Cmd+D. While active,
     /// `project` contains the preview copy, but `base_project`
     /// lets Escape cancel without dirtying the document and lets
@@ -348,12 +330,6 @@ pub struct EditorWorkspace {
     /// only). Drives the entity-bounds highlight overlay and
     /// the click→select fast path.
     hovered_entity_node: Option<NodeId>,
-    /// Active 3D node-drag stroke. Set when the user
-    /// presses on an entity bound; updated each frame the
-    /// pointer moves while held; cleared on release.
-    node_drag: Option<NodeDrag>,
-    /// Active drag/resize stroke in the UI canvas workspace.
-    ui_canvas_drag: Option<UiCanvasDrag>,
     /// What the next paint click would target. Cell variant fires
     /// for floor / ceiling / erase / place; Wall variant fires for
     /// PaintWall. World-cell coords let the preview track cells
@@ -1832,6 +1808,89 @@ struct UiCanvasDrag {
     snapshot_pushed: bool,
 }
 
+/// The single pointer-driven interaction stroke in flight.
+///
+/// A stroke is bound to one pointer-button press, so at most one can ever be
+/// active. Modelling that as one enum (rather than one `Option<…>` field per
+/// stroke kind) makes the illegal "two strokes at once" states unrepresentable
+/// and makes every begin-site self-clearing: assigning a new stroke replaces
+/// whatever was active, so a stroke can no longer leak when its release event
+/// is missed.
+///
+/// Floating-duplicate placement (`floating_geometry`) is deliberately *not*
+/// here: it is a persistent placement *mode* that survives pointer-up and
+/// mutates the document with rollback, not a transient stroke.
+#[derive(Debug, Clone, Default)]
+enum Interaction {
+    /// No stroke in flight.
+    #[default]
+    Idle,
+    /// Per-vertex height drag of selected world geometry (3D viewport).
+    PrimitiveHeight(PrimitiveDrag),
+    /// Grid-snapped X/Z move of selected primitive faces.
+    PrimitiveGrid(PrimitiveGridDrag),
+    /// Axis-gizmo drag of selected world geometry.
+    PrimitiveGizmo(PrimitiveGizmoDrag),
+    /// Axis-gizmo drag of selected scene nodes.
+    NodeGizmo(NodeGizmoDrag),
+    /// Entity-bound plane drag of a scene node (3D viewport).
+    Node(NodeDrag),
+    /// Screen-space marquee selection in the 3D viewport.
+    BoxSelect3d(Viewport3dBoxSelect),
+    /// Screen-space marquee selection in the 2D viewport.
+    BoxSelect2d(ViewportBoxSelect),
+    /// Move/resize stroke in the UI authoring canvas.
+    UiCanvas(UiCanvasDrag),
+}
+
+/// Generates `&`/`&mut`/owning accessors for one [`Interaction`] variant, so
+/// call sites read like the old per-field `Option` API (`.primitive_drag()`,
+/// `.primitive_drag_mut()`, `.take_primitive_drag()`) while the storage stays a
+/// single enum. The `take_*` form resets to [`Interaction::Idle`] only when the
+/// active stroke matches, so it is a safe variant-scoped cancel.
+macro_rules! interaction_accessors {
+    ($($variant:ident => $get:ident, $get_mut:ident, $take:ident : $ty:ty);* $(;)?) => {
+        impl Interaction {
+            $(
+                fn $get(&self) -> Option<&$ty> {
+                    match self {
+                        Interaction::$variant(value) => Some(value),
+                        _ => None,
+                    }
+                }
+
+                fn $get_mut(&mut self) -> Option<&mut $ty> {
+                    match self {
+                        Interaction::$variant(value) => Some(value),
+                        _ => None,
+                    }
+                }
+
+                fn $take(&mut self) -> Option<$ty> {
+                    match std::mem::take(self) {
+                        Interaction::$variant(value) => Some(value),
+                        other => {
+                            *self = other;
+                            None
+                        }
+                    }
+                }
+            )*
+        }
+    };
+}
+
+interaction_accessors! {
+    PrimitiveHeight => primitive_drag, primitive_drag_mut, take_primitive_drag : PrimitiveDrag;
+    PrimitiveGrid => primitive_grid_drag, primitive_grid_drag_mut, take_primitive_grid_drag : PrimitiveGridDrag;
+    PrimitiveGizmo => primitive_gizmo_drag, primitive_gizmo_drag_mut, take_primitive_gizmo_drag : PrimitiveGizmoDrag;
+    NodeGizmo => node_gizmo_drag, node_gizmo_drag_mut, take_node_gizmo_drag : NodeGizmoDrag;
+    Node => node_drag, node_drag_mut, take_node_drag : NodeDrag;
+    BoxSelect3d => box_select_3d, box_select_3d_mut, take_box_select_3d : Viewport3dBoxSelect;
+    BoxSelect2d => box_select_2d, box_select_2d_mut, take_box_select_2d : ViewportBoxSelect;
+    UiCanvas => ui_canvas_drag, ui_canvas_drag_mut, take_ui_canvas_drag : UiCanvasDrag;
+}
+
 /// Resolved physical vertex: every face-corner that currently
 /// sits at `world` and therefore moves together when the
 /// vertex's height is dragged.
@@ -2343,8 +2402,7 @@ impl EditorWorkspace {
             selected_sector: None,
             selected_sectors: HashSet::new(),
             sector_selection_anchor: None,
-            viewport_box_select: None,
-            viewport_3d_box_select: None,
+            interaction: Interaction::Idle,
             selection_mode: SelectionMode::default(),
             transform_gizmo_mode: TransformGizmoMode::Move,
             horizontal_edit_mode: HorizontalEditMode::default(),
@@ -2354,14 +2412,8 @@ impl EditorWorkspace {
             selected_primitives: Vec::new(),
             validation_issue_primitives: Vec::new(),
             validation_issue_rooms: HashSet::new(),
-            primitive_drag: None,
-            primitive_grid_drag: None,
-            primitive_gizmo_drag: None,
-            node_gizmo_drag: None,
             floating_geometry: None,
             hovered_entity_node: None,
-            node_drag: None,
-            ui_canvas_drag: None,
             paint_target_preview: None,
             last_paint_stamp: None,
             wall_paint_shape: WallPaintShape::Cardinal,
@@ -4395,7 +4447,7 @@ impl EditorWorkspace {
         let primary_down =
             ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
         if !primary_down {
-            self.ui_canvas_drag = None;
+            self.interaction.take_ui_canvas_drag();
         }
 
         let painter = ui.painter_at(container.expand(UI_RESIZE_HANDLE_SIZE));
@@ -4458,7 +4510,7 @@ impl EditorWorkspace {
             return;
         };
         self.select_ui_node(node);
-        self.ui_canvas_drag = Some(UiCanvasDrag {
+        self.interaction = Interaction::UiCanvas(UiCanvasDrag {
             node,
             mode,
             start_pointer_canvas,
@@ -4472,7 +4524,7 @@ impl EditorWorkspace {
     }
 
     fn update_ui_canvas_drag(&mut self, canvas: Rect, canvas_size: [u16; 2], pointer: Pos2) {
-        let Some(drag) = self.ui_canvas_drag.clone() else {
+        let Some(drag) = self.interaction.ui_canvas_drag().cloned() else {
             return;
         };
         let Some(pointer_canvas) = ui_screen_to_canvas(pointer, canvas, canvas_size) else {
@@ -4497,7 +4549,7 @@ impl EditorWorkspace {
         }
         if !drag.snapshot_pushed {
             self.push_undo();
-            if let Some(active) = self.ui_canvas_drag.as_mut() {
+            if let Some(active) = self.interaction.ui_canvas_drag_mut() {
                 active.snapshot_pushed = true;
             }
         }
@@ -4580,7 +4632,7 @@ impl EditorWorkspace {
             return false;
         }
         self.selected_ui_node = parent;
-        self.ui_canvas_drag = None;
+        self.interaction.take_ui_canvas_drag();
         self.mark_dirty();
         self.status = format!("Deleted UI {name}");
         true
@@ -4648,12 +4700,15 @@ impl EditorWorkspace {
                 | ViewTool::Place
         );
         let select_tool = matches!(self.active_tool, ViewTool::Select);
-        let select_drag_active = self.primitive_drag.is_some()
-            || self.primitive_grid_drag.is_some()
-            || self.primitive_gizmo_drag.is_some()
-            || self.node_gizmo_drag.is_some()
-            || self.node_drag.is_some()
-            || self.viewport_3d_box_select.is_some();
+        let select_drag_active = matches!(
+            self.interaction,
+            Interaction::PrimitiveHeight(_)
+                | Interaction::PrimitiveGrid(_)
+                | Interaction::PrimitiveGizmo(_)
+                | Interaction::NodeGizmo(_)
+                | Interaction::Node(_)
+                | Interaction::BoxSelect3d(_)
+        );
         let pointer_target = if select_tool && select_drag_active {
             None
         } else {
@@ -4786,44 +4841,44 @@ impl EditorWorkspace {
                     }
                 }
                 if response.dragged_by(egui::PointerButton::Primary) {
-                    if self.primitive_gizmo_drag.is_some() {
-                        if let Some(p) = response.interact_pointer_pos() {
-                            self.update_primitive_gizmo_drag(p);
+                    match self.interaction {
+                        Interaction::PrimitiveGizmo(_) => {
+                            if let Some(p) = response.interact_pointer_pos() {
+                                self.update_primitive_gizmo_drag(p);
+                            }
                         }
-                    } else if self.node_gizmo_drag.is_some() {
-                        if let Some(p) = response.interact_pointer_pos() {
-                            self.update_node_gizmo_drag(rect, p);
+                        Interaction::NodeGizmo(_) => {
+                            if let Some(p) = response.interact_pointer_pos() {
+                                self.update_node_gizmo_drag(rect, p);
+                            }
                         }
-                    } else if self.node_drag.is_some() {
-                        if let Some(p) = response.interact_pointer_pos() {
-                            self.update_node_drag(rect, p);
+                        Interaction::Node(_) => {
+                            if let Some(p) = response.interact_pointer_pos() {
+                                self.update_node_drag(rect, p);
+                            }
                         }
-                    } else if self.primitive_grid_drag.is_some() {
-                        if let Some(p) = response.interact_pointer_pos() {
-                            self.update_primitive_grid_drag(rect, p);
+                        Interaction::PrimitiveGrid(_) => {
+                            if let Some(p) = response.interact_pointer_pos() {
+                                self.update_primitive_grid_drag(rect, p);
+                            }
                         }
-                    } else if self.viewport_3d_box_select.is_some() {
-                        if let Some(p) = response.interact_pointer_pos().or(response.hover_pos()) {
-                            self.update_viewport_3d_box_select(p, rect);
+                        Interaction::BoxSelect3d(_) => {
+                            if let Some(p) = response.interact_pointer_pos().or(response.hover_pos())
+                            {
+                                self.update_viewport_3d_box_select(p, rect);
+                            }
                         }
-                    } else {
-                        let dy = response.drag_delta().y;
-                        self.update_primitive_drag(dy);
+                        _ => self.update_primitive_drag(response.drag_delta().y),
                     }
                 }
                 if response.drag_stopped_by(egui::PointerButton::Primary) {
-                    if self.primitive_gizmo_drag.is_some() {
-                        self.end_primitive_gizmo_drag();
-                    } else if self.node_gizmo_drag.is_some() {
-                        self.end_node_gizmo_drag();
-                    } else if self.node_drag.is_some() {
-                        self.end_node_drag();
-                    } else if self.primitive_grid_drag.is_some() {
-                        self.end_primitive_grid_drag();
-                    } else if self.viewport_3d_box_select.is_some() {
-                        self.end_viewport_3d_box_select();
-                    } else {
-                        self.end_primitive_drag();
+                    match self.interaction {
+                        Interaction::PrimitiveGizmo(_) => self.end_primitive_gizmo_drag(),
+                        Interaction::NodeGizmo(_) => self.end_node_gizmo_drag(),
+                        Interaction::Node(_) => self.end_node_drag(),
+                        Interaction::PrimitiveGrid(_) => self.end_primitive_grid_drag(),
+                        Interaction::BoxSelect3d(_) => self.end_viewport_3d_box_select(),
+                        _ => self.end_primitive_drag(),
                     }
                 }
                 if response.clicked_by(egui::PointerButton::Primary) {
@@ -5719,7 +5774,7 @@ impl EditorWorkspace {
         if vertices.is_empty() {
             return;
         }
-        self.primitive_drag = Some(PrimitiveDrag {
+        self.interaction = Interaction::PrimitiveHeight(PrimitiveDrag {
             targets,
             vertices,
             accumulated_pixel_dy: 0.0,
@@ -5788,7 +5843,7 @@ impl EditorWorkspace {
         let Ok((clipboard, _)) = self.primitive_geometry_clipboard_for_targets(&targets) else {
             return false;
         };
-        self.primitive_grid_drag = Some(PrimitiveGridDrag {
+        self.interaction = Interaction::PrimitiveGrid(PrimitiveGridDrag {
             base_project: self.project.clone(),
             base_dirty: self.dirty,
             room,
@@ -5813,7 +5868,7 @@ impl EditorWorkspace {
         // sector, one full sector of height takes 128 pixels of
         // mouse travel -- comfortable for the orbit-cam panel.
         const PIXELS_PER_QUANTUM: f32 = 8.0;
-        let Some(drag) = self.primitive_drag.as_mut() else {
+        let Some(drag) = self.interaction.primitive_drag_mut() else {
             return;
         };
         // Screen +Y is down; world +Y is up -- invert.
@@ -5831,7 +5886,7 @@ impl EditorWorkspace {
             self.push_undo();
         }
         // Re-borrow after the push_undo(&mut self) call.
-        let Some(drag) = self.primitive_drag.as_ref() else {
+        let Some(drag) = self.interaction.primitive_drag() else {
             return;
         };
         // Compute every (vertex, new_y) BEFORE entering the
@@ -5861,7 +5916,7 @@ impl EditorWorkspace {
     /// Drag released. Just clears the stroke; the heights are
     /// already committed.
     fn end_primitive_drag(&mut self) {
-        if let Some(drag) = self.primitive_drag.take() {
+        if let Some(drag) = self.interaction.take_primitive_drag() {
             if drag.snapshot_pushed {
                 let label = if drag.targets.len() == 1 {
                     describe_selection(drag.targets[0])
@@ -5982,7 +6037,7 @@ impl EditorWorkspace {
     }
 
     fn update_primitive_grid_drag(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
-        let Some(drag) = self.primitive_grid_drag.as_ref() else {
+        let Some(drag) = self.interaction.primitive_grid_drag() else {
             return;
         };
         let Some(current_cell) = self.pointer_world_cell_for_room(rect, pointer, drag.room) else {
@@ -5995,14 +6050,14 @@ impl EditorWorkspace {
         if delta == drag.current_delta {
             return;
         }
-        if let Some(drag) = self.primitive_grid_drag.as_mut() {
+        if let Some(drag) = self.interaction.primitive_grid_drag_mut() {
             drag.current_delta = delta;
         }
         self.apply_primitive_grid_drag_preview();
     }
 
     fn apply_primitive_grid_drag_preview(&mut self) {
-        let Some(drag) = self.primitive_grid_drag.clone() else {
+        let Some(drag) = self.interaction.primitive_grid_drag().cloned() else {
             return;
         };
 
@@ -6018,12 +6073,12 @@ impl EditorWorkspace {
         {
             let scene = self.project.active_scene_mut();
             let Some(node) = scene.node(drag.room) else {
-                self.primitive_grid_drag = None;
+                self.interaction = Interaction::Idle;
                 self.status = "Move target room no longer exists".to_string();
                 return;
             };
             let NodeKind::Room { .. } = &node.kind else {
-                self.primitive_grid_drag = None;
+                self.interaction = Interaction::Idle;
                 self.status = "Move target is not a Room".to_string();
                 return;
             };
@@ -6036,12 +6091,12 @@ impl EditorWorkspace {
                 );
             }
             let Some(node) = scene.node_mut(drag.room) else {
-                self.primitive_grid_drag = None;
+                self.interaction = Interaction::Idle;
                 self.status = "Move target room no longer exists".to_string();
                 return;
             };
             let NodeKind::Room { grid } = &mut node.kind else {
-                self.primitive_grid_drag = None;
+                self.interaction = Interaction::Idle;
                 self.status = "Move target is not a Room".to_string();
                 return;
             };
@@ -6078,8 +6133,8 @@ impl EditorWorkspace {
         room: NodeId,
     ) -> Option<[i32; 2]> {
         let grid = self
-            .primitive_grid_drag
-            .as_ref()
+            .interaction
+            .primitive_grid_drag()
             .filter(|drag| drag.room == room)
             .and_then(|drag| drag.base_project.active_scene().node(room))
             .and_then(|node| match &node.kind {
@@ -6093,7 +6148,7 @@ impl EditorWorkspace {
     }
 
     fn end_primitive_grid_drag(&mut self) {
-        let Some(drag) = self.primitive_grid_drag.take() else {
+        let Some(drag) = self.interaction.take_primitive_grid_drag() else {
             return;
         };
         if drag.current_delta == [0, 0] {
@@ -6209,7 +6264,7 @@ impl EditorWorkspace {
         if axes.is_empty() {
             return;
         }
-        let active_axis = self.primitive_gizmo_drag.as_ref().map(|drag| drag.axis);
+        let active_axis = self.interaction.primitive_gizmo_drag().map(|drag| drag.axis);
         painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
         for screen_axis in axes {
             let highlighted =
@@ -6548,8 +6603,8 @@ impl EditorWorkspace {
                 return;
             }
             let active_axis = self
-                .node_gizmo_drag
-                .as_ref()
+                .interaction
+                .node_gizmo_drag()
                 .and_then(|drag| drag.handle.axis());
             painter.circle_filled(rings[0].center, 4.0, Color32::from_rgb(235, 242, 248));
             for ring in &rings {
@@ -6577,7 +6632,7 @@ impl EditorWorkspace {
         if axes.is_empty() {
             return;
         }
-        let active_handle = self.node_gizmo_drag.as_ref().map(|drag| drag.handle);
+        let active_handle = self.interaction.node_gizmo_drag().map(|drag| drag.handle);
         painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
         if self.transform_gizmo_mode == TransformGizmoMode::Move {
             for screen_plane in self.node_gizmo_screen_planes(rect) {
@@ -6671,7 +6726,7 @@ impl EditorWorkspace {
             }
         }
 
-        self.primitive_gizmo_drag = Some(PrimitiveGizmoDrag {
+        self.interaction = Interaction::PrimitiveGizmo(PrimitiveGizmoDrag {
             axis,
             start_pointer: pointer,
             screen_axis: screen_axis_delta,
@@ -6685,7 +6740,7 @@ impl EditorWorkspace {
     }
 
     fn update_primitive_gizmo_drag(&mut self, pointer: Pos2) {
-        let Some(drag) = self.primitive_gizmo_drag.as_ref() else {
+        let Some(drag) = self.interaction.primitive_gizmo_drag() else {
             return;
         };
         let axis_len_sq = drag.screen_axis.length_sq();
@@ -6707,7 +6762,7 @@ impl EditorWorkspace {
             return;
         }
         let axis = drag.axis;
-        if let Some(drag) = self.primitive_gizmo_drag.as_mut() {
+        if let Some(drag) = self.interaction.primitive_gizmo_drag_mut() {
             drag.current_steps = steps;
             if let Some(grid) = drag.grid.as_mut() {
                 grid.current_delta = axis.cell_delta(steps);
@@ -6722,7 +6777,7 @@ impl EditorWorkspace {
     }
 
     fn apply_primitive_gizmo_y_drag(&mut self) {
-        let Some(drag) = self.primitive_gizmo_drag.as_ref() else {
+        let Some(drag) = self.interaction.primitive_gizmo_drag() else {
             return;
         };
         let world_delta = drag.current_steps * HEIGHT_QUANTUM;
@@ -6730,12 +6785,12 @@ impl EditorWorkspace {
             return;
         }
         if !drag.snapshot_pushed {
-            if let Some(drag) = self.primitive_gizmo_drag.as_mut() {
+            if let Some(drag) = self.interaction.primitive_gizmo_drag_mut() {
                 drag.snapshot_pushed = true;
             }
             self.push_undo();
         }
-        let Some(drag) = self.primitive_gizmo_drag.as_ref() else {
+        let Some(drag) = self.interaction.primitive_gizmo_drag() else {
             return;
         };
         let updates: Vec<(NodeId, PhysicalVertex, i32)> = drag
@@ -6764,8 +6819,8 @@ impl EditorWorkspace {
 
     fn apply_primitive_gizmo_grid_preview(&mut self) {
         let Some(grid_drag) = self
-            .primitive_gizmo_drag
-            .as_ref()
+            .interaction
+            .primitive_gizmo_drag()
             .and_then(|drag| drag.grid.clone())
         else {
             return;
@@ -6783,12 +6838,12 @@ impl EditorWorkspace {
         {
             let scene = self.project.active_scene_mut();
             let Some(node) = scene.node(grid_drag.room) else {
-                self.primitive_gizmo_drag = None;
+                self.interaction = Interaction::Idle;
                 self.status = "Move target room no longer exists".to_string();
                 return;
             };
             let NodeKind::Room { .. } = &node.kind else {
-                self.primitive_gizmo_drag = None;
+                self.interaction = Interaction::Idle;
                 self.status = "Move target is not a Room".to_string();
                 return;
             };
@@ -6801,12 +6856,12 @@ impl EditorWorkspace {
                 );
             }
             let Some(node) = scene.node_mut(grid_drag.room) else {
-                self.primitive_gizmo_drag = None;
+                self.interaction = Interaction::Idle;
                 self.status = "Move target room no longer exists".to_string();
                 return;
             };
             let NodeKind::Room { grid } = &mut node.kind else {
-                self.primitive_gizmo_drag = None;
+                self.interaction = Interaction::Idle;
                 self.status = "Move target is not a Room".to_string();
                 return;
             };
@@ -6837,7 +6892,7 @@ impl EditorWorkspace {
     }
 
     fn end_primitive_gizmo_drag(&mut self) {
-        let Some(drag) = self.primitive_gizmo_drag.take() else {
+        let Some(drag) = self.interaction.take_primitive_gizmo_drag() else {
             return;
         };
         if let Some(grid_drag) = drag.grid {
@@ -6977,7 +7032,7 @@ impl EditorWorkspace {
             return false;
         }
 
-        self.node_gizmo_drag = Some(NodeGizmoDrag {
+        self.interaction = Interaction::NodeGizmo(NodeGizmoDrag {
             mode,
             handle,
             start_pointer: pointer,
@@ -6992,7 +7047,7 @@ impl EditorWorkspace {
     }
 
     fn update_node_gizmo_drag(&mut self, rect: Rect, pointer: Pos2) {
-        let Some(drag) = self.node_gizmo_drag.as_ref() else {
+        let Some(drag) = self.interaction.node_gizmo_drag() else {
             return;
         };
         if let (TransformGizmoMode::Move, NodeGizmoHandle::Plane(plane)) = (drag.mode, drag.handle)
@@ -7016,7 +7071,7 @@ impl EditorWorkspace {
             if vec3_nearly_equal(delta, drag.current_plane_delta_world) {
                 return;
             }
-            if let Some(drag) = self.node_gizmo_drag.as_mut() {
+            if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
                 drag.current_plane_delta_world = delta;
             }
             self.apply_node_gizmo_drag();
@@ -7043,27 +7098,27 @@ impl EditorWorkspace {
         if steps == drag.current_steps {
             return;
         }
-        if let Some(drag) = self.node_gizmo_drag.as_mut() {
+        if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
             drag.current_steps = steps;
         }
         self.apply_node_gizmo_drag();
     }
 
     fn apply_node_gizmo_drag(&mut self) {
-        let Some(drag) = self.node_gizmo_drag.as_ref() else {
+        let Some(drag) = self.interaction.node_gizmo_drag() else {
             return;
         };
         if !node_gizmo_drag_has_motion(drag) && !drag.snapshot_pushed {
             return;
         }
         if !drag.snapshot_pushed {
-            if let Some(drag) = self.node_gizmo_drag.as_mut() {
+            if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
                 drag.snapshot_pushed = true;
             }
             self.push_undo();
         }
 
-        let Some(drag) = self.node_gizmo_drag.as_ref() else {
+        let Some(drag) = self.interaction.node_gizmo_drag() else {
             return;
         };
         let handle = drag.handle;
@@ -7120,7 +7175,7 @@ impl EditorWorkspace {
     }
 
     fn end_node_gizmo_drag(&mut self) {
-        let Some(drag) = self.node_gizmo_drag.take() else {
+        let Some(drag) = self.interaction.take_node_gizmo_drag() else {
             return;
         };
         if !drag.snapshot_pushed {
@@ -7226,7 +7281,7 @@ impl EditorWorkspace {
         // -- that way the cursor stays attached to the bound
         // even if the camera angle changes mid-drag.
         let drag_plane_y = hit.bounds.center[1];
-        self.node_drag = Some(NodeDrag {
+        self.interaction = Interaction::Node(NodeDrag {
             node: hit.node,
             start_translation: node.transform.translation,
             start_world_hit: hit.point,
@@ -7243,7 +7298,7 @@ impl EditorWorkspace {
     /// translation. Pushes undo lazily on the first
     /// non-zero-delta frame.
     fn update_node_drag(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
-        let Some(drag) = self.node_drag.as_ref() else {
+        let Some(drag) = self.interaction.node_drag() else {
             return;
         };
         let plane_y = drag.drag_plane_y;
@@ -7286,7 +7341,7 @@ impl EditorWorkspace {
             && (delta_world[0].abs() > f32::EPSILON || delta_world[1].abs() > f32::EPSILON)
         {
             self.push_undo();
-            if let Some(d) = self.node_drag.as_mut() {
+            if let Some(d) = self.interaction.node_drag_mut() {
                 d.snapshot_pushed = true;
             }
         }
@@ -7304,7 +7359,7 @@ impl EditorWorkspace {
     /// End the active node-drag stroke. Idempotent if no drag
     /// is in flight.
     fn end_node_drag(&mut self) {
-        self.node_drag = None;
+        self.interaction.take_node_drag();
     }
 
     fn commit_face_selection(&mut self, modifiers: egui::Modifiers) {
@@ -10038,9 +10093,15 @@ impl EditorWorkspace {
             return;
         }
         self.transform_gizmo_mode = mode;
-        self.primitive_gizmo_drag = None;
-        self.node_gizmo_drag = None;
-        self.node_drag = None;
+        // Switching gizmo mode cancels an in-flight transform stroke
+        // (gizmo / node-gizmo / node drag), but must leave an unrelated
+        // marquee or UI-canvas stroke alone.
+        if matches!(
+            self.interaction,
+            Interaction::PrimitiveGizmo(_) | Interaction::NodeGizmo(_) | Interaction::Node(_)
+        ) {
+            self.interaction = Interaction::Idle;
+        }
         self.status = format!("Transform: {}", mode.label());
         self.mark_shortcut_group_changed(ShortcutGroup::Transform);
     }
@@ -10443,7 +10504,7 @@ impl EditorWorkspace {
                 };
                 if scene.move_node(source, target_parent, position) {
                     self.select_ui_node(source);
-                    self.ui_canvas_drag = None;
+                    self.interaction.take_ui_canvas_drag();
                     self.status = "Moved UI node".to_string();
                     self.mark_dirty();
                 }
@@ -13953,7 +14014,7 @@ impl EditorWorkspace {
                         let primary_down = ui
                             .input(|input| input.pointer.button_down(egui::PointerButton::Primary));
                         if !primary_down {
-                            self.viewport_box_select = None;
+                            self.interaction.take_box_select_2d();
                         }
                         if !dnd_active && self.floating_geometry.is_some() {
                             if response.clicked_by(egui::PointerButton::Primary) {
@@ -13999,7 +14060,7 @@ impl EditorWorkspace {
                             }
                         }
                         if !dnd_active
-                            && self.viewport_box_select.is_none()
+                            && self.interaction.box_select_2d().is_none()
                             && response.dragged_by(egui::PointerButton::Primary)
                         {
                             self.drag_selected_node(ui.input(|input| input.pointer.delta()));
@@ -15686,7 +15747,7 @@ impl EditorWorkspace {
         self.selected_sector = None;
         self.selected_sectors.clear();
         self.sector_selection_anchor = None;
-        self.viewport_box_select = None;
+        self.interaction.take_box_select_2d();
     }
 
     fn select_sector(&mut self, selection: SectorSelection, modifiers: egui::Modifiers) {
@@ -15757,7 +15818,7 @@ impl EditorWorkspace {
         modifiers: egui::Modifiers,
     ) {
         let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
-        self.viewport_box_select = Some(ViewportBoxSelect {
+        self.interaction = Interaction::BoxSelect2d(ViewportBoxSelect {
             start,
             current: start,
             room,
@@ -15778,7 +15839,7 @@ impl EditorWorkspace {
     }
 
     fn update_viewport_box_select(&mut self, current: Pos2, transform: ViewportTransform) -> bool {
-        let Some(drag) = self.viewport_box_select.as_mut() else {
+        let Some(drag) = self.interaction.box_select_2d_mut() else {
             return false;
         };
         drag.current = current;
@@ -15791,8 +15852,8 @@ impl EditorWorkspace {
     }
 
     fn viewport_box_select_rect(&self) -> Option<Rect> {
-        self.viewport_box_select
-            .as_ref()
+        self.interaction
+            .box_select_2d()
             .map(ViewportBoxSelect::rect)
     }
 
@@ -15803,8 +15864,7 @@ impl EditorWorkspace {
         modifiers: egui::Modifiers,
     ) {
         let additive = modifiers.shift || modifiers.command || modifiers.ctrl;
-        self.viewport_box_select = None;
-        self.viewport_3d_box_select = Some(Viewport3dBoxSelect {
+        self.interaction = Interaction::BoxSelect3d(Viewport3dBoxSelect {
             start,
             current: start,
             room,
@@ -15826,7 +15886,7 @@ impl EditorWorkspace {
     }
 
     fn update_viewport_3d_box_select(&mut self, current: Pos2, viewport: Rect) -> bool {
-        let Some(drag) = self.viewport_3d_box_select.as_mut() else {
+        let Some(drag) = self.interaction.box_select_3d_mut() else {
             return false;
         };
         drag.current = current;
@@ -15845,12 +15905,12 @@ impl EditorWorkspace {
     }
 
     fn end_viewport_3d_box_select(&mut self) {
-        self.viewport_3d_box_select = None;
+        self.interaction.take_box_select_3d();
     }
 
     fn viewport_3d_box_select_rect(&self) -> Option<Rect> {
-        self.viewport_3d_box_select
-            .as_ref()
+        self.interaction
+            .box_select_3d()
             .map(Viewport3dBoxSelect::rect)
     }
 
@@ -16705,7 +16765,7 @@ impl EditorWorkspace {
             .collect::<HashSet<_>>();
         self.selected_sector = cells.first().copied();
         self.sector_selection_anchor = cells.first().map(|(sx, sz)| (room, *sx, *sz));
-        self.viewport_box_select = None;
+        self.interaction.take_box_select_2d();
     }
 
     fn select_geometry_primitives(&mut self, room: NodeId, selections: Vec<Selection>) {
@@ -16716,7 +16776,7 @@ impl EditorWorkspace {
         for selection in selections {
             self.push_selected_primitive_unique(selection);
         }
-        self.viewport_box_select = None;
+        self.interaction.take_box_select_2d();
         self.update_primitive_resource_selection();
     }
 
@@ -37501,8 +37561,8 @@ mod tests {
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
         assert!(workspace.begin_primitive_grid_drag(rect, rect.center(), egui::Modifiers::NONE));
         workspace
-            .primitive_grid_drag
-            .as_mut()
+            .interaction
+            .primitive_grid_drag_mut()
             .unwrap()
             .current_delta = [1, 0];
         workspace.apply_primitive_grid_drag_preview();
@@ -37839,8 +37899,8 @@ mod tests {
             start
         ));
         let start_hit = workspace
-            .node_gizmo_drag
-            .as_ref()
+            .interaction
+            .node_gizmo_drag()
             .and_then(|drag| drag.start_plane_hit)
             .expect("plane drag stores start hit");
         let target_hit = [
