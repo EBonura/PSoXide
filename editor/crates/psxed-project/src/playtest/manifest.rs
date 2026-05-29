@@ -66,6 +66,23 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
 /// can `include!`. Imports types from `psx_level` rather than
 /// re-defining them so the writer here and the reader there
 /// stay in lockstep.
+/// Emit a `pub static {name}: &[u8]` whose backing blob is forced to
+/// 4-byte (word) alignment via [`AlignedAssetBytes`]. Plain
+/// `include_bytes!` is byte-aligned, which makes the runtime stream the
+/// texture/sky payload to VRAM one word at a time through the GP0 FIFO;
+/// a word-aligned blob lets it DMA the payload in a single block-mode
+/// transfer instead (`pixel_bytes` sits at a 4-aligned offset).
+fn write_aligned_asset_bytes_static(out: &mut String, static_name: &str, include_path: &str) {
+    let _ = writeln!(out, "pub static {static_name}: &[u8] = {{");
+    let _ = writeln!(out, "    static ALIGNED: &AlignedAssetBytes<u32, [u8]> =");
+    let _ = writeln!(
+        out,
+        "        &AlignedAssetBytes {{ _align: [], bytes: *include_bytes!(\"{include_path}\") }};",
+    );
+    let _ = writeln!(out, "    &ALIGNED.bytes");
+    let _ = writeln!(out, "}};");
+}
+
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
@@ -114,6 +131,17 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         "pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = {runtime_texture_split_max_edge};\n",
     );
 
+    // Force 4-byte alignment on embedded asset blobs. A zero-size
+    // `[u32; 0]` marker bumps the wrapper's alignment to a word; the
+    // trailing unsized `bytes` field then starts word-aligned, which
+    // keeps each texture's `pixel_bytes` DMA-eligible at upload time.
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str("#[repr(C)]\n");
+    out.push_str("struct AlignedAssetBytes<Align, Bytes: ?Sized> {\n");
+    out.push_str("    _align: [Align; 0],\n");
+    out.push_str("    bytes: Bytes,\n");
+    out.push_str("}\n\n");
+
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
     // statics so the slice is still constructible at compile time.
@@ -140,17 +168,9 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
                 asset_static_name(asset, i)
             );
             let _ = writeln!(out, "#[cfg(not(feature = \"cd-stream-bench\"))]");
-            let _ = writeln!(
-                out,
-                "pub static {}: &[u8] = include_bytes!(\"{include_path}\");",
-                asset_static_name(asset, i),
-            );
+            write_aligned_asset_bytes_static(&mut out, &asset_static_name(asset, i), &include_path);
         } else {
-            let _ = writeln!(
-                out,
-                "pub static {}: &[u8] = include_bytes!(\"{include_path}\");",
-                asset_static_name(asset, i),
-            );
+            write_aligned_asset_bytes_static(&mut out, &asset_static_name(asset, i), &include_path);
         }
     }
     out.push('\n');
@@ -2615,7 +2635,8 @@ mod tests {
         assert!(src.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 1;"));
         assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 96;"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = &[];"));
-        assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = include_bytes!(\"rooms/room_000.psxw\");"));
+        assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = {"));
+        assert!(src.contains("bytes: *include_bytes!(\"rooms/room_000.psxw\") };"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read room-surface cache slices from `.psxc` chunks.\npub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room cells from `.psxc` chunks.\npub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached cell vertex indices from `.psxc` chunks.\npub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];"));

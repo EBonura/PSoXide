@@ -405,25 +405,6 @@ pub fn draw_sprite_material(
     write_gp0(pack_xy(w, h));
 }
 
-/// Upload raw 16bpp pixels from CPU memory into a VRAM rectangle.
-/// Used for font glyphs, sprites, and CLUTs -- the standard
-/// "CPU→VRAM transfer" pipe (GP0 0xA0 + pixel words).
-///
-/// Length of `pixels` must equal `w * h / 2` words (two 16bpp
-/// pixels packed per word). Alignment of `pixels` doesn't matter
-/// here because we push one word at a time via the FIFO; games
-/// doing DMA uploads get an order-of-magnitude speedup but need
-/// extra care with addresses, which we skip for this simple path.
-pub fn upload_rect_raw(x: u16, y: u16, w: u16, h: u16, pixels: &[u32]) {
-    wait_cmd_ready();
-    write_gp0(gp0::COPY_CPU_TO_VRAM);
-    write_gp0(pack_xy(x, y));
-    write_gp0(pack_xy(w, h));
-    for word in pixels {
-        write_gp0(*word);
-    }
-}
-
 /// Set the texture page + CLUT + color depth used by subsequent
 /// textured primitives. Textured-rect commands (0x64..=0x7F) read
 /// the texpage from the last GP0(E1h); textured polygons embed
