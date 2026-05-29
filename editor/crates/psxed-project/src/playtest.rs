@@ -3785,8 +3785,12 @@ fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
     ];
     let mut out = [[0, 0, 0]; 4];
     for (idx, local) in locals.iter().enumerate() {
-        let rotated =
-            rotate_image_prop_local(*local, prop.pitch as u16, prop.yaw as u16, prop.roll as u16);
+        let rotated = crate::spatial::rotate_euler_local_q12(
+            *local,
+            prop.pitch as u16,
+            prop.yaw as u16,
+            prop.roll as u16,
+        );
         out[idx] = [
             prop.x.saturating_add(rotated[0]),
             prop.y.saturating_add(rotated[1]),
@@ -3801,7 +3805,7 @@ fn box_prop_static_face_vertices(
 ) -> [[[i32; 3]; 4]; psx_level::BOX_PROP_FACE_COUNT] {
     let mut vertices = [[0, 0, 0]; psx_level::BOX_PROP_VERTEX_COUNT];
     for (idx, local) in prop.vertices.iter().enumerate() {
-        let rotated = rotate_image_prop_local(
+        let rotated = crate::spatial::rotate_euler_local_q12(
             [local[0] as i32, local[1] as i32, local[2] as i32],
             prop.pitch as u16,
             prop.yaw as u16,
@@ -3821,47 +3825,6 @@ fn box_prop_static_face_vertices(
         }
     }
     faces
-}
-
-fn rotate_image_prop_local(v: [i32; 3], pitch: u16, yaw: u16, roll: u16) -> [i32; 3] {
-    rotate_z_q12(rotate_y_q12(rotate_x_q12(v, pitch), yaw), roll)
-}
-
-fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let angle = psx_engine::Angle::from_q12(angle_q12);
-    let s = angle.sin().raw();
-    let c = angle.cos().raw();
-    [
-        v[0],
-        mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
-        mul_q12_i32(v[1], s) + mul_q12_i32(v[2], c),
-    ]
-}
-
-fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let angle = psx_engine::Angle::from_q12(angle_q12);
-    let s = angle.sin().raw();
-    let c = angle.cos().raw();
-    [
-        mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
-        v[1],
-        -mul_q12_i32(v[0], s) + mul_q12_i32(v[2], c),
-    ]
-}
-
-fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let angle = psx_engine::Angle::from_q12(angle_q12);
-    let s = angle.sin().raw();
-    let c = angle.cos().raw();
-    [
-        mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
-        mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
-        v[2],
-    ]
-}
-
-fn mul_q12_i32(value: i32, q12: i32) -> i32 {
-    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
@@ -4940,11 +4903,12 @@ fn yaw_from_degrees(degrees: f32) -> i16 {
     angle_from_degrees(degrees)
 }
 
-/// Convert editor Euler degrees to PSX angle units (`0..4096`).
+/// Convert editor Euler degrees to PSX angle units (`0..4096`), stored as the
+/// signed value the compact records use. The math is shared with the editor
+/// preview via [`crate::spatial::euler_degrees_to_q12`] so authored facing
+/// can't drift between preview and cooked output.
 fn angle_from_degrees(degrees: f32) -> i16 {
-    let normalised = degrees.rem_euclid(360.0);
-    let units = normalised * (4096.0 / 360.0);
-    units as i16
+    crate::spatial::euler_degrees_to_q12(degrees) as i16
 }
 
 fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String {
