@@ -58,8 +58,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-use psx_hw::gpu::{gp0, pack_xy};
-use psx_io::gpu::{wait_cmd_ready, write_gp0};
+use psx_hw::gpu::{gp0, gp1, pack_xy};
+use psx_io::dma::{self, Channel};
+use psx_io::gpu::{wait_cmd_ready, write_gp0, write_gp1};
 
 /// VRAM framebuffer width in pixels.
 pub const VRAM_WIDTH: u16 = 1024;
@@ -557,14 +558,14 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
         "upload_16bpp: odd pixel count ({expected}) not supported — caller should round up",
     );
 
-    wait_cmd_ready();
-    write_gp0(gp0::COPY_CPU_TO_VRAM);
-    write_gp0(pack_xy(rect.x, rect.y));
-    write_gp0(pack_xy(rect.w, rect.h));
-    // Two halfwords per 32-bit FIFO word, low half first.
+    if try_dma_copy_to_vram(rect, pixels.as_ptr() as *const u32) {
+        return;
+    }
+    // FIFO fallback: two halfwords per 32-bit word, low half first.
     // During GP0(0xA0) image transfer the GPU is waiting for data,
     // not normal commands; DuckStation clears READY_CMD in this
     // state, so stream payload words without polling command-ready.
+    copy_to_vram_header(rect);
     let mut i = 0;
     while i + 1 < pixels.len() {
         let lo = pixels[i] as u32;
@@ -597,20 +598,61 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
         "upload_bytes: byte count must be a positive multiple of 4"
     );
 
-    wait_cmd_ready();
-    write_gp0(gp0::COPY_CPU_TO_VRAM);
-    write_gp0(pack_xy(rect.x, rect.y));
-    write_gp0(pack_xy(rect.w, rect.h));
-    // Two halfwords per FIFO word, low half first -- matches
-    // upload_16bpp's packing convention.
-    // See upload_16bpp: image payload writes must not wait on the
-    // normal command-ready bit.
+    if try_dma_copy_to_vram(rect, bytes.as_ptr() as *const u32) {
+        return;
+    }
+    // FIFO fallback: two halfwords per word, low half first -- matches
+    // upload_16bpp's packing convention. See upload_16bpp: image payload
+    // writes must not wait on the normal command-ready bit.
+    copy_to_vram_header(rect);
     let mut i = 0;
     while i + 3 < bytes.len() {
         let w = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
         write_gp0(w);
         i += 4;
     }
+}
+
+/// Emit the GP0(0xA0) "copy CPU→VRAM" command header: destination
+/// top-left and halfword extent. Pixel payload words follow, pushed
+/// either by the FIFO or by block DMA.
+#[inline]
+fn copy_to_vram_header(rect: VramRect) {
+    wait_cmd_ready();
+    write_gp0(gp0::COPY_CPU_TO_VRAM);
+    write_gp0(pack_xy(rect.x, rect.y));
+    write_gp0(pack_xy(rect.w, rect.h));
+}
+
+/// Fast path: stream the pixel payload to the GPU over block-mode DMA
+/// (channel 2) instead of word-at-a-time FIFO writes. Returns `false`
+/// (leaving the GPU untouched) when the transfer can't be expressed as
+/// whole 32-bit words from a word-aligned source, so the caller can
+/// fall back to the FIFO loop.
+///
+/// `src` must point at `(rect.w / 2) * rect.h` little-endian words. The
+/// DMA controller is word-addressed, so a non-word-aligned `src` (or an
+/// odd halfword row stride) can't be DMA'd and takes the FIFO path. This
+/// mirrors PsyQ's `LoadImage`: `BS = words-per-row`, `BA = rows`.
+fn try_dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
+    if (src as usize) % 4 != 0 || rect.w % 2 != 0 || rect.w == 0 || rect.h == 0 {
+        return false;
+    }
+    let words_per_row = rect.w / 2;
+
+    copy_to_vram_header(rect);
+    // GP1(04h) = 2: route DMA words CPU→GP0. `psx-gpu::init` sets this,
+    // but a VRAM readback could have flipped it to GPUREAD→CPU.
+    write_gp1(gp1::dma_direction(2));
+    dma::enable_channel(Channel::Gpu);
+    dma::set_madr(Channel::Gpu, src as u32);
+    dma::set_bcr_block(Channel::Gpu, words_per_row, rect.h);
+    dma::set_chcr(
+        Channel::Gpu,
+        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+    );
+    while dma::is_busy(Channel::Gpu) {}
+    true
 }
 
 /// Upload typed [`Color555`] pixels -- sugar over [`upload_16bpp`]
