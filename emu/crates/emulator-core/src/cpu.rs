@@ -92,6 +92,11 @@ pub struct Cpu {
     /// between an op and its result read hides the latency. The emulator
     /// computes GTE results eagerly, so this models timing only.
     gte_busy_until: u64,
+    /// Bus cycle at which the multiply/divide unit's HI/LO result becomes
+    /// available. MFHI/MFLO stall to this point (the R3000A HI/LO interlock),
+    /// and interleaving work between a MULT/DIV and its result read hides the
+    /// latency. Results are computed eagerly, so this models timing only.
+    hilo_busy_until: u64,
     hi: u32,
     lo: u32,
     /// When a SYSCALL/BREAK/exception fires, the post-retire PC goes
@@ -147,6 +152,7 @@ impl Cpu {
             pending_load: None,
             committing_load: None,
             gte_busy_until: 0,
+            hilo_busy_until: 0,
             hi: 0,
             lo: 0,
             pending_exception_pc: None,
@@ -216,6 +222,7 @@ impl Cpu {
         self.pending_load = None;
         self.committing_load = None;
         self.gte_busy_until = 0;
+        self.hilo_busy_until = 0;
         self.pending_exception_pc = None;
         self.set_gpr(28, initial_gp);
         if let Some(sp) = initial_sp {
@@ -536,7 +543,7 @@ impl Cpu {
     ) -> Result<(), ExecutionError> {
         let opcode = ((instr >> 26) & 0x3F) as u8;
         match opcode {
-            0x00 => self.dispatch_special(instr, pc, in_delay_slot),
+            0x00 => self.dispatch_special(instr, pc, in_delay_slot, bus),
             0x01 => self.dispatch_regimm(instr, pc),
             0x02 => self.op_j(instr, pc),
             0x03 => self.op_jal(instr, pc),
@@ -630,10 +637,7 @@ impl Cpu {
     /// between an op and its result read.
     #[inline]
     fn gte_sync(&mut self, bus: &mut Bus) {
-        let now = bus.cycles();
-        if now < self.gte_busy_until {
-            bus.add_cycles((self.gte_busy_until - now) as u32);
-        }
+        stall_to(bus, self.gte_busy_until);
     }
 
     /// `MFC2 rt, rd` -- move from COP2 data register `rd` into GPR
@@ -745,6 +749,7 @@ impl Cpu {
         instr: u32,
         pc: u32,
         in_delay_slot: bool,
+        bus: &mut Bus,
     ) -> Result<(), ExecutionError> {
         let funct = (instr & 0x3F) as u8;
         match funct {
@@ -758,14 +763,42 @@ impl Cpu {
             0x09 => self.op_jalr(instr, pc),
             0x0C => self.op_syscall(pc, in_delay_slot),
             0x0D => self.op_break(pc, in_delay_slot),
-            0x10 => self.op_mfhi(instr),
+            // MFHI/MFLO read the multiply/divide unit; stall until an
+            // in-flight MULT/DIV has retired (the R3000A HI/LO interlock).
+            0x10 => {
+                stall_to(bus, self.hilo_busy_until);
+                self.op_mfhi(instr)
+            }
             0x11 => self.op_mthi(instr),
-            0x12 => self.op_mflo(instr),
+            0x12 => {
+                stall_to(bus, self.hilo_busy_until);
+                self.op_mflo(instr)
+            }
             0x13 => self.op_mtlo(instr),
-            0x18 => self.op_mult(instr),
-            0x19 => self.op_multu(instr),
-            0x1A => self.op_div(instr),
-            0x1B => self.op_divu(instr),
+            // MULT/MULTU/DIV/DIVU run asynchronously: charge their latency so
+            // a dependent MFHI/MFLO stalls and interleaved work hides it.
+            0x18 => {
+                let cycles = mult_cycles(self.gpr(((instr >> 21) & 0x1F) as u8), true);
+                let r = self.op_mult(instr);
+                self.hilo_busy_until = bus.cycles() + cycles as u64;
+                r
+            }
+            0x19 => {
+                let cycles = mult_cycles(self.gpr(((instr >> 21) & 0x1F) as u8), false);
+                let r = self.op_multu(instr);
+                self.hilo_busy_until = bus.cycles() + cycles as u64;
+                r
+            }
+            0x1A => {
+                let r = self.op_div(instr);
+                self.hilo_busy_until = bus.cycles() + DIV_CYCLES as u64;
+                r
+            }
+            0x1B => {
+                let r = self.op_divu(instr);
+                self.hilo_busy_until = bus.cycles() + DIV_CYCLES as u64;
+                r
+            }
             0x20 => self.op_add(instr),
             0x21 => self.op_addu(instr),
             0x22 => self.op_sub(instr),
@@ -1660,6 +1693,38 @@ impl Cpu {
         let in_delay_slot = self.pending_pc.is_some();
         self.cop0[8] = addr;
         self.enter_exception(code, self.pc, in_delay_slot);
+    }
+}
+
+/// R3000A iterative divide latency, in CPU cycles. DIV and DIVU take the
+/// same fixed time regardless of operands.
+const DIV_CYCLES: u32 = 36;
+
+/// Stall the CPU forward to `deadline` (a [`Bus::cycles`] value) if it has
+/// not reached it yet. Shared by the GTE and multiply/divide result
+/// interlocks: both compute their result eagerly, and this charges the cycles
+/// the CPU would spend waiting for the unit to retire before reading it.
+#[inline]
+fn stall_to(bus: &mut Bus, deadline: u64) {
+    let now = bus.cycles();
+    if now < deadline {
+        bus.add_cycles((deadline - now) as u32);
+    }
+}
+
+/// R3000A multiply latency in CPU cycles. The multiply/divide unit retires
+/// faster for small multipliers: 6 cycles when the `rs` operand's magnitude
+/// fits in 11 bits, 9 within 20 bits, otherwise the full 13. `signed` selects
+/// the MULT (sign-magnitude) versus MULTU (raw) interpretation of `rs`.
+#[inline]
+fn mult_cycles(rs: u32, signed: bool) -> u32 {
+    let magnitude = if signed && (rs as i32) < 0 { !rs } else { rs };
+    if magnitude < 0x800 {
+        6
+    } else if magnitude < 0x10_0000 {
+        9
+    } else {
+        13
     }
 }
 
