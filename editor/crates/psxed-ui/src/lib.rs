@@ -3,6 +3,7 @@
 //! The frontend owns the window/Menu. This crate owns the editor panels and
 //! the in-memory authoring document they manipulate.
 
+mod gizmo;
 mod history;
 mod icons;
 mod model_animation_viewer;
@@ -16,6 +17,7 @@ pub use play_mode::{
     EditorViewportOverlayLine,
 };
 
+use crate::gizmo::*;
 use crate::history::UndoStack;
 use crate::model_animation_viewer::ModelAnimationViewerState;
 use crate::style::*;
@@ -1546,124 +1548,6 @@ struct PrimitiveGridDrag {
     cells: Vec<GeometryClipboardCell>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum PrimitiveGizmoAxis {
-    X,
-    Y,
-    Z,
-}
-
-impl PrimitiveGizmoAxis {
-    fn color(self) -> Color32 {
-        match self {
-            Self::X => Color32::from_rgb(255, 84, 76),
-            Self::Y => Color32::from_rgb(98, 236, 112),
-            Self::Z => Color32::from_rgb(86, 156, 255),
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::X => "X",
-            Self::Y => "Y",
-            Self::Z => "Z",
-        }
-    }
-
-    fn world_delta(self, sector_size: i32) -> [f32; 3] {
-        let sector_size = sector_size as f32;
-        match self {
-            Self::X => [sector_size, 0.0, 0.0],
-            Self::Y => [0.0, sector_size, 0.0],
-            Self::Z => [0.0, 0.0, sector_size],
-        }
-    }
-
-    const fn cell_delta(self, steps: i32) -> [i32; 2] {
-        match self {
-            Self::X => [steps, 0],
-            Self::Y => [0, 0],
-            Self::Z => [0, steps],
-        }
-    }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::X => 0,
-            Self::Y => 1,
-            Self::Z => 2,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PrimitiveGizmoScreenAxis {
-    axis: PrimitiveGizmoAxis,
-    start: Pos2,
-    end: Pos2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum NodeGizmoPlane {
-    XY,
-    XZ,
-    YZ,
-}
-
-impl NodeGizmoPlane {
-    const ALL: [Self; 3] = [Self::XY, Self::XZ, Self::YZ];
-
-    const fn axes(self) -> [PrimitiveGizmoAxis; 2] {
-        match self {
-            Self::XY => [PrimitiveGizmoAxis::X, PrimitiveGizmoAxis::Y],
-            Self::XZ => [PrimitiveGizmoAxis::X, PrimitiveGizmoAxis::Z],
-            Self::YZ => [PrimitiveGizmoAxis::Y, PrimitiveGizmoAxis::Z],
-        }
-    }
-
-    const fn normal_axis(self) -> PrimitiveGizmoAxis {
-        match self {
-            Self::XY => PrimitiveGizmoAxis::Z,
-            Self::XZ => PrimitiveGizmoAxis::Y,
-            Self::YZ => PrimitiveGizmoAxis::X,
-        }
-    }
-
-    fn color(self) -> Color32 {
-        self.normal_axis().color()
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::XY => "XY",
-            Self::XZ => "XZ",
-            Self::YZ => "YZ",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum NodeGizmoHandle {
-    Axis(PrimitiveGizmoAxis),
-    Plane(NodeGizmoPlane),
-}
-
-impl NodeGizmoHandle {
-    const fn axis(self) -> Option<PrimitiveGizmoAxis> {
-        match self {
-            Self::Axis(axis) => Some(axis),
-            Self::Plane(_) => None,
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Axis(axis) => axis.label(),
-            Self::Plane(plane) => plane.label(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum Viewport3dPointerTarget {
     PrimitiveGizmo(PrimitiveGizmoAxis),
@@ -1710,38 +1594,6 @@ impl Viewport3dPointerTarget {
             Self::Surface { selection, .. } => Some(selection),
             _ => None,
         }
-    }
-}
-
-fn gizmo_axis_color(axis: PrimitiveGizmoAxis, highlighted: bool) -> Color32 {
-    gizmo_highlight_color(axis.color(), highlighted)
-}
-
-fn gizmo_highlight_color(color: Color32, highlighted: bool) -> Color32 {
-    if highlighted {
-        Color32::from_rgb(
-            lerp_u8(color.r(), 255, 96),
-            lerp_u8(color.g(), 255, 96),
-            lerp_u8(color.b(), 255, 96),
-        )
-    } else {
-        color
-    }
-}
-
-fn gizmo_axis_stroke_width(highlighted: bool) -> f32 {
-    if highlighted {
-        4.25
-    } else {
-        2.5
-    }
-}
-
-fn gizmo_axis_handle_radius(highlighted: bool) -> f32 {
-    if highlighted {
-        6.5
-    } else {
-        5.0
     }
 }
 
