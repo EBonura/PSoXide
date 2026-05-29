@@ -4886,19 +4886,19 @@ fn project_blended_textured_model_vertex(
     // project loop, so transform view_a there instead of by hand on the CPU.
     let a = scene::transform_vertex_scheduled(vertex.position);
     let view_a = ViewVertex::new(a.x, a.y, a.z);
-    // view_b needs the secondary joint: load it, transform, then restore the
-    // primary so the caller's GTE batch state is preserved on return.
+    // view_b needs the secondary joint: load it and transform.
     scene::load_rotation(&secondary.rotation);
     scene::load_translation(secondary.translation);
     let b = scene::transform_vertex_scheduled(vertex.position);
     let view_b = ViewVertex::new(b.x, b.y, b.z);
+    let view_blend = lerp_view_vertex(view_a, view_b, vertex.blend);
+    // Project the blended view-space vertex on the GTE (perspective divide in
+    // hardware) instead of two CPU divides, then restore the primary joint so
+    // the caller's GTE batch state is preserved on return.
+    let projected = project_gte_view_vertex(view_blend, projection);
     scene::load_rotation(&primary.rotation);
     scene::load_translation(primary.translation);
-    let view_blend = lerp_view_vertex(view_a, view_b, vertex.blend);
-    match cpu_project_gte_view(view_blend, projection) {
-        Some(proj) => proj,
-        None => ProjectedVertex::new(0, 0, projection.near_z - 1),
-    }
+    projected
 }
 
 /// Minimum `joint1` weight (out of 255) for a vertex to take the two-bone
@@ -4978,6 +4978,32 @@ fn cpu_project_gte_view(view: ViewVertex, projection: WorldProjection) -> Option
     let sx = (projection.screen_x as i32) + (view.x * projection.focal_length) / view.z;
     let sy = (projection.screen_y as i32) + (view.y * projection.focal_length) / view.z;
     Some(ProjectedVertex::new(clamp_i16(sx), clamp_i16(sy), view.z))
+}
+
+/// Project an already-view-space vertex through the GTE. Loading the identity
+/// rotation with zero translation makes RTPS perform only the perspective
+/// divide and screen mapping -- in hardware -- replacing the two CPU divides
+/// in [`cpu_project_gte_view`]. The screen offset and projection plane are
+/// already loaded frame-wide for the model batch. The GTE vertex input is
+/// i16, so a rare oversized view vertex (far off-screen) falls back to the CPU
+/// path. Leaves the GTE rotation clobbered; the caller restores its own state.
+fn project_gte_view_vertex(view: ViewVertex, projection: WorldProjection) -> ProjectedVertex {
+    let (Ok(x), Ok(y), Ok(z)) = (
+        i16::try_from(view.x),
+        i16::try_from(view.y),
+        i16::try_from(view.z),
+    ) else {
+        return cpu_project_gte_view(view, projection)
+            .unwrap_or_else(|| ProjectedVertex::new(0, 0, projection.near_z - 1));
+    };
+    scene::load_rotation(&Mat3I16::IDENTITY);
+    scene::load_translation(Vec3I32::ZERO);
+    let p = scene::project_vertex(Vec3I16::new(x, y, z));
+    if (p.sz as i32) >= projection.near_z {
+        ProjectedVertex::new(p.sx, p.sy, p.sz as i32)
+    } else {
+        ProjectedVertex::new(0, 0, projection.near_z - 1)
+    }
 }
 
 /// 256-step linear blend between two view-space positions.
