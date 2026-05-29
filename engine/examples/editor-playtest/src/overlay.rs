@@ -1,7 +1,7 @@
 //! Debug/status overlays for editor-playtest.
 
 use super::*;
-use psx_gpu::draw_quad_flat;
+use psx_gpu::{draw_quad_flat, draw_quad_textured_material};
 use psx_level::{ui_node_flags, LevelUiNodeKind, LevelUiNodeRecord, LevelUiValueBinding};
 
 const PLAYER_HEALTH_MAX_Q12: i32 = 4096;
