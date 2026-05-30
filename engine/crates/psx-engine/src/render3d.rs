@@ -20,7 +20,7 @@ use core::mem::MaybeUninit;
 use psx_asset::{Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelVertex};
 use psx_gpu::{
     material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
-    prim::{TriGouraud, TriTextured, TriTexturedGouraud},
+    prim::{QuadTexturedGouraud, TriGouraud, TriTextured, TriTexturedGouraud},
 };
 use psx_gte::{
     lighting::{project_lit, project_lit_triangle, ProjectedLit},
@@ -2257,6 +2257,63 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             },
             tri as *mut TriTexturedGouraud as *mut u32,
             TriTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        stats
+    }
+
+    /// Submit a cached room quad as a single GP0(3Ch) textured-Gouraud
+    /// quad with a caller-prepared fixed depth, instead of two
+    /// [`TriTexturedGouraud`] leaves.
+    ///
+    /// `verts`/`uv_words`/`colors` are in **GP0 packet order** -- the
+    /// hardware rasterizes the quad as `tri(v0,v1,v2)+tri(v1,v2,v3)`
+    /// (the `1`-`2` diagonal). The caller is responsible for ordering
+    /// the four corners so this hardware split lands on the engine's
+    /// chosen diagonal, which makes the output pixel-identical to the
+    /// two-triangle submission (proved by
+    /// `textured_gouraud_quad_matches_two_triangle_split_bitexact`).
+    pub(crate) fn submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
+        &mut self,
+        quads: &mut impl PrimitiveSink<QuadTexturedGouraud>,
+        verts: [ProjectedVertex; 4],
+        uv_words: [u16; 4],
+        colors: [(u8, u8, u8); 4],
+        material: TexturedGouraudPacketMaterial,
+        options: WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+
+        let Some(quad) = quads.push(QuadTexturedGouraud::with_packet_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+                (verts[3].sx, verts[3].sy),
+            ],
+            uv_words,
+            colors,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+
+        self.push_command(
+            prepared_depth.slot,
+            prepared_depth.depth,
+            if material.is_translucent() {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            quad as *mut QuadTexturedGouraud as *mut u32,
+            QuadTexturedGouraud::WORDS,
         );
         stats.submitted_triangles = 1;
         stats
