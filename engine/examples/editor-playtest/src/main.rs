@@ -1344,6 +1344,16 @@ const MAX_ROOM_MATERIALS: usize = 32;
 /// count per cooked build; this cap only prevents the fixed arrays from
 /// growing past the editor-exposed maximum.
 const MAX_ACTIVE_ROOMS: usize = 32;
+/// Graph-distance (BFS) radius for the streaming residency ring. Rooms within
+/// this many portal hops of the current room are kept resident in memory
+/// (the load-ahead prefetch buffer). `WORLD_STREAM_RADIUS >= WORLD_VISIBILITY_RADIUS`.
+/// 16 covers demo10's 8-room graph, so the streaming ring is every room and the
+/// runtime stays equivalent to today's all-resident baseline.
+const WORLD_STREAM_RADIUS: u16 = 16;
+/// Graph-distance (BFS) radius for the surface-cache build ring. Rooms within
+/// this many portal hops of the current room get their surface caches built;
+/// the portal-visibility/frustum pass still decides which built rooms draw.
+const WORLD_VISIBILITY_RADIUS: u16 = 16;
 const MAX_PORTAL_FRUSTUMS: usize = 64;
 const MAX_PORTAL_FRONTIER_ROOMS: usize = 32;
 const MAX_PORTAL_ROOM_BOUNDS: usize = 256;
@@ -1386,15 +1396,6 @@ const MAX_COLLISION_ROOMS: usize = STREAMED_ROOM_SLOT_COUNT;
 #[cfg(not(feature = "cd-stream-bench"))]
 const MAX_COLLISION_ROOMS: usize = MAX_ACTIVE_ROOMS;
 
-/// Whether the entire level fits the resident budget. When it does, the
-/// residency owner declares every room resident (Tomb-Raider model); larger
-/// worlds declare only the current room plus its visible neighbourhood and the
-/// scheduler slides that window.
-#[cfg(feature = "cd-stream-bench")]
-const FULL_RESIDENCY: bool =
-    ROOMS.len() <= STREAMED_ROOM_SLOT_COUNT && ROOMS.len() <= MAX_ACTIVE_ROOMS;
-#[cfg(not(feature = "cd-stream-bench"))]
-const FULL_RESIDENCY: bool = ROOMS.len() <= MAX_ACTIVE_ROOMS;
 
 #[cfg(feature = "cd-stream-bench")]
 const fn clamp_streamed_room_slot_count(raw: usize) -> usize {
@@ -3215,6 +3216,19 @@ struct Playtest {
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
+    /// Room the cached BFS rings below were computed from. The resident and
+    /// visible sets are a pure function of `(current_room, radius, static
+    /// graph)`, so they are recomputed only when `room_index` changes and
+    /// cached between crossings.
+    room_rings_root: RoomIndex,
+    /// Streaming ring: rooms within `WORLD_STREAM_RADIUS` portal hops, kept
+    /// resident in memory. Drives the residency desired-set.
+    stream_ring: [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    stream_ring_count: usize,
+    /// Visibility ring: rooms within `WORLD_VISIBILITY_RADIUS` portal hops whose
+    /// surface caches are built. Drives the active-window build job's request.
+    visibility_ring: [RoomIndex; MAX_ACTIVE_ROOMS],
+    visibility_ring_count: usize,
     /// Active room's material table, ordered by `local_slot`.
     /// Indexed directly by the slot value the cooked `.psxw`
     /// stores per face.
@@ -3349,6 +3363,11 @@ impl Playtest {
             active_room_view_pitch_sin_key: 0,
             active_room_view_pitch_cos_key: 0,
             room_index: RoomIndex::ZERO,
+            room_rings_root: INVALID_ROOM_INDEX,
+            stream_ring: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
+            stream_ring_count: 0,
+            visibility_ring: [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS],
+            visibility_ring_count: 0,
             materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
             material_count: 0,
             motor: CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO),
@@ -5607,6 +5626,35 @@ impl Playtest {
         }
     }
 
+    /// Recompute the cached streaming + visibility BFS rings if the current
+    /// room changed since they were last built. The rings are a pure function
+    /// of `(current_room, radius, static graph)`, so they are cached between
+    /// crossings and only rebuilt when `room_index` moves.
+    fn ensure_room_rings(&mut self) {
+        if self.room_rings_root == self.room_index {
+            return;
+        }
+        let mut s = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
+        let sc = room_graph_ring(
+            self.room_index,
+            WORLD_STREAM_RADIUS,
+            &mut s,
+            STREAMED_ROOM_SLOT_COUNT,
+        );
+        let mut v = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+        let vc = room_graph_ring(
+            self.room_index,
+            WORLD_VISIBILITY_RADIUS,
+            &mut v,
+            MAX_ACTIVE_ROOMS,
+        );
+        self.stream_ring = s;
+        self.stream_ring_count = sc;
+        self.visibility_ring = v;
+        self.visibility_ring_count = vc;
+        self.room_rings_root = self.room_index;
+    }
+
     fn begin_active_room_window_job(&mut self, update_streaming: bool) {
         if !self.chunked_level() {
             return;
@@ -5618,17 +5666,15 @@ impl Playtest {
         let view = self.active_room_selection_view();
         self.refresh_portal_visibility_for_view(current_index, current_record, view);
 
+        self.ensure_room_rings();
         let mut requested_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        let mut requested_count = self.portal_visible_room_limit(current_record);
+        let mut requested_count = self.visibility_ring_count.min(MAX_ACTIVE_ROOMS);
         if requested_count == 0 {
             requested_rooms[0] = current_index;
             requested_count = 1;
         } else {
-            let mut i = 0usize;
-            while i < requested_count {
-                requested_rooms[i] = self.portal_visibility.rooms[i].room;
-                i += 1;
-            }
+            requested_rooms[..requested_count]
+                .copy_from_slice(&self.visibility_ring[..requested_count]);
         }
 
         self.active_room_anchor = self.motor.position();
@@ -6067,32 +6113,13 @@ impl Playtest {
     /// residency from what this makes resident.
     #[cfg(feature = "cd-stream-bench")]
     fn update_room_residency(&mut self) {
+        // Residency desired-set is the streaming BFS ring: every room within
+        // WORLD_STREAM_RADIUS portal hops of the current room. Computed once per
+        // crossing and cached; recompute here is a no-op unless the room moved.
+        self.ensure_room_rings();
+        let count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
         let mut desired = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut count = 0usize;
-        if FULL_RESIDENCY {
-            while count < ROOMS.len() && count < STREAMED_ROOM_SLOT_COUNT {
-                desired[count] = RoomIndex::new(count as u16);
-                count += 1;
-            }
-        } else {
-            push_stream_room_request(
-                &mut desired,
-                &mut count,
-                STREAMED_ROOM_SLOT_COUNT,
-                self.room_index,
-            );
-            let visible = self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS);
-            let mut i = 0usize;
-            while i < visible {
-                push_stream_room_request(
-                    &mut desired,
-                    &mut count,
-                    STREAMED_ROOM_SLOT_COUNT,
-                    self.portal_visibility.rooms[i].room,
-                );
-                i += 1;
-            }
-        }
+        desired[..count].copy_from_slice(&self.stream_ring[..count]);
         unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
     }
 
@@ -7653,6 +7680,91 @@ fn streamed_slot_reserved(slot: usize, reserved_slots: &[usize], reserved_count:
     false
 }
 
+/// Breadth-first room-graph ring around `start`.
+///
+/// Walks the portal connectivity graph (portals are edges, rooms are nodes) in
+/// distance order and writes the rooms reachable within `max_depth` portal hops
+/// into `out`, stopping once `out_cap` rooms are written. Because expansion is
+/// distance-ordered, capping keeps the NEAREST rooms. Returns the number of
+/// rooms written.
+///
+/// Neighbours of room `r` are the `destination_room`s of the portals in
+/// `ROOM_PORTALS[r.portal_first .. r.portal_first + r.portal_count]`. Invalid
+/// indices and indices outside `ROOMS` are skipped.
+fn room_graph_ring(
+    start: RoomIndex,
+    max_depth: u16,
+    out: &mut [RoomIndex],
+    out_cap: usize,
+) -> usize {
+    let mut count = 0usize;
+    if start == INVALID_ROOM_INDEX
+        || start.to_usize() >= ROOMS.len()
+        || start.to_usize() >= MAX_STREAMED_ROOM_INDEX_COUNT
+        || out_cap == 0
+    {
+        return count;
+    }
+
+    let mut visited = [false; MAX_STREAMED_ROOM_INDEX_COUNT];
+    let mut queue = [(INVALID_ROOM_INDEX, 0u16); MAX_STREAMED_ROOM_INDEX_COUNT];
+    let mut head = 0usize;
+    let mut tail = 0usize;
+
+    visited[start.to_usize()] = true;
+    queue[tail] = (start, 0u16);
+    tail += 1;
+
+    while head < tail {
+        let (room, depth) = queue[head];
+        head += 1;
+
+        if count < out_cap {
+            out[count] = room;
+            count += 1;
+        } else {
+            break;
+        }
+
+        if depth >= max_depth {
+            continue;
+        }
+
+        let Some(record) = ROOMS.get(room.to_usize()) else {
+            continue;
+        };
+        let portal_first = record.portal_first as usize;
+        let portal_end = portal_first.saturating_add(record.portal_count as usize);
+        let mut portal_index = portal_first;
+        while portal_index < portal_end.min(ROOM_PORTALS.len()) {
+            let portal = ROOM_PORTALS[portal_index];
+            portal_index += 1;
+            if portal.source_room != room {
+                continue;
+            }
+            let neighbour = portal.destination_room;
+            if neighbour == INVALID_ROOM_INDEX {
+                continue;
+            }
+            let neighbour_idx = neighbour.to_usize();
+            if neighbour_idx >= ROOMS.len() || neighbour_idx >= MAX_STREAMED_ROOM_INDEX_COUNT {
+                continue;
+            }
+            if visited[neighbour_idx] {
+                continue;
+            }
+            if tail >= MAX_STREAMED_ROOM_INDEX_COUNT {
+                continue;
+            }
+            visited[neighbour_idx] = true;
+            queue[tail] = (neighbour, depth + 1);
+            tail += 1;
+        }
+    }
+
+    count
+}
+
 #[cfg(feature = "cd-stream-bench")]
 fn room_requested(
     room: RoomIndex,
@@ -7669,25 +7781,8 @@ fn room_requested(
     false
 }
 
-#[cfg(feature = "cd-stream-bench")]
-fn push_stream_room_request(
-    requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    requested_count: &mut usize,
-    request_limit: usize,
-    room: RoomIndex,
-) -> bool {
-    if room == INVALID_ROOM_INDEX
-        || *requested_count >= request_limit
-        || *requested_count >= STREAMED_ROOM_SLOT_COUNT
-        || room_requested(room, requested_rooms, *requested_count)
-    {
-        return false;
-    }
-    requested_rooms[*requested_count] = room;
-    *requested_count += 1;
-    true
-}
-
+// Retained after the BFS-ring residency rewrite (the desired-set is now copied
+// from the cached stream ring); kept for other build paths / future reuse.
 const fn room_material_fallback() -> WorldRenderMaterial {
     WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
 }
