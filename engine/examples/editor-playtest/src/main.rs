@@ -3487,11 +3487,16 @@ impl Scene for Playtest {
             // Residency owner: the single per-frame declaration of which rooms
             // must be resident (pin + load), so the build paths no longer have
             // to request residency themselves.
+            telemetry::stage_begin(telemetry::stage::SIM_RESIDENCY);
             self.update_room_residency();
+            telemetry::stage_end(telemetry::stage::SIM_RESIDENCY);
         }
         #[cfg(feature = "cd-stream-bench")]
         let stream_progress = if background_tick {
-            self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick)
+            telemetry::stage_begin(telemetry::stage::SIM_PUMP);
+            let progress = self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
+            telemetry::stage_end(telemetry::stage::SIM_PUMP);
+            progress
         } else {
             false
         };
@@ -3602,6 +3607,7 @@ impl Scene for Playtest {
         {
             self.break_box_props_for_movement(trigger, input, config, delta_vblanks);
         }
+        telemetry::stage_begin(telemetry::stage::SIM_COLLISION);
         let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
         let collision_room_count = if self.chunked_level() {
             let catchup = delta_vblanks.min(4) as i32;
@@ -3642,13 +3648,18 @@ impl Scene for Playtest {
                 &aabb_blockers[..aabb_blocker_count],
             )
         };
+        telemetry::stage_end(telemetry::stage::SIM_COLLISION);
+        telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
         let motor_frame =
             self.motor
                 .update_vblanks_with_collision(collision, input, config, delta_vblanks);
+        telemetry::stage_end(telemetry::stage::SIM_SOLVE);
         self.player_moved_last_tick = motor_frame.moved;
+        telemetry::stage_begin(telemetry::stage::SIM_ROOM_TRACK);
         if !self.update_current_room_from_player() {
             self.refresh_active_room_window_if_needed();
         }
+        telemetry::stage_end(telemetry::stage::SIM_ROOM_TRACK);
 
         let new_state = if self.anim_lock_until_tick > now {
             self.anim_state
