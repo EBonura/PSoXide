@@ -77,6 +77,13 @@ const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
+/// Screen-space forgiveness, in pixels, for grabbing a translate move
+/// plane. The axes already pick within [`GIZMO_AXIS_PICK_RADIUS`]; the
+/// planes used strict polygon containment with no tolerance, so a click
+/// one pixel outside the projected quad (or anywhere on it when a
+/// grazing camera angle squashes it to a sliver) fell through to the
+/// tile behind. Matching the axes' radius makes plane grabs reliable.
+const GIZMO_PLANE_PICK_RADIUS: f32 = 8.0;
 /// Minimum on-screen span, in pixels, of the translate gizmo's full
 /// axis length. The gizmo is authored in world units (one sector) and
 /// perspective-projected, so it shrinks as the camera pulls back. The
@@ -6740,11 +6747,26 @@ impl EditorWorkspace {
             return Some(handle);
         }
         if self.transform_gizmo_mode == TransformGizmoMode::Move {
+            // Distance-with-tolerance, mirroring the axis pick above:
+            // inside the quad is distance 0, just outside is the distance
+            // to the nearest edge, and the closest plane within
+            // `GIZMO_PLANE_PICK_RADIUS` wins. Strict containment alone was
+            // the source of the zoomed-out "grabs the tile underneath"
+            // flakiness.
             return self
                 .node_gizmo_screen_planes(rect)
                 .into_iter()
-                .find(|screen_plane| point_in_polygon_2d(pointer, &screen_plane.corners))
-                .map(|plane| NodeGizmoHandle::Plane(plane.plane));
+                .filter_map(|screen_plane| {
+                    let distance = if point_in_polygon_2d(pointer, &screen_plane.corners) {
+                        0.0
+                    } else {
+                        distance_to_polygon_edges_2d(pointer, &screen_plane.corners)
+                    };
+                    (distance <= GIZMO_PLANE_PICK_RADIUS)
+                        .then_some((distance, NodeGizmoHandle::Plane(screen_plane.plane)))
+                })
+                .min_by(|(a, _), (b, _)| a.total_cmp(b))
+                .map(|(_, handle)| handle);
         }
         None
     }
@@ -25401,7 +25423,7 @@ fn draw_play_chunk_debug_map(
         return;
     }
 
-    let map_size = Vec2::new(300.0, 224.0);
+    let map_size = Vec2::new(300.0, 248.0);
     let mut map_rect = Rect::from_min_size(
         Pos2::new(
             viewport_rect.right() - map_size.x - 8.0,
@@ -25441,15 +25463,64 @@ fn draw_play_chunk_debug_map(
         StrokeKind::Inside,
     );
     painter.text(
-        map_rect.left_top() + Vec2::new(8.0, 7.0),
+        map_rect.left_top() + Vec2::new(8.0, 6.0),
         Align2::LEFT_TOP,
         "Room rings",
         FontId::monospace(11.0),
         STUDIO_TEXT,
     );
+    // Live streaming dashboard, read alongside the coloured rooms: the resident
+    // slot pool and its pressure, then the correctness faults. This makes the
+    // map a self-contained view of the streaming system.
+    let slot_limit = metrics.stream_slot_limit.max(1);
+    let pool_color = if metrics.stream_protected_full > 0 {
+        // Over budget: a visible room could not be granted a slot.
+        Color32::from_rgb(255, 120, 120)
+    } else if metrics.chunk_loaded >= slot_limit {
+        // Pool full: every new load now costs an eviction.
+        Color32::from_rgb(255, 200, 96)
+    } else {
+        STUDIO_TEXT_WEAK
+    };
+    painter.text(
+        map_rect.left_top() + Vec2::new(8.0, 21.0),
+        Align2::LEFT_TOP,
+        format!(
+            "pool {}/{}  load {}  pre {}  evict {}",
+            metrics.chunk_loaded,
+            metrics.stream_slot_limit,
+            metrics.stream_pending,
+            metrics.stream_prefetches,
+            metrics.stream_evictions
+        ),
+        FontId::monospace(9.0),
+        pool_color,
+    );
+    let fault_total = metrics.portal_missing_resident
+        + metrics.portal_build_failed
+        + metrics.stream_failed
+        + metrics.stream_protected_full;
+    let fault_color = if fault_total > 0 {
+        Color32::from_rgb(255, 120, 120)
+    } else {
+        STUDIO_TEXT_WEAK
+    };
+    painter.text(
+        map_rect.left_top() + Vec2::new(8.0, 33.0),
+        Align2::LEFT_TOP,
+        format!(
+            "vis {}  miss {}  bfail {}  full {}",
+            metrics.portal_visible_rooms,
+            metrics.portal_missing_resident,
+            metrics.portal_build_failed,
+            metrics.stream_protected_full
+        ),
+        FontId::monospace(9.0),
+        fault_color,
+    );
 
     let plot = Rect::from_min_max(
-        map_rect.left_top() + Vec2::new(8.0, 24.0),
+        map_rect.left_top() + Vec2::new(8.0, 48.0),
         map_rect.right_bottom() - Vec2::new(8.0, 78.0),
     );
     let world_w = (max_x - min_x).max(1.0);
@@ -25478,6 +25549,7 @@ fn draw_play_chunk_debug_map(
             && cell.runtime_room_index == metrics.player_room_index as usize;
         let loaded = bit != 0 && metrics.chunk_loaded_mask & bit != 0;
         let loading = bit != 0 && metrics.chunk_loading_mask & bit != 0;
+        let active = bit != 0 && metrics.chunk_active_mask & bit != 0;
         let visible = bit != 0 && metrics.portal_visible_mask & bit != 0;
         let frontier = bit != 0 && metrics.portal_frontier_mask & bit != 0;
         let missing = bit != 0 && metrics.portal_missing_mask & bit != 0;
@@ -25530,11 +25602,19 @@ fn draw_play_chunk_debug_map(
                 Color32::from_rgba_unmultiplied(72, 150, 255, 100),
                 Stroke::new(1.8, Color32::from_rgb(110, 188, 255)),
             )
-        } else if loaded {
-            // Streaming ring: resident prefetch buffer.
+        } else if active {
+            // Streaming ring: built and ready (surface cache staged) but not
+            // visible -- the warm prefetch that makes the next crossing instant.
             (
-                Color32::from_rgba_unmultiplied(96, 130, 180, 64),
-                Stroke::new(1.3, Color32::from_rgb(132, 166, 210)),
+                Color32::from_rgba_unmultiplied(96, 150, 190, 92),
+                Stroke::new(1.4, Color32::from_rgb(140, 190, 224)),
+            )
+        } else if loaded {
+            // Streaming ring: resident bytes only, surface cache not built yet
+            // -- the cold prefetch buffer.
+            (
+                Color32::from_rgba_unmultiplied(84, 104, 144, 52),
+                Stroke::new(1.2, Color32::from_rgb(116, 140, 180)),
             )
         } else if frontier {
             // Beyond the rings: portal-traversal depth/capacity frontier.
@@ -25553,6 +25633,33 @@ fn draw_play_chunk_debug_map(
             painter.rect_filled(rect, 0.0, fill);
         }
         painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
+        // Runtime room index, to correlate the map with logs and counter dumps.
+        // A dark four-way outline keeps it legible on both bright and dark fills.
+        if rect.width() >= 12.0 && rect.height() >= 10.0 {
+            let center = rect.center();
+            let label = format!("{}", cell.runtime_room_index);
+            for off in [
+                Vec2::new(-0.8, 0.0),
+                Vec2::new(0.8, 0.0),
+                Vec2::new(0.0, -0.8),
+                Vec2::new(0.0, 0.8),
+            ] {
+                painter.text(
+                    center + off,
+                    Align2::CENTER_CENTER,
+                    label.as_str(),
+                    FontId::monospace(8.0),
+                    Color32::from_black_alpha(210),
+                );
+            }
+            painter.text(
+                center,
+                Align2::CENTER_CENTER,
+                label.as_str(),
+                FontId::monospace(8.0),
+                Color32::WHITE,
+            );
+        }
     }
 
     let clipped = painter.with_clip_rect(plot);
@@ -25737,21 +25844,36 @@ fn draw_play_chunk_debug_map(
         Color32::from_rgb(255, 184, 58),
         "accepted",
     );
-    // Streaming ring: resident prefetch buffer + in-flight loads.
+    // Portal-traversal frontier: reached but cut at the depth/capacity edge.
+    draw_chunk_map_legend_item(
+        painter,
+        Pos2::new(swatch_x + 166.0, legend_bottom - 53.0),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 0),
+        Color32::from_rgb(150, 120, 210),
+        "frontier",
+    );
+    // Streaming ring: in-flight load, built/ready prefetch, resident bytes only.
     ring_tag(-36.0, "stream");
     draw_chunk_map_legend_item(
         painter,
         Pos2::new(swatch_x, legend_bottom - 36.0),
-        Color32::from_rgba_unmultiplied(96, 130, 180, 64),
-        Color32::from_rgb(132, 166, 210),
-        "resident",
-    );
-    draw_chunk_map_legend_item(
-        painter,
-        Pos2::new(swatch_x + 88.0, legend_bottom - 36.0),
         Color32::from_rgba_unmultiplied(72, 150, 255, 100),
         Color32::from_rgb(110, 188, 255),
         "loading",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        Pos2::new(swatch_x + 70.0, legend_bottom - 36.0),
+        Color32::from_rgba_unmultiplied(96, 150, 190, 92),
+        Color32::from_rgb(140, 190, 224),
+        "built",
+    );
+    draw_chunk_map_legend_item(
+        painter,
+        Pos2::new(swatch_x + 136.0, legend_bottom - 36.0),
+        Color32::from_rgba_unmultiplied(84, 104, 144, 52),
+        Color32::from_rgb(116, 140, 180),
+        "resident",
     );
     // Faults: visible rooms that should be resident + built but are not.
     ring_tag(-19.0, "fault");
@@ -30543,6 +30665,22 @@ fn polygon_area_2d(points: &[Pos2]) -> f32 {
         area += a.x * b.y - b.x * a.y;
     }
     area * 0.5
+}
+
+/// Smallest distance from `point` to any edge of `polygon`, in pixels.
+/// Used to give the move-plane pick the same screen-space forgiveness
+/// the axis pick already has.
+fn distance_to_polygon_edges_2d(point: Pos2, polygon: &[Pos2]) -> f32 {
+    if polygon.len() < 2 {
+        return f32::INFINITY;
+    }
+    let mut best = f32::INFINITY;
+    let mut j = polygon.len() - 1;
+    for i in 0..polygon.len() {
+        best = best.min(distance_to_segment_2d(point, polygon[j], polygon[i]));
+        j = i;
+    }
+    best
 }
 
 fn point_in_polygon_2d(point: Pos2, polygon: &[Pos2]) -> bool {
