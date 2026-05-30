@@ -119,10 +119,10 @@ pub use third_person_camera::{
 };
 pub use transform::{ActorTransform, RoomPoint, Vec3World, WorldVertex};
 pub use world::{
-    CompactCollisionParseError, CompactCollisionRoom, GridCoord, GridDirection, GridFloorSample,
-    GridHorizontalFace, GridRoom, GridSector, GridSplit, GridVerticalFace, GridWalls, GridWorld,
-    RoomCollision, RoomRender, RuntimeCollisionRoom, RuntimeRoom, SectorCollision, SectorRender,
-    WallCollision, WallRender, WorldMaterialId, GRID_SECTOR_SIZE,
+    CompactCollisionParseError, CompactCollisionRoom, GridDirection, GridHorizontalFace,
+    GridSector, GridSplit, GridVerticalFace, GridWalls, RoomCollision, RoomRender,
+    RuntimeCollisionRoom, RuntimeRoom, SectorCollision, SectorRender, WallCollision, WallRender,
+    WorldMaterialId,
 };
 pub use world_render::{
     cache_room_vertex_lit_surfaces, cached_room_cells_from_level_records,
