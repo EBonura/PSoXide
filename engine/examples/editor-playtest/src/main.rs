@@ -581,6 +581,9 @@ fn debug_log_room_transition(
     camera_before: RoomPoint,
     camera_after: RoomPoint,
 ) {
+    if !POST_CROSS_RENDER_DEBUG_LOGS {
+        return;
+    }
     let mut line = DebugLogLine::new("room cross prev=");
     line.push_room(previous_room);
     line.push_str(" next=");
@@ -613,6 +616,9 @@ fn debug_log_room_window_after_cross(
     portals_tested: u16,
     portals_accepted: u16,
 ) {
+    if !POST_CROSS_RENDER_DEBUG_LOGS {
+        return;
+    }
     let mut line = DebugLogLine::new("room window room=");
     line.push_room(room);
     line.push_str(" visible=");
