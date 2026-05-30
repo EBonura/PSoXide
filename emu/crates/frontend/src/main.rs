@@ -1324,6 +1324,7 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         stream_slot_limit: recent_counter(counter::ROOM_STREAM_SLOT_LIMIT),
         stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
         stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
+        stream_protected_full: recent_counter(counter::ROOM_STREAM_PROTECTED_FULL),
         chunk_loaded_mask: chunk_mask(
             counter::ROOM_STREAM_RESIDENT_MASK_LO,
             counter::ROOM_STREAM_RESIDENT_MASK_HI,
