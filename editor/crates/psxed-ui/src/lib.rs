@@ -84,15 +84,6 @@ const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
 /// grazing camera angle squashes it to a sliver) fell through to the
 /// tile behind. Matching the axes' radius makes plane grabs reliable.
 const GIZMO_PLANE_PICK_RADIUS: f32 = 8.0;
-/// Minimum on-screen span, in pixels, of the translate gizmo's full
-/// axis length. The gizmo is authored in world units (one sector) and
-/// perspective-projected, so it shrinks as the camera pulls back. The
-/// move planes are hit-tested by polygon containment with no screen
-/// tolerance, so once a plane projects smaller than the cursor the click
-/// falls straight through to the tile behind it. Flooring the world
-/// length so it never projects below this many pixels keeps the handles
-/// grabbable at any zoom.
-const GIZMO_MIN_SCREEN_PX: f32 = 120.0;
 const UI_RESIZE_HANDLE_SIZE: f32 = 8.0;
 const UI_RESIZE_HANDLE_HIT_SIZE: f32 = 14.0;
 const UI_NODE_HIT_MIN_SIZE: f32 = 10.0;
@@ -6486,7 +6477,7 @@ impl EditorWorkspace {
         let Some(start) = project_world_to_viewport_screen(camera, rect, pivot) else {
             return Vec::new();
         };
-        let axis_len = self.node_gizmo_axis_world_length_screen_stable(&targets, rect, pivot);
+        let axis_len = self.node_gizmo_axis_world_length(&targets);
         let axes: &[PrimitiveGizmoAxis] = match self.transform_gizmo_mode {
             TransformGizmoMode::Move => &[
                 PrimitiveGizmoAxis::X,
@@ -6535,7 +6526,7 @@ impl EditorWorkspace {
             return Vec::new();
         };
         let camera = self.viewport_3d_camera();
-        let axis_len = self.node_gizmo_axis_world_length_screen_stable(&targets, rect, pivot) as f32;
+        let axis_len = self.node_gizmo_axis_world_length(&targets) as f32;
         let near = axis_len * 0.18;
         let far = axis_len * 0.44;
 
@@ -6606,36 +6597,6 @@ impl EditorWorkspace {
             return grid.sector_size.max(1);
         }
         DEFAULT_WORLD_SECTOR_SIZE
-    }
-
-    /// World length the translate gizmo should span so it stays a
-    /// grabbable size on screen. Returns the authored world length (one
-    /// sector) when zoomed in, but floors it so the gizmo projects to at
-    /// least [`GIZMO_MIN_SCREEN_PX`] pixels at the pivot's depth. Both the
-    /// axes and the move planes derive their size from this, and the same
-    /// value feeds drawing and picking, so flooring here keeps the visual,
-    /// the hit-test, and the drag consistent and stops the plane handle
-    /// from collapsing under the cursor (where the click would fall
-    /// through to the tile behind it) when zoomed out.
-    fn node_gizmo_axis_world_length_screen_stable(
-        &self,
-        targets: &[NodeId],
-        rect: Rect,
-        pivot: [f32; 3],
-    ) -> i32 {
-        let base = self.node_gizmo_axis_world_length(targets);
-        let basis = self.viewport_3d_camera().basis();
-        let depth = dot3(sub3(pivot, basis.position), basis.forward);
-        if !depth.is_finite() || depth <= 1.0 || rect.width() <= 1.0 {
-            return base;
-        }
-        // `project_world_to_viewport_screen` maps a world offset `L`
-        // perpendicular to the view at this depth to `L * width / depth`
-        // pixels (half_fov_x = 0.5 cancels the factor of two), so the
-        // world length that fills `GIZMO_MIN_SCREEN_PX` pixels is
-        // `px * depth / width`.
-        let min_world = GIZMO_MIN_SCREEN_PX * depth / rect.width();
-        base.max(min_world.ceil() as i32)
     }
 
     fn node_rotation_gizmo_screen_ring_for_axis(
@@ -6732,43 +6693,55 @@ impl EditorWorkspace {
                 .min_by(|(a, _), (b, _)| a.total_cmp(b))
                 .map(|(_, axis)| NodeGizmoHandle::Axis(axis));
         }
-        if let Some(handle) = self
-            .node_gizmo_screen_axes(rect)
-            .into_iter()
-            .filter_map(|screen_axis| {
-                let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
-                    .min((pointer - screen_axis.end).length());
-                (distance <= GIZMO_AXIS_PICK_RADIUS)
-                    .then_some((distance, NodeGizmoHandle::Axis(screen_axis.axis)))
-            })
-            .min_by(|(a, _), (b, _)| a.total_cmp(b))
-            .map(|(_, handle)| handle)
-        {
-            return Some(handle);
+        // Axes and move planes overlap on screen: each plane handle is an
+        // inner quad spanning two axes, so a cursor inside a plane is also
+        // within the axis pick radius of both of that plane's axes.
+        // Gather every in-tolerance handle and choose the globally closest
+        // instead of returning the first kind checked. The old code
+        // early-returned on axes, so a click inside the plane grabbed an
+        // axis -- and when the plane was foreshortened while zoomed out,
+        // that miss read as "grabbed the tile behind it". Ties go to the
+        // plane: a plane hit reports distance 0 by polygon containment, so
+        // an equal distance means the cursor is inside the quad, where the
+        // user is aiming at the plane rather than its bounding axes.
+        let mut best: Option<(f32, u8, NodeGizmoHandle)> = None;
+        let mut consider = |distance: f32, plane_tiebreak: u8, handle: NodeGizmoHandle| {
+            let better = match best {
+                Some((best_distance, best_tiebreak, _)) => {
+                    distance < best_distance
+                        || (distance == best_distance && plane_tiebreak > best_tiebreak)
+                }
+                None => true,
+            };
+            if better {
+                best = Some((distance, plane_tiebreak, handle));
+            }
+        };
+        for screen_axis in self.node_gizmo_screen_axes(rect) {
+            let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
+                .min((pointer - screen_axis.end).length());
+            if distance <= GIZMO_AXIS_PICK_RADIUS {
+                consider(distance, 0, NodeGizmoHandle::Axis(screen_axis.axis));
+            }
         }
         if self.transform_gizmo_mode == TransformGizmoMode::Move {
-            // Distance-with-tolerance, mirroring the axis pick above:
-            // inside the quad is distance 0, just outside is the distance
-            // to the nearest edge, and the closest plane within
-            // `GIZMO_PLANE_PICK_RADIUS` wins. Strict containment alone was
-            // the source of the zoomed-out "grabs the tile underneath"
-            // flakiness.
-            return self
-                .node_gizmo_screen_planes(rect)
-                .into_iter()
-                .filter_map(|screen_plane| {
-                    let distance = if point_in_polygon_2d(pointer, &screen_plane.corners) {
-                        0.0
-                    } else {
-                        distance_to_polygon_edges_2d(pointer, &screen_plane.corners)
-                    };
-                    (distance <= GIZMO_PLANE_PICK_RADIUS)
-                        .then_some((distance, NodeGizmoHandle::Plane(screen_plane.plane)))
-                })
-                .min_by(|(a, _), (b, _)| a.total_cmp(b))
-                .map(|(_, handle)| handle);
+            for screen_plane in self.node_gizmo_screen_planes(rect) {
+                // Inside the quad is distance 0; just outside is the
+                // distance to the nearest edge, giving the plane the same
+                // screen-space forgiveness the axes already have so a
+                // cursor a few pixels off a foreshortened quad still grabs
+                // it instead of falling through to the floor behind.
+                let distance = if point_in_polygon_2d(pointer, &screen_plane.corners) {
+                    0.0
+                } else {
+                    distance_to_polygon_edges_2d(pointer, &screen_plane.corners)
+                };
+                if distance <= GIZMO_PLANE_PICK_RADIUS {
+                    consider(distance, 1, NodeGizmoHandle::Plane(screen_plane.plane));
+                }
+            }
         }
-        None
+        best.map(|(_, _, handle)| handle)
     }
 
     fn resolve_viewport_3d_pointer_target(
@@ -35210,6 +35183,298 @@ mod tests {
             .fold(Vec2::ZERO, |acc, corner| acc + corner.to_vec2());
         let average = sum / plane.corners.len() as f32;
         Pos2::new(average.x, average.y)
+    }
+
+    /// Headless driver for the 3D viewport's pointer-resolution path.
+    ///
+    /// Builds a workspace with one floored room, aims a free-fly camera
+    /// at the room from a chosen distance, and runs the *real*
+    /// [`EditorWorkspace::resolve_viewport_3d_pointer_target`] used by
+    /// click handling. Interaction bugs that only appear at certain
+    /// zooms or angles (gizmo-vs-tile picking, entity-vs-surface
+    /// priority) become deterministic tests with no live window or GPU.
+    /// The floor matters: it guarantees there is always a tile *behind*
+    /// the gizmo for a failed pick to wrongly fall through to.
+    struct ViewportHarness {
+        workspace: EditorWorkspace,
+        room: NodeId,
+        viewport: Rect,
+    }
+
+    impl ViewportHarness {
+        /// `extent` x `extent` sectors, every cell floored at y=0.
+        fn floored_room(label: &str, extent: u16) -> Self {
+            let mut project = ProjectDocument::new(label);
+            let mut grid = WorldGrid::empty(extent, extent, 1024);
+            for sx in 0..extent {
+                for sz in 0..extent {
+                    grid.set_floor(sx, sz, 0, None);
+                }
+            }
+            let room =
+                project
+                    .active_scene_mut()
+                    .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+            let mut workspace = EditorWorkspace::with_project(test_temp_dir(label), project);
+            workspace.transform_gizmo_mode = TransformGizmoMode::Move;
+            workspace.camera_rig.mode = ViewportCameraMode::Free;
+            workspace.camera_rig.free_initialized = true;
+            Self {
+                workspace,
+                room,
+                viewport: Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)),
+            }
+        }
+
+        /// World-space centre of the room's floor plane, the natural
+        /// camera target and gizmo pivot for a centred node.
+        fn room_center(&self) -> [f32; 3] {
+            let grid = self.workspace.room_grid_view(self.room).unwrap();
+            let s = grid.sector_size as f32;
+            [grid.width as f32 * 0.5 * s, 0.0, grid.depth as f32 * 0.5 * s]
+        }
+
+        /// Add a point light at the room centre, lifted `lift_sectors`
+        /// off the floor. Returns the node so the test can select it.
+        fn add_centre_light(&mut self, lift_sectors: f32) -> NodeId {
+            let light = self.workspace.project.active_scene_mut().add_node(
+                self.room,
+                "Light",
+                NodeKind::PointLight {
+                    color: [255, 240, 200],
+                    intensity: 1.0,
+                    radius: 4.0,
+                },
+            );
+            if let Some(node) = self.workspace.project.active_scene_mut().node_mut(light) {
+                node.transform.translation = [0.0, lift_sectors, 0.0];
+            }
+            light
+        }
+
+        /// Aim the free camera at `target` from `distance` world units
+        /// away along a fixed oblique down-and-aside direction. Larger
+        /// `distance` = more zoomed out.
+        fn frame(&mut self, target: [f32; 3], distance: f32) {
+            // Pre-normalised oblique look direction (~34deg above the
+            // ground), the kind of angle at which the green XZ ground
+            // plane foreshortens.
+            const DIR: [f32; 3] = [0.5217, 0.5691, -0.6356];
+            let pos = [
+                round_to_i32(target[0] + DIR[0] * distance),
+                round_to_i32(target[1] + DIR[1] * distance),
+                round_to_i32(target[2] + DIR[2] * distance),
+            ];
+            self.workspace.camera_rig.free_position = pos;
+            let tgt = [
+                round_to_i32(target[0]),
+                round_to_i32(target[1]),
+                round_to_i32(target[2]),
+            ];
+            if let Some((yaw, pitch)) = camera_angles_to_look_at(pos, tgt) {
+                self.workspace.camera_rig.free_yaw = yaw;
+                self.workspace.camera_rig.free_pitch = pitch;
+            }
+        }
+
+        fn select(&mut self, node: NodeId) {
+            self.workspace.replace_node_selection(node);
+        }
+
+        /// Resolve what a click at `pointer` would target, through the
+        /// same path the live viewport uses.
+        fn resolve(&self, pointer: Pos2) -> Option<Viewport3dPointerTarget> {
+            self.workspace.resolve_viewport_3d_pointer_target(
+                self.viewport,
+                pointer,
+                Some(self.room),
+                true,
+            )
+        }
+
+        /// The node-gizmo handle a click at `pointer` would grab, if any.
+        fn gizmo_handle_at(&self, pointer: Pos2) -> Option<NodeGizmoHandle> {
+            self.resolve(pointer).and_then(|target| target.node_handle())
+        }
+
+        /// On-screen quad corners of a move-plane handle, or `None` if
+        /// the plane is currently culled (too small / edge-on to
+        /// project).
+        fn plane_quad(&self, plane: NodeGizmoPlane) -> Option<[Pos2; 4]> {
+            self.workspace
+                .node_gizmo_screen_planes(self.viewport)
+                .into_iter()
+                .find(|candidate| candidate.plane == plane)
+                .map(|candidate| candidate.corners)
+        }
+
+        /// Distance in pixels from `pointer` to the nearest gizmo axis
+        /// segment, matching the metric `pick_node_gizmo_handle` uses.
+        fn nearest_axis_distance(&self, pointer: Pos2) -> f32 {
+            self.workspace
+                .node_gizmo_screen_axes(self.viewport)
+                .into_iter()
+                .map(|axis| {
+                    distance_to_segment_2d(pointer, axis.start, axis.end)
+                        .min((pointer - axis.end).length())
+                })
+                .fold(f32::INFINITY, f32::min)
+        }
+    }
+
+    #[test]
+    fn node_gizmo_xz_plane_grabbable_across_zoom_out() {
+        let mut harness = ViewportHarness::floored_room("gizmo-zoom-grab", 4);
+        let light = harness.add_centre_light(0.25);
+        harness.select(light);
+        let target = harness.room_center();
+
+        // Regression: the green XZ ground plane must stay grabbable as the
+        // camera pulls back. The bug was a click inside the plane quad
+        // grabbing an axis (which, on a foreshortened quad, read as the
+        // floor tile behind it) because axes were picked first and
+        // short-circuited the plane test.
+        //
+        // The three move-plane quads overlap on screen once foreshortened,
+        // so in the overlap zone which plane wins is genuinely ambiguous
+        // and not worth asserting. We instead sample a dense grid over the
+        // XZ quad's bounding box, keep only points that are inside XZ and
+        // outside XY and YZ -- the region unambiguously "on the XZ handle"
+        // -- and require every one of those to grab XZ. The centre is
+        // always required to be such a point and to grab XZ.
+        for &distance in &[3_000.0, 6_000.0, 12_000.0, 20_000.0] {
+            harness.frame(target, distance);
+            let xz = harness.plane_quad(NodeGizmoPlane::XZ).unwrap_or_else(|| {
+                panic!("XZ plane should still project when framed from {distance} units")
+            });
+            let others: Vec<[Pos2; 4]> = [NodeGizmoPlane::XY, NodeGizmoPlane::YZ]
+                .into_iter()
+                .filter_map(|plane| harness.plane_quad(plane))
+                .collect();
+            let exclusive_to_xz = |p: Pos2| {
+                point_in_polygon_2d(p, &xz)
+                    && others.iter().all(|quad| !point_in_polygon_2d(p, quad))
+            };
+
+            let center = {
+                let sum = xz.iter().fold(Vec2::ZERO, |acc, c| acc + c.to_vec2());
+                Pos2::new(sum.x / 4.0, sum.y / 4.0)
+            };
+            assert!(
+                exclusive_to_xz(center),
+                "framed from {distance} units, the XZ quad centre {center:?} is not \
+                 exclusively on XZ -- the quads overlap their own centre, revisit the test",
+            );
+
+            let min_x = xz.iter().map(|c| c.x).fold(f32::INFINITY, f32::min);
+            let max_x = xz.iter().map(|c| c.x).fold(f32::NEG_INFINITY, f32::max);
+            let min_y = xz.iter().map(|c| c.y).fold(f32::INFINITY, f32::min);
+            let max_y = xz.iter().map(|c| c.y).fold(f32::NEG_INFINITY, f32::max);
+            let mut checked = 0;
+            for ix in 0..=10 {
+                for iy in 0..=10 {
+                    let probe = Pos2::new(
+                        min_x + (max_x - min_x) * ix as f32 / 10.0,
+                        min_y + (max_y - min_y) * iy as f32 / 10.0,
+                    );
+                    if !exclusive_to_xz(probe) {
+                        continue;
+                    }
+                    checked += 1;
+                    assert_eq!(
+                        harness.gizmo_handle_at(probe),
+                        Some(NodeGizmoHandle::Plane(NodeGizmoPlane::XZ)),
+                        "framed from {distance} units, a click at {probe:?} \
+                         exclusively on the XZ quad did not grab the XZ plane",
+                    );
+                }
+            }
+            assert!(
+                checked >= 4,
+                "framed from {distance} units, only {checked} probes were exclusively \
+                 on XZ -- too few to be a meaningful regression check",
+            );
+        }
+    }
+
+    #[test]
+    fn node_gizmo_plane_click_never_falls_through_to_tile() {
+        // The user-visible symptom was the click "grabbing the underlying
+        // tile". That happened in the thin band *just outside* a
+        // foreshortened plane quad: too far for strict polygon containment
+        // (so the old plane test missed) and too far from any axis (so the
+        // axis test missed too), leaving `pick_node_gizmo_handle` returning
+        // None and the click falling through to the floor Surface.
+        //
+        // We reconstruct exactly that band: scan a grid around the XZ quad
+        // and keep points that are outside every plane quad AND outside the
+        // axis pick radius but within the plane pick tolerance of XZ. Under
+        // the old code each such point resolved to a Surface (tile); with
+        // the fix each must resolve to the XZ plane handle. The final
+        // assert that the band was non-empty stops this silently becoming a
+        // no-op if the projection ever changes.
+        let mut harness = ViewportHarness::floored_room("gizmo-no-tile-fallthrough", 4);
+        let light = harness.add_centre_light(0.25);
+        harness.select(light);
+        let target = harness.room_center();
+
+        let mut total_band_points = 0;
+        for &distance in &[6_000.0, 12_000.0, 20_000.0] {
+            harness.frame(target, distance);
+            let xz = harness.plane_quad(NodeGizmoPlane::XZ).unwrap_or_else(|| {
+                panic!("XZ plane should project when framed from {distance} units")
+            });
+            let other_quads: Vec<[Pos2; 4]> = [NodeGizmoPlane::XY, NodeGizmoPlane::YZ]
+                .into_iter()
+                .filter_map(|plane| harness.plane_quad(plane))
+                .collect();
+
+            let min_x = xz.iter().map(|c| c.x).fold(f32::INFINITY, f32::min) - GIZMO_PLANE_PICK_RADIUS;
+            let max_x =
+                xz.iter().map(|c| c.x).fold(f32::NEG_INFINITY, f32::max) + GIZMO_PLANE_PICK_RADIUS;
+            let min_y = xz.iter().map(|c| c.y).fold(f32::INFINITY, f32::min) - GIZMO_PLANE_PICK_RADIUS;
+            let max_y =
+                xz.iter().map(|c| c.y).fold(f32::NEG_INFINITY, f32::max) + GIZMO_PLANE_PICK_RADIUS;
+
+            for ix in 0..=24 {
+                for iy in 0..=24 {
+                    let probe = Pos2::new(
+                        min_x + (max_x - min_x) * ix as f32 / 24.0,
+                        min_y + (max_y - min_y) * iy as f32 / 24.0,
+                    );
+                    // The fallthrough band: outside every quad (strict),
+                    // beyond axis radius, but within plane tolerance of XZ.
+                    let outside_all_quads = !point_in_polygon_2d(probe, &xz)
+                        && other_quads
+                            .iter()
+                            .all(|quad| !point_in_polygon_2d(probe, quad));
+                    let beyond_axes =
+                        harness.nearest_axis_distance(probe) > GIZMO_AXIS_PICK_RADIUS;
+                    let within_xz_tolerance =
+                        distance_to_polygon_edges_2d(probe, &xz) <= GIZMO_PLANE_PICK_RADIUS;
+                    if !(outside_all_quads && beyond_axes && within_xz_tolerance) {
+                        continue;
+                    }
+                    total_band_points += 1;
+                    // The symptom was grabbing the tile, so the invariant
+                    // is "not a Surface", not a specific plane: a band
+                    // point can sit within tolerance of XZ and a
+                    // neighbouring plane at once, and either gizmo handle is
+                    // a correct, non-fallthrough result.
+                    let resolved = harness.resolve(probe);
+                    assert!(
+                        matches!(resolved, Some(Viewport3dPointerTarget::NodeGizmo(_))),
+                        "framed from {distance} units, a click at {probe:?} in the XZ \
+                         tolerance band fell through to {resolved:?} instead of a gizmo handle",
+                    );
+                }
+            }
+        }
+        assert!(
+            total_band_points >= 3,
+            "expected the XZ fallthrough band to contain probe points across zoom levels, \
+             found {total_band_points} -- the test is no longer exercising the bug",
+        );
     }
 
     fn assert_pos_approx(actual: Pos2, expected: Pos2) {
