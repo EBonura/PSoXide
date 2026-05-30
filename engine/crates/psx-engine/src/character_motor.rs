@@ -1000,11 +1000,11 @@ fn stand_height_in_rooms(
         return Some(height);
     }
     let r = radius.max(0);
-    floor_height_at_rooms(rooms, x.saturating_sub(r), z)?;
-    floor_height_at_rooms(rooms, x.saturating_add(r), z)?;
-    floor_height_at_rooms(rooms, x, z.saturating_sub(r))?;
-    floor_height_at_rooms(rooms, x, z.saturating_add(r))?;
-    Some(height)
+    let footprint_clear = floor_walkable_at_rooms(rooms, x.saturating_sub(r), z)
+        && floor_walkable_at_rooms(rooms, x.saturating_add(r), z)
+        && floor_walkable_at_rooms(rooms, x, z.saturating_sub(r))
+        && floor_walkable_at_rooms(rooms, x, z.saturating_add(r));
+    footprint_clear.then_some(height)
 }
 
 fn floor_height_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -> Option<i32> {
@@ -1024,6 +1024,27 @@ fn floor_height_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -
         }
     }
     None
+}
+
+/// Multi-room walkability check, the height-free counterpart to
+/// [`floor_height_at_rooms`] used by the cylinder-footprint samples.
+fn floor_walkable_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -> bool {
+    for collision_room in rooms {
+        let Some(room) = collision_room.room else {
+            continue;
+        };
+        if !collision_room_contains_point(*collision_room, room, x, z) {
+            continue;
+        }
+        if floor_walkable_at(
+            room.collision(),
+            x.saturating_sub(collision_room.offset_x),
+            z.saturating_sub(collision_room.offset_z),
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 fn body_hits_solid_wall_in_rooms(
@@ -1178,14 +1199,14 @@ fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Opt
         return Some(height);
     }
     let r = radius.max(0);
-    floor_height_at(room, x.saturating_sub(r), z)?;
-    floor_height_at(room, x.saturating_add(r), z)?;
-    floor_height_at(room, x, z.saturating_sub(r))?;
-    floor_height_at(room, x, z.saturating_add(r))?;
-    Some(height)
+    let footprint_clear = floor_walkable_at(room, x.saturating_sub(r), z)
+        && floor_walkable_at(room, x.saturating_add(r), z)
+        && floor_walkable_at(room, x, z.saturating_sub(r))
+        && floor_walkable_at(room, x, z.saturating_add(r));
+    footprint_clear.then_some(height)
 }
 
-fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
+fn floor_probe(room: RoomCollision<'_, '_>, x: i32, z: i32, need_height: bool) -> Option<i32> {
     let s = room.sector_size();
     if s <= 0 || x < 0 || z < 0 {
         return None;
@@ -1205,6 +1226,9 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
     if !sector.floor_triangle_walkable(triangle) {
         return None;
     }
+    if !need_height {
+        return Some(0);
+    }
     let heights = triangle_heights_to_quad(
         sector.floor_heights(),
         sector.floor_split(),
@@ -1218,6 +1242,19 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
         local_z,
         s,
     ))
+}
+
+/// Interpolated floor height at a point, or `None` if it is off walkable floor.
+fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
+    floor_probe(room, x, z, true)
+}
+
+/// Whether a point sits on walkable floor, without interpolating its height.
+/// The four cylinder-footprint samples in `stand_height` only need this; skipping
+/// the interpolation drops `triangle_heights_to_quad` + `height_at_local` (and its
+/// per-axis divides) for four of every five floor queries.
+fn floor_walkable_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> bool {
+    floor_probe(room, x, z, false).is_some()
 }
 
 fn triangle_index_at_local(split: u8, local_x: i32, local_z: i32, sector: i32) -> usize {
