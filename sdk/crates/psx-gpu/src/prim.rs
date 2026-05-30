@@ -543,6 +543,93 @@ impl TriTexturedGouraud {
     }
 }
 
+/// Textured Gouraud quad with inline texture-window state. Mirrors
+/// [`TriTexturedGouraud`] extended to four vertices: GP0(E2)
+/// texture-window state immediately followed by the GP0(3Ch)
+/// Gouraud-textured-quad command. Per-vertex RGB modulates the sampled
+/// texel exactly like the triangle. 14 words (tag + 13 data).
+///
+/// The PS1 GPU rasterizes this quad as the two triangles `(v0,v1,v2)`
+/// and `(v1,v2,v3)` -- the `1`-`2` diagonal. A caller whose engine
+/// splits quads on the `0`-`2` diagonal as `tri(a,b,c)+tri(a,c,d)` must
+/// reorder its perimeter `[a,b,c,d]` to `[b,a,c,d]` before building the
+/// packet so the hardware split lands on the same edge; that yields
+/// pixel-identical output (proved by
+/// `textured_gouraud_quad_matches_two_triangle_split_bitexact` in the
+/// emulator GPU tests).
+#[repr(C, align(4))]
+pub struct QuadTexturedGouraud {
+    /// OT linkage.
+    pub tag: u32,
+    /// GP0(E2) texture-window command.
+    pub tex_window: u32,
+    /// `0x3C000000 | color0` header -- v0's RGB shares the opcode word.
+    pub color0_cmd: u32,
+    /// Vertex 0 position.
+    pub v0: u32,
+    /// `(u0, v0, clut)` packed.
+    pub uv0_clut: u32,
+    /// Vertex 1 colour.
+    pub color1: u32,
+    /// Vertex 1 position.
+    pub v1: u32,
+    /// `(u1, v1, tpage)` packed.
+    pub uv1_tpage: u32,
+    /// Vertex 2 colour.
+    pub color2: u32,
+    /// Vertex 2 position.
+    pub v2: u32,
+    /// `(u2, v2, 0)` packed.
+    pub uv2: u32,
+    /// Vertex 3 colour.
+    pub color3: u32,
+    /// Vertex 3 position.
+    pub v3: u32,
+    /// `(u3, v3, 0)` packed.
+    pub uv3: u32,
+}
+
+impl QuadTexturedGouraud {
+    /// Data-word count (tag excluded).
+    pub const WORDS: u8 = 13;
+
+    /// Opcode bit promoting the Gouraud-textured-triangle header
+    /// (`0x34`) to the Gouraud-textured-quad header (`0x3C`).
+    const QUAD_OPCODE_BIT: u32 = 0x0800_0000;
+
+    /// Build a textured Gouraud quad from UV words and a packet material
+    /// precomputed for a hot material, mirroring
+    /// [`TriTexturedGouraud::with_packet_material_packed_uv_words`].
+    pub const fn with_packet_material_packed_uv_words(
+        verts: [(i16, i16); 4],
+        uv_words: [u16; 4],
+        colors: [(u8, u8, u8); 4],
+        material: TexturedGouraudPacketMaterial,
+    ) -> Self {
+        let (r0, g0, b0) = colors[0];
+        let (r1, g1, b1) = colors[1];
+        let (r2, g2, b2) = colors[2];
+        let (r3, g3, b3) = colors[3];
+        Self {
+            tag: 0,
+            tex_window: material.tex_window_word,
+            color0_cmd: (material.color0_command_word | Self::QUAD_OPCODE_BIT)
+                | pack_color(r0, g0, b0),
+            v0: pack_vertex(verts[0].0, verts[0].1),
+            uv0_clut: (uv_words[0] as u32) | material.clut_high_word,
+            color1: pack_color(r1, g1, b1),
+            v1: pack_vertex(verts[1].0, verts[1].1),
+            uv1_tpage: (uv_words[1] as u32) | material.tpage_high_word,
+            color2: pack_color(r2, g2, b2),
+            v2: pack_vertex(verts[2].0, verts[2].1),
+            uv2: uv_words[2] as u32,
+            color3: pack_color(r3, g3, b3),
+            v3: pack_vertex(verts[3].0, verts[3].1),
+            uv3: uv_words[3] as u32,
+        }
+    }
+}
+
 /// Textured quad with a single flat tint. 10 words (tag + 9 data).
 ///
 /// Same CLUT + tpage embedding as [`TriTextured`], extended by
@@ -737,5 +824,52 @@ impl Sprite {
             uv_clut: pack_texcoord(uv.0, uv.1, material.clut_word()),
             wh: pack_xy(w, h),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Gouraud-textured quad packet must serialize to the exact GP0
+    /// 0x3C word stream: a GP0(E2) texture-window prefix, then
+    /// `[0x3C|c0, v0, uv0|clut, c1, v1, uv1|tpage, c2, v2, uv2, c3, v3, uv3]`.
+    /// This guards the on-wire layout the DMA walker and emulator decode.
+    #[test]
+    fn quad_textured_gouraud_serializes_to_gp0_3c_stream() {
+        let material =
+            TexturedGouraudPacketMaterial::from_texture(TextureMaterial::new(0x1234, 0x0105));
+        let uvw = [0x0201u16, 0x3C04, 0x3C42, 0x0240];
+        let cols = [
+            (0x11u8, 0x22u8, 0x33u8),
+            (0x44, 0x55, 0x66),
+            (0x77, 0x88, 0x99),
+            (0xAA, 0xBB, 0xCC),
+        ];
+        let verts = [(10i16, 20i16), (110, 20), (110, 90), (10, 90)];
+        let quad =
+            QuadTexturedGouraud::with_packet_material_packed_uv_words(verts, uvw, cols, material);
+
+        assert_eq!(core::mem::size_of::<QuadTexturedGouraud>(), 14 * 4);
+        assert_eq!(QuadTexturedGouraud::WORDS, 13);
+
+        let words = unsafe {
+            core::slice::from_raw_parts((&quad as *const QuadTexturedGouraud).cast::<u32>(), 14)
+        };
+        assert_eq!(words[0], 0, "tag zero until OT insert");
+        assert_eq!(words[1], material.tex_window_word, "E2 window prefix");
+        assert_eq!(words[2] >> 24, 0x3C, "Gouraud+textured+quad opcode");
+        assert_eq!(words[2] & 0x00FF_FFFF, pack_color(0x11, 0x22, 0x33));
+        assert_eq!(words[3], pack_vertex(10, 20));
+        assert_eq!(words[4], 0x0201 | material.clut_high_word);
+        assert_eq!(words[5], pack_color(0x44, 0x55, 0x66));
+        assert_eq!(words[6], pack_vertex(110, 20));
+        assert_eq!(words[7], 0x3C04 | material.tpage_high_word);
+        assert_eq!(words[8], pack_color(0x77, 0x88, 0x99));
+        assert_eq!(words[9], pack_vertex(110, 90));
+        assert_eq!(words[10], 0x3C42);
+        assert_eq!(words[11], pack_color(0xAA, 0xBB, 0xCC));
+        assert_eq!(words[12], pack_vertex(10, 90));
+        assert_eq!(words[13], 0x0240);
     }
 }

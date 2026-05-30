@@ -9,8 +9,8 @@
 use psx_gpu::{
     ot::OrderingTable,
     prim::{
-        LineMono, QuadFlat, QuadGouraud, QuadTextured, QuadTexturedMaterial, RectFlat, Sprite,
-        TriFlat, TriGouraud, TriTextured, TriTexturedGouraud,
+        LineMono, QuadFlat, QuadGouraud, QuadTextured, QuadTexturedGouraud, QuadTexturedMaterial,
+        RectFlat, Sprite, TriFlat, TriGouraud, TriTextured, TriTexturedGouraud,
     },
 };
 
@@ -45,6 +45,7 @@ impl_gpu_packet!(
     TriTextured,
     TriTexturedGouraud,
     QuadTextured,
+    QuadTexturedGouraud,
     QuadTexturedMaterial,
     Sprite,
 );
@@ -436,6 +437,21 @@ pub trait PrimitiveSink<T> {
     }
 }
 
+/// A sink that accepts both packet shapes a room surface can emit: the
+/// per-triangle [`TriTexturedGouraud`] (subdivided / triangle-depth
+/// surfaces) and the whole-surface [`QuadTexturedGouraud`]
+/// (prepared-depth quads). Implemented for any sink that takes both, so
+/// the room draw chain can carry one parameter instead of two.
+pub trait RoomSurfaceSink:
+    PrimitiveSink<TriTexturedGouraud> + PrimitiveSink<QuadTexturedGouraud>
+{
+}
+
+impl<T> RoomSurfaceSink for T where
+    T: PrimitiveSink<TriTexturedGouraud> + PrimitiveSink<QuadTexturedGouraud>
+{
+}
+
 impl<'a, T> PrimitiveArena<'a, T> {
     /// Wrap caller-owned primitive storage.
     pub fn new(storage: &'a mut [T]) -> Self {
@@ -514,8 +530,19 @@ impl<T> PrimitiveSink<T> for PrimitiveArena<'_, T> {
     }
 }
 
-const PRIMITIVE_PACKET_SLOT_WORDS: usize =
-    core::mem::size_of::<TriTexturedGouraud>().div_ceil(core::mem::size_of::<u32>());
+const PRIMITIVE_PACKET_SLOT_WORDS: usize = {
+    // Slots must hold the largest packet that shares the arena. The
+    // textured-Gouraud quad (14 words) is wider than the triangle
+    // (11 words); a single quad replaces two triangles, so widening the
+    // slot still reduces total slot pressure for quad-heavy rooms.
+    let tri = core::mem::size_of::<TriTexturedGouraud>().div_ceil(core::mem::size_of::<u32>());
+    let quad = core::mem::size_of::<QuadTexturedGouraud>().div_ceil(core::mem::size_of::<u32>());
+    if quad > tri {
+        quad
+    } else {
+        tri
+    }
+};
 
 /// One aligned primitive packet slot sized for the largest triangle packet.
 #[derive(Copy, Clone)]
