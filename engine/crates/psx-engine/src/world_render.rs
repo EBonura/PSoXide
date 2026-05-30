@@ -23,8 +23,8 @@ use crate::{
         project_world_vertex_indices_gte, CullMode, DepthPolicy, LoadedWorldCameraGte,
         PreparedTriangleDepth, ProjectedVertex, ViewVertex,
     },
-    PrimitiveSink, RoomPoint, RoomRender, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
-    WorldVertex,
+    PrimitiveSink, RoomPoint, RoomRender, RoomSurfaceSink, WorldCamera, WorldRenderPass,
+    WorldSurfaceOptions, WorldVertex,
 };
 
 /// Which side(s) of a room face should render.
@@ -1965,7 +1965,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     subdivision_mode: CachedRoomSubdivisionMode,
     visible_cells: &[GridVisibleCell],
     screen_margin: i32,
-    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+    triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
     let mut stats = GridVisibilityStats::default();
@@ -2152,7 +2152,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
     screen_margin: i32,
-    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+    triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
     let mut stats = GridVisibilityStats::default();
@@ -2565,7 +2565,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     submit_depths: CachedRoomSubmitDepths,
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
-    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+    triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
     profile: &mut RoomSurfaceMicroProfile,
 ) -> u16 {
@@ -4437,7 +4437,7 @@ fn submit_projected_split_triangle_vertex_lit_cached_uv_words<const OT: usize>(
 #[inline(always)]
 fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     world: &mut WorldRenderPass<'_, '_, OT>,
-    triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+    triangles: &mut impl RoomSurfaceSink,
     verts: [crate::render3d::ProjectedVertex; 4],
     uv_words: [u16; 4],
     colors: [(u8, u8, u8); 4],
@@ -4458,7 +4458,32 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     };
     let opts = options.with_material_layer(material.texture);
     let [(a, b, c), (d, e, f)] = split_triangles;
+    // The hardware quad (GP0 3Ch) rasterizes as tri(q0,q1,q2)+tri(q1,q2,q3),
+    // i.e. the 1-2 diagonal. Reorder the four corners so that diagonal
+    // lands on the engine's split diagonal, then one quad packet is
+    // pixel-identical to the two leaves (proved bit-exact in the emulator
+    // GPU tests). Only the two authored diagonals are recognised; any
+    // other split falls back to the two-triangle path.
+    let quad_order = match split_triangles {
+        [(0, 1, 2), (0, 2, 3)] => Some([1usize, 0, 2, 3]),
+        [(0, 1, 3), (1, 2, 3)] => Some([0usize, 1, 3, 2]),
+        _ => None,
+    };
     if let Some(prepared_depth) = prepared_depth {
+        if let Some(o) = quad_order {
+            let _ = world.submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
+                triangles,
+                [verts[o[0]], verts[o[1]], verts[o[2]], verts[o[3]]],
+                [uv_words[o[0]], uv_words[o[1]], uv_words[o[2]], uv_words[o[3]]],
+                [colors[o[0]], colors[o[1]], colors[o[2]], colors[o[3]]],
+                material.gouraud_packet,
+                opts,
+                prepared_depth,
+            );
+            #[cfg(not(feature = "room-surface-profile"))]
+            let _ = profile;
+            return;
+        }
         #[cfg(feature = "room-surface-profile")]
         let stats = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
             triangles,
@@ -5433,13 +5458,16 @@ mod tests {
         );
         assert_eq!(stats.surfaces_considered, 1);
         assert_eq!(projected_ready, [false; 4]);
-        assert_eq!(pass.command_len(), 2);
+        // A whole-quad surface with prepared (fixed-cell) depth now emits
+        // a single GP0(3Ch) quad packet instead of two triangle leaves;
+        // the rendered pixels are bit-identical (proved in the emulator
+        // GPU tests).
+        assert_eq!(pass.command_len(), 1);
         drop(pass);
 
         let expected_depth =
             tile_camera_depth(&camera, visible_cells[0], 1024) + HORIZONTAL_DEPTH_BIAS;
         assert_eq!(commands[0].depth_raw(), expected_depth);
-        assert_eq!(commands[1].depth_raw(), expected_depth);
     }
 
     #[test]
