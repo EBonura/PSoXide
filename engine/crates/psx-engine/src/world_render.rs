@@ -1014,10 +1014,10 @@ pub trait WorldSurfaceLighting {
         material: WorldRenderMaterial,
     ) -> [(u8, u8, u8); 4] {
         [
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[0]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[1]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[2]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[3]), material),
+            self.shade_vertex(sample, vertices[0], material),
+            self.shade_vertex(sample, vertices[1], material),
+            self.shade_vertex(sample, vertices[2], material),
+            self.shade_vertex(sample, vertices[3], material),
         ]
     }
 
