@@ -460,6 +460,15 @@ fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: RuntimeDebugMask
 }
 
 const DEBUG_LOG_LINE_CAP: usize = 256;
+/// Master gate for the verbose portal-visibility snapshot log. Default off: the
+/// snapshot emits many lines one byte at a time via `write_volatile` to the
+/// trapped emulator log port, and every trapped byte costs the emulator
+/// thousands of cycles, so a single snapshot smears ~1M guest cycles onto its
+/// tick and reads as a frametime spike. Its `should_debug_log_*` predicate is
+/// almost always true (some portal is always rejected), so it fired on a fixed
+/// cooldown in normal runs. Keep false for play/perf; flip to true only when
+/// debugging portal traversal.
+const PORTAL_VIS_DEBUG_LOGS: bool = false;
 const PORTAL_VIS_DEBUG_LOG_COOLDOWN_TICKS: u8 = 120;
 const PORTAL_VIS_DEBUG_VERBOSE_CLIPS: bool = false;
 const PORTAL_VIS_DEBUG_LOG_MAX_FRUSTUMS: usize = 4;
@@ -5281,7 +5290,8 @@ impl Playtest {
             &mut self.portal_visibility,
         );
         telemetry::stage_end(telemetry::stage::PORTAL_VISIBILITY);
-        if self.portal_debug_log_cooldown == 0
+        if PORTAL_VIS_DEBUG_LOGS
+            && self.portal_debug_log_cooldown == 0
             && should_debug_log_portal_visibility(current_record, &self.portal_visibility)
         {
             let player_local = self.motor.position();
