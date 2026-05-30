@@ -1384,6 +1384,16 @@ const MAX_COLLISION_ROOMS: usize = STREAMED_ROOM_SLOT_COUNT;
 #[cfg(not(feature = "cd-stream-bench"))]
 const MAX_COLLISION_ROOMS: usize = MAX_ACTIVE_ROOMS;
 
+/// Whether the entire level fits the resident budget. When it does, the
+/// residency owner declares every room resident (Tomb-Raider model); larger
+/// worlds declare only the current room plus its visible neighbourhood and the
+/// scheduler slides that window.
+#[cfg(feature = "cd-stream-bench")]
+const FULL_RESIDENCY: bool =
+    ROOMS.len() <= STREAMED_ROOM_SLOT_COUNT && ROOMS.len() <= MAX_ACTIVE_ROOMS;
+#[cfg(not(feature = "cd-stream-bench"))]
+const FULL_RESIDENCY: bool = ROOMS.len() <= MAX_ACTIVE_ROOMS;
+
 #[cfg(feature = "cd-stream-bench")]
 const fn clamp_streamed_room_slot_count(raw: usize) -> usize {
     if raw < 1 {
@@ -2512,6 +2522,12 @@ impl<const N: usize> RoomStreamLoadPlan<N> {
 struct RoomStreamScheduler<const N: usize> {
     slots: [StreamedRoomSlot; N],
     room_slots: [u16; MAX_STREAMED_ROOM_INDEX_COUNT],
+    /// Rooms declared part of the resident window via `set_resident_window`.
+    /// Pinned rooms are never chosen for eviction regardless of LRU age, so the
+    /// residency owner can keep them resident without re-requesting them. This
+    /// is the primitive both policies build on: full-residency pins every room,
+    /// a sliding window pins the current room plus its near neighbours.
+    pinned_rooms: [bool; MAX_STREAMED_ROOM_INDEX_COUNT],
     job: cd_stream::WorldRoomSlotsReadJob<N>,
     job_plan: RoomStreamLoadPlan<N>,
     slot_limit: usize,
@@ -2531,6 +2547,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
         Self {
             slots: [StreamedRoomSlot::EMPTY; N],
             room_slots: [STREAMED_ROOM_SLOT_NONE; MAX_STREAMED_ROOM_INDEX_COUNT],
+            pinned_rooms: [false; MAX_STREAMED_ROOM_INDEX_COUNT],
             job: cd_stream::WorldRoomSlotsReadJob::new(),
             job_plan: RoomStreamLoadPlan::EMPTY,
             slot_limit: N,
@@ -2551,6 +2568,52 @@ impl<const N: usize> RoomStreamScheduler<N> {
 
     fn effective_slot_limit(&self) -> usize {
         self.slot_limit.clamp(1, N)
+    }
+
+    fn is_room_pinned(&self, room: RoomIndex) -> bool {
+        let index = room.to_usize();
+        index < MAX_STREAMED_ROOM_INDEX_COUNT && self.pinned_rooms[index]
+    }
+
+    /// Declare the rooms that must stay resident. They are pinned (never
+    /// evicted) so they survive without being re-requested; rooms no longer in
+    /// the set are unpinned and become evictable again.
+    fn set_resident_window(&mut self, rooms: &[RoomIndex], count: usize) {
+        self.pinned_rooms = [false; MAX_STREAMED_ROOM_INDEX_COUNT];
+        let mut i = 0usize;
+        while i < count {
+            let index = rooms[i].to_usize();
+            if index < MAX_STREAMED_ROOM_INDEX_COUNT {
+                self.pinned_rooms[index] = true;
+            }
+            i += 1;
+        }
+    }
+
+    /// Single residency entry point: pin the desired set and load whatever is
+    /// missing. Called once per frame by the residency owner so residency is
+    /// no longer requested ad-hoc from the build paths.
+    fn reconcile_residency(
+        &mut self,
+        desired: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        count: usize,
+    ) {
+        self.set_resident_window(desired, count);
+        let plan = self.plan_window_loads(desired, count, count);
+        self.start_load_plan(plan);
+    }
+
+    fn resident_room_count(&self) -> usize {
+        let mut count = 0usize;
+        let mut slot = 0usize;
+        let limit = self.effective_slot_limit();
+        while slot < limit {
+            if self.slots[slot].state == RoomStreamSlotState::Resident {
+                count += 1;
+            }
+            slot += 1;
+        }
+        count
     }
 
     fn begin_window(&mut self) {
@@ -2994,6 +3057,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
             if meta.state != RoomStreamSlotState::Resident
                 || streamed_slot_reserved(candidate, reserved_slots, reserved_count)
                 || room_requested(meta.room, requested_rooms, requested_count)
+                || self.is_room_pinned(meta.room)
             {
                 candidate += 1;
                 continue;
@@ -3437,6 +3501,13 @@ impl Scene for Playtest {
     fn update(&mut self, ctx: &mut Ctx) {
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         let background_tick = self.streaming_jobs.background_tick(ctx);
+        #[cfg(feature = "cd-stream-bench")]
+        if background_tick {
+            // Residency owner: the single per-frame declaration of which rooms
+            // must be resident (pin + load), so the build paths no longer have
+            // to request residency themselves.
+            self.update_room_residency();
+        }
         #[cfg(feature = "cd-stream-bench")]
         let stream_progress = if background_tick {
             self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick)
@@ -5592,16 +5663,8 @@ impl Playtest {
             return;
         };
 
-        #[cfg(feature = "cd-stream-bench")]
-        if self.active_room_job.update_streaming {
-            let requested_rooms = self.active_room_job.requested_rooms;
-            let requested_count = self.active_room_job.requested_count;
-            self.request_streamed_active_room_job(
-                &requested_rooms,
-                requested_count,
-                current_record,
-            );
-        }
+        // Residency is owned by update_room_residency now; the build job no
+        // longer requests streaming itself, it only builds from resident rooms.
 
         telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
         let mut built_this_tick = 0usize;
@@ -5918,8 +5981,11 @@ impl Playtest {
         desired_visible_count: usize,
         current_record: &LevelRoomRecord,
     ) {
-        let visible_limit =
-            self.request_streamed_active_room_window(desired_visible_count, current_record);
+        // Residency is owned by update_room_residency now; this path only
+        // builds the active window from whatever the owner made resident.
+        let visible_limit = desired_visible_count
+            .min(self.portal_visibility.room_count)
+            .min(room_active_chunk_limit(current_record));
 
         let previous_active_rooms = self.active_rooms;
         let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
@@ -6350,6 +6416,42 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
         unsafe { ROOM_STREAM_SCHEDULER.pump(&mut STREAMED_ROOM_WORDS, max_sectors) }
+    }
+
+    /// The residency owner: computes the single desired resident set -- the
+    /// whole level when it fits the budget, otherwise the current room plus its
+    /// visible neighbourhood -- and hands it to the scheduler to pin + load.
+    /// This is the one place residency is declared; the build paths read
+    /// residency from what this makes resident.
+    #[cfg(feature = "cd-stream-bench")]
+    fn update_room_residency(&mut self) {
+        let mut desired = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
+        let mut count = 0usize;
+        if FULL_RESIDENCY {
+            while count < ROOMS.len() && count < STREAMED_ROOM_SLOT_COUNT {
+                desired[count] = RoomIndex::new(count as u16);
+                count += 1;
+            }
+        } else {
+            push_stream_room_request(
+                &mut desired,
+                &mut count,
+                STREAMED_ROOM_SLOT_COUNT,
+                self.room_index,
+            );
+            let visible = self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS);
+            let mut i = 0usize;
+            while i < visible {
+                push_stream_room_request(
+                    &mut desired,
+                    &mut count,
+                    STREAMED_ROOM_SLOT_COUNT,
+                    self.portal_visibility.rooms[i].room,
+                );
+                i += 1;
+            }
+        }
+        unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
     }
 
     #[cfg(feature = "cd-stream-bench")]
