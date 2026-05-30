@@ -212,6 +212,12 @@ const PROFILE_LOG_COUNTER_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
     (counter::ROOM_STREAM_PREFETCH_REQUESTS, "stream_prefetch_v"),
     (counter::ROOM_STREAM_RESIDENT_SLOTS, "stream_resident_v"),
     (counter::ROOM_STREAM_PENDING_LOADS, "stream_pending_v"),
+    (counter::ROOM_STREAM_EVICTIONS, "stream_evict_v"),
+    (counter::ROOM_STREAM_PROTECTED_FULL, "stream_full_v"),
+    (
+        counter::PORTAL_VIS_VISIBLE_MISSING_RESIDENT,
+        "stream_missing_v",
+    ),
 ];
 
 /// Timing breakdown returned by [`crate::gfx::Graphics::render`].
