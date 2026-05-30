@@ -5666,15 +5666,17 @@ impl Playtest {
         let view = self.active_room_selection_view();
         self.refresh_portal_visibility_for_view(current_index, current_record, view);
 
-        self.ensure_room_rings();
         let mut requested_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        let mut requested_count = self.visibility_ring_count.min(MAX_ACTIVE_ROOMS);
+        let mut requested_count = self.portal_visible_room_limit(current_record);
         if requested_count == 0 {
             requested_rooms[0] = current_index;
             requested_count = 1;
         } else {
-            requested_rooms[..requested_count]
-                .copy_from_slice(&self.visibility_ring[..requested_count]);
+            let mut i = 0usize;
+            while i < requested_count {
+                requested_rooms[i] = self.portal_visibility.rooms[i].room;
+                i += 1;
+            }
         }
 
         self.active_room_anchor = self.motor.position();
@@ -6117,9 +6119,22 @@ impl Playtest {
         // WORLD_STREAM_RADIUS portal hops of the current room. Computed once per
         // crossing and cached; recompute here is a no-op unless the room moved.
         self.ensure_room_rings();
-        let count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
         let mut desired = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
+        let mut count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
         desired[..count].copy_from_slice(&self.stream_ring[..count]);
+        // The BFS ring is prefetch; portal visibility is correctness. Whatever
+        // the renderer can currently see MUST be resident even when the graph
+        // ring and the geometric visibility disagree, or it draws nothing.
+        let visible = self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS);
+        let mut i = 0usize;
+        while i < visible && count < STREAMED_ROOM_SLOT_COUNT {
+            let room = self.portal_visibility.rooms[i].room;
+            if room != INVALID_ROOM_INDEX && !room_requested(room, &desired, count) {
+                desired[count] = room;
+                count += 1;
+            }
+            i += 1;
+        }
         unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
     }
 
