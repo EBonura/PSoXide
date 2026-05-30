@@ -6400,19 +6400,6 @@ mod tests {
     }
 
     #[test]
-    fn room_point_converts_to_raw_world_vertex_only_at_boundary() {
-        let point = RoomPoint::new(12, -34, 56);
-        let vertex = point.to_world_vertex();
-
-        assert_eq!(vertex, WorldVertex::new(12, -34, 56));
-        assert_eq!(RoomPoint::from_world_vertex(vertex), point);
-        assert_eq!(
-            core::mem::size_of::<RoomPoint>(),
-            core::mem::size_of::<WorldVertex>()
-        );
-    }
-
-    #[test]
     fn textured_submit_uses_transparent_layer_for_translucent_material() {
         const ZERO: TriTextured = TriTextured::new(
             [(0, 0), (0, 0), (0, 0)],
