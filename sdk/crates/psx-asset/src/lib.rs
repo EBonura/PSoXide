@@ -1429,8 +1429,8 @@ impl<'a> Texture<'a> {
 
 /// A parsed `.psxw` grid-world backed by slices into the cooked blob.
 ///
-/// This is the runtime view of the binary format, not the higher-level engine
-/// `psx_engine::GridWorld` model. It keeps parsing zero-copy and lets engine
+/// This is the binary runtime format; engine code wraps it as
+/// `psx_engine::RuntimeRoom`. It keeps parsing zero-copy and lets engine
 /// code pull sectors and walls by value as needed.
 #[derive(Copy, Clone, Debug)]
 pub struct World<'a> {
