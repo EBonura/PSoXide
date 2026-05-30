@@ -5340,7 +5340,7 @@ impl EditorWorkspace {
         let show_debug_map = self.show_play_debug_map;
         let debug_rect = Rect::from_min_size(
             rect.left_top() + Vec2::new(44.0, 8.0),
-            Vec2::new(320.0, 158.0),
+            Vec2::new(320.0, 171.0),
         );
         let clicked_overlay = response.interact_pointer_pos().is_some_and(|pos| {
             controls_rect.contains(pos) || (show_debug_overlays && debug_rect.contains(pos))
@@ -5428,9 +5428,9 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "PORT rooms {:>2}/{:<2}  tests {:>2}  rej {:>2}",
+                        "PORT vis {:>2} front {:>2} tests {:>2} rej {:>2}",
                         metrics.portal_visible_rooms,
-                        metrics.chunk_loaded,
+                        metrics.portal_frontier_rooms,
                         metrics.portal_tests,
                         metrics.portal_rejects.iter().copied().sum::<u32>()
                     ),
@@ -5441,14 +5441,40 @@ impl EditorWorkspace {
                     debug_rect.left() + 8.0,
                     &mut y,
                     &format!(
-                        "STRM slots {:>2}/{:<2}  req {:>2}  miss/fail {:>2}/{:<2}",
+                        "STRM {:>2}/{:<2} load {:>2} evict {:>2} pre {:>2}",
                         metrics.chunk_loaded,
                         metrics.stream_slot_limit,
-                        metrics.stream_requests,
-                        metrics.stream_misses,
-                        metrics.stream_failed
+                        metrics.stream_pending,
+                        metrics.stream_evictions,
+                        metrics.stream_prefetches
                     ),
                     STUDIO_TEXT_WEAK,
+                );
+                // Correctness / over-budget signals: every value should sit at 0
+                // on a healthy stream. The line lights up when streaming breaks
+                // (visible geometry not resident/built) or the resident budget
+                // is exceeded (more high-priority rooms than slots).
+                let stream_warnings = metrics.portal_missing_resident
+                    + metrics.portal_build_failed
+                    + metrics.stream_failed
+                    + metrics.stream_protected_full;
+                let warn_color = if stream_warnings > 0 {
+                    Color32::from_rgb(255, 120, 120)
+                } else {
+                    STUDIO_TEXT_WEAK
+                };
+                draw_play_metric_line(
+                    &painter,
+                    debug_rect.left() + 8.0,
+                    &mut y,
+                    &format!(
+                        "WARN miss {:>2} bfail {:>2} fail {:>2} full {:>2}",
+                        metrics.portal_missing_resident,
+                        metrics.portal_build_failed,
+                        metrics.stream_failed,
+                        metrics.stream_protected_full
+                    ),
+                    warn_color,
                 );
                 let chart_rect = Rect::from_min_size(
                     Pos2::new(debug_rect.left() + 8.0, y + 2.0),
@@ -11123,7 +11149,7 @@ impl EditorWorkspace {
         );
         let _ = writeln!(
             out,
-            "stream_counts: visible_chunks={} loaded={} candidates={} built={} cache_skips={} priorities_c/v/f={:?} req={} miss={} prefetch={} evict={} slot_limit={} pending={} failed={}",
+            "stream_counts: visible_chunks={} loaded={} candidates={} built={} cache_skips={} priorities_c/v/f={:?} req={} miss={} prefetch={} evict={} slot_limit={} pending={} failed={} protected_full={}",
             metrics.chunk_visible,
             metrics.chunk_loaded,
             metrics.chunk_candidates,
@@ -11136,7 +11162,8 @@ impl EditorWorkspace {
             metrics.stream_evictions,
             metrics.stream_slot_limit,
             metrics.stream_pending,
-            metrics.stream_failed
+            metrics.stream_failed,
+            metrics.stream_protected_full
         );
         let _ = writeln!(
             out,
@@ -16749,22 +16776,30 @@ impl EditorWorkspace {
         face_hit: Option<(FaceRef, [f32; 3])>,
         ground_hit: Option<[f32; 2]>,
     ) -> Option<[i32; 2]> {
-        let grid = self
-            .floating_geometry
-            .as_ref()
-            .and_then(|preview| preview.base_project.active_scene().node(room))
-            .and_then(|node| match &node.kind {
-                NodeKind::Room { grid } => Some(grid),
-                _ => None,
-            })
-            .or_else(|| self.room_grid_view(room))?;
-        if let Some((face, _)) = face_hit {
-            return Some([
-                grid.origin[0] + face.sx as i32,
-                grid.origin[1] + face.sz as i32,
-            ]);
-        }
+        // Anchor on the ground-plane projection only, never on
+        // `face_hit`. `face_hit` comes from `pick_face_with_hit`, which
+        // ray-tests the baked preview in `self.project`; feeding the
+        // preview's own faces back as the anchor makes the origin flip
+        // to whatever cell the cursor's nearest preview surface is in.
+        // `ground_hit` is a pure camera-ray/plane intersection
+        // (`pick_3d_world`), independent of scene geometry.
+        let _ = face_hit;
         let editor = ground_hit?;
+        // Convert with the SAME grid the pick used. `ground_hit` was
+        // produced by `pick_3d_world_on_room_plane` via
+        // `WorldGrid::room_local_to_editor`, which subtracts
+        // `grid_center_cells()` of the *current* (`self.project`) grid.
+        // `editor_to_world_cells` re-adds the center, so it must read the
+        // same grid or the two centers cancel incorrectly. During a
+        // floating placement `self.project` may have been auto-grown,
+        // shifting its center: reading the clean base grid here would
+        // leave a constant offset between the two centers, the origin
+        // lands a cell over, the preview re-grows, the center shifts
+        // again, and the wireframe oscillates between two cells frame to
+        // frame. Using `self.project`'s grid makes the center cancel so
+        // `world_cells` is the true absolute cell under the cursor,
+        // regardless of how the preview grew.
+        let grid = self.room_grid_view(room)?;
         let world_cells = grid.editor_to_world_cells(editor);
         Some([world_cells[0].floor() as i32, world_cells[1].floor() as i32])
     }
@@ -25634,7 +25669,7 @@ fn draw_play_chunk_debug_map(
         legend_row1 + Vec2::new(188.0, 0.0),
         Color32::from_rgba_unmultiplied(226, 54, 74, 112),
         Color32::from_rgb(255, 82, 104),
-        "not loaded",
+        "missing",
     );
     draw_chunk_map_legend_item(
         painter,
@@ -35597,6 +35632,7 @@ mod tests {
             stream_slot_limit: 0,
             stream_pending: 0,
             stream_failed: 0,
+            stream_protected_full: 0,
             chunk_loaded_mask: 1,
             chunk_loading_mask: 0,
             chunk_active_mask: 1,
