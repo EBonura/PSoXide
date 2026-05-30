@@ -77,6 +77,16 @@ pub mod stage {
     pub const WORLD_FLUSH: u16 = 10;
     /// Ordering-table DMA submission.
     pub const OT_SUBMIT: u16 = 11;
+    /// Player collision gather + motor solve (sim).
+    pub const SIM_COLLISION: u16 = 36;
+    /// Current-room tracking + active-window refresh (sim).
+    pub const SIM_ROOM_TRACK: u16 = 37;
+    /// Streamed-room residency reconcile (sim).
+    pub const SIM_RESIDENCY: u16 = 38;
+    /// Streamed-room sector pump (sim).
+    pub const SIM_PUMP: u16 = 39;
+    /// Character motor solve (floor snap + wall sweep), excludes the gather.
+    pub const SIM_SOLVE: u16 = 40;
 }
 
 /// Runtime task ids. Keep in sync with `emulator_core::telemetry::task`.
