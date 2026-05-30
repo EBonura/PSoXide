@@ -435,10 +435,6 @@ fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
 }
 
 #[cfg(feature = "cd-stream-bench")]
-fn room_stream_request_chunk_limit(record: &LevelRoomRecord) -> usize {
-    room_resident_chunk_limit(record).clamp(1, STREAMED_ROOM_SLOT_COUNT)
-}
-
 fn room_visible_chunk_limit(record: &LevelRoomRecord) -> usize {
     usize::from(record.visible_chunk_limit.max(1)).min(MAX_ACTIVE_ROOMS)
 }
@@ -2562,10 +2558,6 @@ impl<const N: usize> RoomStreamScheduler<N> {
         }
     }
 
-    fn set_slot_limit(&mut self, limit: usize) {
-        self.slot_limit = limit.clamp(1, N);
-    }
-
     fn effective_slot_limit(&self) -> usize {
         self.slot_limit.clamp(1, N)
     }
@@ -2598,22 +2590,11 @@ impl<const N: usize> RoomStreamScheduler<N> {
         desired: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
         count: usize,
     ) {
+        self.begin_window();
         self.set_resident_window(desired, count);
         let plan = self.plan_window_loads(desired, count, count);
         self.start_load_plan(plan);
-    }
-
-    fn resident_room_count(&self) -> usize {
-        let mut count = 0usize;
-        let mut slot = 0usize;
-        let limit = self.effective_slot_limit();
-        while slot < limit {
-            if self.slots[slot].state == RoomStreamSlotState::Resident {
-                count += 1;
-            }
-            slot += 1;
-        }
-        count
+        self.emit_counters();
     }
 
     fn begin_window(&mut self) {
@@ -6058,362 +6039,6 @@ impl Playtest {
     }
 
     #[cfg(feature = "cd-stream-bench")]
-    fn request_streamed_active_room_window(
-        &mut self,
-        desired_visible_count: usize,
-        current_record: &LevelRoomRecord,
-    ) -> usize {
-        let resident_capacity = room_resident_chunk_limit(current_record);
-        let request_limit = room_stream_request_chunk_limit(current_record);
-        let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut requested_count = 0usize;
-        self.portal_stream_priority_current = 0;
-        self.portal_stream_priority_visible = 0;
-        self.portal_stream_priority_frontier = 0;
-
-        if push_stream_room_request(
-            &mut requested_rooms,
-            &mut requested_count,
-            request_limit,
-            self.room_index,
-        ) {
-            self.portal_stream_priority_current = 1;
-        }
-        self.portal_stream_priority_frontier = self.portal_stream_priority_frontier.saturating_add(
-            self.push_current_floor_link_stream_requests(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-            ) as u16,
-        );
-
-        let visible_limit = desired_visible_count
-            .min(self.portal_visibility.room_count)
-            .min(room_active_chunk_limit(current_record));
-        let mut i = 0usize;
-        while i < visible_limit {
-            let room = self.portal_visibility.rooms[i].room;
-            if push_stream_room_request(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-                room,
-            ) {
-                self.portal_stream_priority_visible =
-                    self.portal_stream_priority_visible.saturating_add(1);
-            }
-            i += 1;
-        }
-
-        let portal_first = current_record.portal_first as usize;
-        let portal_end = portal_first.saturating_add(current_record.portal_count as usize);
-        let mut portal_index = portal_first;
-        while portal_index < portal_end.min(ROOM_PORTALS.len())
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let portal = ROOM_PORTALS[portal_index];
-            if portal.source_room == self.room_index
-                && push_stream_room_request(
-                    &mut requested_rooms,
-                    &mut requested_count,
-                    request_limit,
-                    portal.destination_room,
-                )
-            {
-                self.portal_stream_priority_frontier =
-                    self.portal_stream_priority_frontier.saturating_add(1);
-            }
-            portal_index += 1;
-        }
-        let protected_count = requested_count;
-
-        let mut frontier = 0usize;
-        while frontier < self.portal_visibility.frontier_count
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let room = self.portal_visibility.frontier_rooms[frontier].room;
-            if push_stream_room_request(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-                room,
-            ) {
-                self.portal_stream_priority_frontier =
-                    self.portal_stream_priority_frontier.saturating_add(1);
-            }
-            frontier += 1;
-        }
-
-        let requested_count = self.append_pack_aware_streamed_prefetches(
-            &mut requested_rooms,
-            requested_count,
-            request_limit,
-        );
-        self.ensure_streamed_room_residency(
-            &requested_rooms,
-            requested_count,
-            protected_count,
-            resident_capacity,
-        );
-
-        visible_limit
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn request_streamed_active_room_job(
-        &mut self,
-        job_rooms: &[RoomIndex; MAX_ACTIVE_ROOMS],
-        job_room_count: usize,
-        current_record: &LevelRoomRecord,
-    ) {
-        let resident_capacity = room_resident_chunk_limit(current_record);
-        let request_limit = room_stream_request_chunk_limit(current_record);
-        let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut requested_count = 0usize;
-        self.portal_stream_priority_current = 0;
-        self.portal_stream_priority_visible = 0;
-        self.portal_stream_priority_frontier = 0;
-
-        if push_stream_room_request(
-            &mut requested_rooms,
-            &mut requested_count,
-            request_limit,
-            self.room_index,
-        ) {
-            self.portal_stream_priority_current = 1;
-        }
-        self.portal_stream_priority_frontier = self.portal_stream_priority_frontier.saturating_add(
-            self.push_current_floor_link_stream_requests(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-            ) as u16,
-        );
-
-        let mut i = 0usize;
-        while i < job_room_count
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            if push_stream_room_request(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-                job_rooms[i],
-            ) {
-                self.portal_stream_priority_visible =
-                    self.portal_stream_priority_visible.saturating_add(1);
-            }
-            i += 1;
-        }
-
-        let portal_first = current_record.portal_first as usize;
-        let portal_end = portal_first.saturating_add(current_record.portal_count as usize);
-        let mut portal_index = portal_first;
-        while portal_index < portal_end.min(ROOM_PORTALS.len())
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let portal = ROOM_PORTALS[portal_index];
-            if portal.source_room == self.room_index
-                && push_stream_room_request(
-                    &mut requested_rooms,
-                    &mut requested_count,
-                    request_limit,
-                    portal.destination_room,
-                )
-            {
-                self.portal_stream_priority_frontier =
-                    self.portal_stream_priority_frontier.saturating_add(1);
-            }
-            portal_index += 1;
-        }
-
-        let mut frontier = 0usize;
-        while frontier < self.portal_visibility.frontier_count
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let room = self.portal_visibility.frontier_rooms[frontier].room;
-            if push_stream_room_request(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-                room,
-            ) {
-                self.portal_stream_priority_frontier =
-                    self.portal_stream_priority_frontier.saturating_add(1);
-            }
-            frontier += 1;
-        }
-
-        let protected_count = requested_count;
-        let requested_count = self.append_pack_aware_streamed_prefetches(
-            &mut requested_rooms,
-            requested_count,
-            request_limit,
-        );
-        self.ensure_streamed_room_residency(
-            &requested_rooms,
-            requested_count,
-            protected_count,
-            resident_capacity,
-        );
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn push_current_floor_link_stream_requests(
-        &self,
-        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-        requested_count: &mut usize,
-        request_limit: usize,
-    ) -> usize {
-        let (rooms, count) = self.current_floor_link_rooms();
-        let mut added = 0usize;
-        let mut i = 0usize;
-        while i < count
-            && *requested_count < request_limit
-            && *requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            if push_stream_room_request(requested_rooms, requested_count, request_limit, rooms[i]) {
-                added += 1;
-            }
-            i += 1;
-        }
-        added
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn append_pack_aware_streamed_prefetches(
-        &self,
-        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-        active_count: usize,
-        request_limit: usize,
-    ) -> usize {
-        let mut requested_count = active_count
-            .min(request_limit)
-            .min(STREAMED_ROOM_SLOT_COUNT);
-        if requested_count == 0
-            || requested_count >= request_limit
-            || requested_count >= STREAMED_ROOM_SLOT_COUNT
-            || RUNTIME_SCHEDULE.stream_prefetch_count == 0
-            || ROOM_CHUNKS.is_empty()
-        {
-            return requested_count;
-        }
-
-        let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
-            return requested_count;
-        };
-        let player = self.motor.position();
-
-        let mut added = 0usize;
-        while added < RUNTIME_SCHEDULE.stream_prefetch_count
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let Some((span_start, span_end)) =
-                streamed_request_sector_span(requested_rooms, requested_count)
-            else {
-                break;
-            };
-            let base_span = span_end.saturating_sub(span_start);
-            let mut best_room = INVALID_ROOM_INDEX;
-            let mut best_score = ChunkResidencyScore::WORST;
-            let mut best_extra_sectors = u32::MAX;
-            let mut best_total_sectors = u32::MAX;
-
-            for chunk in ROOM_CHUNKS {
-                if chunk.room == self.room_index
-                    || room_requested(chunk.room, requested_rooms, requested_count)
-                    || streamed_room_is_resident(chunk.room)
-                {
-                    continue;
-                }
-                let Some(score) =
-                    chunk_residency_score(*chunk, self.room_index, current_record, player)
-                else {
-                    continue;
-                };
-                let Some(info) = cd_stream::world_room_chunk_info(chunk.room.raw(), WORLD_PACK_TOC)
-                else {
-                    continue;
-                };
-                if info.sector_count == 0
-                    || info.byte_size == 0
-                    || info.byte_size > STREAMED_ROOM_SLOT_BYTES
-                {
-                    continue;
-                }
-                let candidate_end = info.sector_offset.saturating_add(info.sector_count);
-                let total_sectors = span_end
-                    .max(candidate_end)
-                    .saturating_sub(span_start.min(info.sector_offset));
-                let extra_sectors = total_sectors.saturating_sub(base_span);
-                if extra_sectors > RUNTIME_SCHEDULE.stream_prefetch_max_extra_sectors
-                    || (extra_sectors > 0
-                        && total_sectors > RUNTIME_SCHEDULE.stream_prefetch_max_total_sectors)
-                {
-                    continue;
-                }
-                let better = best_room == INVALID_ROOM_INDEX
-                    || extra_sectors < best_extra_sectors
-                    || (extra_sectors == best_extra_sectors
-                        && (score.better_than(best_score)
-                            || (best_total_sectors > total_sectors
-                                && !best_score.better_than(score))));
-                if better {
-                    best_room = chunk.room;
-                    best_score = score;
-                    best_extra_sectors = extra_sectors;
-                    best_total_sectors = total_sectors;
-                }
-            }
-
-            if best_room == INVALID_ROOM_INDEX {
-                break;
-            }
-            requested_rooms[requested_count] = best_room;
-            requested_count += 1;
-            added += 1;
-        }
-
-        requested_count
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn ensure_streamed_room_residency(
-        &mut self,
-        requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-        requested_count: usize,
-        active_count: usize,
-        resident_limit: usize,
-    ) {
-        let plan = unsafe {
-            ROOM_STREAM_SCHEDULER.set_slot_limit(resident_limit);
-            ROOM_STREAM_SCHEDULER.begin_window();
-            ROOM_STREAM_SCHEDULER.plan_window_loads(
-                requested_rooms,
-                requested_count,
-                active_count.min(requested_count),
-            )
-        };
-        if plan.count == 0 {
-            unsafe {
-                ROOM_STREAM_SCHEDULER.emit_counters();
-            }
-            return;
-        }
-
-        unsafe {
-            ROOM_STREAM_SCHEDULER.start_load_plan(plan);
-            ROOM_STREAM_SCHEDULER.emit_counters();
-        }
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
     fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
         unsafe { ROOM_STREAM_SCHEDULER.pump(&mut STREAMED_ROOM_WORDS, max_sectors) }
     }
@@ -6485,45 +6110,6 @@ impl Playtest {
             return None;
         }
         room.sector(sx as u16, sz as u16)
-    }
-
-    fn current_floor_link_rooms(&self) -> ([RoomIndex; 2], usize) {
-        let Some(sector) = self.current_floor_link_sector() else {
-            return ([INVALID_ROOM_INDEX; 2], 0);
-        };
-        let mut rooms = [INVALID_ROOM_INDEX; 2];
-        let mut count = 0usize;
-        if let Some(room) = sector.floor_above_room() {
-            self.push_valid_floor_link_room(&mut rooms, &mut count, room);
-        }
-        if let Some(room) = sector.floor_below_room() {
-            self.push_valid_floor_link_room(&mut rooms, &mut count, room);
-        }
-        (rooms, count)
-    }
-
-    fn push_valid_floor_link_room(
-        &self,
-        rooms: &mut [RoomIndex; 2],
-        count: &mut usize,
-        room: RoomIndex,
-    ) {
-        if *count >= rooms.len()
-            || room == self.room_index
-            || room == INVALID_ROOM_INDEX
-            || room.to_usize() >= ROOMS.len()
-        {
-            return;
-        }
-        let mut i = 0usize;
-        while i < *count {
-            if rooms[i] == room {
-                return;
-            }
-            i += 1;
-        }
-        rooms[*count] = room;
-        *count += 1;
     }
 
     fn current_floor_link_switch_target(&self) -> Option<RoomIndex> {
@@ -8085,40 +7671,6 @@ fn push_stream_room_request(
     true
 }
 
-#[cfg(feature = "cd-stream-bench")]
-fn streamed_request_sector_span(
-    requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    requested_count: usize,
-) -> Option<(u32, u32)> {
-    let mut span_start = u32::MAX;
-    let mut span_end = 0u32;
-    let mut found = false;
-    let mut i = 0usize;
-    while i < requested_count.min(STREAMED_ROOM_SLOT_COUNT) {
-        let room = requested_rooms[i];
-        if room == INVALID_ROOM_INDEX {
-            i += 1;
-            continue;
-        }
-        let info = cd_stream::world_room_chunk_info(room.raw(), WORLD_PACK_TOC)?;
-        if info.sector_count == 0
-            || info.byte_size == 0
-            || info.byte_size > STREAMED_ROOM_SLOT_BYTES
-        {
-            return None;
-        }
-        span_start = span_start.min(info.sector_offset);
-        span_end = span_end.max(info.sector_offset.saturating_add(info.sector_count));
-        found = true;
-        i += 1;
-    }
-    if found {
-        Some((span_start, span_end))
-    } else {
-        None
-    }
-}
-
 const fn room_material_fallback() -> WorldRenderMaterial {
     WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
 }
@@ -9376,46 +8928,6 @@ fn portal_visibility_view_keys(view: ActiveRoomView) -> (i16, i16, i16, i16) {
     )
 }
 
-#[derive(Copy, Clone)]
-struct ChunkResidencyScore {
-    tier: u8,
-    distance: u32,
-}
-
-impl ChunkResidencyScore {
-    const WORST: Self = Self {
-        tier: u8::MAX,
-        distance: u32::MAX,
-    };
-
-    fn better_than(self, other: Self) -> bool {
-        self.tier < other.tier || (self.tier == other.tier && self.distance < other.distance)
-    }
-}
-
-fn chunk_residency_score(
-    chunk: LevelChunkRecord,
-    current_index: RoomIndex,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-) -> Option<ChunkResidencyScore> {
-    let current_authored_room = authored_room_for_chunk(current_index)?;
-    let same_authored = chunk.authored_room == current_authored_room;
-    if !same_authored
-        && authored_room_for_chunk(current_index)
-            .and_then(|authored| authored_bounds_current_space(authored, current_record))
-            .is_some_and(|bounds| {
-                rects_overlap(chunk_bounds_current_space(chunk, current_record), bounds)
-            })
-    {
-        return None;
-    }
-    Some(ChunkResidencyScore {
-        tier: if same_authored { 0 } else { 1 },
-        distance: chunk_distance_sq_current_space(chunk, current_record, player),
-    })
-}
-
 fn authored_room_for_chunk(index: RoomIndex) -> Option<u32> {
     chunk_record_for_room(index).map(|chunk| chunk.authored_room)
 }
@@ -9427,59 +8939,6 @@ fn chunk_record_for_room(index: RoomIndex) -> Option<&'static LevelChunkRecord> 
         }
     }
     ROOM_CHUNKS.iter().find(|chunk| chunk.room == index)
-}
-
-fn authored_bounds_current_space(
-    authored_room: u32,
-    current_record: &LevelRoomRecord,
-) -> Option<(i32, i32, i32, i32)> {
-    let mut bounds: Option<(i32, i32, i32, i32)> = None;
-    for chunk in ROOM_CHUNKS {
-        if chunk.authored_room != authored_room {
-            continue;
-        }
-        bounds = Some(match bounds {
-            Some((ax0, ax1, az0, az1)) => {
-                let (bx0, bx1, bz0, bz1) = chunk_bounds_current_space(*chunk, current_record);
-                (ax0.min(bx0), ax1.max(bx1), az0.min(bz0), az1.max(bz1))
-            }
-            None => chunk_bounds_current_space(*chunk, current_record),
-        });
-    }
-    bounds
-}
-
-fn rects_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
-    let (ax0, ax1, az0, az1) = a;
-    let (bx0, bx1, bz0, bz1) = b;
-    ax0 < bx1 && ax1 > bx0 && az0 < bz1 && az1 > bz0
-}
-
-fn chunk_distance_sq_current_space(
-    chunk: LevelChunkRecord,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-) -> u32 {
-    let (x0, x1, z0, z1) = chunk_bounds_current_space(chunk, current_record);
-    rect_distance_sq(player.x, player.z, x0, x1, z0, z1)
-}
-
-fn chunk_bounds_current_space(
-    chunk: LevelChunkRecord,
-    current_record: &LevelRoomRecord,
-) -> (i32, i32, i32, i32) {
-    let sector_size = current_record.sector_size.max(1);
-    let x0 = chunk
-        .origin_x
-        .saturating_sub(current_record.origin_x)
-        .saturating_mul(sector_size);
-    let z0 = chunk
-        .origin_z
-        .saturating_sub(current_record.origin_z)
-        .saturating_mul(sector_size);
-    let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector_size));
-    let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector_size));
-    (x0, x1, z0, z1)
 }
 
 fn chunk_overlaps_collision_window(
