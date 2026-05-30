@@ -1178,7 +1178,7 @@ fn camera_from_position_focus(
     )
     .max(1);
     WorldCamera {
-        position: position.to_world_vertex(),
+        position: position,
         projection,
         sin_yaw: Q12::from_ratio(dx, radius),
         cos_yaw: Q12::from_ratio(dz, radius),

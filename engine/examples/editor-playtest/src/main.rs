@@ -2342,7 +2342,7 @@ fn world_camera_from_position_focus(
             .max(1);
     WorldCamera::from_basis(
         projection,
-        position.to_world_vertex(),
+        position,
         Q12::from_ratio(dx, radius),
         Q12::from_ratio(dz, radius),
         Q12::from_ratio(target_dy, pitch_len),
@@ -5143,7 +5143,7 @@ impl Playtest {
     fn free_orbit_camera(&self) -> WorldCamera {
         WorldCamera::orbit_yaw(
             PROJECTION,
-            self.spawn.to_world_vertex(),
+            self.spawn,
             CAMERA_Y_OFFSET,
             self.orbit_radius,
             self.orbit_yaw,
@@ -9482,7 +9482,7 @@ impl RuntimeRoomLighting {
         point: WorldVertex,
         material: TextureMaterial,
     ) -> TextureMaterial {
-        material.with_tint(self.shade_tint_at(RoomPoint::from_world_vertex(point), material.tint()))
+        material.with_tint(self.shade_tint_at(point, material.tint()))
     }
 
     fn shade_tint_at(&self, point: RoomPoint, base: (u8, u8, u8)) -> (u8, u8, u8) {
@@ -9496,7 +9496,7 @@ impl RuntimeRoomLighting {
         if !self.fog_enabled || self.fog_far <= self.fog_near {
             return tint;
         }
-        let depth = self.camera.view_vertex(point.to_world_vertex()).z;
+        let depth = self.camera.view_vertex(point).z;
         self.apply_fog_at_depth(tint, depth)
     }
 
@@ -9591,10 +9591,10 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
             ];
         }
         [
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[0]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[1]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[2]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[3]), material),
+            self.shade_vertex(sample, vertices[0], material),
+            self.shade_vertex(sample, vertices[1], material),
+            self.shade_vertex(sample, vertices[2], material),
+            self.shade_vertex(sample, vertices[3], material),
         ]
     }
 
@@ -9618,22 +9618,22 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
         }
         [
             self.shade_tint_at_depth(
-                RoomPoint::from_world_vertex(vertices[0]),
+                vertices[0],
                 material.texture.tint(),
                 depths[0],
             ),
             self.shade_tint_at_depth(
-                RoomPoint::from_world_vertex(vertices[1]),
+                vertices[1],
                 material.texture.tint(),
                 depths[1],
             ),
             self.shade_tint_at_depth(
-                RoomPoint::from_world_vertex(vertices[2]),
+                vertices[2],
                 material.texture.tint(),
                 depths[2],
             ),
             self.shade_tint_at_depth(
-                RoomPoint::from_world_vertex(vertices[3]),
+                vertices[3],
                 material.texture.tint(),
                 depths[3],
             ),
@@ -12581,7 +12581,7 @@ fn draw_entity_markers(
 }
 
 fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_tick: SimTick) {
-    let Some(center) = camera.project_world(target.to_world_vertex()) else {
+    let Some(center) = camera.project_world(target) else {
         return;
     };
 
