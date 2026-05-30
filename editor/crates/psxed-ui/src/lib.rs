@@ -6725,19 +6725,40 @@ impl EditorWorkspace {
             }
         }
         if self.transform_gizmo_mode == TransformGizmoMode::Move {
+            let axes = self.node_gizmo_screen_axes(rect);
+            let pivot = axes.first().map(|axis| axis.start);
             for screen_plane in self.node_gizmo_screen_planes(rect) {
-                // Inside the quad is distance 0; just outside is the
-                // distance to the nearest edge, giving the plane the same
-                // screen-space forgiveness the axes already have so a
-                // cursor a few pixels off a foreshortened quad still grabs
-                // it instead of falling through to the floor behind.
-                let distance = if point_in_polygon_2d(pointer, &screen_plane.corners) {
+                // The plane is drawn as a small square inset into the
+                // corner between its two axes, but the user reads the whole
+                // corner as the handle. So the plane is grabbable in two
+                // tiers, both reported at distance-to-quad so a genuinely
+                // nearby axis (added above within its 10px radius) still
+                // wins and the plane only claims interior the axes leave:
+                //   1. inside the quad (distance 0) or within the usual
+                //      few-px tolerance of it -- the tight, primary target;
+                //   2. anywhere inside the footprint triangle (pivot + the
+                //      two axis endpoints) -- fills the wedge of bare tile
+                //      that used to sit between the inset quad and the axes
+                //      and caused zoomed-out clicks to fall through to the
+                //      floor.
+                let quad_distance = if point_in_polygon_2d(pointer, &screen_plane.corners) {
                     0.0
                 } else {
                     distance_to_polygon_edges_2d(pointer, &screen_plane.corners)
                 };
-                if distance <= GIZMO_PLANE_PICK_RADIUS {
-                    consider(distance, 1, NodeGizmoHandle::Plane(screen_plane.plane));
+                if quad_distance <= GIZMO_PLANE_PICK_RADIUS {
+                    consider(quad_distance, 1, NodeGizmoHandle::Plane(screen_plane.plane));
+                    continue;
+                }
+                if let Some(pivot) = pivot {
+                    let [axis_a, axis_b] = screen_plane.plane.axes();
+                    let end_a = axes.iter().find(|axis| axis.axis == axis_a).map(|a| a.end);
+                    let end_b = axes.iter().find(|axis| axis.axis == axis_b).map(|a| a.end);
+                    if let (Some(end_a), Some(end_b)) = (end_a, end_b) {
+                        if point_in_polygon_2d(pointer, &[pivot, end_a, end_b]) {
+                            consider(quad_distance, 1, NodeGizmoHandle::Plane(screen_plane.plane));
+                        }
+                    }
                 }
             }
         }
@@ -35256,14 +35277,22 @@ mod tests {
         /// away along a fixed oblique down-and-aside direction. Larger
         /// `distance` = more zoomed out.
         fn frame(&mut self, target: [f32; 3], distance: f32) {
-            // Pre-normalised oblique look direction (~34deg above the
-            // ground), the kind of angle at which the green XZ ground
-            // plane foreshortens.
-            const DIR: [f32; 3] = [0.5217, 0.5691, -0.6356];
+            // ~34deg above the ground.
+            self.frame_at_elevation(target, distance, 0.5691_f32.asin());
+        }
+
+        /// Aim the free camera at `target` from `distance` units away,
+        /// `elevation_rad` above the horizon (0 = looking horizontally
+        /// across the ground, PI/2 = straight down). Lower elevation
+        /// foreshortens the flat XZ ground plane.
+        fn frame_at_elevation(&mut self, target: [f32; 3], distance: f32, elevation_rad: f32) {
+            let horiz = elevation_rad.cos();
+            // Keep the same azimuth as the original oblique direction.
+            let dir = [0.6556 * horiz, elevation_rad.sin(), -0.7551 * horiz];
             let pos = [
-                round_to_i32(target[0] + DIR[0] * distance),
-                round_to_i32(target[1] + DIR[1] * distance),
-                round_to_i32(target[2] + DIR[2] * distance),
+                round_to_i32(target[0] + dir[0] * distance),
+                round_to_i32(target[1] + dir[1] * distance),
+                round_to_i32(target[2] + dir[2] * distance),
             ];
             self.workspace.camera_rig.free_position = pos;
             let tgt = [
@@ -35320,6 +35349,187 @@ mod tests {
                 })
                 .fold(f32::INFINITY, f32::min)
         }
+
+        /// Screen triangle a move plane visually occupies: the pivot and
+        /// the two axis endpoints that bound it. The drawn plane quad is a
+        /// small inset inside this triangle; the user reads the whole
+        /// corner as "the plane". `None` if the plane or an axis is culled.
+        fn plane_footprint_triangle(&self, plane: NodeGizmoPlane) -> Option<[Pos2; 3]> {
+            let axes = self.workspace.node_gizmo_screen_axes(self.viewport);
+            let pivot = axes.first().map(|a| a.start)?;
+            let [pa, pb] = plane.axes();
+            let end_a = axes.iter().find(|a| a.axis == pa).map(|a| a.end)?;
+            let end_b = axes.iter().find(|a| a.axis == pb).map(|a| a.end)?;
+            Some([pivot, end_a, end_b])
+        }
+
+        /// One-character class of what a click at `pointer` resolves to,
+        /// for diagnostic maps. Uppercase = node-gizmo plane, lowercase =
+        /// node-gizmo axis, `P` = primitive gizmo, `#` = tile/surface (the
+        /// bug), `.` = nothing.
+        fn classify(&self, pointer: Pos2) -> char {
+            match self.resolve(pointer) {
+                Some(Viewport3dPointerTarget::NodeGizmo(NodeGizmoHandle::Plane(p))) => match p {
+                    NodeGizmoPlane::XZ => 'Z',
+                    NodeGizmoPlane::XY => 'Y',
+                    NodeGizmoPlane::YZ => 'V',
+                },
+                Some(Viewport3dPointerTarget::NodeGizmo(NodeGizmoHandle::Axis(a))) => match a {
+                    PrimitiveGizmoAxis::X => 'x',
+                    PrimitiveGizmoAxis::Y => 'y',
+                    PrimitiveGizmoAxis::Z => 'z',
+                },
+                Some(Viewport3dPointerTarget::PrimitiveGizmo(_)) => 'P',
+                Some(Viewport3dPointerTarget::Entity(_)) => 'E',
+                Some(Viewport3dPointerTarget::Surface { .. }) => '#',
+                None => '.',
+            }
+        }
+    }
+
+    /// Diagnostic (not a strict assertion): print an ASCII map of what a
+    /// click resolves to across the gizmo region, at several zoom levels.
+    /// Run with `cargo test gizmo_pick_map -- --nocapture` to eyeball
+    /// where the tile (`#`) leaks in among the handles.
+    #[test]
+    fn gizmo_pick_map_diagnostic() {
+        // Big room so the floor fills the view behind the gizmo at every
+        // zoom -- gaps in the handle pick then show as '#' (tile), the way
+        // they do in a real level, not '.' (ray missed the small floor).
+        let mut harness = ViewportHarness::floored_room("gizmo-pick-map", 24);
+        let light = harness.add_centre_light(0.25);
+        harness.select(light);
+        let target = harness.room_center();
+
+        // Sweep camera elevation (degrees above the horizon) at a fixed
+        // moderate distance: the flat XZ ground plane foreshortens as the
+        // angle gets shallow, the regime the user hits when orbiting to a
+        // near-horizontal view.
+        println!("##### ELEVATION SWEEP (dist 12000) #####");
+        for &deg in &[60.0_f32, 40.0, 25.0, 15.0, 8.0, 4.0] {
+            harness.frame_at_elevation(target, 12_000.0, deg.to_radians());
+            let xz_area = harness
+                .workspace
+                .node_gizmo_screen_planes(harness.viewport)
+                .into_iter()
+                .find(|p| p.plane == NodeGizmoPlane::XZ)
+                .map(|p| polygon_area_2d(&p.corners).abs());
+            // Where the XZ plane centre projects, whether or not it is
+            // culled (a point lerped along +X/+Z from the pivot).
+            let pivot = harness
+                .workspace
+                .node_gizmo_bounds_3d(&[harness.workspace.selection.selected_node])
+                .map(|(p, _)| p)
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let probe_world = [pivot[0] + 300.0, pivot[1], pivot[2] + 300.0];
+            let at_center = project_world_to_viewport_screen(
+                harness.workspace.viewport_3d_camera(),
+                harness.viewport,
+                probe_world,
+            )
+            .map(|p| harness.classify(p));
+            println!(
+                "elev {deg:>4}deg: XZ area = {:>8}  click-at-XZ-region = {:?}",
+                xz_area
+                    .map(|a| format!("{a:.1}"))
+                    .unwrap_or_else(|| "CULLED".to_string()),
+                at_center,
+            );
+        }
+
+        for &distance in &[4_000.0, 8_000.0, 16_000.0, 32_000.0, 60_000.0] {
+            harness.frame(target, distance);
+            // Bounding box over all axis + plane handles, with margin.
+            let mut pts: Vec<Pos2> = harness
+                .workspace
+                .node_gizmo_screen_axes(harness.viewport)
+                .into_iter()
+                .flat_map(|a| [a.start, a.end])
+                .collect();
+            for plane in NodeGizmoPlane::ALL {
+                if let Some(q) = harness.plane_quad(plane) {
+                    pts.extend(q);
+                }
+            }
+            if pts.is_empty() {
+                println!("dist {distance}: no gizmo projected");
+                continue;
+            }
+            let pad = 16.0;
+            let min_x = pts.iter().map(|p| p.x).fold(f32::INFINITY, f32::min) - pad;
+            let max_x = pts.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max) + pad;
+            let min_y = pts.iter().map(|p| p.y).fold(f32::INFINITY, f32::min) - pad;
+            let max_y = pts.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max) + pad;
+            let cols = 70usize;
+            let rows = 30usize;
+            println!(
+                "=== dist {distance} | x[{min_x:.0}..{max_x:.0}] y[{min_y:.0}..{max_y:.0}] ===",
+            );
+            for r in 0..rows {
+                let mut line = String::with_capacity(cols);
+                for c in 0..cols {
+                    let probe = Pos2::new(
+                        min_x + (max_x - min_x) * c as f32 / (cols - 1) as f32,
+                        min_y + (max_y - min_y) * r as f32 / (rows - 1) as f32,
+                    );
+                    line.push(harness.classify(probe));
+                }
+                println!("{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn node_gizmo_no_tile_inside_plane_footprint() {
+        // Regression for "clicking near the plane grabs the tile when
+        // zoomed out". A move plane is drawn as a small inset square in
+        // the corner between its two axes, but the user reads the whole
+        // corner as the handle. The pick covered only the small square (+
+        // a few px) and the axis tubes, leaving wedges of bare tile
+        // between them. This sweeps each plane's footprint triangle
+        // (pivot + the two axis endpoints) and requires every interior
+        // point to resolve to a gizmo handle, never a floor Surface.
+        // Big room so the floor is always behind the gizmo.
+        let mut harness = ViewportHarness::floored_room("gizmo-footprint", 24);
+        let light = harness.add_centre_light(0.25);
+        harness.select(light);
+        let target = harness.room_center();
+
+        let mut checked = 0;
+        for &distance in &[6_000.0, 10_000.0, 16_000.0, 24_000.0] {
+            harness.frame(target, distance);
+            for plane in NodeGizmoPlane::ALL {
+                let Some(tri) = harness.plane_footprint_triangle(plane) else {
+                    continue;
+                };
+                // Barycentric sweep of the triangle interior.
+                let steps = 12;
+                for i in 0..=steps {
+                    for j in 0..=(steps - i) {
+                        let a = i as f32 / steps as f32;
+                        let b = j as f32 / steps as f32;
+                        let c = 1.0 - a - b;
+                        // Stay strictly interior so we test the wedge, not
+                        // the axis edges themselves.
+                        if a < 0.08 || b < 0.08 || c < 0.08 {
+                            continue;
+                        }
+                        let probe = Pos2::new(
+                            tri[0].x * c + tri[1].x * a + tri[2].x * b,
+                            tri[0].y * c + tri[1].y * a + tri[2].y * b,
+                        );
+                        checked += 1;
+                        let resolved = harness.resolve(probe);
+                        assert!(
+                            !matches!(resolved, Some(Viewport3dPointerTarget::Surface { .. })),
+                            "dist {distance}, {plane:?} footprint: click at {probe:?} \
+                             grabbed the tile ({resolved:?}) instead of a gizmo handle",
+                        );
+                    }
+                }
+            }
+        }
+        assert!(checked >= 50, "footprint sweep covered too few points ({checked})");
     }
 
     #[test]
