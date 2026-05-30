@@ -3192,6 +3192,11 @@ struct Playtest {
     portal_visibility_camera_global: RoomPoint,
     /// Global chunk bounds retained for portal diagnostics and streaming.
     portal_room_bounds: [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
+    /// Cached `portal_room_bounds` length. The bounds are a pure function of the
+    /// static cooked geometry (ROOM_VISIBILITY / VISIBILITY_CELLS / ROOMS), so
+    /// they are computed once and reused; recomputing them per portal-visibility
+    /// refresh was ~74% of the portal-visibility cost.
+    portal_room_bounds_count: Option<usize>,
     portal_visible_missing_resident: u16,
     portal_visible_missing_mask: RuntimeDebugMask,
     portal_visible_build_failed: u16,
@@ -3341,6 +3346,7 @@ impl Playtest {
             portal_visibility_root: RoomIndex::ZERO,
             portal_visibility_camera_global: RoomPoint::ZERO,
             portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
+            portal_room_bounds_count: None,
             portal_visible_missing_resident: 0,
             portal_visible_missing_mask: RuntimeDebugMask::EMPTY,
             portal_visible_build_failed: 0,
@@ -5279,7 +5285,16 @@ impl Playtest {
             half_fov_y_tan_q12,
             RUNTIME_SCHEDULE.portal_min_width_q12,
         );
-        let bounds_count = collect_portal_room_bounds(&mut self.portal_room_bounds);
+        // The room bounds are a pure function of the static cooked geometry, so
+        // collect them once and reuse the cached length on every later refresh.
+        let bounds_count = match self.portal_room_bounds_count {
+            Some(count) => count,
+            None => {
+                let count = collect_portal_room_bounds(&mut self.portal_room_bounds);
+                self.portal_room_bounds_count = Some(count);
+                count
+            }
+        };
         build_portal_visibility_with_room_bounds(
             ROOMS,
             ROOM_PORTALS,
