@@ -228,6 +228,9 @@ pub struct EditorPlaytestMetrics {
     pub stream_pending: u32,
     /// Stream loads that failed validation or CD reads.
     pub stream_failed: u32,
+    /// Requested rooms denied a slot because every candidate was protected
+    /// (the resident-budget-exceeded signal: more high-priority rooms than slots).
+    pub stream_protected_full: u32,
     /// Resident streamed chunks, keyed by runtime room/chunk index.
     pub chunk_loaded_mask: u64,
     /// Streamed chunks with in-flight loads, keyed by runtime room/chunk index.
