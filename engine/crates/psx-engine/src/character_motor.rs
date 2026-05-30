@@ -508,7 +508,7 @@ impl CharacterMotorState {
         config: CharacterMotorConfig,
     ) -> CharacterMotorFrame {
         self.stamina_q12 = self.stamina_q12.clamp(0, config.stamina_max_q12);
-        self.snap_floor(collision.room, config.radius);
+        self.snap_floor(collision.room);
 
         if self.action.is_idle() && input.evade {
             self.try_start_evade(input, config);
@@ -844,11 +844,16 @@ impl CharacterMotorState {
         }
     }
 
-    fn snap_floor(&mut self, collision: Option<RoomCollision<'_, '_>>, radius: i32) {
+    fn snap_floor(&mut self, collision: Option<RoomCollision<'_, '_>>) {
         let Some(room) = collision else {
             return;
         };
-        if let Some(height) = stand_height(room, self.position.x, self.position.z, radius) {
+        // The player is already standing here (a prior move validated the cylinder
+        // footprint), so re-validating it is redundant for a snap: only the centre
+        // floor height is needed to stay grounded on slopes/steps. Probing the
+        // centre alone drops four of the five floor lookups the footprint-gated
+        // snap ran every tick.
+        if let Some(height) = floor_height_at(room, self.position.x, self.position.z) {
             self.position.y = height;
         }
     }
