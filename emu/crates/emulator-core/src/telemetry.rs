@@ -102,7 +102,7 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 36;
+pub const STAGE_COUNT: usize = 41;
 
 /// Runtime task id constants shared with `psx-engine::telemetry`.
 pub mod task {
@@ -976,6 +976,11 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
+        36 => "sim collision",
+        37 => "sim room track",
+        38 => "sim residency",
+        39 => "sim pump",
+        40 => "sim solve",
         _ => "unknown",
     }
 }
