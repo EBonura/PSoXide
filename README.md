@@ -467,6 +467,19 @@ The GPL choice is deliberate: the emulator core builds on PCSX-Redux
 as a parity oracle and reference, and PCSX-Redux is GPL-2.0-or-later.
 Releasing PSoXide under the same license keeps the lineage clean.
 
+Commercial use is allowed. Free, paid, open-source, and commercial
+homebrew projects can be built with PSoXide, as long as the code they
+distribute complies with GPL-2.0-or-later. In practice, if a shipped
+game includes PSoXide SDK/runtime/engine code, or modifications to that
+code, the corresponding code should remain available under
+GPL-compatible terms to the people receiving the game.
+
+Original game content is separate from the engine/toolchain code.
+Models, textures, audio, writing, level data, branding, and other
+project-specific assets may use their own licenses, provided those
+asset licenses allow the intended distribution. PSoXide does not claim
+ownership of content created with the editor, cooker, SDK, or runtime.
+
 Asset provenance is tracked in
 [`docs/asset-provenance.md`](docs/asset-provenance.md). Third-party
 reference notes and non-redistribution notices live in `LICENSE`.
