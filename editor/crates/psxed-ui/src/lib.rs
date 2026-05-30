@@ -77,6 +77,15 @@ const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
+/// Minimum on-screen span, in pixels, of the translate gizmo's full
+/// axis length. The gizmo is authored in world units (one sector) and
+/// perspective-projected, so it shrinks as the camera pulls back. The
+/// move planes are hit-tested by polygon containment with no screen
+/// tolerance, so once a plane projects smaller than the cursor the click
+/// falls straight through to the tile behind it. Flooring the world
+/// length so it never projects below this many pixels keeps the handles
+/// grabbable at any zoom.
+const GIZMO_MIN_SCREEN_PX: f32 = 120.0;
 const UI_RESIZE_HANDLE_SIZE: f32 = 8.0;
 const UI_RESIZE_HANDLE_HIT_SIZE: f32 = 14.0;
 const UI_NODE_HIT_MIN_SIZE: f32 = 10.0;
@@ -6470,7 +6479,7 @@ impl EditorWorkspace {
         let Some(start) = project_world_to_viewport_screen(camera, rect, pivot) else {
             return Vec::new();
         };
-        let axis_len = self.node_gizmo_axis_world_length(&targets);
+        let axis_len = self.node_gizmo_axis_world_length_screen_stable(&targets, rect, pivot);
         let axes: &[PrimitiveGizmoAxis] = match self.transform_gizmo_mode {
             TransformGizmoMode::Move => &[
                 PrimitiveGizmoAxis::X,
@@ -6519,7 +6528,7 @@ impl EditorWorkspace {
             return Vec::new();
         };
         let camera = self.viewport_3d_camera();
-        let axis_len = self.node_gizmo_axis_world_length(&targets) as f32;
+        let axis_len = self.node_gizmo_axis_world_length_screen_stable(&targets, rect, pivot) as f32;
         let near = axis_len * 0.18;
         let far = axis_len * 0.44;
 
@@ -6590,6 +6599,36 @@ impl EditorWorkspace {
             return grid.sector_size.max(1);
         }
         DEFAULT_WORLD_SECTOR_SIZE
+    }
+
+    /// World length the translate gizmo should span so it stays a
+    /// grabbable size on screen. Returns the authored world length (one
+    /// sector) when zoomed in, but floors it so the gizmo projects to at
+    /// least [`GIZMO_MIN_SCREEN_PX`] pixels at the pivot's depth. Both the
+    /// axes and the move planes derive their size from this, and the same
+    /// value feeds drawing and picking, so flooring here keeps the visual,
+    /// the hit-test, and the drag consistent and stops the plane handle
+    /// from collapsing under the cursor (where the click would fall
+    /// through to the tile behind it) when zoomed out.
+    fn node_gizmo_axis_world_length_screen_stable(
+        &self,
+        targets: &[NodeId],
+        rect: Rect,
+        pivot: [f32; 3],
+    ) -> i32 {
+        let base = self.node_gizmo_axis_world_length(targets);
+        let basis = self.viewport_3d_camera().basis();
+        let depth = dot3(sub3(pivot, basis.position), basis.forward);
+        if !depth.is_finite() || depth <= 1.0 || rect.width() <= 1.0 {
+            return base;
+        }
+        // `project_world_to_viewport_screen` maps a world offset `L`
+        // perpendicular to the view at this depth to `L * width / depth`
+        // pixels (half_fov_x = 0.5 cancels the factor of two), so the
+        // world length that fills `GIZMO_MIN_SCREEN_PX` pixels is
+        // `px * depth / width`.
+        let min_world = GIZMO_MIN_SCREEN_PX * depth / rect.width();
+        base.max(min_world.ceil() as i32)
     }
 
     fn node_rotation_gizmo_screen_ring_for_axis(
@@ -25404,14 +25443,14 @@ fn draw_play_chunk_debug_map(
     painter.text(
         map_rect.left_top() + Vec2::new(8.0, 7.0),
         Align2::LEFT_TOP,
-        "Portal map",
+        "Room rings",
         FontId::monospace(11.0),
         STUDIO_TEXT,
     );
 
     let plot = Rect::from_min_max(
         map_rect.left_top() + Vec2::new(8.0, 24.0),
-        map_rect.right_bottom() - Vec2::new(8.0, 60.0),
+        map_rect.right_bottom() - Vec2::new(8.0, 78.0),
     );
     let world_w = (max_x - min_x).max(1.0);
     let world_h = (max_z - min_z).max(1.0);
@@ -25425,8 +25464,18 @@ fn draw_play_chunk_debug_map(
     let map_x = |x: f32| origin.x + (x - min_x) * scale;
     let map_z = |z: f32| origin.y + (z - min_z) * scale;
 
+    // Each room is shaded by its innermost membership in the three rings of the
+    // streaming model, read as a heat ramp out from the player:
+    //   COLLISION ring  (red)         = the current room, where the motor runs.
+    //   VISIBILITY ring (green/amber) = portal-visible rooms, built and drawn.
+    //   STREAMING ring  (blue/slate)  = resident prefetch buffer + in-flight loads.
+    // Faults overlay the rings: a visible room that is not resident ("missing")
+    // or resident-but-unbuilt ("build fail") is a correctness problem and shows
+    // hot pink/red. Rooms outside every ring stay unfilled.
     for cell in &map.cells {
         let bit = debug_chunk_bit(cell.runtime_room_index);
+        let is_current = metrics.player_map_valid
+            && cell.runtime_room_index == metrics.player_room_index as usize;
         let loaded = bit != 0 && metrics.chunk_loaded_mask & bit != 0;
         let loading = bit != 0 && metrics.chunk_loading_mask & bit != 0;
         let visible = bit != 0 && metrics.portal_visible_mask & bit != 0;
@@ -25445,41 +25494,64 @@ fn draw_play_chunk_debug_map(
             ),
         )
         .shrink(0.75);
-        let fill = if drawn {
-            Color32::from_rgba_unmultiplied(42, 214, 124, 156)
+        let (fill, stroke) = if is_current {
+            // Collision ring: the room the player occupies.
+            (
+                Color32::from_rgba_unmultiplied(240, 96, 64, 150),
+                Stroke::new(2.2, Color32::from_rgb(255, 138, 96)),
+            )
         } else if build_failed {
-            Color32::from_rgba_unmultiplied(232, 76, 196, 112)
+            // Fault: visible + resident but its surface cache would not build.
+            (
+                Color32::from_rgba_unmultiplied(232, 76, 196, 112),
+                Stroke::new(1.8, Color32::from_rgb(255, 92, 214)),
+            )
         } else if missing {
-            Color32::from_rgba_unmultiplied(226, 54, 74, 112)
-        } else if loading {
-            Color32::from_rgba_unmultiplied(72, 150, 255, 96)
+            // Fault: visible but neither resident nor loading.
+            (
+                Color32::from_rgba_unmultiplied(210, 40, 60, 120),
+                Stroke::new(1.8, Color32::from_rgb(245, 70, 90)),
+            )
+        } else if drawn {
+            // Visibility ring: rendered this frame.
+            (
+                Color32::from_rgba_unmultiplied(42, 214, 124, 150),
+                Stroke::new(1.6, Color32::from_rgb(72, 255, 152)),
+            )
         } else if visible {
-            Color32::from_rgba_unmultiplied(244, 170, 48, 96)
+            // Visibility ring: portal-accepted, not yet drawn.
+            (
+                Color32::from_rgba_unmultiplied(244, 170, 48, 96),
+                Stroke::new(1.7, Color32::from_rgb(255, 184, 58)),
+            )
+        } else if loading {
+            // Streaming ring: load in flight.
+            (
+                Color32::from_rgba_unmultiplied(72, 150, 255, 100),
+                Stroke::new(1.8, Color32::from_rgb(110, 188, 255)),
+            )
         } else if loaded {
-            Color32::from_rgba_unmultiplied(132, 148, 164, 48)
+            // Streaming ring: resident prefetch buffer.
+            (
+                Color32::from_rgba_unmultiplied(96, 130, 180, 64),
+                Stroke::new(1.3, Color32::from_rgb(132, 166, 210)),
+            )
+        } else if frontier {
+            // Beyond the rings: portal-traversal depth/capacity frontier.
+            (
+                Color32::from_rgba_unmultiplied(0, 0, 0, 0),
+                Stroke::new(1.4, Color32::from_rgb(150, 120, 210)),
+            )
         } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 0)
+            // Outside every ring.
+            (
+                Color32::from_rgba_unmultiplied(0, 0, 0, 0),
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 90)),
+            )
         };
         if fill.a() > 0 {
             painter.rect_filled(rect, 0.0, fill);
         }
-        let stroke = if drawn {
-            Stroke::new(1.6, Color32::from_rgb(72, 255, 152))
-        } else if build_failed {
-            Stroke::new(1.8, Color32::from_rgb(255, 92, 214))
-        } else if missing {
-            Stroke::new(1.8, Color32::from_rgb(255, 82, 104))
-        } else if loading {
-            Stroke::new(1.8, Color32::from_rgb(96, 178, 255))
-        } else if visible {
-            Stroke::new(1.7, Color32::from_rgb(255, 184, 58))
-        } else if frontier {
-            Stroke::new(1.6, Color32::from_rgb(172, 128, 255))
-        } else if loaded {
-            Stroke::new(1.2, Color32::from_rgb(154, 170, 188))
-        } else {
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(210, 220, 235, 120))
-        };
         painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
     }
 
@@ -25626,68 +25698,76 @@ fn draw_play_chunk_debug_map(
         }
     }
 
-    let legend_row0 = map_rect.left_bottom() + Vec2::new(8.0, -51.0);
-    let legend_row1 = map_rect.left_bottom() + Vec2::new(8.0, -34.0);
-    let legend_row2 = map_rect.left_bottom() + Vec2::new(8.0, -17.0);
+    // Three-ring legend: one row per ring (collision / visibility / streaming),
+    // tagged with the ring name, plus a faults row for the correctness signals.
+    let legend_x = map_rect.left() + 8.0;
+    let legend_bottom = map_rect.bottom();
+    let swatch_x = legend_x + 52.0;
+    let ring_tag = |y_off: f32, text: &str| {
+        painter.text(
+            Pos2::new(legend_x, legend_bottom + y_off - 1.0),
+            Align2::LEFT_TOP,
+            text,
+            FontId::monospace(9.0),
+            STUDIO_TEXT,
+        );
+    };
+    // Collision ring: the current room.
+    ring_tag(-70.0, "collide");
     draw_chunk_map_legend_item(
         painter,
-        legend_row0,
-        Color32::from_rgba_unmultiplied(42, 214, 124, 156),
+        Pos2::new(swatch_x, legend_bottom - 70.0),
+        Color32::from_rgba_unmultiplied(240, 96, 64, 150),
+        Color32::from_rgb(255, 138, 96),
+        "current",
+    );
+    // Visibility ring: built + drawn portal-visible rooms.
+    ring_tag(-53.0, "visible");
+    draw_chunk_map_legend_item(
+        painter,
+        Pos2::new(swatch_x, legend_bottom - 53.0),
+        Color32::from_rgba_unmultiplied(42, 214, 124, 150),
         Color32::from_rgb(72, 255, 152),
         "drawn",
     );
     draw_chunk_map_legend_item(
         painter,
-        legend_row0 + Vec2::new(70.0, 0.0),
+        Pos2::new(swatch_x + 78.0, legend_bottom - 53.0),
         Color32::from_rgba_unmultiplied(244, 170, 48, 96),
         Color32::from_rgb(255, 184, 58),
         "accepted",
     );
+    // Streaming ring: resident prefetch buffer + in-flight loads.
+    ring_tag(-36.0, "stream");
     draw_chunk_map_legend_item(
         painter,
-        legend_row0 + Vec2::new(158.0, 0.0),
-        Color32::from_rgba_unmultiplied(0, 0, 0, 0),
-        Color32::from_rgb(172, 128, 255),
-        "depth/cap",
-    );
-    draw_chunk_map_legend_item(
-        painter,
-        legend_row1,
-        Color32::from_rgba_unmultiplied(132, 148, 164, 48),
-        Color32::from_rgb(154, 170, 188),
+        Pos2::new(swatch_x, legend_bottom - 36.0),
+        Color32::from_rgba_unmultiplied(96, 130, 180, 64),
+        Color32::from_rgb(132, 166, 210),
         "resident",
     );
     draw_chunk_map_legend_item(
         painter,
-        legend_row1 + Vec2::new(94.0, 0.0),
-        Color32::from_rgba_unmultiplied(72, 150, 255, 96),
-        Color32::from_rgb(96, 178, 255),
+        Pos2::new(swatch_x + 88.0, legend_bottom - 36.0),
+        Color32::from_rgba_unmultiplied(72, 150, 255, 100),
+        Color32::from_rgb(110, 188, 255),
         "loading",
     );
+    // Faults: visible rooms that should be resident + built but are not.
+    ring_tag(-19.0, "fault");
     draw_chunk_map_legend_item(
         painter,
-        legend_row1 + Vec2::new(188.0, 0.0),
-        Color32::from_rgba_unmultiplied(226, 54, 74, 112),
-        Color32::from_rgb(255, 82, 104),
+        Pos2::new(swatch_x, legend_bottom - 19.0),
+        Color32::from_rgba_unmultiplied(210, 40, 60, 120),
+        Color32::from_rgb(245, 70, 90),
         "missing",
     );
     draw_chunk_map_legend_item(
         painter,
-        legend_row2,
+        Pos2::new(swatch_x + 82.0, legend_bottom - 19.0),
         Color32::from_rgba_unmultiplied(232, 76, 196, 112),
         Color32::from_rgb(255, 92, 214),
         "build fail",
-    );
-    draw_chunk_map_legend_item(
-        painter,
-        legend_row2 + Vec2::new(94.0, 0.0),
-        Color32::from_rgba_unmultiplied(255, 124, 36, 84),
-        Color32::from_rgb(255, 142, 48),
-        "rejected",
-    );
-    draw_rejected_map_marker(
-        painter,
-        Rect::from_min_size(legend_row2 + Vec2::new(94.0, 0.0), Vec2::new(9.0, 9.0)),
     );
 }
 
@@ -25830,17 +25910,6 @@ fn directed_portal_map_segment(
     };
     let offset = Vec2::new(-edge.y / len, edge.x / len) * (1.6 * side);
     (a + offset, b + offset)
-}
-
-fn draw_rejected_map_marker(painter: &egui::Painter, rect: Rect) {
-    let inset = (rect.width().min(rect.height()) * 0.22).clamp(1.0, 4.0);
-    let a = rect.left_top() + Vec2::splat(inset);
-    let b = rect.right_bottom() - Vec2::splat(inset);
-    painter.line_segment(
-        [a, b],
-        Stroke::new(2.4, Color32::from_rgba_unmultiplied(20, 14, 10, 160)),
-    );
-    painter.line_segment([a, b], Stroke::new(1.2, Color32::from_rgb(255, 238, 204)));
 }
 
 fn draw_rejected_portal_marker(painter: &egui::Painter, a: Pos2, b: Pos2) {
