@@ -307,11 +307,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
             room.origin_z,
+            room.origin_y,
             room.sector_size,
             room.draw_distance,
             room.chunk_activation_radius_sectors,
@@ -944,6 +945,33 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         );
     }
     out.push_str("];\n\n");
+
+    out.push_str("/// Addressable cooked UI scenes indexing `UI_NODES`.\n");
+    out.push_str("pub static UI_SCENES: &[LevelUiScene] = &[\n");
+    for scene in &package.ui_scenes {
+        let _ = writeln!(
+            out,
+            "    LevelUiScene {{ id: {}, name: {:?}, node_first: {}, node_count: {} }},",
+            scene.id, scene.name, scene.node_first, scene.node_count,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cooked game-state flow.\n");
+    out.push_str("pub static GAME_FLOW: GameFlow = GameFlow {\n");
+    out.push_str("    states: &[\n");
+    for state in &package.game_flow.states {
+        let rendered = match state {
+            PlaytestFlowState::UiScene { scene } => {
+                format!("FlowState::UiScene {{ scene: {scene} }}")
+            }
+            PlaytestFlowState::Gameplay => "FlowState::Gameplay".to_string(),
+        };
+        let _ = writeln!(out, "        {rendered},");
+    }
+    out.push_str("    ],\n");
+    let _ = writeln!(out, "    entry: {},", package.game_flow.entry);
+    out.push_str("};\n\n");
 
     out.push_str("/// Weapon hitboxes, local to weapon grips.\n");
     out.push_str("pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[\n");
@@ -2609,6 +2637,61 @@ mod tests {
     }
 
     #[test]
+    fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
+        let package = PlaytestPackage::default();
+        let src = render_manifest_source(&package);
+        assert!(src.contains("pub static UI_SCENES: &[LevelUiScene] = &[\n];"));
+        assert!(src.contains(
+            "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::Gameplay,\n    ],\n    entry: 0,\n};"
+        ));
+    }
+
+    #[test]
+    fn ui_scene_table_and_flow_emit_addressable_scenes() {
+        let mut package = PlaytestPackage::default();
+        package.ui_nodes = vec![PlaytestUiNode {
+            parent: None,
+            kind: UiNodeKind::Canvas {
+                width: 320,
+                height: 240,
+            },
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 240,
+            color: [0, 0, 0],
+            background: [0, 0, 0],
+            value: UiValueBinding::ConstantQ12(0),
+            max: UiValueBinding::ConstantQ12(0),
+            texture_asset: None,
+            text: String::new(),
+            tag: String::new(),
+            flags: 0,
+        }];
+        package.ui_scenes = vec![PlaytestUiScene {
+            id: 7,
+            name: "Pause".to_string(),
+            node_first: 0,
+            node_count: 1,
+        }];
+        package.game_flow = PlaytestGameFlow {
+            states: vec![
+                PlaytestFlowState::UiScene { scene: 7 },
+                PlaytestFlowState::Gameplay,
+            ],
+            entry: 0,
+        };
+
+        let src = render_manifest_source(&package);
+        assert!(src.contains(
+            "LevelUiScene { id: 7, name: \"Pause\", node_first: 0, node_count: 1 },"
+        ));
+        assert!(src.contains("FlowState::UiScene { scene: 7 },"));
+        assert!(src.contains("FlowState::Gameplay,"));
+        assert!(src.contains("entry: 0,"));
+    }
+
+    #[test]
     fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
         let mut package = PlaytestPackage::default();
         package.runtime_depth_sort_mode = crate::RuntimeDepthSortMode::PerTriangle;
@@ -2898,6 +2981,7 @@ mod tests {
             world_asset_index,
             origin_x: 0,
             origin_z: 0,
+            origin_y: 0,
             sector_size: 1024,
             draw_distance: 25_000,
             chunk_activation_radius_sectors: 64,
@@ -3052,6 +3136,8 @@ use psx_level::{
     EntityKind,
     EntityRecord,
     EquipmentRecord,
+    FlowState,
+    GameFlow,
     LevelCachedRoomCellRecord,
     LevelCachedRoomSurfaceRecord,
     LevelCachedRoomVertexRecord,
@@ -3079,6 +3165,7 @@ use psx_level::{
     LevelSkyRecord,
     LevelUiNodeKind,
     LevelUiNodeRecord,
+    LevelUiScene,
     LevelUiValueBinding,
     LevelVisibilityCellRecord,
     LevelVisibilityPvsRecord,
