@@ -2726,6 +2726,8 @@ mod tests {
                     label: "Play".to_string(),
                     align: UiTextAlign::Center,
                     color: [50, 60, 70],
+                    text_color: [236, 240, 248],
+                    transparent: false,
                     action: UiAction::Back,
                 },
                 x: 0,
