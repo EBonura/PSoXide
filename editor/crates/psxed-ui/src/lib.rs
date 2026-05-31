@@ -19752,14 +19752,33 @@ fn room_grid_transform_editor(
         ui.label("Grid Position");
         let mut x = transform.translation[0].round() as i32;
         let mut z = transform.translation[2].round() as i32;
-        changed |= ui
+        let mut moved = false;
+        moved |= ui
             .add(egui::DragValue::new(&mut x).prefix("X ").speed(1.0))
             .changed();
-        changed |= ui
+        moved |= ui
             .add(egui::DragValue::new(&mut z).prefix("Z ").speed(1.0))
             .changed();
-        if changed {
-            transform.translation = [x as f32, 0.0, z as f32];
+        if moved {
+            // Edit X/Z only; preserve the room's elevation (Y), which is the
+            // vertical stacking axis edited on the Elevation row below.
+            transform.translation[0] = x as f32;
+            transform.translation[2] = z as f32;
+            changed = true;
+        }
+        ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Elevation");
+        let mut y = transform.translation[1].round() as i32;
+        let response = ui.add(egui::DragValue::new(&mut y).speed(1.0)).on_hover_text(
+            "Vertical level of this room, in sectors. Stack rooms by giving them different elevations; cooked to the room's origin_y.",
+        );
+        if response.changed() {
+            transform.translation[1] = y as f32;
+            changed = true;
         }
         ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
     });
