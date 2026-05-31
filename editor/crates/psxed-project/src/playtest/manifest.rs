@@ -978,6 +978,17 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(out, "    entry: {},", package.game_flow.entry);
     out.push_str("};\n\n");
 
+    out.push_str("/// Cooked project options sliders and SetOption actions bind to.\n");
+    out.push_str("pub static OPTIONS: &[LevelOptionDef] = &[\n");
+    for option in &package.options {
+        let _ = writeln!(
+            out,
+            "    LevelOptionDef {{ id: {}, min: {}, max: {}, step: {}, default: {} }},",
+            option.id, option.min, option.max, option.step, option.default,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Weapon hitboxes, local to weapon grips.\n");
     out.push_str("pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[\n");
     for hitbox in &package.weapon_hitboxes {
@@ -3248,6 +3259,7 @@ use psx_level::{
     LevelModelInstanceRecord,
     LevelModelRecord,
     LevelModelSocketRecord,
+    LevelOptionDef,
     LevelRoomPortalRecord,
     LevelRoomRecord,
     LevelRoomSurfaceCacheRecord,

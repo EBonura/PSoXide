@@ -37,7 +37,8 @@ use psx_gpu::{
     material::{TextureMaterial, TextureWindow},
 };
 use psx_level::{
-    ui_node_flags, AssetId, LevelUiNodeKind, LevelUiNodeRecord, LevelUiValueBinding, NavRect,
+    ui_node_flags, AssetId, LevelOptionDef, LevelUiNodeKind, LevelUiNodeRecord,
+    LevelUiValueBinding, NavRect, UI_OPTION_NONE,
 };
 
 /// Canvas width used as the fallback parent rectangle for a node
@@ -97,8 +98,18 @@ pub struct UiTextureSlot {
 /// `value` resolves a [`LevelUiValueBinding`] to a Q12 fixed-point
 /// integer for bar fill ratios.
 ///
+/// `options` is the cooked project-option table and `option_value`
+/// resolves an option id to its live runtime value. A [`LevelUiNodeKind::Slider`]
+/// draws its knob from the bound option's value: the fill proportion is
+/// `(value - min) / (max - min)` clamped to `[0, 1]`, looking the option
+/// up in `options` by id. A slider bound to [`UI_OPTION_NONE`], or to an
+/// id missing from `options`, or with a degenerate `min == max` range,
+/// draws an empty track. The caller owns the option store, so a HUD with
+/// no options passes an empty slice and a resolver returning `0`.
+///
 /// Drawing order follows pool order, so authoring order is the
 /// back-to-front paint order.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_scene(
     nodes: &[LevelUiNodeRecord],
     first: usize,
@@ -107,6 +118,8 @@ pub fn draw_scene(
     focused: Option<usize>,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
     value: &impl Fn(LevelUiValueBinding) -> i32,
+    options: &[LevelOptionDef],
+    option_value: &impl Fn(u16) -> i32,
 ) {
     let end = first.saturating_add(count).min(nodes.len());
     for index in first..end {
@@ -147,17 +160,18 @@ pub fn draw_scene(
                 }
             }
             LevelUiNodeKind::Slider => {
-                // TODO(menu-step3): resolve the bound option's current value
-                // (node.option) to a fill proportion and let input nudge it.
-                // Until the option store exists the knob sits at the
-                // half-way mark so the control is visible while authoring.
+                // Resolve the bound option's live value to a fill
+                // proportion (num/den). An unbound / unknown / degenerate
+                // option yields 0/1 (empty track).
+                let (fill_num, fill_den) =
+                    slider_fill(node.option, options, option_value);
                 draw_slider(
                     x,
                     y,
                     width as i16,
                     height as i16,
-                    SLIDER_PREVIEW_NUM,
-                    SLIDER_PREVIEW_DEN,
+                    fill_num,
+                    fill_den,
                     rgb(node.color),
                     rgb(node.background),
                     rgb(node.accent),
@@ -190,12 +204,33 @@ fn draw_focus_ring(x: i16, y: i16, width: i16, height: i16) {
     draw_rect(left + outer_w - 1, top + 1, 1, outer_h - 2, RING);
 }
 
-/// Placeholder slider fill proportion (`NUM / DEN`) used until the
-/// runtime option store lands. See the `TODO(menu-nav)` in
-/// [`draw_scene`].
-const SLIDER_PREVIEW_NUM: i32 = 1;
-/// Denominator counterpart to [`SLIDER_PREVIEW_NUM`].
-const SLIDER_PREVIEW_DEN: i32 = 2;
+/// Fill proportion `(num, den)` for a slider bound to option `option_id`,
+/// for [`draw_slider`]'s `[0, 1]` knob position.
+///
+/// `num` is `value - min` and `den` is `max - min`, where `value` comes
+/// from `option_value(option_id)` and `min` / `max` come from the matching
+/// [`LevelOptionDef`] in `options`. A slider bound to [`UI_OPTION_NONE`],
+/// to an id not present in `options`, or to a degenerate `min == max`
+/// range returns `(0, 1)` (an empty track). `draw_slider` clamps `num`
+/// into `[0, den]`, so an out-of-range value cannot overflow the track.
+fn slider_fill(
+    option_id: u16,
+    options: &[LevelOptionDef],
+    option_value: &impl Fn(u16) -> i32,
+) -> (i32, i32) {
+    if option_id == UI_OPTION_NONE {
+        return (0, 1);
+    }
+    let Some(option) = options.iter().find(|option| option.id == option_id) else {
+        return (0, 1);
+    };
+    let den = option.max - option.min;
+    if den <= 0 {
+        return (0, 1);
+    }
+    let num = option_value(option_id) - option.min;
+    (num, den)
+}
 
 /// Resolve a node's absolute on-screen rectangle, applying the
 /// parent chain and 9-point anchor. Falls back to a 1x1 rect at the
@@ -400,8 +435,7 @@ fn status_fill_width(width: i16, value: i32, max_value: i32) -> i16 {
 /// Draw an interactive button: a filled rectangle with a thin top
 /// highlight, then its label aligned inside the rect using the same
 /// horizontal alignment + word-wrap path as [`LevelUiNodeKind::Label`]
-/// and vertically centred. No focus styling yet; see the
-/// `TODO(menu-nav)` in [`draw_scene`].
+/// and vertically centred. The focus ring is drawn by [`draw_scene`].
 fn draw_button(
     font: Option<&FontAtlas>,
     node: &LevelUiNodeRecord,
@@ -433,8 +467,9 @@ fn draw_button(
 
 /// Draw a slider: a recessed track, a proportional fill, and a knob
 /// rectangle centred on the fill edge. `fill_num / fill_den` is the
-/// current proportion in `[0, 1]`. Runtime value binding is a later
-/// step (see the `TODO(menu-nav)` in [`draw_scene`]).
+/// current proportion; `fill_num` is clamped into `[0, fill_den]` here so
+/// an out-of-range value cannot run the knob off the track. The bound
+/// option's value feeds this through [`slider_fill`] in [`draw_scene`].
 #[allow(clippy::too_many_arguments)]
 fn draw_slider(
     x: i16,

@@ -1569,6 +1569,31 @@ pub enum LevelUiAction {
 /// [`LevelUiNodeRecord::option`] for every non-`Slider` node.
 pub const UI_OPTION_NONE: u16 = u16::MAX;
 
+/// One cooked project option: a runtime-tunable integer with a bounded
+/// range, step, and default. Sliders ([`LevelUiNodeRecord::option`]) and
+/// `SetOption` button actions ([`LevelUiAction::SetOption`]) reference an
+/// option by [`Self::id`]. The authoring side's richer kinds (int range,
+/// enum, bool) all flatten to this integer triple at cook time: an enum is
+/// `[0, variants - 1]` step `1`, a bool is `[0, 1]` step `1`.
+///
+/// Plain `Copy` POD so a generated `OPTIONS` static lives in the linker's
+/// rodata next to the rest of the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelOptionDef {
+    /// Stable option id (mirrors the authored `OptionId`, low 16 bits).
+    /// Matched against [`LevelUiNodeRecord::option`] and
+    /// [`LevelUiAction::SetOption::option`].
+    pub id: u16,
+    /// Inclusive minimum value.
+    pub min: i32,
+    /// Inclusive maximum value.
+    pub max: i32,
+    /// Step applied per slider nudge (the `SetOption` delta is used as-is).
+    pub step: i32,
+    /// Initial value the runtime store seeds with.
+    pub default: i32,
+}
+
 /// One cooked screen-space UI node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelUiNodeRecord {
