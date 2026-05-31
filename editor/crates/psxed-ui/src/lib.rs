@@ -331,6 +331,14 @@ pub struct EditorWorkspace {
     /// editor edits the selected scene rather than always `ui_scenes[0]`.
     /// Clamped against `ui_scenes.len()` after deletions and undo/redo.
     active_ui_scene_index: usize,
+    /// When on, the UI canvas runs an in-editor navigation preview: arrow
+    /// keys move focus through the scene's focusable controls via the shared
+    /// `psx_level::next_focus` (the same resolver the runtime uses), Enter
+    /// activates a focused button's GotoScene, and the focused control is
+    /// highlighted. Toggled in the UI workspace; off by default.
+    ui_nav_preview: bool,
+    /// Focused control id during the in-editor nav preview, if any.
+    ui_nav_focus: Option<UiNodeId>,
     /// `Some((index, buffer))` while a scene strip row is in rename mode.
     /// Mirrors the scene-tree rename pattern: commit on Enter / blur,
     /// cancel on Escape.
@@ -2678,6 +2686,8 @@ impl EditorWorkspace {
             renaming: None,
             pending_rename_focus: false,
             active_ui_scene_index: 0,
+            ui_nav_preview: false,
+            ui_nav_focus: None,
             ui_scene_renaming: None,
             ui_scene_rename_focus_pending: false,
             ui_scene_delete_confirm: None,
@@ -4688,6 +4698,12 @@ impl EditorWorkspace {
         };
         let (canvas_w, canvas_h) = ui_scene_canvas_size(&scene);
         let aspect = (canvas_w as f32 / canvas_h.max(1) as f32).max(0.01);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.ui_nav_preview, "Preview nav");
+            if self.ui_nav_preview {
+                ui.weak("arrows move focus  /  Enter activates");
+            }
+        });
         let avail = ui.available_size();
         let container_size = Vec2::new(avail.x.max(1.0), avail.y.max(1.0));
         let (container, _) = ui.allocate_exact_size(container_size, Sense::hover());
@@ -4790,6 +4806,94 @@ impl EditorWorkspace {
                 (node == self.selection.selected_ui_node).then_some(handle)
             }),
         );
+
+        if self.ui_nav_preview {
+            // Drive in-editor focus through the SAME resolver the runtime uses,
+            // so navigation authored here matches the console exactly.
+            let mut focus_ids: Vec<UiNodeId> = Vec::new();
+            let mut rects: Vec<psx_level::NavRect> = Vec::new();
+            for id in preview_scene.hierarchy_node_ids() {
+                let Some(node) = preview_scene.node(id) else {
+                    continue;
+                };
+                if !matches!(
+                    node.kind,
+                    UiNodeKind::Button { .. } | UiNodeKind::Slider { .. }
+                ) {
+                    continue;
+                }
+                if let Some(r) = preview_scene.absolute_rect(id) {
+                    focus_ids.push(id);
+                    rects.push(psx_level::NavRect {
+                        x: r.x,
+                        y: r.y,
+                        w: r.width,
+                        h: r.height,
+                    });
+                }
+            }
+            if focus_ids.is_empty() {
+                self.ui_nav_focus = None;
+            } else {
+                let mut cur = self
+                    .ui_nav_focus
+                    .and_then(|f| focus_ids.iter().position(|&id| id == f))
+                    .or_else(|| psx_level::first_focus(&rects))
+                    .unwrap_or(0);
+                let typing = ui.ctx().wants_keyboard_input();
+                let dir = if typing {
+                    None
+                } else {
+                    ui.input(|i| {
+                        if i.key_pressed(egui::Key::ArrowUp) {
+                            Some(psx_level::NavDir::Up)
+                        } else if i.key_pressed(egui::Key::ArrowDown) {
+                            Some(psx_level::NavDir::Down)
+                        } else if i.key_pressed(egui::Key::ArrowLeft) {
+                            Some(psx_level::NavDir::Left)
+                        } else if i.key_pressed(egui::Key::ArrowRight) {
+                            Some(psx_level::NavDir::Right)
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some(dir) = dir {
+                    if let Some(next) = psx_level::next_focus(&rects, cur, dir) {
+                        cur = next;
+                    }
+                }
+                let focus_id = focus_ids[cur];
+                self.ui_nav_focus = Some(focus_id);
+                let activate = !typing && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let goto = activate
+                    .then(|| preview_scene.node(focus_id))
+                    .flatten()
+                    .and_then(|node| match &node.kind {
+                        UiNodeKind::Button {
+                            action: UiAction::GotoScene(target),
+                            ..
+                        } => Some(*target),
+                        _ => None,
+                    });
+                if let Some(target) = goto {
+                    if let Some(idx) = self.project.ui_scenes.iter().position(|s| s.id == target) {
+                        self.switch_ui_scene(idx);
+                    }
+                }
+                if let Some(r) = preview_scene.absolute_rect(focus_id) {
+                    let screen = ui_rect_to_screen(r, canvas_rect, canvas_size);
+                    painter.rect_stroke(
+                        screen.expand(1.5),
+                        0.0,
+                        Stroke::new(2.0, Color32::from_rgb(248, 224, 96)),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+        } else {
+            self.ui_nav_focus = None;
+        }
 
         let label = format!("{}  {}x{}", preview_scene.name, canvas_w, canvas_h);
         painter.text(
