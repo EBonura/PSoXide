@@ -12445,6 +12445,8 @@ impl EditorWorkspace {
                 label,
                 align,
                 color,
+                text_color,
+                transparent,
                 action,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
@@ -12453,7 +12455,9 @@ impl EditorWorkspace {
                     changed |= ui.text_edit_singleline(label).changed();
                 });
                 changed |= draw_ui_text_align_editor(ui, align);
-                changed |= color_editor(ui, "Color", color);
+                changed |= color_editor(ui, "Text", text_color);
+                changed |= ui.checkbox(transparent, "Transparent background").changed();
+                changed |= color_editor(ui, "Background", color);
                 changed |= draw_ui_action_editor(ui, action, &scene_options, &option_choices);
             }
             UiNodeKind::Slider {
@@ -28227,6 +28231,8 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 label: "Button".to_string(),
                 align: UiTextAlign::Center,
                 color: [52, 60, 80],
+                text_color: [236, 240, 248],
+                transparent: false,
                 action: UiAction::Back,
             },
         ),
@@ -28315,6 +28321,7 @@ fn draw_ui_scene_preview(
                     text,
                     *align,
                     *wrap,
+                    false,
                     FontId::monospace((8.0 * scale).clamp(8.0, 22.0)),
                     Color32::from_rgb(color[0], color[1], color[2]),
                 );
@@ -28381,16 +28388,21 @@ fn draw_ui_scene_preview(
                 label,
                 align,
                 color,
+                text_color,
+                transparent,
                 ..
             } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
-                painter.rect_filled(screen, 0.0, Color32::from_rgb(color[0], color[1], color[2]));
-                let label_color = if ui_preview_luma(*color) > 140 {
-                    Color32::from_rgb(16, 18, 24)
-                } else {
-                    Color32::from_rgb(236, 240, 248)
-                };
+                if !*transparent {
+                    painter.rect_filled(
+                        screen,
+                        0.0,
+                        Color32::from_rgb(color[0], color[1], color[2]),
+                    );
+                }
+                let label_color =
+                    Color32::from_rgb(text_color[0], text_color[1], text_color[2]);
                 let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
                 draw_ui_preview_text(
                     painter,
@@ -28398,6 +28410,7 @@ fn draw_ui_scene_preview(
                     label,
                     *align,
                     false,
+                    true,
                     FontId::monospace((8.0 * scale).clamp(8.0, 22.0)),
                     label_color,
                 );
@@ -28462,42 +28475,36 @@ fn ui_psx_tint_to_egui(tint: [u8; 3]) -> Color32 {
     )
 }
 
-/// Approximate integer luma of an RGB triple, matching the engine's
-/// `button_label_tint` so the preview and runtime pick the same
-/// light/dark label colour.
-fn ui_preview_luma(color: [u8; 3]) -> u32 {
-    (color[0] as u32 * 2 + color[1] as u32 * 5 + color[2] as u32) / 8
-}
-
 fn draw_ui_preview_text(
     painter: &egui::Painter,
     rect: Rect,
     text: &str,
     align: UiTextAlign,
     wrap: bool,
+    vcenter: bool,
     font: FontId,
     color: Color32,
 ) {
     let approx_char_width = (font.size * 0.62).max(1.0);
     let max_chars = (rect.width() / approx_char_width).floor().max(1.0) as usize;
     let line_height = (font.size * 1.15).max(1.0);
-    let mut y = rect.top();
-    if wrap {
-        for line in wrap_preview_text_lines(text, max_chars) {
-            if y > rect.bottom() {
-                break;
-            }
-            draw_ui_preview_text_line(painter, rect, y, line, align, font.clone(), color);
-            y += line_height;
-        }
+    let lines: Vec<&str> = if wrap {
+        wrap_preview_text_lines(text, max_chars)
     } else {
-        for line in text.lines() {
-            if y > rect.bottom() {
-                break;
-            }
-            draw_ui_preview_text_line(painter, rect, y, line, align, font.clone(), color);
-            y += line_height;
+        text.lines().collect()
+    };
+    let total_h = lines.len().max(1) as f32 * line_height;
+    let mut y = if vcenter {
+        rect.top() + (rect.height() - total_h).max(0.0) / 2.0
+    } else {
+        rect.top()
+    };
+    for line in lines {
+        if y > rect.bottom() {
+            break;
         }
+        draw_ui_preview_text_line(painter, rect, y, line, align, font.clone(), color);
+        y += line_height;
     }
 }
 
