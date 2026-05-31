@@ -57,6 +57,7 @@ pub mod app;
 pub mod character_motor;
 pub mod fixed;
 pub mod frames;
+pub mod game_app;
 pub mod lighting;
 pub mod movement;
 pub mod render;
@@ -81,6 +82,7 @@ pub use character_motor::{
 };
 pub use fixed::{Q12, Q8};
 pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};
+pub use game_app::{FlowCursor, GameApp, GAMEPLAY_ONLY};
 pub use lighting::{
     accumulate_point_lights, accumulate_point_lights_rgb, modulate_material_tint, modulate_tint,
     shade_material_tint_with_lights, shade_tint_with_lights, LightingRgb, MaterialTint,
