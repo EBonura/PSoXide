@@ -74,13 +74,17 @@ fn main() {
     let ours_wav = out_dir.join(format!("ours_audio_{tag}_{steps}.wav"));
     let report_path = out_dir.join(format!("audio_compare_{tag}_{steps}.txt"));
 
-    let redux_audio = capture_redux_audio(
-        steps,
-        chunk_steps,
-        &bios_path,
-        disc_path.as_deref(),
-        &redux_raw,
-    );
+    let redux_audio = if env::var("PSOXIDE_SKIP_REDUX").is_ok() {
+        eprintln!("[redux] skipped (PSOXIDE_SKIP_REDUX set)");
+        CapturedAudio {
+            tick: 0,
+            samples: Vec::new(),
+            first_kon_cycle: None,
+            first_unmute_cycle: None,
+        }
+    } else {
+        capture_redux_audio(steps, chunk_steps, &bios_path, disc_path.as_deref(), &redux_raw)
+    };
     write_wav(&redux_wav, &redux_audio.samples).expect("write redux wav");
 
     let our_audio = capture_our_audio(steps, &bios_path, disc_path.as_deref());
@@ -187,6 +191,82 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
                 );
             }
         }
+    }
+
+    let (kon, voiced) = bus.spu.voice_debug_counts();
+    let (koff, sampstop) = bus.spu.voice_end_counts();
+    let cfg = bus.spu.voice_keyon_cfg();
+    eprintln!("[ours] per-voice (kon/koff/sampstop, voiced, mean note len, cfg):");
+    for v in 0..kon.len() {
+        if kon[v] > 0 || voiced[v] > 0 {
+            let (sa, alo, ahi, pit, vl, vr) = cfg[v];
+            let flag = if kon[v] > 0 && voiced[v] == 0 {
+                "  <-- SILENT"
+            } else {
+                ""
+            };
+            let note_ms = if kon[v] > 0 {
+                (voiced[v] as f64 / kon[v] as f64) * 1000.0 / 44_100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "  v{v:02}: kon={:<3} koff={:<3} sampstop={:<3} voiced={:<8} note~{note_ms:.0}ms start=0x{sa:05x} adsr={alo:04x}/{ahi:04x} pitch={pit:04x} vol={vl}/{vr}{flag}",
+                kon[v], koff[v], sampstop[v], voiced[v]
+            );
+        }
+    }
+
+    let (dry, wet, spucnt, reverb_on, pmon, noise_on) = bus.spu.reverb_debug();
+    eprintln!(
+        "[ours] spu globals: wet/dry={:.3} spucnt={spucnt:04x} reverb_en={} eon={reverb_on:06x} pmon={pmon:06x} noise={noise_on:06x}  (v10 bit set? pmon={} noise={})",
+        wet as f64 / dry.max(1) as f64,
+        (spucnt >> 7) & 1,
+        (pmon >> 10) & 1,
+        (noise_on >> 10) & 1
+    );
+
+    let trace = bus.spu.voice_trace();
+    let tlen = trace.iter().map(|t| t.len()).max().unwrap_or(0);
+    let gstep = (tlen / 90).max(1);
+    let ms_per_col = gstep * 1024 * 1000 / 44100;
+    eprintln!(
+        "[ours] per-voice timeline (each col ~{ms_per_col}ms, {tlen} snaps; env/dec scaled 0-9, .=silent; phase /=Atk \\\\=Dec ==Sus v=Rel _=Off):"
+    );
+    for v in 0..16 {
+        let t = &trace[v];
+        if t.is_empty() {
+            continue;
+        }
+        let step = gstep;
+        let scale = |x: i32| -> char {
+            let d = (x.max(0) * 10 / 0x8000).min(9);
+            if d == 0 {
+                '.'
+            } else {
+                (b'0' + d as u8) as char
+            }
+        };
+        let env: String = t.iter().step_by(step).map(|&(_, e, _)| scale(e)).collect();
+        let dec: String = t
+            .iter()
+            .step_by(step)
+            .map(|&(s, _, _)| scale((s as i32).abs()))
+            .collect();
+        let pha: String = t
+            .iter()
+            .step_by(step)
+            .map(|&(_, _, p)| match p {
+                1 => '/',
+                2 => '\\',
+                3 => '=',
+                4 => 'v',
+                _ => '_',
+            })
+            .collect();
+        eprintln!("  v{v:02} env:{env}");
+        eprintln!("      dec:{dec}");
+        eprintln!("      pha:{pha}");
     }
 
     CapturedAudio {
