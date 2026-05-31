@@ -141,7 +141,8 @@ mod voice_offset {
     pub const VOLUME_L: u32 = 0x0;
     /// +2..3 volume right.
     pub const VOLUME_R: u32 = 0x2;
-    /// +4..5 ADPCM pitch. `0x1000` = base rate (44.1 kHz). Max 0x3FFF.
+    /// +4..5 ADPCM pitch. `0x1000` = base rate (44.1 kHz). 16-bit R/W
+    /// register (full readback); the effective rate clamps to 0x3FFF.
     pub const PITCH: u32 = 0x4;
     /// +6..7 ADPCM start address (in 8-byte units; <<3 = byte addr).
     pub const START_ADDR: u32 = 0x6;
@@ -361,12 +362,17 @@ struct Voice {
     vol_l: VolumeEnvelope,
     /// Right volume envelope.
     vol_r: VolumeEnvelope,
-    /// Raw pitch register (0..=0x3FFF). `0x1000` plays at the sample's
-    /// source rate (typically 44.1 kHz).
+    /// Raw pitch register, full 16-bit R/W -- reads echo the written value
+    /// like hardware. `0x1000` plays at the sample's source rate (typically
+    /// 44.1 kHz); the rate counter clamps to 0x3FFF at use.
     raw_pitch: u16,
     /// Byte address into SPU RAM where playback begins on KON. `<<3`
-    /// of the register value.
+    /// of the register value, 16-byte aligned for the decoder.
     start_addr: u32,
+    /// The raw 16-bit START_ADDR register value, kept verbatim so reads
+    /// echo it back like hardware (the decoder uses `start_addr`, the
+    /// `<<3`/aligned form derived from it).
+    start_addr_raw: u16,
     /// Loop address (byte address). Set by software via REPEAT_ADDR
     /// register and by the ADPCM flag-4 bit (loop-start).
     loop_addr: u32,
@@ -435,6 +441,7 @@ impl Default for Voice {
             vol_r: VolumeEnvelope::new(),
             raw_pitch: 0,
             start_addr: 0,
+            start_addr_raw: 0,
             loop_addr: 0,
             loop_addr_locked: false,
             adsr_lo: 0,
@@ -1203,7 +1210,7 @@ impl Spu {
             voice_offset::VOLUME_L => voice.vol_l.reg_read(),
             voice_offset::VOLUME_R => voice.vol_r.reg_read(),
             voice_offset::PITCH => voice.raw_pitch,
-            voice_offset::START_ADDR => (voice.start_addr >> 3) as u16,
+            voice_offset::START_ADDR => voice.start_addr_raw,
             voice_offset::ADSR_LO => voice.adsr_lo,
             voice_offset::ADSR_HI => voice.adsr_hi,
             voice_offset::ADSR_CURRENT => {
@@ -1234,9 +1241,11 @@ impl Spu {
         match off {
             voice_offset::VOLUME_L => voice.vol_l.write(value),
             voice_offset::VOLUME_R => voice.vol_r.write(value),
-            voice_offset::PITCH => voice.raw_pitch = value.min(0x3FFF),
+            voice_offset::PITCH => voice.raw_pitch = value,
             voice_offset::START_ADDR => {
-                // 16-byte aligned byte address.
+                // Echo the full 16-bit register on read; the decoder uses
+                // the <<3, 16-byte-aligned byte address.
+                voice.start_addr_raw = value;
                 voice.start_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xF;
             }
             voice_offset::ADSR_LO => {
@@ -1739,7 +1748,10 @@ impl Spu {
         // Voice 0 cannot be modulated (no preceding voice). The
         // modulator voice's own L/R output is suppressed from the
         // audible mix in `tick_sample`.
-        let mut pitch = self.voices[v].raw_pitch as u32;
+        // The sample-rate register stores the full 16-bit written value so
+        // reads echo it back like hardware; the rate counter clamps to
+        // 0x3FFF here (values above that don't speed playback further).
+        let mut pitch = (self.voices[v].raw_pitch as u32).min(0x3FFF);
         if v > 0 && self.pmon & (1 << v) != 0 {
             let prev = self.voices[v - 1].last_sample as i32;
             let np = ((0x8000 + prev) * pitch as i32) / 0x8000;
