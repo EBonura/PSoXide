@@ -91,6 +91,11 @@ pub struct PlaytestRoom {
     pub origin_x: i32,
     /// Editor-side `WorldGrid::origin[1]`.
     pub origin_z: i32,
+    /// Room vertical placement in engine units, from the Room node's
+    /// authored `Transform3::translation[1]`. Diagnostic only for now,
+    /// mirroring `origin_x` / `origin_z`: the cooker still normalizes
+    /// geometry to array-rooted at ground level.
+    pub origin_y: i32,
     /// Engine units per sector.
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
@@ -677,6 +682,54 @@ pub struct PlaytestUiNode {
     pub flags: u16,
 }
 
+/// One cooked UI scene addressing a contiguous block of
+/// [`PlaytestPackage::ui_nodes`]. Mirrors
+/// [`psx_level::LevelUiScene`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiScene {
+    /// Stable authored scene id.
+    pub id: u16,
+    /// Display name.
+    pub name: String,
+    /// First node index into [`PlaytestPackage::ui_nodes`].
+    pub node_first: u16,
+    /// Number of nodes belonging to this scene.
+    pub node_count: u16,
+}
+
+/// One cooked game-flow state. Mirrors [`psx_level::FlowState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestFlowState {
+    /// Show a UI scene by its [`PlaytestUiScene::id`].
+    UiScene {
+        /// Target scene id.
+        scene: u16,
+    },
+    /// Run the gameplay/level simulation.
+    Gameplay,
+}
+
+/// Cooked game-state flow. Mirrors [`psx_level::GameFlow`]: an
+/// addressable state table plus the entry index into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestGameFlow {
+    /// Flow state table.
+    pub states: Vec<PlaytestFlowState>,
+    /// Index into `states` of the starting state.
+    pub entry: u16,
+}
+
+impl Default for PlaytestGameFlow {
+    /// A project with no authored UI scenes starts straight in
+    /// gameplay.
+    fn default() -> Self {
+        Self {
+            states: vec![PlaytestFlowState::Gameplay],
+            entry: 0,
+        }
+    }
+}
+
 /// Weapon-local hit shape, ready for manifest emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestWeaponHitShape {
@@ -1019,8 +1072,13 @@ pub struct PlaytestPackage {
     pub image_props: Vec<PlaytestImageProp>,
     /// Placed editable box props, room-local coordinates.
     pub box_props: Vec<PlaytestBoxProp>,
-    /// Cooked screen-space UI nodes.
+    /// Cooked screen-space UI nodes for every scene, concatenated
+    /// into one shared pool. [`Self::ui_scenes`] slices this pool.
     pub ui_nodes: Vec<PlaytestUiNode>,
+    /// Addressable cooked UI scene table indexing [`Self::ui_nodes`].
+    pub ui_scenes: Vec<PlaytestUiScene>,
+    /// Cooked game-state flow definition.
+    pub game_flow: PlaytestGameFlow,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.

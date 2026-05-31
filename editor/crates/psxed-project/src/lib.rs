@@ -189,6 +189,35 @@ impl UiNodeId {
     }
 }
 
+/// Stable identifier for an authored UI scene. Assigned once when
+/// the scene is created and preserved across renames so the cook
+/// and the runtime game-state flow can address a scene by id rather
+/// than by list position. `UNASSIGNED` is the load-time sentinel
+/// for legacy `project.ron` files that predate the field; such
+/// scenes are given a fresh id during normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct UiSceneId(pub u64);
+
+impl UiSceneId {
+    /// Sentinel meaning "no id assigned yet". Normalization replaces
+    /// it with the next free id.
+    pub const UNASSIGNED: Self = Self(0);
+
+    /// First id handed out to a freshly authored scene.
+    pub const FIRST: Self = Self(1);
+
+    /// Return the raw integer value for compact UI/debug display.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for UiSceneId {
+    fn default() -> Self {
+        Self::UNASSIGNED
+    }
+}
+
 /// Anchor point used to resolve a UI rectangle against its parent
 /// rectangle or the root canvas.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,10 +586,19 @@ pub struct UiNodeRow {
 /// One authored 2D UI scene.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiScene {
+    /// Stable scene id. Defaults to [`UiSceneId::UNASSIGNED`] for
+    /// legacy projects and is filled in by
+    /// [`ProjectDocument::normalize_loaded`].
+    #[serde(default)]
+    pub id: UiSceneId,
     /// Display name.
     pub name: String,
     /// Root node id.
     pub root: UiNodeId,
+    /// Optional node that receives focus when this scene becomes the
+    /// active game state. `None` falls back to the root canvas.
+    #[serde(default)]
+    pub default_focus: Option<UiNodeId>,
     next_node_id: u64,
     nodes: Vec<UiNode>,
 }
@@ -603,8 +641,10 @@ impl UiScene {
         );
         root.children = vec![health.id, stamina.id];
         Self {
+            id: UiSceneId::FIRST,
             name: "HUD".to_string(),
             root: UiNodeId::ROOT,
+            default_focus: None,
             next_node_id: 4,
             nodes: vec![root, health, stamina],
         }
@@ -851,6 +891,12 @@ impl UiScene {
         }
         self.rebuild_child_links();
         self.next_node_id = self.next_node_id.max(max_id.saturating_add(1));
+        if self
+            .default_focus
+            .is_some_and(|focus| self.node(focus).is_none())
+        {
+            self.default_focus = None;
+        }
     }
 
     fn rebuild_child_links(&mut self) {
@@ -5126,6 +5172,17 @@ pub struct WorldGrid {
     /// `[0, 0]` for backward compat with already-saved projects.
     #[serde(default)]
     pub origin: [i32; 2],
+    /// Vertical placement of the room, in engine units, used for
+    /// Tomb-Raider-style stacked rooms. This is the room's `Y`
+    /// companion to the cell-unit `X` / `Z` [`Self::origin`]; unlike
+    /// `origin` (sectors) it is already in engine units so the
+    /// integer-only runtime cook can emit it without a per-cell
+    /// conversion. Authored from the Room node's
+    /// `Transform3::translation[1]` (sectors) at cook time. Default
+    /// `0` keeps every existing room pinned to the ground plane, so
+    /// projects saved before vertical placement load unchanged.
+    #[serde(default)]
+    pub elevation: i32,
     /// Room ambient color used as editor/cooker metadata.
     #[serde(default = "default_ambient_color")]
     pub ambient_color: [u8; 3],
@@ -5167,6 +5224,7 @@ impl WorldGrid {
             sector_size,
             sectors: vec![None; len],
             origin: [0, 0],
+            elevation: 0,
             ambient_color: default_ambient_color(),
             fog_enabled: true,
             fog_color: default_fog_color(),
@@ -9074,6 +9132,47 @@ impl ProjectDocument {
         self.ui_scenes.first_mut()
     }
 
+    /// UI scene by stable id.
+    pub fn ui_scene(&self, id: UiSceneId) -> Option<&UiScene> {
+        self.ui_scenes.iter().find(|scene| scene.id == id)
+    }
+
+    /// UI scene by stable id, mutable.
+    pub fn ui_scene_mut(&mut self, id: UiSceneId) -> Option<&mut UiScene> {
+        self.ui_scenes.iter_mut().find(|scene| scene.id == id)
+    }
+
+    /// UI scene by list position.
+    pub fn ui_scene_at(&self, index: usize) -> Option<&UiScene> {
+        self.ui_scenes.get(index)
+    }
+
+    /// UI scene by list position, mutable.
+    pub fn ui_scene_at_mut(&mut self, index: usize) -> Option<&mut UiScene> {
+        self.ui_scenes.get_mut(index)
+    }
+
+    /// Assign a stable id to every UI scene that still carries
+    /// [`UiSceneId::UNASSIGNED`], and de-duplicate any colliding ids
+    /// from hand-authored data. Ids already in use are preserved so
+    /// they stay stable across renames and reorders.
+    fn assign_ui_scene_ids(&mut self) {
+        let mut next = UiSceneId::FIRST.raw();
+        for scene in &self.ui_scenes {
+            if scene.id != UiSceneId::UNASSIGNED {
+                next = next.max(scene.id.raw().saturating_add(1));
+            }
+        }
+        let mut seen: HashSet<UiSceneId> = HashSet::new();
+        for scene in &mut self.ui_scenes {
+            if scene.id == UiSceneId::UNASSIGNED || !seen.insert(scene.id) {
+                scene.id = UiSceneId(next);
+                seen.insert(scene.id);
+                next = next.saturating_add(1);
+            }
+        }
+    }
+
     /// Add a resource and return its id.
     pub fn add_resource(&mut self, name: impl Into<String>, data: ResourceData) -> ResourceId {
         let id = ResourceId(self.next_resource_id);
@@ -9424,6 +9523,7 @@ impl ProjectDocument {
         for scene in &mut self.ui_scenes {
             scene.normalize();
         }
+        self.assign_ui_scene_ids();
         for scene in &mut self.scenes {
             scene.normalize_world_root();
             for node in &mut scene.nodes {
@@ -11661,6 +11761,50 @@ mod tests {
         project.ui_scenes.clear();
         project.normalize_loaded();
         assert_eq!(project.active_ui_scene().unwrap().name, "HUD");
+    }
+
+    #[test]
+    fn normalize_loaded_assigns_stable_unique_ui_scene_ids() {
+        let mut project = ProjectDocument::new("ids");
+        // Simulate a legacy project: scenes with the unassigned sentinel.
+        let mut second = UiScene::default_hud();
+        second.name = "Pause".to_string();
+        second.id = UiSceneId::UNASSIGNED;
+        project.ui_scenes.push(second);
+        for scene in &mut project.ui_scenes {
+            scene.id = UiSceneId::UNASSIGNED;
+        }
+
+        project.normalize_loaded();
+
+        let ids: Vec<UiSceneId> = project.ui_scenes.iter().map(|scene| scene.id).collect();
+        assert!(ids.iter().all(|id| *id != UiSceneId::UNASSIGNED));
+        let unique: HashSet<UiSceneId> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "scene ids must be unique");
+
+        // Ids are stable across a second normalize and addressable.
+        let first_id = project.ui_scenes[0].id;
+        project.normalize_loaded();
+        assert_eq!(project.ui_scenes[0].id, first_id);
+        assert_eq!(
+            project.ui_scene(first_id).map(|scene| scene.name.as_str()),
+            Some(project.ui_scenes[0].name.as_str())
+        );
+        assert_eq!(
+            project.ui_scene_at(1).map(|scene| scene.id),
+            Some(project.ui_scenes[1].id)
+        );
+    }
+
+    #[test]
+    fn ui_scene_id_survives_ron_roundtrip() {
+        let mut project = ProjectDocument::new("ids");
+        project.normalize_loaded();
+        let assigned = project.ui_scenes[0].id;
+        let ron = project.to_ron_string().unwrap();
+        let mut reloaded = ProjectDocument::from_ron_str(&ron).unwrap();
+        reloaded.normalize_loaded();
+        assert_eq!(reloaded.ui_scenes[0].id, assigned);
     }
 
     #[test]

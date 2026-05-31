@@ -212,6 +212,19 @@ pub fn build_package(
             ));
             continue;
         }
+        // Vertical room placement. The authoring surface for room Y is
+        // the Room node's `Transform3::translation[1]`, expressed in
+        // sectors like X/Z; convert to engine units here (the
+        // integer-only runtime never sees the host f32). Reading the
+        // authored transform directly (rather than `grid.elevation`)
+        // keeps the value correct even though `extract_portal_room_grid`
+        // does not yet carry elevation onto the per-chunk grids.
+        // TODO(vertical-rooms): once portal_rooms.rs propagates
+        // `WorldGrid::elevation` onto extracted chunk grids, source the
+        // per-chunk Y from `chunk_grid.elevation` so within-room chunks
+        // can sit at independent heights.
+        let room_origin_y = (f64::from(room_node.transform.translation[1])
+            * f64::from(grid.sector_size)) as i32;
         let streaming = scene
             .world_streaming_for_node(room_node.id)
             .unwrap_or_default()
@@ -467,6 +480,7 @@ pub fn build_package(
                 world_asset_index,
                 origin_x: chunk_grid.origin[0],
                 origin_z: chunk_grid.origin[1],
+                origin_y: room_origin_y,
                 sector_size: chunk_grid.sector_size,
                 draw_distance: resolved_culling.draw_distance,
                 chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
@@ -1192,7 +1206,7 @@ pub fn build_package(
     }
 
     let room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
-    let ui_nodes = cook_ui_nodes(
+    let (ui_nodes, ui_scenes, game_flow) = cook_ui_nodes(
         project,
         project_root,
         &mut texture_asset_for_resource,
@@ -1235,6 +1249,8 @@ pub fn build_package(
             image_props,
             box_props,
             ui_nodes,
+            ui_scenes,
+            game_flow,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -1262,24 +1278,94 @@ fn active_far_vista_panel_count(
         .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
 }
 
+/// Cook every authored UI scene into one shared node pool plus a
+/// parallel scene table, and derive the default game flow.
+///
+/// Each scene's nodes are flattened in hierarchy order and appended
+/// to the shared pool; the scene's `node_first` records the pool
+/// offset of its block. Parent indices stored on each cooked node
+/// are made relative to the shared pool (scene-local index plus the
+/// scene's offset), so the runtime can address any scene's nodes
+/// through a single table.
+///
+/// The default flow lists one [`PlaytestFlowState::UiScene`] per
+/// cooked scene followed by [`PlaytestFlowState::Gameplay`], and
+/// enters the first UI scene when one exists. With no UI scenes the
+/// flow is a single `Gameplay` state entered at index `0`.
 fn cook_ui_nodes(
     project: &ProjectDocument,
     project_root: &Path,
     texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
-) -> Vec<PlaytestUiNode> {
-    let Some(scene) = project.active_ui_scene() else {
-        return Vec::new();
+) -> (Vec<PlaytestUiNode>, Vec<PlaytestUiScene>, PlaytestGameFlow) {
+    let mut ui_nodes: Vec<PlaytestUiNode> = Vec::new();
+    let mut ui_scenes: Vec<PlaytestUiScene> = Vec::new();
+
+    for scene in &project.ui_scenes {
+        let node_first = ui_nodes.len().min(u16::MAX as usize) as u16;
+        cook_ui_scene_nodes(
+            scene,
+            node_first,
+            project,
+            project_root,
+            texture_asset_for_resource,
+            assets,
+            report,
+            &mut ui_nodes,
+        );
+        let node_count = (ui_nodes.len() - node_first as usize).min(u16::MAX as usize) as u16;
+        ui_scenes.push(PlaytestUiScene {
+            id: (scene.id.raw() & u16::MAX as u64) as u16,
+            name: scene.name.clone(),
+            node_first,
+            node_count,
+        });
+    }
+
+    let game_flow = if ui_scenes.is_empty() {
+        // No authored UI: start straight in gameplay.
+        PlaytestGameFlow::default()
+    } else {
+        // One state per scene, gameplay last, entering the first scene.
+        let mut states: Vec<PlaytestFlowState> = ui_scenes
+            .iter()
+            .map(|scene| PlaytestFlowState::UiScene { scene: scene.id })
+            .collect();
+        states.push(PlaytestFlowState::Gameplay);
+        PlaytestGameFlow { states, entry: 0 }
     };
+
+    (ui_nodes, ui_scenes, game_flow)
+}
+
+/// Flatten one scene's nodes into the shared `out` pool. `node_first`
+/// is the pool offset of this scene's block; parent indices are
+/// rebased onto the shared pool.
+#[allow(clippy::too_many_arguments)]
+fn cook_ui_scene_nodes(
+    scene: &crate::UiScene,
+    node_first: u16,
+    project: &ProjectDocument,
+    project_root: &Path,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+    out: &mut Vec<PlaytestUiNode>,
+) {
     let ordered_ids = scene.hierarchy_node_ids();
     let id_to_index: HashMap<UiNodeId, u16> = ordered_ids
         .iter()
         .enumerate()
-        .map(|(index, id)| (*id, index.min(u16::MAX as usize) as u16))
+        .map(|(index, id)| {
+            (
+                *id,
+                (index + node_first as usize).min(u16::MAX as usize) as u16,
+            )
+        })
         .collect();
 
-    ordered_ids
+    let cooked = ordered_ids
         .iter()
         .filter_map(|id| scene.node(*id))
         .map(|node| {
@@ -1427,7 +1513,8 @@ fn cook_ui_nodes(
                 flags,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    out.extend(cooked);
 }
 
 fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
@@ -4985,6 +5072,7 @@ mod tests {
                     world_asset: psx_level::AssetId(room.world_asset_index as u16),
                     origin_x: room.origin_x,
                     origin_z: room.origin_z,
+                    origin_y: room.origin_y,
                     sector_size: room.sector_size,
                     draw_distance: room.draw_distance,
                     chunk_activation_radius_sectors: room.chunk_activation_radius_sectors,
@@ -7110,13 +7198,24 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let nodes = cook_ui_nodes(
+        let (nodes, scenes, flow) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
             &mut assets,
             &mut report,
         );
+        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes[0].node_first, 0);
+        assert_eq!(scenes[0].node_count as usize, nodes.len());
+        assert_eq!(
+            flow.states.first(),
+            Some(&PlaytestFlowState::UiScene {
+                scene: scenes[0].id
+            })
+        );
+        assert_eq!(flow.states.last(), Some(&PlaytestFlowState::Gameplay));
+        assert_eq!(flow.entry, 0);
         let group_index = nodes
             .iter()
             .position(|node| {
@@ -7222,6 +7321,39 @@ mod tests {
         assert_eq!(package.room_floor_links[0].z, 0);
         assert_eq!(package.room_floor_links[0].above_room, None);
         assert_eq!(package.room_floor_links[0].below_room, Some(1));
+    }
+
+    #[test]
+    fn room_vertical_placement_flows_from_transform_into_origin_y() {
+        // Ground placement: a room left at the default transform Y
+        // cooks to origin_y == 0, preserving today's behaviour.
+        let project = project_with_one_room();
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let package = package.expect("package");
+        assert_eq!(package.rooms[0].origin_y, 0);
+
+        // Raised placement: authoring translation[1] = 2 sectors must
+        // cook to engine units (2 * sector_size). The cook reads the
+        // Room node transform, so the authored Y reaches the record
+        // even though the per-chunk grid does not carry elevation yet.
+        let mut project = project_with_one_room();
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .expect("room node");
+        scene.node_mut(room_id).expect("room").transform.translation[1] = 2.0;
+        let (raised, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let raised = raised.expect("package");
+        // 2 authored sectors converted to engine units. Derived from
+        // the room's own sector_size so the test holds whatever the
+        // starter project uses.
+        assert_eq!(raised.rooms[0].origin_y, 2 * raised.rooms[0].sector_size);
+        assert!(raised.rooms[0].sector_size > 0);
     }
 
     #[test]
