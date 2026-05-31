@@ -1351,6 +1351,7 @@ mod tests {
             world_asset: AssetId(index),
             origin_x: 0,
             origin_z: 0,
+            origin_y: 0,
             sector_size: 2048,
             draw_distance: 16_384,
             chunk_activation_radius_sectors: 8,
