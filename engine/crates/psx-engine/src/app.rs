@@ -37,7 +37,7 @@
 
 use psx_gpu::framebuf::FrameBuffer;
 use psx_gpu::{self as gpu, Resolution, VideoMode};
-use psx_level::{GameFlow, LevelUiNodeRecord, LevelUiScene};
+use psx_level::{GameFlow, LevelOptionDef, LevelUiNodeRecord, LevelUiScene};
 use psx_pad::{poll_port1, PadState};
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
@@ -188,8 +188,8 @@ impl App {
         // to `scene.init` and `update`/`render` forward straight to
         // the scene every tick -- the old one-init-then-loop shape,
         // plus one already-taken `match` branch. No UI scenes, no
-        // nodes: the front-end arms are dead code on this path.
-        Self::run_with_flow(config, &GAMEPLAY_ONLY, &[], &[], scene)
+        // nodes, no options: the front-end arms are dead code on this path.
+        Self::run_with_flow(config, &GAMEPLAY_ONLY, &[], &[], &[], scene)
     }
 
     /// Run `scene` as the gameplay state of a cooked [`GameFlow`].
@@ -200,12 +200,15 @@ impl App {
     /// UI-scene states (title / pause / game-over) under the identical
     /// pacing and telemetry. `scenes` and `nodes` supply the
     /// addressable UI scenes and the shared node pool they slice into;
-    /// pass empty slices for a gameplay-only flow.
+    /// `options` supplies the cooked project options sliders and
+    /// `SetOption` actions bind to. Pass empty slices for a gameplay-only
+    /// flow.
     pub fn run_with_flow<S: Scene>(
         config: Config,
         flow: &'static GameFlow,
         scenes: &'static [LevelUiScene],
         nodes: &'static [LevelUiNodeRecord],
+        options: &'static [LevelOptionDef],
         scene: &mut S,
     ) -> ! {
         boot_trace("psx-engine: run");
@@ -235,7 +238,7 @@ impl App {
         // The wrapper is the Scene the scheduled loop drives: its
         // init/update/render dispatch to the borrowed gameplay scene
         // (or the UI renderer) per flow state.
-        let mut app = GameApp::new(flow, scenes, nodes, scene);
+        let mut app = GameApp::new(flow, scenes, nodes, options, scene);
 
         boot_trace("psx-engine: scene init");
         app.init(&mut ctx);

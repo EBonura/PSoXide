@@ -8,7 +8,8 @@ use psx_level::{
     LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord,
     LevelImagePropRecord, LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomPortalRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord,
+    LevelModelSocketRecord, LevelOptionDef, LevelRoomPortalRecord, LevelRoomRecord,
+    LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord, LevelSkyRecord, LevelUiNodeRecord, LevelUiScene,
     LevelVisibilityCellRecord, LevelVisibilityPvsRecord, LevelWeaponRecord,
     LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
@@ -64,6 +65,7 @@ pub static GAME_FLOW: GameFlow = GameFlow {
     states: &[FlowState::Gameplay],
     entry: 0,
 };
+pub static OPTIONS: &[LevelOptionDef] = &[];
 pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[];
 pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
