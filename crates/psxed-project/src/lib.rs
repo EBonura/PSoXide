@@ -175,6 +175,19 @@ impl ResourceId {
     }
 }
 
+/// Stable identifier for a project [`OptionDef`]. Sliders bind to an
+/// option by id; the cook carries the low 16 bits into the runtime
+/// record so an option survives renames and reorders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub struct OptionId(pub u32);
+
+impl OptionId {
+    /// Return the raw integer value for compact UI/debug display.
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// Stable identifier for a node inside one authored UI scene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct UiNodeId(u64);
@@ -421,6 +434,109 @@ impl UiValueBinding {
     }
 }
 
+/// Action a [`UiNodeKind::Button`] fires when activated. Runtime
+/// dispatch is a later step; this carries the authored intent so the
+/// cook can lower it to a [`psx_level::LevelUiAction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiAction {
+    /// Switch to another authored UI scene by stable id.
+    GotoScene(UiSceneId),
+    /// Enter the gameplay/level simulation.
+    StartGameplay,
+    /// Return to the previous menu/scene.
+    Back,
+    /// Adjust a project option by a signed delta.
+    SetOption {
+        /// Target option id.
+        option: OptionId,
+        /// Signed step applied to the option value.
+        delta: i32,
+    },
+    /// Game-specific action dispatched by opaque id.
+    Game(u16),
+}
+
+impl Default for UiAction {
+    fn default() -> Self {
+        Self::Back
+    }
+}
+
+impl UiAction {
+    /// Editor-facing label for the action variant.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::GotoScene(_) => "Go To Scene",
+            Self::StartGameplay => "Start Gameplay",
+            Self::Back => "Back",
+            Self::SetOption { .. } => "Set Option",
+            Self::Game(_) => "Game Action",
+        }
+    }
+}
+
+/// How a project [`OptionDef`] is interpreted and edited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OptionKind {
+    /// Bounded integer with a fixed step.
+    IntRange {
+        /// Minimum value.
+        min: i32,
+        /// Maximum value.
+        max: i32,
+        /// Increment applied per step.
+        step: i32,
+        /// Default value.
+        default: i32,
+    },
+    /// Choice from a fixed list of named variants.
+    Enum {
+        /// Ordered variant labels.
+        variants: Vec<String>,
+        /// Default variant index.
+        default: usize,
+    },
+    /// On/off toggle.
+    Bool {
+        /// Default value.
+        default: bool,
+    },
+}
+
+impl Default for OptionKind {
+    fn default() -> Self {
+        Self::IntRange {
+            min: 0,
+            max: 10,
+            step: 1,
+            default: 5,
+        }
+    }
+}
+
+impl OptionKind {
+    /// Editor-facing label for the option kind.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::IntRange { .. } => "Int Range",
+            Self::Enum { .. } => "Enum",
+            Self::Bool { .. } => "Bool",
+        }
+    }
+}
+
+/// One project-level tunable option. Sliders and `SetOption` button
+/// actions reference an option by its stable [`OptionId`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionDef {
+    /// Stable id, preserved across renames and reorders.
+    pub id: OptionId,
+    /// Display name.
+    pub name: String,
+    /// Value domain and default.
+    pub kind: OptionKind,
+}
+
 /// Authored 2D UI node type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiNodeKind {
@@ -485,6 +601,44 @@ pub enum UiNodeKind {
         /// Empty/background colour.
         background: [u8; 3],
     },
+    /// Interactive button: a filled rectangle with a centered label
+    /// that fires `action` when activated. Runtime activation is a
+    /// later step.
+    Button {
+        /// Button bounds in canvas pixels.
+        rect: UiRect,
+        /// Centered label text.
+        #[serde(default)]
+        label: String,
+        /// Label alignment inside `rect`.
+        #[serde(default)]
+        align: UiTextAlign,
+        /// Fill colour.
+        #[serde(default = "default_ui_button_color")]
+        color: [u8; 3],
+        /// Action fired on activation.
+        #[serde(default)]
+        action: UiAction,
+    },
+    /// Interactive slider bound to a project option, drawn as a track,
+    /// a proportional fill, and a knob. Runtime value editing is a
+    /// later step.
+    Slider {
+        /// Slider bounds in canvas pixels.
+        rect: UiRect,
+        /// Bound project option id.
+        #[serde(default)]
+        option: OptionId,
+        /// Track (background) colour.
+        #[serde(default = "default_ui_slider_track")]
+        track: [u8; 3],
+        /// Fill colour up to the current value.
+        #[serde(default = "default_ui_slider_fill")]
+        fill: [u8; 3],
+        /// Knob colour.
+        #[serde(default = "default_ui_slider_knob")]
+        knob: [u8; 3],
+    },
 }
 
 impl UiNodeKind {
@@ -497,6 +651,8 @@ impl UiNodeKind {
             Self::Label { .. } => "Label",
             Self::Image { .. } => "Image",
             Self::Bar { .. } => "Bar",
+            Self::Button { .. } => "Button",
+            Self::Slider { .. } => "Slider",
         }
     }
 
@@ -508,7 +664,9 @@ impl UiNodeKind {
             | Self::Rect { rect, .. }
             | Self::Label { rect, .. }
             | Self::Image { rect, .. }
-            | Self::Bar { rect, .. } => Some(rect),
+            | Self::Bar { rect, .. }
+            | Self::Button { rect, .. }
+            | Self::Slider { rect, .. } => Some(rect),
         }
     }
 
@@ -520,13 +678,31 @@ impl UiNodeKind {
             | Self::Rect { rect, .. }
             | Self::Label { rect, .. }
             | Self::Image { rect, .. }
-            | Self::Bar { rect, .. } => Some(*rect),
+            | Self::Bar { rect, .. }
+            | Self::Button { rect, .. }
+            | Self::Slider { rect, .. } => Some(*rect),
         }
     }
 }
 
 fn default_ui_image_tint() -> [u8; 3] {
     [128, 128, 128]
+}
+
+fn default_ui_button_color() -> [u8; 3] {
+    [52, 60, 80]
+}
+
+fn default_ui_slider_track() -> [u8; 3] {
+    [30, 34, 44]
+}
+
+fn default_ui_slider_fill() -> [u8; 3] {
+    [80, 132, 180]
+}
+
+fn default_ui_slider_knob() -> [u8; 3] {
+    [210, 218, 232]
 }
 
 /// One node in an authored UI scene tree.
@@ -9099,6 +9275,10 @@ pub struct ProjectDocument {
     /// Authored screen-space UI scenes. The first scene is the HUD for now.
     #[serde(default = "default_ui_scenes")]
     pub ui_scenes: Vec<UiScene>,
+    /// Project-level tunable options sliders and `SetOption` button
+    /// actions bind to. Defaults to empty for legacy projects.
+    #[serde(default)]
+    pub options: Vec<OptionDef>,
     /// Project resources.
     pub resources: Vec<Resource>,
     next_resource_id: u64,
@@ -9117,6 +9297,7 @@ impl ProjectDocument {
             runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
             ui_scenes: default_ui_scenes(),
+            options: Vec::new(),
             resources: Vec::new(),
             next_resource_id: 1,
         }
@@ -9238,6 +9419,45 @@ impl ProjectDocument {
             self.assign_ui_scene_ids();
         }
         true
+    }
+
+    /// Look up a project option by stable id.
+    pub fn option(&self, id: OptionId) -> Option<&OptionDef> {
+        self.options.iter().find(|option| option.id == id)
+    }
+
+    /// Append a fresh [`OptionDef`] named `name` with a default
+    /// [`OptionKind`], assign it a stable id that does not collide with
+    /// any existing option, and return that id.
+    pub fn add_option(&mut self, name: impl Into<String>) -> OptionId {
+        let id = self.next_option_id();
+        self.options.push(OptionDef {
+            id,
+            name: name.into(),
+            kind: OptionKind::default(),
+        });
+        id
+    }
+
+    /// Remove the option at `index`. Returns `true` when an option
+    /// existed there. Sliders bound to the removed id keep the id and
+    /// simply resolve to nothing until rebound.
+    pub fn remove_option(&mut self, index: usize) -> bool {
+        if index >= self.options.len() {
+            return false;
+        }
+        self.options.remove(index);
+        true
+    }
+
+    /// First option id not already in use. Stable across reorders so a
+    /// freshly added option never shadows an existing slider binding.
+    fn next_option_id(&self) -> OptionId {
+        let mut next = 1u32;
+        for option in &self.options {
+            next = next.max(option.id.raw().saturating_add(1));
+        }
+        OptionId(next)
     }
 
     /// Add a resource and return its id.

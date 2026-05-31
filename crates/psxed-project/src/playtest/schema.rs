@@ -649,6 +649,41 @@ pub struct PlaytestBoxProp {
     pub flags: u16,
 }
 
+/// Cooked button action, ready for manifest emission. Mirrors
+/// [`psx_level::LevelUiAction`]: the authored `GotoScene(UiSceneId)`
+/// is resolved to a cooked [`PlaytestUiScene::id`] at cook time, and
+/// the option/game ids are carried as compact integers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestUiAction {
+    /// Switch to the cooked UI scene with this id.
+    GotoScene {
+        /// Target [`PlaytestUiScene::id`].
+        scene: u16,
+    },
+    /// Enter the gameplay/level simulation.
+    StartGameplay,
+    /// Return to the previous menu/scene.
+    Back,
+    /// Adjust a project option by a signed delta.
+    SetOption {
+        /// Target option id.
+        option: u16,
+        /// Signed step.
+        delta: i32,
+    },
+    /// Game-specific action dispatched by opaque id.
+    Game {
+        /// Caller-defined id.
+        id: u16,
+    },
+}
+
+impl Default for PlaytestUiAction {
+    fn default() -> Self {
+        Self::Back
+    }
+}
+
 /// One cooked screen-space UI node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestUiNode {
@@ -664,20 +699,27 @@ pub struct PlaytestUiNode {
     pub width: u16,
     /// Height in canvas pixels.
     pub height: u16,
-    /// Primary colour: fill for `Rect`/`Bar`, text tint for `Label`.
+    /// Primary colour: fill for `Rect`/`Bar`/`Button`, text tint for
+    /// `Label`, track colour for `Slider`.
     pub color: [u8; 3],
-    /// Secondary colour, currently the `Bar` background.
+    /// Secondary colour: `Bar` background or `Slider` fill.
     pub background: [u8; 3],
+    /// Tertiary colour, currently the `Slider` knob.
+    pub accent: [u8; 3],
     /// Current value binding for `Bar`.
     pub value: UiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: UiValueBinding,
     /// Texture asset index for `Image`, or `None`.
     pub texture_asset: Option<usize>,
-    /// Text for `Label`.
+    /// Text for `Label`/`Button`.
     pub text: String,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
     pub tag: String,
+    /// Action fired by a `Button`. Ignored by other kinds.
+    pub action: PlaytestUiAction,
+    /// Project option a `Slider` binds to, or [`psx_level::UI_OPTION_NONE`].
+    pub option: u16,
     /// Runtime flags.
     pub flags: u16,
 }
