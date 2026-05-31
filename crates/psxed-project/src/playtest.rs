@@ -48,9 +48,9 @@ use crate::world_cook::{
 };
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
-    NodeKind, OptionId, ParticleEmitterSettings, ProjectDocument, PsxBlendMode, ResourceData,
-    ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiTextAlign, UiValueBinding,
-    WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    NodeKind, OptionId, OptionKind, ParticleEmitterSettings, ProjectDocument, PsxBlendMode,
+    ResourceData, ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiTextAlign,
+    UiValueBinding, WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -1216,6 +1216,7 @@ pub fn build_package(
     if !report.is_ok() {
         return (None, report);
     }
+    let options = cook_options(project);
 
     (
         Some(PlaytestPackage {
@@ -1251,6 +1252,7 @@ pub fn build_package(
             ui_nodes,
             ui_scenes,
             game_flow,
+            options,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -1627,6 +1629,42 @@ fn cook_ui_action(action: UiAction) -> PlaytestUiAction {
 /// slot, clamping to the low 16 bits.
 fn cook_option_id(option: OptionId) -> u16 {
     (option.raw() & u16::MAX as u32) as u16
+}
+
+/// Flatten every authored [`OptionDef`] into a cooked [`PlaytestOption`]
+/// the runtime store can seed from. Each [`OptionKind`] collapses to a
+/// bounded integer triple: an `IntRange` maps directly, an `Enum` becomes
+/// `[0, variants - 1]` step `1` (an empty variant list yields a degenerate
+/// `[0, 0]`), and a `Bool` becomes `[0, 1]` step `1`. The id is the same
+/// low-16-bit packing sliders and `SetOption` actions cook to, so a slider
+/// or button resolves its bound option by matching ids at runtime.
+fn cook_options(project: &ProjectDocument) -> Vec<PlaytestOption> {
+    project
+        .options
+        .iter()
+        .map(|option| {
+            let (min, max, step, default) = match &option.kind {
+                OptionKind::IntRange {
+                    min,
+                    max,
+                    step,
+                    default,
+                } => (*min, *max, *step, *default),
+                OptionKind::Enum { variants, default } => {
+                    let last = variants.len().saturating_sub(1) as i32;
+                    (0, last, 1, *default as i32)
+                }
+                OptionKind::Bool { default } => (0, 1, 1, *default as i32),
+            };
+            PlaytestOption {
+                id: cook_option_id(option.id),
+                min,
+                max,
+                step,
+                default,
+            }
+        })
+        .collect()
 }
 
 fn cook_sky_panorama_texture_asset(
@@ -7472,6 +7510,73 @@ mod tests {
     }
 
     #[test]
+    fn cook_options_flattens_every_kind() {
+        // One option of each kind; the cook collapses them to bounded
+        // integer triples keyed by the low-16-bit option id.
+        let mut project = ProjectDocument::new("ui");
+        let int_id = project.add_option("Volume");
+        if let Some(opt) = project.options.iter_mut().find(|o| o.id == int_id) {
+            opt.kind = crate::OptionKind::IntRange {
+                min: 2,
+                max: 9,
+                step: 3,
+                default: 5,
+            };
+        }
+        let enum_id = project.add_option("Quality");
+        if let Some(opt) = project.options.iter_mut().find(|o| o.id == enum_id) {
+            opt.kind = crate::OptionKind::Enum {
+                variants: vec!["Low".into(), "Medium".into(), "High".into()],
+                default: 2,
+            };
+        }
+        let bool_id = project.add_option("Subtitles");
+        if let Some(opt) = project.options.iter_mut().find(|o| o.id == bool_id) {
+            opt.kind = crate::OptionKind::Bool { default: true };
+        }
+
+        let options = cook_options(&project);
+        assert_eq!(options.len(), 3);
+
+        let int_opt = options
+            .iter()
+            .find(|o| o.id == (int_id.raw() & u16::MAX as u32) as u16)
+            .expect("int option cooked");
+        assert_eq!((int_opt.min, int_opt.max, int_opt.step, int_opt.default), (2, 9, 3, 5));
+
+        // Enum -> [0, variants - 1] step 1, default = variant index.
+        let enum_opt = options
+            .iter()
+            .find(|o| o.id == (enum_id.raw() & u16::MAX as u32) as u16)
+            .expect("enum option cooked");
+        assert_eq!((enum_opt.min, enum_opt.max, enum_opt.step, enum_opt.default), (0, 2, 1, 2));
+
+        // Bool -> [0, 1] step 1, default = 1 for true.
+        let bool_opt = options
+            .iter()
+            .find(|o| o.id == (bool_id.raw() & u16::MAX as u32) as u16)
+            .expect("bool option cooked");
+        assert_eq!((bool_opt.min, bool_opt.max, bool_opt.step, bool_opt.default), (0, 1, 1, 1));
+    }
+
+    #[test]
+    fn manifest_emits_cooked_options_table() {
+        let mut package = PlaytestPackage::default();
+        package.options = vec![PlaytestOption {
+            id: 7,
+            min: 0,
+            max: 5,
+            step: 1,
+            default: 3,
+        }];
+        let src = render_manifest_source(&package);
+        assert!(src.contains("pub static OPTIONS: &[LevelOptionDef] = &[\n"));
+        assert!(src.contains(
+            "LevelOptionDef { id: 7, min: 0, max: 5, step: 1, default: 3 },"
+        ));
+    }
+
+    #[test]
     fn generated_room_cache_counts_match_runtime_builder() {
         let project = project_with_one_room();
         let (package, report) = build_package(&project, &starter_project_root());
@@ -10086,6 +10191,7 @@ mod tests {
             .contains("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[\n];"));
         assert!(src.contains("pub static UI_NODES: &[LevelUiNodeRecord] = &[\n];"));
+        assert!(src.contains("pub static OPTIONS: &[LevelOptionDef] = &[\n];"));
         assert!(src.contains("pub static ENTITIES: &[EntityRecord] = &[\n];"));
         assert!(src.contains("pub static PLAYER_SPAWN"));
     }
