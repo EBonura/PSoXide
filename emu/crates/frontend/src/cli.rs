@@ -202,6 +202,10 @@ pub struct LaunchArgs {
     /// a window or screen-capture permission.
     #[arg(long)]
     pub dump_hw: Option<PathBuf>,
+    /// Optional path to dump the SPU's mixed stereo output as a 16-bit
+    /// 44.1 kHz WAV, for A/B comparison against a reference emulator.
+    #[arg(long)]
+    pub dump_audio: Option<PathBuf>,
     /// Print a guest-runtime telemetry summary captured out-of-band.
     #[arg(long)]
     pub dump_guest_profile: bool,
@@ -677,6 +681,7 @@ fn run_headless_launch(
     // "we hit an unimplemented instruction" and worth surfacing.
     let mut stopped_at: Option<u64> = None;
     let mut audio_cycle_accum = 0u64;
+    let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
         let cycles_before = bus.cycles();
@@ -691,7 +696,10 @@ fn run_headless_launch(
         audio_cycle_accum %= SAMPLE_CYCLES;
         if sample_count > 0 {
             bus.run_spu_samples(sample_count);
-            let _ = bus.spu.drain_audio();
+            let drained = bus.spu.drain_audio();
+            if args.dump_audio.is_some() {
+                audio_capture.extend(drained);
+            }
         }
         let current_guest_frames = bus.telemetry.frames_seen();
         if let Some(samples) = tape_samples.as_ref() {
@@ -809,6 +817,18 @@ fn run_headless_launch(
         }
     }
 
+    if let Some(path) = args.dump_audio.as_ref() {
+        write_wav_s16_stereo(path, 44_100, &audio_capture)?;
+        if emit_summary {
+            eprintln!(
+                "[cli] audio → {} ({} stereo samples, {:.2}s @ 44.1kHz)",
+                path.display(),
+                audio_capture.len(),
+                audio_capture.len() as f64 / 44_100.0
+            );
+        }
+    }
+
     if let Some(path) = args.dump_hw {
         let used_24bpp_fallback = dump_hw_ppm(&bus, &path)?;
         if emit_summary {
@@ -848,6 +868,35 @@ fn run_headless_launch(
         display_rgba_height,
         vram_words: bus.gpu.vram.words().to_vec(),
     })
+}
+
+/// Write 16-bit stereo PCM as a canonical 44-byte-header WAV. No crate
+/// dependency -- the SPU output is already interleaved `(left, right)`.
+fn write_wav_s16_stereo(
+    path: &std::path::Path,
+    sample_rate: u32,
+    samples: &[(i16, i16)],
+) -> Result<(), String> {
+    let data_len = (samples.len() as u32).saturating_mul(4); // 2 ch * 2 bytes
+    let mut out: Vec<u8> = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // format = PCM
+    out.extend_from_slice(&2u16.to_le_bytes()); // channels
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 4).to_le_bytes()); // byte rate
+    out.extend_from_slice(&4u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for (l, r) in samples {
+        out.extend_from_slice(&l.to_le_bytes());
+        out.extend_from_slice(&r.to_le_bytes());
+    }
+    std::fs::write(path, out).map_err(|e| format!("write wav {}: {e}", path.display()))
 }
 
 fn cmd_build_editor_playtest_disc() -> Result<(), String> {
@@ -1180,6 +1229,7 @@ fn validation_launch_args(
         counter_log: None,
         dump_vram: None,
         dump_hw: None,
+        dump_audio: None,
         dump_guest_profile: false,
         hold_forward: checkpoint.hold_forward,
         hold_run: checkpoint.hold_run,
@@ -1437,6 +1487,7 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         true,
         &empty_hidden,
         None,
+        0,
         NodeId::ROOT,
         None,
         None,

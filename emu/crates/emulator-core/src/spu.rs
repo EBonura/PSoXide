@@ -777,6 +777,43 @@ pub struct Spu {
     koff_raw: u32,
     /// KOFF pending bitmap.
     koff_pending: u32,
+    /// Diagnostic per-voice activity: key-on count and number of samples
+    /// that produced nonzero output. A voice keyed but never voiced is the
+    /// signature of a missing-instrument bug (ADSR/decode failure). Not on
+    /// any hot register path.
+    dbg_kon_count: [u32; NUM_VOICES],
+    dbg_voiced_samples: [u32; NUM_VOICES],
+    /// Per-voice note-end reason tally: key-off (game gate) vs sample-stop
+    /// (one-shot/loop end). Distinguishes a gate/release cutoff from samples
+    /// ending early.
+    dbg_koff_count: [u32; NUM_VOICES],
+    dbg_sampstop_count: [u32; NUM_VOICES],
+    /// Voice config captured at the last key-on: (start_addr, adsr_lo,
+    /// adsr_hi, raw_pitch, vol_l, vol_r). Reveals why a keyed voice stays
+    /// silent (bad start address, dead ADSR, zero volume).
+    dbg_keyon_cfg: [(u32, u16, u16, u16, i16, i16); NUM_VOICES],
+    /// Per-voice envelope/decode trace, snapshotted every 1024 output
+    /// samples: (decoded_sample_pre_adsr, envelope_level, phase). Bisects
+    /// premature note cutoff -- decoded->0 with envelope held = decode/loop
+    /// bug; envelope->0 = ADSR/key-off. Capped, diagnostic-only.
+    dbg_trace: [Vec<(i16, i32, u8)>; NUM_VOICES],
+    /// Output-sample clock that gates dbg_trace snapshots.
+    dbg_sample_idx: u32,
+    /// Per-voice running max of |decoded sample| and envelope within the
+    /// current trace window; pushed + reset at each snapshot boundary.
+    dbg_acc_smax: [i32; NUM_VOICES],
+    dbg_acc_emax: [i32; NUM_VOICES],
+    /// Accumulated |dry| and |wet (reverb)| output magnitude over the run.
+    /// A near-zero wet/dry ratio means the reverb bus is not contributing --
+    /// missing reverb tails read as dry, "cut-off" notes vs the oracle.
+    dbg_dry_energy: u64,
+    dbg_wet_energy: u64,
+    /// OR-accumulated pmon / noise bitmaps over the whole run -- captures
+    /// any voice ever pitch-modulated or noise-mode, not just the end state.
+    dbg_pmon_ever: u32,
+    dbg_noise_ever: u32,
+    dbg_v10_log: u32,
+    dbg_ram_log: u32,
     /// Voice pitch-modulation enable bitmap. Bit N means voice N takes
     /// its pitch from voice N-1's output sample.
     pmon: u32,
@@ -878,6 +915,21 @@ impl Spu {
             kon_pending: 0,
             koff_raw: 0,
             koff_pending: 0,
+            dbg_kon_count: [0; NUM_VOICES],
+            dbg_voiced_samples: [0; NUM_VOICES],
+            dbg_koff_count: [0; NUM_VOICES],
+            dbg_sampstop_count: [0; NUM_VOICES],
+            dbg_keyon_cfg: [(0, 0, 0, 0, 0, 0); NUM_VOICES],
+            dbg_trace: core::array::from_fn(|_| Vec::new()),
+            dbg_sample_idx: 0,
+            dbg_acc_smax: [0; NUM_VOICES],
+            dbg_acc_emax: [0; NUM_VOICES],
+            dbg_dry_energy: 0,
+            dbg_wet_energy: 0,
+            dbg_pmon_ever: 0,
+            dbg_noise_ever: 0,
+            dbg_v10_log: 0,
+            dbg_ram_log: 0,
             pmon: 0,
             noise_on: 0,
             reverb_on: 0,
@@ -1005,6 +1057,43 @@ impl Spu {
     /// How many stereo samples are queued but not yet drained.
     pub fn audio_queue_len(&self) -> usize {
         self.audio_out.len()
+    }
+
+    /// Diagnostic: per-voice (key-on count, samples that produced nonzero
+    /// output). A voice with key-ons but ~no voiced samples is keyed but
+    /// silent -- the signature of a missing-instrument bug.
+    pub fn voice_debug_counts(&self) -> ([u32; NUM_VOICES], [u32; NUM_VOICES]) {
+        (self.dbg_kon_count, self.dbg_voiced_samples)
+    }
+
+    /// Diagnostic: per-voice note-end tally (key-off count, sample-stop count).
+    pub fn voice_end_counts(&self) -> ([u32; NUM_VOICES], [u32; NUM_VOICES]) {
+        (self.dbg_koff_count, self.dbg_sampstop_count)
+    }
+
+    /// Diagnostic: per-voice (start_addr, adsr_lo, adsr_hi, raw_pitch,
+    /// vol_l, vol_r) captured at the last key-on.
+    pub fn voice_trace(&self) -> &[Vec<(i16, i32, u8)>; NUM_VOICES] {
+        &self.dbg_trace
+    }
+
+    /// Diagnostic: (dry_energy, wet_energy, spucnt, reverb_on, pmon, noise_on)
+    /// to gauge reverb activity + which voices are pitch-modulated / noise.
+    pub fn reverb_debug(&self) -> (u64, u64, u16, u32, u32, u32) {
+        (
+            self.dbg_dry_energy,
+            self.dbg_wet_energy,
+            self.spucnt,
+            self.reverb_on,
+            self.dbg_pmon_ever,
+            self.dbg_noise_ever,
+        )
+    }
+
+    /// Diagnostic: per-voice (start_addr, adsr_lo, adsr_hi, raw_pitch,
+    /// vol_l, vol_r) captured at the last key-on.
+    pub fn voice_keyon_cfg(&self) -> [(u32, u16, u16, u16, i16, i16); NUM_VOICES] {
+        self.dbg_keyon_cfg
     }
 
     /// True when the SPU has an IRQ to report. Bus drains this flag
@@ -1304,6 +1393,13 @@ impl Spu {
         // post-increments by 2 bytes each write.
         let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
         self.ram[idx] = value;
+        if (0x4a200..0x4a280).contains(&self.transfer_addr) && self.dbg_ram_log < 60 {
+            self.dbg_ram_log += 1;
+            eprintln!(
+                "[ram FIFO] 0x{:05x} = {:04x} @s{}",
+                self.transfer_addr, value, self.dbg_sample_idx
+            );
+        }
         // Check IRQ address match.
         self.check_irq_on_transfer();
         self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
@@ -1347,6 +1443,13 @@ impl Spu {
         for &w in words {
             let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
             self.ram[idx] = w;
+            if (0x4a200..0x4a280).contains(&self.transfer_addr) && self.dbg_ram_log < 60 {
+                self.dbg_ram_log += 1;
+                eprintln!(
+                    "[ram DMA ] 0x{:05x} = {:04x} @s{}",
+                    self.transfer_addr, w, self.dbg_sample_idx
+                );
+            }
             self.check_irq_on_transfer();
             self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
         }
@@ -1617,6 +1720,9 @@ impl Spu {
         let mut reverb_in_r: i32 = 0;
         for v in 0..NUM_VOICES {
             let (l, r) = self.tick_voice(v);
+            if l != 0 || r != 0 {
+                self.dbg_voiced_samples[v] = self.dbg_voiced_samples[v].saturating_add(1);
+            }
             let is_modulator = v + 1 < NUM_VOICES && (self.pmon & (1 << (v + 1))) != 0;
             if !is_modulator {
                 sum_l = sum_l.saturating_add(l as i32);
@@ -1627,6 +1733,9 @@ impl Spu {
                 }
             }
         }
+        self.dbg_sample_idx = self.dbg_sample_idx.wrapping_add(1);
+        self.dbg_pmon_ever |= self.pmon;
+        self.dbg_noise_ever |= self.noise_on;
 
         // 3. Mix CD audio input at CD_VOL_L/R. Source is the CDROM's
         //    CD-DA sample stream or the decoded XA-ADPCM payload,
@@ -1664,6 +1773,12 @@ impl Spu {
         let dry_r = sum_r;
         let out_l = saturate_i16(dry_l.saturating_add(wet_l));
         let out_r = saturate_i16(dry_r.saturating_add(wet_r));
+        self.dbg_dry_energy = self
+            .dbg_dry_energy
+            .saturating_add(dry_l.unsigned_abs() as u64 + dry_r.unsigned_abs() as u64);
+        self.dbg_wet_energy = self
+            .dbg_wet_energy
+            .saturating_add(wet_l.unsigned_abs() as u64 + wet_r.unsigned_abs() as u64);
 
         // 5. Push to output ring, discarding oldest if full.
         if self.audio_out.len() >= OUTPUT_BUFFER_CAP {
@@ -1702,9 +1817,21 @@ impl Spu {
             let key_on = kon & bit != 0;
             if key_on {
                 self.voices[v].key_on();
+                self.dbg_kon_count[v] = self.dbg_kon_count[v].saturating_add(1);
+                let vc = &self.voices[v];
+                let cfg = (
+                    vc.start_addr,
+                    vc.adsr_lo,
+                    vc.adsr_hi,
+                    vc.raw_pitch,
+                    vc.vol_l.current,
+                    vc.vol_r.current,
+                );
+                self.dbg_keyon_cfg[v] = cfg;
             }
             if !key_on && koff & bit != 0 {
                 self.voices[v].key_off();
+                self.dbg_koff_count[v] = self.dbg_koff_count[v].saturating_add(1);
             }
         }
     }
@@ -1718,6 +1845,23 @@ impl Spu {
         // Advance ADSR envelope.
         let env = self.voices[v].step_envelope();
         let mixed_i16 = apply_adsr_volume(sample_i16, env);
+
+        // Diagnostic trace: track per-window max decode amplitude + envelope,
+        // snapshot every 1024 samples to bisect premature cutoffs
+        // (decode-silence with envelope held vs envelope-drop).
+        let s_abs = (sample_i16 as i32).abs();
+        if s_abs > self.dbg_acc_smax[v] {
+            self.dbg_acc_smax[v] = s_abs;
+        }
+        if env > self.dbg_acc_emax[v] {
+            self.dbg_acc_emax[v] = env;
+        }
+        if self.dbg_sample_idx & 0x3FF == 0 && self.dbg_trace[v].len() < 2600 {
+            let ph = self.voices[v].phase as u8;
+            self.dbg_trace[v].push((self.dbg_acc_smax[v] as i16, self.dbg_acc_emax[v], ph));
+            self.dbg_acc_smax[v] = 0;
+            self.dbg_acc_emax[v] = 0;
+        }
 
         let voice = &mut self.voices[v];
         voice.last_sample = mixed_i16;
@@ -1773,6 +1917,7 @@ impl Spu {
         while self.voices[v].sample_pos >= 0x10000 {
             if self.voices[v].sample_index >= ADPCM_SAMPLES_PER_BLOCK {
                 if self.voices[v].stop_after_block {
+                    self.dbg_sampstop_count[v] = self.dbg_sampstop_count[v].saturating_add(1);
                     let voice = &mut self.voices[v];
                     voice.phase = AdsrPhase::Off;
                     voice.envelope = 0;
@@ -1834,6 +1979,15 @@ impl Spu {
         let predictor = predictor.min(ADPCM_FILTER_TABLE.len() - 1);
         let shift = (block[0] & 0x0F).min(12) as u32;
         let flags = block[1];
+
+        if v == 10 && self.dbg_v10_log < 14 {
+            self.dbg_v10_log += 1;
+            eprintln!(
+                "[v10 dec#{:2}] addr=0x{:05x} hdr={:02x} flags={:02x} pred={} shift={} data={:02x}{:02x}{:02x}{:02x} @s{}",
+                self.dbg_v10_log, current, block[0], flags, predictor, shift,
+                block[2], block[3], block[4], block[5], self.dbg_sample_idx
+            );
+        }
 
         // Decode 28 samples (4-bit nibbles, little-endian within bytes:
         // byte[n] low nibble → sample 2n, high nibble → sample 2n+1).
