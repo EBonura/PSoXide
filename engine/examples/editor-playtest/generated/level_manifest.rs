@@ -3,16 +3,16 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    EntityRecord, EquipmentRecord, LevelAssetRecord, LevelBoxPropRecord, LevelCachedRoomCellRecord,
-    LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
+    EntityRecord, EquipmentRecord, FlowState, GameFlow, LevelAssetRecord, LevelBoxPropRecord,
+    LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
+    LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord,
+    LevelImagePropRecord, LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelRoomPortalRecord, LevelRoomRecord, LevelRoomSurfaceCacheRecord,
-    LevelRoomVisibilityRecord, LevelSkyRecord, LevelUiNodeRecord, LevelVisibilityCellRecord,
-    LevelVisibilityPvsRecord, LevelWeaponRecord, LevelWorldPackEntryRecord,
-    ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord, PointLightRecord, RoomIndex,
-    RoomResidencyRecord, WeaponHitboxRecord,
+    LevelRoomVisibilityRecord, LevelSkyRecord, LevelUiNodeRecord, LevelUiScene,
+    LevelVisibilityCellRecord, LevelVisibilityPvsRecord, LevelWeaponRecord,
+    LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
+    PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
 };
 
 pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
@@ -59,6 +59,11 @@ pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
 pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
 pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
 pub static UI_NODES: &[LevelUiNodeRecord] = &[];
+pub static UI_SCENES: &[LevelUiScene] = &[];
+pub static GAME_FLOW: GameFlow = GameFlow {
+    states: &[FlowState::Gameplay],
+    entry: 0,
+};
 pub static WEAPON_HITBOXES: &[WeaponHitboxRecord] = &[];
 pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
