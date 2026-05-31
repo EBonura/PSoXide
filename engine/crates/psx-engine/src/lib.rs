@@ -121,7 +121,7 @@ pub use third_person_camera::{
     ThirdPersonCameraState, ThirdPersonCameraTarget,
 };
 pub use transform::{ActorTransform, RoomPoint, Vec3World, WorldVertex};
-pub use ui::{draw_scene, UiTextureSlot, UI_CANVAS_H, UI_CANVAS_W};
+pub use ui::{draw_scene, is_focusable, node_nav_rect, UiTextureSlot, UI_CANVAS_H, UI_CANVAS_W};
 pub use world::{
     CompactCollisionParseError, CompactCollisionRoom, GridDirection, GridHorizontalFace,
     GridSector, GridSplit, GridVerticalFace, GridWalls, RoomCollision, RoomRender,
