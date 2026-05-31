@@ -68,6 +68,7 @@ pub mod telemetry;
 pub mod third_person_camera;
 mod time;
 pub mod transform;
+pub mod ui;
 pub mod world;
 pub mod world_render;
 
@@ -118,6 +119,7 @@ pub use third_person_camera::{
     ThirdPersonCameraState, ThirdPersonCameraTarget,
 };
 pub use transform::{ActorTransform, RoomPoint, Vec3World, WorldVertex};
+pub use ui::{draw_scene, UiTextureSlot, UI_CANVAS_H, UI_CANVAS_W};
 pub use world::{
     CompactCollisionParseError, CompactCollisionRoom, GridDirection, GridHorizontalFace,
     GridSector, GridSplit, GridVerticalFace, GridWalls, RoomCollision, RoomRender,
