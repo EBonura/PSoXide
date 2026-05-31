@@ -48,9 +48,9 @@ use crate::world_cook::{
 };
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
-    NodeKind, ParticleEmitterSettings, ProjectDocument, PsxBlendMode, ResourceData, ResourceId,
-    SceneNode, UiAnchor, UiNodeId, UiNodeKind, UiTextAlign, UiValueBinding, WorldGrid,
-    WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    NodeKind, OptionId, ParticleEmitterSettings, ProjectDocument, PsxBlendMode, ResourceData,
+    ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiTextAlign, UiValueBinding,
+    WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
 };
 
 mod assets;
@@ -1377,11 +1377,14 @@ fn cook_ui_scene_nodes(
                 height,
                 color,
                 background,
+                accent,
                 value,
                 max,
                 texture_asset,
                 text,
                 tag,
+                action,
+                option,
                 flags,
             ) = match &node.kind {
                 UiNodeKind::Canvas { width, height } => (
@@ -1391,11 +1394,14 @@ fn cook_ui_scene_nodes(
                     (*height).max(1),
                     [0, 0, 0],
                     [0, 0, 0],
+                    [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     0,
                 ),
                 UiNodeKind::Group { rect } => (
@@ -1405,11 +1411,14 @@ fn cook_ui_scene_nodes(
                     rect.height.max(1),
                     [0, 0, 0],
                     [0, 0, 0],
+                    [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Rect { rect, color } => (
@@ -1419,11 +1428,14 @@ fn cook_ui_scene_nodes(
                     rect.height.max(1),
                     *color,
                     [0, 0, 0],
+                    [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Label {
@@ -1440,11 +1452,14 @@ fn cook_ui_scene_nodes(
                     rect.height.max(1),
                     *color,
                     [0, 0, 0],
+                    [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     text.clone(),
                     tag.clone(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, *align, *wrap),
                 ),
                 UiNodeKind::Image {
@@ -1457,6 +1472,7 @@ fn cook_ui_scene_nodes(
                     rect.width.max(1),
                     rect.height.max(1),
                     *tint,
+                    [0, 0, 0],
                     [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
@@ -1473,6 +1489,8 @@ fn cook_ui_scene_nodes(
                     }),
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Bar {
@@ -1488,11 +1506,60 @@ fn cook_ui_scene_nodes(
                     rect.height.max(1),
                     *fill,
                     *background,
+                    [0, 0, 0],
                     *value,
                     *max,
                     None,
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                ),
+                UiNodeKind::Button {
+                    rect,
+                    label,
+                    align,
+                    color,
+                    action,
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *color,
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    label.clone(),
+                    String::new(),
+                    cook_ui_action(*action),
+                    psx_level::UI_OPTION_NONE,
+                    ui_node_flags(rect.anchor, *align, false),
+                ),
+                UiNodeKind::Slider {
+                    rect,
+                    option,
+                    track,
+                    fill,
+                    knob,
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *track,
+                    *fill,
+                    *knob,
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    String::new(),
+                    String::new(),
+                    PlaytestUiAction::default(),
+                    cook_option_id(*option),
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
             };
@@ -1505,11 +1572,14 @@ fn cook_ui_scene_nodes(
                 height,
                 color,
                 background,
+                accent,
                 value,
                 max,
                 texture_asset,
                 text,
                 tag,
+                action,
+                option,
                 flags,
             }
         })
@@ -1525,6 +1595,31 @@ fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
         flags |= psx_level::ui_node_flags::TEXT_WRAP;
     }
     flags
+}
+
+/// Lower an authored [`UiAction`] to a cooked [`PlaytestUiAction`].
+/// `GotoScene` resolves the target [`crate::UiSceneId`] to a cooked
+/// scene id by taking its low 16 bits, matching how `cook_ui_nodes`
+/// assigns each [`PlaytestUiScene::id`].
+fn cook_ui_action(action: UiAction) -> PlaytestUiAction {
+    match action {
+        UiAction::GotoScene(scene) => PlaytestUiAction::GotoScene {
+            scene: (scene.raw() & u16::MAX as u64) as u16,
+        },
+        UiAction::StartGameplay => PlaytestUiAction::StartGameplay,
+        UiAction::Back => PlaytestUiAction::Back,
+        UiAction::SetOption { option, delta } => PlaytestUiAction::SetOption {
+            option: cook_option_id(option),
+            delta,
+        },
+        UiAction::Game(id) => PlaytestUiAction::Game { id },
+    }
+}
+
+/// Pack an authored [`OptionId`] into the runtime's compact `u16`
+/// slot, clamping to the low 16 bits.
+fn cook_option_id(option: OptionId) -> u16 {
+    (option.raw() & u16::MAX as u32) as u16
 }
 
 fn cook_sky_panorama_texture_asset(
@@ -7234,6 +7329,133 @@ mod tests {
         assert_eq!(nodes[label_index].parent, Some(group_index as u16));
         assert_eq!((nodes[label_index].x, nodes[label_index].y), (8, 6));
         assert_eq!(nodes[label_index].tag, "prompt");
+    }
+
+    #[test]
+    fn button_and_slider_cook_action_colours_and_option_binding() {
+        let mut project = ProjectDocument::new("ui");
+        // A second scene so GotoScene has a non-trivial target id to
+        // resolve and we can assert the low-16-bit lowering.
+        let target_scene = project.add_ui_scene("Pause");
+        let option = project.add_option("Volume");
+
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        scene.add_node(
+            scene.root,
+            "Play",
+            UiNodeKind::Button {
+                rect: UiRect::new(10, 12, 80, 18),
+                label: "Play".to_string(),
+                align: UiTextAlign::Center,
+                color: [50, 60, 70],
+                action: UiAction::GotoScene(target_scene),
+            },
+        );
+        scene.add_node(
+            scene.root,
+            "Volume",
+            UiNodeKind::Slider {
+                rect: UiRect::new(10, 40, 96, 8),
+                option,
+                track: [11, 12, 13],
+                fill: [21, 22, 23],
+                knob: [31, 32, 33],
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (nodes, _scenes, _flow) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+
+        let button = nodes
+            .iter()
+            .find(|node| matches!(node.kind, UiNodeKind::Button { .. }))
+            .expect("button cooked");
+        assert_eq!(button.text, "Play");
+        assert_eq!(button.color, [50, 60, 70]);
+        assert_eq!(button.option, psx_level::UI_OPTION_NONE);
+        assert_eq!(
+            button.action,
+            PlaytestUiAction::GotoScene {
+                scene: (target_scene.raw() & u16::MAX as u64) as u16,
+            }
+        );
+
+        let slider = nodes
+            .iter()
+            .find(|node| matches!(node.kind, UiNodeKind::Slider { .. }))
+            .expect("slider cooked");
+        // Track -> color, fill -> background, knob -> accent.
+        assert_eq!(slider.color, [11, 12, 13]);
+        assert_eq!(slider.background, [21, 22, 23]);
+        assert_eq!(slider.accent, [31, 32, 33]);
+        assert_eq!(slider.option, (option.raw() & u16::MAX as u32) as u16);
+        assert_eq!(slider.action, PlaytestUiAction::default());
+    }
+
+    #[test]
+    fn button_set_option_and_back_actions_lower_to_runtime_ids() {
+        let mut project = ProjectDocument::new("ui");
+        let option = project.add_option("Difficulty");
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        scene.add_node(
+            scene.root,
+            "Harder",
+            UiNodeKind::Button {
+                rect: UiRect::new(0, 0, 40, 16),
+                label: "+".to_string(),
+                align: UiTextAlign::Center,
+                color: [40, 40, 40],
+                action: UiAction::SetOption { option, delta: 2 },
+            },
+        );
+        scene.add_node(
+            scene.root,
+            "Back",
+            UiNodeKind::Button {
+                rect: UiRect::new(0, 20, 40, 16),
+                label: "Back".to_string(),
+                align: UiTextAlign::Center,
+                color: [40, 40, 40],
+                action: UiAction::Back,
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (nodes, _scenes, _flow) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+
+        let set_option = nodes
+            .iter()
+            .find(|node| node.text == "+")
+            .expect("set-option button cooked");
+        assert_eq!(
+            set_option.action,
+            PlaytestUiAction::SetOption {
+                option: (option.raw() & u16::MAX as u32) as u16,
+                delta: 2,
+            }
+        );
+
+        let back = nodes
+            .iter()
+            .find(|node| node.text == "Back")
+            .expect("back button cooked");
+        assert_eq!(back.action, PlaytestUiAction::Back);
     }
 
     #[test]

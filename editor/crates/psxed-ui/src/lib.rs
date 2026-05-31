@@ -45,10 +45,11 @@ use psxed_project::{
     ColliderShape, EditorCameraMode, EditorCameraState, EditorVisibilityState, FarVistaSettings,
     GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
-    MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ParticleEmitterSettings,
-    ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
-    RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings,
-    UiAnchor, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene, UiTextAlign, UiValueBinding,
+    MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId, OptionKind,
+    ParticleEmitterSettings, ProjectDocument, PsxBlendMode, Resource, ResourceData,
+    ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene,
+    SceneNode, SkyMode, SkySettings, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiNodeRow, UiRect,
+    UiScene, UiSceneId, UiTextAlign, UiValueBinding,
     WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
     DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
@@ -11910,6 +11911,51 @@ impl EditorWorkspace {
                 self.delete_selected_ui_node();
             }
         });
+        ui.separator();
+        self.draw_ui_options_editor(ui);
+    }
+
+    /// Project-level options editor shown under the UI tree. Lists the
+    /// project's [`OptionDef`]s with an inline name + kind editor and
+    /// Add / Remove controls so [`UiNodeKind::Slider`] and
+    /// `SetOption` button actions have bindable options. Kept compact:
+    /// one collapsing header, rename in place, per-row kind controls.
+    fn draw_ui_options_editor(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        let mut remove_index: Option<usize> = None;
+        egui::CollapsingHeader::new(format!("Options ({})", self.project.options.len()))
+            .id_salt("psxed_ui_options")
+            .default_open(false)
+            .show(ui, |ui| {
+                for (index, option) in self.project.options.iter_mut().enumerate() {
+                    ui.push_id(option.id.raw(), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(icons::text(icons::WAYPOINT, 12.0).color(STUDIO_TEXT_WEAK));
+                            changed |= ui.text_edit_singleline(&mut option.name).changed();
+                            if ui
+                                .button(icons::text(icons::TRASH, 12.0))
+                                .on_hover_text("Remove option")
+                                .clicked()
+                            {
+                                remove_index = Some(index);
+                            }
+                        });
+                        changed |= draw_option_kind_editor(ui, &mut option.kind);
+                    });
+                    ui.separator();
+                }
+                if ui.button(icons::label(icons::PLUS, "Add Option")).clicked() {
+                    self.project.add_option("Option");
+                    changed = true;
+                }
+            });
+        if let Some(index) = remove_index {
+            self.project.remove_option(index);
+            changed = true;
+        }
+        if changed {
+            self.mark_dirty();
+        }
     }
 
     /// Multi-scene browser shown at the top of the UI tree panel. Lists
@@ -12278,6 +12324,21 @@ impl EditorWorkspace {
                 _ => None,
             })
             .collect();
+        // Scene + option pick-lists are gathered before the mutable
+        // node borrow below so the Button/Slider editors can offer
+        // dropdowns without re-borrowing `self.project`.
+        let scene_options: Vec<(UiSceneId, String)> = self
+            .project
+            .ui_scenes
+            .iter()
+            .map(|scene| (scene.id, scene.name.clone()))
+            .collect();
+        let option_choices: Vec<(OptionId, String)> = self
+            .project
+            .options
+            .iter()
+            .map(|option| (option.id, option.name.clone()))
+            .collect();
 
         let Some(scene) = self.current_ui_scene_mut() else {
             ui.weak("No UI scene");
@@ -12378,6 +12439,35 @@ impl EditorWorkspace {
                 changed |= draw_ui_value_binding_editor(ui, "Max", max);
                 changed |= color_editor(ui, "Fill", fill);
                 changed |= color_editor(ui, "Background", background);
+            }
+            UiNodeKind::Button {
+                rect,
+                label,
+                align,
+                color,
+                action,
+            } => {
+                changed |= draw_ui_rect_editor(ui, rect);
+                ui.horizontal(|ui| {
+                    ui.label("Label");
+                    changed |= ui.text_edit_singleline(label).changed();
+                });
+                changed |= draw_ui_text_align_editor(ui, align);
+                changed |= color_editor(ui, "Color", color);
+                changed |= draw_ui_action_editor(ui, action, &scene_options, &option_choices);
+            }
+            UiNodeKind::Slider {
+                rect,
+                option,
+                track,
+                fill,
+                knob,
+            } => {
+                changed |= draw_ui_rect_editor(ui, rect);
+                changed |= draw_ui_option_picker(ui, "Option", option, &option_choices);
+                changed |= color_editor(ui, "Track", track);
+                changed |= color_editor(ui, "Fill", fill);
+                changed |= color_editor(ui, "Knob", knob);
             }
         }
 
@@ -24845,6 +24935,210 @@ fn ui_value_binding_same_variant(a: UiValueBinding, b: UiValueBinding) -> bool {
     )
 }
 
+/// `true` when two [`UiAction`]s are the same variant, ignoring their
+/// payloads. Used to keep the variant combo selection stable while the
+/// per-variant payload controls edit the data.
+fn ui_action_same_variant(a: &UiAction, b: &UiAction) -> bool {
+    matches!(
+        (a, b),
+        (UiAction::GotoScene(_), UiAction::GotoScene(_))
+            | (UiAction::StartGameplay, UiAction::StartGameplay)
+            | (UiAction::Back, UiAction::Back)
+            | (UiAction::SetOption { .. }, UiAction::SetOption { .. })
+            | (UiAction::Game(_), UiAction::Game(_))
+    )
+}
+
+/// Editor for a button's [`UiAction`]: a variant combo plus the
+/// per-variant payload (a scene dropdown for `GotoScene`, an option
+/// dropdown + delta for `SetOption`, a raw id for `Game`).
+fn draw_ui_action_editor(
+    ui: &mut egui::Ui,
+    action: &mut UiAction,
+    scene_options: &[(UiSceneId, String)],
+    option_choices: &[(OptionId, String)],
+) -> bool {
+    let mut changed = false;
+    let variants = [
+        UiAction::GotoScene(
+            scene_options
+                .first()
+                .map(|(id, _)| *id)
+                .unwrap_or_default(),
+        ),
+        UiAction::StartGameplay,
+        UiAction::Back,
+        UiAction::SetOption {
+            option: option_choices
+                .first()
+                .map(|(id, _)| *id)
+                .unwrap_or_default(),
+            delta: 1,
+        },
+        UiAction::Game(0),
+    ];
+    egui::ComboBox::from_label("Action")
+        .selected_text(action.label())
+        .show_ui(ui, |ui| {
+            for candidate in &variants {
+                if ui
+                    .selectable_label(ui_action_same_variant(action, candidate), candidate.label())
+                    .clicked()
+                    && !ui_action_same_variant(action, candidate)
+                {
+                    *action = candidate.clone();
+                    changed = true;
+                }
+            }
+        });
+    match action {
+        UiAction::GotoScene(scene) => {
+            changed |= draw_ui_scene_picker(ui, "Target", scene, scene_options);
+        }
+        UiAction::SetOption { option, delta } => {
+            changed |= draw_ui_option_picker(ui, "Option", option, option_choices);
+            changed |= drag_i32(ui, "Delta", delta, -65536, 65536);
+        }
+        UiAction::Game(id) => {
+            let mut value = *id as i32;
+            if drag_i32(ui, "Id", &mut value, 0, u16::MAX as i32) {
+                *id = value.clamp(0, u16::MAX as i32) as u16;
+                changed = true;
+            }
+        }
+        UiAction::StartGameplay | UiAction::Back => {}
+    }
+    changed
+}
+
+/// Dropdown that picks a [`UiSceneId`] from the project's UI scenes.
+fn draw_ui_scene_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: &mut UiSceneId,
+    options: &[(UiSceneId, String)],
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let preview = options
+            .iter()
+            .find(|(id, _)| id == current)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("(none)");
+        egui::ComboBox::from_id_salt(ui.id().with(label))
+            .selected_text(preview)
+            .show_ui(ui, |ui| {
+                for (id, name) in options {
+                    if ui.selectable_label(current == id, name).clicked() && current != id {
+                        *current = *id;
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed
+}
+
+/// Dropdown that picks an [`OptionId`] from the project's options.
+/// Shows "(none)" when the project has no options or the bound id is
+/// unresolved.
+fn draw_ui_option_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: &mut OptionId,
+    options: &[(OptionId, String)],
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let preview = options
+            .iter()
+            .find(|(id, _)| id == current)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("(none)");
+        egui::ComboBox::from_id_salt(ui.id().with(label))
+            .selected_text(preview)
+            .show_ui(ui, |ui| {
+                for (id, name) in options {
+                    if ui.selectable_label(current == id, name).clicked() && current != id {
+                        *current = *id;
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed
+}
+
+/// Editor for one [`OptionKind`]: a variant combo plus the per-variant
+/// fields (bounds + step + default for `IntRange`, a default toggle
+/// for `Bool`, and a default-index picker for `Enum` with its variant
+/// labels editable as a newline-separated list).
+fn draw_option_kind_editor(ui: &mut egui::Ui, kind: &mut OptionKind) -> bool {
+    let mut changed = false;
+    let variants = [
+        OptionKind::IntRange {
+            min: 0,
+            max: 10,
+            step: 1,
+            default: 5,
+        },
+        OptionKind::Enum {
+            variants: vec!["Off".to_string(), "On".to_string()],
+            default: 0,
+        },
+        OptionKind::Bool { default: false },
+    ];
+    egui::ComboBox::from_id_salt(ui.id().with("option_kind"))
+        .selected_text(kind.label())
+        .show_ui(ui, |ui| {
+            for candidate in &variants {
+                let same = candidate.label() == kind.label();
+                if ui.selectable_label(same, candidate.label()).clicked() && !same {
+                    *kind = candidate.clone();
+                    changed = true;
+                }
+            }
+        });
+    match kind {
+        OptionKind::IntRange {
+            min,
+            max,
+            step,
+            default,
+        } => {
+            changed |= drag_i32(ui, "Min", min, i32::MIN / 2, i32::MAX / 2);
+            changed |= drag_i32(ui, "Max", max, i32::MIN / 2, i32::MAX / 2);
+            changed |= drag_i32(ui, "Step", step, 1, i32::MAX / 2);
+            changed |= drag_i32(ui, "Default", default, *min, *max);
+        }
+        OptionKind::Enum { variants, default } => {
+            let mut joined = variants.join("\n");
+            ui.horizontal(|ui| {
+                ui.label("Variants");
+                if ui
+                    .add(egui::TextEdit::multiline(&mut joined).desired_rows(2))
+                    .changed()
+                {
+                    *variants = joined.lines().map(str::to_string).collect();
+                    changed = true;
+                }
+            });
+            let max_index = variants.len().saturating_sub(1);
+            let mut value = (*default).min(max_index) as i32;
+            if drag_i32(ui, "Default", &mut value, 0, max_index as i32) {
+                *default = value.max(0) as usize;
+                changed = true;
+            }
+        }
+        OptionKind::Bool { default } => {
+            changed |= ui.checkbox(default, "Default on").changed();
+        }
+    }
+    changed
+}
+
 fn drag_u8(ui: &mut egui::Ui, label: &str, value: &mut u8, min: u8, max: u8) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -27926,6 +28220,26 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 background: [30, 26, 28],
             },
         ),
+        (
+            "Button",
+            UiNodeKind::Button {
+                rect: UiRect::new(24, 24, 96, 18),
+                label: "Button".to_string(),
+                align: UiTextAlign::Center,
+                color: [52, 60, 80],
+                action: UiAction::Back,
+            },
+        ),
+        (
+            "Slider",
+            UiNodeKind::Slider {
+                rect: UiRect::new(24, 48, 96, 8),
+                option: OptionId::default(),
+                track: [30, 34, 44],
+                fill: [80, 132, 180],
+                knob: [210, 218, 232],
+            },
+        ),
     ]
 }
 
@@ -27937,6 +28251,8 @@ fn ui_node_kind_icon(kind: &str) -> char {
         "Label" => icons::FILE,
         "Image" => icons::PALETTE,
         "Bar" => icons::BLEND,
+        "Button" => icons::POINTER,
+        "Slider" => icons::WAYPOINT,
         _ => icons::CIRCLE_DOT,
     }
 }
@@ -28060,6 +28376,60 @@ fn draw_ui_scene_preview(
                     );
                 }
             }
+            UiNodeKind::Button {
+                rect,
+                label,
+                align,
+                color,
+                ..
+            } => {
+                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
+                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
+                painter.rect_filled(screen, 0.0, Color32::from_rgb(color[0], color[1], color[2]));
+                let label_color = if ui_preview_luma(*color) > 140 {
+                    Color32::from_rgb(16, 18, 24)
+                } else {
+                    Color32::from_rgb(236, 240, 248)
+                };
+                let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
+                draw_ui_preview_text(
+                    painter,
+                    screen,
+                    label,
+                    *align,
+                    false,
+                    FontId::monospace((8.0 * scale).clamp(8.0, 22.0)),
+                    label_color,
+                );
+            }
+            UiNodeKind::Slider {
+                rect,
+                track,
+                fill,
+                knob,
+                ..
+            } => {
+                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
+                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
+                painter.rect_filled(screen, 0.0, Color32::from_rgb(track[0], track[1], track[2]));
+                // Half-way preview fill until the runtime option store
+                // drives the value (matches the engine renderer).
+                let fill_w = screen.width() * 0.5;
+                if fill_w > 0.0 {
+                    let fill_rect =
+                        Rect::from_min_size(screen.min, Vec2::new(fill_w, screen.height()));
+                    painter.rect_filled(fill_rect, 0.0, Color32::from_rgb(fill[0], fill[1], fill[2]));
+                }
+                let knob_w = (screen.height() + 2.0).clamp(3.0, screen.width().max(3.0));
+                let edge = screen.min.x + fill_w;
+                let knob_x = (edge - knob_w / 2.0)
+                    .clamp(screen.min.x, (screen.max.x - knob_w).max(screen.min.x));
+                let knob_rect = Rect::from_min_size(
+                    Pos2::new(knob_x, screen.min.y - 1.0),
+                    Vec2::new(knob_w, screen.height() + 2.0),
+                );
+                painter.rect_filled(knob_rect, 0.0, Color32::from_rgb(knob[0], knob[1], knob[2]));
+            }
         }
     }
 
@@ -28090,6 +28460,13 @@ fn ui_psx_tint_to_egui(tint: [u8; 3]) -> Color32 {
         tint[1].saturating_mul(2),
         tint[2].saturating_mul(2),
     )
+}
+
+/// Approximate integer luma of an RGB triple, matching the engine's
+/// `button_label_tint` so the preview and runtime pick the same
+/// light/dark label colour.
+fn ui_preview_luma(color: [u8; 3]) -> u32 {
+    (color[0] as u32 * 2 + color[1] as u32 * 5 + color[2] as u32) / 8
 }
 
 fn draw_ui_preview_text(
@@ -41888,6 +42265,76 @@ mod tests {
             workspace.project.ui_scenes.len(),
             1,
             "the last UI scene cannot be deleted"
+        );
+    }
+
+    #[test]
+    fn button_and_slider_are_addable_and_options_crud_round_trips() {
+        // Both new interactive kinds appear in the add-node menu.
+        let addable = default_addable_ui_kinds();
+        assert!(
+            addable
+                .iter()
+                .any(|(label, kind)| *label == "Button"
+                    && matches!(kind, UiNodeKind::Button { .. })),
+            "Button must be addable"
+        );
+        assert!(
+            addable
+                .iter()
+                .any(|(label, kind)| *label == "Slider"
+                    && matches!(kind, UiNodeKind::Slider { .. })),
+            "Slider must be addable"
+        );
+
+        let mut project = ProjectDocument::new("ui-button-slider");
+        project.normalize_loaded();
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("ui-button-slider"), project);
+
+        // Options CRUD: add two, remove the first, ids stay distinct and
+        // a slider can bind to a surviving option.
+        let first = workspace.project.add_option("Volume");
+        let second = workspace.project.add_option("Brightness");
+        assert_ne!(first, second);
+        assert_eq!(workspace.project.options.len(), 2);
+        assert!(workspace.project.remove_option(0));
+        assert_eq!(workspace.project.options.len(), 1);
+        assert_eq!(workspace.project.options[0].id, second);
+        // A newly added option after a removal must not collide with a
+        // surviving id (so a slider bound to `second` is never shadowed).
+        let third = workspace.project.add_option("Contrast");
+        assert_ne!(third, second);
+
+        // Add a Slider bound to the surviving option and confirm the
+        // authored binding round-trips through the scene tree.
+        workspace.add_ui_child(
+            UiNodeKind::Slider {
+                rect: UiRect::new(8, 8, 96, 8),
+                option: second,
+                track: [11, 12, 13],
+                fill: [21, 22, 23],
+                knob: [31, 32, 33],
+            },
+            "Brightness",
+        );
+        let added = workspace.selection.selected_ui_node;
+        let node = workspace
+            .current_ui_scene()
+            .unwrap()
+            .node(added)
+            .expect("slider node added");
+        match &node.kind {
+            UiNodeKind::Slider { option, knob, .. } => {
+                assert_eq!(*option, second);
+                assert_eq!(*knob, [31, 32, 33]);
+            }
+            other => panic!("expected slider, got {other:?}"),
+        }
+        // The bound option still resolves to a name in the project.
+        assert_eq!(
+            workspace.project.option(second).map(|o| o.name.as_str()),
+            Some("Brightness")
         );
     }
 }
