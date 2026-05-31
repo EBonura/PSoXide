@@ -739,6 +739,24 @@ pub struct PlaytestUiScene {
     pub node_count: u16,
 }
 
+/// One cooked project option, ready for manifest emission. Mirrors
+/// [`psx_level::LevelOptionDef`]: the authored [`crate::OptionKind`] is
+/// flattened to a bounded integer triple at cook time (an enum becomes
+/// `[0, variants - 1]` step `1`, a bool becomes `[0, 1]` step `1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestOption {
+    /// Stable option id, low 16 bits of the authored [`crate::OptionId`].
+    pub id: u16,
+    /// Inclusive minimum value.
+    pub min: i32,
+    /// Inclusive maximum value.
+    pub max: i32,
+    /// Step applied per slider nudge.
+    pub step: i32,
+    /// Initial runtime value.
+    pub default: i32,
+}
+
 /// One cooked game-flow state. Mirrors [`psx_level::FlowState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestFlowState {
@@ -1121,6 +1139,9 @@ pub struct PlaytestPackage {
     pub ui_scenes: Vec<PlaytestUiScene>,
     /// Cooked game-state flow definition.
     pub game_flow: PlaytestGameFlow,
+    /// Cooked project options, flattened to bounded integer ranges.
+    /// Sliders and `SetOption` actions reference these by id.
+    pub options: Vec<PlaytestOption>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.
