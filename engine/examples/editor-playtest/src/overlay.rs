@@ -60,7 +60,9 @@ pub(crate) fn draw_player_hud(
     };
 
     // HUD overlay: draw the whole pool (the HUD is a single scene at
-    // pool offset 0), no menu focus, so no control is highlighted.
+    // pool offset 0), no menu focus, so no control is highlighted. The
+    // HUD carries no sliders, so the option table is empty and the value
+    // resolver always reports zero.
     ui::draw_scene(
         nodes,
         0,
@@ -69,6 +71,8 @@ pub(crate) fn draw_player_hud(
         None,
         &mut resolve_texture,
         &resolve_value,
+        &[],
+        &|_option_id| 0,
     );
 }
 
