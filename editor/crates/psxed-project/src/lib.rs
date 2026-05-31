@@ -650,6 +650,30 @@ impl UiScene {
         }
     }
 
+    /// Build a fresh scene with `name`, `id`, and a single empty root
+    /// Canvas at the PSX 320x240 authoring resolution. Used by the
+    /// editor's "new scene" path; pass [`UiSceneId::UNASSIGNED`] to let
+    /// [`ProjectDocument::assign_ui_scene_ids`] hand out the stable id.
+    pub fn empty_canvas(name: impl Into<String>, id: UiSceneId) -> Self {
+        let root = UiNode::new(
+            UiNodeId::ROOT,
+            None,
+            "Canvas",
+            UiNodeKind::Canvas {
+                width: 320,
+                height: 240,
+            },
+        );
+        Self {
+            id,
+            name: name.into(),
+            root: UiNodeId::ROOT,
+            default_focus: None,
+            next_node_id: UiNodeId::ROOT.raw().saturating_add(1),
+            nodes: vec![root],
+        }
+    }
+
     /// All nodes in storage order.
     pub fn nodes(&self) -> &[UiNode] {
         &self.nodes
@@ -9173,6 +9197,49 @@ impl ProjectDocument {
         }
     }
 
+    /// Append a fresh UI scene named `name`, seeded with an empty root
+    /// Canvas at the PSX 320x240 authoring resolution, and return its
+    /// freshly assigned stable id. The id is handed out by the shared
+    /// [`Self::assign_ui_scene_ids`] path so it never collides with an
+    /// existing scene and stays stable across renames and reorders.
+    pub fn add_ui_scene(&mut self, name: impl Into<String>) -> UiSceneId {
+        self.ui_scenes
+            .push(UiScene::empty_canvas(name, UiSceneId::UNASSIGNED));
+        self.assign_ui_scene_ids();
+        self.ui_scenes
+            .last()
+            .map(|scene| scene.id)
+            .unwrap_or(UiSceneId::UNASSIGNED)
+    }
+
+    /// Deep-copy the UI scene at `index`, insert the copy directly after
+    /// the source, give it a fresh stable id, and name it "{source} Copy".
+    /// Returns the new scene's id, or `None` when `index` is out of range.
+    pub fn duplicate_ui_scene(&mut self, index: usize) -> Option<UiSceneId> {
+        let source = self.ui_scenes.get(index)?;
+        let mut copy = source.clone();
+        copy.id = UiSceneId::UNASSIGNED;
+        copy.name = format!("{} Copy", source.name);
+        self.ui_scenes.insert(index + 1, copy);
+        self.assign_ui_scene_ids();
+        self.ui_scenes.get(index + 1).map(|scene| scene.id)
+    }
+
+    /// Remove the UI scene at `index`. `ui_scenes` is never left empty:
+    /// removing the final scene re-seeds the default HUD in its place.
+    /// Returns `true` when a scene at `index` existed and was removed.
+    pub fn remove_ui_scene(&mut self, index: usize) -> bool {
+        if index >= self.ui_scenes.len() {
+            return false;
+        }
+        self.ui_scenes.remove(index);
+        if self.ui_scenes.is_empty() {
+            self.ui_scenes = default_ui_scenes();
+            self.assign_ui_scene_ids();
+        }
+        true
+    }
+
     /// Add a resource and return its id.
     pub fn add_resource(&mut self, name: impl Into<String>, data: ResourceData) -> ResourceId {
         let id = ResourceId(self.next_resource_id);
@@ -11805,6 +11872,85 @@ mod tests {
         let mut reloaded = ProjectDocument::from_ron_str(&ron).unwrap();
         reloaded.normalize_loaded();
         assert_eq!(reloaded.ui_scenes[0].id, assigned);
+    }
+
+    #[test]
+    fn add_ui_scene_seeds_empty_canvas_with_fresh_id() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        let existing: HashSet<UiSceneId> =
+            project.ui_scenes.iter().map(|scene| scene.id).collect();
+
+        let id = project.add_ui_scene("Pause");
+        assert!(id != UiSceneId::UNASSIGNED);
+        assert!(!existing.contains(&id), "new scene id is unique");
+
+        let scene = project.ui_scene(id).unwrap();
+        assert_eq!(scene.name, "Pause");
+        // Empty root canvas at PSX resolution: exactly one node, a Canvas.
+        assert_eq!(scene.nodes().len(), 1);
+        assert_eq!(scene.root, UiNodeId::ROOT);
+        let root = scene.node(scene.root).unwrap();
+        assert!(matches!(
+            root.kind,
+            UiNodeKind::Canvas {
+                width: 320,
+                height: 240
+            }
+        ));
+    }
+
+    #[test]
+    fn duplicate_ui_scene_deep_copies_after_source_with_fresh_id() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        // Give the source an extra node so the deep copy is observable.
+        let source_index = 0;
+        let source_root = project.ui_scenes[source_index].root;
+        let extra = project.ui_scenes[source_index].add_node(
+            source_root,
+            "Extra",
+            UiNodeKind::Rect {
+                rect: UiRect::new(1, 2, 3, 4),
+                color: [9, 9, 9],
+            },
+        );
+        let source_id = project.ui_scenes[source_index].id;
+        let source_name = project.ui_scenes[source_index].name.clone();
+        let source_node_count = project.ui_scenes[source_index].nodes().len();
+
+        let copy_id = project.duplicate_ui_scene(source_index).unwrap();
+        // Inserted directly after the source.
+        assert_eq!(project.ui_scenes[source_index + 1].id, copy_id);
+        assert_ne!(copy_id, source_id, "copy gets a fresh id");
+        let copy = project.ui_scene(copy_id).unwrap();
+        assert_eq!(copy.name, format!("{source_name} Copy"));
+        assert_eq!(copy.nodes().len(), source_node_count);
+        assert!(copy.node(extra).is_some(), "deep copy carries child nodes");
+
+        // Editing the copy does not touch the source.
+        let copy_index = source_index + 1;
+        project.ui_scenes[copy_index].remove_node(extra);
+        assert!(project.ui_scene(source_id).unwrap().node(extra).is_some());
+    }
+
+    #[test]
+    fn remove_ui_scene_never_leaves_list_empty() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        project.add_ui_scene("Second");
+        assert_eq!(project.ui_scenes.len(), 2);
+
+        assert!(project.remove_ui_scene(0));
+        assert_eq!(project.ui_scenes.len(), 1);
+
+        // Removing the final scene re-seeds a default so the list is
+        // never empty, and out-of-range indices are a no-op.
+        assert!(project.remove_ui_scene(0));
+        assert_eq!(project.ui_scenes.len(), 1, "list re-seeds a default HUD");
+        assert!(project.ui_scenes[0].id != UiSceneId::UNASSIGNED);
+        assert!(!project.remove_ui_scene(9));
+        assert_eq!(project.ui_scenes.len(), 1);
     }
 
     #[test]
