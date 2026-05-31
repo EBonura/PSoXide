@@ -8200,7 +8200,22 @@ impl EditorWorkspace {
             .room_grid_view(room_id)
             .map(|grid| grid.room_local_to_editor(hit_world))
             .unwrap_or([hit_world[0], hit_world[2]]);
-        [editor[0], 0.0, editor[1]]
+        // Preserve the picked surface height instead of pinning placed
+        // content to the room floor. `hit_world` is room-local engine
+        // units; `translation[1]` is authored in sectors (the same
+        // convention `node_preview_origin` reads back as
+        // `translation[1] * sector_size`), so divide the hit Y by the
+        // sector size. A floor-plane pick reports `hit_world[1] == 0`,
+        // which keeps ground placement identical to the old behaviour;
+        // clicking a raised floor now drops the node onto that level,
+        // the first lever a user reaches for when stacking rooms.
+        let sector_size = self.room_sector_size(room_id).unwrap_or(1) as f32;
+        let y = if sector_size > 0.0 {
+            hit_world[1] / sector_size
+        } else {
+            0.0
+        };
+        [editor[0], y, editor[1]]
     }
 
     fn create_model_entity_at_room_hit(
@@ -8671,7 +8686,7 @@ impl EditorWorkspace {
         }
 
         if matches!(tool, ViewTool::Place) {
-            let mut translation = self.placement_translation_for_room_hit(room_id, hit_world);
+            let translation = self.placement_translation_for_room_hit(room_id, hit_world);
             let kind = self.place_kind;
             if matches!(kind, PlaceKind::PlayerSpawn) && self.has_player_source() {
                 self.status =
@@ -8776,7 +8791,6 @@ impl EditorWorkspace {
                 PlaceKind::ImageProp => match self.resolve_place_image_prop_material() {
                     Ok((material_id, name)) => {
                         let size = image_prop_default_size_for_sector(sector_size_i);
-                        translation[1] = hit_world[1] as f32 / sector_size;
                         if let Some(existing) =
                             self.find_duplicate_image_prop(room_id, material_id, translation)
                         {
@@ -8803,7 +8817,6 @@ impl EditorWorkspace {
                 PlaceKind::BoxProp => match self.resolve_place_image_prop_material() {
                     Ok((material_id, name)) => {
                         let size = image_prop_default_size_for_sector(sector_size_i);
-                        translation[1] = hit_world[1] as f32 / sector_size;
                         if let Some(existing) =
                             self.find_duplicate_box_prop(room_id, material_id, translation)
                         {
@@ -8842,7 +8855,6 @@ impl EditorWorkspace {
                     )
                 }
                 PlaceKind::ParticleEmitter => {
-                    translation[1] = hit_world[1] as f32 / sector_size;
                     if let Some(existing) =
                         self.find_duplicate_particle_emitter(room_id, translation)
                     {
