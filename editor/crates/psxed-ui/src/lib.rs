@@ -48,7 +48,7 @@ use psxed_project::{
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, ParticleEmitterSettings,
     ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId, RuntimeDepthSortMode,
     RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings,
-    UiAnchor, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiTextAlign, UiValueBinding,
+    UiAnchor, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene, UiTextAlign, UiValueBinding,
     WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
     DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
     MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
@@ -324,6 +324,21 @@ pub struct EditorWorkspace {
     /// One-shot flag set when entering rename mode so the next frame
     /// requests focus + selects the text inside the rename TextEdit.
     pending_rename_focus: bool,
+    /// List position of the UI scene the editor is currently authoring.
+    /// All UI-scene read/write call sites resolve through this index via
+    /// [`Self::current_ui_scene`] / [`Self::current_ui_scene_mut`] so the
+    /// editor edits the selected scene rather than always `ui_scenes[0]`.
+    /// Clamped against `ui_scenes.len()` after deletions and undo/redo.
+    active_ui_scene_index: usize,
+    /// `Some((index, buffer))` while a scene strip row is in rename mode.
+    /// Mirrors the scene-tree rename pattern: commit on Enter / blur,
+    /// cancel on Escape.
+    ui_scene_renaming: Option<(usize, String)>,
+    /// One-shot focus request for the in-flight scene strip rename field.
+    ui_scene_rename_focus_pending: bool,
+    /// Scene strip index waiting for a second explicit Delete click, the
+    /// two-step delete-confirm pattern used by the resource browser.
+    ui_scene_delete_confirm: Option<usize>,
     collapsed_scene_nodes: HashSet<NodeId>,
     collapsed_file_folders: HashSet<String>,
     hidden_scene_nodes: HashSet<NodeId>,
@@ -2661,6 +2676,10 @@ impl EditorWorkspace {
             wall_paint_shape: WallPaintShape::Cardinal,
             renaming: None,
             pending_rename_focus: false,
+            active_ui_scene_index: 0,
+            ui_scene_renaming: None,
+            ui_scene_rename_focus_pending: false,
+            ui_scene_delete_confirm: None,
             collapsed_scene_nodes: HashSet::new(),
             collapsed_file_folders: HashSet::new(),
             hidden_scene_nodes: HashSet::new(),
@@ -4595,9 +4614,72 @@ impl EditorWorkspace {
         path.to_string_lossy().into_owned()
     }
 
+    /// List position of the UI scene the editor is currently authoring,
+    /// clamped into range. Returns 0 when there are no scenes. Read this
+    /// first (by value) before taking a mutable borrow of `self.project`
+    /// so the borrow stays disjoint.
+    fn current_ui_scene_index(&self) -> usize {
+        let count = self.project.ui_scenes.len();
+        if count == 0 {
+            0
+        } else {
+            self.active_ui_scene_index.min(count - 1)
+        }
+    }
+
+    /// The UI scene the editor is currently authoring, resolved through
+    /// the clamped active index. Replaces `active_ui_scene()` at read
+    /// sites so the editor reads the selected scene.
+    fn current_ui_scene(&self) -> Option<&UiScene> {
+        self.project.ui_scene_at(self.current_ui_scene_index())
+    }
+
+    /// Mutable counterpart to [`Self::current_ui_scene`]. Reads the
+    /// clamped index by value first so the mutable borrow is purely
+    /// `&mut self.project`.
+    fn current_ui_scene_mut(&mut self) -> Option<&mut UiScene> {
+        let index = self.current_ui_scene_index();
+        self.project.ui_scene_at_mut(index)
+    }
+
+    /// Switch the editor to author the UI scene at `index`. Clamps the
+    /// index, resets the UI-node selection so a stale node id from the
+    /// previous scene is never carried over, and cancels any in-flight
+    /// scene-strip rename / delete-confirm. No document mutation, so no
+    /// undo step is pushed.
+    fn switch_ui_scene(&mut self, index: usize) {
+        let count = self.project.ui_scenes.len();
+        if count == 0 {
+            return;
+        }
+        let clamped = index.min(count - 1);
+        if clamped != self.active_ui_scene_index {
+            self.ui_scene_renaming = None;
+            self.ui_scene_delete_confirm = None;
+        }
+        self.active_ui_scene_index = clamped;
+        self.reset_ui_node_selection();
+        self.status = self
+            .current_ui_scene()
+            .map(|scene| format!("UI scene: {}", scene.name))
+            .unwrap_or_else(|| "UI scene".to_string());
+    }
+
+    /// Reset the UI-node selection to the current scene's root canvas so
+    /// a node id authored in another scene is never carried across a
+    /// scene switch or CRUD edit. Also drops any in-flight canvas drag.
+    fn reset_ui_node_selection(&mut self) {
+        let root = self
+            .current_ui_scene()
+            .map(|scene| scene.root)
+            .unwrap_or(UiNodeId::ROOT);
+        self.selection.selected_ui_node = root;
+        self.interaction.take_ui_canvas_drag();
+    }
+
     fn draw_ui_workspace_body(&mut self, ui: &mut egui::Ui) {
         self.refresh_texture_thumbs(ui.ctx());
-        let Some(scene) = self.project.active_ui_scene().cloned() else {
+        let Some(scene) = self.current_ui_scene().cloned() else {
             ui.centered_and_justified(|ui| {
                 ui.weak("No UI scene");
             });
@@ -4694,7 +4776,7 @@ impl EditorWorkspace {
             Stroke::new(1.0, STUDIO_BORDER),
             StrokeKind::Inside,
         );
-        let preview_scene = self.project.active_ui_scene().cloned().unwrap_or(scene);
+        let preview_scene = self.current_ui_scene().cloned().unwrap_or(scene);
         draw_ui_scene_preview(
             &painter,
             &self.project,
@@ -4737,8 +4819,7 @@ impl EditorWorkspace {
             return;
         };
         let Some(start_rect) = self
-            .project
-            .active_ui_scene()
+            .current_ui_scene()
             .and_then(|scene| scene.node(node))
             .and_then(|node| node.kind.rect())
         else {
@@ -4776,8 +4857,7 @@ impl EditorWorkspace {
         };
 
         let current_rect = self
-            .project
-            .active_ui_scene()
+            .current_ui_scene()
             .and_then(|scene| scene.node(drag.node))
             .and_then(|node| node.kind.rect());
         if current_rect == Some(next_rect) {
@@ -4790,8 +4870,7 @@ impl EditorWorkspace {
             }
         }
         if let Some(rect) = self
-            .project
-            .active_ui_scene_mut()
+            .current_ui_scene_mut()
             .and_then(|scene| scene.node_mut(drag.node))
             .and_then(|node| node.kind.rect_mut())
         {
@@ -4814,8 +4893,7 @@ impl EditorWorkspace {
         }
         let selected = self.selection.selected_ui_node;
         let Some(rect) = self
-            .project
-            .active_ui_scene()
+            .current_ui_scene()
             .and_then(|scene| scene.node(selected))
             .and_then(|node| node.kind.rect())
         else {
@@ -4827,8 +4905,7 @@ impl EditorWorkspace {
         }
         self.push_undo();
         if let Some(rect) = self
-            .project
-            .active_ui_scene_mut()
+            .current_ui_scene_mut()
             .and_then(|scene| scene.node_mut(selected))
             .and_then(|node| node.kind.rect_mut())
         {
@@ -4842,7 +4919,7 @@ impl EditorWorkspace {
 
     fn delete_selected_ui_node(&mut self) -> bool {
         let selected = self.selection.selected_ui_node;
-        let Some((root, parent, name)) = self.project.active_ui_scene().and_then(|scene| {
+        let Some((root, parent, name)) = self.current_ui_scene().and_then(|scene| {
             let node = scene.node(selected)?;
             Some((
                 scene.root,
@@ -4860,8 +4937,7 @@ impl EditorWorkspace {
 
         self.push_undo();
         let removed = self
-            .project
-            .active_ui_scene_mut()
+            .current_ui_scene_mut()
             .is_some_and(|scene| scene.remove_node(selected));
         if !removed {
             self.status = "UI node no longer exists".to_string();
@@ -10742,7 +10818,7 @@ impl EditorWorkspace {
                 if source == target_parent {
                     return;
                 }
-                let Some(scene) = self.project.active_ui_scene() else {
+                let Some(scene) = self.current_ui_scene() else {
                     return;
                 };
                 if scene.is_descendant_of(target_parent, source) {
@@ -10750,7 +10826,7 @@ impl EditorWorkspace {
                     return;
                 }
                 self.push_undo();
-                let Some(scene) = self.project.active_ui_scene_mut() else {
+                let Some(scene) = self.current_ui_scene_mut() else {
                     return;
                 };
                 if scene.move_node(source, target_parent, position) {
@@ -11793,7 +11869,9 @@ impl EditorWorkspace {
     }
 
     fn draw_ui_tree_panel_body(&mut self, ui: &mut egui::Ui) {
-        let Some(scene) = self.project.active_ui_scene() else {
+        self.draw_ui_scene_strip(ui);
+        ui.separator();
+        let Some(scene) = self.current_ui_scene() else {
             ui.weak("No UI scene");
             return;
         };
@@ -11815,13 +11893,12 @@ impl EditorWorkspace {
         }
         ui.horizontal(|ui| {
             if ui.button(icons::label(icons::FOCUS, "Canvas")).clicked() {
-                if let Some(scene) = self.project.active_ui_scene() {
+                if let Some(scene) = self.current_ui_scene() {
                     self.selection.selected_ui_node = scene.root;
                 }
             }
             let can_delete = self
-                .project
-                .active_ui_scene()
+                .current_ui_scene()
                 .is_some_and(|scene| self.selection.selected_ui_node != scene.root);
             if ui
                 .add_enabled(
@@ -11833,6 +11910,268 @@ impl EditorWorkspace {
                 self.delete_selected_ui_node();
             }
         });
+    }
+
+    /// Multi-scene browser shown at the top of the UI tree panel. Lists
+    /// the project's UI scenes by name, lets the user click to switch the
+    /// authored scene, and exposes New / Duplicate / Rename / Delete. The
+    /// active row supports inline rename (commit on Enter / blur, cancel
+    /// on Escape) and Delete is a two-step confirm, disabled when only one
+    /// scene remains.
+    fn draw_ui_scene_strip(&mut self, ui: &mut egui::Ui) {
+        let active = self.current_ui_scene_index();
+        let scene_count = self.project.ui_scenes.len();
+        let mut switch_to: Option<usize> = None;
+        let mut commit_rename: Option<(usize, String)> = None;
+        let mut cancel_rename = false;
+
+        ui.horizontal(|ui| {
+            ui.label(icons::text(icons::LAYERS, 14.0).color(STUDIO_ACCENT));
+            ui.label(
+                RichText::new(format!("Scenes ({scene_count})"))
+                    .color(STUDIO_TEXT_WEAK)
+                    .small(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_delete = scene_count > 1;
+                let delete_pending = self.ui_scene_delete_confirm == Some(active);
+                let delete_label = if delete_pending { "Confirm" } else { "Delete" };
+                if ui
+                    .add_enabled(
+                        can_delete,
+                        egui::Button::new(icons::label(icons::TRASH, delete_label)),
+                    )
+                    .on_hover_text(if delete_pending {
+                        "Click again to delete this scene"
+                    } else {
+                        "Delete this UI scene"
+                    })
+                    .clicked()
+                {
+                    if delete_pending {
+                        self.delete_ui_scene_action(active);
+                    } else {
+                        self.ui_scene_delete_confirm = Some(active);
+                    }
+                }
+                if ui
+                    .button(icons::label(icons::PEN_LINE, "Rename"))
+                    .on_hover_text("Rename this UI scene")
+                    .clicked()
+                {
+                    self.begin_ui_scene_rename(active);
+                }
+                if ui
+                    .button(icons::label(icons::COPY, "Duplicate"))
+                    .on_hover_text("Duplicate this UI scene")
+                    .clicked()
+                {
+                    self.duplicate_ui_scene_action(active);
+                }
+                if ui
+                    .button(icons::label(icons::FILE_PLUS, "New"))
+                    .on_hover_text("Create a new UI scene")
+                    .clicked()
+                {
+                    self.add_ui_scene_action();
+                }
+            });
+        });
+
+        let renaming_index = match &self.ui_scene_renaming {
+            Some((index, _)) if *index < scene_count => Some(*index),
+            _ => None,
+        };
+        let strip_height = (ui.available_height() * 0.32).clamp(48.0, 132.0);
+        egui::ScrollArea::vertical()
+            .id_salt("psxed_ui_scene_strip")
+            .auto_shrink([false, false])
+            .max_height(strip_height)
+            .show(ui, |ui| {
+                for index in 0..scene_count {
+                    if renaming_index == Some(index) {
+                        if let Some((_, buffer)) = self.ui_scene_renaming.as_mut() {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(buffer)
+                                    .desired_width(f32::INFINITY)
+                                    .margin(egui::Vec2::new(4.0, 2.0)),
+                            );
+                            if self.ui_scene_rename_focus_pending {
+                                response.request_focus();
+                                self.ui_scene_rename_focus_pending = false;
+                            }
+                            let lost_focus = response.lost_focus();
+                            let pressed_enter =
+                                lost_focus && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let pressed_esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            if pressed_esc {
+                                cancel_rename = true;
+                            } else if pressed_enter || lost_focus {
+                                commit_rename = Some((index, buffer.clone()));
+                            }
+                        }
+                        continue;
+                    }
+                    let name = self
+                        .project
+                        .ui_scene_at(index)
+                        .map(|scene| scene.name.clone())
+                        .unwrap_or_else(|| format!("Scene {index}"));
+                    let selected = index == active;
+                    let response = ui.selectable_label(
+                        selected,
+                        icons::label(icons::SQUARE, &compact_middle(&name, 28)),
+                    );
+                    let response = if name.chars().count() > 28 {
+                        response.on_hover_text(name.clone())
+                    } else {
+                        response
+                    };
+                    if response.clicked() {
+                        switch_to = Some(index);
+                    }
+                    if response.double_clicked() {
+                        switch_to = Some(index);
+                        self.begin_ui_scene_rename(index);
+                    }
+                }
+            });
+
+        if let Some((index, name)) = commit_rename {
+            self.commit_ui_scene_rename(index, name);
+        } else if cancel_rename {
+            self.ui_scene_renaming = None;
+            self.ui_scene_rename_focus_pending = false;
+        }
+        if let Some(index) = switch_to {
+            self.switch_ui_scene(index);
+        }
+    }
+
+    /// Create a new empty UI scene, make it active, and select its root.
+    fn add_ui_scene_action(&mut self) {
+        self.push_undo();
+        let name = self.unique_ui_scene_name("UI Scene");
+        self.project.add_ui_scene(name);
+        let index = self.project.ui_scenes.len().saturating_sub(1);
+        self.active_ui_scene_index = index;
+        self.ui_scene_renaming = None;
+        self.ui_scene_delete_confirm = None;
+        self.reset_ui_node_selection();
+        self.status = self
+            .current_ui_scene()
+            .map(|scene| format!("Added UI scene {}", scene.name))
+            .unwrap_or_else(|| "Added UI scene".to_string());
+        self.mark_dirty();
+    }
+
+    /// Duplicate the UI scene at `index`, select the copy, and reset the
+    /// node selection so no node id leaks across from the source.
+    fn duplicate_ui_scene_action(&mut self, index: usize) {
+        self.push_undo();
+        let Some(_) = self.project.duplicate_ui_scene(index) else {
+            self.status = "No UI scene to duplicate".to_string();
+            return;
+        };
+        self.active_ui_scene_index = index + 1;
+        self.ui_scene_renaming = None;
+        self.ui_scene_delete_confirm = None;
+        self.reset_ui_node_selection();
+        self.status = self
+            .current_ui_scene()
+            .map(|scene| format!("Duplicated UI scene as {}", scene.name))
+            .unwrap_or_else(|| "Duplicated UI scene".to_string());
+        self.mark_dirty();
+    }
+
+    /// Delete the UI scene at `index`. The project layer keeps the list
+    /// non-empty; this clamps the active index and resets the node
+    /// selection against whatever scene becomes active.
+    fn delete_ui_scene_action(&mut self, index: usize) {
+        self.ui_scene_delete_confirm = None;
+        self.ui_scene_renaming = None;
+        if self.project.ui_scenes.len() <= 1 {
+            self.status = "Cannot delete the only UI scene".to_string();
+            return;
+        }
+        let removed_name = self
+            .project
+            .ui_scene_at(index)
+            .map(|scene| scene.name.clone());
+        self.push_undo();
+        if !self.project.remove_ui_scene(index) {
+            self.status = "No UI scene to delete".to_string();
+            return;
+        }
+        let count = self.project.ui_scenes.len();
+        if self.active_ui_scene_index >= count {
+            self.active_ui_scene_index = count.saturating_sub(1);
+        } else if index < self.active_ui_scene_index {
+            self.active_ui_scene_index -= 1;
+        }
+        self.reset_ui_node_selection();
+        self.status = match removed_name {
+            Some(name) => format!("Deleted UI scene {name}"),
+            None => "Deleted UI scene".to_string(),
+        };
+        self.mark_dirty();
+    }
+
+    /// Enter inline-rename mode for the UI scene at `index`.
+    fn begin_ui_scene_rename(&mut self, index: usize) {
+        let Some(scene) = self.project.ui_scene_at(index) else {
+            return;
+        };
+        self.ui_scene_renaming = Some((index, scene.name.clone()));
+        self.ui_scene_rename_focus_pending = true;
+        self.ui_scene_delete_confirm = None;
+    }
+
+    /// Commit a UI scene rename. Empty names revert to the current name;
+    /// a real change is one undo step.
+    fn commit_ui_scene_rename(&mut self, index: usize, name: String) {
+        self.ui_scene_renaming = None;
+        self.ui_scene_rename_focus_pending = false;
+        let trimmed = name.trim();
+        let Some(current) = self
+            .project
+            .ui_scene_at(index)
+            .map(|scene| scene.name.clone())
+        else {
+            return;
+        };
+        if trimmed.is_empty() || trimmed == current {
+            return;
+        }
+        let final_name = trimmed.to_string();
+        self.push_undo();
+        if let Some(scene) = self.project.ui_scene_at_mut(index) {
+            scene.name = final_name.clone();
+        }
+        self.status = format!("Renamed UI scene {final_name}");
+        self.mark_dirty();
+    }
+
+    /// Build a UI scene name not already taken, e.g. "UI Scene",
+    /// "UI Scene 2". Keeps the strip readable when several are created.
+    fn unique_ui_scene_name(&self, base: &str) -> String {
+        let taken: HashSet<&str> = self
+            .project
+            .ui_scenes
+            .iter()
+            .map(|scene| scene.name.as_str())
+            .collect();
+        if !taken.contains(base) {
+            return base.to_string();
+        }
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{base} {suffix}");
+            if !taken.contains(candidate.as_str()) {
+                return candidate;
+            }
+            suffix += 1;
+        }
     }
 
     fn draw_filesystem_panel(&mut self, ui: &mut egui::Ui) {
@@ -11905,7 +12244,7 @@ impl EditorWorkspace {
         self.refresh_texture_thumbs(ui.ctx());
         let requested = self.selection.selected_ui_node;
         let mut changed = false;
-        let Some(scene) = self.project.active_ui_scene() else {
+        let Some(scene) = self.current_ui_scene() else {
             ui.weak("No UI scene");
             return;
         };
@@ -11934,7 +12273,7 @@ impl EditorWorkspace {
             })
             .collect();
 
-        let Some(scene) = self.project.active_ui_scene_mut() else {
+        let Some(scene) = self.current_ui_scene_mut() else {
             ui.weak("No UI scene");
             return;
         };
@@ -15940,6 +16279,43 @@ impl EditorWorkspace {
                 self.resource_delete_confirm = None;
             }
         }
+
+        // The UI-scene list can shrink across undo/redo (a created or
+        // duplicated scene is rolled back). Clamp the active index and
+        // drop any pending scene-strip rename / delete-confirm so they
+        // never point past the end.
+        let ui_scene_count = self.project.ui_scenes.len();
+        if ui_scene_count == 0 {
+            self.active_ui_scene_index = 0;
+        } else if self.active_ui_scene_index >= ui_scene_count {
+            self.active_ui_scene_index = ui_scene_count - 1;
+        }
+        if self
+            .ui_scene_renaming
+            .as_ref()
+            .is_some_and(|(index, _)| *index >= ui_scene_count)
+        {
+            self.ui_scene_renaming = None;
+            self.ui_scene_rename_focus_pending = false;
+        }
+        if self
+            .ui_scene_delete_confirm
+            .is_some_and(|index| index >= ui_scene_count)
+        {
+            self.ui_scene_delete_confirm = None;
+        }
+        // The selected UI node belongs to whatever scene is now active;
+        // a stale id from a rolled-back scene snaps back to the canvas.
+        let ui_root = self
+            .current_ui_scene()
+            .map(|scene| scene.root)
+            .unwrap_or(UiNodeId::ROOT);
+        if self
+            .current_ui_scene()
+            .is_none_or(|scene| scene.node(self.selection.selected_ui_node).is_none())
+        {
+            self.selection.selected_ui_node = ui_root;
+        }
     }
 
     fn clear_sector_selection(&mut self) {
@@ -17022,7 +17398,7 @@ impl EditorWorkspace {
     fn add_ui_child(&mut self, kind: UiNodeKind, name: &str) {
         self.push_undo();
         let parent = self.selection.selected_ui_node;
-        let Some(scene) = self.project.active_ui_scene_mut() else {
+        let Some(scene) = self.current_ui_scene_mut() else {
             self.status = "No UI scene available".to_string();
             return;
         };
@@ -41407,6 +41783,105 @@ mod tests {
         assert_eq!(
             action_bar_height_for_status("First line\nSecond line"),
             ACTION_BAR_EXPANDED_HEIGHT
+        );
+    }
+
+    /// End-to-end of the multi-scene UX on the editor side: create a
+    /// scene, switch to it, confirm edits land only in the selected
+    /// scene, then delete it and confirm the active index clamps and the
+    /// scene list never empties.
+    #[test]
+    fn ui_scene_create_switch_edit_isolated_delete_clamps() {
+        let mut project = ProjectDocument::new("ui-scene-crud");
+        project.normalize_loaded();
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("ui-scene-crud"), project);
+
+        // One default scene to start; index points at it.
+        assert_eq!(workspace.project.ui_scenes.len(), 1);
+        assert_eq!(workspace.current_ui_scene_index(), 0);
+        let first_id = workspace.current_ui_scene().unwrap().id;
+        let first_node_count = workspace.current_ui_scene().unwrap().nodes().len();
+
+        // Create -> the new scene becomes active and selection resets to
+        // its root canvas (no stale node id from scene 0).
+        workspace.add_ui_scene_action();
+        assert_eq!(workspace.project.ui_scenes.len(), 2);
+        assert_eq!(workspace.current_ui_scene_index(), 1);
+        let second_id = workspace.current_ui_scene().unwrap().id;
+        assert_ne!(first_id, second_id, "new scene gets a fresh stable id");
+        let second_root = workspace.current_ui_scene().unwrap().root;
+        assert_eq!(workspace.selection.selected_ui_node, second_root);
+
+        // Edit isolation: add a node into the active (second) scene.
+        workspace.add_ui_child(
+            UiNodeKind::Rect {
+                rect: UiRect::new(8, 8, 32, 16),
+                color: [10, 20, 30],
+            },
+            "Probe",
+        );
+        let added = workspace.selection.selected_ui_node;
+        assert!(workspace
+            .current_ui_scene()
+            .unwrap()
+            .node(added)
+            .is_some());
+        let second_node_count = workspace.current_ui_scene().unwrap().nodes().len();
+
+        // Switch back to scene 0: its structure is untouched, and the
+        // selection snaps to scene 0's root rather than carrying the
+        // second scene's node over. Node ids are per-scene, so isolation
+        // is asserted structurally (count + the absence of "Probe")
+        // rather than by id, which can legitimately repeat across scenes.
+        workspace.switch_ui_scene(0);
+        assert_eq!(workspace.current_ui_scene_index(), 0);
+        let first_scene = workspace.current_ui_scene().unwrap();
+        assert_eq!(first_scene.id, first_id);
+        assert_eq!(
+            first_scene.nodes().len(),
+            first_node_count,
+            "edit must not change the other scene's node count"
+        );
+        assert!(
+            first_scene
+                .nodes()
+                .iter()
+                .all(|node| node.name != "Probe"),
+            "edit must not leak into the other scene"
+        );
+        assert_eq!(
+            workspace.selection.selected_ui_node,
+            first_scene.root,
+            "selection resets on scene switch"
+        );
+
+        // The second scene still holds its extra node.
+        assert_eq!(
+            workspace.project.ui_scene(second_id).unwrap().nodes().len(),
+            second_node_count
+        );
+
+        // Point the active index at the last scene, then delete it:
+        // the index must clamp back into range and the list stays
+        // non-empty.
+        workspace.switch_ui_scene(1);
+        assert_eq!(workspace.current_ui_scene_index(), 1);
+        workspace.delete_ui_scene_action(1);
+        assert_eq!(workspace.project.ui_scenes.len(), 1);
+        assert_eq!(
+            workspace.current_ui_scene_index(),
+            0,
+            "active index clamps after deleting the last scene"
+        );
+        assert_eq!(workspace.current_ui_scene().unwrap().id, first_id);
+
+        // Deleting the final remaining scene is forbidden (never empty).
+        workspace.delete_ui_scene_action(0);
+        assert_eq!(
+            workspace.project.ui_scenes.len(),
+            1,
+            "the last UI scene cannot be deleted"
         );
     }
 }
