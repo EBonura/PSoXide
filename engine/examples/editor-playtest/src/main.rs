@@ -3079,7 +3079,11 @@ struct ActiveRuntimeRoom {
     depth: u16,
     sector_size: i32,
     ambient_rgb: [u8; 3],
+    /// Non-streamed builds keep materials inline; streamed builds pool them by
+    /// `stream_slot` (see [`ROOM_MATERIAL_POOL`]) to keep this struct small.
+    #[cfg(not(feature = "cd-stream-bench"))]
     materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
+    #[cfg(not(feature = "cd-stream-bench"))]
     material_count: usize,
     /// Offset from the current chunk's origin to this chunk's
     /// origin, in engine units.
@@ -3091,6 +3095,24 @@ struct ActiveRuntimeRoom {
 impl ActiveRuntimeRoom {
     fn render(&self) -> Option<RoomRender<'static, '_>> {
         self.render_room.as_ref().map(|room| room.render())
+    }
+
+    /// In-use room-surface materials. Streamed builds read the `stream_slot`
+    /// pool; non-streamed builds read the inline array.
+    fn materials(&self) -> &[WorldRenderMaterial] {
+        #[cfg(feature = "cd-stream-bench")]
+        {
+            let slot = self.stream_slot as usize;
+            if slot < STREAMED_ROOM_SLOT_COUNT {
+                let pool = unsafe { &*core::ptr::addr_of!(ROOM_MATERIAL_POOL) };
+                return &pool[slot].materials[..pool[slot].count];
+            }
+            &[]
+        }
+        #[cfg(not(feature = "cd-stream-bench"))]
+        {
+            &self.materials[..self.material_count]
+        }
     }
 
     fn with_current_room_offsets(
@@ -3855,7 +3877,7 @@ impl Scene for Playtest {
                     room_cache_surfaces = room_cache_surfaces
                         .saturating_add(active.surface_cache.surface_count as u32);
                 }
-                let materials = &active.materials[..active.material_count];
+                let materials = active.materials();
                 let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                     continue;
                 };
@@ -5852,19 +5874,32 @@ impl Playtest {
         self.room = active.render_room;
         self.current_collision_room = Some(active.collision_room);
         self.current_ambient_rgb = active.ambient_rgb;
-        self.materials = active.materials;
-        self.material_count = active.material_count;
+        self.set_current_materials(&active);
+    }
+
+    /// Copy a room's in-use materials into the current-room slot the renderer
+    /// reads. Source is the `stream_slot` pool (streamed) or inline (non-stream).
+    fn set_current_materials(&mut self, active: &ActiveRuntimeRoom) {
+        let mats = active.materials();
+        self.material_count = mats.len();
+        self.materials[..mats.len()].copy_from_slice(mats);
     }
 
     fn refresh_active_room_materials(&mut self) {
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
-            if let Some(mut active) = self.active_rooms[slot] {
+            if let Some(active) = self.active_rooms[slot] {
                 if let Some(record) = ROOMS.get(active.index.to_usize()) {
                     let (materials, material_count) = build_runtime_room_material_table(record);
-                    active.materials = materials;
-                    active.material_count = material_count;
-                    self.active_rooms[slot] = Some(active);
+                    #[cfg(feature = "cd-stream-bench")]
+                    store_room_materials(active.stream_slot, materials, material_count);
+                    #[cfg(not(feature = "cd-stream-bench"))]
+                    {
+                        let mut active = active;
+                        active.materials = materials;
+                        active.material_count = material_count;
+                        self.active_rooms[slot] = Some(active);
+                    }
                 }
             }
             slot += 1;
@@ -5952,8 +5987,7 @@ impl Playtest {
                         self.room = active.render_room;
                         self.current_collision_room = Some(active.collision_room);
                         self.current_ambient_rgb = active.ambient_rgb;
-                        self.materials = active.materials;
-                        self.material_count = active.material_count;
+                        self.set_current_materials(&active);
                     }
                     self.active_rooms[next_slot] = Some(active);
                     next_slot += 1;
@@ -5982,8 +6016,7 @@ impl Playtest {
                 self.room = active.render_room;
                 self.current_collision_room = Some(active.collision_room);
                 self.current_ambient_rgb = active.ambient_rgb;
-                self.materials = active.materials;
-                self.material_count = active.material_count;
+                self.set_current_materials(&active);
                 self.active_rooms[next_slot] = Some(active);
                 next_slot += 1;
             }
@@ -6002,8 +6035,7 @@ impl Playtest {
                     self.room = active.render_room;
                     self.current_collision_room = Some(active.collision_room);
                     self.current_ambient_rgb = active.ambient_rgb;
-                    self.materials = active.materials;
-                    self.material_count = active.material_count;
+                    self.set_current_materials(&active);
                     self.active_rooms[0] = Some(active);
                     next_slot = 1;
                 }
@@ -7827,6 +7859,38 @@ const fn room_material_fallback() -> WorldRenderMaterial {
     WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
 }
 
+/// Refactor B: room-surface materials live in a pool keyed by the resident
+/// `stream_slot` rather than inline in `ActiveRuntimeRoom`, so the per-crossing
+/// copy of the `[ActiveRuntimeRoom; MAX_ACTIVE_ROOMS]` window stays small. An
+/// entry is (re)built whenever a room becomes active in its slot and read at
+/// render through `ActiveRuntimeRoom::materials()`.
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone)]
+struct ResidentRoomMaterials {
+    materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
+    count: usize,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+static mut ROOM_MATERIAL_POOL: [ResidentRoomMaterials; STREAMED_ROOM_SLOT_COUNT] =
+    [ResidentRoomMaterials {
+        materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
+        count: 0,
+    }; STREAMED_ROOM_SLOT_COUNT];
+
+#[cfg(feature = "cd-stream-bench")]
+fn store_room_materials(
+    stream_slot: u16,
+    materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
+    count: usize,
+) {
+    let slot = stream_slot as usize;
+    if slot < STREAMED_ROOM_SLOT_COUNT {
+        let pool = unsafe { &mut *core::ptr::addr_of_mut!(ROOM_MATERIAL_POOL) };
+        pool[slot] = ResidentRoomMaterials { materials, count };
+    }
+}
+
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
@@ -8748,17 +8812,22 @@ fn build_active_room(
     }
     let payload = parse_active_room_payload(slot, index, record)?;
     let (materials, material_count) = build_runtime_room_material_table(record);
+    let stream_slot = active_room_stream_slot(index);
+    #[cfg(feature = "cd-stream-bench")]
+    store_room_materials(stream_slot, materials, material_count);
     let surface_cache = active_room_surface_cache_for(index);
     Some(ActiveRuntimeRoom {
         index,
-        stream_slot: active_room_stream_slot(index),
+        stream_slot,
         render_room: payload.render_room,
         collision_room: payload.collision_room,
         width: payload.width,
         depth: payload.depth,
         sector_size: payload.sector_size,
         ambient_rgb: payload.ambient_rgb,
+        #[cfg(not(feature = "cd-stream-bench"))]
         materials,
+        #[cfg(not(feature = "cd-stream-bench"))]
         material_count,
         offset_x: room_origin_x(record).saturating_sub(room_origin_x(current_record)),
         offset_z: room_origin_z(record).saturating_sub(room_origin_z(current_record)),
