@@ -1352,7 +1352,7 @@ const MAX_ROOM_MATERIALS: usize = 8;
 /// runtime window. The world-level resident room limit picks the effective
 /// count per cooked build; this cap only prevents the fixed arrays from
 /// growing past the editor-exposed maximum.
-const MAX_ACTIVE_ROOMS: usize = 32;
+const MAX_ACTIVE_ROOMS: usize = 16;
 /// Graph-distance (BFS) radius for the streaming residency ring. Rooms within
 /// this many portal hops of the current room are kept resident in memory
 /// (the load-ahead prefetch buffer). `WORLD_STREAM_RADIUS >= WORLD_VISIBILITY_RADIUS`.
