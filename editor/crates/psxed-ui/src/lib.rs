@@ -11933,14 +11933,20 @@ impl EditorWorkspace {
                     .small(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Compact icon-only actions: a narrow side panel cannot fit four
+                // text-labelled buttons in one row (they collapse to vertical,
+                // one-glyph-per-line text), so each action is the icon plus its
+                // hover tooltip.
+                let action_btn = egui::Vec2::new(26.0, 22.0);
                 let can_delete = scene_count > 1;
                 let delete_pending = self.ui_scene_delete_confirm == Some(active);
-                let delete_label = if delete_pending { "Confirm" } else { "Delete" };
+                let trash = if delete_pending {
+                    icons::text(icons::TRASH, 14.0).color(egui::Color32::from_rgb(220, 96, 96))
+                } else {
+                    icons::text(icons::TRASH, 14.0)
+                };
                 if ui
-                    .add_enabled(
-                        can_delete,
-                        egui::Button::new(icons::label(icons::TRASH, delete_label)),
-                    )
+                    .add_enabled(can_delete, egui::Button::new(trash).min_size(action_btn))
                     .on_hover_text(if delete_pending {
                         "Click again to delete this scene"
                     } else {
@@ -11955,21 +11961,21 @@ impl EditorWorkspace {
                     }
                 }
                 if ui
-                    .button(icons::label(icons::PEN_LINE, "Rename"))
+                    .add(egui::Button::new(icons::text(icons::PEN_LINE, 14.0)).min_size(action_btn))
                     .on_hover_text("Rename this UI scene")
                     .clicked()
                 {
                     self.begin_ui_scene_rename(active);
                 }
                 if ui
-                    .button(icons::label(icons::COPY, "Duplicate"))
+                    .add(egui::Button::new(icons::text(icons::COPY, 14.0)).min_size(action_btn))
                     .on_hover_text("Duplicate this UI scene")
                     .clicked()
                 {
                     self.duplicate_ui_scene_action(active);
                 }
                 if ui
-                    .button(icons::label(icons::FILE_PLUS, "New"))
+                    .add(egui::Button::new(icons::text(icons::FILE_PLUS, 14.0)).min_size(action_btn))
                     .on_hover_text("Create a new UI scene")
                     .clicked()
                 {
