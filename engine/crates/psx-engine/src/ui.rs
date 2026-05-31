@@ -36,7 +36,9 @@ use psx_gpu::{
     draw_quad_flat, draw_quad_textured_material,
     material::{TextureMaterial, TextureWindow},
 };
-use psx_level::{ui_node_flags, AssetId, LevelUiNodeKind, LevelUiNodeRecord, LevelUiValueBinding};
+use psx_level::{
+    ui_node_flags, AssetId, LevelUiNodeKind, LevelUiNodeRecord, LevelUiValueBinding, NavRect,
+};
 
 /// Canvas width used as the fallback parent rectangle for a node
 /// whose parent chain does not resolve to a [`LevelUiNodeKind::Canvas`].
@@ -67,11 +69,26 @@ pub struct UiTextureSlot {
     pub texture_height: u16,
 }
 
-/// Draw a cooked UI scene to the framebuffer.
+/// Draw the cooked nodes `nodes[first..first + count]` of one UI scene
+/// to the framebuffer.
 ///
-/// `nodes` is the full node slice; layout walks parent links inside
-/// it. `font` supplies glyph metrics and the draw path for
+/// `nodes` is always the *full* shared node pool, never a sub-slice:
+/// cooked parent indices are pool-relative (see the cooker's
+/// `cook_ui_scene_nodes`), so anchor/parent layout walks the whole pool
+/// even though only the `[first, first + count)` block is painted.
+/// `first` / `count` come straight from the active
+/// [`psx_level::LevelUiScene`]; pass `first = 0`, `count = nodes.len()`
+/// to draw a single-scene pool whole (the HUD overlay does this).
+///
+/// `font` supplies glyph metrics and the draw path for
 /// [`LevelUiNodeKind::Label`] nodes; when `None`, labels are skipped.
+///
+/// `focused` is the *pool* index of the currently focused node, if any,
+/// so a focused [`LevelUiNodeKind::Button`] / [`LevelUiNodeKind::Slider`]
+/// gets a focus ring. The game-flow driver tracks focus as a pool index
+/// and resolves moves through [`psx_level::next_focus`] over the same
+/// pool, so the highlight here matches the control input lands on. Pass
+/// `None` for non-interactive overlays such as a HUD.
 ///
 /// `textures` resolves an image node's [`AssetId`] to an uploaded
 /// [`UiTextureSlot`], or `None` to skip that image. It is `FnMut` so
@@ -80,16 +97,22 @@ pub struct UiTextureSlot {
 /// `value` resolves a [`LevelUiValueBinding`] to a Q12 fixed-point
 /// integer for bar fill ratios.
 ///
-/// Drawing order follows slice order, so authoring order is the
+/// Drawing order follows pool order, so authoring order is the
 /// back-to-front paint order.
 pub fn draw_scene(
     nodes: &[LevelUiNodeRecord],
+    first: usize,
+    count: usize,
     font: Option<&FontAtlas>,
+    focused: Option<usize>,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
     value: &impl Fn(LevelUiValueBinding) -> i32,
 ) {
-    for (index, node) in nodes.iter().enumerate() {
+    let end = first.saturating_add(count).min(nodes.len());
+    for index in first..end {
+        let node = &nodes[index];
         let (x, y, width, height) = node_absolute_rect(nodes, index);
+        let is_focused = focused == Some(index);
         match node.kind {
             LevelUiNodeKind::Canvas | LevelUiNodeKind::Group => {}
             LevelUiNodeKind::Rect => {
@@ -118,12 +141,13 @@ pub fn draw_scene(
                 );
             }
             LevelUiNodeKind::Button => {
-                // TODO(menu-nav): take a focused-node parameter and brighten
-                // the fill / draw a focus ring when this button is focused.
                 draw_button(font, node, x, y, width, height);
+                if is_focused {
+                    draw_focus_ring(x, y, width as i16, height as i16);
+                }
             }
             LevelUiNodeKind::Slider => {
-                // TODO(menu-nav): resolve the bound option's current value
+                // TODO(menu-step3): resolve the bound option's current value
                 // (node.option) to a fill proportion and let input nudge it.
                 // Until the option store exists the knob sits at the
                 // half-way mark so the control is visible while authoring.
@@ -138,9 +162,32 @@ pub fn draw_scene(
                     rgb(node.background),
                     rgb(node.accent),
                 );
+                if is_focused {
+                    draw_focus_ring(x, y, width as i16, height as i16);
+                }
             }
         }
     }
+}
+
+/// Bright 1px outline drawn just outside a focused control's rect so
+/// the highlight reads regardless of the control's own colours. Four
+/// thin [`draw_rect`] edges, integer-only, no allocation.
+fn draw_focus_ring(x: i16, y: i16, width: i16, height: i16) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    const RING: (u8, u8, u8) = (248, 224, 96);
+    let left = x - 1;
+    let top = y - 1;
+    let outer_w = width + 2;
+    let outer_h = height + 2;
+    // Top and bottom edges span the full outer width; the side edges
+    // fill the gap between them so the corners paint exactly once.
+    draw_rect(left, top, outer_w, 1, RING);
+    draw_rect(left, top + outer_h - 1, outer_w, 1, RING);
+    draw_rect(left, top + 1, 1, outer_h - 2, RING);
+    draw_rect(left + outer_w - 1, top + 1, 1, outer_h - 2, RING);
 }
 
 /// Placeholder slider fill proportion (`NUM / DEN`) used until the
@@ -155,6 +202,25 @@ const SLIDER_PREVIEW_DEN: i32 = 2;
 /// origin for an out-of-range index.
 fn node_absolute_rect(nodes: &[LevelUiNodeRecord], index: usize) -> (i16, i16, u16, u16) {
     node_absolute_rect_inner(nodes, index, 0).unwrap_or((0, 0, 1, 1))
+}
+
+/// `true` when a node kind takes menu focus and so should be drawn
+/// with a focus ring and visited by [`psx_level::next_focus`]. Only
+/// [`LevelUiNodeKind::Button`] and [`LevelUiNodeKind::Slider`] are
+/// interactive; everything else is decoration.
+#[inline]
+pub fn is_focusable(kind: LevelUiNodeKind) -> bool {
+    matches!(kind, LevelUiNodeKind::Button | LevelUiNodeKind::Slider)
+}
+
+/// Absolute on-screen rectangle of node `index` as a
+/// [`NavRect`], so the game-flow driver can build the focusable-rect
+/// list the resolver consumes without duplicating the anchor/parent
+/// layout maths. Uses the same resolution as [`draw_scene`], so the
+/// focus ring and the navigation geometry never drift apart.
+pub fn node_nav_rect(nodes: &[LevelUiNodeRecord], index: usize) -> NavRect {
+    let (x, y, w, h) = node_absolute_rect(nodes, index);
+    NavRect { x, y, w, h }
 }
 
 fn node_absolute_rect_inner(
