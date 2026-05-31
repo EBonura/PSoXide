@@ -1509,6 +1509,15 @@ pub enum LevelUiNodeKind {
     Image,
     /// Horizontal value bar.
     Bar,
+    /// Interactive button: a filled rect with a centered label that
+    /// fires a [`LevelUiAction`] when activated. Activation handling
+    /// is a later step; cooking and rendering land now.
+    Button,
+    /// Interactive slider bound to a project option: a track, a
+    /// proportional fill, and a draggable knob. The bound option id
+    /// lives in [`LevelUiNodeRecord::option`]. Value changes are a
+    /// later step.
+    Slider,
 }
 
 /// Runtime value source for data-bound UI elements.
@@ -1526,6 +1535,38 @@ pub enum LevelUiValueBinding {
     PlayerStaminaMax,
 }
 
+/// Action a [`LevelUiNodeKind::Button`] fires when activated. Plain
+/// `Copy` data carrying compact ids so it lives in a generated
+/// `static`. Activation/navigation is wired in a later step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiAction {
+    /// Switch the game flow to the named [`LevelUiScene`] by id.
+    GotoScene {
+        /// Target [`LevelUiScene::id`].
+        scene: u16,
+    },
+    /// Enter the gameplay/level simulation.
+    StartGameplay,
+    /// Return to the previous menu/scene.
+    Back,
+    /// Adjust a project option by a signed delta.
+    SetOption {
+        /// Target option id (mirrors the authored `OptionId`).
+        option: u16,
+        /// Signed step applied to the option value.
+        delta: i32,
+    },
+    /// Game-specific action dispatched by opaque id.
+    Game {
+        /// Caller-defined action id.
+        id: u16,
+    },
+}
+
+/// Sentinel meaning "this node binds to no project option". Stored in
+/// [`LevelUiNodeRecord::option`] for every non-`Slider` node.
+pub const UI_OPTION_NONE: u16 = u16::MAX;
+
 /// One cooked screen-space UI node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelUiNodeRecord {
@@ -1541,20 +1582,27 @@ pub struct LevelUiNodeRecord {
     pub width: u16,
     /// Height in canvas pixels.
     pub height: u16,
-    /// Primary colour: fill for `Rect`/`Bar`, text tint for `Label`.
+    /// Primary colour: fill for `Rect`/`Bar`/`Button`, text tint for
+    /// `Label`, track colour for `Slider`.
     pub color: [u8; 3],
-    /// Secondary colour, currently the `Bar` background.
+    /// Secondary colour: `Bar` background or `Slider` fill.
     pub background: [u8; 3],
+    /// Tertiary colour, currently the `Slider` knob.
+    pub accent: [u8; 3],
     /// Current value binding for `Bar`.
     pub value: LevelUiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: LevelUiValueBinding,
     /// Texture asset for `Image`, or `AssetId(u16::MAX)`.
     pub texture_asset: AssetId,
-    /// Text for `Label`.
+    /// Text for `Label`/`Button`.
     pub text: &'static str,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
     pub tag: &'static str,
+    /// Action fired by a `Button`. Ignored by other kinds.
+    pub action: LevelUiAction,
+    /// Project option a `Slider` binds to, or [`UI_OPTION_NONE`].
+    pub option: u16,
     /// Runtime flags.
     pub flags: u16,
 }

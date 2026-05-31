@@ -922,13 +922,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let kind = render_ui_node_kind(&node.kind);
         let value = render_ui_value_binding(node.value);
         let max = render_ui_value_binding(node.max);
+        let action = render_ui_action(node.action);
         let texture_asset = node
             .texture_asset
             .map(|index| format!("AssetId({index})"))
             .unwrap_or_else(|| "AssetId(u16::MAX)".to_string());
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, flags: {} }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {} }},",
             node.x,
             node.y,
             node.width,
@@ -939,8 +940,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             node.background[0],
             node.background[1],
             node.background[2],
+            node.accent[0],
+            node.accent[1],
+            node.accent[2],
             node.text,
             node.tag,
+            node.option,
             node.flags,
         );
     }
@@ -2159,6 +2164,22 @@ fn render_ui_node_kind(kind: &UiNodeKind) -> &'static str {
         UiNodeKind::Label { .. } => "LevelUiNodeKind::Label",
         UiNodeKind::Image { .. } => "LevelUiNodeKind::Image",
         UiNodeKind::Bar { .. } => "LevelUiNodeKind::Bar",
+        UiNodeKind::Button { .. } => "LevelUiNodeKind::Button",
+        UiNodeKind::Slider { .. } => "LevelUiNodeKind::Slider",
+    }
+}
+
+fn render_ui_action(action: PlaytestUiAction) -> String {
+    match action {
+        PlaytestUiAction::GotoScene { scene } => {
+            format!("LevelUiAction::GotoScene {{ scene: {scene} }}")
+        }
+        PlaytestUiAction::StartGameplay => "LevelUiAction::StartGameplay".to_string(),
+        PlaytestUiAction::Back => "LevelUiAction::Back".to_string(),
+        PlaytestUiAction::SetOption { option, delta } => {
+            format!("LevelUiAction::SetOption {{ option: {option}, delta: {delta} }}")
+        }
+        PlaytestUiAction::Game { id } => format!("LevelUiAction::Game {{ id: {id} }}"),
     }
 }
 
@@ -2661,11 +2682,14 @@ mod tests {
             height: 240,
             color: [0, 0, 0],
             background: [0, 0, 0],
+            accent: [0, 0, 0],
             value: UiValueBinding::ConstantQ12(0),
             max: UiValueBinding::ConstantQ12(0),
             texture_asset: None,
             text: String::new(),
             tag: String::new(),
+            action: PlaytestUiAction::default(),
+            option: psx_level::UI_OPTION_NONE,
             flags: 0,
         }];
         package.ui_scenes = vec![PlaytestUiScene {
@@ -2689,6 +2713,70 @@ mod tests {
         assert!(src.contains("FlowState::UiScene { scene: 7 },"));
         assert!(src.contains("FlowState::Gameplay,"));
         assert!(src.contains("entry: 0,"));
+    }
+
+    #[test]
+    fn button_and_slider_nodes_render_action_accent_and_option_fields() {
+        let mut package = PlaytestPackage::default();
+        package.ui_nodes = vec![
+            PlaytestUiNode {
+                parent: None,
+                kind: UiNodeKind::Button {
+                    rect: crate::UiRect::new(0, 0, 80, 18),
+                    label: "Play".to_string(),
+                    align: UiTextAlign::Center,
+                    color: [50, 60, 70],
+                    action: UiAction::Back,
+                },
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 18,
+                color: [50, 60, 70],
+                background: [0, 0, 0],
+                accent: [0, 0, 0],
+                value: UiValueBinding::ConstantQ12(0),
+                max: UiValueBinding::ConstantQ12(0),
+                texture_asset: None,
+                text: "Play".to_string(),
+                tag: String::new(),
+                action: PlaytestUiAction::GotoScene { scene: 7 },
+                option: psx_level::UI_OPTION_NONE,
+                flags: 0,
+            },
+            PlaytestUiNode {
+                parent: None,
+                kind: UiNodeKind::Slider {
+                    rect: crate::UiRect::new(0, 0, 96, 8),
+                    option: crate::OptionId(3),
+                    track: [11, 12, 13],
+                    fill: [21, 22, 23],
+                    knob: [31, 32, 33],
+                },
+                x: 0,
+                y: 0,
+                width: 96,
+                height: 8,
+                color: [11, 12, 13],
+                background: [21, 22, 23],
+                accent: [31, 32, 33],
+                value: UiValueBinding::ConstantQ12(0),
+                max: UiValueBinding::ConstantQ12(0),
+                texture_asset: None,
+                text: String::new(),
+                tag: String::new(),
+                action: PlaytestUiAction::default(),
+                option: 3,
+                flags: 0,
+            },
+        ];
+
+        let src = render_manifest_source(&package);
+        assert!(src.contains("kind: LevelUiNodeKind::Button"));
+        assert!(src.contains("action: LevelUiAction::GotoScene { scene: 7 }"));
+        assert!(src.contains("kind: LevelUiNodeKind::Slider"));
+        assert!(src.contains("accent: [31, 32, 33]"));
+        assert!(src.contains("option: 3"));
     }
 
     #[test]
@@ -3163,6 +3251,7 @@ use psx_level::{
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,
     LevelSkyRecord,
+    LevelUiAction,
     LevelUiNodeKind,
     LevelUiNodeRecord,
     LevelUiScene,
