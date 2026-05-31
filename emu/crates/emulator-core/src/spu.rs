@@ -376,6 +376,9 @@ struct Voice {
     /// Loop address (byte address). Set by software via REPEAT_ADDR
     /// register and by the ADPCM flag-4 bit (loop-start).
     loop_addr: u32,
+    /// Raw REPEAT_ADDR register value for readback: the software-written
+    /// 16-bit word, or `loop_addr >> 3` when the decoder sets the loop.
+    loop_addr_raw: u16,
     /// True if software wrote REPEAT_ADDR directly since voice start;
     /// suppresses the ADPCM flag-4 loop-start auto-update (matches
     /// Redux's `IgnoreLoop`).
@@ -443,6 +446,7 @@ impl Default for Voice {
             start_addr: 0,
             start_addr_raw: 0,
             loop_addr: 0,
+            loop_addr_raw: 0,
             loop_addr_locked: false,
             adsr_lo: 0,
             adsr_hi: 0,
@@ -1231,7 +1235,7 @@ impl Spu {
                 // its SPU thread synchronously.
                 0x0001
             }
-            voice_offset::REPEAT_ADDR => (voice.loop_addr >> 3) as u16,
+            voice_offset::REPEAT_ADDR => voice.loop_addr_raw,
             _ => 0,
         }
     }
@@ -1262,6 +1266,7 @@ impl Spu {
                 voice.envelope = (value as i16) as i32 & 0x7FFF;
             }
             voice_offset::REPEAT_ADDR => {
+                voice.loop_addr_raw = value;
                 voice.loop_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xF;
                 voice.loop_addr_locked = true;
             }
@@ -1871,6 +1876,7 @@ impl Spu {
         //     REPEAT_ADDR write).
         if flags & 0x4 != 0 && !voice.loop_addr_locked {
             voice.loop_addr = current;
+            voice.loop_addr_raw = (current >> 3) as u16;
         }
         if flags & 0x1 != 0 {
             // End of sample -- latch ENDX.
