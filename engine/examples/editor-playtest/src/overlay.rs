@@ -59,7 +59,17 @@ pub(crate) fn draw_player_hud(
         }
     };
 
-    ui::draw_scene(nodes, font, &mut resolve_texture, &resolve_value);
+    // HUD overlay: draw the whole pool (the HUD is a single scene at
+    // pool offset 0), no menu focus, so no control is highlighted.
+    ui::draw_scene(
+        nodes,
+        0,
+        nodes.len(),
+        font,
+        None,
+        &mut resolve_texture,
+        &resolve_value,
+    );
 }
 
 fn draw_legacy_player_hud(stamina_q12: i32, stamina_max_q12: i32) {
