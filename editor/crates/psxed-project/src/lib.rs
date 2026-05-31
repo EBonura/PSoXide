@@ -613,9 +613,15 @@ pub enum UiNodeKind {
         /// Label alignment inside `rect`.
         #[serde(default)]
         align: UiTextAlign,
-        /// Fill colour.
+        /// Background fill colour (ignored when `transparent`).
         #[serde(default = "default_ui_button_color")]
         color: [u8; 3],
+        /// Label text colour.
+        #[serde(default = "default_ui_button_text_color")]
+        text_color: [u8; 3],
+        /// Transparent background: skip the fill and draw only the label.
+        #[serde(default)]
+        transparent: bool,
         /// Action fired on activation.
         #[serde(default)]
         action: UiAction,
@@ -691,6 +697,10 @@ fn default_ui_image_tint() -> [u8; 3] {
 
 fn default_ui_button_color() -> [u8; 3] {
     [52, 60, 80]
+}
+
+fn default_ui_button_text_color() -> [u8; 3] {
+    [236, 240, 248]
 }
 
 fn default_ui_slider_track() -> [u8; 3] {
