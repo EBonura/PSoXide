@@ -1345,7 +1345,7 @@ const MAX_TEXTURED_TRIS: usize = 3328;
 /// over-reserving VRAM or RAM. If a future room exceeds this,
 /// the runtime fails graceful (skips the over-cap material) and
 /// the cook report should also flag.
-const MAX_ROOM_MATERIALS: usize = 32;
+const MAX_ROOM_MATERIALS: usize = 8;
 /// Current manual portal room plus the best cache-budgeted nearby rooms.
 ///
 /// Upper bound for rooms that can be active, drawable, and collidable in one
