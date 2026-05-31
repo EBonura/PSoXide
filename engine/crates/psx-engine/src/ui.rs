@@ -117,9 +117,38 @@ pub fn draw_scene(
                     rgb(node.background),
                 );
             }
+            LevelUiNodeKind::Button => {
+                // TODO(menu-nav): take a focused-node parameter and brighten
+                // the fill / draw a focus ring when this button is focused.
+                draw_button(font, node, x, y, width, height);
+            }
+            LevelUiNodeKind::Slider => {
+                // TODO(menu-nav): resolve the bound option's current value
+                // (node.option) to a fill proportion and let input nudge it.
+                // Until the option store exists the knob sits at the
+                // half-way mark so the control is visible while authoring.
+                draw_slider(
+                    x,
+                    y,
+                    width as i16,
+                    height as i16,
+                    SLIDER_PREVIEW_NUM,
+                    SLIDER_PREVIEW_DEN,
+                    rgb(node.color),
+                    rgb(node.background),
+                    rgb(node.accent),
+                );
+            }
         }
     }
 }
+
+/// Placeholder slider fill proportion (`NUM / DEN`) used until the
+/// runtime option store lands. See the `TODO(menu-nav)` in
+/// [`draw_scene`].
+const SLIDER_PREVIEW_NUM: i32 = 1;
+/// Denominator counterpart to [`SLIDER_PREVIEW_NUM`].
+const SLIDER_PREVIEW_DEN: i32 = 2;
 
 /// Resolve a node's absolute on-screen rectangle, applying the
 /// parent chain and 9-point anchor. Falls back to a 1x1 rect at the
@@ -300,6 +329,87 @@ fn status_fill_width(width: i16, value: i32, max_value: i32) -> i16 {
     }
     let clamped = value.clamp(0, max_value);
     ((width as i32).saturating_mul(clamped) / max_value) as i16
+}
+
+/// Draw an interactive button: a filled rectangle with a thin top
+/// highlight, then its label aligned inside the rect using the same
+/// horizontal alignment + word-wrap path as [`LevelUiNodeKind::Label`]
+/// and vertically centred. No focus styling yet; see the
+/// `TODO(menu-nav)` in [`draw_scene`].
+fn draw_button(
+    font: Option<&FontAtlas>,
+    node: &LevelUiNodeRecord,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+) {
+    let fill = rgb(node.color);
+    draw_rect(x, y, width as i16, height as i16, fill);
+    if height > 3 {
+        draw_rect(x, y, width as i16, 1, brighten(fill));
+    }
+    let Some(font) = font else {
+        return;
+    };
+    if node.text.is_empty() {
+        return;
+    }
+    let line_h = font.line_height() as i32;
+    let text_y = (y as i32 + (height as i32 - line_h).max(0) / 2)
+        .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
+    let text_x = aligned_text_x(font, node.text, x, width, align);
+    font.draw_text(text_x, text_y, node.text, button_label_tint(fill));
+}
+
+/// Pick a legible label tint for a button fill: white on dark fills,
+/// near-black on light fills. Integer luma keeps it `no_std`.
+fn button_label_tint(fill: (u8, u8, u8)) -> (u8, u8, u8) {
+    let luma = (fill.0 as u32 * 2 + fill.1 as u32 * 5 + fill.2 as u32) / 8;
+    if luma > 140 {
+        (16, 18, 24)
+    } else {
+        (236, 240, 248)
+    }
+}
+
+/// Draw a slider: a recessed track, a proportional fill, and a knob
+/// rectangle centred on the fill edge. `fill_num / fill_den` is the
+/// current proportion in `[0, 1]`. Runtime value binding is a later
+/// step (see the `TODO(menu-nav)` in [`draw_scene`]).
+#[allow(clippy::too_many_arguments)]
+fn draw_slider(
+    x: i16,
+    y: i16,
+    width: i16,
+    height: i16,
+    fill_num: i32,
+    fill_den: i32,
+    track: (u8, u8, u8),
+    fill: (u8, u8, u8),
+    knob: (u8, u8, u8),
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    draw_rect(x - 1, y - 1, width + 2, height + 2, (12, 14, 18));
+    draw_rect(x, y, width, height, track);
+
+    let den = fill_den.max(1);
+    let num = fill_num.clamp(0, den);
+    let fill_width = ((width as i32).saturating_mul(num) / den) as i16;
+    if fill_width > 0 {
+        draw_rect(x, y, fill_width, height, fill);
+    }
+
+    // Knob: a fixed-width rect centred on the fill edge, clamped so it
+    // stays inside the track.
+    let knob_w = (height + 2).clamp(3, width.max(3));
+    let edge = x as i32 + fill_width as i32;
+    let knob_x = (edge - knob_w as i32 / 2).clamp(x as i32, x as i32 + width as i32 - knob_w as i32);
+    let knob_x = knob_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    draw_rect(knob_x, y - 1, knob_w, height + 2, knob);
 }
 
 fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
