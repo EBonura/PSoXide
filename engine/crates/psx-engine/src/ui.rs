@@ -344,10 +344,12 @@ fn draw_button(
     width: u16,
     height: u16,
 ) {
-    let fill = rgb(node.color);
-    draw_rect(x, y, width as i16, height as i16, fill);
-    if height > 3 {
-        draw_rect(x, y, width as i16, 1, brighten(fill));
+    if node.flags & ui_node_flags::BUTTON_TRANSPARENT == 0 {
+        let fill = rgb(node.color);
+        draw_rect(x, y, width as i16, height as i16, fill);
+        if height > 3 {
+            draw_rect(x, y, width as i16, 1, brighten(fill));
+        }
     }
     let Some(font) = font else {
         return;
@@ -360,18 +362,7 @@ fn draw_button(
         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
     let text_x = aligned_text_x(font, node.text, x, width, align);
-    font.draw_text(text_x, text_y, node.text, button_label_tint(fill));
-}
-
-/// Pick a legible label tint for a button fill: white on dark fills,
-/// near-black on light fills. Integer luma keeps it `no_std`.
-fn button_label_tint(fill: (u8, u8, u8)) -> (u8, u8, u8) {
-    let luma = (fill.0 as u32 * 2 + fill.1 as u32 * 5 + fill.2 as u32) / 8;
-    if luma > 140 {
-        (16, 18, 24)
-    } else {
-        (236, 240, 248)
-    }
+    font.draw_text(text_x, text_y, node.text, rgb(node.accent));
 }
 
 /// Draw a slider: a recessed track, a proportional fill, and a knob
