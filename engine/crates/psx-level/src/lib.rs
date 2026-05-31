@@ -345,6 +345,8 @@ pub mod ui_node_flags {
     pub const TEXT_ALIGN_MASK: u16 = 0x0030;
     /// Label text wraps inside its rectangle.
     pub const TEXT_WRAP: u16 = 1 << 6;
+    /// Button background is transparent: skip the fill and draw only the label.
+    pub const BUTTON_TRANSPARENT: u16 = 1 << 7;
 }
 
 typed_index! {

@@ -1521,6 +1521,8 @@ fn cook_ui_scene_nodes(
                     label,
                     align,
                     color,
+                    text_color,
+                    transparent,
                     action,
                 } => (
                     rect.x,
@@ -1529,7 +1531,7 @@ fn cook_ui_scene_nodes(
                     rect.height.max(1),
                     *color,
                     [0, 0, 0],
-                    [0, 0, 0],
+                    *text_color,
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
@@ -1537,7 +1539,12 @@ fn cook_ui_scene_nodes(
                     String::new(),
                     cook_ui_action(*action),
                     psx_level::UI_OPTION_NONE,
-                    ui_node_flags(rect.anchor, *align, false),
+                    ui_node_flags(rect.anchor, *align, false)
+                        | if *transparent {
+                            psx_level::ui_node_flags::BUTTON_TRANSPARENT
+                        } else {
+                            0
+                        },
                 ),
                 UiNodeKind::Slider {
                     rect,
@@ -7348,6 +7355,8 @@ mod tests {
                 label: "Play".to_string(),
                 align: UiTextAlign::Center,
                 color: [50, 60, 70],
+                text_color: [236, 240, 248],
+                transparent: false,
                 action: UiAction::GotoScene(target_scene),
             },
         );
@@ -7413,6 +7422,8 @@ mod tests {
                 label: "+".to_string(),
                 align: UiTextAlign::Center,
                 color: [40, 40, 40],
+                text_color: [236, 240, 248],
+                transparent: false,
                 action: UiAction::SetOption { option, delta: 2 },
             },
         );
@@ -7424,6 +7435,8 @@ mod tests {
                 label: "Back".to_string(),
                 align: UiTextAlign::Center,
                 color: [40, 40, 40],
+                text_color: [236, 240, 248],
+                transparent: false,
                 action: UiAction::Back,
             },
         );
