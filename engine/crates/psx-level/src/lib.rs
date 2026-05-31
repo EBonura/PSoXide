@@ -625,6 +625,11 @@ pub struct LevelRoomRecord {
     pub origin_x: i32,
     /// Editor-side origin Z.
     pub origin_z: i32,
+    /// Room vertical placement in engine units, authored from the
+    /// Room node's transform. Diagnostic only for now (the cooker
+    /// still array-roots geometry at ground level); it is the
+    /// preserved foundation for Tomb-Raider-style stacked rooms.
+    pub origin_y: i32,
     /// Engine units per sector.
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
@@ -1445,6 +1450,48 @@ pub struct LevelBoxPropRecord {
     pub baked_vertex_rgb: [[(u8, u8, u8); 4]; BOX_PROP_FACE_COUNT],
     /// Runtime flags.
     pub flags: u16,
+}
+
+/// One addressable cooked UI scene. Each scene names a contiguous
+/// block inside the shared [`UI_NODES`](LevelUiNodeRecord) pool, so
+/// the runtime can activate any authored scene as a game state by
+/// id without re-cooking. `node_first`/`node_count` index the
+/// shared pool; parent indices stored in the pooled nodes are
+/// already pool-relative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiScene {
+    /// Stable scene id, assigned at author time and preserved across renames.
+    pub id: u16,
+    /// Display name.
+    pub name: &'static str,
+    /// First node index into the shared UI node pool.
+    pub node_first: u16,
+    /// Number of nodes belonging to this scene.
+    pub node_count: u16,
+}
+
+/// One state in the game flow graph. A `UiScene` state shows the
+/// named scene; `Gameplay` hands control to the level runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowState {
+    /// Show a UI scene by its [`LevelUiScene::id`].
+    UiScene {
+        /// Target scene id.
+        scene: u16,
+    },
+    /// Run the gameplay/level simulation.
+    Gameplay,
+}
+
+/// Cooked game-state flow definition. `states` is the addressable
+/// state table and `entry` is the index into `states` the runtime
+/// begins in. Plain `Copy` data so it lives in a generated `static`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameFlow {
+    /// Flow state table.
+    pub states: &'static [FlowState],
+    /// Index into `states` of the starting state.
+    pub entry: u16,
 }
 
 /// Screen-space UI node kind.
