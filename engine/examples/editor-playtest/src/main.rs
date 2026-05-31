@@ -11912,15 +11912,28 @@ fn draw_box_prop_faces<T>(
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
-        let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
-            continue;
-        };
-        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-            asset.id,
-            asset.bytes,
-            VramSlotClutMode::TransparentZero,
-        ) else {
-            continue;
+        // Box props share the texture pool with room surfaces, so the texture
+        // is already resident: look the slot up directly and skip the per-face
+        // linear ASSETS scan + upload check. Fall back to the full
+        // resolve-and-upload path only on a (rare) cold miss. `find_vram_slot`
+        // returns exactly the slot `ensure_texture_uploaded` would for a
+        // resident asset, so this is bit-identical.
+        let slot = match find_vram_slot(texture_asset, VramSlotClutMode::TransparentZero) {
+            Some(slot) => slot,
+            None => {
+                let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture)
+                else {
+                    continue;
+                };
+                match ensure_texture_uploaded_with_clut_mode(
+                    asset.id,
+                    asset.bytes,
+                    VramSlotClutMode::TransparentZero,
+                ) {
+                    Some(slot) => slot,
+                    None => continue,
+                }
+            }
         };
         let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
             .with_texture_window(slot.texture_window);
