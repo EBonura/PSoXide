@@ -47,8 +47,8 @@
 //! tables are `&'static` slices that the linker pins.
 
 use psx_level::{
-    first_focus, next_focus, FlowState, GameFlow, LevelUiAction, LevelUiNodeRecord, LevelUiScene,
-    LevelUiValueBinding, NavDir, NavRect,
+    first_focus, next_focus, FlowState, GameFlow, LevelOptionDef, LevelUiAction, LevelUiNodeKind,
+    LevelUiNodeRecord, LevelUiScene, LevelUiValueBinding, NavDir, NavRect, UI_OPTION_NONE,
 };
 use psx_pad::button;
 
@@ -67,6 +67,13 @@ const MAX_FOCUSABLE_NODES: usize = 64;
 /// this, so the entry path can tell an uninitialised cursor from a
 /// genuine focus on node 0.
 const MENU_FOCUS_NONE: u16 = u16::MAX;
+
+/// Upper bound on project options the runtime value store tracks. The
+/// store is a fixed `[i32; MAX_OPTIONS]` so the driver stays `no_std` /
+/// alloc-free; a project with more options than this keeps the overflow
+/// at its cooked default (read-only, never adjusted). Menus tune a
+/// handful of options in practice, so the cap is generous.
+const MAX_OPTIONS: usize = 32;
 
 /// The implicit single-state flow every plain [`App::run`] call uses.
 ///
@@ -151,29 +158,70 @@ pub struct GameApp<'a, S: Scene> {
     pub scenes: &'static [LevelUiScene],
     /// Shared UI node pool the scenes slice into.
     pub nodes: &'static [LevelUiNodeRecord],
+    /// Cooked project options. Sliders and `SetOption` actions bind to
+    /// these by id; the live value store ([`Self::option_values`]) is
+    /// seeded from each option's `default`.
+    pub options: &'static [LevelOptionDef],
     /// Borrowed gameplay scene. Not owned, so the caller keeps it.
     pub gameplay: &'a mut S,
     /// Where in the flow we currently are.
     pub cursor: FlowCursor,
+    /// Live option values, one slot per [`Self::options`] entry (parallel
+    /// by index, capped at [`MAX_OPTIONS`]). Fixed array, no allocator.
+    option_values: [i32; MAX_OPTIONS],
+    /// Number of populated [`Self::option_values`] slots (`min(options.len(),
+    /// MAX_OPTIONS)`).
+    option_len: usize,
 }
 
 impl<'a, S: Scene> GameApp<'a, S> {
     /// Build a driver over `flow`, borrowing `gameplay`. The cursor is
     /// positioned at `flow.entry`; nothing runs until [`Scene::init`].
+    /// The option value store is seeded from each [`LevelOptionDef::default`]
+    /// (capped at [`MAX_OPTIONS`]) so sliders read a sensible value on the
+    /// first frame.
     #[inline]
     pub fn new(
         flow: &'static GameFlow,
         scenes: &'static [LevelUiScene],
         nodes: &'static [LevelUiNodeRecord],
+        options: &'static [LevelOptionDef],
         gameplay: &'a mut S,
     ) -> Self {
+        let mut option_values = [0i32; MAX_OPTIONS];
+        let option_len = options.len().min(MAX_OPTIONS);
+        for (slot, option) in option_values[..option_len].iter_mut().zip(options) {
+            *slot = option.default.clamp(option.min, option.max);
+        }
         Self {
             flow,
             scenes,
             nodes,
+            options,
             gameplay,
             cursor: FlowCursor::new(flow.entry),
+            option_values,
+            option_len,
         }
+    }
+
+    /// Adjust the option with id `option_id` by `delta`, clamping the
+    /// result to that option's `[min, max]`. No-op for the unbound
+    /// sentinel or an unknown id, so a stray binding cannot panic or write
+    /// out of range.
+    fn adjust_option(&mut self, option_id: u16, delta: i32) {
+        if option_id == UI_OPTION_NONE {
+            return;
+        }
+        let Some(index) = self.options[..self.option_len]
+            .iter()
+            .position(|option| option.id == option_id)
+        else {
+            return;
+        };
+        let option = self.options[index];
+        let next = self.option_values[index].saturating_add(delta);
+        self.option_values[index] = next.clamp(option.min, option.max);
     }
 
     /// Resolve a flow-state index to its `Copy` [`StateTag`]. An
@@ -306,9 +354,44 @@ impl<'a, S: Scene> GameApp<'a, S> {
         }
     }
 
+    /// Handle a horizontal d-pad press over the scene at `[first, count)`.
+    ///
+    /// When the focused control is a [`LevelUiNodeKind::Slider`] bound to a
+    /// project option, LEFT / RIGHT nudge that option by `-step` / `+step`
+    /// (clamped) and focus stays put: a slider owns the horizontal axis so
+    /// the player can scrub its value. Otherwise the press falls through to
+    /// ordinary horizontal focus movement. `right` selects the direction.
+    fn horizontal_press(&mut self, first: usize, count: usize, right: bool) {
+        if let Some(node_index) = self.resolved_focus(first, count) {
+            if let Some(node) = self.nodes.get(node_index) {
+                if matches!(node.kind, LevelUiNodeKind::Slider) && node.option != UI_OPTION_NONE {
+                    let step = self.option_step(node.option);
+                    let delta = if right { step } else { -step };
+                    self.adjust_option(node.option, delta);
+                    return;
+                }
+            }
+        }
+        self.move_focus(first, count, if right { NavDir::Right } else { NavDir::Left });
+    }
+
+    /// Step size of the option with id `option_id`, or `0` when the id is
+    /// unbound or unknown. A zero step makes a LEFT/RIGHT press a no-op
+    /// rather than panicking on a stray binding.
+    fn option_step(&self, option_id: u16) -> i32 {
+        if option_id == UI_OPTION_NONE {
+            return 0;
+        }
+        self.options[..self.option_len]
+            .iter()
+            .find(|option| option.id == option_id)
+            .map(|option| option.step)
+            .unwrap_or(0)
+    }
+
     /// Fire the focused control's action. `GotoScene` / `StartGameplay`
-    /// / `Back` drive the flow cursor; `SetOption` / `Game` are no-ops
-    /// until the option store and dispatch land in a later step.
+    /// / `Back` drive the flow cursor; `SetOption` nudges the bound option
+    /// in the value store; `Game` is a no-op until game dispatch lands.
     fn activate_focus(&mut self, first: usize, count: usize, ctx: &mut Ctx) {
         let Some(node_index) = self.resolved_focus(first, count) else {
             return;
@@ -329,9 +412,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 }
             }
             LevelUiAction::Back => self.go_back(),
-            // TODO(menu-step3): apply the option delta to the runtime
-            // option store, then refresh any data-bound labels.
-            LevelUiAction::SetOption { .. } => {}
+            // Nudge the bound option by the authored delta (clamped). A
+            // dynamic-label refresh from the new value is a later step.
+            LevelUiAction::SetOption { option, delta } => self.adjust_option(option, delta),
             // TODO(menu-step3): dispatch game-specific actions by id.
             LevelUiAction::Game { .. } => {}
         }
@@ -380,6 +463,28 @@ fn gather_focusable(
     written
 }
 
+/// Resolve option id `option_id` to its live value in the parallel store
+/// `values[..len]` (one slot per `options[..len]` entry), or `0` when the
+/// id is the unbound sentinel or no [`LevelOptionDef`] matches. Free
+/// function so both [`GameApp::option_value`] and the render path's
+/// resolver closure (which captures copied locals, not `&self`) share one
+/// id-matching rule. Pure + alloc-free.
+fn resolve_option_value(
+    options: &[LevelOptionDef],
+    values: &[i32; MAX_OPTIONS],
+    len: usize,
+    option_id: u16,
+) -> i32 {
+    if option_id == UI_OPTION_NONE {
+        return 0;
+    }
+    options[..len.min(MAX_OPTIONS)]
+        .iter()
+        .position(|option| option.id == option_id)
+        .map(|index| values[index])
+        .unwrap_or(0)
+}
+
 impl<'a, S: Scene> Scene for GameApp<'a, S> {
     fn init(&mut self, ctx: &mut Ctx) {
         // Enter the configured entry state. For GAMEPLAY_ONLY this
@@ -424,11 +529,13 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 if ctx.just_pressed(button::DOWN) {
                     self.move_focus(first, count, NavDir::Down);
                 }
+                // LEFT / RIGHT scrub a focused slider's bound option, or
+                // move focus horizontally for any other control.
                 if ctx.just_pressed(button::LEFT) {
-                    self.move_focus(first, count, NavDir::Left);
+                    self.horizontal_press(first, count, false);
                 }
                 if ctx.just_pressed(button::RIGHT) {
-                    self.move_focus(first, count, NavDir::Right);
+                    self.horizontal_press(first, count, true);
                 }
 
                 // CROSS activates the focused control. CIRCLE is a
@@ -458,13 +565,35 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 // the highlighted control matches the one input acts on.
                 let (first, count) = self.scene_node_range(scene);
                 let focused = self.resolved_focus(first, count);
+                // Copy the node pool + option store out of `self` first so
+                // the resolver closures borrow only these Copy locals, not
+                // `self` (draw_scene already borrows `self.nodes`).
+                let nodes = self.nodes;
+                let options = self.options;
+                let option_values = self.option_values;
+                let option_len = self.option_len;
                 // TODO(p5): thread real texture / value resolvers through
                 // run_with_flow so image nodes and data-bound bars draw.
                 // Stub resolvers skip images (None) and report zero for
                 // every binding, so rects and labels still paint.
                 let mut textures = |_asset| None;
                 let value = |_binding: LevelUiValueBinding| 0;
-                ui::draw_scene(self.nodes, first, count, None, focused, &mut textures, &value);
+                // Slider fill reads the live option value by id from the
+                // copied store, through the same resolver the input path
+                // uses so the knob position matches what scrubbing changed.
+                let option_value =
+                    |option_id: u16| resolve_option_value(options, &option_values, option_len, option_id);
+                ui::draw_scene(
+                    nodes,
+                    first,
+                    count,
+                    None,
+                    focused,
+                    &mut textures,
+                    &value,
+                    options,
+                    &option_value,
+                );
             }
         }
     }
@@ -513,7 +642,7 @@ mod tests {
     #[test]
     fn gameplay_only_inits_once_then_forwards() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -532,7 +661,7 @@ mod tests {
         // Mirrors the old App::run shape: init is paid before the first
         // update tick, not lazily on first update.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -554,7 +683,7 @@ mod tests {
         };
 
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &mut scene);
+        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -581,7 +710,7 @@ mod tests {
     #[test]
     fn unknown_scene_id_yields_empty_node_range() {
         let mut scene = CountingScene::default();
-        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &mut scene);
+        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &mut scene);
         assert_eq!(app.scene_node_range(999), (0, 0));
     }
 
@@ -687,7 +816,7 @@ mod tests {
     #[test]
     fn menu_seeds_focus_to_first_control() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &mut scene);
+        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
 
@@ -700,7 +829,7 @@ mod tests {
     #[test]
     fn dpad_moves_focus_between_buttons() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &mut scene);
+        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         idle_tick(&mut app, &mut ctx); // seed focus to index 1
@@ -725,7 +854,7 @@ mod tests {
     #[test]
     fn cross_on_start_button_enters_gameplay() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &mut scene);
+        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         assert_eq!(app.gameplay.inits, 0);
@@ -746,7 +875,7 @@ mod tests {
     #[test]
     fn goto_scene_then_circle_returns() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &mut scene);
+        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         idle_tick(&mut app, &mut ctx); // seed focus on the title scene
@@ -782,7 +911,7 @@ mod tests {
     #[test]
     fn back_button_via_cross_pops_to_return_state() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &mut scene);
+        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         idle_tick(&mut app, &mut ctx);
@@ -808,7 +937,7 @@ mod tests {
         // A gameplay-only flow never enters a UI arm, so d-pad presses do
         // not touch menu_focus and updates forward straight to gameplay.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
 
@@ -816,5 +945,166 @@ mod tests {
         app.update(&mut ctx);
         assert_eq!(app.cursor.menu_focus, MENU_FOCUS_NONE);
         assert_eq!(app.gameplay.updates, 1);
+    }
+
+    // --- Option store: slider scrub + SetOption ---------------------------
+
+    /// Read the live value of option `option_id` out of an app's store,
+    /// through the same resolver the runtime render/input paths use.
+    fn value_of(app: &GameApp<'_, CountingScene>, option_id: u16) -> i32 {
+        resolve_option_value(app.options, &app.option_values, app.option_len, option_id)
+    }
+
+    /// Build a focusable slider at `(x, y)` bound to option id `option`,
+    /// parented to the canvas at slice index 0.
+    const fn slider(x: i16, y: i16, option: u16) -> LevelUiNodeRecord {
+        LevelUiNodeRecord {
+            parent: Some(psx_level::UiNodeIndex::new(0)),
+            kind: LevelUiNodeKind::Slider,
+            x,
+            y,
+            width: 96,
+            height: 8,
+            color: [11, 12, 13],
+            background: [21, 22, 23],
+            accent: [31, 32, 33],
+            value: LevelUiValueBinding::ConstantQ12(0),
+            max: LevelUiValueBinding::ConstantQ12(1),
+            texture_asset: AssetId(u16::MAX),
+            text: "",
+            tag: "",
+            action: LevelUiAction::Back,
+            option,
+            flags: 0,
+        }
+    }
+
+    // One option, id 1: range [0, 10], step 2, default 4.
+    const OPT_ID: u16 = 1;
+    static OPTIONS: &[LevelOptionDef] = &[LevelOptionDef {
+        id: OPT_ID,
+        min: 0,
+        max: 10,
+        step: 2,
+        default: 4,
+    }];
+
+    // Scene 1: a single slider bound to option 1, at pool [0..2).
+    // Scene 2: a single SetOption(+5) button bound to option 1, at [2..4).
+    static OPT_NODES: &[LevelUiNodeRecord] = &[
+        CANVAS,
+        slider(100, 100, OPT_ID),
+        CANVAS,
+        button(
+            100,
+            100,
+            LevelUiAction::SetOption {
+                option: OPT_ID,
+                delta: 5,
+            },
+        ),
+    ];
+    static OPT_SCENES: &[LevelUiScene] = &[
+        LevelUiScene {
+            id: 1,
+            name: "slider",
+            node_first: 0,
+            node_count: 2,
+        },
+        LevelUiScene {
+            id: 2,
+            name: "setoption",
+            node_first: 2,
+            node_count: 2,
+        },
+    ];
+    static OPT_FLOW_SLIDER: GameFlow = GameFlow {
+        states: &[FlowState::UiScene { scene: 1 }],
+        entry: 0,
+    };
+    static OPT_FLOW_BUTTON: GameFlow = GameFlow {
+        states: &[FlowState::UiScene { scene: 2 }],
+        entry: 0,
+    };
+
+    #[test]
+    fn option_store_seeds_from_default() {
+        // The value store seeds from each option's default at construction,
+        // so a slider reads its default before any input.
+        let mut scene = CountingScene::default();
+        let app = GameApp::new(&OPT_FLOW_SLIDER, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        assert_eq!(value_of(&app, OPT_ID), 4);
+        // An unbound / unknown id resolves to zero, never panics.
+        assert_eq!(value_of(&app, UI_OPTION_NONE), 0);
+        assert_eq!(value_of(&app, 999), 0);
+    }
+
+    #[test]
+    fn slider_left_right_scrubs_bound_option_clamped() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(&OPT_FLOW_SLIDER, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        idle_tick(&mut app, &mut ctx); // seed focus onto the slider
+        assert_eq!(app.cursor.menu_focus, 1, "focus seeds onto the slider");
+        assert_eq!(value_of(&app, OPT_ID), 4);
+
+        // RIGHT nudges by +step (2), clamped at max (10).
+        press(&mut ctx, button::RIGHT);
+        app.update(&mut ctx);
+        assert_eq!(value_of(&app, OPT_ID), 6);
+        press(&mut ctx, button::RIGHT);
+        app.update(&mut ctx);
+        assert_eq!(value_of(&app, OPT_ID), 8);
+        press(&mut ctx, button::RIGHT);
+        app.update(&mut ctx);
+        assert_eq!(value_of(&app, OPT_ID), 10);
+        // Already at max: another RIGHT clamps, value holds.
+        press(&mut ctx, button::RIGHT);
+        app.update(&mut ctx);
+        assert_eq!(value_of(&app, OPT_ID), 10);
+
+        // Focus never left the slider while scrubbing.
+        assert_eq!(app.cursor.menu_focus, 1);
+
+        // LEFT nudges by -step, clamped at min (0).
+        for expected in [8, 6, 4, 2, 0] {
+            press(&mut ctx, button::LEFT);
+            app.update(&mut ctx);
+            assert_eq!(value_of(&app, OPT_ID), expected);
+        }
+        press(&mut ctx, button::LEFT);
+        app.update(&mut ctx);
+        assert_eq!(value_of(&app, OPT_ID), 0, "LEFT at min clamps");
+    }
+
+    #[test]
+    fn set_option_button_adjusts_and_clamps() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(&OPT_FLOW_BUTTON, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+
+        // CROSS on the focused SetOption(+5) button: 4 -> 9.
+        press(&mut ctx, button::CROSS);
+        app.update(&mut ctx);
+        assert_eq!(app.cursor.menu_focus, 3, "focus seeded onto the button");
+        assert_eq!(value_of(&app, OPT_ID), 9);
+
+        // Again: 9 + 5 = 14, clamped to max (10).
+        press(&mut ctx, button::CROSS);
+        app.update(&mut ctx);
+        assert_eq!(value_of(&app, OPT_ID), 10);
+    }
+
+    #[test]
+    fn unbound_and_unknown_option_adjust_is_noop() {
+        // A slider bound to UI_OPTION_NONE and a SetOption to an unknown id
+        // must not panic or write anywhere in the store.
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(&OPT_FLOW_SLIDER, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        app.adjust_option(UI_OPTION_NONE, 3);
+        app.adjust_option(12345, 3);
+        assert_eq!(value_of(&app, OPT_ID), 4, "store untouched by stray ids");
     }
 }
