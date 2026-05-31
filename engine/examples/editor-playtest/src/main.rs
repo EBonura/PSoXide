@@ -2601,20 +2601,16 @@ impl<const N: usize> RoomStreamScheduler<N> {
     /// Single residency entry point: pin the desired set and load whatever is
     /// missing. Called once per frame by the residency owner so residency is
     /// no longer requested ad-hoc from the build paths.
-    /// Returns true when the whole desired set is already resident with nothing
-    /// left to load -- i.e. residency has fully settled and the caller may stop
-    /// re-planning until the room moves.
     fn reconcile_residency(
         &mut self,
         desired: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
         count: usize,
-    ) -> bool {
+    ) {
         self.begin_window();
         self.set_resident_window(desired, count);
         let plan = self.plan_window_loads(desired, count, count);
         self.start_load_plan(plan);
         self.emit_counters();
-        self.window_misses == 0 && self.window_pending_loads == 0
     }
 
     fn begin_window(&mut self) {
@@ -2841,12 +2837,6 @@ impl<const N: usize> RoomStreamScheduler<N> {
         } else {
             committed
         }
-    }
-
-    /// True when no streamed-room load is in flight (nothing Ready/Reading),
-    /// i.e. residency has settled. Lets the owner skip re-planning.
-    fn is_idle(&self) -> bool {
-        !self.job.is_active()
     }
 
     fn commit_ready_job_entries(&mut self) -> bool {
@@ -6180,91 +6170,38 @@ impl Playtest {
     /// visible neighbourhood -- and hands it to the scheduler to pin + load.
     /// This is the one place residency is declared; the build paths read
     /// residency from what this makes resident.
-    /// Reconcile streamed-room residency for the current room. Returns true once
-    /// the whole desired set is resident with nothing in flight (settled).
     #[cfg(feature = "cd-stream-bench")]
-    fn update_room_residency(&mut self) -> bool {
+    fn update_room_residency(&mut self) {
+        // Residency desired-set is the streaming BFS ring: every room within
+        // WORLD_STREAM_RADIUS portal hops of the current room. Computed once per
+        // crossing and cached; recompute here is a no-op unless the room moved.
         self.ensure_room_rings();
-        // C early-out: once residency has settled for the current room
-        // (everything desired is resident, no load in flight) the desired-set
-        // cannot change, so the per-tick re-plan + its telemetry emits are pure
-        // overhead -- skip them until the room moves or a load is outstanding.
-        unsafe {
-            if self.room_index == LAST_RESIDENCY_ROOT && ROOM_STREAM_SCHEDULER.is_idle() {
-                return true;
-            }
-        }
         let mut desired = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut count;
-        if ROOMS.len() <= STREAMED_ROOM_SLOT_COUNT {
-            // Whole level fits the resident budget: pin EVERY room so a crossing
-            // never has to reload. The CURRENT room MUST stay first so the
-            // scheduler's "current room can't wait" priority keeps targeting it
-            // -- putting any other room first makes plan_window_loads abort the
-            // in-flight load every tick and thrash (the corrected-A bug).
-            desired[0] = self.room_index;
-            count = 1;
-            let mut r = 0usize;
-            while r < ROOMS.len() && count < STREAMED_ROOM_SLOT_COUNT {
-                let room = RoomIndex(r as u16);
-                if room != self.room_index {
-                    desired[count] = room;
-                    count += 1;
-                }
-                r += 1;
+        let mut count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
+        desired[..count].copy_from_slice(&self.stream_ring[..count]);
+        // The BFS ring is prefetch; portal visibility is correctness. Whatever
+        // the renderer can currently see MUST be resident even when the graph
+        // ring and the geometric visibility disagree, or it draws nothing.
+        let visible = self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS);
+        let mut i = 0usize;
+        while i < visible && count < STREAMED_ROOM_SLOT_COUNT {
+            let room = self.portal_visibility.rooms[i].room;
+            if room != INVALID_ROOM_INDEX && !room_requested(room, &desired, count) {
+                desired[count] = room;
+                count += 1;
             }
-        } else {
-            count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
-            desired[..count].copy_from_slice(&self.stream_ring[..count]);
-            // The BFS ring is prefetch; portal visibility is correctness. Whatever
-            // the renderer can currently see MUST be resident even when the graph
-            // ring and the geometric visibility disagree, or it draws nothing.
-            let visible = self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS);
-            let mut i = 0usize;
-            while i < visible && count < STREAMED_ROOM_SLOT_COUNT {
-                let room = self.portal_visibility.rooms[i].room;
-                if room != INVALID_ROOM_INDEX && !room_requested(room, &desired, count) {
-                    desired[count] = room;
-                    count += 1;
-                }
-                i += 1;
-            }
+            i += 1;
         }
-        // Latch the early-out ONLY when residency fully settled. While the level
-        // is still streaming in batch by batch, leave the root invalid so we keep
-        // planning the next batch each tick. Returns settled so the bootstrap
-        // preloader knows when the whole set is resident.
-        let settled = unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
-        unsafe {
-            LAST_RESIDENCY_ROOT = if settled {
-                self.room_index
-            } else {
-                INVALID_ROOM_INDEX
-            };
-        }
-        settled
+        unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
     }
 
     #[cfg(feature = "cd-stream-bench")]
     fn bootstrap_streamed_room_window(&mut self) {
-        // Preload the entire desired residency set before gameplay starts, so no
-        // room first-loads (and spikes) mid-play. `update_room_residency` only
-        // schedules one batch per call (stream_load_batch_count) and returns true
-        // once residency has fully settled, so interleave it with the pump:
-        // reconcile schedules the next batch, the pump drains the in-flight one,
-        // repeat until settled or the bootstrap budget is spent.
         let mut pumps = 0usize;
-        while pumps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit {
-            if self.update_room_residency() {
-                break;
-            }
-            while streamed_room_stream_active()
-                && pumps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit
-            {
-                if self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick) {
-                    self.load_active_room_window();
-                }
-                pumps += 1;
+        while pumps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit && streamed_room_stream_active()
+        {
+            if self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick) {
+                self.load_active_room_window();
             }
             pumps += 1;
         }
@@ -7940,12 +7877,6 @@ static mut ROOM_MATERIAL_POOL: [ResidentRoomMaterials; STREAMED_ROOM_SLOT_COUNT]
         materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
         count: 0,
     }; STREAMED_ROOM_SLOT_COUNT];
-
-/// Refactor C: current room the residency desired-set was last reconciled for.
-/// Once it matches and the scheduler is idle, the desired-set cannot have
-/// changed, so the per-tick re-plan is skipped (see `update_room_residency`).
-#[cfg(feature = "cd-stream-bench")]
-static mut LAST_RESIDENCY_ROOT: RoomIndex = INVALID_ROOM_INDEX;
 
 #[cfg(feature = "cd-stream-bench")]
 fn store_room_materials(
