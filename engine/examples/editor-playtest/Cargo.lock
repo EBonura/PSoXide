@@ -37,6 +37,7 @@ name = "psx-engine"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
+ "psx-font",
  "psx-gpu",
  "psx-gte",
  "psx-level",

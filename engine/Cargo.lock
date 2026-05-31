@@ -70,6 +70,7 @@ name = "psx-engine"
 version = "0.1.0"
 dependencies = [
  "psx-asset",
+ "psx-font",
  "psx-gpu",
  "psx-gte",
  "psx-level",
@@ -79,6 +80,17 @@ dependencies = [
  "psx-spu",
  "psx-vram",
  "trybuild",
+]
+
+[[package]]
+name = "psx-font"
+version = "0.1.0"
+dependencies = [
+ "psx-gpu",
+ "psx-hw",
+ "psx-io",
+ "psx-math",
+ "psx-vram",
 ]
 
 [[package]]

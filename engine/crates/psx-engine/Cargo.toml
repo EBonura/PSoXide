@@ -11,6 +11,7 @@ description = "PSoXide engine layer. Scene/App framework + canonical unit types 
 # resolves cleanly when consumed from outside its native workspace
 # (the editor frontend pulls it in for the 3D-viewport host renderer).
 psx-asset = { path = "../../../sdk/crates/psx-asset" }
+psx-font  = { path = "../../../sdk/crates/psx-font" }
 psx-gpu   = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte   = { path = "../../../sdk/crates/psx-gte" }
 psx-level = { path = "../psx-level" }
