@@ -650,7 +650,13 @@ pub fn build_portal_visibility_with_room_bounds<
             {
                 continue;
             }
-            if !portal_front_faces_camera(portal, camera) {
+            let is_vertical = portal.kind == 1;
+            // A vertical portal whose hole the camera is standing in stays
+            // open across the plane: while climbing/descending the eye
+            // crosses the portal Y, and the plain front-face test would
+            // otherwise back-face it and cull the linked room mid-step.
+            let in_hole = is_vertical && camera_in_vertical_portal_footprint(portal, camera);
+            if !in_hole && !portal_front_faces_camera(portal, camera) {
                 out.stats.reject_backface = out.stats.reject_backface.saturating_add(1);
                 continue;
             }
@@ -664,7 +670,6 @@ pub fn build_portal_visibility_with_room_bounds<
             // frustum (the linked room is an implicit neighbour through the
             // hole). When the camera does look through the hole at an angle
             // the quad has area and we use the tighter clipped frustum.
-            let is_vertical = portal.kind == 1;
             let child_clip = clipped_portal_clip(portal, camera, frustum);
             let usable_clip = match child_clip {
                 Some(clip) if !portal_clip_is_tiny(clip, camera.min_portal_width_q12.max(0)) => {
@@ -957,6 +962,25 @@ fn portal_front_faces_camera(
         .saturating_add(dy.saturating_mul(portal.normal_y as i32))
         .saturating_add(dz.saturating_mul(portal.normal_z as i32));
     dot >= 0
+}
+
+/// Whether the camera's XZ sits within a vertical (floor/ceiling) portal's
+/// rectangular footprint. While climbing/descending a hole the eye crosses
+/// the portal plane; the plain front-face test would then back-face the
+/// portal and cull the linked room mid-transition. When the camera is
+/// inside the opening's footprint it is physically in the hole, so the
+/// linked room must stay visible regardless of which side of the plane the
+/// eye is on. Only meaningful for axis-aligned horizontal quads (all four
+/// `vertex_y` equal), which floor-stack portals are.
+fn camera_in_vertical_portal_footprint(
+    portal: LevelRoomPortalRecord,
+    camera: PortalVisibilityCamera,
+) -> bool {
+    let min_x = portal.vertex_x.iter().copied().min().unwrap_or(0);
+    let max_x = portal.vertex_x.iter().copied().max().unwrap_or(0);
+    let min_z = portal.vertex_z.iter().copied().min().unwrap_or(0);
+    let max_z = portal.vertex_z.iter().copied().max().unwrap_or(0);
+    camera.x >= min_x && camera.x <= max_x && camera.z >= min_z && camera.z <= max_z
 }
 
 fn clipped_portal_clip(
@@ -1677,6 +1701,42 @@ mod tests {
 
         assert_eq!(out.visible_room_mask(), 0b01, "only the current room");
         assert_eq!(out.stats.reject_backface, 1);
+    }
+
+    /// Climbing stairs through a hole: as the eye rises past the portal
+    /// plane while still INSIDE the hole footprint, the linked room must
+    /// stay visible (you're physically in the opening). The plain
+    /// front-face test would back-face the up-portal the instant the
+    /// camera crosses the plane, making the upper room vanish mid-climb.
+    #[test]
+    fn vertical_portal_stays_visible_in_hole_across_plane() {
+        let rooms = [room(0, 0, 1), room(1, 1, 0)];
+        // Up-portal hole at y=2048, footprint x[-1024,1024] z[1024,3072].
+        let up = LevelRoomPortalRecord {
+            source_room: RoomIndex(0),
+            destination_room: RoomIndex(1),
+            kind: 1,
+            normal_x: 0,
+            normal_y: -1,
+            normal_z: 0,
+            vertex_x: [-1024, 1024, 1024, -1024],
+            vertex_y: [2048, 2048, 2048, 2048],
+            vertex_z: [1024, 1024, 3072, 3072],
+        };
+        let portals = [up];
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+        // Camera just ABOVE the plane (y=2240) but INSIDE the hole
+        // footprint (x=0, z=2048): mid-climb through the opening.
+        let camera =
+            PortalVisibilityCamera::new(0, 2240, 2048, 0, 4096, 0, 4096, 64, 16_384, 4096, 3072, 4);
+
+        build_portal_visibility(&rooms, &portals, RoomIndex(0), camera, 4, &mut out);
+
+        assert_eq!(
+            out.visible_room_mask(),
+            0b11,
+            "upper room must stay visible while climbing through the hole"
+        );
     }
 
     #[test]
