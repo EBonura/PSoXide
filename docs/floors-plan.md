@@ -94,6 +94,41 @@ render agree. Then: stamp/track the floor a node belongs to explicitly; generate
 portal quads from the floor links; entities move with their floor because the floor is
 where its elevation says.
 
+### FIX PROGRESS (full-fix path, user-approved)
+
+- BUG 1 (wrong spawn floor): FIXED + verified. Y is a placement DEFAULT (2.892857 sectors,
+  identical across demo7/demo10/default/demo11), so a node's floor can't be inferred from
+  Y. Added explicit `SceneNode::floor: usize` (#[serde(default)]=0=ground); placement sets
+  it = active_floor; `chunk_for_node` binds by it. REVERTED the unsound Y-elevation
+  placement stamp and the "closest elevation" binding from the prior turn. demo11 now cooks
+  SPAWN room=0 (origin_y=0). Test: `entities_bind_to_their_explicit_floor` (two markers at
+  identical transforms, only `floor` differs).
+- BUG 2 (no vertical portals): FIXED + verified. `auto_wire_floor_stack_portals` emits a
+  reciprocal up(-Y)/down(+Y) `PlaytestRoomPortal` (kind=1) per shared cell at the boundary
+  elevation, merged into `room_portals`. demo11: 72 portals (36 cells × 2). Test extended
+  `floors_cook_to_stacked_rooms_with_auto_links` (vertical, reciprocal, planar-in-Y).
+  FOLLOW-UP: per-cell quads (36 pairs); could merge contiguous cells into one quad like the
+  wall-portal path for perf / cleaner portal view.
+- BUG 3 (editor render: player marker floats / "moves" on floor switch): FIXED + visually
+  verified (headless `dump-editor-preview`). Two changes in editor_preview.rs: (a)
+  `walk_entities` now uses `floor_anchored_node_room_local_origin` so the marker sits on the
+  floor surface like the model (was raw translation.y=5184, floating); (b) `preview_room_grids`
+  now returns `PreviewFloor { room, grid, y_offset, active }` and emits EVERY floor of the
+  active room at its real elevation (`grid.elevation - base.elevation`), threaded into
+  `walk_room` via off3/off4 height offsets — the whole stack renders at true Y, so switching
+  the active floor no longer shifts the world. Edit overlays (selection/hover/paint) gate on
+  the active floor (`active || y_offset==0`) so they stay aligned to floor-local geometry.
+  Removed the now-dead floor-below ghost (`walk_room_ghost`/`GHOST_FLOOR_SHADE`) — the real
+  floor below renders instead. Added a `--active-floor` flag to the dump CLI for inspection.
+  Verified: demo11 dumps show floor 0 and floor 1 stacked with a real vertical gap.
+  REMAINING (not exercised by demo11, all entities on floor 0): entities/props/lights on
+  UPPER floors still render at floor-local Y (not +y_offset) — the walks position via the
+  per-floor grid but don't add the elevation. Thread y_offset through walk_entities/
+  image/box props/model_instances/light_gizmos when stacked-floor entities are authored.
+- KNOWN EDGE: cook's `floor_anchored_node_chunk_local_position` samples the BASE grid's
+  surface for all entities; an entity bound to floor N>0 would get floor 0's surface Y.
+  Fine for demo11 (player on floor 0). Fix when stacked-floor entities are exercised.
+
 ## Status
 
 - Per-floor entities/lights (post-selection-fix): DONE (but see demo11 bug 1 — the
