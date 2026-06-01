@@ -1632,6 +1632,12 @@ pub struct LevelUiNodeRecord {
     pub option: u16,
     /// Runtime flags.
     pub flags: u16,
+    /// Font selector for `Label` / `Button` text: an index into the font
+    /// table the caller passes to the UI renderer. `0` is the default font;
+    /// an index past the end of the table falls back to font `0`. Lets a
+    /// scene mix, e.g., a large title font and a small body font. Ignored by
+    /// non-text node kinds.
+    pub font: u8,
 }
 
 /// Direction a focus move travels across a menu's focusable rects.
