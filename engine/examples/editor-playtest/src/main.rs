@@ -1313,19 +1313,6 @@ fn emit_player_map_debug(
         telemetry::counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
         encode_debug_map_position(camera_global.y),
     );
-    // TEMP DIAGNOSTIC: player feet absolute (global) Y. `position` is the
-    // current-room-local player feet; lift by the room's origin_y so it can
-    // be compared against the upper floor's elevation (the up-switch test).
-    {
-        let feet_global_y = ROOMS
-            .get(room.to_usize())
-            .map(|record| position.y.saturating_add(room_origin_y(record)))
-            .unwrap_or(position.y);
-        telemetry::counter(
-            telemetry::counter::DBG_PLAYER_GLOBAL_Y_BIASED,
-            encode_debug_map_position(feet_global_y),
-        );
-    }
     telemetry::counter(
         telemetry::counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
         encode_debug_map_position(camera_global.z),
