@@ -53,6 +53,26 @@ portals), and the runtime `floor_above_room`/`floor_below_room` consumption
 (`editor-playtest/src/main.rs:6235`). The new work is the floors dimension, the up/down
 editor with ghosting, and the cook auto-wiring.
 
+## RUNTIME: upper room drawn but at Y=0 (round 4) — ROOT CAUSE FOUND
+
+demo11 overlay showed `vis 2` and counter-log `drawn=3` (both rooms resident AND drawn),
+yet the upper room is invisible in-game. NOT a streaming/visibility/draw-gate bug — those
+are all correct now. ROOT CAUSE: the runtime never applies a room's `origin_y` at render
+time. `ActiveRuntimeRoom` has `offset_x`/`offset_z` but NO `offset_y`;
+`local_to_global_room_point` (main.rs ~9547) passes `point.y` through unchanged;
+`camera_for_room` (~9569) subtracts `offset_x`/`offset_z` from the camera but not Y. So the
+cooked `origin_y=3584` is ignored and the upper room renders stacked ON TOP of floor 0 at
+Y=0 (overlapping/z-fighting), instead of a storey up. The whole vertical separation
+collapses at draw.
+
+FIX (editor-playtest, the runtime — shared with the streaming lane): add `offset_y` to
+`ActiveRuntimeRoom`, compute it in `with_current_room_offsets` as
+`record.origin_y - current_record.origin_y` (origin_y is ABSOLUTE, floors don't shift with
+the current room, unlike x/z which are relative), and subtract it in `camera_for_room` so
+the room's geometry lands at its real elevation relative to the camera. Mirror x/z exactly
+at the ~15 offset_x/_z consumer sites. Cook + visibility already correct; this is purely
+the render transform.
+
 ## SIMS-STYLE EDITOR FLOOR VIEW + selection fix (user issues round 3)
 
 User on floor 2/3 still saw the player duplicated AND selection landing on the floor
