@@ -131,7 +131,7 @@ pub fn draw_scene(
         let (x, y, width, height) = node_absolute_rect(nodes, index);
         let is_focused = focused == Some(index);
         match node.kind {
-            LevelUiNodeKind::Canvas | LevelUiNodeKind::Group => {}
+            LevelUiNodeKind::Canvas | LevelUiNodeKind::Group | LevelUiNodeKind::Music => {}
             LevelUiNodeKind::Rect => {
                 draw_rect(x, y, width as i16, height as i16, rgb(node.color));
             }
