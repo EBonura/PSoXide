@@ -133,6 +133,7 @@ use generated::{
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
     ROOM_VISIBILITY, UI_NODES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
+use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
@@ -285,6 +286,13 @@ const COLLISION_DEBUG_BUTTON: u16 = button::L3;
 const COLLISION_DEBUG_SEGMENTS: usize = 8;
 const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
 const FLOOR_LINK_CROSS_EPSILON: i32 = 32;
+/// Dead-band (engine units) below a floor boundary before a downward room
+/// switch fires. Climbing up lands the player AT the boundary; without a
+/// margin the down-switch would immediately fire and the player would
+/// thrash between floors. Must exceed `FLOOR_LINK_CROSS_EPSILON` (the
+/// up-switch slack) so the up and down conditions can't both hold at the
+/// seam; well under a floor's height so a real fall still registers.
+const FLOOR_LINK_SWITCH_HYSTERESIS: i32 = 256;
 const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
 
 const CAMERA_Y_OFFSET: i32 = 1100;
@@ -1305,6 +1313,19 @@ fn emit_player_map_debug(
         telemetry::counter::ROOM_CAMERA_GLOBAL_Y_BIASED,
         encode_debug_map_position(camera_global.y),
     );
+    // TEMP DIAGNOSTIC: player feet absolute (global) Y. `position` is the
+    // current-room-local player feet; lift by the room's origin_y so it can
+    // be compared against the upper floor's elevation (the up-switch test).
+    {
+        let feet_global_y = ROOMS
+            .get(room.to_usize())
+            .map(|record| position.y.saturating_add(room_origin_y(record)))
+            .unwrap_or(position.y);
+        telemetry::counter(
+            telemetry::counter::DBG_PLAYER_GLOBAL_Y_BIASED,
+            encode_debug_map_position(feet_global_y),
+        );
+    }
     telemetry::counter(
         telemetry::counter::ROOM_CAMERA_GLOBAL_Z_BIASED,
         encode_debug_map_position(camera_global.z),
@@ -3496,8 +3517,21 @@ impl Playtest {
 }
 
 impl Scene for Playtest {
-    fn init(&mut self, _ctx: &mut Ctx) {
+    /// Lend the uploaded HUD font to the flow driver so front-end UI
+    /// scenes (the cooked Main Menu) draw their labels and buttons with
+    /// the same glyphs the in-game HUD uses.
+    fn ui_font(&self) -> Option<&FontAtlas> {
+        self.font.as_ref()
+    }
+
+    /// Upload the font at boot (before any state is entered) so a front-end
+    /// menu scene -- which renders before gameplay `init` runs -- has glyphs
+    /// to draw its labels and buttons with.
+    fn load_shared_assets(&mut self, _ctx: &mut Ctx) {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
+    }
+
+    fn init(&mut self, _ctx: &mut Ctx) {
         self.shadow_material = upload_shadow_texture();
         self.particle_material = Some(upload_particle_texture());
 
@@ -4596,14 +4630,35 @@ impl Scene for Playtest {
         }
 
         if self.character.is_some() {
+            // The shared UI_NODES pool now holds front-end menu scenes too, so
+            // draw only the HUD scene's slice as the in-game overlay.
+            let (hud_first, hud_count) = hud_scene_range();
             draw_player_hud(
                 UI_NODES,
+                hud_first,
+                hud_count,
                 self.font.as_ref(),
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );
         }
     }
+}
+
+/// Node-pool range `(first, count)` of the cooked "HUD" UI scene, so the
+/// in-game overlay draws only the HUD and not the front-end menu scenes that
+/// now share the same `UI_NODES` pool. Falls back to the whole pool when no
+/// scene is named "HUD".
+fn hud_scene_range() -> (usize, usize) {
+    let mut i = 0usize;
+    while i < UI_SCENES.len() {
+        let scene = &UI_SCENES[i];
+        if scene.name == "HUD" {
+            return (scene.node_first as usize, scene.node_count as usize);
+        }
+        i += 1;
+    }
+    (0, UI_NODES.len())
 }
 
 #[cfg(all(
@@ -6243,21 +6298,42 @@ impl Playtest {
     fn current_floor_link_switch_target(&self) -> Option<RoomIndex> {
         let sector = self.current_floor_link_sector()?;
         let player_y = self.motor.position().y;
+        let current_origin_y = ROOMS
+            .get(self.room_index.to_usize())
+            .map(room_origin_y)
+            .unwrap_or(0);
+        // The motor's Y is current-room-local; lift to global so it can be
+        // compared against another room's absolute elevation.
+        let global_y = player_y.saturating_add(current_origin_y);
 
-        if let Some(room) = sector.floor_below_room() {
-            let crosses = !sector.has_floor()
-                || player_y
-                    < min_i32x4(sector.floor_heights()).saturating_sub(FLOOR_LINK_CROSS_EPSILON);
-            if crosses && self.can_switch_to_floor_link_room(room) {
+        // Switch floors using a hysteresis band around the boundary
+        // between the two rooms (the higher of the two origins). Without
+        // it the player thrashes between rooms at the seam: climbing up to
+        // the boundary satisfies "below me is a hole" (down) and "I've
+        // reached the upper floor" (up) on the same frame. Requiring the
+        // player to clear the boundary by FLOOR_LINK_SWITCH_HYSTERESIS in
+        // the travel direction makes the transition one-way and stable.
+        if let Some(room) = sector.floor_above_room() {
+            let boundary = ROOMS.get(room.to_usize()).map(room_origin_y).unwrap_or(0);
+            // Climbed clearly up to / past the upper floor's elevation.
+            if global_y >= boundary.saturating_sub(FLOOR_LINK_CROSS_EPSILON)
+                && self.can_switch_to_floor_link_room(room)
+            {
                 return Some(room);
             }
         }
 
-        if let Some(room) = sector.floor_above_room() {
-            let crosses = sector.has_ceiling()
-                && player_y
-                    > max_i32x4(sector.ceiling_heights()).saturating_add(FLOOR_LINK_CROSS_EPSILON);
-            if crosses && self.can_switch_to_floor_link_room(room) {
+        if let Some(room) = sector.floor_below_room() {
+            // Boundary is THIS room's own floor elevation; the lower room
+            // sits below it. Only drop down when the player has descended
+            // CLEARLY below the boundary (by the hysteresis margin). This
+            // is what stops climb-thrash: arriving at the boundary from
+            // below (global_y ~= boundary) does NOT re-trigger a drop, even
+            // on the floorless hole cell you climbed through -- you must
+            // actually fall to leave.
+            let boundary = current_origin_y;
+            let descended = global_y <= boundary.saturating_sub(FLOOR_LINK_SWITCH_HYSTERESIS);
+            if descended && self.can_switch_to_floor_link_room(room) {
                 return Some(room);
             }
         }
@@ -9113,6 +9189,13 @@ fn room_origin_z(record: &LevelRoomRecord) -> i32 {
     record.origin_z.saturating_mul(record.sector_size)
 }
 
+/// Vertical origin of a room in engine units. Unlike X/Z (`origin_*` in
+/// sectors), `origin_y` is already stored in engine units, so it is used
+/// directly. Drives Y rebasing across room transitions for stacked floors.
+fn room_origin_y(record: &LevelRoomRecord) -> i32 {
+    record.origin_y
+}
+
 #[derive(Copy, Clone)]
 struct ActiveRoomView {
     position: RoomPoint,
@@ -9563,7 +9646,7 @@ fn local_to_global_room_point(room: RoomIndex, point: RoomPoint) -> RoomPoint {
     };
     RoomPoint::new(
         point.x.saturating_add(room_origin_x(record)),
-        point.y,
+        point.y.saturating_add(room_origin_y(record)),
         point.z.saturating_add(room_origin_z(record)),
     )
 }
@@ -9574,7 +9657,7 @@ fn global_to_local_room_point(room: RoomIndex, point: RoomPoint) -> RoomPoint {
     };
     RoomPoint::new(
         point.x.saturating_sub(room_origin_x(record)),
-        point.y,
+        point.y.saturating_sub(room_origin_y(record)),
         point.z.saturating_sub(room_origin_z(record)),
     )
 }
@@ -13198,5 +13281,9 @@ fn main() -> ! {
             .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual),
         ..Config::default()
     };
-    App::run(config, &mut scene);
+    // Drive the cooked game flow (front-end UI scenes + gameplay) rather than
+    // booting straight into gameplay, so an authored menu shows first and
+    // `GAME_FLOW.entry` (set from the project's boot target) decides where
+    // play begins.
+    App::run_with_flow(config, &GAME_FLOW, UI_SCENES, UI_NODES, OPTIONS, &mut scene);
 }

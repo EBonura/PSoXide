@@ -4474,7 +4474,12 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
             let _ = world.submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
                 triangles,
                 [verts[o[0]], verts[o[1]], verts[o[2]], verts[o[3]]],
-                [uv_words[o[0]], uv_words[o[1]], uv_words[o[2]], uv_words[o[3]]],
+                [
+                    uv_words[o[0]],
+                    uv_words[o[1]],
+                    uv_words[o[2]],
+                    uv_words[o[3]],
+                ],
                 [colors[o[0]], colors[o[1]], colors[o[2]], colors[o[3]]],
                 material.gouraud_packet,
                 opts,

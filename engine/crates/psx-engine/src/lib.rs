@@ -103,8 +103,8 @@ pub use render3d::{
     LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation,
     ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector, TexturedModelGeometry,
     TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera,
-    WorldProjection,
-    WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+    WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions,
+    WorldTriCommand,
 };
 pub use scheduler::{
     collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,
