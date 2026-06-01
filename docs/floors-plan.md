@@ -53,6 +53,20 @@ portals), and the runtime `floor_above_room`/`floor_below_room` consumption
 (`editor-playtest/src/main.rs:6235`). The new work is the floors dimension, the up/down
 editor with ghosting, and the cook auto-wiring.
 
+## RUNTIME: upper room vanishes mid-climb (round 5) — FIXED
+
+After the offset_y + stair-step fixes, climbing demo11's stairs works and the upper room
+shows — but it DISAPPEARS as the eye nears/crosses the portal plane on the top steps.
+Cause: `portal_front_faces_camera` for the up-portal (normal [0,-1,0], plane Y=elev)
+back-faces once `camera.y >= plane`, so crossing the portal Y while climbing culls the
+upper room from the visibility BFS (which roots at the still-current lower room). FIX
+(portal_visibility.rs): `camera_in_vertical_portal_footprint` — when the camera's XZ is
+inside the hole's rectangle, a vertical portal stays admitted across the plane regardless
+of front-face (you're physically in the opening). Outside the footprint the front-face test
+still applies, so the sealed-slab reject (`vertical_portal_backface_still_rejected`, camera
+above plane but off the hole) is preserved. Red→green test
+`vertical_portal_stays_visible_in_hole_across_plane`. psx-level 39 green.
+
 ## RUNTIME: upper room drawn but at Y=0 (round 4) — ROOT CAUSE FOUND
 
 demo11 overlay showed `vis 2` and counter-log `drawn=3` (both rooms resident AND drawn),
