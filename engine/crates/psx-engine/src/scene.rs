@@ -12,6 +12,7 @@
 //! to add determinism/replay hooks later (record `Ctx.pad` during
 //! update, replay without re-rendering, etc).
 
+use psx_font::FontAtlas;
 use psx_gpu::framebuf::FrameBuffer;
 use psx_pad::{button, PadState};
 
@@ -94,6 +95,19 @@ impl Ctx {
 /// inline (no globals needed). All methods take `&mut Ctx` so the
 /// scene can read pad state and draw into the framebuffer.
 pub trait Scene {
+    /// Called once at boot, before any flow state is entered, for assets
+    /// the front-end UI shares with gameplay -- chiefly the [`ui_font`] atlas
+    /// menus draw their text with. It runs even when the game boots into a
+    /// UI scene (a title/menu), where full gameplay [`init`] is deferred
+    /// until play actually starts, so the menu would otherwise have no font.
+    /// Default is a no-op; a gameplay-only scene can upload everything in
+    /// [`init`] as before.
+    ///
+    /// [`ui_font`]: Scene::ui_font
+    /// [`init`]: Scene::init
+    #[allow(unused_variables)]
+    fn load_shared_assets(&mut self, ctx: &mut Ctx) {}
+
     /// Called once, before the main loop starts. Use for asset
     /// uploads (font atlas, textures), SPU sample loads, state
     /// initialisation. Default is a no-op.
@@ -113,4 +127,15 @@ pub trait Scene {
     ///
     /// [`update`]: Scene::update
     fn render(&mut self, ctx: &mut Ctx);
+
+    /// Font the flow driver uses to draw front-end UI scene text (menu
+    /// labels and buttons). The gameplay scene owns the font atlas it
+    /// uploads in [`init`](Scene::init), so it lends it here for the menu
+    /// states to share rather than uploading a second copy. The default
+    /// returns `None`, which skips UI text -- correct for a gameplay-only
+    /// scene with no menus. Override to return your uploaded atlas.
+    #[inline]
+    fn ui_font(&self) -> Option<&FontAtlas> {
+        None
+    }
 }
