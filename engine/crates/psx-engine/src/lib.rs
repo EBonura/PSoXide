@@ -62,6 +62,7 @@ pub mod lighting;
 pub mod movement;
 pub mod render;
 pub mod render3d;
+pub mod sample_menu;
 pub mod scene;
 pub mod scheduler;
 pub mod sfx;
