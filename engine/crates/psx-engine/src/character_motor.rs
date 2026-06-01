@@ -98,6 +98,12 @@ pub struct CharacterCollisionRoom<'room> {
     /// Offset from the motor's current room origin to this room's
     /// origin, in engine units.
     pub offset_z: i32,
+    /// Vertical offset from the motor's current room elevation to this
+    /// room's, in engine units. Stacked floors are separate collision
+    /// rooms at distinct `origin_y`; this lets the motor see an upper
+    /// floor's surface at its true height (so you can step up onto it)
+    /// instead of collapsed to the current room's elevation.
+    pub offset_y: i32,
 }
 
 impl<'room> CharacterCollisionRoom<'room> {
@@ -106,6 +112,7 @@ impl<'room> CharacterCollisionRoom<'room> {
         room: None,
         offset_x: 0,
         offset_z: 0,
+        offset_y: 0,
     };
 
     /// Build a collision room with a current-space origin offset.
@@ -114,6 +121,7 @@ impl<'room> CharacterCollisionRoom<'room> {
             room: Some(RuntimeCollisionRoom::Runtime(room)),
             offset_x,
             offset_z,
+            offset_y: 0,
         }
     }
 
@@ -127,7 +135,15 @@ impl<'room> CharacterCollisionRoom<'room> {
             room: Some(room),
             offset_x,
             offset_z,
+            offset_y: 0,
         }
+    }
+
+    /// Set the vertical (elevation) offset, for stacked-floor collision
+    /// rooms. Builder form keeps the common offset_y=0 constructors terse.
+    pub const fn with_offset_y(mut self, offset_y: i32) -> Self {
+        self.offset_y = offset_y;
+        self
     }
 }
 
@@ -1032,7 +1048,9 @@ fn floor_height_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -
             x.saturating_sub(collision_room.offset_x),
             z.saturating_sub(collision_room.offset_z),
         ) {
-            return Some(height);
+            // Floor height is room-local; lift it back into the motor's
+            // current space so a stacked floor reports its true elevation.
+            return Some(height.saturating_add(collision_room.offset_y));
         }
     }
     None
@@ -1074,7 +1092,7 @@ fn body_hits_solid_wall_in_rooms(
         }
         let local_position = RoomPoint::new(
             position.x.saturating_sub(collision_room.offset_x),
-            position.y,
+            position.y.saturating_sub(collision_room.offset_y),
             position.z.saturating_sub(collision_room.offset_z),
         );
         return body_hits_solid_wall(room.collision(), local_position, radius, height);
@@ -1841,6 +1859,30 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(512, 0, 800));
         assert!(!frame.moved);
         assert!(frame.blocked);
+    }
+
+    #[test]
+    fn stacked_floor_reports_elevation_in_current_space() {
+        // A collision room offset up by 3584 engine units (an upper floor)
+        // must report its floor at the current-space height 3584, not its
+        // room-local 0. Without the offset_y handling the motor would see
+        // the upper floor at Y=0 and never let the player step up onto it.
+        let bytes = flat_floor_world();
+        let upper = RuntimeRoom::from_bytes(&bytes).expect("upper room parses");
+        let rooms = [CharacterCollisionRoom::new(upper, 0, 0).with_offset_y(3584)];
+        // Query a cell inside the room footprint.
+        let h = floor_height_at_rooms(&rooms, 512, 512);
+        assert_eq!(h, Some(3584), "upper floor must report its true elevation");
+    }
+
+    #[test]
+    fn ground_floor_unaffected_by_zero_offset() {
+        // offset_y defaults to 0, so a ground room is byte-identical to
+        // before: floor at room-local 0.
+        let bytes = flat_floor_world();
+        let ground = RuntimeRoom::from_bytes(&bytes).expect("ground room parses");
+        let rooms = [CharacterCollisionRoom::new(ground, 0, 0)];
+        assert_eq!(floor_height_at_rooms(&rooms, 512, 512), Some(0));
     }
 
     #[test]
