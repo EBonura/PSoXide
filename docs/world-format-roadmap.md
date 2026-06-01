@@ -1,8 +1,9 @@
 # `.psxw` Format Roadmap
 
-The active world wire format is **VERSION = 3**. It's the shape
-`psxed-project` cooks and the main shape `psx_asset::World::from_bytes`
-accepts; the parser also keeps v1/v2 compatibility for older blobs. The
+The active world wire format is **VERSION = 5** (`psxed_format::world::VERSION`).
+It's the shape `psxed-project` cooks and the main shape
+`psx_asset::World::from_bytes` accepts; the parser also keeps v1-v4
+compatibility for older blobs. The
 compact format sketched below is **not in `psxed-format`** as Rust types
 -- it lives here, in docs, until both producer and consumer support it
 together.
@@ -21,7 +22,7 @@ runtime. Speculative records that meet none of those points
 clutter that contract and trick callers into thinking a future
 format already works. They go in this doc instead.
 
-## Active format -- VERSION 3
+## Active format -- VERSION 5
 
 ```
 AssetHeader               12 B
@@ -153,14 +154,14 @@ because the constraints are similar. Mapping:
 
 ## Migration plan (when it lands)
 
-1. Author the cooker side of the compact emit. Bump VERSION to 2
+1. Author the cooker side of the compact emit. Bump VERSION to 6
    on the wire only when the cooker can actually produce it.
 2. Author the runtime parser. Add tests that round-trip cooked
    blobs end-to-end.
 3. Add public Rust types for the new records to `psxed-format`
    only after the round-trip test passes.
-4. Keep the v1 parser path until at least one cooker still emits
-   v1 -- version negotiation should be explicit, not implicit.
+4. Keep the older parser paths until no cooker still emits them;
+   version negotiation should be explicit, not implicit.
 5. Retire v1 only after the editor stops emitting it.
 
 Until step 3 lands, this document is the contract.
