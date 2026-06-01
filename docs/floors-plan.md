@@ -53,6 +53,32 @@ portals), and the runtime `floor_above_room`/`floor_below_room` consumption
 (`editor-playtest/src/main.rs:6235`). The new work is the floors dimension, the up/down
 editor with ghosting, and the cook auto-wiring.
 
+## RUNTIME: can't cross to the upper floor (round 6) — DIAGNOSED via user tape
+
+Replayed the user's recorded tape (`<config>/editor/playtest_tapes/demo11.pxtape`, PXITAPE1)
+headless via `--input-tape` + `--counter-log`. Result: active room mask stays 1 (room 0)
+the whole climb — the room switch into room 1 NEVER fires. Player ends visually atop the
+stairs but still "in" room 0, blocked from entering room 1.
+
+Cooked links are fine: ALL 36 room-0 cells have `above=Some(1)`. So the bug is the SWITCH,
+two coordinated problems in editor-playtest/main.rs:
+
+1. `current_floor_link_switch_target` up-branch requires `sector.has_ceiling() && player_y >
+   ceiling_top + EPS`. Climbing stairs tops out AT the upper floor's elevation (3584), resting
+   ON the step, never strictly above the room-0 ceiling; and an open stairwell sector has no
+   ceiling at all, so `has_ceiling()` is false and the branch never fires. Wrong model for
+   stairs. Correct: switch up to `above_room` when `player_y >= ROOMS[above_room].origin_y -
+   EPS` over a linked cell (you've climbed to the upper floor's level).
+2. `local_to_global_room_point` / `global_to_local_room_point` translate X/Z only, NOT Y. So
+   even if the switch fired, the player's Y isn't rebased into the new room's local frame
+   (room geometry is floor-local; origin_y is applied as a render/collision offset). The
+   player would land origin_y units above room 1's floor and fall. Y rebasing must subtract
+   `origin_y` on enter (and the reciprocal on the global mapping).
+
+Both are runtime changes in the shared main.rs (co-mingled with the other lane's HUD work).
+The Y-rebase touches ALL room transitions (horizontal portals too), so it needs care +
+regression on the existing flat-seam crossing.
+
 ## RUNTIME: upper room vanishes mid-climb (round 5) — FIXED
 
 After the offset_y + stair-step fixes, climbing demo11's stairs works and the upper room

@@ -6,6 +6,9 @@
 # engine examples share `/build/examples` as their MIPS target-dir;
 # committed source should never depend on a checked-in EXE.
 /build/
+
+# Runtime logs (e.g. the editor-playtest build log the frontend captures).
+/logs/
 Cargo.lock.orig
 *.swp
 *.swo

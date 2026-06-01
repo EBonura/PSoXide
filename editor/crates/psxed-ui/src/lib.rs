@@ -42,7 +42,8 @@ use psxed_project::streaming::{collect_scene_resource_use, SceneResourceUse};
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
     default_model_collision_radius_for_height, snap_height, CharacterControllerSettings,
-    ColliderShape, EditorCameraMode, EditorCameraState, EditorVisibilityState, FarVistaSettings,
+    BootTarget, ColliderShape, EditorCameraMode, EditorCameraState, EditorVisibilityState,
+    FarVistaSettings,
     GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId, OptionKind,
@@ -11044,6 +11045,31 @@ impl EditorWorkspace {
         }
     }
 
+    /// Set the project's boot target and mark it dirty so the next cook (and
+    /// the saved project) picks it up.
+    fn set_boot_target(&mut self, target: BootTarget) {
+        if self.project.boot != target {
+            self.project.boot = target;
+            self.mark_dirty();
+        }
+    }
+
+    /// Human-readable name of the current boot target for tooltips: "Gameplay"
+    /// or the bound UI scene's name (falling back to "Gameplay" if the bound
+    /// scene was deleted).
+    fn boot_target_label(&self) -> String {
+        match self.project.boot {
+            BootTarget::Gameplay => "Gameplay".to_string(),
+            BootTarget::UiScene(scene_id) => self
+                .project
+                .ui_scenes
+                .iter()
+                .find(|scene| scene.id == scene_id)
+                .map(|scene| scene.name.clone())
+                .unwrap_or_else(|| "Gameplay".to_string()),
+        }
+    }
+
     fn request_play_or_rebuild(&mut self, playtest_status: EditorPlaytestStatus) {
         self.resources_open = true;
         self.content_browser_view = ContentBrowserView::Debug;
@@ -11341,15 +11367,51 @@ impl EditorWorkspace {
         } else {
             "Play"
         };
-        if ui
-            .button(icons::label(icons::PLAY, play_label))
-            .on_hover_text(format!(
-                "Cook assets, build the runtime, and run it inside the 3D viewport. Shortcut: {}.",
-                command_shortcut_text("Enter")
-            ))
-            .clicked()
-        {
-            self.request_play_or_rebuild(playtest_status);
+        // Play is a split button: the main face runs the project; the attached
+        // chevron opens a "boot at" picker that only *changes the setting*
+        // (where Play will boot from), without starting the game. Zero item
+        // spacing inside this group makes the two faces read as one control.
+        let mut set_boot: Option<BootTarget> = None;
+        let current_boot = self.project.boot;
+        let boot_label = self.boot_target_label();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            if ui
+                .button(icons::label(icons::PLAY, play_label))
+                .on_hover_text(format!(
+                    "Cook, build, and run inside the 3D viewport. Boots at: {}. Shortcut: {}.",
+                    boot_label,
+                    command_shortcut_text("Enter")
+                ))
+                .clicked()
+            {
+                self.request_play_or_rebuild(playtest_status);
+            }
+            ui.menu_button(icons::text(icons::CHEVRON_DOWN, 12.0), |ui| {
+                ui.label(RichText::new("Boot at").color(STUDIO_TEXT_WEAK).small());
+                if ui
+                    .selectable_label(current_boot == BootTarget::Gameplay, "Gameplay")
+                    .clicked()
+                {
+                    set_boot = Some(BootTarget::Gameplay);
+                    ui.close_menu();
+                }
+                for scene in &self.project.ui_scenes {
+                    let target = BootTarget::UiScene(scene.id);
+                    if ui
+                        .selectable_label(current_boot == target, &scene.name)
+                        .clicked()
+                    {
+                        set_boot = Some(target);
+                        ui.close_menu();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Choose where Play boots: gameplay, or a UI scene (menu/title). Sets the boot point; does not start the game.");
+        });
+        if let Some(target) = set_boot {
+            self.set_boot_target(target);
         }
 
         if playtest_active
