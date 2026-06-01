@@ -271,6 +271,7 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
             bus.cdrom.debug_read_lba(),
             cmds.join(" "),
         );
+        eprintln!("[ours] cd-state: {}", bus.cdrom.debug_state(bus.cycles()));
         let istat = bus.irq_mut().stat();
         let imask = bus.irq_mut().mask();
         eprintln!("[ours] global IRQ: I_STAT={istat:08x} I_MASK={imask:08x} (active={:08x})", istat & imask);
@@ -286,9 +287,69 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
             }
         }
         eprintln!(
-            "[ours] regs: v0={:08x} v1={:08x} a0={:08x} a1={:08x} a2={:08x} a3={:08x} sp={:08x} ra={:08x}",
-            cpu.gpr(2), cpu.gpr(3), cpu.gpr(4), cpu.gpr(5), cpu.gpr(6), cpu.gpr(7), cpu.gpr(29), cpu.gpr(31),
+            "[ours] regs: v0={:08x} v1={:08x} a0={:08x} a1={:08x} a2={:08x} a3={:08x} gp={:08x} sp={:08x} ra={:08x}",
+            cpu.gpr(2), cpu.gpr(3), cpu.gpr(4), cpu.gpr(5), cpu.gpr(6), cpu.gpr(7), cpu.gpr(28), cpu.gpr(29), cpu.gpr(31),
         );
+        // Find what writes [$gp+OFFSET] (the flag a spin loop polls): scan
+        // RAM for `sw rt, OFFSET($gp)`. PSOXIDE_FIND_GP_STORE=0x74c
+        if let Ok(off_s) = std::env::var("PSOXIDE_FIND_GP_STORE") {
+            if let Ok(off) = u32::from_str_radix(off_s.trim_start_matches("0x"), 16) {
+                let want = 0xAF80_0000u32 | (off & 0xFFFF); // sw rt, off($gp), rt bits masked
+                let gp = cpu.gpr(28);
+                eprintln!(
+                    "[ours] scan `sw rt,0x{off:x}($gp)` gp=0x{gp:08x} flag@0x{:08x}:",
+                    gp.wrapping_add(off)
+                );
+                let mut found = 0;
+                let mut addr = 0x8000_0000u32;
+                while addr < 0x8020_0000 {
+                    if let Some(w) = bus.peek_instruction(addr) {
+                        if (w & 0xFFE0_FFFF) == want {
+                            let rt = (w >> 16) & 0x1F;
+                            eprintln!("  writer @0x{addr:08x}: {w:08x} (sw r{rt},0x{off:x}($gp))");
+                            found += 1;
+                        }
+                    }
+                    addr = addr.wrapping_add(4);
+                }
+                eprintln!("[ours]   {found} writer(s)");
+            }
+        }
+        // Find callers of a function at PSOXIDE_FIND_CALLERS=0xADDR: scan RAM
+        // for `jal ADDR` and for ADDR stored as a literal (callback pointer).
+        if let Ok(t_s) = std::env::var("PSOXIDE_FIND_CALLERS") {
+            if let Ok(target) = u32::from_str_radix(t_s.trim_start_matches("0x"), 16) {
+                let jal = 0x0C00_0000u32 | ((target >> 2) & 0x03FF_FFFF);
+                eprintln!("[ours] callers of 0x{target:08x} (jal={jal:08x} or literal ptr):");
+                let mut found = 0;
+                let mut addr = 0x8000_0000u32;
+                while addr < 0x8020_0000 {
+                    if let Some(w) = bus.peek_instruction(addr) {
+                        if w == jal {
+                            eprintln!("  jal  @0x{addr:08x}");
+                            found += 1;
+                        } else if w == target {
+                            eprintln!("  ptr  @0x{addr:08x}");
+                            found += 1;
+                        }
+                    }
+                    addr = addr.wrapping_add(4);
+                }
+                eprintln!("[ours]   {found} site(s)");
+            }
+        }
+        // Dump raw words at PSOXIDE_DIS=0xADDR (96 words) for hand-disasm.
+        if let Ok(addr_s) = std::env::var("PSOXIDE_DIS") {
+            if let Ok(start) = u32::from_str_radix(addr_s.trim_start_matches("0x"), 16) {
+                eprintln!("[ours] words @0x{start:08x}:");
+                for off in 0..96u32 {
+                    let addr = start + off * 4;
+                    if let Some(w) = bus.peek_instruction(addr) {
+                        eprintln!("    0x{addr:08x}: {w:08x}");
+                    }
+                }
+            }
+        }
         if let Some(&(top_pc, _)) = pcs.first() {
             let base = top_pc & !0x1F;
             eprintln!("[ours] spin-loop words @0x{base:08x}:");
