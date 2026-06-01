@@ -549,10 +549,12 @@ pub mod counter {
     pub const TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS: u16 = 215;
     /// Model submits that exceeded world-command storage.
     pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
+    /// TEMP DIAGNOSTIC: player feet absolute level Y, biased for unsigned transport.
+    pub const DBG_PLAYER_GLOBAL_Y_BIASED: u16 = 217;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 217;
+pub const COUNTER_COUNT: usize = 218;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

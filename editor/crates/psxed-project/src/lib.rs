@@ -9362,9 +9362,25 @@ pub struct ProjectDocument {
     /// actions bind to. Defaults to empty for legacy projects.
     #[serde(default)]
     pub options: Vec<OptionDef>,
+    /// Where the cooked game boots: straight into gameplay, or into one of
+    /// the authored UI scenes (a title/menu screen). Drives the cooked
+    /// `GameFlow.entry`. Defaults to [`BootTarget::Gameplay`] so existing
+    /// projects boot exactly as before.
+    #[serde(default)]
+    pub boot: BootTarget,
     /// Project resources.
     pub resources: Vec<Resource>,
     next_resource_id: u64,
+}
+
+/// Where a cooked project starts running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BootTarget {
+    /// Boot straight into the gameplay/level simulation (skip any menus).
+    #[default]
+    Gameplay,
+    /// Boot into the authored UI scene with this stable id (a title/menu).
+    UiScene(UiSceneId),
 }
 
 impl ProjectDocument {
@@ -9381,6 +9397,7 @@ impl ProjectDocument {
             scenes: vec![Scene::new("Main")],
             ui_scenes: default_ui_scenes(),
             options: Vec::new(),
+            boot: BootTarget::default(),
             resources: Vec::new(),
             next_resource_id: 1,
         }

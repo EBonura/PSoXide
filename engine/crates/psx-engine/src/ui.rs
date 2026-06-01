@@ -167,8 +167,7 @@ pub fn draw_scene(
                 // Resolve the bound option's live value to a fill
                 // proportion (num/den). An unbound / unknown / degenerate
                 // option yields 0/1 (empty track).
-                let (fill_num, fill_den) =
-                    slider_fill(node.option, options, option_value);
+                let (fill_num, fill_den) = slider_fill(node.option, options, option_value);
                 draw_slider(
                     x,
                     y,
@@ -551,7 +550,8 @@ fn draw_slider(
     // stays inside the track.
     let knob_w = (height + 2).clamp(3, width.max(3));
     let edge = x as i32 + fill_width as i32;
-    let knob_x = (edge - knob_w as i32 / 2).clamp(x as i32, x as i32 + width as i32 - knob_w as i32);
+    let knob_x =
+        (edge - knob_w as i32 / 2).clamp(x as i32, x as i32 + width as i32 - knob_w as i32);
     let knob_x = knob_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     draw_rect(knob_x, y - 1, knob_w, height + 2, knob);
 }
