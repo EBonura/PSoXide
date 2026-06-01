@@ -50,8 +50,8 @@ use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
     NodeKind, OptionId, OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument,
     PsxBlendMode, ResourceData, ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind,
-    UiTextAlign, UiValueBinding, WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT,
-    MAX_ROOM_BYTES, PHYSICS_WEIGHT_ONE_Q8,
+    UiSfxCue, UiTextAlign, UiValueBinding, WorldGrid, WorldStreamingSettings,
+    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES, PHYSICS_WEIGHT_ONE_Q8,
 };
 
 mod assets;
@@ -990,16 +990,6 @@ pub fn build_package(
                     return (None, report);
                 }
             }
-            NodeKind::Trigger { .. } => {
-                if warned_unsupported.insert("Trigger") {
-                    report.warn("Trigger volumes are skipped in this pass");
-                }
-            }
-            NodeKind::AudioSource { .. } => {
-                if warned_unsupported.insert("AudioSource") {
-                    report.warn("AudioSource nodes are skipped in this pass");
-                }
-            }
             NodeKind::Portal { .. } => {
                 if warned_unsupported.insert("Portal") {
                     report
@@ -1025,10 +1015,7 @@ pub fn build_package(
             | NodeKind::ModelRenderer { .. }
             | NodeKind::Animator { .. }
             | NodeKind::Collider { .. }
-            | NodeKind::Interactable { .. }
             | NodeKind::CharacterController { .. }
-            | NodeKind::AiController { .. }
-            | NodeKind::Combat { .. }
             | NodeKind::Equipment { .. }
             | NodeKind::PhysicsBody { .. } => {}
         }
@@ -1250,7 +1237,7 @@ pub fn build_package(
     // never scans them). Regroup the whole table by source_room and
     // rebuild every room's range so both kinds are reachable.
     regroup_room_portals(&mut rooms, &mut room_portals);
-    let (ui_nodes, ui_scenes, game_flow, cdda_tracks) = cook_ui_nodes(
+    let (ui_nodes, ui_scenes, ui_sfx_samples, ui_sfx_cues, game_flow, cdda_tracks) = cook_ui_nodes(
         project,
         project_root,
         &mut texture_asset_for_resource,
@@ -1295,6 +1282,8 @@ pub fn build_package(
             box_props,
             ui_nodes,
             ui_scenes,
+            ui_sfx_samples,
+            ui_sfx_cues,
             game_flow,
             options,
             cdda_tracks,
@@ -1348,11 +1337,16 @@ fn cook_ui_nodes(
 ) -> (
     Vec<PlaytestUiNode>,
     Vec<PlaytestUiScene>,
+    Vec<PlaytestUiSfxSample>,
+    Vec<PlaytestUiSfxCue>,
     PlaytestGameFlow,
     Vec<PlaytestCddaTrack>,
 ) {
     let mut ui_nodes: Vec<PlaytestUiNode> = Vec::new();
     let mut ui_scenes: Vec<PlaytestUiScene> = Vec::new();
+    let mut ui_sfx_samples: Vec<PlaytestUiSfxSample> = Vec::new();
+    let mut ui_sfx_cues: Vec<PlaytestUiSfxCue> = Vec::new();
+    let mut ui_sfx_sample_for_wav: HashMap<String, u16> = HashMap::new();
     let mut cdda_tracks: Vec<PlaytestCddaTrack> = Vec::new();
     let mut cdda_track_for_wav: HashMap<String, u8> = HashMap::new();
 
@@ -1368,6 +1362,9 @@ fn cook_ui_nodes(
             report,
             &mut cdda_tracks,
             &mut cdda_track_for_wav,
+            &mut ui_sfx_samples,
+            &mut ui_sfx_cues,
+            &mut ui_sfx_sample_for_wav,
             &mut ui_nodes,
         );
         let node_count = (ui_nodes.len() - node_first as usize).min(u16::MAX as usize) as u16;
@@ -1404,7 +1401,14 @@ fn cook_ui_nodes(
         PlaytestGameFlow { states, entry }
     };
 
-    (ui_nodes, ui_scenes, game_flow, cdda_tracks)
+    (
+        ui_nodes,
+        ui_scenes,
+        ui_sfx_samples,
+        ui_sfx_cues,
+        game_flow,
+        cdda_tracks,
+    )
 }
 
 /// Flatten one scene's nodes into the shared `out` pool. `node_first`
@@ -1421,6 +1425,9 @@ fn cook_ui_scene_nodes(
     report: &mut PlaytestValidationReport,
     cdda_tracks: &mut Vec<PlaytestCddaTrack>,
     cdda_track_for_wav: &mut HashMap<String, u8>,
+    ui_sfx_samples: &mut Vec<PlaytestUiSfxSample>,
+    ui_sfx_cues: &mut Vec<PlaytestUiSfxCue>,
+    ui_sfx_sample_for_wav: &mut HashMap<String, u16>,
     out: &mut Vec<PlaytestUiNode>,
 ) {
     let ordered_ids = scene.hierarchy_node_ids();
@@ -1594,6 +1601,7 @@ fn cook_ui_scene_nodes(
                     text_color,
                     transparent,
                     action,
+                    ..
                 } => (
                     rect.x,
                     rect.y,
@@ -1622,6 +1630,7 @@ fn cook_ui_scene_nodes(
                     track,
                     fill,
                     knob,
+                    ..
                 } => (
                     rect.x,
                     rect.y,
@@ -1642,6 +1651,7 @@ fn cook_ui_scene_nodes(
                 UiNodeKind::Music {
                     wav_path,
                     volume,
+                    volume_option,
                     loop_track,
                 } => (
                     0,
@@ -1651,7 +1661,11 @@ fn cook_ui_scene_nodes(
                     [0, 0, 0],
                     [0, 0, 0],
                     [0, 0, 0],
-                    UiValueBinding::ConstantQ12(i32::from((*volume).min(100))),
+                    volume_option
+                        .map(UiValueBinding::Option)
+                        .unwrap_or_else(|| {
+                            UiValueBinding::ConstantQ12(i32::from((*volume).min(100)))
+                        }),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     String::new(),
@@ -1671,6 +1685,14 @@ fn cook_ui_scene_nodes(
                     },
                 ),
             };
+            let (sfx_first, sfx_count) = cook_ui_node_sfx(
+                &node.kind,
+                project_root,
+                ui_sfx_samples,
+                ui_sfx_cues,
+                ui_sfx_sample_for_wav,
+                report,
+            );
             PlaytestUiNode {
                 parent,
                 kind: node.kind.clone(),
@@ -1689,6 +1711,8 @@ fn cook_ui_scene_nodes(
                 action,
                 option,
                 flags,
+                sfx_first,
+                sfx_count,
             }
         })
         .collect::<Vec<_>>();
@@ -1740,6 +1764,165 @@ fn cook_cdda_track_number(
     });
     cdda_track_for_wav.insert(key, track);
     u16::from(track)
+}
+
+fn cook_ui_node_sfx(
+    kind: &UiNodeKind,
+    project_root: &Path,
+    samples: &mut Vec<PlaytestUiSfxSample>,
+    cues: &mut Vec<PlaytestUiSfxCue>,
+    sample_for_wav: &mut HashMap<String, u16>,
+    report: &mut PlaytestValidationReport,
+) -> (u16, u8) {
+    let first = cues.len().min(u16::MAX as usize) as u16;
+    match kind {
+        UiNodeKind::Button { sfx, .. } => {
+            cook_ui_sfx_event(
+                &sfx.focus,
+                psx_level::LevelUiSfxEvent::Focus,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+            cook_ui_sfx_event(
+                &sfx.activate,
+                psx_level::LevelUiSfxEvent::Activate,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+        }
+        UiNodeKind::Slider { sfx, .. } => {
+            cook_ui_sfx_event(
+                &sfx.focus,
+                psx_level::LevelUiSfxEvent::Focus,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+            cook_ui_sfx_event(
+                &sfx.nudge,
+                psx_level::LevelUiSfxEvent::SliderNudge,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+            cook_ui_sfx_event(
+                &sfx.limit,
+                psx_level::LevelUiSfxEvent::SliderLimit,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+        }
+        _ => {}
+    }
+    let count = cues.len().saturating_sub(first as usize);
+    if count == 0 {
+        (psx_level::UI_SFX_NONE, 0)
+    } else {
+        (first, count.min(u8::MAX as usize) as u8)
+    }
+}
+
+fn cook_ui_sfx_event(
+    authored: &[UiSfxCue],
+    event: psx_level::LevelUiSfxEvent,
+    project_root: &Path,
+    samples: &mut Vec<PlaytestUiSfxSample>,
+    cues: &mut Vec<PlaytestUiSfxCue>,
+    sample_for_wav: &mut HashMap<String, u16>,
+    report: &mut PlaytestValidationReport,
+) {
+    for cue in authored {
+        let Some(sample) =
+            cook_ui_sfx_sample_index(&cue.wav_path, project_root, samples, sample_for_wav, report)
+        else {
+            continue;
+        };
+        cues.push(PlaytestUiSfxCue {
+            sample,
+            event,
+            volume_percent: cue.volume.min(100),
+            pitch_q12: cue.pitch_q12.clamp(1, 0x3FFF),
+            flags: 0,
+        });
+    }
+}
+
+fn cook_ui_sfx_sample_index(
+    wav_path: &str,
+    project_root: &Path,
+    samples: &mut Vec<PlaytestUiSfxSample>,
+    sample_for_wav: &mut HashMap<String, u16>,
+    report: &mut PlaytestValidationReport,
+) -> Option<u16> {
+    let trimmed = wav_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+    {
+        report.warn(format!(
+            "UI SFX source '{trimmed}' is not a .wav file and was skipped"
+        ));
+        return None;
+    }
+    let abs = resolve_path(trimmed, project_root);
+    if !abs.is_file() {
+        report.warn(format!(
+            "UI SFX source '{}' does not exist and was skipped",
+            abs.display()
+        ));
+        return None;
+    }
+    let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
+    let key = abs.to_string_lossy().into_owned();
+    if let Some(index) = sample_for_wav.get(&key) {
+        return Some(*index);
+    }
+    if samples.len() >= u16::MAX as usize {
+        report.warn("UI SFX sample limit reached; extra SFX sources were skipped");
+        return None;
+    }
+    let bytes = match std::fs::read(&abs) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            report.warn(format!("UI SFX source '{}': {error}", abs.display()));
+            return None;
+        }
+    };
+    let psau = match psxed_audio::cook_sfx_from_wav(&bytes) {
+        Ok(psau) => psau,
+        Err(error) => {
+            report.warn(format!(
+                "UI SFX source '{}' could not be cooked: {error}",
+                abs.display()
+            ));
+            return None;
+        }
+    };
+    let index = samples.len() as u16;
+    samples.push(PlaytestUiSfxSample {
+        bytes: psau,
+        filename: format!("ui_sfx_{index:03}.psau"),
+        source_path: key.clone(),
+    });
+    sample_for_wav.insert(key, index);
+    Some(index)
 }
 
 fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
@@ -5531,6 +5714,41 @@ mod tests {
         crate::default_project_dir()
     }
 
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "psxed-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ))
+    }
+
+    fn test_wav_mono_44k() -> Vec<u8> {
+        let sample_rate = 44_100u32;
+        let samples = [0i16, 2048, -2048, 4096, -4096, 0, 1024, -1024];
+        let data_bytes = (samples.len() * 2) as u32;
+        let mut out = Vec::with_capacity(44 + data_bytes as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_bytes.to_le_bytes());
+        for sample in samples {
+            out.extend_from_slice(&sample.to_le_bytes());
+        }
+        out
+    }
+
     #[test]
     #[ignore = "diagnostic: run with --ignored --nocapture to inspect demo11 cook"]
     fn diag_demo11_cook() {
@@ -7849,7 +8067,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, scenes, flow, _cdda_tracks) = cook_ui_nodes(
+        let (nodes, scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -7910,7 +8128,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (_nodes, scenes, flow, _cdda_tracks) = cook_ui_nodes(
+        let (_nodes, scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -7942,7 +8160,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (_nodes, _scenes, flow, _cdda_tracks) = cook_ui_nodes(
+        let (_nodes, _scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -7975,6 +8193,7 @@ mod tests {
                 text_color: [236, 240, 248],
                 transparent: false,
                 action: UiAction::GotoScene(target_scene),
+                sfx: crate::UiSfxBindings::default(),
             },
         );
         scene.add_node(
@@ -7986,13 +8205,14 @@ mod tests {
                 track: [11, 12, 13],
                 fill: [21, 22, 23],
                 knob: [31, 32, 33],
+                sfx: crate::UiSfxBindings::default(),
             },
         );
 
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, _scenes, _flow, _cdda_tracks) = cook_ui_nodes(
+        let (nodes, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -8027,6 +8247,65 @@ mod tests {
     }
 
     #[test]
+    fn button_sfx_cooks_wav_to_sample_and_cue_range() {
+        let root = unique_temp_dir("ui-sfx-cook");
+        let sfx_dir = root.join("assets/sfx");
+        std::fs::create_dir_all(&sfx_dir).expect("sfx dir");
+        std::fs::write(sfx_dir.join("click.wav"), test_wav_mono_44k()).expect("test wav");
+
+        let mut project = ProjectDocument::new("ui-sfx");
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        scene.add_node(
+            scene.root,
+            "Play",
+            UiNodeKind::Button {
+                rect: UiRect::new(10, 12, 80, 18),
+                label: "Play".to_string(),
+                align: UiTextAlign::Center,
+                color: [50, 60, 70],
+                text_color: [236, 240, 248],
+                transparent: false,
+                action: UiAction::Back,
+                sfx: crate::UiSfxBindings {
+                    activate: vec![UiSfxCue {
+                        wav_path: "assets/sfx/click.wav".to_string(),
+                        volume: 73,
+                        pitch_q12: 5120,
+                    }],
+                    ..crate::UiSfxBindings::default()
+                },
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (nodes, _scenes, samples, cues, _flow, _cdda_tracks) = cook_ui_nodes(
+            &project,
+            &root,
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(report.is_ok(), "warnings/errors: {:?}", report);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(&samples[0].bytes[0..4], b"PSAU");
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].sample, 0);
+        assert_eq!(cues[0].event, psx_level::LevelUiSfxEvent::Activate);
+        assert_eq!(cues[0].volume_percent, 73);
+        assert_eq!(cues[0].pitch_q12, 5120);
+        let button = nodes
+            .iter()
+            .find(|node| matches!(node.kind, UiNodeKind::Button { .. }))
+            .expect("button cooked");
+        assert_eq!(button.sfx_first, 0);
+        assert_eq!(button.sfx_count, 1);
+    }
+
+    #[test]
     fn button_set_option_and_back_actions_lower_to_runtime_ids() {
         let mut project = ProjectDocument::new("ui");
         let option = project.add_option("Difficulty");
@@ -8042,6 +8321,7 @@ mod tests {
                 text_color: [236, 240, 248],
                 transparent: false,
                 action: UiAction::SetOption { option, delta: 2 },
+                sfx: crate::UiSfxBindings::default(),
             },
         );
         scene.add_node(
@@ -8055,13 +8335,14 @@ mod tests {
                 text_color: [236, 240, 248],
                 transparent: false,
                 action: UiAction::Back,
+                sfx: crate::UiSfxBindings::default(),
             },
         );
 
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, _scenes, _flow, _cdda_tracks) = cook_ui_nodes(
+        let (nodes, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
