@@ -1,8 +1,8 @@
-# `engine/` — PSX runtime engine
+# `engine/` (PSX runtime engine)
 
 The engine layer that sits on top of the [SDK](../sdk): a Scene/App
 framework plus the shared level manifest schema. Host-independent and
-MIPS-target only — this is what authored games and the editor-playtest
+MIPS-target only. This is what authored games and the editor-playtest
 runtime are built against.
 
 `engine/Cargo.toml` is its own workspace; each example under
@@ -33,6 +33,6 @@ PSX target flags independently.
 
 ## See also
 
-- [Root README](../README.md) — example gallery with screenshots.
-- [`docs/engine-rearchitecture.md`](../docs/engine-rearchitecture.md) — engine design direction.
-- [`docs/world-grid-architecture.md`](../docs/world-grid-architecture.md), [`docs/level-residency.md`](../docs/level-residency.md) — room/level runtime model.
+- [Root README](../README.md). Example gallery with screenshots.
+- [`docs/engine-rearchitecture.md`](../docs/engine-rearchitecture.md). Engine design direction.
+- [`docs/world-grid-architecture.md`](../docs/world-grid-architecture.md), [`docs/level-residency.md`](../docs/level-residency.md). Room/level runtime model.

@@ -1,4 +1,4 @@
-# `docs/` — design & reference notes
+# `docs/` (design & reference notes)
 
 Narrative documentation: architecture deep-dives, hardware references, and
 planning/roadmap notes. For an overview of the codebase itself, start from
@@ -31,7 +31,7 @@ the [root README](../README.md) and the per-area READMEs
 
 ## Hardware reference
 
-Per-subsystem behavioural notes backing the emulator: [`hardware-refs/`](hardware-refs) —
+Per-subsystem behavioural notes backing the emulator, in [`hardware-refs/`](hardware-refs):
 [gpu](hardware-refs/gpu.md), [spu](hardware-refs/spu.md), [dma](hardware-refs/dma.md),
 [irq](hardware-refs/irq.md), [timers](hardware-refs/timers.md).
 

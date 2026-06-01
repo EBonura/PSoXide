@@ -1,4 +1,4 @@
-# `tools/` — standalone utilities
+# `tools/` (standalone utilities)
 
 Small host-side command-line utilities used by the build and disc-mastering
 flow. Each is its own workspace.
@@ -10,5 +10,5 @@ flow. Each is its own workspace.
 
 ## See also
 
-- [Root README](../README.md#7-export-an-authored-project-disc) — disc export flow.
-- [`crates/psx-iso`](../crates/psx-iso) — the BIN/CUE / ISO9660 parsing these build on.
+- [Root README](../README.md#7-export-an-authored-project-disc). Disc export flow.
+- [`crates/psx-iso`](../crates/psx-iso). The BIN/CUE / ISO9660 parsing these build on.
