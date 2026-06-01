@@ -1198,12 +1198,25 @@ impl AppState {
         toast: &'static str,
     ) -> Result<(), String> {
         let workspace_root = repo_root_dir();
+        // Capture the build's stdout+stderr to a log file rather than
+        // discarding it, so a compile failure surfaces the actual error
+        // (not just "exit status: 2"). Both streams go to the same file so
+        // the log reads in source order.
+        let log_path = editor_playtest_build_log_path();
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|error| format!("create build log {}: {error}", log_path.display()))?;
+        let log_stderr = log_file
+            .try_clone()
+            .map_err(|error| format!("clone build log handle: {error}"))?;
         let mut command = Command::new("make");
         command
             .arg("build-editor-playtest")
             .current_dir(&workspace_root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_stderr));
         let child = command
             .spawn()
             .map_err(|error| format!("spawn make: {error}"))?;
@@ -1232,7 +1245,12 @@ impl AppState {
         };
 
         if !status.success() {
-            let message = format!("{} failed: {status}", self.editor_build_label());
+            // Surface the real compiler error from the captured build log,
+            // not just the bare exit status, plus where to read the full log.
+            let label = self.editor_build_label();
+            let log_path = editor_playtest_build_log_path();
+            let detail = build_log_failure_detail(&log_path);
+            let message = format!("{label} failed ({status}). {detail}");
             self.editor.set_status(message.clone());
             self.editor_build_completion = None;
             self.embedded_playtest.fail();
@@ -2064,6 +2082,49 @@ fn repo_root_dir() -> PathBuf {
         .join("..")
         .join("..")
         .join("..")
+}
+
+/// File the editor-playtest build's stdout+stderr is captured to, so a failed
+/// Play surfaces the real compiler error instead of just an exit code.
+fn editor_playtest_build_log_path() -> PathBuf {
+    repo_root_dir().join("logs").join("editor-playtest-build.log")
+}
+
+/// Build a one-line failure detail from the captured build log: the first
+/// actionable compiler error line, plus where to read the full log. Falls back
+/// to just the log path when the log can't be read or has no obvious error.
+fn build_log_failure_detail(log_path: &std::path::Path) -> String {
+    let where_full = format!("Full log: {}", log_path.display());
+    let Ok(text) = std::fs::read_to_string(log_path) else {
+        return where_full;
+    };
+    // Prefer the first `error[Ennnn]:` / `error:` line -- that's the rustc
+    // diagnostic a user can act on. Otherwise show the last non-empty line.
+    let first_error = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("error[") || line.starts_with("error:"));
+    let summary = first_error.or_else(|| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .last()
+    });
+    match summary {
+        Some(line) => format!("{}. {where_full}", truncate_for_status(line, 200)),
+        None => where_full,
+    }
+}
+
+/// Clamp a status string to `max` chars on a char boundary, appending an
+/// ellipsis when truncated, so a long compiler line cannot blow out the toast.
+fn truncate_for_status(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 fn editor_playtest_exe_path() -> PathBuf {

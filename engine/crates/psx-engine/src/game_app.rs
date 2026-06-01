@@ -336,7 +336,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
         if current_ok {
             return Some(focus);
         }
-        let mut rects = [NavRect { x: 0, y: 0, w: 0, h: 0 }; MAX_FOCUSABLE_NODES];
+        let mut rects = [NavRect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }; MAX_FOCUSABLE_NODES];
         let mut node_indices = [0usize; MAX_FOCUSABLE_NODES];
         let n = gather_focusable(self.nodes, first, count, &mut rects, &mut node_indices);
         let slot = first_focus(&rects[..n])?;
@@ -352,7 +357,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let Some(current_node) = self.resolved_focus(first, count) else {
             return;
         };
-        let mut rects = [NavRect { x: 0, y: 0, w: 0, h: 0 }; MAX_FOCUSABLE_NODES];
+        let mut rects = [NavRect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }; MAX_FOCUSABLE_NODES];
         let mut node_indices = [0usize; MAX_FOCUSABLE_NODES];
         let n = gather_focusable(self.nodes, first, count, &mut rects, &mut node_indices);
         // Locate the current node's slot inside the focusable list the
@@ -386,7 +396,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
                 }
             }
         }
-        self.move_focus(first, count, if right { NavDir::Right } else { NavDir::Left });
+        self.move_focus(
+            first,
+            count,
+            if right { NavDir::Right } else { NavDir::Left },
+        );
     }
 
     /// Step size of the option with id `option_id`, or `0` when the id is
@@ -501,6 +515,11 @@ fn resolve_option_value(
 
 impl<'a, S: Scene> Scene for GameApp<'a, S> {
     fn init(&mut self, ctx: &mut Ctx) {
+        // Shared assets (the UI font menus draw with) upload first, before any
+        // state is entered -- a UI entry defers gameplay init, so without this
+        // the menu would have no font and its text would be invisible.
+        self.gameplay.load_shared_assets(ctx);
+
         // Enter the configured entry state. For GAMEPLAY_ONLY this
         // resolves to Gameplay and forwards straight to gameplay.init,
         // reproducing the boot-time init the old App::run did inline.
@@ -595,16 +614,23 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 // Slider fill reads the live option value by id from the
                 // copied store, through the same resolver the input path
                 // uses so the knob position matches what scrubbing changed.
-                let option_value =
-                    |option_id: u16| resolve_option_value(options, &option_values, option_len, option_id);
-                // This driver's built-in render path carries no font table
-                // yet, so text is skipped here; a caller that wants menu text
-                // calls `ui::draw_scene` directly with its own font table.
+                let option_value = |option_id: u16| {
+                    resolve_option_value(options, &option_values, option_len, option_id)
+                };
+                // The gameplay scene lends its uploaded font atlas (via
+                // `Scene::ui_font`) so menu labels and buttons draw with the
+                // same glyphs the HUD uses. A gameplay-only scene returns
+                // `None`, leaving the font table empty (text skipped).
+                let font = self.gameplay.ui_font();
+                let font_table: &[&psx_font::FontAtlas] = match &font {
+                    Some(font) => core::slice::from_ref(font),
+                    None => &[],
+                };
                 ui::draw_scene(
                     nodes,
                     first,
                     count,
-                    &[],
+                    font_table,
                     focused,
                     &mut textures,
                     &value,
@@ -868,6 +894,40 @@ mod tests {
         press(&mut ctx, button::UP);
         app.update(&mut ctx);
         assert_eq!(app.cursor.menu_focus, 1);
+    }
+
+    #[test]
+    fn cross_held_from_boot_does_not_auto_enter_gameplay() {
+        // Regression: editor embedded Play captures input from frame 1, so a
+        // button still held as Play starts must NOT count as a fresh press on
+        // the menu's first frame (which would activate PLAY and skip straight
+        // into gameplay). `run_with_flow` seeds pad == pad_prev from the initial
+        // poll; model that here by seeding both to CROSS held.
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
+        let mut ctx = test_ctx();
+        // Held from boot: pressed this frame AND last frame (the seeded state).
+        ctx.pad.buttons = ButtonState::from_bits(button::CROSS);
+        ctx.pad_prev.buttons = ButtonState::from_bits(button::CROSS);
+        app.init(&mut ctx);
+
+        app.update(&mut ctx);
+        assert_eq!(
+            app.gameplay.inits, 0,
+            "a CROSS held from boot must not activate the menu and enter gameplay"
+        );
+
+        // Releasing then pressing CROSS is a real press and DOES activate.
+        ctx.pad_prev = ctx.pad; // still held -> becomes prev
+        ctx.pad.buttons = ButtonState::NONE; // release
+        app.update(&mut ctx);
+        assert_eq!(app.gameplay.inits, 0, "release alone does nothing");
+        press(&mut ctx, button::CROSS); // fresh press
+        app.update(&mut ctx);
+        assert_eq!(
+            app.gameplay.inits, 1,
+            "a genuine CROSS press after release activates Play"
+        );
     }
 
     #[test]
