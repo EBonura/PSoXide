@@ -31,8 +31,21 @@ PSX target flags independently.
 | [`hardware-tests`](examples/hardware-tests) | On-target hardware behaviour checks. |
 | [`editor-playtest`](examples/editor-playtest) | Renders a level cooked from the editor on real hardware. Has its own [README](examples/editor-playtest/README.md). |
 
+## How it runs
+
+- **Fixed 60 Hz simulation, 30 fps visual target.** The simulation advances one
+  fixed tick per NTSC VBlank (a fixed timestep off the hardware vblank counter),
+  while rendering targets every second vblank. Under load, visual frames drop
+  without slowing the gameplay clock, so controls stay responsive.
+- **Allocation-free and float-free on device.** Runtime code is `no_std` and
+  fixed-point only (no heap, no floats), so it matches the PS1's 32-bit integer
+  hardware. GTE transforms are batched (RTPT) and per-vertex projection is
+  deduplicated per frame.
+- **Portal-culled with offline-baked visibility.** Rooms are selected by portal
+  traversal; the per-room visible-cell set (PVS) is precomputed at cook time
+  rather than per frame.
+
 ## See also
 
 - [Root README](../README.md). Example gallery with screenshots.
-- [`docs/engine-rearchitecture.md`](../docs/engine-rearchitecture.md). Engine design direction.
 - [`docs/world-grid-architecture.md`](../docs/world-grid-architecture.md), [`docs/level-residency.md`](../docs/level-residency.md). Room/level runtime model.
