@@ -3072,6 +3072,7 @@ dependencies = [
  "image",
  "psx-asset",
  "psx-engine",
+ "psx-font",
  "psx-gte",
  "psx-level",
  "psxed-project",
