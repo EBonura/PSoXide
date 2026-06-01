@@ -1043,6 +1043,18 @@ impl Spu {
         self.samples_produced
     }
 
+    /// Diagnostic SPU IRQ state: (irq_addr, spucnt, spustat, decode cursor,
+    /// cd-audio queue len). For tracing games that sync on the SPU IRQ.
+    pub fn debug_irq_state(&self) -> (u32, u16, u16, u32, usize) {
+        (
+            self.irq_addr,
+            self.spucnt,
+            self.spustat,
+            self.decode_irq_cursor,
+            self.cd_audio_in.len(),
+        )
+    }
+
     /// Drain pending host-facing stereo samples. Frontend calls this
     /// every frame to feed its audio output. Returns `(left, right)`
     /// pairs in playback order, oldest first.
@@ -1774,7 +1786,7 @@ impl Spu {
     }
 
     fn tick_decode_buffer_irq(&mut self) {
-        if self.spucnt & (1 << 6) != 0 && self.irq_addr != 0 && self.irq_addr < 0x1000 {
+        if self.spucnt & (1 << 6) != 0 && self.irq_addr < 0x1000 {
             for bank in 0..4 {
                 let cursor = self.decode_irq_cursor + bank * 0x400;
                 if self.irq_addr >= cursor && self.irq_addr < cursor + 2 {
@@ -2433,15 +2445,19 @@ mod tests {
     }
 
     #[test]
-    fn decoded_buffer_irq_ignores_zero_irq_address() {
+    fn decoded_buffer_irq_fires_at_zero_irq_address() {
+        // Address 0 (CD-left capture buffer start) is a valid SPU IRQ
+        // target. CTR arms its SCEA advance-timer SPU IRQ there; gating
+        // it off (the old behavior) froze the game on the SCEA screen.
+        // SPUCNT bit 6 already guards against firing before a game arms.
         let mut s = Spu::new();
         s.write16(SPUCNT, 1 << 6); // IRQ enable
         s.write16(IRQ_ADDR, 0x0000);
 
         s.tick_sample(0);
 
-        assert!(!s.take_irq_pending());
-        assert_eq!(s.spustat() & (1 << 6), 0);
+        assert!(s.take_irq_pending());
+        assert_ne!(s.spustat() & (1 << 6), 0);
     }
 
     #[test]
