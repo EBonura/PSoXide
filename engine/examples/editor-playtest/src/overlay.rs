@@ -62,12 +62,17 @@ pub(crate) fn draw_player_hud(
     // HUD overlay: draw the whole pool (the HUD is a single scene at
     // pool offset 0), no menu focus, so no control is highlighted. The
     // HUD carries no sliders, so the option table is empty and the value
-    // resolver always reports zero.
+    // resolver always reports zero. The HUD uses one font, so the font
+    // table is that atlas as a single-element slice (or empty when absent).
+    let font_table: &[&FontAtlas] = match font {
+        Some(font) => &[font],
+        None => &[],
+    };
     ui::draw_scene(
         nodes,
         0,
         nodes.len(),
-        font,
+        font_table,
         None,
         &mut resolve_texture,
         &resolve_value,
