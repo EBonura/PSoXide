@@ -1536,6 +1536,8 @@ pub enum LevelUiNodeKind {
 pub enum LevelUiValueBinding {
     /// Literal Q12 fixed-point value.
     ConstantQ12(i32),
+    /// Live project option value.
+    Option(u16),
     /// Player health value.
     PlayerHealth,
     /// Player health maximum.
@@ -1544,6 +1546,42 @@ pub enum LevelUiValueBinding {
     PlayerStamina,
     /// Player stamina maximum.
     PlayerStaminaMax,
+}
+
+/// UI event that can fire one of a node's cooked SFX cues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiSfxEvent {
+    /// Focus moved onto this control.
+    Focus,
+    /// Button activation / confirm.
+    Activate,
+    /// Slider value changed by one authored step.
+    SliderNudge,
+    /// Slider was nudged while already clamped at its min/max.
+    SliderLimit,
+}
+
+/// One cooked UI SFX sample blob. Samples are global to a cooked level and
+/// nodes reference them indirectly through [`LevelUiSfxCueRecord::sample`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiSfxSampleRecord {
+    /// Cooked `.psau` bytes, usually from `include_bytes!`.
+    pub bytes: &'static [u8],
+}
+
+/// One authored SFX cue for a UI node event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiSfxCueRecord {
+    /// Index into the generated `UI_SFX_SAMPLES` table.
+    pub sample: u16,
+    /// Event that triggers this cue.
+    pub event: LevelUiSfxEvent,
+    /// Per-play volume as a percentage of full voice volume.
+    pub volume_percent: u8,
+    /// Pitch multiplier in Q12 (`4096` = source pitch).
+    pub pitch_q12: u16,
+    /// Reserved runtime flags.
+    pub flags: u16,
 }
 
 /// Action a [`LevelUiNodeKind::Button`] fires when activated. Plain
@@ -1577,6 +1615,9 @@ pub enum LevelUiAction {
 /// Sentinel meaning "this node binds to no project option". Stored in
 /// [`LevelUiNodeRecord::option`] for every non-`Slider` node.
 pub const UI_OPTION_NONE: u16 = u16::MAX;
+
+/// Sentinel meaning "this UI node has no cooked SFX cue range".
+pub const UI_SFX_NONE: u16 = u16::MAX;
 
 /// One cooked project option: a runtime-tunable integer with a bounded
 /// range, step, and default. Sliders ([`LevelUiNodeRecord::option`]) and
@@ -1641,6 +1682,11 @@ pub struct LevelUiNodeRecord {
     pub option: u16,
     /// Runtime flags.
     pub flags: u16,
+    /// First index into the generated `UI_SFX_CUES` table, or
+    /// [`UI_SFX_NONE`] when this node has no SFX.
+    pub sfx_first: u16,
+    /// Number of SFX cues belonging to this node.
+    pub sfx_count: u8,
     /// Font selector for `Label` / `Button` text: an index into the font
     /// table the caller passes to the UI renderer. `0` is the default font;
     /// an index past the end of the table falls back to font `0`. Lets a

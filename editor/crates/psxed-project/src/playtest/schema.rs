@@ -47,6 +47,10 @@ pub const TEXTURES_DIRNAME: &str = "textures";
 /// referenced by any placed [`NodeKind::MeshInstance`].
 pub const MODELS_DIRNAME: &str = "models";
 
+/// Subdirectory inside `generated/` that holds cooked UI SFX `.psau`
+/// blobs selected by button/slider cue pools.
+pub const UI_SFX_DIRNAME: &str = "ui_sfx";
+
 /// Coarse asset class -- mirrors [`psx_level::AssetKind`] but
 /// stays host-side `String`/`Vec` friendly. Converted to the
 /// runtime enum at write time.
@@ -729,6 +733,38 @@ pub struct PlaytestUiNode {
     pub option: u16,
     /// Runtime flags.
     pub flags: u16,
+    /// First index into [`PlaytestPackage::ui_sfx_cues`], or
+    /// [`psx_level::UI_SFX_NONE`] when the node has no SFX.
+    pub sfx_first: u16,
+    /// Number of SFX cues belonging to this node.
+    pub sfx_count: u8,
+}
+
+/// One cooked UI SFX sample. Written to `generated/ui_sfx/` and
+/// referenced by [`PlaytestUiSfxCue::sample`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiSfxSample {
+    /// Cooked `.psau` bytes.
+    pub bytes: Vec<u8>,
+    /// Filename inside the generated UI SFX directory.
+    pub filename: String,
+    /// Source WAV path for diagnostics.
+    pub source_path: String,
+}
+
+/// One cooked SFX cue owned by a UI node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestUiSfxCue {
+    /// Index into [`PlaytestPackage::ui_sfx_samples`].
+    pub sample: u16,
+    /// Runtime event that triggers this cue.
+    pub event: psx_level::LevelUiSfxEvent,
+    /// Per-play volume as a percentage of full voice volume.
+    pub volume_percent: u8,
+    /// Pitch multiplier in Q12 (`4096` = source pitch).
+    pub pitch_q12: u16,
+    /// Reserved runtime flags.
+    pub flags: u16,
 }
 
 /// One cooked UI scene addressing a contiguous block of
@@ -1156,6 +1192,11 @@ pub struct PlaytestPackage {
     pub ui_nodes: Vec<PlaytestUiNode>,
     /// Addressable cooked UI scene table indexing [`Self::ui_nodes`].
     pub ui_scenes: Vec<PlaytestUiScene>,
+    /// Cooked UI SFX samples, deduplicated by source WAV path.
+    pub ui_sfx_samples: Vec<PlaytestUiSfxSample>,
+    /// Cooked UI SFX cues, sliced by [`PlaytestUiNode::sfx_first`] /
+    /// [`PlaytestUiNode::sfx_count`].
+    pub ui_sfx_cues: Vec<PlaytestUiSfxCue>,
     /// Cooked game-state flow definition.
     pub game_flow: PlaytestGameFlow,
     /// Cooked project options, flattened to bounded integer ranges.

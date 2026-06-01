@@ -329,6 +329,22 @@ pub fn cook_cdda_track_from_wav(src: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
+/// Convert a source WAV into a cooked `.psau` one-shot sample for SPU SFX.
+///
+/// The output is mono SPU ADPCM wrapped in the shared PSoXide audio asset
+/// header. It uses the same defaults as the audio-pack importer: 44.1 kHz
+/// target sample rate and 0.9 peak normalization.
+pub fn cook_sfx_from_wav(src: &[u8]) -> Result<Vec<u8>, Error> {
+    let cooked = cook_wav(
+        src,
+        &CookConfig {
+            sample_rate_hz: SPU_SAMPLE_RATE_HZ,
+            normalize_peak: 0.9,
+        },
+    )?;
+    Ok(cooked.psau)
+}
+
 fn validate_manifest(manifest: &PackManifest) -> Result<(), Error> {
     if manifest.sounds.is_empty() {
         return Err(Error::InvalidManifest(

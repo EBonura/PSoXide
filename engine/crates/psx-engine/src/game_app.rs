@@ -48,7 +48,8 @@
 
 use psx_level::{
     first_focus, next_focus, FlowState, GameFlow, LevelOptionDef, LevelUiAction, LevelUiNodeKind,
-    LevelUiNodeRecord, LevelUiScene, LevelUiValueBinding, NavDir, NavRect, UI_OPTION_NONE,
+    LevelUiNodeRecord, LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord,
+    LevelUiValueBinding, NavDir, NavRect, UI_OPTION_NONE, UI_SFX_NONE,
 };
 use psx_pad::button;
 
@@ -74,6 +75,13 @@ const MENU_FOCUS_NONE: u16 = u16::MAX;
 /// at its cooked default (read-only, never adjusted). Menus tune a
 /// handful of options in practice, so the cap is generous.
 const MAX_OPTIONS: usize = 32;
+const MAX_UI_SFX_SAMPLES: usize = 64;
+#[cfg(target_arch = "mips")]
+const UI_SFX_SAMPLE_BASE_BYTES: u32 = 0x30000;
+#[cfg(target_arch = "mips")]
+const UI_SFX_VOICE_BASE: u8 = 20;
+#[cfg(target_arch = "mips")]
+const UI_SFX_VOICE_COUNT: u8 = 4;
 const CDDA_RETRY_TICKS: u32 = 60;
 const CDDA_STATUS_TICKS: u32 = 30;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
@@ -149,6 +157,21 @@ struct CddaPlayer {
     next_retry_tick: u32,
     next_status_tick: u32,
     routed: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct UiSfxRuntimeSample {
+    addr_bytes: u32,
+    base_pitch_q12: u16,
+    loaded: bool,
+}
+
+impl UiSfxRuntimeSample {
+    const EMPTY: Self = Self {
+        addr_bytes: 0,
+        base_pitch_q12: 0x1000,
+        loaded: false,
+    };
 }
 
 impl CddaPlayer {
@@ -244,25 +267,51 @@ impl CddaPlayer {
     }
 }
 
-fn music_cue_from_node(node: &LevelUiNodeRecord) -> MusicCue {
+fn music_cue_from_node(
+    node: &LevelUiNodeRecord,
+    options: &[LevelOptionDef],
+    values: &[i32; MAX_OPTIONS],
+    len: usize,
+) -> MusicCue {
     MusicCue {
         track: node.option as u8,
-        volume_percent: music_volume_percent(node.value),
+        volume_percent: music_volume_percent(node.value, options, values, len),
         loop_track: node.flags & psx_level::ui_node_flags::MUSIC_LOOP != 0,
     }
     .normalized()
 }
 
-fn music_volume_percent(value: LevelUiValueBinding) -> u8 {
+fn music_volume_percent(
+    value: LevelUiValueBinding,
+    options: &[LevelOptionDef],
+    values: &[i32; MAX_OPTIONS],
+    len: usize,
+) -> u8 {
     match value {
         LevelUiValueBinding::ConstantQ12(value) => value.clamp(0, 100) as u8,
+        LevelUiValueBinding::Option(option_id) => {
+            resolve_option_value(options, values, len, option_id).clamp(0, 100) as u8
+        }
         _ => CDDA_DEFAULT_VOLUME_PERCENT,
     }
 }
 
 #[cfg(target_arch = "mips")]
-fn cdda_route_audio(volume_percent: u8) {
+fn menu_audio_init() {
     psx_spu::init();
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn menu_audio_init() {}
+
+#[cfg(target_arch = "mips")]
+fn scaled_pitch(base_q12: u16, multiplier_q12: u16) -> psx_spu::Pitch {
+    let raw = ((base_q12 as u32) * (multiplier_q12.max(1) as u32) + 2048) / 4096;
+    psx_spu::Pitch::raw(raw.clamp(1, 0x3FFF) as u16)
+}
+
+#[cfg(target_arch = "mips")]
+fn cdda_route_audio(volume_percent: u8) {
     cdda_set_volume(volume_percent);
     psx_spu::enable_cd_audio(true);
 }
@@ -392,6 +441,10 @@ pub struct GameApp<'a, S: Scene> {
     /// these by id; the live value store ([`Self::option_values`]) is
     /// seeded from each option's `default`.
     pub options: &'static [LevelOptionDef],
+    /// Cooked UI SFX sample blobs.
+    pub ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
+    /// Cooked UI SFX cues, sliced by per-node `sfx_first` / `sfx_count`.
+    pub ui_sfx_cues: &'static [LevelUiSfxCueRecord],
     /// Borrowed gameplay scene. Not owned, so the caller keeps it.
     pub gameplay: &'a mut S,
     /// Where in the flow we currently are.
@@ -404,6 +457,13 @@ pub struct GameApp<'a, S: Scene> {
     option_len: usize,
     /// Nonblocking CD-DA menu music driver.
     cdda: CddaPlayer,
+    /// Uploaded UI SFX sample metadata, capped for no-alloc runtime lookup.
+    #[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
+    ui_sfx_runtime_samples: [UiSfxRuntimeSample; MAX_UI_SFX_SAMPLES],
+    /// Number of loaded UI SFX sample metadata slots.
+    ui_sfx_runtime_len: usize,
+    /// Round-robin cursor for choosing cue variants and voices.
+    ui_sfx_cursor: u16,
 }
 
 impl<'a, S: Scene> GameApp<'a, S> {
@@ -418,6 +478,8 @@ impl<'a, S: Scene> GameApp<'a, S> {
         scenes: &'static [LevelUiScene],
         nodes: &'static [LevelUiNodeRecord],
         options: &'static [LevelOptionDef],
+        ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
+        ui_sfx_cues: &'static [LevelUiSfxCueRecord],
         gameplay: &'a mut S,
     ) -> Self {
         let mut option_values = [0i32; MAX_OPTIONS];
@@ -430,11 +492,16 @@ impl<'a, S: Scene> GameApp<'a, S> {
             scenes,
             nodes,
             options,
+            ui_sfx_samples,
+            ui_sfx_cues,
             gameplay,
             cursor: FlowCursor::new(flow.entry),
             option_values,
             option_len,
             cdda: CddaPlayer::new(),
+            ui_sfx_runtime_samples: [UiSfxRuntimeSample::EMPTY; MAX_UI_SFX_SAMPLES],
+            ui_sfx_runtime_len: 0,
+            ui_sfx_cursor: 0,
         }
     }
 
@@ -442,23 +509,25 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// result to that option's `[min, max]`. No-op for the unbound
     /// sentinel or an unknown id, so a stray binding cannot panic or write
     /// out of range.
-    fn adjust_option(&mut self, option_id: u16, delta: i32) {
+    fn adjust_option(&mut self, option_id: u16, delta: i32) -> bool {
         if option_id == UI_OPTION_NONE {
-            return;
+            return false;
         }
         let Some(index) = self.options[..self.option_len]
             .iter()
             .position(|option| option.id == option_id)
         else {
-            return;
+            return false;
         };
         let option = self.options[index];
         let next = self.option_values[index].saturating_add(delta);
         let next = next.clamp(option.min, option.max);
-        if self.option_values[index] != next {
-            self.option_values[index] = next;
-            self.apply_current_options();
+        if self.option_values[index] == next {
+            return false;
         }
+        self.option_values[index] = next;
+        self.apply_current_options();
+        true
     }
 
     /// Publish the live option store through the project hook. UI scenes call
@@ -469,6 +538,103 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.gameplay
             .apply_options(self.options, &self.option_values[..self.option_len]);
     }
+
+    fn init_menu_audio(&mut self) {
+        menu_audio_init();
+        self.upload_ui_sfx_samples();
+    }
+
+    #[cfg(target_arch = "mips")]
+    fn upload_ui_sfx_samples(&mut self) {
+        let mut addr = UI_SFX_SAMPLE_BASE_BYTES;
+        self.ui_sfx_runtime_len = 0;
+        for (index, sample) in self
+            .ui_sfx_samples
+            .iter()
+            .take(MAX_UI_SFX_SAMPLES)
+            .enumerate()
+        {
+            let audio = psx_asset::Audio::from_bytes(sample.bytes).expect("ui psau sample");
+            let spu_addr = psx_spu::SpuAddr::new(addr);
+            let adpcm = audio.adpcm_bytes();
+            psx_spu::upload_adpcm(spu_addr, adpcm);
+            self.ui_sfx_runtime_samples[index] = UiSfxRuntimeSample {
+                addr_bytes: addr,
+                base_pitch_q12: psx_spu::Pitch::for_sample_rate(audio.sample_rate_hz()).as_u16(),
+                loaded: true,
+            };
+            self.ui_sfx_runtime_len = index + 1;
+            addr = addr.saturating_add(adpcm.len() as u32);
+        }
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    fn upload_ui_sfx_samples(&mut self) {
+        self.ui_sfx_runtime_len = self.ui_sfx_samples.len().min(MAX_UI_SFX_SAMPLES);
+    }
+
+    fn play_node_sfx_event(&mut self, node: LevelUiNodeRecord, event: LevelUiSfxEvent) {
+        if node.sfx_first == UI_SFX_NONE || node.sfx_count == 0 {
+            return;
+        }
+        let first = node.sfx_first as usize;
+        let end = first
+            .saturating_add(node.sfx_count as usize)
+            .min(self.ui_sfx_cues.len());
+        if first >= end {
+            return;
+        }
+        let mut matching = 0usize;
+        for cue in &self.ui_sfx_cues[first..end] {
+            if cue.event == event {
+                matching += 1;
+            }
+        }
+        if matching == 0 {
+            return;
+        }
+        let choice = self.ui_sfx_cursor as usize % matching;
+        self.ui_sfx_cursor = self.ui_sfx_cursor.wrapping_add(1);
+        let mut seen = 0usize;
+        let mut selected = None;
+        for cue in &self.ui_sfx_cues[first..end] {
+            if cue.event != event {
+                continue;
+            }
+            if seen == choice {
+                selected = Some(*cue);
+                break;
+            }
+            seen += 1;
+        }
+        if let Some(cue) = selected {
+            self.play_ui_sfx_cue(cue);
+        }
+    }
+
+    #[cfg(target_arch = "mips")]
+    fn play_ui_sfx_cue(&mut self, cue: LevelUiSfxCueRecord) {
+        let Some(sample) = self
+            .ui_sfx_runtime_samples
+            .get(cue.sample as usize)
+            .copied()
+            .filter(|sample| sample.loaded)
+        else {
+            return;
+        };
+        let voice_index = UI_SFX_VOICE_BASE + (self.ui_sfx_cursor as u8 % UI_SFX_VOICE_COUNT);
+        let voice = psx_spu::Voice::new(voice_index);
+        let pitch = scaled_pitch(sample.base_pitch_q12, cue.pitch_q12);
+        let volume = psx_spu::Volume::linear(cue.volume_percent.min(100) as u16, 100);
+        voice.set_volume(volume, volume);
+        voice.set_pitch(pitch);
+        voice.set_start_addr(psx_spu::SpuAddr::new(sample.addr_bytes));
+        voice.set_adsr(psx_spu::Adsr::sample());
+        psx_spu::Voice::key_on(voice.mask());
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    fn play_ui_sfx_cue(&mut self, _cue: LevelUiSfxCueRecord) {}
 
     /// Resolve a flow-state index to its `Copy` [`StateTag`]. An
     /// out-of-range index falls back to `Gameplay` so a malformed flow
@@ -542,7 +708,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
                     && node.option <= 99
                     && node.option != 0
             })
-            .map(music_cue_from_node)
+            .map(|node| {
+                music_cue_from_node(node, self.options, &self.option_values, self.option_len)
+            })
             .unwrap_or(MusicCue::SILENT)
     }
 
@@ -626,7 +794,13 @@ impl<'a, S: Scene> GameApp<'a, S> {
             return;
         };
         if let Some(next_slot) = next_focus(&rects[..n], current_slot, dir) {
-            self.cursor.menu_focus = node_indices[next_slot] as u16;
+            let next_node = node_indices[next_slot];
+            self.cursor.menu_focus = next_node as u16;
+            if next_node != current_node {
+                if let Some(node) = self.nodes.get(next_node).copied() {
+                    self.play_node_sfx_event(node, LevelUiSfxEvent::Focus);
+                }
+            }
         }
     }
 
@@ -639,11 +813,22 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// ordinary horizontal focus movement. `right` selects the direction.
     fn horizontal_press(&mut self, first: usize, count: usize, right: bool) {
         if let Some(node_index) = self.resolved_focus(first, count) {
-            if let Some(node) = self.nodes.get(node_index) {
+            if let Some(node) = self.nodes.get(node_index).copied() {
                 if matches!(node.kind, LevelUiNodeKind::Slider) && node.option != UI_OPTION_NONE {
                     let step = self.option_step(node.option);
+                    if step == 0 {
+                        return;
+                    }
                     let delta = if right { step } else { -step };
-                    self.adjust_option(node.option, delta);
+                    let changed = self.adjust_option(node.option, delta);
+                    self.play_node_sfx_event(
+                        node,
+                        if changed {
+                            LevelUiSfxEvent::SliderNudge
+                        } else {
+                            LevelUiSfxEvent::SliderLimit
+                        },
+                    );
                     return;
                 }
             }
@@ -676,9 +861,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let Some(node_index) = self.resolved_focus(first, count) else {
             return;
         };
-        let Some(node) = self.nodes.get(node_index) else {
+        let Some(node) = self.nodes.get(node_index).copied() else {
             return;
         };
+        self.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
         match node.action {
             LevelUiAction::GotoScene { scene } => {
                 if let Some(state_index) = self.ui_state_index_for_scene(scene) {
@@ -694,7 +880,9 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelUiAction::Back => self.go_back(),
             // Nudge the bound option by the authored delta (clamped). A
             // dynamic-label refresh from the new value is a later step.
-            LevelUiAction::SetOption { option, delta } => self.adjust_option(option, delta),
+            LevelUiAction::SetOption { option, delta } => {
+                let _ = self.adjust_option(option, delta);
+            }
             // TODO(menu-step3): dispatch game-specific actions by id.
             LevelUiAction::Game { .. } => {}
         }
@@ -765,8 +953,31 @@ fn resolve_option_value(
         .unwrap_or(0)
 }
 
+fn resolve_ui_value(
+    binding: LevelUiValueBinding,
+    options: &[LevelOptionDef],
+    values: &[i32; MAX_OPTIONS],
+    len: usize,
+) -> i32 {
+    match binding {
+        LevelUiValueBinding::ConstantQ12(value) => value,
+        LevelUiValueBinding::Option(option_id) => {
+            resolve_option_value(options, values, len, option_id)
+        }
+        LevelUiValueBinding::PlayerHealth
+        | LevelUiValueBinding::PlayerHealthMax
+        | LevelUiValueBinding::PlayerStamina
+        | LevelUiValueBinding::PlayerStaminaMax => 0,
+    }
+}
+
 impl<'a, S: Scene> Scene for GameApp<'a, S> {
     fn init(&mut self, ctx: &mut Ctx) {
+        // Menu music and UI SFX share SPU state. Initialise once here and
+        // upload the generated UI SFX bank before any UI scene starts routing
+        // CD-DA audio.
+        self.init_menu_audio();
+
         // Shared assets (the UI font menus draw with) upload first, before any
         // state is entered -- a UI entry defers gameplay init, so without this
         // the menu would have no font and its text would be invisible.
@@ -796,10 +1007,6 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         match self.current_tag() {
             StateTag::Gameplay => self.gameplay.update(ctx),
             StateTag::UiScene { scene } => {
-                let music_cue = self.scene_music_cue(scene);
-                self.cdda.request(music_cue, ctx.sim_tick.as_u32());
-                self.cdda.update(ctx.sim_tick.as_u32());
-
                 // Resolve the scene's block in the shared pool once.
                 // Focus geometry walks the whole pool (parents are
                 // pool-relative), so the helpers take the range, not a
@@ -845,6 +1052,12 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                         self.enter_gameplay(gameplay_index, ctx);
                     }
                 }
+
+                if let StateTag::UiScene { scene } = self.current_tag() {
+                    let music_cue = self.scene_music_cue(scene);
+                    self.cdda.request(music_cue, ctx.sim_tick.as_u32());
+                    self.cdda.update(ctx.sim_tick.as_u32());
+                }
             }
         }
     }
@@ -869,7 +1082,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 // Stub resolvers skip images (None) and report zero for
                 // every binding, so rects and labels still paint.
                 let mut textures = |_asset| None;
-                let value = |_binding: LevelUiValueBinding| 0;
+                let value = |binding: LevelUiValueBinding| {
+                    resolve_ui_value(binding, options, &option_values, option_len)
+                };
                 // Slider fill reads the live option value by id from the
                 // copied store, through the same resolver the input path
                 // uses so the knob position matches what scrubbing changed.
@@ -954,7 +1169,7 @@ mod tests {
     #[test]
     fn gameplay_only_inits_once_then_forwards() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -973,7 +1188,7 @@ mod tests {
         // Mirrors the old App::run shape: init is paid before the first
         // update tick, not lazily on first update.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -995,7 +1210,7 @@ mod tests {
         };
 
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &mut scene);
+        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -1022,7 +1237,7 @@ mod tests {
     #[test]
     fn unknown_scene_id_yields_empty_node_range() {
         let mut scene = CountingScene::default();
-        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &mut scene);
+        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &mut scene);
         assert_eq!(app.scene_node_range(999), (0, 0));
     }
 
@@ -1058,6 +1273,8 @@ mod tests {
             action,
             option: UI_OPTION_NONE,
             flags: 0,
+            sfx_first: UI_SFX_NONE,
+            sfx_count: 0,
             font: 0,
         }
     }
@@ -1080,6 +1297,8 @@ mod tests {
         action: LevelUiAction::Back,
         option: UI_OPTION_NONE,
         flags: 0,
+        sfx_first: UI_SFX_NONE,
+        sfx_count: 0,
         font: 0,
     };
 
@@ -1130,7 +1349,15 @@ mod tests {
     #[test]
     fn menu_seeds_focus_to_first_control() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
+        let mut app = GameApp::new(
+            &MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         app.init(&mut ctx);
 
@@ -1141,9 +1368,50 @@ mod tests {
     }
 
     #[test]
+    fn ui_sfx_event_uses_matching_node_cue_range() {
+        static CUES: &[LevelUiSfxCueRecord] = &[
+            LevelUiSfxCueRecord {
+                sample: 0,
+                event: LevelUiSfxEvent::Focus,
+                volume_percent: 50,
+                pitch_q12: 4096,
+                flags: 0,
+            },
+            LevelUiSfxCueRecord {
+                sample: 0,
+                event: LevelUiSfxEvent::Activate,
+                volume_percent: 80,
+                pitch_q12: 4096,
+                flags: 0,
+            },
+        ];
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], CUES, &mut scene);
+        let node = LevelUiNodeRecord {
+            sfx_first: 0,
+            sfx_count: 2,
+            ..button(0, 0, LevelUiAction::Back)
+        };
+
+        app.play_node_sfx_event(node, LevelUiSfxEvent::SliderNudge);
+        assert_eq!(app.ui_sfx_cursor, 0, "unmatched events do not advance");
+
+        app.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
+        assert_eq!(app.ui_sfx_cursor, 1);
+    }
+
+    #[test]
     fn dpad_moves_focus_between_buttons() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
+        let mut app = GameApp::new(
+            &MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         idle_tick(&mut app, &mut ctx); // seed focus to index 1
@@ -1173,7 +1441,15 @@ mod tests {
         // into gameplay). `run_with_flow` seeds pad == pad_prev from the initial
         // poll; model that here by seeding both to CROSS held.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
+        let mut app = GameApp::new(
+            &MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         // Held from boot: pressed this frame AND last frame (the seeded state).
         ctx.pad.buttons = ButtonState::from_bits(button::CROSS);
@@ -1202,7 +1478,15 @@ mod tests {
     #[test]
     fn cross_on_start_button_enters_gameplay() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
+        let mut app = GameApp::new(
+            &MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         assert_eq!(app.gameplay.inits, 0);
@@ -1223,7 +1507,15 @@ mod tests {
     #[test]
     fn goto_scene_then_circle_returns() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
+        let mut app = GameApp::new(
+            &MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         idle_tick(&mut app, &mut ctx); // seed focus on the title scene
@@ -1259,7 +1551,15 @@ mod tests {
     #[test]
     fn back_button_via_cross_pops_to_return_state() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&MENU_FLOW, MENU_SCENES, MENU_NODES, &[], &mut scene);
+        let mut app = GameApp::new(
+            &MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         idle_tick(&mut app, &mut ctx);
@@ -1285,7 +1585,7 @@ mod tests {
         // A gameplay-only flow never enters a UI arm, so d-pad presses do
         // not touch menu_focus and updates forward straight to gameplay.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
 
@@ -1324,6 +1624,8 @@ mod tests {
             action: LevelUiAction::Back,
             option,
             flags: 0,
+            sfx_first: UI_SFX_NONE,
+            sfx_count: 0,
             font: 0,
         }
     }
@@ -1376,12 +1678,65 @@ mod tests {
         entry: 0,
     };
 
+    const VOL_ID: u16 = 9;
+    static MUSIC_OPTIONS: &[LevelOptionDef] = &[LevelOptionDef {
+        id: VOL_ID,
+        min: 0,
+        max: 100,
+        step: 5,
+        default: 25,
+    }];
+    static MUSIC_NODES: &[LevelUiNodeRecord] = &[
+        CANVAS,
+        LevelUiNodeRecord {
+            parent: Some(psx_level::UiNodeIndex::new(0)),
+            kind: LevelUiNodeKind::Music,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            color: [0, 0, 0],
+            background: [0, 0, 0],
+            accent: [0, 0, 0],
+            value: LevelUiValueBinding::Option(VOL_ID),
+            max: LevelUiValueBinding::ConstantQ12(0),
+            texture_asset: AssetId(u16::MAX),
+            text: "",
+            tag: "",
+            action: LevelUiAction::Back,
+            option: 2,
+            flags: psx_level::ui_node_flags::MUSIC_LOOP,
+            sfx_first: UI_SFX_NONE,
+            sfx_count: 0,
+            font: 0,
+        },
+        slider(100, 100, VOL_ID),
+    ];
+    static MUSIC_SCENES: &[LevelUiScene] = &[LevelUiScene {
+        id: 9,
+        name: "music",
+        node_first: 0,
+        node_count: 3,
+    }];
+    static MUSIC_FLOW: GameFlow = GameFlow {
+        states: &[FlowState::UiScene { scene: 9 }],
+        entry: 0,
+    };
+
     #[test]
     fn option_store_seeds_from_default() {
         // The value store seeds from each option's default at construction,
         // so a slider reads its default before any input.
         let mut scene = CountingScene::default();
-        let app = GameApp::new(&OPT_FLOW_SLIDER, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        let app = GameApp::new(
+            &OPT_FLOW_SLIDER,
+            OPT_SCENES,
+            OPT_NODES,
+            OPTIONS,
+            &[],
+            &[],
+            &mut scene,
+        );
         assert_eq!(value_of(&app, OPT_ID), 4);
         // An unbound / unknown id resolves to zero, never panics.
         assert_eq!(value_of(&app, UI_OPTION_NONE), 0);
@@ -1391,7 +1746,15 @@ mod tests {
     #[test]
     fn slider_left_right_scrubs_bound_option_clamped() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&OPT_FLOW_SLIDER, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        let mut app = GameApp::new(
+            &OPT_FLOW_SLIDER,
+            OPT_SCENES,
+            OPT_NODES,
+            OPTIONS,
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         idle_tick(&mut app, &mut ctx); // seed focus onto the slider
@@ -1430,7 +1793,15 @@ mod tests {
     #[test]
     fn front_end_option_edits_apply_options_for_preview() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&OPT_FLOW_SLIDER, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        let mut app = GameApp::new(
+            &OPT_FLOW_SLIDER,
+            OPT_SCENES,
+            OPT_NODES,
+            OPTIONS,
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -1465,9 +1836,48 @@ mod tests {
     }
 
     #[test]
+    fn option_bound_music_volume_updates_on_slider_scrub() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &MUSIC_FLOW,
+            MUSIC_SCENES,
+            MUSIC_NODES,
+            MUSIC_OPTIONS,
+            &[],
+            &[],
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        assert_eq!(app.scene_music_cue(9).track, 2);
+        assert_eq!(app.scene_music_cue(9).volume_percent, 25);
+
+        idle_tick(&mut app, &mut ctx);
+        assert_eq!(app.cursor.menu_focus, 2);
+        assert_eq!(app.cdda.requested.volume_percent, 25);
+
+        press(&mut ctx, button::RIGHT);
+        app.update(&mut ctx);
+
+        assert_eq!(value_of(&app, VOL_ID), 30);
+        assert_eq!(app.cdda.requested.track, 2);
+        assert_eq!(app.cdda.requested.volume_percent, 30);
+        assert!(app.cdda.requested.loop_track);
+    }
+
+    #[test]
     fn set_option_button_adjusts_and_clamps() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&OPT_FLOW_BUTTON, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        let mut app = GameApp::new(
+            &OPT_FLOW_BUTTON,
+            OPT_SCENES,
+            OPT_NODES,
+            OPTIONS,
+            &[],
+            &[],
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         app.init(&mut ctx);
 
@@ -1488,7 +1898,15 @@ mod tests {
         // A slider bound to UI_OPTION_NONE and a SetOption to an unknown id
         // must not panic or write anywhere in the store.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&OPT_FLOW_SLIDER, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        let mut app = GameApp::new(
+            &OPT_FLOW_SLIDER,
+            OPT_SCENES,
+            OPT_NODES,
+            OPTIONS,
+            &[],
+            &[],
+            &mut scene,
+        );
         app.adjust_option(UI_OPTION_NONE, 3);
         app.adjust_option(12345, 3);
         assert_eq!(value_of(&app, OPT_ID), 4, "store untouched by stray ids");
