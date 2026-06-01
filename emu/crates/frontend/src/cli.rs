@@ -262,6 +262,9 @@ pub struct DumpEditorPreviewArgs {
     /// Hide the streaming grid overlay.
     #[arg(long)]
     pub no_grid: bool,
+    /// Active floor to render (0 = ground). Diagnostic for stacked-floor rooms.
+    #[arg(long, default_value_t = 0)]
+    pub active_floor: usize,
 }
 
 /// Arguments for `validate`.
@@ -1486,8 +1489,15 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         true,
         true,
         &empty_hidden,
-        None,
-        0,
+        // Active room defaults to the first room; pass the requested
+        // active floor so stacked-floor rooms can be inspected per floor.
+        project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, psxed_project::NodeKind::Room { .. }))
+            .map(|n| n.id),
+        args.active_floor,
         NodeId::ROOT,
         None,
         None,
