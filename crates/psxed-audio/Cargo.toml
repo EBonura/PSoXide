@@ -7,8 +7,10 @@ repository.workspace = true
 description = "Host-side WAV to PSoXide PS1 SPU ADPCM audio cooker."
 
 [dependencies]
-psxed-format = { workspace = true }
-serde        = { workspace = true }
-serde_json   = { workspace = true }
-sha2         = { workspace = true }
-zip          = { workspace = true }
+# Explicit deps so emu/ can pull psxed-audio in without inheriting
+# editor-workspace `workspace = true` values it does not have.
+psxed-format = { path = "../psxed-format" }
+serde        = { version = "1.0", features = ["derive"] }
+serde_json   = "1.0"
+sha2         = "0.10"
+zip          = { version = "2", default-features = false, features = ["deflate"] }
