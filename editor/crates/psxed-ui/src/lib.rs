@@ -426,6 +426,10 @@ pub struct EditorWorkspace {
     /// follow `material.texture` to the same key.
     texture_thumbs: HashMap<ResourceId, ThumbnailEntry>,
     psoxide_logo_texture: Option<egui::TextureHandle>,
+    /// Cached egui texture of the on-device bitmap UI font, rasterized once
+    /// from `psx_font::fonts::BASIC` so the UI-scene preview shows the real
+    /// glyphs the runtime draws instead of an egui host face.
+    ui_font_texture: Option<egui::TextureHandle>,
     /// Persistent texture used by the Model resource inspector's
     /// animated preview. Keeping the handle alive across frames
     /// avoids submitting a texture id that egui has already freed.
@@ -2753,6 +2757,7 @@ impl EditorWorkspace {
             },
             texture_thumbs: HashMap::new(),
             psoxide_logo_texture: None,
+            ui_font_texture: None,
             model_resource_preview_texture: None,
             animation_viewer: ModelAnimationViewerState::default(),
             animation_viewer_preview_texture: None,
@@ -3881,6 +3886,9 @@ impl EditorWorkspace {
     }
 
     fn drain_live_egui_textures(&mut self) -> Vec<egui::TextureHandle> {
+        // `ui_font_texture` is intentionally NOT drained here: the bitmap UI
+        // font is project-independent, so it persists across project switches
+        // and is rebuilt only if it was never loaded.
         let mut handles = Vec::new();
         if let Some(handle) = self.psoxide_logo_texture.take() {
             handles.push(handle);
@@ -4800,10 +4808,14 @@ impl EditorWorkspace {
             StrokeKind::Inside,
         );
         let preview_scene = self.current_ui_scene().cloned().unwrap_or(scene);
+        // Resolve the bitmap-font texture before the immutable project borrows
+        // below, since rasterizing it needs `&mut self`.
+        let ui_font = self.ui_font_texture(ui.ctx());
         draw_ui_scene_preview(
             &painter,
             &self.project,
             &self.texture_thumbs,
+            &ui_font,
             &preview_scene,
             canvas_rect,
             canvas_size,
@@ -11148,6 +11160,23 @@ impl EditorWorkspace {
                 Some(ctx.load_texture("psoxide-app-icon", logo, egui::TextureOptions::LINEAR));
         }
         self.psoxide_logo_texture.as_ref().map(|handle| handle.id())
+    }
+
+    /// Lazily rasterize the on-device UI bitmap font into an egui texture and
+    /// return its handle. The atlas is a `UI_FONT_COLS x UI_FONT_ROWS` grid of
+    /// 8x8 glyphs (white, alpha from the source bits) so the UI-scene preview
+    /// can blit the exact glyphs the runtime draws. Uses NEAREST sampling so
+    /// the crisp 1:1 pixels survive any preview scale.
+    fn ui_font_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
+        self.ui_font_texture
+            .get_or_insert_with(|| {
+                ctx.load_texture(
+                    "psx-ui-font",
+                    rasterize_ui_font_atlas(),
+                    egui::TextureOptions::NEAREST,
+                )
+            })
+            .clone()
     }
 
     fn draw_main_menus(
@@ -28533,6 +28562,7 @@ fn draw_ui_scene_preview(
     painter: &egui::Painter,
     project: &ProjectDocument,
     texture_thumbs: &HashMap<ResourceId, ThumbnailEntry>,
+    font_texture: &egui::TextureHandle,
     scene: &psxed_project::UiScene,
     canvas: Rect,
     canvas_size: [u16; 2],
@@ -28573,12 +28603,13 @@ fn draw_ui_scene_preview(
                 let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
                 draw_ui_preview_text(
                     painter,
+                    font_texture,
                     screen,
                     text,
                     *align,
                     *wrap,
                     false,
-                    FontId::monospace((8.0 * scale).clamp(8.0, 22.0)),
+                    scale,
                     Color32::from_rgb(color[0], color[1], color[2]),
                 );
             }
@@ -28661,12 +28692,13 @@ fn draw_ui_scene_preview(
                 let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
                 draw_ui_preview_text(
                     painter,
+                    font_texture,
                     screen,
                     label,
                     *align,
                     false,
                     true,
-                    FontId::monospace((8.0 * scale).clamp(8.0, 22.0)),
+                    scale,
                     label_color,
                 );
             }
@@ -28734,25 +28766,75 @@ fn ui_psx_tint_to_egui(tint: [u8; 3]) -> Color32 {
     )
 }
 
+/// Source glyph cell size of the UI bitmap font, in texels. The on-device
+/// font ([`psx_font::fonts::BASIC`]) is 8x8.
+const UI_FONT_GLYPH: usize = 8;
+/// Atlas grid: 16 columns x 8 rows = 128 glyphs (the font's `glyph_count`).
+const UI_FONT_COLS: usize = 16;
+const UI_FONT_ROWS: usize = 8;
+
+/// Rasterize the on-device UI bitmap font into an RGBA egui image: a
+/// `(UI_FONT_COLS*8) x (UI_FONT_ROWS*8)` atlas of white glyphs whose alpha is
+/// the source bit (1 -> opaque white, 0 -> transparent). Tinting happens at
+/// blit time, mirroring the PS1 "monochrome glyph * vertex colour" path.
+fn rasterize_ui_font_atlas() -> egui::ColorImage {
+    use psx_font::fonts::BASIC;
+    let aw = UI_FONT_COLS * UI_FONT_GLYPH;
+    let ah = UI_FONT_ROWS * UI_FONT_GLYPH;
+    let mut pixels = vec![Color32::TRANSPARENT; aw * ah];
+    for glyph in 0..BASIC.glyph_count.min((UI_FONT_COLS * UI_FONT_ROWS) as u16) {
+        let gx = (glyph as usize % UI_FONT_COLS) * UI_FONT_GLYPH;
+        let gy = (glyph as usize / UI_FONT_COLS) * UI_FONT_GLYPH;
+        for row in 0..UI_FONT_GLYPH {
+            // `glyph_row_packed` normalises bit order: pixel 0 is bit 0.
+            let bits = BASIC.glyph_row_packed(glyph, row as u8);
+            for col in 0..UI_FONT_GLYPH {
+                if bits & (1 << col) != 0 {
+                    pixels[(gy + row) * aw + (gx + col)] = Color32::WHITE;
+                }
+            }
+        }
+    }
+    egui::ColorImage {
+        size: [aw, ah],
+        pixels,
+    }
+}
+
+/// UV rect of glyph `code` within the atlas, in 0..1 space. Codes outside the
+/// font's range map to glyph 0 (the missing-glyph cell).
+fn ui_font_glyph_uv(code: u8) -> Rect {
+    let index = (code as usize).min(UI_FONT_COLS * UI_FONT_ROWS - 1);
+    let gx = (index % UI_FONT_COLS) as f32 / UI_FONT_COLS as f32;
+    let gy = (index / UI_FONT_COLS) as f32 / UI_FONT_ROWS as f32;
+    let gw = 1.0 / UI_FONT_COLS as f32;
+    let gh = 1.0 / UI_FONT_ROWS as f32;
+    Rect::from_min_size(Pos2::new(gx, gy), Vec2::new(gw, gh))
+}
+
+/// Draw preview text using the on-device bitmap font, so the editor canvas
+/// matches what the runtime renderer ([`psx_engine::ui::draw_scene`]) draws:
+/// fixed 8px cells, 8px advance, 8px line height, all scaled by `scale`.
+#[allow(clippy::too_many_arguments)]
 fn draw_ui_preview_text(
     painter: &egui::Painter,
+    font_texture: &egui::TextureHandle,
     rect: Rect,
     text: &str,
     align: UiTextAlign,
     wrap: bool,
     vcenter: bool,
-    font: FontId,
+    scale: f32,
     color: Color32,
 ) {
-    let approx_char_width = (font.size * 0.62).max(1.0);
-    let max_chars = (rect.width() / approx_char_width).floor().max(1.0) as usize;
-    let line_height = (font.size * 1.15).max(1.0);
+    let cell = (UI_FONT_GLYPH as f32 * scale).max(1.0);
+    let max_chars = (rect.width() / cell).floor().max(1.0) as usize;
     let lines: Vec<&str> = if wrap {
         wrap_preview_text_lines(text, max_chars)
     } else {
         text.lines().collect()
     };
-    let total_h = lines.len().max(1) as f32 * line_height;
+    let total_h = lines.len().max(1) as f32 * cell;
     let mut y = if vcenter {
         rect.top() + (rect.height() - total_h).max(0.0) / 2.0
     } else {
@@ -28762,26 +28844,48 @@ fn draw_ui_preview_text(
         if y > rect.bottom() {
             break;
         }
-        draw_ui_preview_text_line(painter, rect, y, line, align, font.clone(), color);
-        y += line_height;
+        draw_ui_preview_text_line(painter, font_texture, rect, y, line, align, cell, color);
+        y += cell;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_ui_preview_text_line(
     painter: &egui::Painter,
+    font_texture: &egui::TextureHandle,
     rect: Rect,
     y: f32,
     line: &str,
     align: UiTextAlign,
-    font: FontId,
+    cell: f32,
     color: Color32,
 ) {
-    let (x, align2) = match align {
-        UiTextAlign::Left => (rect.left(), Align2::LEFT_TOP),
-        UiTextAlign::Center => (rect.center().x, Align2::CENTER_TOP),
-        UiTextAlign::Right => (rect.right(), Align2::RIGHT_TOP),
+    // Advance is the cell width (the font is fixed-pitch); ASCII-count gives
+    // the run width since each glyph occupies one cell.
+    let glyph_count = line.chars().count() as f32;
+    let line_w = glyph_count * cell;
+    let start_x = match align {
+        UiTextAlign::Left => rect.left(),
+        UiTextAlign::Center => rect.center().x - line_w / 2.0,
+        UiTextAlign::Right => rect.right() - line_w,
     };
-    painter.text(Pos2::new(x, y), align2, line, font, color);
+    let mut x = start_x;
+    for ch in line.chars() {
+        if x + cell > rect.right() + 0.5 {
+            break;
+        }
+        // Only the 128-glyph ASCII range is in the atlas; others draw the
+        // missing-glyph cell (index 0), matching the runtime's fallback.
+        let code = if (ch as u32) < 128 { ch as u8 } else { 0 };
+        let glyph_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(cell));
+        painter.image(
+            font_texture.id(),
+            glyph_rect,
+            ui_font_glyph_uv(code),
+            color,
+        );
+        x += cell;
+    }
 }
 
 fn wrap_preview_text_lines(text: &str, max_chars: usize) -> Vec<&str> {
@@ -36087,6 +36191,56 @@ fn material_option_label(material: Option<ResourceId>, options: &[(ResourceId, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_font_atlas_has_expected_dimensions() {
+        let atlas = rasterize_ui_font_atlas();
+        assert_eq!(atlas.size, [UI_FONT_COLS * 8, UI_FONT_ROWS * 8]);
+        // A real font has many lit pixels; an all-transparent atlas would mean
+        // the rasterizer read the source wrong.
+        let opaque = atlas.pixels.iter().filter(|p| p.a() == 255).count();
+        assert!(opaque > 500, "atlas looks empty ({opaque} opaque px)");
+    }
+
+    #[test]
+    fn ui_font_atlas_pixels_match_the_source_font_bits() {
+        use psx_font::fonts::BASIC;
+        let atlas = rasterize_ui_font_atlas();
+        let aw = UI_FONT_COLS * 8;
+        // Check every glyph cell against the source bitmap: an atlas pixel is
+        // opaque exactly when the corresponding source bit is set. This proves
+        // the rasterizer (grid placement + bit-order via glyph_row_packed) is
+        // faithful, not just non-empty.
+        for glyph in 0..BASIC.glyph_count.min((UI_FONT_COLS * UI_FONT_ROWS) as u16) {
+            let gx = (glyph as usize % UI_FONT_COLS) * 8;
+            let gy = (glyph as usize / UI_FONT_COLS) * 8;
+            for row in 0..8 {
+                let bits = BASIC.glyph_row_packed(glyph, row as u8);
+                for col in 0..8 {
+                    let lit = bits & (1 << col) != 0;
+                    let px = atlas.pixels[(gy + row) * aw + (gx + col)];
+                    assert_eq!(
+                        px.a() == 255,
+                        lit,
+                        "glyph {glyph} row {row} col {col} mismatch",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ui_font_glyph_uv_is_in_unit_range_and_advances_by_one_cell() {
+        let a = ui_font_glyph_uv(b'A');
+        assert!(a.min.x >= 0.0 && a.max.x <= 1.0 && a.min.y >= 0.0 && a.max.y <= 1.0);
+        // Adjacent codes on the same row differ by exactly one column step.
+        let b = ui_font_glyph_uv(b'B');
+        let step = 1.0 / UI_FONT_COLS as f32;
+        assert!((b.min.x - a.min.x - step).abs() < 1e-6);
+        // Out-of-range codes clamp into the atlas (no panic, stays in 0..1).
+        let oob = ui_font_glyph_uv(255);
+        assert!(oob.max.x <= 1.0 && oob.max.y <= 1.0);
+    }
 
     /// The shared multi-select math (`apply_range_modifiers`) backs both scene
     /// node and resource selection. Exercise it directly over plain ids so the
