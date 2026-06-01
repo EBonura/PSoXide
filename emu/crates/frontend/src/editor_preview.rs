@@ -3799,8 +3799,8 @@ fn walk_entity_bounds(
 
         // Yaw arrow only for kinds with meaningful facing --
         // models and spawn points point at where they'll
-        // render / face. Lights / triggers / portals / audio
-        // are either omnidirectional or carry their own
+        // render / face. Lights and portals are either
+        // omnidirectional or carry their own
         // direction gizmo elsewhere (light radius ring).
         if matches!(
             b.kind,
@@ -3835,9 +3835,7 @@ fn entity_bound_style(
         psxed_ui::EntityBoundKind::SpawnPoint => (0x60, 0xE0, 0x80),
         psxed_ui::EntityBoundKind::PointLight => (0xFF, 0xD8, 0x70),
         psxed_ui::EntityBoundKind::ParticleEmitter => (0x98, 0xD6, 0xE6),
-        psxed_ui::EntityBoundKind::Trigger => (0xC8, 0x80, 0xE0),
         psxed_ui::EntityBoundKind::Portal => PORTAL_SEAM_STYLE.rgb,
-        psxed_ui::EntityBoundKind::AudioSource => (0x70, 0xD8, 0xC0),
     };
     FaceOutlineStyle {
         rgb,
@@ -4106,16 +4104,11 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         // makes them read like ordinary markers.
         NodeKind::PointLight { .. } => None,
         NodeKind::ParticleEmitter { .. } => Some((0x98, 0xD6, 0xE6)),
-        NodeKind::Trigger { .. } => Some((0xC8, 0x80, 0xE0)),
         NodeKind::Portal { .. } => None,
-        NodeKind::AudioSource { .. } => Some((0x70, 0xD8, 0xC0)),
         NodeKind::ModelRenderer { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
-        | NodeKind::Interactable { .. }
         | NodeKind::CharacterController { .. }
-        | NodeKind::AiController { .. }
-        | NodeKind::Combat { .. }
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Room { .. }
