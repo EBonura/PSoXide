@@ -15,6 +15,7 @@ pub mod dma;
 pub mod fastboot;
 pub mod gpu;
 pub mod hle_bios;
+pub mod input_tape;
 pub mod irq;
 pub mod mdec;
 pub mod mmio_trace;
@@ -35,6 +36,7 @@ pub use fastboot::{
     DISC_FAST_BOOT_WARMUP_STEPS,
 };
 pub use gpu::{DisplayArea, Gpu};
+pub use input_tape::{read_tape, write_tape, PadSample};
 pub use irq::{Irq, IrqSource};
 pub use mmio_trace::{MmioKind, MmioTrace};
 pub use pad::{button, ButtonState, DigitalPad, PortDevice};
