@@ -11,7 +11,8 @@ use psx_level::{
     LevelModelSocketRecord, LevelOptionDef, LevelRoomPortalRecord, LevelRoomRecord,
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord, LevelSkyRecord, LevelUiNodeRecord, LevelUiScene,
-    LevelVisibilityCellRecord, LevelVisibilityPvsRecord, LevelWeaponRecord,
+    LevelUiSfxCueRecord, LevelUiSfxSampleRecord, LevelVisibilityCellRecord,
+    LevelVisibilityPvsRecord, LevelWeaponRecord,
     LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
     PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
 };
@@ -60,6 +61,8 @@ pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
 pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
 pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
 pub static UI_NODES: &[LevelUiNodeRecord] = &[];
+pub static UI_SFX_SAMPLES: &[LevelUiSfxSampleRecord] = &[];
+pub static UI_SFX_CUES: &[LevelUiSfxCueRecord] = &[];
 pub static UI_SCENES: &[LevelUiScene] = &[];
 pub static GAME_FLOW: GameFlow = GameFlow {
     states: &[FlowState::Gameplay],

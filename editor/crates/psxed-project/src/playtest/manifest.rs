@@ -12,13 +12,16 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
     let textures_dir = generated_dir.join(TEXTURES_DIRNAME);
     let models_dir = generated_dir.join(MODELS_DIRNAME);
+    let ui_sfx_dir = generated_dir.join(UI_SFX_DIRNAME);
     std::fs::create_dir_all(&rooms_dir)?;
     std::fs::create_dir_all(&stream_chunks_dir)?;
     std::fs::create_dir_all(&textures_dir)?;
     std::fs::create_dir_all(&models_dir)?;
+    std::fs::create_dir_all(&ui_sfx_dir)?;
     purge_directory_files(&rooms_dir, "psxw")?;
     purge_directory_files(&stream_chunks_dir, "psxc")?;
     purge_directory_files(&textures_dir, "psxt")?;
+    purge_directory_files(&ui_sfx_dir, "psau")?;
     // Models live in per-model subfolders so the recursive
     // purge needs to traverse one level deeper than rooms /
     // textures.
@@ -43,6 +46,9 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&target, &asset.bytes)?;
+    }
+    for sample in &package.ui_sfx_samples {
+        std::fs::write(ui_sfx_dir.join(&sample.filename), &sample.bytes)?;
     }
     for room_index in 0..package.rooms.len().min(u16::MAX as usize + 1) {
         let payload = streamed_room_chunk_payload(package, room_index as u16)
@@ -176,6 +182,15 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         } else {
             write_aligned_asset_bytes_static(&mut out, &asset_static_name(asset, i), &include_path);
         }
+    }
+    for (i, sample) in package.ui_sfx_samples.iter().enumerate() {
+        let static_name = ui_sfx_sample_static_name(i);
+        let _ = writeln!(out, "/// {static_name} - {}", sample.source_path);
+        write_aligned_asset_bytes_static(
+            &mut out,
+            &static_name,
+            &format!("{UI_SFX_DIRNAME}/{}", sample.filename),
+        );
     }
     out.push('\n');
 
@@ -934,7 +949,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .unwrap_or_else(|| "AssetId(u16::MAX)".to_string());
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {}, font: 0 }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {}, sfx_first: {}, sfx_count: {}, font: 0 }},",
             node.x,
             node.y,
             node.width,
@@ -952,6 +967,31 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             node.tag,
             node.option,
             node.flags,
+            node.sfx_first,
+            node.sfx_count,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cooked UI SFX samples.\n");
+    out.push_str("pub static UI_SFX_SAMPLES: &[LevelUiSfxSampleRecord] = &[\n");
+    for i in 0..package.ui_sfx_samples.len() {
+        let static_name = ui_sfx_sample_static_name(i);
+        let _ = writeln!(
+            out,
+            "    LevelUiSfxSampleRecord {{ bytes: {static_name} }},"
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cooked UI SFX cue bindings.\n");
+    out.push_str("pub static UI_SFX_CUES: &[LevelUiSfxCueRecord] = &[\n");
+    for cue in &package.ui_sfx_cues {
+        let event = render_ui_sfx_event(cue.event);
+        let _ = writeln!(
+            out,
+            "    LevelUiSfxCueRecord {{ sample: {}, event: {event}, volume_percent: {}, pitch_q12: {}, flags: {} }},",
+            cue.sample, cue.volume_percent, cue.pitch_q12, cue.flags,
         );
     }
     out.push_str("];\n\n");
@@ -2212,10 +2252,25 @@ fn render_ui_action(action: PlaytestUiAction) -> String {
     }
 }
 
+fn render_ui_sfx_event(event: psx_level::LevelUiSfxEvent) -> &'static str {
+    match event {
+        psx_level::LevelUiSfxEvent::Focus => "LevelUiSfxEvent::Focus",
+        psx_level::LevelUiSfxEvent::Activate => "LevelUiSfxEvent::Activate",
+        psx_level::LevelUiSfxEvent::SliderNudge => "LevelUiSfxEvent::SliderNudge",
+        psx_level::LevelUiSfxEvent::SliderLimit => "LevelUiSfxEvent::SliderLimit",
+    }
+}
+
 fn render_ui_value_binding(binding: UiValueBinding) -> String {
     match binding {
         UiValueBinding::ConstantQ12(value) => {
             format!("LevelUiValueBinding::ConstantQ12({value})")
+        }
+        UiValueBinding::Option(option) => {
+            format!(
+                "LevelUiValueBinding::Option({})",
+                crate::playtest::cook_option_id(option)
+            )
         }
         UiValueBinding::PlayerHealth => "LevelUiValueBinding::PlayerHealth".to_string(),
         UiValueBinding::PlayerHealthMax => "LevelUiValueBinding::PlayerHealthMax".to_string(),
@@ -2516,6 +2571,10 @@ fn asset_static_name(asset: &PlaytestAsset, index: usize) -> String {
     format!("ASSET_{index:03}_{}_BYTES", stem.to_ascii_uppercase())
 }
 
+fn ui_sfx_sample_static_name(index: usize) -> String {
+    format!("UI_SFX_SAMPLE_{index:03}_BYTES")
+}
+
 fn purge_directory_files(dir: &Path, ext: &str) -> std::io::Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -2720,6 +2779,8 @@ mod tests {
             action: PlaytestUiAction::default(),
             option: psx_level::UI_OPTION_NONE,
             flags: 0,
+            sfx_first: psx_level::UI_SFX_NONE,
+            sfx_count: 0,
         }];
         package.ui_scenes = vec![PlaytestUiScene {
             id: 7,
@@ -2758,6 +2819,7 @@ mod tests {
                     text_color: [236, 240, 248],
                     transparent: false,
                     action: UiAction::Back,
+                    sfx: crate::UiSfxBindings::default(),
                 },
                 x: 0,
                 y: 0,
@@ -2774,6 +2836,8 @@ mod tests {
                 action: PlaytestUiAction::GotoScene { scene: 7 },
                 option: psx_level::UI_OPTION_NONE,
                 flags: 0,
+                sfx_first: psx_level::UI_SFX_NONE,
+                sfx_count: 0,
             },
             PlaytestUiNode {
                 parent: None,
@@ -2783,6 +2847,7 @@ mod tests {
                     track: [11, 12, 13],
                     fill: [21, 22, 23],
                     knob: [31, 32, 33],
+                    sfx: crate::UiSfxBindings::default(),
                 },
                 x: 0,
                 y: 0,
@@ -2799,6 +2864,8 @@ mod tests {
                 action: PlaytestUiAction::default(),
                 option: 3,
                 flags: 0,
+                sfx_first: psx_level::UI_SFX_NONE,
+                sfx_count: 0,
             },
         ];
 
@@ -3288,6 +3355,9 @@ use psx_level::{
     LevelUiNodeKind,
     LevelUiNodeRecord,
     LevelUiScene,
+    LevelUiSfxCueRecord,
+    LevelUiSfxEvent,
+    LevelUiSfxSampleRecord,
     LevelUiValueBinding,
     LevelVisibilityCellRecord,
     LevelVisibilityPvsRecord,
