@@ -5340,8 +5340,7 @@ mod tests {
     #[test]
     #[ignore = "diagnostic: run with --ignored --nocapture to inspect demo11 cook"]
     fn diag_demo11_cook() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../projects/demo11");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/demo11");
         let mut project =
             ProjectDocument::load_from_path(root.join("project.ron")).expect("load demo11");
         project.normalize_loaded();
@@ -5442,7 +5441,10 @@ mod tests {
                 p.source_room, p.destination_room, p.kind, p.normal, p.vertices
             );
         }
-        println!("=== room_floor_links ({}) ===", package.room_floor_links.len());
+        println!(
+            "=== room_floor_links ({}) ===",
+            package.room_floor_links.len()
+        );
         for (i, l) in package.room_floor_links.iter().enumerate() {
             println!(
                 "  link[{i}] room={} cell=({},{}) above={:?} below={:?}",
@@ -5452,8 +5454,15 @@ mod tests {
         if let Some(spawn) = package.spawn {
             println!(
                 "=== SPAWN room={} pos=({},{},{}) -> room origin_y={} ===",
-                spawn.room, spawn.x, spawn.y, spawn.z,
-                package.rooms.get(spawn.room as usize).map(|r| r.origin_y).unwrap_or(-1)
+                spawn.room,
+                spawn.x,
+                spawn.y,
+                spawn.z,
+                package
+                    .rooms
+                    .get(spawn.room as usize)
+                    .map(|r| r.origin_y)
+                    .unwrap_or(-1)
             );
         }
     }
@@ -8036,6 +8045,33 @@ mod tests {
                 .any(|link| link.above_room.is_some() || link.below_room.is_some()),
             "consecutive floors should be auto-linked"
         );
+        // ...and with vertical portal quads (kind=1) so the portal
+        // clipper / portal view have geometry between the floors. A
+        // reciprocal up/down pair per shared cell, with ±Y normals.
+        let vertical: Vec<_> = package
+            .room_portals
+            .iter()
+            .filter(|p| p.kind == 1)
+            .collect();
+        assert!(
+            !vertical.is_empty(),
+            "stacked floors should emit vertical portal quads"
+        );
+        assert!(
+            vertical.iter().any(|p| p.normal == [0, 1, 0])
+                && vertical.iter().any(|p| p.normal == [0, -1, 0]),
+            "vertical portals should be reciprocal (both +Y and -Y normals): {vertical:?}"
+        );
+        // Each vertical portal is planar in Y (a horizontal quad at the
+        // boundary elevation).
+        for p in &vertical {
+            let y = p.vertices[0][1];
+            assert!(
+                p.vertices.iter().all(|v| v[1] == y),
+                "a vertical portal quad must be planar in Y: {:?}",
+                p.vertices
+            );
+        }
     }
 
     #[test]
