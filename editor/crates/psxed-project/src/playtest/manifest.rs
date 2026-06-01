@@ -929,7 +929,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .unwrap_or_else(|| "AssetId(u16::MAX)".to_string());
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {} }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {}, font: 0 }},",
             node.x,
             node.y,
             node.width,
