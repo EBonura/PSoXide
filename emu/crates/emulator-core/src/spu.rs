@@ -1308,22 +1308,17 @@ impl Spu {
             voice_offset::ADSR_LO => voice.adsr_lo,
             voice_offset::ADSR_HI => voice.adsr_hi,
             voice_offset::ADSR_CURRENT => {
-                // Pinned at 0x0001 for Redux parity. Redux's SPU runs
-                // in a background thread (`MainThread`); during a
-                // parity-oracle trace that thread does not get
-                // scheduled, so `Chan::New` stays true for every
-                // keyed voice and `readRegister` case 12 returns 1
-                // unconditionally. The BIOS's SPU-init probe polls
-                // ADSR_CURRENT at ~step 19M expecting 1; anything
-                // else diverges the trace.
+                // Current ADSR volume (ENVX), 15-bit. Hardware exposes the
+                // live envelope level, and games poll it: a commercial title
+                // spins until every voice's ENVX reaches 0 before advancing
+                // past its intro, so a pinned non-zero value hangs it forever.
                 //
-                // Real hardware advances this register over time,
-                // and our full ADSR machine does produce correct
-                // envelope values internally -- but exposing them
-                // here would break the Redux parity contract.
-                // Revisit once the Redux oracle is taught to pump
-                // its SPU thread synchronously.
-                0x0001
+                // This deliberately diverges from the Redux parity trace --
+                // Redux's SPU runs on an unpumped background thread during an
+                // oracle trace, so its `readRegister` case 12 returns a stale
+                // 1 -- but per the hardware > Redux oracle priority the live
+                // envelope is the correct, hardware-accurate value.
+                self.voices[v].envelope.clamp(0, 0x7FFF) as u16
             }
             voice_offset::REPEAT_ADDR => voice.loop_addr_raw,
             _ => 0,
@@ -2268,16 +2263,17 @@ mod tests {
     }
 
     #[test]
-    fn voice_adsr_current_pinned_at_one_for_redux_parity() {
-        // Until the parity oracle pumps Redux's SPU thread, this
-        // register must read 0x0001 regardless of the real internal
-        // envelope state. See comment in `read_voice_reg`.
+    fn voice_adsr_current_reads_live_envelope() {
+        // ENVX exposes the live envelope level (hardware behavior). Games
+        // poll it -- e.g. a commercial title spins until every voice reaches 0
+        // before advancing past its intro -- so it must reflect the real
+        // envelope, not a pinned constant. See `read_voice_reg`.
         let mut s = Spu::new();
         s.voices[0].phase = AdsrPhase::Attack;
         s.voices[0].envelope = 0x4000;
-        assert_eq!(s.read16(VOICE_BASE + voice_offset::ADSR_CURRENT), 1);
-        s.voices[0].phase = AdsrPhase::Off;
-        assert_eq!(s.read16(VOICE_BASE + voice_offset::ADSR_CURRENT), 1);
+        assert_eq!(s.read16(VOICE_BASE + voice_offset::ADSR_CURRENT), 0x4000);
+        s.voices[0].envelope = 0;
+        assert_eq!(s.read16(VOICE_BASE + voice_offset::ADSR_CURRENT), 0);
     }
 
     #[test]
