@@ -1928,7 +1928,7 @@ fn region_label(e: &LibraryEntry) -> &'static str {
 
 fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<bool, String> {
     let display = bus.gpu.display_area();
-    if display.bpp24 {
+    if display.bpp24 || bus.gpu.horizontal_display_offset_px() != 0 {
         let (rgba, w, h) = bus.gpu.display_rgba8();
         write_rgb_ppm_from_rgba(path, w, h, &rgba)?;
         return Ok(true);

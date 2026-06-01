@@ -95,6 +95,15 @@ impl Resolution {
     };
 }
 
+/// GPU clocks per displayed pixel at the standard PSX dot clock that
+/// [`init`] programs. The horizontal display window therefore spans
+/// `width * H_CLOCKS_PER_PIXEL` GPU clocks.
+const H_CLOCKS_PER_PIXEL: u32 = 8;
+
+/// Default left edge (GP1 06h X1) of the horizontal display window, in GPU
+/// clocks from start-of-line -- the standard centred NTSC picture.
+const H_DISPLAY_WINDOW_START: u32 = 0x260;
+
 /// Initialise the GPU: reset, set display mode, set display ranges,
 /// configure DMA direction, enable display output.
 pub fn init(mode: VideoMode, res: Resolution) {
@@ -115,8 +124,8 @@ pub fn init(mode: VideoMode, res: Resolution) {
     // Horizontal & vertical display windows. Values below match the
     // standard PSX output (NTSC 260h..C60h, PAL similar) -- tweaking
     // them shifts the picture on the TV but not the VRAM layout.
-    let h_start = 0x260;
-    let h_end = h_start + (res.width as u32) * 8;
+    let h_start = H_DISPLAY_WINDOW_START;
+    let h_end = h_start + (res.width as u32) * H_CLOCKS_PER_PIXEL;
     write_gp1(gp1::h_display_range(h_start, h_end));
 
     let (v_start, v_end) = match mode {
@@ -180,6 +189,25 @@ pub fn set_draw_area(x0: u16, y0: u16, x1: u16, y1: u16) {
 pub fn set_draw_offset(x: i16, y: i16) {
     wait_cmd_ready();
     write_gp0(gp0::draw_offset(x as i32, y as i32));
+}
+
+/// Shift the displayed picture horizontally on the TV by `offset_px` pixels
+/// (positive = right) via the authentic GP1(06h) horizontal display range --
+/// the same mechanism period games used to recentre the image inside a CRT's
+/// overscan. Unlike [`set_draw_offset`], this never clips rendered content: it
+/// only slides where the active window lands in the video signal, so the whole
+/// picture is preserved. `res` must match the value handed to [`init`] so the
+/// window keeps its width.
+///
+/// Note: this project's emulator mirrors the offset in its presentation buffer
+/// so the front-end preview is visible; other emulators may crop to the active
+/// display region and hide the shift.
+pub fn set_screen_h_offset(offset_px: i16, res: Resolution) {
+    let start = (H_DISPLAY_WINDOW_START as i32
+        + offset_px as i32 * H_CLOCKS_PER_PIXEL as i32)
+        .max(0) as u32;
+    let end = start + res.width as u32 * H_CLOCKS_PER_PIXEL;
+    write_gp1(gp1::h_display_range(start, end));
 }
 
 /// Fill a VRAM rectangle with a solid color. Ignores draw area / offset.

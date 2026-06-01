@@ -1028,7 +1028,9 @@ fn frontend_display(
     gfx: &gfx::Graphics,
 ) -> (egui::TextureId, egui::Rect) {
     let area = display_area_or_default(bus);
-    if area.bpp24 {
+    let screen_offset_active = bus
+        .is_some_and(|bus| bus.gpu.horizontal_display_offset_px() != 0);
+    if area.bpp24 || screen_offset_active {
         return (gfx.display_texture_id(), cpu_display_uv(area));
     }
     (gfx.hw_texture_id(), hw_display_uv(area))

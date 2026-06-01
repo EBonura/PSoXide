@@ -343,6 +343,13 @@ pub struct EditorWorkspace {
     /// activates a focused button's GotoScene, and the focused control is
     /// highlighted. Toggled in the UI workspace; off by default.
     ui_nav_preview: bool,
+    /// Device-pixel horizontal "screen offset" for the UI workspace's
+    /// TV-centring simulation -- the in-editor mirror of the runtime's
+    /// GP1(06h) screen offset. The preview slides the previewed picture this
+    /// many pixels within the fixed screen/bezel so an authored offset can be
+    /// eyeballed while authoring. It never changes authored node positions;
+    /// `0` = centred.
+    screen_offset_sim_px: i16,
     /// Focused control id during the in-editor nav preview, if any.
     ui_nav_focus: Option<UiNodeId>,
     /// `Some((index, buffer))` while a scene strip row is in rename mode.
@@ -2607,6 +2614,15 @@ fn centered_aspect_rect(container: Rect, target_aspect: f32) -> Rect {
     Rect::from_center_size(container.center(), Vec2::new(w, h))
 }
 
+/// Horizontal egui-pixel shift for the UI workspace's screen-offset
+/// simulation: `offset_px` device pixels scaled onto a preview canvas of egui
+/// width `canvas_width` and logical width `logical_w` (e.g. 320). Mirrors how
+/// the runtime's GP1(06h) offset slides the whole picture; here it only moves
+/// the preview, never the authored layout.
+fn screen_offset_preview_shift(offset_px: i16, canvas_width: f32, logical_w: u16) -> f32 {
+    offset_px as f32 * canvas_width / logical_w.max(1) as f32
+}
+
 fn decode_embedded_png(bytes: &[u8]) -> Option<ColorImage> {
     let image = image::load_from_memory(bytes).ok()?.into_rgba8();
     let size = [image.width() as usize, image.height() as usize];
@@ -2698,6 +2714,7 @@ impl EditorWorkspace {
             active_ui_scene_index: 0,
             active_floor: 0,
             ui_nav_preview: false,
+            screen_offset_sim_px: 0,
             ui_nav_focus: None,
             ui_scene_renaming: None,
             ui_scene_rename_focus_pending: false,
@@ -4718,6 +4735,19 @@ impl EditorWorkspace {
             if self.ui_nav_preview {
                 ui.weak("arrows move focus  /  Enter activates");
             }
+            ui.separator();
+            ui.label("Screen offset");
+            ui.add(
+                egui::DragValue::new(&mut self.screen_offset_sim_px)
+                    .range(-48..=48)
+                    .suffix(" px"),
+            );
+            if self.screen_offset_sim_px != 0 {
+                if ui.button("Centre").clicked() {
+                    self.screen_offset_sim_px = 0;
+                }
+                ui.weak("TV-position preview -- editing uses the centred screen");
+            }
         });
         let avail = ui.available_size();
         let container_size = Vec2::new(avail.x.max(1.0), avail.y.max(1.0));
@@ -4812,19 +4842,41 @@ impl EditorWorkspace {
         // Resolve the bitmap-font texture before the immutable project borrows
         // below, since rasterizing it needs `&mut self`.
         let ui_font = self.ui_font_texture(ui.ctx());
+        // Screen-offset (TV-centring) simulation: slide the previewed picture
+        // horizontally within the fixed screen, clipped at the bezel, so the
+        // authored GP1(06h) offset can be eyeballed here. Node hit-testing keeps
+        // using the centred `canvas_rect` above, so authoring is unaffected.
+        let display_canvas = canvas_rect.translate(Vec2::new(
+            screen_offset_preview_shift(
+                self.screen_offset_sim_px,
+                canvas_rect.width(),
+                canvas_size[0],
+            ),
+            0.0,
+        ));
+        let scene_painter = ui.painter_at(canvas_rect);
         draw_ui_scene_preview(
-            &painter,
+            &scene_painter,
             &self.project,
             &self.texture_thumbs,
             &ui_font,
             &preview_scene,
-            canvas_rect,
+            display_canvas,
             canvas_size,
             self.selection.selected_ui_node,
             hovered_resize_target.and_then(|(node, handle)| {
                 (node == self.selection.selected_ui_node).then_some(handle)
             }),
         );
+        if self.screen_offset_sim_px != 0 {
+            painter.text(
+                canvas_rect.left_top() + Vec2::new(4.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                format!("screen offset {:+} px", self.screen_offset_sim_px),
+                egui::FontId::proportional(11.0),
+                Color32::from_rgb(180, 190, 210),
+            );
+        }
 
         if self.ui_nav_preview {
             // Drive in-editor focus through the SAME resolver the runtime uses,
@@ -37194,6 +37246,18 @@ mod tests {
 
         assert_size_approx(rect.size(), Vec2::new(320.0, 240.0));
         assert_pos_approx(rect.center(), container.center());
+    }
+
+    #[test]
+    fn screen_offset_preview_shift_scales_device_px_to_canvas_px() {
+        // No offset -> no shift, regardless of scale.
+        assert_eq!(screen_offset_preview_shift(0, 640.0, 320), 0.0);
+        // 320-logical canvas drawn at 640 egui px is 2x, so 32 device px -> 64.
+        assert_eq!(screen_offset_preview_shift(32, 640.0, 320), 64.0);
+        // 1:1 scale passes the device offset straight through, sign preserved.
+        assert_eq!(screen_offset_preview_shift(-16, 320.0, 320), -16.0);
+        // Degenerate logical width is clamped, never divides by zero.
+        assert_eq!(screen_offset_preview_shift(10, 320.0, 0), 3200.0);
     }
 
     #[test]
