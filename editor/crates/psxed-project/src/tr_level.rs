@@ -15,7 +15,7 @@ use crate::{
     FarVistaSettings, GridDirection, GridFloorLink, GridHorizontalFace, GridVerticalFace,
     MaterialResource, NodeId, NodeKind, PortalGeometry, ProjectDocument, ResourceData, ResourceId,
     SkySettings, Transform3, WorldCameraSettings, WorldCullingSettings, WorldGrid,
-    WorldStreamingSettings,
+    WorldPhysicsSettings, WorldStreamingSettings,
 };
 
 pub const TR4_VERSION: u32 = 0x0034_5254;
@@ -296,6 +296,7 @@ impl TrLevel {
                 camera: WorldCameraSettings::default(),
                 culling: WorldCullingSettings::default(),
                 streaming: WorldStreamingSettings::default(),
+                physics: WorldPhysicsSettings::default(),
             };
         }
 
