@@ -608,6 +608,23 @@ impl Gpu {
         }
     }
 
+    /// Horizontal presentation offset, in displayed pixels, requested by
+    /// GP1(06h) relative to the standard centred window. Real hardware slides
+    /// the active picture by this much within the video signal (the classic
+    /// CRT screen-position adjustment); [`Gpu::display_rgba8`] reproduces it so
+    /// the setting is visible even though we otherwise crop to the active
+    /// region. Content that leaves the H-range at the standard value -- the
+    /// vast majority -- gets `0`.
+    pub fn horizontal_display_offset_px(&self) -> i32 {
+        // Standard centred H-range start (GP1 06h X1) the SDK and most content
+        // use; the offset is measured relative to it. GPU clocks per pixel come
+        // from the active dot clock, so 320-wide content uses 8 (matching the
+        // SDK's `set_screen_h_offset`).
+        const H_DISPLAY_START_STANDARD: i32 = 0x260;
+        let divisor = self.dot_clock_divisor().max(1) as i32;
+        (self.h_range_x1 as i32 - H_DISPLAY_START_STANDARD) / divisor
+    }
+
     /// Produce a row-major `RGBA8` buffer of the current display area.
     /// In 16-bit mode the 5-bit channels are bit-replicated to 8-bit;
     /// in 24-bit mode the packed RGB888 triplets are used directly.
@@ -622,14 +639,28 @@ impl Gpu {
         let vram_h = crate::VRAM_HEIGHT as u16;
         let eff_h = da.height.min(vram_h.saturating_sub(da.y));
         let eff_w = da.width.min(vram_w.saturating_sub(da.x));
+        // GP1(06h) horizontal screen positioning: slide the picture within the
+        // output by the requested offset and black-fill the exposed edge, so a
+        // screen-position setting is visible. Real hardware shifts the active
+        // window inside the video signal; cropping to the active region would
+        // otherwise discard the shift. Standard-centred content -> off 0.
+        let off = self
+            .horizontal_display_offset_px()
+            .clamp(-(eff_w as i32), eff_w as i32);
         let mut out = Vec::with_capacity((eff_w as usize) * (eff_h as usize) * 4);
         for dy in 0..eff_h {
             for dx in 0..eff_w {
+                let src = dx as i32 - off;
+                if src < 0 || src >= eff_w as i32 {
+                    out.extend_from_slice(&[0, 0, 0, 0xFF]);
+                    continue;
+                }
+                let sx = da.x + src as u16;
                 if da.bpp24 {
-                    let (r, g, b) = self.read_pixel_rgb24(da.x + dx, da.y + dy);
+                    let (r, g, b) = self.read_pixel_rgb24(sx, da.y + dy);
                     out.extend_from_slice(&[r, g, b, 0xFF]);
                 } else {
-                    let pixel = self.vram.get_pixel(da.x + dx, da.y + dy);
+                    let pixel = self.vram.get_pixel(sx, da.y + dy);
                     let r = ((pixel & 0x1F) as u8) << 3;
                     let g = (((pixel >> 5) & 0x1F) as u8) << 3;
                     let b = (((pixel >> 10) & 0x1F) as u8) << 3;
@@ -3726,6 +3757,34 @@ mod tests {
 
         gpu.write32(GP1_ADDR, 0x0800_0061); // hres2=1, hres1=1
         assert_eq!(gpu.display_area().width, 384);
+    }
+
+    #[test]
+    fn display_rgba8_pans_by_gp1_06_horizontal_offset() {
+        let mut gpu = Gpu::new();
+        gpu.write32(GP1_ADDR, 0x0500_0000); // display start (0, 0)
+        gpu.write32(GP1_ADDR, 0x0703_c000); // v-range 0..240
+        gpu.write32(GP1_ADDR, 0x0800_0001); // 320-wide, 240 lines
+        // Mark VRAM column 0 red so we can see where it lands on the output.
+        for y in 0..4 {
+            gpu.vram.set_pixel(0, y, 0x001F); // 15bpp red
+        }
+        let px = |buf: &[u8], x: usize| (buf[x * 4], buf[x * 4 + 1], buf[x * 4 + 2]);
+
+        // H-range at the standard centre (0x260): no pan, column 0 is red.
+        gpu.write32(GP1_ADDR, 0x0600_0000 | 0x260 | (0xC60 << 12));
+        assert_eq!(gpu.horizontal_display_offset_px(), 0);
+        let (rgba, w, _h) = gpu.display_rgba8();
+        assert_eq!(w, 320);
+        assert_eq!(px(&rgba, 0), (255, 0, 0), "centred: column 0 = VRAM x=0");
+
+        // H-range start 0x260 + 32*8 = 0x360 -> +32 px: the picture slides right,
+        // so VRAM x=0 lands at output column 32 and columns 0..31 are black-fill.
+        gpu.write32(GP1_ADDR, 0x0600_0000 | 0x360 | (0xD60 << 12));
+        assert_eq!(gpu.horizontal_display_offset_px(), 32);
+        let (rgba, _w, _h) = gpu.display_rgba8();
+        assert_eq!(px(&rgba, 0), (0, 0, 0), "offset: exposed left edge is black");
+        assert_eq!(px(&rgba, 32), (255, 0, 0), "offset: VRAM x=0 now at column 32");
     }
 
     #[test]
