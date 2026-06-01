@@ -140,16 +140,17 @@ pub trait Scene {
         None
     }
 
-    /// Receive the current project-option values as gameplay begins. The flow
-    /// driver calls this each time it enters the gameplay state, handing the
-    /// cooked [`LevelOptionDef`] table and the parallel live-value slice
-    /// (`values[i]` is the current value of `options[i]`, already clamped to
-    /// that option's range). A scene reads whatever settings it cares about by
-    /// matching `option.id` and caches them.
+    /// Receive the current project-option values. The flow driver calls this
+    /// when a UI entry applies defaults, after front-end option edits, and each
+    /// time it enters the gameplay state, handing the cooked [`LevelOptionDef`]
+    /// table and the parallel live-value slice (`values[i]` is the current value
+    /// of `options[i]`, already clamped to that option's range). A scene reads
+    /// whatever settings it cares about by matching `option.id` and caches or
+    /// applies them.
     ///
-    /// Values are delivered at gameplay entry, not per frame, so a setting
-    /// changed in a front-end menu takes effect on the next Play. Live in-game
-    /// adjustment is a separate, later concern. Default is a no-op.
+    /// Values are not delivered per frame: front-end menus publish only when an
+    /// option changes, and live in-game adjustment is a separate, later concern.
+    /// Default is a no-op.
     #[allow(unused_variables)]
     fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32]) {}
 }
