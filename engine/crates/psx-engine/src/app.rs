@@ -226,12 +226,20 @@ impl App {
         gpu::set_draw_offset(0, 0);
         boot_trace("psx-engine: framebuffer ok");
 
+        // Seed pad + pad_prev from a real poll so a button already held at
+        // boot does NOT register as `just_pressed` on the first frame. This
+        // matters when booting into a UI scene with captured input (editor
+        // embedded Play): the CROSS/START that may be down as Play starts must
+        // not instantly activate a menu button and skip into gameplay. With
+        // both seeded to the current state, an input must actually transition
+        // (release then press) to count as a press.
+        let initial_pad = poll_port1();
         let mut ctx = Ctx {
             sim_tick: SimTick::ZERO,
             visual_frame: VisualFrame::ZERO,
             video_hz: config.video_hz(),
-            pad: PadState::NONE,
-            pad_prev: PadState::NONE,
+            pad: initial_pad,
+            pad_prev: initial_pad,
             fb,
         };
 
