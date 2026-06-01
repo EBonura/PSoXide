@@ -3089,6 +3089,12 @@ struct ActiveRuntimeRoom {
     /// origin, in engine units.
     offset_x: i32,
     offset_z: i32,
+    /// Vertical offset from the current room's elevation to this room's,
+    /// in engine units. Stacked floors cook to distinct `origin_y`; this
+    /// places the room's geometry at its real height relative to the
+    /// camera so an upper floor renders a storey up, not on top of the
+    /// current one at Y=0.
+    offset_y: i32,
     surface_cache: ActiveRoomSurfaceCache,
 }
 
@@ -3122,6 +3128,9 @@ impl ActiveRuntimeRoom {
     ) -> Self {
         self.offset_x = room_origin_x(record).saturating_sub(room_origin_x(current_record));
         self.offset_z = room_origin_z(record).saturating_sub(room_origin_z(current_record));
+        // `origin_y` is absolute engine units (not sector-scaled like
+        // x/z), so the vertical offset is a plain record difference.
+        self.offset_y = record.origin_y.saturating_sub(current_record.origin_y);
         self
     }
 }
@@ -8831,6 +8840,7 @@ fn build_active_room(
         material_count,
         offset_x: room_origin_x(record).saturating_sub(room_origin_x(current_record)),
         offset_z: room_origin_z(record).saturating_sub(room_origin_z(current_record)),
+        offset_y: record.origin_y.saturating_sub(current_record.origin_y),
         surface_cache,
     })
 }
@@ -9571,7 +9581,7 @@ fn camera_for_room(camera: WorldCamera, active: ActiveRuntimeRoom) -> WorldCamer
         camera.projection,
         WorldVertex::new(
             camera.position.x.saturating_sub(active.offset_x),
-            camera.position.y,
+            camera.position.y.saturating_sub(active.offset_y),
             camera.position.z.saturating_sub(active.offset_z),
         ),
         camera.sin_yaw,

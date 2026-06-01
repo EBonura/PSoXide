@@ -12,6 +12,13 @@ use crate::{
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
 const DEFAULT_BODY_HEIGHT: i32 = 768;
+/// Max height (engine units) of a wall the character steps over instead
+/// of being blocked by. A riser whose top is within this of the feet is
+/// treated as a step (the floor probe already found walkable floor on the
+/// far side, so the body simply rises onto it); taller walls still block.
+/// Sits in the gap between demo-scale steps (<=~576) and real walls
+/// (>=~1152).
+const STEP_UP_HEIGHT: i32 = 640;
 const MAX_MOTOR_CATCHUP_VBLANKS: u16 = 4;
 const SPLIT_NE_SW: u8 = 1;
 const DIR_NORTH: u8 = 0;
@@ -1309,7 +1316,7 @@ fn body_hits_solid_wall(
                 while i < sector.wall_count() {
                     if let Some(wall) = room.sector_wall(sector, i) {
                         if wall.solid()
-                            && vertical_ranges_overlap(position.y, height, wall.heights())
+                            && wall_blocks_body(position.y, height, wall.heights())
                             && circle_overlaps_wall_segment(
                                 position.x,
                                 position.z,
@@ -1331,6 +1338,22 @@ fn body_hits_solid_wall(
         sx += 1;
     }
     false
+}
+
+/// Whether a solid wall blocks the body, accounting for stair-stepping.
+/// A wall blocks when it overlaps the body's vertical span AND its top
+/// rises more than [`STEP_UP_HEIGHT`] above the body's feet. A lower
+/// riser is a step the character climbs: the floor probe has already
+/// confirmed walkable floor at the target X/Z, so the body rises onto it
+/// rather than being stopped. `snap_floor` then settles the feet on the
+/// step surface the next tick.
+fn wall_blocks_body(feet_y: i32, body_height: i32, wall_heights: [i32; 4]) -> bool {
+    if !vertical_ranges_overlap(feet_y, body_height, wall_heights) {
+        return false;
+    }
+    let wall_top = wall_heights.iter().copied().max().unwrap_or(feet_y);
+    // Steppable riser: top within a step of the feet -> not a blocker.
+    wall_top > feet_y.saturating_add(STEP_UP_HEIGHT)
 }
 
 fn vertical_ranges_overlap(body_y: i32, body_height: i32, wall_heights: [i32; 4]) -> bool {
@@ -1535,6 +1558,51 @@ mod tests {
 
     fn config() -> CharacterMotorConfig {
         CharacterMotorConfig::character(64, 32, 64, Angle::from_q12(16))
+    }
+
+    #[test]
+    fn low_riser_is_steppable_not_blocking() {
+        // Feet on the lower floor at y=0, body 768 tall. A short riser
+        // (top 320, a demo-scale step) overlaps the body but is within a
+        // step of the feet, so it must NOT block: the character steps up.
+        let step = [0, 0, 320, 320];
+        assert!(vertical_ranges_overlap(0, 768, step), "step overlaps body");
+        assert!(
+            !wall_blocks_body(0, 768, step),
+            "a low riser within STEP_UP_HEIGHT must be steppable"
+        );
+    }
+
+    #[test]
+    fn full_wall_still_blocks() {
+        // A real wall (top 1792, a full sector) rises far above the feet
+        // and must block.
+        let wall = [0, 0, 1792, 1792];
+        assert!(
+            wall_blocks_body(0, 768, wall),
+            "a full-height wall must block"
+        );
+    }
+
+    #[test]
+    fn step_at_threshold_boundary() {
+        // Exactly STEP_UP_HEIGHT above the feet is still steppable; one
+        // unit higher blocks. Guards the off-by-one at the boundary.
+        let at = [0, 0, STEP_UP_HEIGHT, STEP_UP_HEIGHT];
+        let over = [0, 0, STEP_UP_HEIGHT + 1, STEP_UP_HEIGHT + 1];
+        assert!(
+            !wall_blocks_body(0, 768, at),
+            "top == feet+STEP_UP steppable"
+        );
+        assert!(wall_blocks_body(0, 768, over), "one unit higher blocks");
+    }
+
+    #[test]
+    fn wall_below_feet_does_not_block() {
+        // A wall entirely below the feet (e.g. seen from an upper floor)
+        // doesn't overlap the body and never blocks.
+        let below = [-1024, -1024, -512, -512];
+        assert!(!wall_blocks_body(0, 768, below));
     }
 
     fn world_with_internal_south_wall() -> [u8; 184] {
