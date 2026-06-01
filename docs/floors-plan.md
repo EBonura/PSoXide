@@ -1,0 +1,191 @@
+# Floors: vertical levels within a room
+
+Supersedes the VR2b/VR2c "stack separate room nodes + manual vertical portals"
+framing in `docs/vertical-rooms-vr2-plan.md`. A project authors a single Room (one
+grid plus manually placed portals that the cook splits into streaming regions), so
+the right vertical primitive is FLOORS (levels) within that one room, navigated by an
+up/down button, not stacked room nodes.
+
+## Model (agreed with the user)
+
+- A Room is a base floor (today's floor + ceiling grid = floor 0) plus a stack of
+  floors above it.
+- Each floor is its own free grid: any footprint, any floor/ceiling heights.
+- Auto-stack: floor N's base sits just above floor N-1's ceiling, so floors never
+  overlap in Y.
+- Authoring: an up/down button switches the active floor; the paint/edit tools target
+  the active floor's plane. Clicking "up" moves you to the plane above.
+- Ghosting: while editing floor N, floor N-1 is drawn faintly underneath for alignment
+  (lining up stairs / holes).
+
+## Data
+
+`WorldGrid` gains `floors_above: Vec<WorldGrid>` (`#[serde(default)]`, empty). Floor 0 is
+the base grid itself; floor `i` is `floors_above[i - 1]`. Floors live on the grid, NOT on
+the `NodeKind::Room` variant, on purpose: the grid's cells are public fields (`sectors`,
+`width`, `depth`) read directly at ~168 `NodeKind::Room { grid }` sites, so a Room-variant
+field (or a multi-floor restructure of those public fields) would ripple through all of
+them. With floors on `WorldGrid`, those 168 sites keep operating on floor 0 (the base
+grid) untouched; only the editor's active-floor access (paint, hit-test, render) routes to
+`grid.floor(i)` / `grid.floor_mut(i)`.
+
+Accessors on `WorldGrid`: `floor_count()`, `floor(i)`, `floor_mut(i)`, and `push_floor()`
+(adds an empty floor auto-stacked just above the top floor's ceiling). The editor holds
+the active-floor index as view state (like the active UI scene index), not in grid data.
+
+## Slices
+
+- Slice 1 (authoring, INLINE in the editor): add `floors_above` to `WorldGrid` + floor
+  accessors; an active-floor index plus up/down buttons in the Room workspace; paint/edit
+  target the active floor; the viewport ghosts the floor below. The cook still emits only
+  floor 0 (upper floors are author-only until Slice 2). This delivers the edit-floor-0,
+  click-up, edit-floor-1 loop.
+- Slice 2 (playable, cook + runtime): cook every floor at its auto elevation
+  (`origin_y`); auto-wire vertical connections from holes (a missing floor face becomes
+  a floor/ceiling portal for seeing down + the `floor_above`/`floor_below` links for
+  walking, both already runtime-supported); add the streaming edge between vertically
+  overlapping regions (the old Decision 3, now derived rather than hand-wired).
+
+## Reuses
+
+VR1 `origin_y` (per-floor elevation), the 3D portal record + clipper (floor/ceiling
+portals), and the runtime `floor_above_room`/`floor_below_room` consumption
+(`editor-playtest/src/main.rs:6235`). The new work is the floors dimension, the up/down
+editor with ghosting, and the cook auto-wiring.
+
+## demo11 reproduction (cook ground truth) — OPEN BUGS
+
+Loaded `editor/projects/demo11/project.ron` and cooked it via `build_package` in a
+diagnostic test (`diag_demo11_cook`, `#[ignore]`, run with `--ignored --nocapture`).
+Structure: ONE Room node "Demo7 Map" (id 18), sector_size 1792, 2 floors (floor 0
+elevation 0, floor 1 elevation 3584 = 2 sectors), each 36 populated cells. Player Entity
+(id 28) at translation.y = 2.892857 sectors (= 5184 engine units). Cook output:
+- rooms: room[0] origin_y=0, room[1] origin_y=3584. Good.
+- room_portals: **0**. Floor links exist (72) but NO vertical portal quads.
+- SPAWN room=1 (origin_y 3584) — WRONG, player authored on floor 0.
+
+Three root causes, all from the floors design conflict (Slice 1 renders floors IN PLACE at
+base Y; Slice 2 cook + entities use REAL elevation — the editor and cook disagree on where
+a floor is):
+
+1. PLAYER SPAWNS ON WRONG FLOOR. `chunk_for_node` "closest elevation" picks floor 1:
+   |5184−3584|=1600 < |5184−0|=5184. But 2.89 sectors is a model-height offset standing
+   ON floor 0 (visual_offset.y=640 on top), not a floor selector. Even a half-open band
+   rule [elev_N, elev_{N+1}) misassigns: 5184 ≥ 3584 → floor 1. The real problem: the
+   player Y was authored against the in-place (Y=0) floor-0 render, so its absolute Y is
+   meaningless as a floor key. My elevation-binding (the just-"DONE" item below) BROKE this
+   existing project. Likely correct fix: bind by the floor the node was authored on
+   (explicit), not by inferring from a Y that the in-place render made unreliable.
+
+2. NO VERTICAL PORTALS. `room_portals` only come from `plan.portals` (manual seams within
+   one grid, playtest.rs:259). The auto floor-stack produces `room_floor_links` but no
+   `PlaytestRoomPortal` quads → portal view empty, no visual/render connection between
+   floors. Slice 2 wired links but never generated the horizontal portal quads at the
+   shared floor/ceiling boundary.
+
+3. "GOING UP MOVES THE PLAYER MODEL." Editor renders the active floor's GEOMETRY in place
+   at base Y (`preview_room_grids`), but `walk_entities` draws entities at their true
+   `translation.y` (`node_room_local_origin`, raw transform). Switching floors swaps the
+   geometry under a fixed-Y entity, so the player appears to shift relative to the floor.
+
+Fix direction (NEEDS USER CALL — reverses Slice 1's "render in place"): make the editor
+render each floor at its REAL elevation (stack visibly), so authored Y, cook elevation, and
+render agree. Then: stamp/track the floor a node belongs to explicitly; generate vertical
+portal quads from the floor links; entities move with their floor because the floor is
+where its elevation says.
+
+## Status
+
+- Per-floor entities/lights (post-selection-fix): DONE (but see demo11 bug 1 — the
+  elevation-inference binding is unreliable for nodes authored against the in-place render;
+  revisit alongside the render-at-real-elevation fix). Entity/light chunk binding was
+  XZ-only, so on stacked floors a node bound to floor 0's chunk. Root cause: entities
+  carried no floor, the editor renders the active floor in place at base Y, so a floor-1
+  placement stored `translation[1] ≈ 0`, identical to floor 0. Three coordinated parts:
+  (1) placement stamps the active floor's elevation into `translation[1]`
+  (`placement_translation_for_room_hit` + new `active_floor_elevation_sectors`), so a node
+  records its floor (and cooks at the right height for free); (2) `chunk_for_node` picks
+  the candidate chunk whose `floor_idx` elevation is closest to the node's Y (entities AND
+  light source-binding route through it); (3) `expand_lights_across_chunks` gates the
+  cross-chunk spill by Y (`CookedRoomBakeInput` gained `origin_y`) so a light stays on its
+  level. Red→green test `entities_bind_to_the_floor_matching_their_y` (two markers, one per
+  floor; XZ-only binding yields `[0,0]`, Y-aware binds each to its own `origin_y`). Tests:
+  psxed-project 258, psxed-ui 195; frontend builds. KNOWN LIMIT: floating-geometry
+  duplicate placement (`floating_origin_from_3d_hover`) is XZ-cell based and doesn't carry
+  floor Y; only the main click-placement path stamps elevation.
+- Selection fix (post-Slice-2): DONE. The 3D ray-pick and every selection / inspector
+  reader destructured `NodeKind::Room { grid }` directly (always floor 0), so on an upper
+  floor you saw floor N but selected floor 0's faces. Routed all of them through
+  `room_grid_view` (active floor): `pick_face_with_hit`, `face_world_corners`,
+  `triangle_world_corners`, `horizontal_triangle_ref_at_hit`, `horizontal_face_split_and_drop`,
+  `face_material`, `triangle_material`, `triangle_parent_values`, `all_faces_in_room`,
+  `existing_horizontal_rect_faces`, `existing_wall_span_faces`, `world_to_sector`,
+  `ensure_cell_in_grid`, `apply_paint`, `sector_bounds_2d`, `selection_bounds_3d`, and the
+  2D box-select (`select_sectors_in_screen_rect`, per-floor via `grid.floor(idx)`).
+  Red→green test `face_corner_reads_address_the_active_floor` (distinct per-floor geometry:
+  floor 0 has a floor face, floor 1 a wall) covers `face_world_corners` + `all_faces_in_room`.
+  195 psxed-ui tests pass; frontend builds.
+- Slice 1 (authoring + visual): DONE. `floors_above` + accessors on `WorldGrid`
+  (`psxed-project/src/lib.rs`); `push_floor` auto-stacks one storey above the top floor
+  and inherits the base's fog/ambient/atmosphere. Editor: `active_floor` view-state +
+  Up/Down stepper in the viewport toolbar; `room_grid_view` (reads) and a new
+  `room_floor_grid_mut` (writes) route EVERY floor-level edit to the active floor (paint,
+  vertex/edge heights, materials, autotile, face/triangle/sector/vertex delete, sector
+  inspector, auto-grow `extend`, `resize`, drag-move, rotate, duplicate/paste). The
+  `extend`/`resize`/`draw_sector_inspector`/`remove_primitive_faces_from_project` free fns
+  gained an `active_floor` param. Render: `emu/.../editor_preview.rs::preview_room_grids`
+  routes the active room to its active floor (in place); `walk_room_ghost` draws the floor
+  below dropped one storey, flat-dim, for alignment. Tests green: psxed-project 256,
+  psxed-ui 194, frontend editor_preview 38.
+- Slice 2 (playable cook): DONE (cook-side). The per-room cook loop now wraps a
+  `for floor_idx in 0..base_grid.floor_count()` so each floor cooks its own streaming
+  chunks at `room_origin_y_base + (floor.elevation - base.elevation)`; `AuthoredRoomChunk`
+  carries `floor_idx`; `auto_wire_floor_stack_links` links consecutive floors by chunk
+  `room_index` (bypassing the `(node id, cell)` resolver, which can't disambiguate floors)
+  and is merged into `room_floor_links`. 256 psxed-project tests pass; psxed-ui builds.
+  Playtest to confirm the runtime renders/walks the stack. Design below.
+
+## Slice 2 implementation plan (cook)
+
+Cook is `psxed-project/src/playtest.rs`, pass 1 = `for room_node in &room_nodes` (~204).
+Per room node today: destructure base `grid`; `room_origin_y` from
+`transform.translation[1] * sector_size` (~226); `plan_portal_rooms(scene, node.id, grid)`
+(~232); `for portal_room in plan.rooms` cooks each chunk (`extract_portal_room_grid` ->
+`cook_world_grid` -> push `rooms`/`room_meta`/`room_origins` with `origin_y`, materials,
+`collect_room_lights`, `collect_pending_floor_links`); then per-node entities; then
+post-loop `resolve_room_floor_links(&pending, &room_chunks_by_node)` (~1208) keyed by
+`(target NodeId, world_cell)`.
+
+Changes:
+
+1. Wrap ONLY the chunk-cook (streaming + `plan_portal_rooms` + the `for portal_room`
+   loop, roughly the `let streaming` .. close-of-`for portal_room`) in
+   `for floor_idx in 0..base_grid.floor_count()`, binding `let grid =
+   base_grid.floor(floor_idx).unwrap()` and `room_origin_y = base_origin_y +
+   (grid.elevation - base_grid.elevation)`. Keep per-node entities OUTSIDE the floor loop
+   (entities belong to the room once). Destructure as `base_grid`, shadow `grid` inside.
+2. Add `floor_idx: usize` to `AuthoredRoomChunk` and set it, so chunks know their floor.
+3. After the floor loop (per node), auto-wire vertical links: for consecutive floors
+   (N-1, N), for each XZ cell present in both, emit a `ResolvedRoomFloorLink` directly by
+   chunk `room_index` (floor N's sector floor_below -> floor N-1 chunk; floor N-1
+   floor_above -> floor N chunk). Do NOT route through `resolve_floor_link_target` /
+   `(NodeId, cell)` resolution: that CANNOT disambiguate two floors of the same room node
+   (same node id, same cell). Build a per-floor `cell -> room_index` map from the
+   `AuthoredRoomChunk`s (now carrying `floor_idx`) and link directly.
+4. Vertical portals between floors follow from the links (runtime already consumes
+   `origin_y` + floor links + vertical portal records). No runtime change expected.
+
+Known gotchas / unverified:
+- Lights (`collect_room_lights`) and entities (`resolve_entity_room`) resolve by XZ, so on
+  stacked floors they may bind to the wrong floor's chunk. Acceptable for a first pass
+  (entities/lights effectively floor-0); refine by elevation later.
+- Whether the runtime cleanly renders one room node -> several stacked chunks is only
+  verifiable by playtest; that path is adjacent to the streaming refactor. Cook-side
+  changes are isolated to `psxed-project`.
+
+DONE as described above. Remaining follow-ups: (a) a dedicated cook test asserting N
+floors -> N stacked rooms at distinct `origin_y` with auto-wired links; (b) lights
+(`collect_room_lights`) and entities (`resolve_entity_room`) still resolve by XZ, so on
+stacked floors they bind to whichever chunk matches in plan order (effectively floor 0),
+refine by elevation later; (c) playtest one room with two floors to confirm the runtime
+renders/walks the stack.
