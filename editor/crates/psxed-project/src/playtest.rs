@@ -1230,6 +1230,15 @@ pub fn build_package(
     let mut room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
     room_floor_links.extend(auto_wire_floor_stack_links(&room_chunks_by_node));
     room_portals.extend(auto_wire_floor_stack_portals(scene, &room_chunks_by_node));
+    // The runtime visibility BFS reads each room's portals as the
+    // contiguous slice [portal_first, portal_first+portal_count). The
+    // per-room ranges set during the cook loop only covered the
+    // horizontal portals from `plan_portal_rooms`; the vertical
+    // floor-stack portals were appended afterwards and would be
+    // unreferenced (room.portal_count wouldn't include them, so the BFS
+    // never scans them). Regroup the whole table by source_room and
+    // rebuild every room's range so both kinds are reachable.
+    regroup_room_portals(&mut rooms, &mut room_portals);
     let (ui_nodes, ui_scenes, game_flow) = cook_ui_nodes(
         project,
         project_root,
@@ -5095,9 +5104,12 @@ fn auto_wire_floor_stack_portals(
             // Only emit from the lower side of each boundary, so each
             // shared cell yields exactly one reciprocal pair.
             let upper_floor = chunk.floor_idx + 1;
-            let Some(boundary_y) = grid.floor(upper_floor).map(|f| f.elevation) else {
+            let (Some(lower_grid), Some(upper_grid)) =
+                (grid.floor(chunk.floor_idx), grid.floor(upper_floor))
+            else {
                 continue;
             };
+            let boundary_y = upper_grid.elevation;
             for &cell in &chunk.cells {
                 let world_cell = chunk_cell_world_cell(chunk, cell);
                 let Some(above) = chunks.iter().find(|other| {
@@ -5105,6 +5117,24 @@ fn auto_wire_floor_stack_portals(
                 }) else {
                     continue;
                 };
+                // A vertical portal only exists where there is an actual
+                // GAP between the floors: the upper floor has no floor
+                // face AND the lower floor has no ceiling face at this
+                // cell. A sealed cell (floor above / ceiling below) is a
+                // solid slab you can neither see nor walk through, so it
+                // gets no portal. Cells are addressed in each floor grid's
+                // own array space via its origin.
+                let upper_sealed = upper_grid
+                    .world_cell_to_array(world_cell[0], world_cell[1])
+                    .and_then(|(sx, sz)| upper_grid.sector(sx, sz))
+                    .is_some_and(|sector| sector.floor.is_some());
+                let lower_sealed = lower_grid
+                    .world_cell_to_array(world_cell[0], world_cell[1])
+                    .and_then(|(sx, sz)| lower_grid.sector(sx, sz))
+                    .is_some_and(|sector| sector.ceiling.is_some());
+                if upper_sealed || lower_sealed {
+                    continue;
+                }
                 let below_room = u16::try_from(chunk.room_index as usize).unwrap_or(u16::MAX);
                 let above_room = above.room_index;
                 // Cell footprint in world units at the boundary plane.
@@ -5139,6 +5169,35 @@ fn auto_wire_floor_stack_portals(
         }
     }
     out
+}
+
+/// Sort the portal table by `source_room` and rebuild every room's
+/// `[portal_first, portal_count)` range so the runtime BFS scans all of a
+/// room's portals (horizontal + vertical) as one contiguous slice.
+/// Stable sort preserves each room's internal portal order. Rooms with no
+/// portals get `portal_first=0, portal_count=0`.
+fn regroup_room_portals(rooms: &mut [PlaytestRoom], room_portals: &mut [PlaytestRoomPortal]) {
+    room_portals.sort_by_key(|portal| portal.source_room);
+    for (index, room) in rooms.iter_mut().enumerate() {
+        let room_index = u16::try_from(index).unwrap_or(u16::MAX);
+        let first = room_portals
+            .iter()
+            .position(|portal| portal.source_room == room_index);
+        match first {
+            Some(first) => {
+                let count = room_portals[first..]
+                    .iter()
+                    .take_while(|portal| portal.source_room == room_index)
+                    .count();
+                room.portal_first = u16::try_from(first).unwrap_or(u16::MAX);
+                room.portal_count = u8::try_from(count).unwrap_or(u8::MAX);
+            }
+            None => {
+                room.portal_first = 0;
+                room.portal_count = 0;
+            }
+        }
+    }
 }
 
 fn resolve_floor_link_target(

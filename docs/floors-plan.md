@@ -53,7 +53,84 @@ portals), and the runtime `floor_above_room`/`floor_below_room` consumption
 (`editor-playtest/src/main.rs:6235`). The new work is the floors dimension, the up/down
 editor with ghosting, and the cook auto-wiring.
 
-## demo11 reproduction (cook ground truth) — OPEN BUGS
+## SIMS-STYLE EDITOR FLOOR VIEW + selection fix (user issues round 3)
+
+User on floor 2/3 still saw the player duplicated AND selection landing on the floor
+below. Directive: "Sims style, when you select a floor it visualises ALL floors below."
+
+ROOT CAUSE of the selection bug: render moved the active floor UP to its real elevation
+(`y_offset = elevation - base`), but ALL pick paths test at Y=0 (`pick_3d_world` ->
+`pick_3d_world_on_room_plane(plane_y=0)`, and `pick_face_with_hit` ray-tests the active
+floor's floor-LOCAL faces ~Y=0). So a click on the visually-high active floor resolved at
+Y=0 where lower geometry sat -> "selects the one below". Render and pick disagreed on Y.
+
+FIX (`preview_room_grids`): Sims model. The ACTIVE floor is the working plane drawn at
+`y_offset = 0`; floors BELOW render descending (`y_offset = floor.elevation -
+active.elevation`, negative); floors ABOVE are hidden (loop `0..=active`). Anchoring the
+active floor at Y=0 makes it coincide with where every pick tests, so selection/paint hit
+the floor you're editing. Entities/models/lights already filter by `node_enclosing_floor ==
+floor_index` and offset by `y_offset`, so each renders once on its own floor at the right
+height. Test `preview_room_grids_shows_active_floor_and_below_only` (active@0, below
+negative, above hidden). Tests: frontend editor_preview 39, psxed-ui 195.
+
+NOTE on the user's persistent duplication: with the entity floor-filter committed, headless
+dumps show the player once (on floor 0 only). If the running editor still shows duplicates
+it's a STALE BUILD -- rebuild the frontend (`cargo build -p frontend --release`) and
+relaunch.
+
+## AUTOPORTAL / vertical visibility (user issues round 2)
+
+Two issues from playtest screenshots:
+1. EDITOR: player drawn twice (once per floor). CAUSE: render-all-floors made the
+   room-scoped entity/model/light/prop walks run once per floor entry. FIX: `PreviewFloor`
+   gained `floor_index`; `node_enclosing_floor()` filters each walk to nodes on that floor,
+   and `y_offset` lifts them to the floor's elevation. Each entity now renders once, on its
+   own floor. Verified by per-floor dumps (player appears only on floor 0). Also closes the
+   upper-floor-entity render gap.
+2. RUNTIME: upper room never visible. The user's model: a vertical link is an "autoportal"
+   you can see through ONLY where there's a real gap (no floor above AND no ceiling below).
+   THREE bugs found, all fixed:
+   a. Portals emitted at EVERY shared cell. FIX: `auto_wire_floor_stack_portals` now gates
+      on an actual hole (upper floor face absent AND lower ceiling absent). demo11: 72 -> 22
+      portals (11 real openings x2 reciprocal). Sealed cells get none.
+   b. Vertical (kind=1) horizontal portal quads go edge-on under a level camera and were
+      frustum-rejected, so the linked room never entered the visibility BFS. FIX
+      (`portal_visibility.rs`): an edge-on vertical portal that front-faces the camera is
+      admitted by INHERITING the parent frustum (still gated by front-face + depth + the
+      hole), so it acts as an implicit neighbour through the opening. Tests
+      `vertical_portal_admits_room_when_edge_on` / `vertical_portal_backface_still_rejected`.
+   c. THE ACTUAL BLOCKER (only found by in-engine repro): vertical portals were appended to
+      the global table AFTER the cook loop set per-room portal_first/count, so rooms'
+      portal ranges didn't include them (room 0 had portal_count=0) and the BFS never
+      scanned them. FIX: `regroup_room_portals` sorts the portal table by source_room and
+      rebuilds every room's [portal_first, portal_count) over BOTH horizontal + vertical
+      portals. demo11: room 0 -> [0,11), room 1 -> [11,22).
+   RESULT (in-engine, counter-log): before, visible mask = 1 (room 0 only) for all frames;
+   after, mask = 3 (rooms 0+1) every frame -- the upper room streams in and renders through
+   the hole. Lesson: the unit test passed because it hand-set portal_count; only the real
+   cook+run exposed bug (c).
+
+## demo11 IN-ENGINE PLAYTEST (verification milestone)
+
+Full pipeline run: `make cook-playtest PROJECT=projects/demo11/project.ron` →
+`make build-editor-playtest` → mkisopsx pack → `frontend launch --embedded-playtest`.
+Cooked manifest: ROOMS[0] origin_y=0, ROOMS[1] origin_y=3584; PLAYER_SPAWN room=0
+x=5184 y=0 z=5056; ROOM_PORTALS = 72 vertical (kind=1, ±Y normals). Headless HW dump
+(`/tmp/demo11_spawn_hw.ppm`): player (Crimson Cross Knight) stands on the stone GROUND
+floor with brick walls + HUD bars — bug 1 (wrong spawn floor) CONFIRMED FIXED in-engine,
+scene renders with no crash. Hold-forward sweep + `--counter-log`: room mask stays `1`
+(room 0) for all 458 post-boot frames; room 1 never streams; cam_y stays ground-level.
+
+WHY YOU CAN'T REACH FLOOR 1 (not a bug): demo11 is authored SEALED. Floor 0 has 25
+ceiling faces; floor 1 has 25 floor faces and 0 ceilings — a solid slab between the two,
+no traversable hole. Runtime floor-switch (`current_floor_link_switch_target`,
+main.rs:6231) crosses DOWN only when `!sector.has_floor()` (a hole) and the player falls
+below it, UP only when above the ceiling. With a sealed slab neither can trigger, so the
+player is correctly locked to floor 0. The cook/link/portal machinery is verified correct;
+the MAP just has no stairs/opening. To actually walk between floors, author a hole (erase a
+floor-1 floor cell AND the floor-0 ceiling cell beneath it) and/or stairs.
+
+## demo11 reproduction (cook ground truth) — OPEN BUGS (historical; all fixed)
 
 Loaded `editor/projects/demo11/project.ron` and cooked it via `build_package` in a
 diagnostic test (`diag_demo11_cook`, `#[ignore]`, run with `--ignored --nocapture`).
