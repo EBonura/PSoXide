@@ -33,34 +33,36 @@ use egui::{
 };
 use psxed_project::portal_rooms::{
     extract_portal_room_grid, plan_portal_rooms, portal_edge_for_node, portal_seam_edges_for_edge,
-    portal_seam_edges_for_node, PortalEdge, PortalRoomConfig, DEFAULT_PORTAL_ROOM_MAX_SECTORS,
+    portal_seam_edges_for_node, PortalEdge, PortalRoomConfig,
 };
 use psxed_project::room_connections::{
     connection_for_portal, derive_room_connections, RoomConnection, RoomConnectionStatus,
 };
-use psxed_project::streaming::{collect_scene_resource_use, SceneResourceUse};
+#[cfg(test)]
+use psxed_project::streaming::SceneResourceUse;
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
-    default_model_collision_radius_for_height, snap_height, CharacterControllerSettings,
-    BootTarget, ColliderShape, EditorCameraMode, EditorCameraState, EditorVisibilityState,
-    FarVistaSettings,
-    GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
-    GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
-    MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId, OptionKind,
-    ParticleEmitterSettings, ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId,
-    RuntimeDepthSortMode, RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode,
-    SkyMode, SkySettings, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene,
-    UiSceneId, UiTextAlign, UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid,
-    WorldGridBudget, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
-    MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    default_model_collision_radius_for_height, snap_height, BootTarget,
+    CharacterControllerSettings, ColliderShape, EditorCameraMode, EditorCameraState,
+    EditorVisibilityState, FarVistaSettings, GridCellBounds, GridDirection, GridHorizontalFace,
+    GridSector, GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform,
+    GridVerticalFace, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId,
+    OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode,
+    Resource, ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
+    RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings, UiAction, UiAnchor, UiNodeId,
+    UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiTextAlign, UiValueBinding,
+    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldPhysicsSettings,
+    WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM,
+    MAX_PHYSICS_WEIGHT_Q8, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
     MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
-    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE, MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
-    MAX_WORLD_STREAMING_VISIBLE_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
-    MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE, MIN_WORLD_SECTOR_SIZE,
-    MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
-    MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
-    SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_QUANTUM,
+    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
+    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+    MAX_WORLD_VISIBILITY_RADIUS, MIN_PHYSICS_WEIGHT_Q8, MIN_WORLD_CAMERA_DISTANCE,
+    MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE, MIN_WORLD_GRAVITY_PER_TICK,
+    MIN_WORLD_SECTOR_SIZE, MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
+    MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, PHYSICS_WEIGHT_ONE_Q8, SKYBOX_COLUMNS_MAX,
+    SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX,
+    WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -12649,6 +12651,9 @@ impl EditorWorkspace {
             .and_then(|parent| scene.node(parent))
             .map(|parent| parent.name.clone())
             .unwrap_or_else(|| "None".to_string());
+        let selected_is_music = scene
+            .node(selected)
+            .is_some_and(|node| matches!(node.kind, UiNodeKind::Music { .. }));
         if selected != self.selection.selected_ui_node {
             self.selection.selected_ui_node = selected;
         }
@@ -12676,6 +12681,11 @@ impl EditorWorkspace {
             .iter()
             .map(|option| (option.id, option.name.clone()))
             .collect();
+        let music_wav_options = if selected_is_music {
+            collect_project_wav_options(&self.project_dir)
+        } else {
+            Vec::new()
+        };
 
         let Some(scene) = self.current_ui_scene_mut() else {
             ui.weak("No UI scene");
@@ -12810,6 +12820,26 @@ impl EditorWorkspace {
                 changed |= color_editor(ui, "Fill", fill);
                 changed |= color_editor(ui, "Knob", knob);
             }
+            UiNodeKind::Music {
+                wav_path,
+                volume,
+                loop_track,
+            } => {
+                ui.weak("Non-visual CD-DA music cue for this UI scene.");
+                changed |= draw_music_wav_picker(ui, "WAV", wav_path, &music_wav_options);
+                changed |= ui.checkbox(loop_track, "Loop").changed();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Volume").color(STUDIO_TEXT_WEAK));
+                    let mut value = (*volume).min(100) as i32;
+                    if ui
+                        .add(egui::Slider::new(&mut value, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        *volume = value as u8;
+                        changed = true;
+                    }
+                });
+            }
         }
 
         if changed {
@@ -12897,7 +12927,6 @@ impl EditorWorkspace {
                                 let selected = self.selection.selected_node;
                                 let animator_clip_context =
                                     selected_animator_clip_context(&self.project, selected);
-                                let active_room = self.active_room_id();
                                 let selected_sector = self.selection.selected_sector;
                                 let selected_sector_count = self.selection.selected_sectors.len();
 
@@ -12944,21 +12973,20 @@ impl EditorWorkspace {
                                     });
                                     ui.separator();
 
-                                    changed |= draw_transform_policy_editor(
-                                        ui,
-                                        node,
-                                        inherited_sector_size,
-                                        &texture_options,
-                                        &mut nav_target,
-                                        &mut world_sector_size_change,
-                                    );
-
                                     egui::CollapsingHeader::new(icons::label(
                                         icons::CIRCLE_DOT,
                                         "Node Properties",
                                     ))
                                     .default_open(true)
                                     .show(ui, |ui| {
+                                        changed |= draw_transform_policy_editor(
+                                            ui,
+                                            node,
+                                            inherited_sector_size,
+                                            &texture_options,
+                                            &mut nav_target,
+                                            &mut world_sector_size_change,
+                                        );
                                         changed |= draw_node_kind_editor(
                                             ui,
                                             &mut node.kind,
@@ -13018,41 +13046,41 @@ impl EditorWorkspace {
                                 // not fight the selected node's property editor above.
                                 self.draw_component_authoring_panel(ui, selected);
 
-                                // Phase 3: per-sector inspector. Owns its own borrow of the
-                                // project so it can edit the active Room's grid.
-                                if let Some(room_id) = active_room {
-                                    if let Some(grid) = self.room_grid_view(room_id) {
-                                        draw_portal_room_budget(
-                                            ui,
-                                            &self.project,
-                                            self.project_root(),
-                                            room_id,
-                                            grid,
-                                        );
+                                // Phase 3: per-sector authoring appears only when a sector is
+                                // actively selected. Do not attach room/sector diagnostics to
+                                // every node that happens to have an active room ancestor.
+                                if let Some((sx, sz)) = selected_sector {
+                                    let room_id = self
+                                        .selection
+                                        .selected_sectors
+                                        .iter()
+                                        .find_map(|(room, x, z)| {
+                                            (*x == sx && *z == sz).then_some(*room)
+                                        })
+                                        .or_else(|| self.active_room_id());
+                                    if selected_sector_count > 1 {
+                                        egui::CollapsingHeader::new(icons::label(
+                                            icons::GRID,
+                                            "Sector Selection",
+                                        ))
+                                        .default_open(true)
+                                        .show(ui, |ui| {
+                                            ui.label(format!(
+                                                "{selected_sector_count} sectors selected"
+                                            ));
+                                            if ui
+                                                .button("Autotile")
+                                                .on_hover_text(
+                                                    "Autotile every wall in the selected sector tiles.",
+                                                )
+                                                .clicked()
+                                            {
+                                                self.autotile_selected_sector_walls();
+                                            }
+                                            ui.weak("The detailed inspector edits the last selected sector for now.");
+                                        });
                                     }
-                                    if let Some((sx, sz)) = selected_sector {
-                                        if selected_sector_count > 1 {
-                                            egui::CollapsingHeader::new(icons::label(
-                                                icons::GRID,
-                                                "Sector Selection",
-                                            ))
-                                            .default_open(true)
-                                            .show(ui, |ui| {
-                                                ui.label(format!(
-                                                    "{selected_sector_count} sectors selected"
-                                                ));
-                                                if ui
-                                                    .button("Autotile")
-                                                    .on_hover_text(
-                                                        "Autotile every wall in the selected sector tiles.",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    self.autotile_selected_sector_walls();
-                                                }
-                                                ui.weak("The detailed inspector edits the last selected sector for now.");
-                                            });
-                                        }
+                                    if let Some(room_id) = room_id {
                                         if draw_sector_inspector(
                                             ui,
                                             &mut self.project,
@@ -13065,19 +13093,10 @@ impl EditorWorkspace {
                                         ) {
                                             changed = true;
                                         }
-                                    } else {
-                                        egui::CollapsingHeader::new(icons::label(
-                                            icons::GRID,
-                                            "Sector",
-                                        ))
-                                        .default_open(true)
-                                        .show(ui, |ui| {
-                                            ui.weak("Click a sector tile to inspect it.");
-                                        });
                                     }
                                 }
 
-                                // Phase 4: read-only diagnostics that just need name / kind.
+                                // Phase 4: relationship panels that need a fresh scene borrow.
                                 let scene = self.project.active_scene();
                                 let Some(node) = scene.node(selected) else {
                                     if changed {
@@ -13093,44 +13112,6 @@ impl EditorWorkspace {
                                             draw_portal_connection_inspector(ui, scene, &connection);
                                     }
                                 }
-
-                                egui::CollapsingHeader::new(icons::label(icons::BOX, "Render"))
-                                    .default_open(false)
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Draw Mode");
-                                            ui.label(node_draw_mode(&node.kind));
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("Ordering");
-                                            ui.label("World OT");
-                                        });
-                                    });
-
-                                egui::CollapsingHeader::new(icons::label(
-                                    icons::SCAN,
-                                    "PS1 Details",
-                                ))
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Texture Format");
-                                        ui.label("4bpp Indexed");
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Transform");
-                                        ui.label("Fixed point");
-                                    });
-                                });
-
-                                egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Node"))
-                                    .default_open(false)
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Path");
-                                            ui.label(format!("/World/{}", node.name));
-                                        });
-                                    });
 
                                 if changed {
                                     self.mark_dirty();
@@ -19339,6 +19320,7 @@ fn draw_transform_policy_editor(
             camera,
             culling,
             streaming,
+            physics,
         } => draw_world_grid_settings(
             ui,
             *sector_size,
@@ -19347,62 +19329,73 @@ fn draw_transform_policy_editor(
             camera,
             culling,
             streaming,
+            physics,
             texture_options,
             nav_target,
             world_sector_size_change,
         ),
-        NodeKind::Room { .. } => {
-            let mut changed = false;
-            egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
-                .default_open(true)
-                .show(ui, |ui| {
-                    changed |=
-                        room_grid_transform_editor(ui, &mut node.transform, inherited_sector_size);
-                });
-            changed
-        }
+        _ => match node_transform_inspector(&node.kind) {
+            NodeTransformInspector::Hidden => false,
+            NodeTransformInspector::RoomGrid => {
+                room_grid_transform_editor(ui, &mut node.transform, inherited_sector_size)
+            }
+            NodeTransformInspector::PositionOnly => {
+                light_transform_editor(ui, &mut node.transform, inherited_sector_size)
+            }
+            NodeTransformInspector::PositionYaw => {
+                entity_transform_editor(ui, &mut node.transform, inherited_sector_size, false)
+            }
+            NodeTransformInspector::PositionFullRotation => {
+                entity_transform_editor(ui, &mut node.transform, inherited_sector_size, true)
+            }
+            NodeTransformInspector::FullTransform => {
+                let mut changed = false;
+                changed |= transform_editor(ui, "Position", &mut node.transform.translation, 1.0);
+                changed |=
+                    transform_editor(ui, "Rotation", &mut node.transform.rotation_degrees, 1.0);
+                changed |= transform_editor(ui, "Scale", &mut node.transform.scale, 0.05);
+                changed
+            }
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeTransformInspector {
+    Hidden,
+    RoomGrid,
+    PositionOnly,
+    PositionYaw,
+    PositionFullRotation,
+    FullTransform,
+}
+
+fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspector {
+    match kind {
+        NodeKind::World { .. } | NodeKind::Node => NodeTransformInspector::Hidden,
+        NodeKind::Room { .. } => NodeTransformInspector::RoomGrid,
         NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } => {
-            let mut changed = false;
-            egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
-                .default_open(true)
-                .show(ui, |ui| {
-                    changed |=
-                        light_transform_editor(ui, &mut node.transform, inherited_sector_size);
-                });
-            changed
+            NodeTransformInspector::PositionOnly
         }
-        kind if kind.is_component() => false,
-        NodeKind::Entity | NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
-            let mut changed = false;
-            let allow_full_rotation = matches!(
-                node.kind,
-                NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. }
-            );
-            egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
-                .default_open(true)
-                .show(ui, |ui| {
-                    changed |= entity_transform_editor(
-                        ui,
-                        &mut node.transform,
-                        inherited_sector_size,
-                        allow_full_rotation,
-                    );
-                });
-            changed
+        NodeKind::ModelRenderer { .. }
+        | NodeKind::Animator { .. }
+        | NodeKind::Collider { .. }
+        | NodeKind::Interactable { .. }
+        | NodeKind::CharacterController { .. }
+        | NodeKind::AiController { .. }
+        | NodeKind::Combat { .. }
+        | NodeKind::Equipment { .. }
+        | NodeKind::PhysicsBody { .. } => NodeTransformInspector::Hidden,
+        NodeKind::Entity
+        | NodeKind::MeshInstance { .. }
+        | NodeKind::SpawnPoint { .. }
+        | NodeKind::Trigger { .. }
+        | NodeKind::AudioSource { .. }
+        | NodeKind::Portal { .. } => NodeTransformInspector::PositionYaw,
+        NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
+            NodeTransformInspector::PositionFullRotation
         }
-        _ => {
-            let mut changed = false;
-            egui::CollapsingHeader::new(icons::label(icons::MOVE, "Transform"))
-                .default_open(true)
-                .show(ui, |ui| {
-                    changed |=
-                        transform_editor(ui, "Position", &mut node.transform.translation, 1.0);
-                    changed |=
-                        transform_editor(ui, "Rotation", &mut node.transform.rotation_degrees, 1.0);
-                    changed |= transform_editor(ui, "Scale", &mut node.transform.scale, 0.05);
-                });
-            changed
-        }
+        NodeKind::Node3D => NodeTransformInspector::FullTransform,
     }
 }
 
@@ -19492,6 +19485,7 @@ fn draw_world_grid_settings(
     camera: &mut WorldCameraSettings,
     culling: &mut WorldCullingSettings,
     streaming: &mut WorldStreamingSettings,
+    physics: &mut WorldPhysicsSettings,
     texture_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
     world_sector_size_change: &mut Option<i32>,
@@ -19518,16 +19512,29 @@ fn draw_world_grid_settings(
                 ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
             });
         });
-    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Manual Portal Rooms"))
-        .default_open(false)
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Physics"))
+        .default_open(true)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Room Hard Cap").color(STUDIO_TEXT_WEAK));
-                ui.label(format!(
-                    "{}×{} sectors",
-                    DEFAULT_PORTAL_ROOM_MAX_SECTORS, DEFAULT_PORTAL_ROOM_MAX_SECTORS
-                ));
+                ui.label(RichText::new("Gravity").color(STUDIO_TEXT_WEAK));
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut physics.gravity_per_tick)
+                            .speed(8.0)
+                            .range(MIN_WORLD_GRAVITY_PER_TICK..=MAX_WORLD_GRAVITY_PER_TICK),
+                    )
+                    .on_hover_text("Downward acceleration in engine units per 60 Hz tick squared.")
+                    .changed()
+                {
+                    *physics = physics.normalized();
+                    changed = true;
+                }
+                ui.label(RichText::new("units/tick^2").color(STUDIO_TEXT_WEAK));
             });
+        });
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Streaming"))
+        .default_open(false)
+        .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Resident Rooms").color(STUDIO_TEXT_WEAK));
                 let mut limit = streaming.resident_chunk_limit as i32;
@@ -21406,6 +21413,36 @@ fn draw_node_kind_editor(
             ui.horizontal(|ui| {
                 ui.label("Weapon Grip");
                 changed |= ui.text_edit_singleline(weapon_grip).changed();
+            });
+        }
+        NodeKind::PhysicsBody { settings } => {
+            ui.weak("Component: per-entity physics tuning. Weight is a Q8 gravity multiplier.");
+            ui.horizontal(|ui| {
+                ui.label("Weight");
+                let mut q8 = settings.weight_q8 as i32;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut q8)
+                            .speed(16.0)
+                            .range(MIN_PHYSICS_WEIGHT_Q8 as i32..=MAX_PHYSICS_WEIGHT_Q8 as i32),
+                    )
+                    .on_hover_text("Q8 multiplier applied to world gravity: 256 = 1.0x.")
+                    .changed()
+                {
+                    settings.weight_q8 =
+                        q8.clamp(MIN_PHYSICS_WEIGHT_Q8 as i32, MAX_PHYSICS_WEIGHT_Q8 as i32) as u16;
+                    *settings = settings.normalized();
+                    changed = true;
+                }
+                ui.label(
+                    RichText::new(format!("{:.3}x", settings.weight_q8 as f32 / 256.0))
+                        .color(STUDIO_TEXT_WEAK)
+                        .monospace(),
+                );
+                if ui.button("Reset").clicked() {
+                    settings.weight_q8 = PHYSICS_WEIGHT_ONE_Q8;
+                    changed = true;
+                }
             });
         }
         NodeKind::PointLight {
@@ -25474,6 +25511,88 @@ fn draw_ui_option_picker(
     changed
 }
 
+fn draw_music_wav_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: &mut String,
+    options: &[String],
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let preview = if current.trim().is_empty() {
+            "(none)"
+        } else {
+            current.as_str()
+        };
+        egui::ComboBox::from_id_salt(ui.id().with(label))
+            .selected_text(preview)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(current.trim().is_empty(), "(none)")
+                    .clicked()
+                    && !current.is_empty()
+                {
+                    current.clear();
+                    changed = true;
+                }
+                for path in options {
+                    if ui.selectable_label(current == path, path).clicked() && current != path {
+                        *current = path.clone();
+                        changed = true;
+                    }
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Path");
+        changed |= ui.text_edit_singleline(current).changed();
+    });
+    changed
+}
+
+fn collect_project_wav_options(project_dir: &Path) -> Vec<String> {
+    let roots = [project_dir.join("assets"), project_dir.to_path_buf()];
+    let mut seen = std::collections::BTreeSet::new();
+    for root in roots {
+        collect_wav_options_from_dir(project_dir, &root, &mut seen);
+    }
+    seen.into_iter().collect()
+}
+
+fn collect_wav_options_from_dir(
+    project_dir: &Path,
+    root: &Path,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let is_wav = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"));
+            if !is_wav {
+                continue;
+            }
+            let display = path
+                .strip_prefix(project_dir)
+                .unwrap_or(path.as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.insert(display);
+        }
+    }
+}
+
 /// Editor for one [`OptionKind`]: a variant combo plus the per-variant
 /// fields (bounds + step + default for `IntRange`, a default toggle
 /// for `Bool`, and a default-index picker for `Enum` with its variant
@@ -28645,6 +28764,14 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 knob: [210, 218, 232],
             },
         ),
+        (
+            "Music",
+            UiNodeKind::Music {
+                wav_path: String::new(),
+                volume: 25,
+                loop_track: false,
+            },
+        ),
     ]
 }
 
@@ -28658,6 +28785,7 @@ fn ui_node_kind_icon(kind: &str) -> char {
         "Bar" => icons::BLEND,
         "Button" => icons::POINTER,
         "Slider" => icons::WAYPOINT,
+        "Music" => icons::AUDIO_LINES,
         _ => icons::CIRCLE_DOT,
     }
 }
@@ -28689,6 +28817,7 @@ fn draw_ui_scene_preview(
         };
         match &node.kind {
             UiNodeKind::Canvas { .. } => {}
+            UiNodeKind::Music { .. } => {}
             UiNodeKind::Group { rect } => {
                 let rect = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(rect, canvas, canvas_size);
@@ -28992,12 +29121,7 @@ fn draw_ui_preview_text_line(
         // missing-glyph cell (index 0), matching the runtime's fallback.
         let code = if (ch as u32) < 128 { ch as u8 } else { 0 };
         let glyph_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(cell));
-        painter.image(
-            font_texture.id(),
-            glyph_rect,
-            ui_font_glyph_uv(code),
-            color,
-        );
+        painter.image(font_texture.id(), glyph_rect, ui_font_glyph_uv(code), color);
         x += cell;
     }
 }
@@ -29336,6 +29460,12 @@ fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'static str, Node
                 weapon_grip: "grip".to_string(),
             },
         ),
+        (
+            "Physics Body",
+            NodeKind::PhysicsBody {
+                settings: PhysicsBodySettings::default(),
+            },
+        ),
     ]
 }
 
@@ -29393,33 +29523,8 @@ const fn component_slot(kind: &NodeKind) -> Option<&'static str> {
         NodeKind::AiController { .. } => Some("AiController"),
         NodeKind::Combat { .. } => Some("Combat"),
         NodeKind::Equipment { .. } => Some("Equipment"),
+        NodeKind::PhysicsBody { .. } => Some("PhysicsBody"),
         _ => None,
-    }
-}
-
-fn node_draw_mode(kind: &NodeKind) -> &'static str {
-    match kind {
-        NodeKind::MeshInstance { .. } => "Textured Triangles",
-        NodeKind::ImageProp { .. } => "Flat Image",
-        NodeKind::BoxProp { .. } => "Box Prop",
-        NodeKind::ModelRenderer { .. } => "Render Component",
-        NodeKind::Animator { .. } => "Animation Component",
-        NodeKind::Collider { .. } => "Collision Component",
-        NodeKind::Interactable { .. } => "Interaction Component",
-        NodeKind::CharacterController { .. } => "Controller Component",
-        NodeKind::AiController { .. } => "AI Component",
-        NodeKind::Combat { .. } => "Combat Component",
-        NodeKind::Equipment { .. } => "Equipment Component",
-        NodeKind::World { .. } => "Portal Region",
-        NodeKind::Entity => "Entity Host",
-        NodeKind::Room { .. } => "Editable Room Sector Grid",
-        NodeKind::PointLight { .. } => "Static Light",
-        NodeKind::ParticleEmitter { .. } => "Particle Emitter",
-        NodeKind::SpawnPoint { .. } => "Spawn Marker",
-        NodeKind::Trigger { .. } => "Trigger Volume",
-        NodeKind::AudioSource { .. } => "Audio Marker",
-        NodeKind::Portal { .. } => "Portal Seam",
-        NodeKind::Node | NodeKind::Node3D => "None",
     }
 }
 
@@ -34384,7 +34489,8 @@ fn entity_bound_kind_and_size(
         | NodeKind::CharacterController { .. }
         | NodeKind::AiController { .. }
         | NodeKind::Combat { .. }
-        | NodeKind::Equipment { .. } => None,
+        | NodeKind::Equipment { .. }
+        | NodeKind::PhysicsBody { .. } => None,
         NodeKind::Entity => {
             if let Some(model) = entity_model_resource(workspace, node) {
                 let h = (model.world_height as f32).max(256.0);
@@ -35351,263 +35457,7 @@ fn collect_weapon_options(project: &ProjectDocument) -> Vec<(ResourceId, String)
         .collect()
 }
 
-fn world_streaming_for_room(project: &ProjectDocument, room_id: NodeId) -> WorldStreamingSettings {
-    project
-        .active_scene()
-        .world_streaming_for_node(room_id)
-        .unwrap_or_default()
-}
-
-fn draw_portal_room_budget(
-    ui: &mut egui::Ui,
-    project: &ProjectDocument,
-    project_root: &Path,
-    room_id: NodeId,
-    grid: &WorldGrid,
-) {
-    let streaming = world_streaming_for_room(project, room_id);
-    let plan = plan_portal_rooms(
-        project.active_scene(),
-        room_id,
-        grid,
-        PortalRoomConfig::default(),
-    );
-    let resource_use = collect_scene_resource_use(project);
-    let file_budget = resource_file_budget(project, project_root, &resource_use);
-    let vram_budget = runtime_vram_budget(project, project_root, &resource_use);
-    let model_budget = runtime_model_budget(project, project_root, &resource_use);
-    let over = plan.over_budget_count() > 0;
-    let header = if over {
-        icons::label(icons::TRASH, "Manual Portal Rooms — over limit")
-    } else {
-        icons::label(icons::SCAN, "Manual Portal Rooms")
-    };
-
-    egui::CollapsingHeader::new(header)
-        .default_open(true)
-        .show(ui, |ui| {
-            draw_budget_row(ui, "Manual rooms", format!("{}", plan.room_count()), over);
-            draw_budget_row(
-                ui,
-                "Hard cap",
-                format!(
-                    "{}×{} sectors",
-                    plan.config.max_width, plan.config.max_depth
-                ),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Resident rooms",
-                format!("{}", streaming.resident_chunk_limit),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Visible rooms",
-                format!("{}", streaming.visible_chunk_limit),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Portal markers",
-                format!("{}", plan.portal_count),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Authored footprint",
-                format!("{}×{} sectors", plan.source_size[0], plan.source_size[1]),
-                false,
-            );
-            ui.weak("Embedded Play cooks this world into manual portal-delimited runtime rooms.");
-            if let Some(room) = plan.largest_room_asset() {
-                draw_budget_row(
-                    ui,
-                    "Largest room asset",
-                    format!(
-                        "#{} {}×{}, {} total",
-                        room.index,
-                        room.size[0],
-                        room.size[1],
-                        human_bytes_u64(room.budget.psxw_static_lit_bytes as u64)
-                    ),
-                    room.over_budget,
-                );
-            }
-            if let Some(room) = plan.largest_geometry() {
-                draw_budget_row(
-                    ui,
-                    "Largest geometry",
-                    format!(
-                        "#{} {}",
-                        room.index,
-                        human_bytes_u64(room.budget.psxw_bytes as u64)
-                    ),
-                    room.budget.psxw_bytes > MAX_ROOM_BYTES,
-                );
-            }
-            if let Some(room) = plan.largest_triangle_room() {
-                draw_budget_row(
-                    ui,
-                    "Most triangles",
-                    format!(
-                        "#{} {} / {}",
-                        room.index, room.budget.triangles, MAX_ROOM_TRIANGLES
-                    ),
-                    room.budget.triangles > MAX_ROOM_TRIANGLES,
-                );
-            }
-
-            ui.add_space(4.0);
-            draw_room_budget_rows(ui, grid.authored_budget());
-
-            ui.add_space(4.0);
-            ui.separator();
-            draw_budget_row(
-                ui,
-                "World resources",
-                resource_count_summary(&resource_use),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "World components",
-                component_count_summary(&resource_use),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Referenced files",
-                format!(
-                    "{} across {} files",
-                    human_bytes_u64(file_budget.bytes),
-                    file_budget.files
-                ),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Texture VRAM",
-                format!(
-                    "{} across {} textures",
-                    human_bytes_u64(vram_budget.bytes),
-                    vram_budget.textures
-                ),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Room texture VRAM",
-                format!(
-                    "{} across {} textures",
-                    human_bytes_u64(vram_budget.room_bytes),
-                    vram_budget.room_textures
-                ),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Model texture VRAM",
-                format!(
-                    "{} across {} atlases",
-                    human_bytes_u64(vram_budget.model_bytes),
-                    vram_budget.model_textures
-                ),
-                false,
-            );
-            draw_budget_row(
-                ui,
-                "Model RAM",
-                format!(
-                    "{} across {} models, {} clips",
-                    human_bytes_u64(model_budget.ram_bytes),
-                    model_budget.models,
-                    model_budget.clips
-                ),
-                false,
-            );
-            if file_budget.missing > 0 {
-                draw_budget_row(
-                    ui,
-                    "Missing files",
-                    format!("{}", file_budget.missing),
-                    true,
-                );
-            }
-            if vram_budget.missing > 0 {
-                draw_budget_row(
-                    ui,
-                    "Unresolved VRAM textures",
-                    format!("{}", vram_budget.missing),
-                    true,
-                );
-            }
-            if model_budget.missing > 0 {
-                draw_budget_row(
-                    ui,
-                    "Unresolved model assets",
-                    format!("{}", model_budget.missing),
-                    true,
-                );
-            }
-
-            ui.add_space(4.0);
-            egui::Grid::new(format!("portal_rooms_{}", room_id.raw()))
-                .num_columns(7)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label(RichText::new("#").color(STUDIO_TEXT_WEAK));
-                    ui.label(RichText::new("Origin").color(STUDIO_TEXT_WEAK));
-                    ui.label(RichText::new("Size").color(STUDIO_TEXT_WEAK));
-                    ui.label(RichText::new("Tris").color(STUDIO_TEXT_WEAK));
-                    ui.label(RichText::new("Geom").color(STUDIO_TEXT_WEAK));
-                    ui.label(RichText::new("Light").color(STUDIO_TEXT_WEAK));
-                    ui.label(RichText::new("Total").color(STUDIO_TEXT_WEAK));
-                    ui.end_row();
-
-                    for room in plan.rooms.iter().take(8) {
-                        let color = room
-                            .over_budget
-                            .then_some(Color32::from_rgb(0xE0, 0x60, 0x60));
-                        let text = |value: String| {
-                            let text = RichText::new(value).monospace();
-                            if let Some(color) = color {
-                                text.color(color)
-                            } else {
-                                text
-                            }
-                        };
-                        ui.label(text(format!("{}", room.index)));
-                        ui.label(text(format!(
-                            "{},{}",
-                            room.world_origin[0], room.world_origin[1]
-                        )));
-                        ui.label(text(format!("{}×{}", room.size[0], room.size[1])));
-                        ui.label(text(format!("{}", room.budget.triangles)));
-                        ui.label(text(human_bytes_u64(room.budget.psxw_bytes as u64)));
-                        ui.label(text(human_bytes_u64(
-                            room.budget.static_light_table_bytes as u64,
-                        )));
-                        ui.label(text(human_bytes_u64(
-                            room.budget.psxw_static_lit_bytes as u64,
-                        )));
-                        ui.end_row();
-                    }
-                });
-            if plan.rooms.len() > 8 {
-                ui.weak(format!("{} more rooms", plan.rooms.len() - 8));
-            }
-        });
-}
-
-#[derive(Default)]
-struct ResourceFileBudget {
-    files: usize,
-    bytes: u64,
-    missing: usize,
-}
-
+#[cfg(test)]
 #[derive(Default)]
 struct RuntimeVramBudget {
     textures: usize,
@@ -35619,64 +35469,7 @@ struct RuntimeVramBudget {
     missing: usize,
 }
 
-#[derive(Default)]
-struct RuntimeModelBudget {
-    models: usize,
-    clips: usize,
-    ram_bytes: u64,
-    missing: usize,
-}
-
-fn resource_file_budget(
-    project: &ProjectDocument,
-    project_root: &Path,
-    resource_use: &SceneResourceUse,
-) -> ResourceFileBudget {
-    let mut budget = ResourceFileBudget::default();
-    let mut seen = HashSet::new();
-    for id in resource_use
-        .textures
-        .iter()
-        .chain(resource_use.models.iter())
-        .chain(resource_use.meshes.iter())
-        .chain(resource_use.audio.iter())
-    {
-        let Some(resource) = project.resource(*id) else {
-            continue;
-        };
-        match &resource.data {
-            ResourceData::Texture { psxt_path } => {
-                add_resource_file(project_root, psxt_path, &mut budget, &mut seen);
-            }
-            ResourceData::Model(model) => {
-                add_resource_file(project_root, &model.model_path, &mut budget, &mut seen);
-                if let Some(texture_path) = &model.texture_path {
-                    add_resource_file(project_root, texture_path, &mut budget, &mut seen);
-                }
-                for clip in &model.clips {
-                    add_resource_file(project_root, &clip.psxanim_path, &mut budget, &mut seen);
-                }
-            }
-            ResourceData::Mesh { source_path }
-            | ResourceData::Scene { source_path }
-            | ResourceData::Script { source_path }
-            | ResourceData::Audio { source_path } => {
-                add_resource_file(project_root, source_path, &mut budget, &mut seen);
-            }
-            ResourceData::AnimationClip(clip) => {
-                add_resource_file(project_root, &clip.psxanim_path, &mut budget, &mut seen);
-            }
-            ResourceData::Material(_)
-            | ResourceData::Skeleton(_)
-            | ResourceData::AnimationSource(_)
-            | ResourceData::AnimationSet(_)
-            | ResourceData::Character(_)
-            | ResourceData::Weapon(_) => {}
-        }
-    }
-    budget
-}
-
+#[cfg(test)]
 fn runtime_vram_budget(
     project: &ProjectDocument,
     project_root: &Path,
@@ -35708,31 +35501,7 @@ fn runtime_vram_budget(
     budget
 }
 
-fn runtime_model_budget(
-    project: &ProjectDocument,
-    project_root: &Path,
-    resource_use: &SceneResourceUse,
-) -> RuntimeModelBudget {
-    let mut budget = RuntimeModelBudget::default();
-
-    for id in &resource_use.models {
-        let Some(resource) = project.resource(*id) else {
-            continue;
-        };
-        let ResourceData::Model(model) = &resource.data else {
-            continue;
-        };
-        budget.models += 1;
-        add_runtime_model_asset_bytes(project_root, &model.model_path, &mut budget);
-        for clip in project.resolved_model_animation_clips(*id) {
-            budget.clips += 1;
-            add_runtime_model_asset_bytes(project_root, &clip.psxanim_path, &mut budget);
-        }
-    }
-
-    budget
-}
-
+#[cfg(test)]
 fn add_runtime_texture_vram(
     project_root: &Path,
     stored: &str,
@@ -35762,134 +35531,6 @@ fn add_runtime_texture_vram(
         budget.model_textures += 1;
         budget.model_bytes = budget.model_bytes.saturating_add(bytes);
     }
-}
-
-fn add_runtime_model_asset_bytes(
-    project_root: &Path,
-    stored: &str,
-    budget: &mut RuntimeModelBudget,
-) {
-    if stored.trim().is_empty() {
-        budget.missing += 1;
-        return;
-    }
-    let abs = psxed_project::model_import::resolve_path(stored, Some(project_root));
-    match std::fs::metadata(&abs) {
-        Ok(metadata) if metadata.is_file() => {
-            budget.ram_bytes = budget.ram_bytes.saturating_add(metadata.len());
-        }
-        _ => budget.missing += 1,
-    }
-}
-
-fn add_resource_file(
-    project_root: &Path,
-    stored: &str,
-    budget: &mut ResourceFileBudget,
-    seen: &mut HashSet<PathBuf>,
-) {
-    if stored.trim().is_empty() {
-        return;
-    }
-    let abs = psxed_project::model_import::resolve_path(stored, Some(project_root));
-    if !seen.insert(abs.clone()) {
-        return;
-    }
-    match std::fs::metadata(&abs) {
-        Ok(metadata) if metadata.is_file() => {
-            budget.files += 1;
-            budget.bytes = budget.bytes.saturating_add(metadata.len());
-        }
-        _ => budget.missing += 1,
-    }
-}
-
-fn resource_count_summary(resource_use: &SceneResourceUse) -> String {
-    format!(
-        "{} model, {} character profile, {} material, {} texture, {} audio",
-        resource_use.models.len(),
-        resource_use.characters.len(),
-        resource_use.materials.len(),
-        resource_use.textures.len(),
-        resource_use.audio.len()
-    )
-}
-
-fn component_count_summary(resource_use: &SceneResourceUse) -> String {
-    format!(
-        "{} renderer, {} controller, {} collider, {} light, {} emitter, {} interactable",
-        resource_use.model_instances,
-        resource_use.character_controllers,
-        resource_use.colliders,
-        resource_use.lights,
-        resource_use.particle_emitters,
-        resource_use.interactables
-    )
-}
-
-fn draw_budget_row(ui: &mut egui::Ui, key: &str, val: String, hot: bool) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(key).color(STUDIO_TEXT_WEAK));
-        let txt = RichText::new(val);
-        ui.label(if hot {
-            txt.color(Color32::from_rgb(0xE0, 0x60, 0x60))
-        } else {
-            txt
-        });
-    });
-}
-
-fn draw_room_budget_rows(ui: &mut egui::Ui, budget: WorldGridBudget) {
-    draw_budget_row(
-        ui,
-        "Cells",
-        format!(
-            "{} populated / {} total",
-            budget.populated_cells, budget.total_cells
-        ),
-        budget.total_cells > (MAX_ROOM_WIDTH as usize) * (MAX_ROOM_DEPTH as usize),
-    );
-    draw_budget_row(ui, "Floors", format!("{}", budget.floors), false);
-    draw_budget_row(ui, "Ceilings", format!("{}", budget.ceilings), false);
-    draw_budget_row(ui, "Walls", format!("{}", budget.walls), false);
-    draw_budget_row(
-        ui,
-        "Triangles",
-        format!("{} / {}", budget.triangles, MAX_ROOM_TRIANGLES),
-        budget.triangles > MAX_ROOM_TRIANGLES,
-    );
-    draw_budget_row(
-        ui,
-        ".psxw geometry",
-        format!(
-            "{} / {}",
-            human_bytes_u64(budget.psxw_bytes as u64),
-            human_bytes_u64(MAX_ROOM_BYTES as u64)
-        ),
-        budget.psxw_bytes > MAX_ROOM_BYTES,
-    );
-    draw_budget_row(
-        ui,
-        "Static-light table",
-        human_bytes_u64(budget.static_light_table_bytes as u64),
-        false,
-    );
-    draw_budget_row(
-        ui,
-        "Room asset total",
-        format!(
-            "{} / {}",
-            human_bytes_u64(budget.psxw_static_lit_bytes as u64),
-            human_bytes_u64(MAX_ROOM_BYTES as u64)
-        ),
-        budget.static_lit_over_budget(),
-    );
-    draw_budget_row(
-        ui,
-        ".psxw compact est.",
-        human_bytes_u64(budget.future_compact_estimated_bytes as u64).to_string(),
-        budget.future_compact_estimated_bytes > MAX_ROOM_BYTES,
-    );
 }
 
 /// Per-cell inspector for one sector inside the active Room.
@@ -38656,6 +38297,50 @@ mod tests {
         let node = workspace.project.active_scene().node(entity).unwrap();
         assert_eq!(node.transform.rotation_degrees, [0.0, 90.0, 0.0]);
         assert!(workspace.is_dirty());
+    }
+
+    #[test]
+    fn node_transform_inspector_hides_unused_transform_fields() {
+        assert_eq!(
+            node_transform_inspector(&NodeKind::Node),
+            NodeTransformInspector::Hidden
+        );
+        assert_eq!(
+            node_transform_inspector(&NodeKind::Room {
+                grid: WorldGrid::empty(1, 1, DEFAULT_WORLD_SECTOR_SIZE),
+            }),
+            NodeTransformInspector::RoomGrid
+        );
+        assert_eq!(
+            node_transform_inspector(&NodeKind::PointLight {
+                color: [255, 240, 200],
+                intensity: 1.0,
+                radius: 4.0,
+            }),
+            NodeTransformInspector::PositionOnly
+        );
+        assert_eq!(
+            node_transform_inspector(&NodeKind::SpawnPoint {
+                player: false,
+                character: None,
+            }),
+            NodeTransformInspector::PositionYaw
+        );
+        assert_eq!(
+            node_transform_inspector(&NodeKind::ImageProp {
+                material: None,
+                width: 256,
+                height: 256,
+                cylindrical_billboard: false,
+                collision_enabled: false,
+                collision_size: [256; 3],
+            }),
+            NodeTransformInspector::PositionFullRotation
+        );
+        assert_eq!(
+            node_transform_inspector(&NodeKind::Node3D),
+            NodeTransformInspector::FullTransform
+        );
     }
 
     #[test]
@@ -42212,17 +41897,28 @@ mod tests {
         assert!(entity_options
             .iter()
             .any(|(_, kind)| matches!(kind, NodeKind::CharacterController { .. })));
+        assert!(entity_options
+            .iter()
+            .any(|(_, kind)| matches!(kind, NodeKind::PhysicsBody { .. })));
 
-        let entity_existing = [NodeKind::CharacterController {
-            character: None,
-            settings: CharacterControllerSettings::default(),
-            player: false,
-        }];
+        let entity_existing = [
+            NodeKind::CharacterController {
+                character: None,
+                settings: CharacterControllerSettings::default(),
+                player: false,
+            },
+            NodeKind::PhysicsBody {
+                settings: PhysicsBodySettings::default(),
+            },
+        ];
         let existing_refs: Vec<&NodeKind> = entity_existing.iter().collect();
         let entity_options = addable_component_templates(&NodeKind::Entity, &existing_refs);
         assert!(!entity_options
             .iter()
             .any(|(_, kind)| matches!(kind, NodeKind::CharacterController { .. })));
+        assert!(!entity_options
+            .iter()
+            .any(|(_, kind)| matches!(kind, NodeKind::PhysicsBody { .. })));
         assert!(entity_options
             .iter()
             .any(|(_, kind)| matches!(kind, NodeKind::AiController { .. })));
@@ -42284,6 +41980,7 @@ mod tests {
                 camera: WorldCameraSettings::default(),
                 culling: WorldCullingSettings::default(),
                 streaming: WorldStreamingSettings::default(),
+                physics: WorldPhysicsSettings::default(),
             },
         );
         let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);

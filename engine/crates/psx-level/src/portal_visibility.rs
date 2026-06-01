@@ -1399,6 +1399,7 @@ mod tests {
             visibility_radius: 1,
             resident_chunk_limit: 8,
             visible_chunk_limit: 8,
+            gravity_per_tick: 96,
             material_first: MaterialIndex(0),
             material_count: 0,
             portal_first,
