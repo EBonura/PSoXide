@@ -141,6 +141,20 @@ impl FlowCursor {
             intro_timer: 0,
         }
     }
+
+    /// Pool index of the currently focused control, or `None` when focus
+    /// has not resolved yet (no scene, or no focusable control). This is the
+    /// same value passed to [`ui::draw_scene`]'s `focused` parameter, so a
+    /// caller can ask "which control is highlighted?" without reaching into
+    /// the driver's internals.
+    #[inline]
+    pub fn focused_node(&self) -> Option<usize> {
+        if self.menu_focus == MENU_FOCUS_NONE {
+            None
+        } else {
+            Some(self.menu_focus as usize)
+        }
+    }
 }
 
 /// The single [`Scene`] the engine runs: a cooked game-flow driver
@@ -583,11 +597,14 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 // uses so the knob position matches what scrubbing changed.
                 let option_value =
                     |option_id: u16| resolve_option_value(options, &option_values, option_len, option_id);
+                // This driver's built-in render path carries no font table
+                // yet, so text is skipped here; a caller that wants menu text
+                // calls `ui::draw_scene` directly with its own font table.
                 ui::draw_scene(
                     nodes,
                     first,
                     count,
-                    None,
+                    &[],
                     focused,
                     &mut textures,
                     &value,
@@ -746,6 +763,7 @@ mod tests {
             action,
             option: UI_OPTION_NONE,
             flags: 0,
+            font: 0,
         }
     }
 
@@ -767,6 +785,7 @@ mod tests {
         action: LevelUiAction::Back,
         option: UI_OPTION_NONE,
         flags: 0,
+        font: 0,
     };
 
     // A title scene (id 1) with two stacked buttons: "Play" (StartGameplay)
@@ -976,6 +995,7 @@ mod tests {
             action: LevelUiAction::Back,
             option,
             flags: 0,
+            font: 0,
         }
     }
 
