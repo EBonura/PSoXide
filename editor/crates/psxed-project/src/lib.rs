@@ -178,7 +178,9 @@ impl ResourceId {
 /// Stable identifier for a project [`OptionDef`]. Sliders bind to an
 /// option by id; the cook carries the low 16 bits into the runtime
 /// record so an option survives renames and reorders.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct OptionId(pub u32);
 
 impl OptionId {
@@ -5422,6 +5424,14 @@ pub struct WorldGrid {
     /// Base horizontal particle speed, in 1/16 pixel-per-vblank units.
     #[serde(default = "default_atmosphere_wind_speed_q4")]
     pub atmosphere_wind_speed_q4: i32,
+    /// Additional floors stacked above this one. Floor 0 is this grid;
+    /// floor `i` is `floors_above[i - 1]`. Each floor is its own free
+    /// grid (footprint + heights), auto-stacked just above the floor
+    /// below. Empty for single-floor rooms, so projects saved before
+    /// floors load unchanged. Only the base (floor 0) grid uses this;
+    /// upper-floor grids keep it empty.
+    #[serde(default)]
+    pub floors_above: Vec<WorldGrid>,
 }
 
 impl WorldGrid {
@@ -5445,7 +5455,59 @@ impl WorldGrid {
             atmosphere_density: default_atmosphere_density(),
             atmosphere_fall_speed_q4: default_atmosphere_fall_speed_q4(),
             atmosphere_wind_speed_q4: default_atmosphere_wind_speed_q4(),
+            floors_above: Vec::new(),
         }
+    }
+
+    /// Number of floors in this room (1 for a single-floor room). Floor 0
+    /// is this base grid; floor `i` is `floors_above[i - 1]`.
+    pub fn floor_count(&self) -> usize {
+        1 + self.floors_above.len()
+    }
+
+    /// Floor `i` (0 = this base grid).
+    pub fn floor(&self, i: usize) -> Option<&WorldGrid> {
+        if i == 0 {
+            Some(self)
+        } else {
+            self.floors_above.get(i - 1)
+        }
+    }
+
+    /// Mutable floor `i`.
+    pub fn floor_mut(&mut self, i: usize) -> Option<&mut WorldGrid> {
+        if i == 0 {
+            Some(self)
+        } else {
+            self.floors_above.get_mut(i - 1)
+        }
+    }
+
+    /// Add an empty floor stacked just above the current top floor's
+    /// ceiling and return its index. The new floor copies the base
+    /// footprint dimensions but starts with no sectors, so it can be
+    /// painted and extended freely.
+    pub fn push_floor(&mut self) -> usize {
+        let top = self.floors_above.last().unwrap_or(self);
+        let elevation = top.elevation + default_wall_height_for_sector_size(top.sector_size);
+        let mut floor = WorldGrid::empty(self.width, self.depth, self.sector_size);
+        floor.origin = self.origin;
+        floor.elevation = elevation;
+        // Inherit the room-level look so stacked floors render
+        // consistently (and the sky/fog seed grid is unaffected by which
+        // floor is active).
+        floor.ambient_color = self.ambient_color;
+        floor.fog_enabled = self.fog_enabled;
+        floor.fog_color = self.fog_color;
+        floor.fog_near = self.fog_near;
+        floor.fog_far = self.fog_far;
+        floor.atmosphere_enabled = self.atmosphere_enabled;
+        floor.atmosphere_color = self.atmosphere_color;
+        floor.atmosphere_density = self.atmosphere_density;
+        floor.atmosphere_fall_speed_q4 = self.atmosphere_fall_speed_q4;
+        floor.atmosphere_wind_speed_q4 = self.atmosphere_wind_speed_q4;
+        self.floors_above.push(floor);
+        self.floors_above.len()
     }
 
     /// Create a rectangular room with floors and perimeter walls.
@@ -8607,6 +8669,15 @@ pub struct SceneNode {
     pub kind: NodeKind,
     /// Local transform.
     pub transform: Transform3,
+    /// Which floor of the enclosing Room this node belongs to (0 =
+    /// ground). Stacked floors share the same XZ cells, so a node's
+    /// floor cannot be inferred from its Y (the authored standing height
+    /// is a placement default identical across projects). Recorded
+    /// explicitly at placement and consumed by the cook to bind the node
+    /// to the right runtime room. Default `0` keeps every existing
+    /// project (and all non-Room-child nodes) on the ground.
+    #[serde(default)]
+    pub floor: usize,
     /// Parent id, absent only for the scene root.
     pub parent: Option<NodeId>,
     /// Ordered child ids.
@@ -8620,6 +8691,7 @@ impl SceneNode {
             name: name.into(),
             kind,
             transform: Transform3::default(),
+            floor: 0,
             parent,
             children: Vec::new(),
         }
@@ -12108,8 +12180,7 @@ mod tests {
     fn add_ui_scene_seeds_empty_canvas_with_fresh_id() {
         let mut project = ProjectDocument::new("crud");
         project.normalize_loaded();
-        let existing: HashSet<UiSceneId> =
-            project.ui_scenes.iter().map(|scene| scene.id).collect();
+        let existing: HashSet<UiSceneId> = project.ui_scenes.iter().map(|scene| scene.id).collect();
 
         let id = project.add_ui_scene("Pause");
         assert!(id != UiSceneId::UNASSIGNED);
