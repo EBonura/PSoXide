@@ -272,6 +272,11 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
             cmds.join(" "),
         );
         eprintln!("[ours] cd-state: {}", bus.cdrom.debug_state(bus.cycles()));
+        let (spu_ia, spu_cnt, spu_stat, spu_cur, spu_cdq) = bus.spu.debug_irq_state();
+        eprintln!(
+            "[ours] spu-irq: irq_addr=0x{spu_ia:05x} spucnt=0x{spu_cnt:04x} (irq_en={}) spustat=0x{spu_stat:04x} decode_cursor=0x{spu_cur:x} cd_audio_q={spu_cdq}",
+            (spu_cnt >> 6) & 1
+        );
         let istat = bus.irq_mut().stat();
         let imask = bus.irq_mut().mask();
         eprintln!("[ours] global IRQ: I_STAT={istat:08x} I_MASK={imask:08x} (active={:08x})", istat & imask);
@@ -330,6 +335,26 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
                             found += 1;
                         } else if w == target {
                             eprintln!("  ptr  @0x{addr:08x}");
+                            found += 1;
+                        }
+                    }
+                    addr = addr.wrapping_add(4);
+                }
+                eprintln!("[ours]   {found} site(s)");
+            }
+        }
+        // Find `lw rt, IMM(rs)` sites (PSOXIDE_FIND_LW_IMM=0xc3f0): locates
+        // code that loads a specific global (e.g. a dispatched callback slot).
+        if let Ok(imm_s) = std::env::var("PSOXIDE_FIND_LW_IMM") {
+            if let Ok(imm) = u32::from_str_radix(imm_s.trim_start_matches("0x"), 16) {
+                let want = 0x8C00_0000u32 | (imm & 0xFFFF);
+                eprintln!("[ours] scan `lw rt,0x{imm:x}(rs)`:");
+                let mut addr = 0x8000_0000u32;
+                let mut found = 0;
+                while addr < 0x8020_0000 {
+                    if let Some(w) = bus.peek_instruction(addr) {
+                        if (w & 0xFC00_FFFF) == want {
+                            eprintln!("  lw @0x{addr:08x}: {w:08x}");
                             found += 1;
                         }
                     }
