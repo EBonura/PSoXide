@@ -1,8 +1,8 @@
-# `sdk/` — PSX SDK
+# `sdk/` (PSX SDK)
 
 Bare-metal PlayStation 1 SDK: typed wrappers over the hardware with no
 engine framework on top. This is the layer you use to write a PS1 program
-directly — `_start`, GPU/SPU/GTE access, controller polling — without the
+directly (`_start`, GPU/SPU/GTE access, controller polling) without the
 Scene/App machinery in [`engine/`](../engine).
 
 The SDK is its own Cargo workspace (`sdk/Cargo.toml`). Code here targets
@@ -45,6 +45,6 @@ Build and run them via the top-level `Makefile` (see the
 
 ## See also
 
-- [Root README](../README.md) — project overview and build instructions.
-- [`engine/`](../engine) — the Scene/App framework built on top of this SDK.
-- [`docs/hardware-refs/`](../docs/hardware-refs) — per-subsystem hardware notes (gpu, spu, dma, irq, timers).
+- [Root README](../README.md). Project overview and build instructions.
+- [`engine/`](../engine). The Scene/App framework built on top of this SDK.
+- [`docs/hardware-refs/`](../docs/hardware-refs). Per-subsystem hardware notes (gpu, spu, dma, irq, timers).
