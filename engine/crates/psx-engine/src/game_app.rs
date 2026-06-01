@@ -278,6 +278,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
             self.gameplay.init(ctx);
             self.cursor.gameplay_inited = true;
         }
+        // Hand the current option values to gameplay on every entry (not just
+        // first init), so a setting changed in a front-end menu before Play
+        // takes effect this session.
+        self.gameplay
+            .apply_options(self.options, &self.option_values[..self.option_len]);
     }
 
     /// Resolve a UI scene id to its `[first, count)` block in the shared
