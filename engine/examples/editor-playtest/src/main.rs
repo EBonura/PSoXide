@@ -34,7 +34,6 @@
 extern crate psx_rt;
 
 use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
-use psx_engine::SkyDirectionProjector;
 #[cfg(feature = "vis-full-active-chunks")]
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
 #[cfg(feature = "cd-stream-bench")]
@@ -46,6 +45,7 @@ use psx_engine::GridVisibilityStats;
     not(feature = "vis-full-active-chunks")
 ))]
 use psx_engine::GridVisibleCell;
+use psx_engine::SkyDirectionProjector;
 use psx_engine::{
     apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
     CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface,
@@ -131,7 +131,8 @@ use generated::{
     MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
-    ROOM_VISIBILITY, UI_NODES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    ROOM_VISIBILITY, UI_NODES, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS,
+    WEAPON_HITBOXES,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
@@ -411,13 +412,13 @@ fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
     DepthRange::new(NEAR_Z, room_draw_distance(record))
 }
 
-/// Project-option id (cooked from the demo10 "Screen Offset" option) that
-/// horizontally recentres the whole picture. Applied through
-/// [`Scene::apply_options`] when front-end menus publish a new value and again
-/// on gameplay entry, using the authentic GP1(06h) horizontal display range:
+/// Project-option ids cooked from demo10's screen-position settings. Applied
+/// through [`Scene::apply_options`] when front-end menus publish new values and
+/// again on gameplay entry, using the authentic GP1 display-window registers:
 /// the classic CRT screen-position setting that slides the active window within
 /// overscan without clipping.
-const SCREEN_OFFSET_OPTION_ID: u16 = 1;
+const SCREEN_OFFSET_X_OPTION_ID: u16 = 1;
+const SCREEN_OFFSET_Y_OPTION_ID: u16 = 2;
 
 fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
     WorldSurfaceOptions::new(WORLD_BAND, room_depth_range(record))
@@ -1420,7 +1421,6 @@ const MAX_RUNTIME_RESIDENT_CHUNKS: usize = STREAMED_ROOM_SLOT_COUNT;
 const MAX_COLLISION_ROOMS: usize = STREAMED_ROOM_SLOT_COUNT;
 #[cfg(not(feature = "cd-stream-bench"))]
 const MAX_COLLISION_ROOMS: usize = MAX_ACTIVE_ROOMS;
-
 
 #[cfg(feature = "cd-stream-bench")]
 const fn clamp_streamed_room_slot_count(raw: usize) -> usize {
@@ -3529,13 +3529,20 @@ impl Scene for Playtest {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
     }
 
-    /// Apply front-end settings chosen before Play. Currently the "Screen
-    /// Offset" option, which horizontally shifts the whole rendered scene.
+    /// Apply front-end settings chosen before Play. Screen-position options
+    /// shift the whole rendered scene through the display window.
     fn apply_options(&mut self, options: &[psx_level::LevelOptionDef], values: &[i32]) {
         for (option, value) in options.iter().zip(values) {
-            if option.id == SCREEN_OFFSET_OPTION_ID {
+            if option.id == SCREEN_OFFSET_X_OPTION_ID {
                 let offset_px = (*value).clamp(-128, 127) as i16;
                 psx_gpu::set_screen_h_offset(offset_px, psx_gpu::Resolution::R320X240);
+            } else if option.id == SCREEN_OFFSET_Y_OPTION_ID {
+                let offset_px = (*value).clamp(-128, 127) as i16;
+                psx_gpu::set_screen_v_offset(
+                    offset_px,
+                    psx_gpu::VideoMode::Ntsc,
+                    psx_gpu::Resolution::R320X240,
+                );
             }
         }
     }
@@ -9930,26 +9937,10 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
             ];
         }
         [
-            self.shade_tint_at_depth(
-                vertices[0],
-                material.texture.tint(),
-                depths[0],
-            ),
-            self.shade_tint_at_depth(
-                vertices[1],
-                material.texture.tint(),
-                depths[1],
-            ),
-            self.shade_tint_at_depth(
-                vertices[2],
-                material.texture.tint(),
-                depths[2],
-            ),
-            self.shade_tint_at_depth(
-                vertices[3],
-                material.texture.tint(),
-                depths[3],
-            ),
+            self.shade_tint_at_depth(vertices[0], material.texture.tint(), depths[0]),
+            self.shade_tint_at_depth(vertices[1], material.texture.tint(), depths[1]),
+            self.shade_tint_at_depth(vertices[2], material.texture.tint(), depths[2]),
+            self.shade_tint_at_depth(vertices[3], material.texture.tint(), depths[3]),
         ]
     }
 
@@ -13298,5 +13289,14 @@ fn main() -> ! {
     // booting straight into gameplay, so an authored menu shows first and
     // `GAME_FLOW.entry` (set from the project's boot target) decides where
     // play begins.
-    App::run_with_flow(config, &GAME_FLOW, UI_SCENES, UI_NODES, OPTIONS, &mut scene);
+    App::run_with_flow(
+        config,
+        &GAME_FLOW,
+        UI_SCENES,
+        UI_NODES,
+        OPTIONS,
+        UI_SFX_SAMPLES,
+        UI_SFX_CUES,
+        &mut scene,
+    );
 }

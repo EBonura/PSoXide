@@ -50,8 +50,8 @@ use psxed_project::{
     OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode,
     Resource, ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
     RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings, UiAction, UiAnchor, UiNodeId,
-    UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiTextAlign, UiValueBinding,
-    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldPhysicsSettings,
+    UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign,
+    UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldPhysicsSettings,
     WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM,
     MAX_PHYSICS_WEIGHT_Q8, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
     MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
@@ -1122,12 +1122,8 @@ pub enum EntityBoundKind {
     PointLight,
     /// `ParticleEmitter`.
     ParticleEmitter,
-    /// `Trigger`.
-    Trigger,
     /// `Portal`.
     Portal,
-    /// `AudioSource`. Marker box only.
-    AudioSource,
 }
 
 /// World-space AABB for one selectable scene entity.
@@ -2395,7 +2391,7 @@ enum PlaceKind {
     /// one exists, or refuses with an actionable error otherwise.
     ModelInstance,
     /// Character entity: `Entity + ModelRenderer + Animator +
-    /// CharacterController + Collider` referencing a
+    /// CharacterController` referencing a
     /// [`ResourceData::Character`] profile.
     Character,
     /// Flat material-backed image prop.
@@ -8607,17 +8603,6 @@ impl EditorWorkspace {
                 player,
             },
         );
-        scene.add_node(
-            entity,
-            "Collider",
-            NodeKind::Collider {
-                shape: ColliderShape::Capsule {
-                    radius: settings.radius,
-                    height: settings.height,
-                },
-                solid: true,
-            },
-        );
         entity
     }
 
@@ -10889,7 +10874,7 @@ impl EditorWorkspace {
     /// macro / structural nodes (World, Room, plain
     /// transform-only nodes) since they have no in-world heading.
     /// Entity hosts, the legacy `MeshInstance` card, and directional
-    /// markers (spawn / trigger / audio / portal) are rotatable.
+    /// markers (spawn / portal) are rotatable.
     fn rotate_selected_yaw_90(&mut self) {
         let id = self.selection.selected_node;
         if id == NodeId::ROOT {
@@ -10904,8 +10889,6 @@ impl EditorWorkspace {
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
                 | NodeKind::SpawnPoint { .. }
-                | NodeKind::Trigger { .. }
-                | NodeKind::AudioSource { .. }
                 | NodeKind::Portal { .. }
         );
         if !rotatable {
@@ -11032,25 +11015,41 @@ impl EditorWorkspace {
                 target_parent,
                 position,
             } => {
-                if source == target_parent {
+                let sources = self.scene_tree_drag_sources(source);
+                if sources.is_empty() {
                     return;
                 }
-                if self
-                    .project
-                    .active_scene()
-                    .is_descendant_of(target_parent, source)
-                {
+                if !self.scene_tree_reparent_is_valid(&sources, target_parent) {
                     self.status = "Cannot reparent: would create a cycle".to_string();
                     return;
                 }
                 self.push_undo();
-                let scene = self.project.active_scene_mut();
-                if scene.move_node(source, target_parent, position) {
-                    self.replace_node_selection(source);
+                let moved = move_scene_nodes_as_group(
+                    self.project.active_scene_mut(),
+                    &sources,
+                    target_parent,
+                    position,
+                );
+                if moved > 0 {
+                    if moved == 1 {
+                        self.replace_node_selection(sources[0]);
+                    } else {
+                        self.selection.selected_node = if sources.contains(&source) {
+                            source
+                        } else {
+                            sources[0]
+                        };
+                        self.selection.selected_nodes = sources.iter().copied().collect();
+                        self.selection.node_selection_anchor = Some(self.selection.selected_node);
+                    }
                     self.clear_resource_selection_state();
                     self.clear_primitive_selection_state();
                     self.clear_sector_selection();
-                    self.status = "Moved node".to_string();
+                    self.status = if moved == 1 {
+                        "Moved node".to_string()
+                    } else {
+                        format!("Moved {moved} nodes")
+                    };
                     self.mark_dirty();
                 }
             }
@@ -12084,9 +12083,9 @@ impl EditorWorkspace {
     fn draw_scene_tree_panel(&mut self, ui: &mut egui::Ui) {
         tool_panel_frame().show(ui, |ui| {
             ui.set_min_height(ui.available_height());
-            tool_panel_header(ui, icons::LAYERS, "World", |ui| {
+            tool_panel_header(ui, icons::LAYERS, "Scene Graph", |ui| {
                 ui.menu_button(icons::text(icons::PLUS, 14.0), |ui| {
-                    for (label, kind) in default_addable_kinds() {
+                    for (label, kind) in scene_graph_addable_kinds() {
                         if ui.button(label).clicked() {
                             self.add_child(kind, label);
                             ui.close_menu();
@@ -12094,7 +12093,9 @@ impl EditorWorkspace {
                     }
                 })
                 .response
-                .on_hover_text("Add node to the selected scene node");
+                .on_hover_text(
+                    "Add structural scene nodes. Place runtime objects from the toolbar Add menu.",
+                );
             });
             tool_panel_body(ui, |ui| self.draw_scene_tree_panel_body(ui));
         });
@@ -12103,7 +12104,7 @@ impl EditorWorkspace {
     fn draw_scene_tree_panel_body(&mut self, ui: &mut egui::Ui) {
         ui.add(
             egui::TextEdit::singleline(&mut self.scene_filter)
-                .hint_text("Filter world")
+                .hint_text("Filter scene graph")
                 .desired_width(f32::INFINITY),
         );
         ui.separator();
@@ -12155,6 +12156,7 @@ impl EditorWorkspace {
                     &mut connection_repair,
                 );
                 draw_room_floor_link_rows(ui, scene, &filter);
+                autoscroll_tree_drag::<NodeId>(ui);
             });
 
         for action in actions {
@@ -12225,6 +12227,7 @@ impl EditorWorkspace {
                 for row in rows {
                     draw_ui_node_row(ui, &row, selected == row.id, &mut actions);
                 }
+                autoscroll_tree_drag::<UiNodeId>(ui);
             });
         for action in actions {
             self.apply_ui_tree_action(action);
@@ -12651,9 +12654,12 @@ impl EditorWorkspace {
             .and_then(|parent| scene.node(parent))
             .map(|parent| parent.name.clone())
             .unwrap_or_else(|| "None".to_string());
-        let selected_is_music = scene
-            .node(selected)
-            .is_some_and(|node| matches!(node.kind, UiNodeKind::Music { .. }));
+        let selected_uses_wav = scene.node(selected).is_some_and(|node| {
+            matches!(
+                node.kind,
+                UiNodeKind::Button { .. } | UiNodeKind::Slider { .. } | UiNodeKind::Music { .. }
+            )
+        });
         if selected != self.selection.selected_ui_node {
             self.selection.selected_ui_node = selected;
         }
@@ -12681,11 +12687,13 @@ impl EditorWorkspace {
             .iter()
             .map(|option| (option.id, option.name.clone()))
             .collect();
-        let music_wav_options = if selected_is_music {
+        let wav_options = if selected_uses_wav {
             collect_project_wav_options(&self.project_dir)
         } else {
             Vec::new()
         };
+        let project_root = self.project_dir.clone();
+        let mut preview_message: Option<String> = None;
 
         let Some(scene) = self.current_ui_scene_mut() else {
             ui.weak("No UI scene");
@@ -12782,8 +12790,8 @@ impl EditorWorkspace {
                 background,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
-                changed |= draw_ui_value_binding_editor(ui, "Value", value);
-                changed |= draw_ui_value_binding_editor(ui, "Max", max);
+                changed |= draw_ui_value_binding_editor(ui, "Value", value, &option_choices);
+                changed |= draw_ui_value_binding_editor(ui, "Max", max, &option_choices);
                 changed |= color_editor(ui, "Fill", fill);
                 changed |= color_editor(ui, "Background", background);
             }
@@ -12795,6 +12803,7 @@ impl EditorWorkspace {
                 text_color,
                 transparent,
                 action,
+                sfx,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 ui.horizontal(|ui| {
@@ -12806,6 +12815,13 @@ impl EditorWorkspace {
                 changed |= ui.checkbox(transparent, "Transparent background").changed();
                 changed |= color_editor(ui, "Background", color);
                 changed |= draw_ui_action_editor(ui, action, &scene_options, &option_choices);
+                changed |= draw_button_sfx_editor(
+                    ui,
+                    sfx,
+                    &wav_options,
+                    &project_root,
+                    &mut preview_message,
+                );
             }
             UiNodeKind::Slider {
                 rect,
@@ -12813,20 +12829,29 @@ impl EditorWorkspace {
                 track,
                 fill,
                 knob,
+                sfx,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 changed |= draw_ui_option_picker(ui, "Option", option, &option_choices);
                 changed |= color_editor(ui, "Track", track);
                 changed |= color_editor(ui, "Fill", fill);
                 changed |= color_editor(ui, "Knob", knob);
+                changed |= draw_slider_sfx_editor(
+                    ui,
+                    sfx,
+                    &wav_options,
+                    &project_root,
+                    &mut preview_message,
+                );
             }
             UiNodeKind::Music {
                 wav_path,
                 volume,
+                volume_option,
                 loop_track,
             } => {
                 ui.weak("Non-visual CD-DA music cue for this UI scene.");
-                changed |= draw_music_wav_picker(ui, "WAV", wav_path, &music_wav_options);
+                changed |= draw_music_wav_picker(ui, "WAV", wav_path, &wav_options);
                 changed |= ui.checkbox(loop_track, "Loop").changed();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Volume").color(STUDIO_TEXT_WEAK));
@@ -12839,11 +12864,20 @@ impl EditorWorkspace {
                         changed = true;
                     }
                 });
+                changed |= draw_optional_ui_option_picker(
+                    ui,
+                    "Volume option",
+                    volume_option,
+                    &option_choices,
+                );
             }
         }
 
         if changed {
             self.mark_dirty();
+        }
+        if let Some(message) = preview_message {
+            self.status = message;
         }
     }
 
@@ -16635,6 +16669,52 @@ impl EditorWorkspace {
             .collect()
     }
 
+    fn scene_tree_drag_sources(&self, source: NodeId) -> Vec<NodeId> {
+        if !self.selection.selected_nodes.contains(&source) {
+            return vec![source];
+        }
+
+        let scene = self.project.active_scene();
+        let mut selected = self.selection.selected_nodes.clone();
+        if self.selection.selected_node != NodeId::ROOT {
+            selected.insert(self.selection.selected_node);
+        }
+        let ordered: Vec<NodeId> = scene
+            .hierarchy_rows()
+            .into_iter()
+            .map(|row| row.id)
+            .filter(|id| *id != NodeId::ROOT && selected.contains(id))
+            .collect();
+
+        let roots: Vec<NodeId> = ordered
+            .iter()
+            .copied()
+            .filter(|id| {
+                !ordered
+                    .iter()
+                    .any(|other| *other != *id && scene.is_descendant_of(*id, *other))
+            })
+            .collect();
+        if roots.is_empty() {
+            vec![source]
+        } else {
+            roots
+        }
+    }
+
+    fn scene_tree_reparent_is_valid(&self, sources: &[NodeId], target_parent: NodeId) -> bool {
+        let scene = self.project.active_scene();
+        if scene.node(target_parent).is_none() {
+            return false;
+        }
+        sources.iter().all(|source| {
+            *source != NodeId::ROOT
+                && scene.node(*source).is_some()
+                && *source != target_parent
+                && !scene.is_descendant_of(target_parent, *source)
+        })
+    }
+
     fn node_frame_bounds_3d(&self, id: NodeId) -> Option<([f32; 3], [f32; 3])> {
         if self.scene_node_effectively_hidden(id) {
             return None;
@@ -19380,17 +19460,12 @@ fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspector {
         NodeKind::ModelRenderer { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
-        | NodeKind::Interactable { .. }
         | NodeKind::CharacterController { .. }
-        | NodeKind::AiController { .. }
-        | NodeKind::Combat { .. }
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. } => NodeTransformInspector::Hidden,
         NodeKind::Entity
         | NodeKind::MeshInstance { .. }
         | NodeKind::SpawnPoint { .. }
-        | NodeKind::Trigger { .. }
-        | NodeKind::AudioSource { .. }
         | NodeKind::Portal { .. } => NodeTransformInspector::PositionYaw,
         NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
             NodeTransformInspector::PositionFullRotation
@@ -20467,8 +20542,6 @@ fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode)
                 | NodeKind::BoxProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
-                | NodeKind::Trigger { .. }
-                | NodeKind::AudioSource { .. }
                 | NodeKind::Portal { .. }
         ),
         TransformGizmoMode::Rotate => matches!(
@@ -20478,8 +20551,6 @@ fn node_kind_supports_transform_gizmo(kind: &NodeKind, mode: TransformGizmoMode)
                 | NodeKind::BoxProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
-                | NodeKind::Trigger { .. }
-                | NodeKind::AudioSource { .. }
                 | NodeKind::Portal { .. }
         ),
         TransformGizmoMode::Scale => {
@@ -21238,7 +21309,7 @@ fn draw_node_kind_editor(
                 );
             }
             ui.separator();
-            ui.weak("Visual calibration only. Collision, camera, and movement still use Entity, Character Controller, and Collider data.");
+            ui.weak("Visual calibration only. Collision, camera, and movement still use Entity and Character Controller data.");
             ui.label("Visual Offset");
             for (axis, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
                 ui.horizontal(|ui| {
@@ -21354,17 +21425,6 @@ fn draw_node_kind_editor(
             changed |= ui.checkbox(solid, "Solid").changed();
             changed |= collider_shape_editor(ui, shape);
         }
-        NodeKind::Interactable { prompt, action } => {
-            ui.weak("Component: marks an Entity as interactable. Runtime interaction cooking lands later.");
-            ui.horizontal(|ui| {
-                ui.label("Prompt");
-                changed |= ui.text_edit_singleline(prompt).changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("Action");
-                changed |= ui.text_edit_singleline(action).changed();
-            });
-        }
         NodeKind::CharacterController {
             character,
             settings,
@@ -21383,21 +21443,6 @@ fn draw_node_kind_editor(
                 .small(),
             );
             changed |= draw_character_controller_settings(ui, settings);
-        }
-        NodeKind::AiController { behavior } => {
-            ui.weak("Component: future NPC/enemy AI profile.");
-            ui.horizontal(|ui| {
-                ui.label("Behavior");
-                changed |= ui.text_edit_singleline(behavior).changed();
-            });
-        }
-        NodeKind::Combat { faction, health } => {
-            ui.weak("Component: future combat stats.");
-            ui.horizontal(|ui| {
-                ui.label("Faction");
-                changed |= ui.text_edit_singleline(faction).changed();
-            });
-            changed |= drag_u16(ui, "Health", health, 0, u16::MAX);
         }
         NodeKind::Equipment {
             weapon,
@@ -21498,28 +21543,6 @@ fn draw_node_kind_editor(
             if *player {
                 changed |= draw_character_selector(ui, character_options, character, nav_target);
             }
-        }
-        NodeKind::Trigger { trigger_id } => {
-            ui.horizontal(|ui| {
-                ui.label(icons::text(icons::SCAN, 12.0).color(STUDIO_TEXT_WEAK));
-                ui.label("Trigger ID");
-            });
-            changed |= ui.text_edit_singleline(trigger_id).changed();
-        }
-        NodeKind::AudioSource { sound, radius } => {
-            ui.horizontal(|ui| {
-                ui.label(icons::text(icons::AUDIO_LINES, 12.0).color(STUDIO_TEXT_WEAK));
-                ui.label(match sound {
-                    Some(id) => format!("Audio resource #{}", id.raw()),
-                    None => "No audio resource assigned".to_string(),
-                });
-            });
-            changed |= ui
-                .add(
-                    egui::Slider::new(radius, 0.0..=16000.0)
-                        .text(icons::label(icons::WAYPOINT, "Radius")),
-                )
-                .changed();
         }
         NodeKind::Portal {
             target_room,
@@ -21872,17 +21895,12 @@ fn node_lucide_icon(kind: &str, root: bool) -> char {
         "Model Renderer" | "ModelRenderer" => icons::BOX,
         "Animator" => icons::PLAY,
         "Collider" => icons::SCALE_3D,
-        "Interactable" => icons::POINTER,
         "Character Controller" | "CharacterController" => icons::MAP_PIN,
-        "AI Controller" | "AiController" => icons::SCAN,
-        "Combat" => icons::FOCUS,
         "Equipment" => icons::WAYPOINT,
         "Light" => icons::SUN,
         "Point Light" | "PointLight" => icons::SUN,
         "Particle Emitter" | "ParticleEmitter" => icons::FOCUS,
         "Spawn Point" | "SpawnPoint" => icons::MAP_PIN,
-        "Trigger" => icons::SCAN,
-        "Audio Source" | "AudioSource" => icons::AUDIO_LINES,
         "Portal" => icons::WAYPOINT,
         _ => icons::CIRCLE_DOT,
     }
@@ -21906,17 +21924,12 @@ fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
         "Model Renderer" | "ModelRenderer" => Color32::from_rgb(134, 168, 196),
         "Animator" => Color32::from_rgb(126, 164, 220),
         "Collider" => Color32::from_rgb(180, 170, 112),
-        "Interactable" => Color32::from_rgb(216, 160, 108),
         "Character Controller" | "CharacterController" => Color32::from_rgb(104, 194, 142),
-        "AI Controller" | "AiController" => Color32::from_rgb(144, 176, 112),
-        "Combat" => Color32::from_rgb(220, 110, 110),
         "Equipment" => Color32::from_rgb(210, 190, 104),
         "Light" => Color32::from_rgb(238, 203, 116),
         "Point Light" | "PointLight" => Color32::from_rgb(238, 203, 116),
         "Particle Emitter" | "ParticleEmitter" => Color32::from_rgb(152, 214, 230),
         "Spawn Point" | "SpawnPoint" => Color32::from_rgb(236, 188, 104),
-        "Trigger" => Color32::from_rgb(190, 128, 232),
-        "Audio Source" | "AudioSource" => Color32::from_rgb(104, 202, 188),
         "Portal" => PORTAL_PINK,
         _ => Color32::from_rgb(141, 160, 180),
     }
@@ -25330,6 +25343,7 @@ fn draw_ui_value_binding_editor(
     ui: &mut egui::Ui,
     label: &str,
     binding: &mut UiValueBinding,
+    option_choices: &[(OptionId, String)],
 ) -> bool {
     let mut changed = false;
     egui::ComboBox::from_label(label)
@@ -25341,6 +25355,15 @@ fn draw_ui_value_binding_editor(
                 ("Player Stamina", UiValueBinding::PlayerStamina),
                 ("Player Stamina Max", UiValueBinding::PlayerStaminaMax),
                 ("Constant", UiValueBinding::ConstantQ12(4096)),
+                (
+                    "Option",
+                    UiValueBinding::Option(
+                        option_choices
+                            .first()
+                            .map(|(id, _)| *id)
+                            .unwrap_or_default(),
+                    ),
+                ),
             ] {
                 if ui
                     .selectable_label(
@@ -25358,6 +25381,9 @@ fn draw_ui_value_binding_editor(
     if let UiValueBinding::ConstantQ12(value) = binding {
         changed |= drag_i32(ui, "Q12", value, 0, 65536);
     }
+    if let UiValueBinding::Option(option) = binding {
+        changed |= draw_ui_option_picker(ui, "Option", option, option_choices);
+    }
     changed
 }
 
@@ -25368,6 +25394,7 @@ fn ui_value_binding_same_variant(a: UiValueBinding, b: UiValueBinding) -> bool {
             UiValueBinding::ConstantQ12(_),
             UiValueBinding::ConstantQ12(_)
         ) | (UiValueBinding::PlayerHealth, UiValueBinding::PlayerHealth)
+            | (UiValueBinding::Option(_), UiValueBinding::Option(_))
             | (
                 UiValueBinding::PlayerHealthMax,
                 UiValueBinding::PlayerHealthMax
@@ -25509,6 +25536,273 @@ fn draw_ui_option_picker(
             });
     });
     changed
+}
+
+/// Dropdown that picks an optional project option.
+fn draw_optional_ui_option_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: &mut Option<OptionId>,
+    options: &[(OptionId, String)],
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let preview = current
+            .and_then(|current| {
+                options
+                    .iter()
+                    .find(|(id, _)| *id == current)
+                    .map(|(_, name)| name.as_str())
+            })
+            .unwrap_or("(none)");
+        egui::ComboBox::from_id_salt(ui.id().with(label))
+            .selected_text(preview)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), "(none)").clicked() && current.is_some() {
+                    *current = None;
+                    changed = true;
+                }
+                for (id, name) in options {
+                    if ui.selectable_label(current == &Some(*id), name).clicked()
+                        && current != &Some(*id)
+                    {
+                        *current = Some(*id);
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed
+}
+
+fn draw_button_sfx_editor(
+    ui: &mut egui::Ui,
+    sfx: &mut UiSfxBindings,
+    wav_options: &[String],
+    project_root: &Path,
+    preview_message: &mut Option<String>,
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::AUDIO_LINES, "SFX"))
+        .default_open(false)
+        .show(ui, |ui| {
+            changed |= draw_ui_sfx_pool_editor(
+                ui,
+                "Focus",
+                &mut sfx.focus,
+                wav_options,
+                project_root,
+                preview_message,
+            );
+            changed |= draw_ui_sfx_pool_editor(
+                ui,
+                "Press",
+                &mut sfx.activate,
+                wav_options,
+                project_root,
+                preview_message,
+            );
+        });
+    changed
+}
+
+fn draw_slider_sfx_editor(
+    ui: &mut egui::Ui,
+    sfx: &mut UiSfxBindings,
+    wav_options: &[String],
+    project_root: &Path,
+    preview_message: &mut Option<String>,
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::AUDIO_LINES, "SFX"))
+        .default_open(false)
+        .show(ui, |ui| {
+            changed |= draw_ui_sfx_pool_editor(
+                ui,
+                "Focus",
+                &mut sfx.focus,
+                wav_options,
+                project_root,
+                preview_message,
+            );
+            changed |= draw_ui_sfx_pool_editor(
+                ui,
+                "Nudge",
+                &mut sfx.nudge,
+                wav_options,
+                project_root,
+                preview_message,
+            );
+            changed |= draw_ui_sfx_pool_editor(
+                ui,
+                "Limit",
+                &mut sfx.limit,
+                wav_options,
+                project_root,
+                preview_message,
+            );
+        });
+    changed
+}
+
+fn draw_ui_sfx_pool_editor(
+    ui: &mut egui::Ui,
+    label: &str,
+    cues: &mut Vec<UiSfxCue>,
+    wav_options: &[String],
+    project_root: &Path,
+    preview_message: &mut Option<String>,
+) -> bool {
+    let mut changed = false;
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).strong());
+        if ui
+            .small_button(icons::label(icons::PLUS, "Sound"))
+            .clicked()
+        {
+            cues.push(UiSfxCue::default());
+            changed = true;
+        }
+    });
+    let mut remove = None;
+    for (index, cue) in cues.iter_mut().enumerate() {
+        ui.push_id((label, index), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("#{}", index + 1));
+                changed |= draw_sfx_wav_picker(ui, "WAV", &mut cue.wav_path, wav_options);
+                if ui
+                    .small_button(icons::label(icons::PLAY, "Preview"))
+                    .clicked()
+                {
+                    *preview_message = Some(match preview_ui_sfx_cue(project_root, cue) {
+                        Ok(()) => format!("Previewing {}", cue.wav_path),
+                        Err(error) => error,
+                    });
+                }
+                if ui
+                    .small_button(icons::label(icons::TRASH, ""))
+                    .on_hover_text("Remove sound")
+                    .clicked()
+                {
+                    remove = Some(index);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Path").color(STUDIO_TEXT_WEAK));
+                changed |= ui.text_edit_singleline(&mut cue.wav_path).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Volume").color(STUDIO_TEXT_WEAK));
+                let mut volume = cue.volume.min(100) as i32;
+                if ui
+                    .add(egui::Slider::new(&mut volume, 0..=100).suffix("%"))
+                    .changed()
+                {
+                    cue.volume = volume as u8;
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Pitch").color(STUDIO_TEXT_WEAK));
+                let mut pitch = (cue.pitch_q12.max(1) as f32) / 4096.0;
+                if ui
+                    .add(egui::Slider::new(&mut pitch, 0.25..=2.0).suffix("x"))
+                    .changed()
+                {
+                    cue.pitch_q12 = ((pitch * 4096.0).round() as i32).clamp(1, 0x3FFF) as u16;
+                    changed = true;
+                }
+            });
+        });
+    }
+    if let Some(index) = remove {
+        cues.remove(index);
+        changed = true;
+    }
+    changed
+}
+
+fn draw_sfx_wav_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: &mut String,
+    options: &[String],
+) -> bool {
+    let mut changed = false;
+    let preview = if current.trim().is_empty() {
+        "(none)"
+    } else {
+        current.as_str()
+    };
+    egui::ComboBox::from_id_salt(ui.id().with(label))
+        .width(150.0)
+        .selected_text(preview)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(current.trim().is_empty(), "(none)")
+                .clicked()
+                && !current.is_empty()
+            {
+                current.clear();
+                changed = true;
+            }
+            for path in options {
+                if ui.selectable_label(current == path, path).clicked() && current != path {
+                    *current = path.clone();
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+fn preview_ui_sfx_cue(project_root: &Path, cue: &UiSfxCue) -> Result<(), String> {
+    let trimmed = cue.wav_path.trim();
+    if trimmed.is_empty() {
+        return Err("Choose a WAV before previewing SFX".to_string());
+    }
+    let path = psxed_project::model_import::resolve_path(trimmed, Some(project_root));
+    if !path.is_file() {
+        return Err(format!("SFX preview source not found: {}", path.display()));
+    }
+    let volume = cue.volume.min(100).to_string();
+    let pitch = (cue.pitch_q12.max(1) as f32 / 4096.0).clamp(0.25, 2.0);
+    let path_arg = path.to_string_lossy().into_owned();
+    let filter = format!("asetrate=44100*{pitch:.4},aresample=44100");
+    let mut ffplay_args = vec![
+        "-nodisp".to_string(),
+        "-autoexit".to_string(),
+        "-loglevel".to_string(),
+        "quiet".to_string(),
+        "-volume".to_string(),
+        volume.clone(),
+    ];
+    if (pitch - 1.0).abs() > 0.001 {
+        ffplay_args.push("-af".to_string());
+        ffplay_args.push(filter);
+    }
+    ffplay_args.push(path_arg.clone());
+    if spawn_audio_preview("ffplay", &ffplay_args).is_ok()
+        || spawn_audio_preview("/opt/homebrew/bin/ffplay", &ffplay_args).is_ok()
+    {
+        return Ok(());
+    }
+    let afplay_args = vec![
+        "-v".to_string(),
+        format!("{:.3}", cue.volume.min(100) as f32 / 100.0),
+        path_arg,
+    ];
+    spawn_audio_preview("afplay", &afplay_args)
+        .map_err(|error| format!("Could not launch audio preview: {error}"))
+}
+
+fn spawn_audio_preview(program: &str, args: &[String]) -> std::io::Result<()> {
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|_| ())
 }
 
 fn draw_music_wav_picker(
@@ -27766,6 +28060,147 @@ fn room_connection_tooltip(scene: &psxed_project::Scene, connection: &RoomConnec
     out
 }
 
+const TREE_DND_INSERT_BAND_HEIGHT: f32 = 6.0;
+const TREE_DND_AUTOSCROLL_EDGE: f32 = 38.0;
+const TREE_DND_AUTOSCROLL_MARGIN: f32 = 18.0;
+const TREE_DND_AUTOSCROLL_MAX_DELTA: f32 = 18.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeRowDropZone {
+    Before,
+    Inside,
+}
+
+fn tree_row_drop_zone(rect: Rect, pointer: Option<Pos2>, allow_before: bool) -> TreeRowDropZone {
+    if allow_before
+        && pointer.is_some_and(|pos| {
+            rect.contains(pos) && pos.y <= rect.top() + TREE_DND_INSERT_BAND_HEIGHT
+        })
+    {
+        TreeRowDropZone::Before
+    } else {
+        TreeRowDropZone::Inside
+    }
+}
+
+fn tree_drag_autoscroll_delta(viewport: Rect, pointer: Pos2) -> f32 {
+    let active = Rect::from_min_max(
+        Pos2::new(viewport.left(), viewport.top() - TREE_DND_AUTOSCROLL_MARGIN),
+        Pos2::new(
+            viewport.right(),
+            viewport.bottom() + TREE_DND_AUTOSCROLL_MARGIN,
+        ),
+    );
+    if !active.contains(pointer) {
+        return 0.0;
+    }
+
+    let edge = TREE_DND_AUTOSCROLL_EDGE
+        .min(viewport.height() * 0.5)
+        .max(1.0);
+    if pointer.y < viewport.top() + edge {
+        let strength = ((viewport.top() + edge - pointer.y) / edge).clamp(0.0, 1.0);
+        TREE_DND_AUTOSCROLL_MAX_DELTA * strength
+    } else if pointer.y > viewport.bottom() - edge {
+        let strength = ((pointer.y - (viewport.bottom() - edge)) / edge).clamp(0.0, 1.0);
+        -TREE_DND_AUTOSCROLL_MAX_DELTA * strength
+    } else {
+        0.0
+    }
+}
+
+fn autoscroll_tree_drag<Payload>(ui: &mut egui::Ui)
+where
+    Payload: 'static + Send + Sync,
+{
+    if !egui::DragAndDrop::has_payload_of_type::<Payload>(ui.ctx()) {
+        return;
+    }
+    let Some(pointer) = ui.ctx().input(|input| input.pointer.interact_pos()) else {
+        return;
+    };
+    let delta = tree_drag_autoscroll_delta(ui.clip_rect(), pointer);
+    if delta.abs() > f32::EPSILON {
+        ui.scroll_with_delta(Vec2::new(0.0, delta));
+        ui.ctx().request_repaint();
+    }
+}
+
+fn move_scene_nodes_as_group(
+    scene: &mut Scene,
+    sources: &[NodeId],
+    target_parent: NodeId,
+    position: usize,
+) -> usize {
+    if scene.node(target_parent).is_none() {
+        return 0;
+    }
+
+    let mut seen = HashSet::new();
+    let sources: Vec<NodeId> = sources
+        .iter()
+        .copied()
+        .filter(|id| *id != scene.root && scene.node(*id).is_some() && seen.insert(*id))
+        .collect();
+    if sources.is_empty() {
+        return 0;
+    }
+
+    let source_set: HashSet<NodeId> = sources.iter().copied().collect();
+    if source_set.contains(&target_parent) {
+        return 0;
+    }
+
+    let adjusted_position = scene
+        .node(target_parent)
+        .map(|parent| {
+            let removed_before = parent
+                .children
+                .iter()
+                .take(position)
+                .filter(|child| source_set.contains(child))
+                .count();
+            position.saturating_sub(removed_before)
+        })
+        .unwrap_or(position);
+
+    let mut parent_ids = Vec::new();
+    for source in &sources {
+        if let Some(parent) = scene.node(*source).and_then(|node| node.parent) {
+            if !parent_ids.contains(&parent) {
+                parent_ids.push(parent);
+            }
+        }
+    }
+    if !parent_ids.contains(&target_parent) {
+        parent_ids.push(target_parent);
+    }
+
+    for parent in parent_ids {
+        if let Some(node) = scene.node_mut(parent) {
+            node.children.retain(|child| !source_set.contains(child));
+        }
+    }
+
+    let moved = if let Some(parent) = scene.node_mut(target_parent) {
+        let insert_at = adjusted_position.min(parent.children.len());
+        for (offset, source) in sources.iter().enumerate() {
+            parent.children.insert(insert_at + offset, *source);
+        }
+        sources.len()
+    } else {
+        0
+    };
+
+    for source in sources.iter().take(moved) {
+        if let Some(node) = scene.node_mut(*source) {
+            node.parent = Some(target_parent);
+        }
+    }
+
+    moved
+}
+
 fn draw_ui_node_row(
     ui: &mut egui::Ui,
     row: &UiNodeRow,
@@ -27773,28 +28208,6 @@ fn draw_ui_node_row(
     actions: &mut Vec<UiTreeAction>,
 ) {
     let row_height = 24.0;
-    let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
-
-    if dnd_active && row.id != UiNodeId::ROOT {
-        let (insert_rect, insert_response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
-        if let Some(payload) = insert_response.dnd_release_payload::<UiNodeId>() {
-            actions.push(UiTreeAction::Reparent {
-                source: *payload,
-                target_parent: row.parent.unwrap_or(UiNodeId::ROOT),
-                position: row.sibling_index,
-            });
-        }
-        if insert_response.contains_pointer() {
-            ui.painter().line_segment(
-                [
-                    Pos2::new(insert_rect.left() + 4.0, insert_rect.center().y),
-                    Pos2::new(insert_rect.right() - 4.0, insert_rect.center().y),
-                ],
-                Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
-            );
-        }
-    }
 
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), row_height),
@@ -27913,22 +28326,47 @@ fn draw_ui_node_row(
         );
     }
 
+    let pointer_pos = ui.ctx().input(|input| input.pointer.interact_pos());
+    let drop_zone = tree_row_drop_zone(rect, pointer_pos, row.id != UiNodeId::ROOT);
+
     if let Some(payload) = response.dnd_hover_payload::<UiNodeId>() {
         if *payload != row.id {
-            ui.painter().rect_stroke(
-                rect.shrink2(Vec2::new(2.0, 1.0)),
-                3.0,
-                Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
-                StrokeKind::Inside,
-            );
+            match drop_zone {
+                TreeRowDropZone::Before => {
+                    ui.painter().line_segment(
+                        [
+                            Pos2::new(rect.left() + 4.0, rect.top() + 1.0),
+                            Pos2::new(rect.right() - 4.0, rect.top() + 1.0),
+                        ],
+                        Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
+                    );
+                }
+                TreeRowDropZone::Inside => {
+                    ui.painter().rect_stroke(
+                        rect.shrink2(Vec2::new(2.0, 1.0)),
+                        3.0,
+                        Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
         }
     }
     if let Some(payload) = response.dnd_release_payload::<UiNodeId>() {
-        actions.push(UiTreeAction::Reparent {
-            source: *payload,
-            target_parent: row.id,
-            position: row.child_count,
-        });
+        if *payload != row.id {
+            match drop_zone {
+                TreeRowDropZone::Before => actions.push(UiTreeAction::Reparent {
+                    source: *payload,
+                    target_parent: row.parent.unwrap_or(UiNodeId::ROOT),
+                    position: row.sibling_index,
+                }),
+                TreeRowDropZone::Inside => actions.push(UiTreeAction::Reparent {
+                    source: *payload,
+                    target_parent: row.id,
+                    position: row.child_count,
+                }),
+            }
+        }
     }
 
     if response.clicked() {
@@ -28056,31 +28494,6 @@ fn draw_scene_node_row(
     actions: &mut Vec<TreeAction>,
 ) {
     let row_height = 24.0;
-    let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
-
-    // Insertion bar above the row: dropping here reorders before the
-    // current row inside its parent's child list. Hidden when no drag
-    // is in flight so we don't steal mouse hovers.
-    if dnd_active && row.id != NodeId::ROOT {
-        let (insert_rect, insert_response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
-        if let Some(payload) = insert_response.dnd_release_payload::<NodeId>() {
-            actions.push(TreeAction::Reparent {
-                source: *payload,
-                target_parent: row.parent.unwrap_or(NodeId::ROOT),
-                position: row.sibling_index,
-            });
-        }
-        if insert_response.contains_pointer() {
-            ui.painter().line_segment(
-                [
-                    Pos2::new(insert_rect.left() + 4.0, insert_rect.center().y),
-                    Pos2::new(insert_rect.right() - 4.0, insert_rect.center().y),
-                ],
-                Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
-            );
-        }
-    }
 
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), row_height),
@@ -28323,22 +28736,47 @@ fn draw_scene_node_row(
 
     // Drop on row body → reparent as last child. Highlight while
     // hovered so the user knows where the drop will land.
+    let pointer_pos = ui.ctx().input(|input| input.pointer.interact_pos());
+    let drop_zone = tree_row_drop_zone(rect, pointer_pos, row.id != NodeId::ROOT);
+
     if let Some(payload) = response.dnd_hover_payload::<NodeId>() {
         if *payload != row.id {
-            ui.painter().rect_stroke(
-                rect.shrink2(Vec2::new(2.0, 1.0)),
-                3.0,
-                Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
-                StrokeKind::Inside,
-            );
+            match drop_zone {
+                TreeRowDropZone::Before => {
+                    ui.painter().line_segment(
+                        [
+                            Pos2::new(rect.left() + 4.0, rect.top() + 1.0),
+                            Pos2::new(rect.right() - 4.0, rect.top() + 1.0),
+                        ],
+                        Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
+                    );
+                }
+                TreeRowDropZone::Inside => {
+                    ui.painter().rect_stroke(
+                        rect.shrink2(Vec2::new(2.0, 1.0)),
+                        3.0,
+                        Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
         }
     }
     if let Some(payload) = response.dnd_release_payload::<NodeId>() {
-        actions.push(TreeAction::Reparent {
-            source: *payload,
-            target_parent: row.id,
-            position: row.child_count,
-        });
+        if *payload != row.id {
+            match drop_zone {
+                TreeRowDropZone::Before => actions.push(TreeAction::Reparent {
+                    source: *payload,
+                    target_parent: row.parent.unwrap_or(NodeId::ROOT),
+                    position: row.sibling_index,
+                }),
+                TreeRowDropZone::Inside => actions.push(TreeAction::Reparent {
+                    source: *payload,
+                    target_parent: row.id,
+                    position: row.child_count,
+                }),
+            }
+        }
     }
 
     if response.clicked() && !icon_clicked {
@@ -28355,7 +28793,7 @@ fn draw_scene_node_row(
     if row.id != NodeId::ROOT {
         response.context_menu(|ui| {
             ui.menu_button(icons::label(icons::PLUS, "Add Child"), |ui| {
-                for (label, kind) in default_addable_kinds() {
+                for (label, kind) in scene_graph_addable_kinds() {
                     if ui.button(label).clicked() {
                         actions.push(TreeAction::AddChild {
                             parent: row.id,
@@ -28381,10 +28819,11 @@ fn draw_scene_node_row(
             }
         });
     } else {
-        // The root is the World; children are rooms, entities, and components.
+        // The root is the scene graph; add structural nodes here and use the
+        // toolbar Add menu for placed runtime objects.
         response.context_menu(|ui| {
             ui.menu_button(icons::label(icons::PLUS, "Add Child"), |ui| {
-                for (label, kind) in default_addable_kinds() {
+                for (label, kind) in scene_graph_addable_kinds() {
                     if ui.button(label).clicked() {
                         actions.push(TreeAction::AddChild {
                             parent: row.id,
@@ -28576,9 +29015,12 @@ fn scene_tree_kind_label(kind: &'static str) -> &'static str {
     }
 }
 
-/// Default `(menu label, kind template)` pairs for "Add Child" menus.
-/// Each menu entry uses the label as the new node's display name.
-fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
+/// Structural scene-graph entries for "Add Child" menus.
+///
+/// Runtime objects are placed through the toolbar Add/Place menu so a click
+/// can resolve room context, resources, floor anchoring, and dedupe rules.
+/// Entity components are added from the selected Entity's Components panel.
+fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 3] {
     [
         (
             "Room",
@@ -28587,113 +29029,7 @@ fn default_addable_kinds() -> [(&'static str, NodeKind); 17] {
             },
         ),
         ("Entity", NodeKind::Entity),
-        ("Node3D", NodeKind::Node3D),
-        (
-            "Model Renderer",
-            NodeKind::ModelRenderer {
-                model: None,
-                material: None,
-                visual_offset: [0; 3],
-                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
-            },
-        ),
-        (
-            "Animator",
-            NodeKind::Animator {
-                clip: None,
-                action_clips: Vec::new(),
-                autoplay: true,
-            },
-        ),
-        (
-            "Collider",
-            NodeKind::Collider {
-                shape: ColliderShape::default(),
-                solid: true,
-            },
-        ),
-        (
-            "Interactable",
-            NodeKind::Interactable {
-                prompt: String::new(),
-                action: String::new(),
-            },
-        ),
-        (
-            "Character Controller",
-            NodeKind::CharacterController {
-                character: None,
-                settings: CharacterControllerSettings::default(),
-                player: false,
-            },
-        ),
-        (
-            "AI Controller",
-            NodeKind::AiController {
-                behavior: String::new(),
-            },
-        ),
-        (
-            "Combat",
-            NodeKind::Combat {
-                faction: String::new(),
-                health: 1,
-            },
-        ),
-        (
-            "Equipment",
-            NodeKind::Equipment {
-                weapon: None,
-                character_socket: "right_hand_grip".to_string(),
-                weapon_grip: "grip".to_string(),
-            },
-        ),
-        (
-            "Point Light",
-            NodeKind::PointLight {
-                color: [255, 240, 200],
-                intensity: 1.0,
-                radius: 4.0,
-            },
-        ),
-        (
-            "Particle Emitter",
-            NodeKind::ParticleEmitter {
-                settings: ParticleEmitterSettings::default(),
-            },
-        ),
-        (
-            "Mesh Instance",
-            NodeKind::MeshInstance {
-                mesh: None,
-                material: None,
-                animation_clip: None,
-            },
-        ),
-        (
-            "Spawn Point",
-            NodeKind::SpawnPoint {
-                player: false,
-                character: None,
-            },
-        ),
-        (
-            "Box Prop",
-            NodeKind::BoxProp {
-                materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
-                vertices: psxed_project::box_prop_vertices_for_size(
-                    psxed_project::DEFAULT_BOX_PROP_SIZE,
-                ),
-                collision_enabled: true,
-                break_flags: 0,
-            },
-        ),
-        (
-            "Trigger",
-            NodeKind::Trigger {
-                trigger_id: String::new(),
-            },
-        ),
+        ("Folder", NodeKind::Node),
     ]
 }
 
@@ -28752,6 +29088,7 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 text_color: [236, 240, 248],
                 transparent: false,
                 action: UiAction::Back,
+                sfx: UiSfxBindings::default(),
             },
         ),
         (
@@ -28762,6 +29099,7 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 track: [30, 34, 44],
                 fill: [80, 132, 180],
                 knob: [210, 218, 232],
+                sfx: UiSfxBindings::default(),
             },
         ),
         (
@@ -28769,6 +29107,7 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
             UiNodeKind::Music {
                 wav_path: String::new(),
                 volume: 25,
+                volume_option: None,
                 loop_track: false,
             },
         ),
@@ -29365,6 +29704,7 @@ fn clamp_ui_coord(value: i32) -> i32 {
 fn ui_binding_preview_q12(binding: UiValueBinding) -> i32 {
     match binding {
         UiValueBinding::ConstantQ12(value) => value,
+        UiValueBinding::Option(_) => 4096,
         UiValueBinding::PlayerHealth => 4096,
         UiValueBinding::PlayerHealthMax => 4096,
         UiValueBinding::PlayerStamina => 3072,
@@ -29418,38 +29758,11 @@ fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'static str, Node
             },
         ),
         (
-            "Collider",
-            NodeKind::Collider {
-                shape: ColliderShape::default(),
-                solid: true,
-            },
-        ),
-        (
-            "Interactable",
-            NodeKind::Interactable {
-                prompt: String::new(),
-                action: String::new(),
-            },
-        ),
-        (
             "Character Controller",
             NodeKind::CharacterController {
                 character: None,
                 settings: CharacterControllerSettings::default(),
                 player: false,
-            },
-        ),
-        (
-            "AI Controller",
-            NodeKind::AiController {
-                behavior: String::new(),
-            },
-        ),
-        (
-            "Combat",
-            NodeKind::Combat {
-                faction: String::new(),
-                health: 1,
             },
         ),
         (
@@ -29518,10 +29831,7 @@ const fn component_slot(kind: &NodeKind) -> Option<&'static str> {
         NodeKind::ModelRenderer { .. } => Some("ModelRenderer"),
         NodeKind::Animator { .. } => Some("Animator"),
         NodeKind::Collider { .. } => Some("Collider"),
-        NodeKind::Interactable { .. } => Some("Interactable"),
         NodeKind::CharacterController { .. } => Some("CharacterController"),
-        NodeKind::AiController { .. } => Some("AiController"),
-        NodeKind::Combat { .. } => Some("Combat"),
         NodeKind::Equipment { .. } => Some("Equipment"),
         NodeKind::PhysicsBody { .. } => Some("PhysicsBody"),
         _ => None,
@@ -30638,30 +30948,6 @@ fn draw_scene_viewport(
                     &mut hits,
                 );
             }
-            NodeKind::Trigger { .. } => {
-                draw_simple_marker(
-                    painter,
-                    transform,
-                    node,
-                    selected_nodes.contains(&node.id)
-                        || (selected_nodes.is_empty() && selected == node.id),
-                    "T",
-                    Color32::from_rgb(180, 116, 230),
-                    &mut hits,
-                );
-            }
-            NodeKind::AudioSource { .. } => {
-                draw_simple_marker(
-                    painter,
-                    transform,
-                    node,
-                    selected_nodes.contains(&node.id)
-                        || (selected_nodes.is_empty() && selected == node.id),
-                    "A",
-                    Color32::from_rgb(70, 190, 165),
-                    &mut hits,
-                );
-            }
             NodeKind::Portal { .. } if show_portals => {
                 draw_portal_seam_2d(
                     painter,
@@ -31577,9 +31863,7 @@ fn node_kind_uses_room_editor_position(kind: &NodeKind) -> bool {
             | NodeKind::BoxProp { .. }
             | NodeKind::SpawnPoint { .. }
             | NodeKind::PointLight { .. }
-            | NodeKind::Trigger { .. }
             | NodeKind::Portal { .. }
-            | NodeKind::AudioSource { .. }
     )
 }
 
@@ -34470,7 +34754,7 @@ fn include_max_i32(target: &mut Option<i32>, value: i32) {
 /// Per-kind half-extents in world units. Picked so:
 /// - bounds are big enough to click reliably at typical
 ///   editor zoom levels,
-/// - small enough that a Light or AudioSource doesn't block
+/// - small enough that a Light marker doesn't block
 ///   selection of nearby grid faces,
 /// - distinct enough to read at a glance.
 ///
@@ -34485,10 +34769,7 @@ fn entity_bound_kind_and_size(
         NodeKind::ModelRenderer { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
-        | NodeKind::Interactable { .. }
         | NodeKind::CharacterController { .. }
-        | NodeKind::AiController { .. }
-        | NodeKind::Combat { .. }
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. } => None,
         NodeKind::Entity => {
@@ -34553,9 +34834,7 @@ fn entity_bound_kind_and_size(
         NodeKind::ParticleEmitter { .. } => {
             Some((EntityBoundKind::ParticleEmitter, [160.0, 160.0, 160.0]))
         }
-        NodeKind::Trigger { .. } => Some((EntityBoundKind::Trigger, [256.0, 256.0, 256.0])),
         NodeKind::Portal { .. } => Some((EntityBoundKind::Portal, [256.0, 256.0, 64.0])),
-        NodeKind::AudioSource { .. } => Some((EntityBoundKind::AudioSource, [128.0, 128.0, 128.0])),
     }
 }
 
@@ -38344,6 +38623,40 @@ mod tests {
     }
 
     #[test]
+    fn tree_row_drop_zone_uses_top_band_without_extra_layout() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(200.0, 24.0));
+
+        assert_eq!(
+            tree_row_drop_zone(rect, Some(Pos2::new(40.0, 22.0)), true),
+            TreeRowDropZone::Before
+        );
+        assert_eq!(
+            tree_row_drop_zone(rect, Some(Pos2::new(40.0, 32.0)), true),
+            TreeRowDropZone::Inside
+        );
+        assert_eq!(
+            tree_row_drop_zone(rect, Some(Pos2::new(40.0, 22.0)), false),
+            TreeRowDropZone::Inside
+        );
+    }
+
+    #[test]
+    fn tree_drag_autoscroll_delta_tracks_edge_bands() {
+        let viewport = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(240.0, 200.0));
+
+        assert!(tree_drag_autoscroll_delta(viewport, Pos2::new(120.0, 106.0)) > 0.0);
+        assert_eq!(
+            tree_drag_autoscroll_delta(viewport, Pos2::new(120.0, 200.0)),
+            0.0
+        );
+        assert!(tree_drag_autoscroll_delta(viewport, Pos2::new(120.0, 294.0)) < 0.0);
+        assert_eq!(
+            tree_drag_autoscroll_delta(viewport, Pos2::new(-4.0, 106.0)),
+            0.0
+        );
+    }
+
+    #[test]
     fn scene_tree_select_clears_inspector_shadow_selection() {
         let mut workspace =
             EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
@@ -38464,6 +38777,71 @@ mod tests {
             assert!(workspace.selection.selected_nodes.contains(id));
         }
         assert_eq!(workspace.selection.selected_nodes.len(), 3);
+    }
+
+    #[test]
+    fn scene_tree_dragging_selected_group_moves_all_into_folder() {
+        let mut project = ProjectDocument::new("multi-drag-folder");
+        let scene = project.active_scene_mut();
+        let folder = scene.add_node(NodeId::ROOT, "Folder", NodeKind::Node);
+        let a = scene.add_node(NodeId::ROOT, "A", NodeKind::Entity);
+        let b = scene.add_node(NodeId::ROOT, "B", NodeKind::Entity);
+        let c = scene.add_node(NodeId::ROOT, "C", NodeKind::Entity);
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("multi-drag-folder"), project);
+        workspace.selection.selected_node = a;
+        workspace.selection.selected_nodes = [a, b].into_iter().collect();
+
+        let order = workspace.scene_node_order();
+        workspace.apply_tree_action(
+            TreeAction::Reparent {
+                source: a,
+                target_parent: folder,
+                position: 0,
+            },
+            &order,
+        );
+
+        let scene = workspace.project.active_scene();
+        assert_eq!(scene.node(folder).unwrap().children, vec![a, b]);
+        assert_eq!(scene.node(NodeId::ROOT).unwrap().children, vec![folder, c]);
+        assert_eq!(scene.node(a).unwrap().parent, Some(folder));
+        assert_eq!(scene.node(b).unwrap().parent, Some(folder));
+        assert_eq!(workspace.selection.selected_node, a);
+        assert_eq!(workspace.selection.selected_nodes.len(), 2);
+        assert!(workspace.selection.selected_nodes.contains(&a));
+        assert!(workspace.selection.selected_nodes.contains(&b));
+    }
+
+    #[test]
+    fn scene_tree_dragging_selected_siblings_reorders_as_group() {
+        let mut project = ProjectDocument::new("multi-drag-reorder");
+        let scene = project.active_scene_mut();
+        let a = scene.add_node(NodeId::ROOT, "A", NodeKind::Entity);
+        let b = scene.add_node(NodeId::ROOT, "B", NodeKind::Entity);
+        let c = scene.add_node(NodeId::ROOT, "C", NodeKind::Entity);
+        let d = scene.add_node(NodeId::ROOT, "D", NodeKind::Entity);
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("multi-drag-reorder"), project);
+        workspace.selection.selected_node = b;
+        workspace.selection.selected_nodes = [b, c].into_iter().collect();
+
+        let order = workspace.scene_node_order();
+        workspace.apply_tree_action(
+            TreeAction::Reparent {
+                source: b,
+                target_parent: NodeId::ROOT,
+                position: 4,
+            },
+            &order,
+        );
+
+        let scene = workspace.project.active_scene();
+        assert_eq!(scene.node(NodeId::ROOT).unwrap().children, vec![a, d, b, c]);
+        assert_eq!(workspace.selection.selected_node, b);
+        assert_eq!(workspace.selection.selected_nodes.len(), 2);
+        assert!(workspace.selection.selected_nodes.contains(&b));
+        assert!(workspace.selection.selected_nodes.contains(&c));
     }
 
     #[test]
@@ -41764,7 +42142,7 @@ mod tests {
                 )
             })
         }));
-        assert!(entity.children.iter().any(|id| {
+        assert!(!entity.children.iter().any(|id| {
             scene
                 .node(*id)
                 .is_some_and(|child| matches!(child.kind, NodeKind::Collider { .. }))
@@ -41921,10 +42299,35 @@ mod tests {
             .any(|(_, kind)| matches!(kind, NodeKind::PhysicsBody { .. })));
         assert!(entity_options
             .iter()
-            .any(|(_, kind)| matches!(kind, NodeKind::AiController { .. })));
+            .any(|(_, kind)| matches!(kind, NodeKind::Equipment { .. })));
         assert!(entity_options
             .iter()
+            .all(|(label, _)| !matches!(*label, "AI Controller" | "Combat" | "Interactable")));
+        assert!(!entity_options
+            .iter()
             .any(|(_, kind)| matches!(kind, NodeKind::Collider { .. })));
+    }
+
+    #[test]
+    fn scene_graph_add_menu_is_structure_only() {
+        let addable = scene_graph_addable_kinds();
+        assert_eq!(addable.len(), 3);
+        assert!(addable
+            .iter()
+            .any(|(label, kind)| *label == "Room" && matches!(kind, NodeKind::Room { .. })));
+        assert!(addable
+            .iter()
+            .any(|(label, kind)| *label == "Entity" && matches!(kind, NodeKind::Entity)));
+        assert!(addable
+            .iter()
+            .any(|(label, kind)| *label == "Folder" && matches!(kind, NodeKind::Node)));
+        assert!(addable.iter().all(|(_, kind)| !kind.is_component()));
+        assert!(addable
+            .iter()
+            .all(|(label, _)| !matches!(*label, "Trigger" | "Audio Source")));
+        assert!(!addable
+            .iter()
+            .any(|(_, kind)| matches!(kind, NodeKind::MeshInstance { .. })));
     }
 
     #[test]
@@ -42699,6 +43102,7 @@ mod tests {
                 track: [11, 12, 13],
                 fill: [21, 22, 23],
                 knob: [31, 32, 33],
+                sfx: UiSfxBindings::default(),
             },
             "Brightness",
         );

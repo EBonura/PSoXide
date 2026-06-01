@@ -414,6 +414,8 @@ impl Default for UiRect {
 pub enum UiValueBinding {
     /// Literal fixed-point Q12 value.
     ConstantQ12(i32),
+    /// Live project option value.
+    Option(OptionId),
     /// Player health value.
     PlayerHealth,
     /// Player health maximum.
@@ -429,6 +431,7 @@ impl UiValueBinding {
     pub const fn label(self) -> &'static str {
         match self {
             Self::ConstantQ12(_) => "Constant",
+            Self::Option(_) => "Option",
             Self::PlayerHealth => "Player Health",
             Self::PlayerHealthMax => "Player Health Max",
             Self::PlayerStamina => "Player Stamina",
@@ -475,6 +478,73 @@ impl UiAction {
             Self::SetOption { .. } => "Set Option",
             Self::Game(_) => "Game Action",
         }
+    }
+}
+
+/// Pitch multiplier that plays a UI SFX cue at its source pitch.
+pub const UI_SFX_PITCH_UNITY_Q12: u16 = 4096;
+
+fn default_ui_sfx_volume() -> u8 {
+    80
+}
+
+fn default_ui_sfx_pitch_q12() -> u16 {
+    UI_SFX_PITCH_UNITY_Q12
+}
+
+/// One editor-authored SFX choice for a UI event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiSfxCue {
+    /// Project-relative source WAV. The playtest/export cook converts it to
+    /// PS1 SPU ADPCM automatically.
+    #[serde(default)]
+    pub wav_path: String,
+    /// Voice volume as a percentage of full scale.
+    #[serde(default = "default_ui_sfx_volume")]
+    pub volume: u8,
+    /// Q12 pitch multiplier (`4096` = source pitch).
+    #[serde(default = "default_ui_sfx_pitch_q12")]
+    pub pitch_q12: u16,
+}
+
+impl Default for UiSfxCue {
+    fn default() -> Self {
+        Self {
+            wav_path: String::new(),
+            volume: default_ui_sfx_volume(),
+            pitch_q12: default_ui_sfx_pitch_q12(),
+        }
+    }
+}
+
+/// Per-event SFX pools shared by interactive UI nodes. Button nodes use
+/// `focus` + `activate`; sliders use `focus` + `nudge` + `limit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiSfxBindings {
+    /// Played when focus moves onto the control.
+    #[serde(default)]
+    pub focus: Vec<UiSfxCue>,
+    /// Played when a button is activated.
+    #[serde(default)]
+    pub activate: Vec<UiSfxCue>,
+    /// Played when a slider changes value.
+    #[serde(default)]
+    pub nudge: Vec<UiSfxCue>,
+    /// Played when a slider is nudged against its clamped limit.
+    #[serde(default)]
+    pub limit: Vec<UiSfxCue>,
+}
+
+fn normalize_ui_sfx_bindings(sfx: &mut UiSfxBindings) {
+    for cue in sfx
+        .focus
+        .iter_mut()
+        .chain(sfx.activate.iter_mut())
+        .chain(sfx.nudge.iter_mut())
+        .chain(sfx.limit.iter_mut())
+    {
+        cue.volume = cue.volume.min(100);
+        cue.pitch_q12 = cue.pitch_q12.clamp(1, 0x3FFF);
     }
 }
 
@@ -628,6 +698,9 @@ pub enum UiNodeKind {
         /// Action fired on activation.
         #[serde(default)]
         action: UiAction,
+        /// Per-event SFX cue pools.
+        #[serde(default)]
+        sfx: UiSfxBindings,
     },
     /// Interactive slider bound to a project option, drawn as a track,
     /// a proportional fill, and a knob. Runtime value editing is a
@@ -647,6 +720,9 @@ pub enum UiNodeKind {
         /// Knob colour.
         #[serde(default = "default_ui_slider_knob")]
         knob: [u8; 3],
+        /// Per-event SFX cue pools.
+        #[serde(default)]
+        sfx: UiSfxBindings,
     },
     /// Non-visual CD-DA music cue for the containing UI scene.
     Music {
@@ -657,6 +733,11 @@ pub enum UiNodeKind {
         /// CD-DA playback volume as a percentage of the hardware maximum.
         #[serde(default = "default_ui_music_volume")]
         volume: u8,
+        /// Optional project option whose live value overrides [`Self::Music`]'s
+        /// fixed `volume`, so a menu slider can change CD-DA loudness while the
+        /// scene is open.
+        #[serde(default)]
+        volume_option: Option<OptionId>,
         /// Restart the track when the CD-ROM reports playback has ended.
         #[serde(default)]
         loop_track: bool,
@@ -1091,6 +1172,12 @@ impl UiScene {
             max_id = max_id.max(node.id.raw());
             if let UiNodeKind::Music { volume, .. } = &mut node.kind {
                 *volume = (*volume).min(100);
+            }
+            match &mut node.kind {
+                UiNodeKind::Button { sfx, .. } | UiNodeKind::Slider { sfx, .. } => {
+                    normalize_ui_sfx_bindings(sfx);
+                }
+                _ => {}
             }
             node.children
                 .retain(|child| *child != node.id && valid_ids.contains(child));
@@ -8534,17 +8621,6 @@ pub enum NodeKind {
         #[serde(default = "default_true")]
         solid: bool,
     },
-    /// Interactable component for props such as chests, doors, and
-    /// levers. Runtime behaviour is not cooked yet; this is authoring
-    /// structure for the upcoming object pass.
-    Interactable {
-        /// UI prompt or editor-facing affordance.
-        #[serde(default)]
-        prompt: String,
-        /// Logical action id.
-        #[serde(default)]
-        action: String,
-    },
     /// Character/controller component. It binds an entity to a reusable
     /// [`ResourceData::Character`] profile. When `player` is true this is
     /// the component-tree replacement for a legacy player
@@ -8560,21 +8636,6 @@ pub enum NodeKind {
         /// Whether this controller drives the player.
         #[serde(default)]
         player: bool,
-    },
-    /// AI marker component for future NPC/enemy runtime records.
-    AiController {
-        /// Logical AI profile id.
-        #[serde(default)]
-        behavior: String,
-    },
-    /// Combat stat component for entity nodes.
-    Combat {
-        /// Team/faction label.
-        #[serde(default)]
-        faction: String,
-        /// Hit points.
-        #[serde(default = "default_combat_health")]
-        health: u16,
     },
     /// Equipment component. The parent Entity supplies the animated
     /// character model; this component names the Weapon and which
@@ -8625,18 +8686,6 @@ pub enum NodeKind {
         #[serde(default)]
         character: Option<ResourceId>,
     },
-    /// Trigger volume marker.
-    Trigger {
-        /// Logical trigger id.
-        trigger_id: String,
-    },
-    /// Positional audio source.
-    AudioSource {
-        /// Audio resource.
-        sound: Option<ResourceId>,
-        /// Playback radius.
-        radius: f32,
-    },
     /// Manual streaming/visibility graph edge: the cooker snaps the marker
     /// to a grid edge and treats that edge as a room-to-room portal.
     Portal {
@@ -8681,17 +8730,12 @@ impl NodeKind {
             Self::ModelRenderer { .. } => "Model Renderer",
             Self::Animator { .. } => "Animator",
             Self::Collider { .. } => "Collider",
-            Self::Interactable { .. } => "Interactable",
             Self::CharacterController { .. } => "Character Controller",
-            Self::AiController { .. } => "AI Controller",
-            Self::Combat { .. } => "Combat",
             Self::Equipment { .. } => "Equipment",
             Self::PhysicsBody { .. } => "Physics Body",
             Self::PointLight { .. } => "Point Light",
             Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
-            Self::Trigger { .. } => "Trigger",
-            Self::AudioSource { .. } => "Audio Source",
             Self::Portal { .. } => "Portal",
         }
     }
@@ -8705,10 +8749,7 @@ impl NodeKind {
             Self::ModelRenderer { .. }
                 | Self::Animator { .. }
                 | Self::Collider { .. }
-                | Self::Interactable { .. }
                 | Self::CharacterController { .. }
-                | Self::AiController { .. }
-                | Self::Combat { .. }
                 | Self::Equipment { .. }
                 | Self::PhysicsBody { .. }
         )
@@ -8747,10 +8788,6 @@ impl Default for ColliderShape {
 
 const fn default_true() -> bool {
     true
-}
-
-const fn default_combat_health() -> u16 {
-    1
 }
 
 /// Explicit adaptive-style portal rectangle.
@@ -10270,19 +10307,14 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
             option_resource_reference_count(settings.texture, id)
         }
         NodeKind::SpawnPoint { character, .. } => option_resource_reference_count(*character, id),
-        NodeKind::AudioSource { sound, .. } => option_resource_reference_count(*sound, id),
         NodeKind::World { far_vista, .. } => far_vista_resource_reference_count(far_vista, id),
         NodeKind::Node
         | NodeKind::Node3D
         | NodeKind::Entity
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
-        | NodeKind::Interactable { .. }
-        | NodeKind::AiController { .. }
-        | NodeKind::Combat { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::PointLight { .. }
-        | NodeKind::Trigger { .. }
         | NodeKind::Portal { .. } => 0,
     }
 }
@@ -10325,19 +10357,14 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
         NodeKind::Equipment { weapon, .. } => clear_option_resource(weapon, id),
         NodeKind::ParticleEmitter { settings } => clear_option_resource(&mut settings.texture, id),
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
-        NodeKind::AudioSource { sound, .. } => clear_option_resource(sound, id),
         NodeKind::World { far_vista, .. } => clear_far_vista_resource_references(far_vista, id),
         NodeKind::Node
         | NodeKind::Node3D
         | NodeKind::Entity
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
-        | NodeKind::Interactable { .. }
-        | NodeKind::AiController { .. }
-        | NodeKind::Combat { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::PointLight { .. }
-        | NodeKind::Trigger { .. }
         | NodeKind::Portal { .. } => 0,
     }
 }
@@ -13201,21 +13228,12 @@ mod tests {
                 character: Some(target),
             },
         );
-        scene.add_node(
-            room,
-            "Audio",
-            NodeKind::AudioSource {
-                sound: Some(target),
-                radius: 1.0,
-            },
-        );
-
-        assert_eq!(project.resource_reference_count(target), 13);
+        assert_eq!(project.resource_reference_count(target), 12);
         let report = project
             .delete_resource_with_files(target, &root)
             .expect("resource exists");
         assert_eq!(report.removed.name, "Target");
-        assert_eq!(report.cleared_references, 13);
+        assert_eq!(report.cleared_references, 12);
         assert_eq!(
             report.deleted_files,
             vec![ResourceFileDelete {
@@ -13275,9 +13293,6 @@ mod tests {
                 }
                 NodeKind::Equipment { weapon, .. } => {
                     assert_eq!(*weapon, None);
-                }
-                NodeKind::AudioSource { sound, .. } => {
-                    assert_eq!(*sound, None);
                 }
                 _ => {}
             }
