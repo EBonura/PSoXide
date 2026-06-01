@@ -15704,6 +15704,29 @@ impl EditorWorkspace {
                     continue;
                 }
             }
+            // Floor-aware selection: in the active room, a node is only
+            // interactable when its floor is visible in the Sims view
+            // (active floor or below), and its bounds must sit at the same
+            // Y the renderer drew it. `node_draw_offset` is the shared
+            // source of truth that the render pass also uses, so selection
+            // and render can't disagree. Nodes in other rooms (or rooms
+            // with a single floor) get offset 0.
+            let floor_y_offset = match enclosing_room {
+                Some(room) => {
+                    match psxed_project::floor_view::node_draw_offset(
+                        scene,
+                        room,
+                        self.active_floor,
+                        node.id,
+                    ) {
+                        Some(offset) => offset,
+                        // Floor hidden (above the active floor): not
+                        // selectable this frame.
+                        None => continue,
+                    }
+                }
+                None => 0,
+            };
             let Some((kind, mut half_extents)) = entity_bound_kind_and_size(self, node) else {
                 continue;
             };
@@ -15744,6 +15767,14 @@ impl EditorWorkspace {
                     [p[0], p[1] + half_extents[1], p[2]]
                 }
             };
+            // Lift the bound to the floor's drawn elevation so the pick
+            // box / gizmo coincides with the rendered node on a stacked
+            // floor.
+            let center_world = [
+                center_world[0],
+                center_world[1] + floor_y_offset as f32,
+                center_world[2],
+            ];
             out.push(EntityBounds {
                 node: node.id,
                 room: enclosing_room,
@@ -36479,6 +36510,63 @@ mod tests {
         assert!(
             faces.contains(&wall_face) && !faces.contains(&floor_face),
             "all_faces_in_room must enumerate the active floor: {faces:?}"
+        );
+    }
+
+    /// Object selection is floor-tied: an entity on floor 0 and one on
+    /// floor 1 must each only be selectable when their floor is active (or
+    /// below it), and their pick bounds sit at the floor's drawn Y. This
+    /// is the user-reported bug ("selecting on floor 2 hits the room
+    /// below") and the payoff of routing selection through the shared
+    /// floor_view resolver.
+    #[test]
+    fn entity_selection_respects_active_floor() {
+        let mut project = ProjectDocument::new("sel-floor");
+        let mut grid = WorldGrid::empty(2, 2, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.push_floor();
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let scene = project.active_scene_mut();
+        let ground = scene.add_node(room, "Ground", NodeKind::Entity);
+        scene.node_mut(ground).unwrap().floor = 0;
+        let upper = scene.add_node(room, "Upper", NodeKind::Entity);
+        scene.node_mut(upper).unwrap().floor = 1;
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("sel-floor"), project);
+
+        let bound_nodes = |ws: &EditorWorkspace| -> Vec<NodeId> {
+            ws.collect_entity_bounds(Some(room))
+                .into_iter()
+                .map(|b| b.node)
+                .collect()
+        };
+
+        // Active floor 0: only the ground entity is selectable; the upper
+        // floor is hidden (above), so its entity is not.
+        workspace.active_floor = 0;
+        let f0 = bound_nodes(&workspace);
+        assert!(f0.contains(&ground), "ground selectable on floor 0: {f0:?}");
+        assert!(
+            !f0.contains(&upper),
+            "upper-floor entity not selectable from floor 0: {f0:?}"
+        );
+
+        // Active floor 1: both are selectable (active + below for Sims
+        // context), and the ground entity's bound is offset below.
+        workspace.active_floor = 1;
+        let bounds = workspace.collect_entity_bounds(Some(room));
+        let nodes: Vec<NodeId> = bounds.iter().map(|b| b.node).collect();
+        assert!(
+            nodes.contains(&ground) && nodes.contains(&upper),
+            "both floors selectable from floor 1: {nodes:?}"
+        );
+        let upper_y = bounds.iter().find(|b| b.node == upper).unwrap().center[1];
+        let ground_y = bounds.iter().find(|b| b.node == ground).unwrap().center[1];
+        assert!(
+            ground_y < upper_y,
+            "ground entity bound sits below the upper one (offset by floor): ground={ground_y} upper={upper_y}"
         );
     }
 

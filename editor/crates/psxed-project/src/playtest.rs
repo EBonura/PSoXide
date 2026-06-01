@@ -8074,12 +8074,22 @@ mod tests {
                 panic!("expected a room");
             };
             let (w, d, s, origin) = (grid.width, grid.depth, grid.sector_size, grid.origin);
+            // Punch a hole at a cell shared by both floors so the
+            // hole-gated portal generator emits a vertical portal there:
+            // floor 0 must have no ceiling and floor 1 no floor at (0,0).
+            if let Some(sector) = grid.sector_mut(0, 0) {
+                sector.ceiling = None;
+            }
             grid.push_floor();
             let floor1 = grid.floor_mut(1).expect("floor 1");
             let elevation = floor1.elevation;
             *floor1 = WorldGrid::stone_room(w, d, s, room_material, room_material);
             floor1.origin = origin;
             floor1.elevation = elevation;
+            // Open the floor-1 floor at the hole cell.
+            if let Some(sector) = floor1.sector_mut(0, 0) {
+                sector.floor = None;
+            }
         }
 
         let (package, report) = build_package(&project, &starter_project_root());
@@ -8105,8 +8115,10 @@ mod tests {
             "consecutive floors should be auto-linked"
         );
         // ...and with vertical portal quads (kind=1) so the portal
-        // clipper / portal view have geometry between the floors. A
-        // reciprocal up/down pair per shared cell, with ±Y normals.
+        // clipper / portal view have geometry between the floors. Portals
+        // are emitted only at actual holes (floor-1 floor open AND floor-0
+        // ceiling open); we punched one at (0,0), so expect a reciprocal
+        // up/down pair there with ±Y normals.
         let vertical: Vec<_> = package
             .room_portals
             .iter()
