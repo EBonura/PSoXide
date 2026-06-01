@@ -366,6 +366,7 @@ pub fn build_phase1_frame(
         let room_id = floor_entry.room;
         let grid = floor_entry.grid;
         let y_offset = floor_entry.y_offset;
+        let floor_index = floor_entry.floor_index;
         let fog = PreviewFog::from_grid(grid, preview_fog);
         walk_room(
             project,
@@ -383,6 +384,8 @@ pub fn build_phase1_frame(
             project,
             room_id,
             grid,
+            floor_index,
+            y_offset,
             textures,
             world_camera,
             hidden_scene_nodes,
@@ -395,6 +398,8 @@ pub fn build_phase1_frame(
             project,
             room_id,
             grid,
+            floor_index,
+            y_offset,
             textures,
             world_camera,
             fog,
@@ -411,6 +416,8 @@ pub fn build_phase1_frame(
             project,
             room_id,
             grid,
+            floor_index,
+            y_offset,
             textures,
             hidden_scene_nodes,
             selected,
@@ -422,6 +429,8 @@ pub fn build_phase1_frame(
                 project,
                 room_id,
                 grid,
+                floor_index,
+                y_offset,
                 hidden_scene_nodes,
                 selected,
                 hovered_entity_node,
@@ -497,6 +506,8 @@ pub fn build_phase1_frame(
             project,
             room_id,
             grid,
+            floor_index,
+            y_offset,
             textures,
             assets,
             selected,
@@ -572,6 +583,11 @@ fn visible_room_grids<'a>(
 struct PreviewFloor<'a> {
     room: NodeId,
     grid: &'a WorldGrid,
+    /// Which floor of the room this is (0 = base). Entities/props/lights
+    /// belong to exactly one floor (`SceneNode::floor`) and render only
+    /// on their own floor entry, so a stacked room draws each entity once
+    /// (not once per floor) at the right elevation.
+    floor_index: usize,
     /// Engine-unit Y offset for this floor's geometry/entities, so
     /// stacked floors render at their real elevation.
     y_offset: i32,
@@ -653,23 +669,24 @@ fn preview_room_grids<'a>(
         }) else {
             continue;
         };
-        // Render every floor of the active room at its REAL elevation
-        // (stacked), with the active floor flagged as the edit target.
-        // Each floor's grid stores faces floor-relative, so the Y offset
-        // is `floor.elevation - base.elevation`. Rendering the whole
-        // stack (not just the active floor in place) keeps geometry,
-        // entities, and the camera consistent: switching the active floor
-        // no longer makes the world appear to shift. Other rooms render
-        // only their base floor (offset 0); single-floor rooms are
-        // unchanged.
+        // Sims-style floor view for the active room: the ACTIVE floor is
+        // the working plane, drawn at Y=0; floors BELOW it are drawn
+        // descending underneath for context; floors ABOVE are hidden so
+        // they don't occlude the one you're editing. Anchoring the active
+        // floor at Y=0 (not its real elevation) is what keeps the ray
+        // pick / selection / paint -- which test the active floor's
+        // floor-local faces -- aligned with what's drawn. Lower floors
+        // get a negative offset relative to the active floor's elevation.
         if Some(room) == active_room {
             let active = active_floor.min(base.floor_count().saturating_sub(1));
-            for i in 0..base.floor_count() {
+            let active_elev = base.floor(active).map(|g| g.elevation).unwrap_or(0);
+            for i in 0..=active {
                 if let Some(grid) = base.floor(i) {
                     result.push(PreviewFloor {
                         room,
                         grid,
-                        y_offset: grid.elevation - base.elevation,
+                        floor_index: i,
+                        y_offset: grid.elevation - active_elev,
                         active: i == active,
                     });
                 }
@@ -678,6 +695,7 @@ fn preview_room_grids<'a>(
             result.push(PreviewFloor {
                 room,
                 grid: base,
+                floor_index: 0,
                 y_offset: 0,
                 active: false,
             });
@@ -1609,6 +1627,26 @@ fn host_renders_as_preview_model(
 /// Walk parent links from `node_id` looking for `room_id`.
 /// `true` if `room_id` itself is on the chain. Used to confine
 /// per-room lights to the room they were authored under.
+/// Which floor a node belongs to, for the editor preview. A placed
+/// entity carries its floor on `SceneNode::floor`; child components
+/// (ModelRenderer, etc.) inherit it. Walk the ancestor chain up to the
+/// room and take the max `floor` seen (children default to 0). Mirrors
+/// how the cook binds a node to its floor, so the editor draws each
+/// entity once, on the floor it cooks to.
+fn node_enclosing_floor(scene: &psxed_project::Scene, node_id: psxed_project::NodeId) -> usize {
+    let mut current = Some(node_id);
+    let mut floor = 0usize;
+    while let Some(id) = current {
+        let Some(node) = scene.node(id) else { break };
+        floor = floor.max(node.floor);
+        if matches!(node.kind, NodeKind::Room { .. }) {
+            break;
+        }
+        current = node.parent;
+    }
+    floor
+}
+
 fn is_descendant_of_room(
     scene: &psxed_project::Scene,
     node_id: psxed_project::NodeId,
@@ -2071,6 +2109,8 @@ fn walk_entities(
     project: &ProjectDocument,
     room_id: NodeId,
     grid: &WorldGrid,
+    floor_index: usize,
+    y_offset: i32,
     textures: &EditorTextures,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
@@ -2084,6 +2124,11 @@ fn walk_entities(
         {
             continue;
         }
+        // One entity, one floor: draw it only on its own floor entry, so
+        // a stacked room doesn't draw every entity once per floor.
+        if node_enclosing_floor(scene, node.id) != floor_index {
+            continue;
+        }
         // Skip nodes that the model-preview pass renders as real
         // textured characters/models. Without this guard they'd get
         // both a marker square and the real model on top of each other.
@@ -2095,8 +2140,10 @@ fn walk_entities(
         // origin) and how the cook places the entity. The raw
         // `translation.y` is a placement default (e.g. the 2.89-sector
         // standing height) and would float the marker far above the
-        // floor, disagreeing with the model on top of it.
-        let entity_world = floor_anchored_node_room_local_origin(grid, &node.transform);
+        // floor, disagreeing with the model on top of it. `y_offset`
+        // lifts it to its floor's real elevation in the stacked render.
+        let mut entity_world = floor_anchored_node_room_local_origin(grid, &node.transform);
+        entity_world.y += y_offset;
         if let NodeKind::ParticleEmitter { settings } = &node.kind {
             push_particle_emitter_preview(
                 settings,
@@ -2377,6 +2424,8 @@ fn walk_image_props(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,
     grid: &WorldGrid,
+    floor_index: usize,
+    y_offset: i32,
     textures: &EditorTextures,
     camera: psx_engine::WorldCamera,
     hidden_scene_nodes: &HashSet<NodeId>,
@@ -2391,6 +2440,9 @@ fn walk_image_props(
         if scene_node_hidden(scene, hidden_scene_nodes, node.id)
             || !is_descendant_of_room(scene, node.id, room_id)
         {
+            continue;
+        }
+        if node_enclosing_floor(scene, node.id) != floor_index {
             continue;
         }
         let NodeKind::ImageProp {
@@ -2417,7 +2469,8 @@ fn walk_image_props(
                 _ => None,
             })
             .unwrap_or([0x80, 0x80, 0x80]);
-        let origin = node_room_local_origin(grid, &node.transform);
+        let mut origin = node_room_local_origin(grid, &node.transform);
+        origin.y += y_offset;
         let verts = image_prop_vertices(
             origin,
             *width,
@@ -2484,6 +2537,8 @@ fn walk_box_props(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,
     grid: &WorldGrid,
+    floor_index: usize,
+    y_offset: i32,
     textures: &EditorTextures,
     camera: psx_engine::WorldCamera,
     fog: PreviewFog,
@@ -2501,6 +2556,9 @@ fn walk_box_props(
         {
             continue;
         }
+        if node_enclosing_floor(scene, node.id) != floor_index {
+            continue;
+        }
         let NodeKind::BoxProp {
             materials,
             vertices,
@@ -2510,7 +2568,8 @@ fn walk_box_props(
         else {
             continue;
         };
-        let origin = node_room_local_origin(grid, &node.transform);
+        let mut origin = node_room_local_origin(grid, &node.transform);
+        origin.y += y_offset;
         let world_vertices = box_prop_vertices(origin, *vertices, node.transform.rotation_degrees);
         for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
             let Some(material_id) = materials[face] else {
@@ -2881,6 +2940,8 @@ fn walk_model_instances(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,
     grid: &WorldGrid,
+    floor_index: usize,
+    y_offset: i32,
     textures: &EditorTextures,
     assets: &crate::editor_assets::EditorAssets,
     selected: psxed_project::NodeId,
@@ -2905,6 +2966,9 @@ fn walk_model_instances(
             break;
         }
         if !is_descendant_of_room(scene, node.id, room_id) {
+            continue;
+        }
+        if node_enclosing_floor(scene, node.id) != floor_index {
             continue;
         }
         let Some(reference) = preview_static_model_reference(scene, node) else {
@@ -2952,8 +3016,10 @@ fn walk_model_instances(
         }
 
         // Model placements are floor anchors: X/Z follow the
-        // authored node, Y is sampled from the floor under it.
-        let origin = floor_anchored_node_room_local_origin(grid, &node.transform);
+        // authored node, Y is sampled from the floor under it, then
+        // lifted to this floor's real elevation in the stacked render.
+        let mut origin = floor_anchored_node_room_local_origin(grid, &node.transform);
+        origin.y += y_offset;
 
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
         let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
@@ -3638,6 +3704,8 @@ fn walk_light_gizmos(
     project: &ProjectDocument,
     room_id: NodeId,
     grid: &WorldGrid,
+    floor_index: usize,
+    y_offset: i32,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
     hovered: Option<psxed_project::NodeId>,
@@ -3648,8 +3716,11 @@ fn walk_light_gizmos(
         if !is_descendant_of_room(scene, light.host_id, room_id) {
             continue;
         }
+        if node_enclosing_floor(scene, light.host_id) != floor_index {
+            continue;
+        }
         let center = node_room_local_origin(grid, &light.transform);
-        let center_world = [center.x, center.y, center.z];
+        let center_world = [center.x, center.y + y_offset, center.z];
         let is_selected = preview_reference_selected(selected, light.host_id, None, None, None);
         let is_hovered = hovered
             .is_some_and(|id| preview_reference_selected(id, light.host_id, None, None, None));
@@ -6266,6 +6337,61 @@ mod tests {
         assert_eq!(visible, vec![room_a, room_b, room_c, room_d]);
         assert!(!visible.contains(&room_e));
         assert!(!visible.contains(&room_far));
+    }
+
+    /// Sims-style floor view: the active floor is the working plane at
+    /// y_offset 0 (so the ray pick, which tests the active floor's
+    /// floor-local faces, aligns with what's drawn), floors BELOW render
+    /// descending (negative offset), and floors ABOVE are hidden. This is
+    /// what keeps selection on the floor you're editing.
+    #[test]
+    fn preview_room_grids_shows_active_floor_and_below_only() {
+        let mut project = ProjectDocument::new("test");
+        let scene = project.active_scene_mut();
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.push_floor(); // floor 1
+        grid.push_floor(); // floor 2
+        let room = scene.add_node(scene.root, "Stacked", NodeKind::Room { grid });
+
+        let hidden = std::collections::HashSet::new();
+        // Active floor = 1 (middle of three).
+        let floors = super::preview_room_grids(
+            &project,
+            &hidden,
+            Some(room),
+            1,
+            NodeId::ROOT,
+            None,
+            &[],
+            &[],
+        );
+        let entries: Vec<(usize, i32, bool)> = floors
+            .iter()
+            .filter(|f| f.room == room)
+            .map(|f| (f.floor_index, f.y_offset, f.active))
+            .collect();
+
+        // Floors 0 and 1 only (the active floor and the one below); floor
+        // 2 (above) is hidden.
+        assert_eq!(entries.len(), 2, "active + below only: {entries:?}");
+        assert!(
+            entries
+                .iter()
+                .any(|&(i, off, act)| i == 1 && off == 0 && act),
+            "active floor 1 at y_offset 0: {entries:?}"
+        );
+        let below = entries
+            .iter()
+            .find(|&&(i, _, _)| i == 0)
+            .expect("floor 0 below");
+        assert!(
+            below.1 < 0,
+            "floor below descends (negative y_offset): {below:?}"
+        );
+        assert!(
+            !entries.iter().any(|&(i, _, _)| i == 2),
+            "floor above hidden"
+        );
     }
 
     #[test]
