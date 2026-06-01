@@ -1320,7 +1320,11 @@ impl Bus {
         }
         let sync_mode = (ch.channel_control >> 9) & 0x3;
         let bcr = ch.block_control;
-        let halfword_count: u32 = match sync_mode {
+        // BCR length is a count of 32-bit DMA words. Each transferred word
+        // maps to TWO 16-bit SPU-RAM halfwords, so the SPU receives twice
+        // this many halfwords (Redux's writeDMAMem `size` = 2 x BCR product).
+        // Completion timing still scales with the word count (product / 2).
+        let word_count: u32 = match sync_mode {
             0 => bcr & 0xFFFF,
             1 => {
                 let block_size = bcr & 0xFFFF;
@@ -1329,6 +1333,7 @@ impl Bus {
             }
             _ => 0, // Linked list + reserved -- not used for SPU.
         };
+        let halfword_count = word_count.saturating_mul(2);
         let to_spu = ch.channel_control & 1 != 0;
         let step: u32 = if (ch.channel_control >> 1) & 1 != 0 {
             0xFFFF_FFFEu32
@@ -1352,7 +1357,7 @@ impl Bus {
             }
         }
         self.service_spu_irq();
-        Some(halfword_count / 2)
+        Some(word_count / 2)
     }
 
     /// Execute DMA channel 3 → CPU. Block mode (sync=1) is the only
@@ -2578,29 +2583,36 @@ mod tests {
     }
 
     #[test]
-    fn spu_dma_uses_halfword_count_and_redux_half_rate_completion_delay() {
+    fn spu_dma_transfers_two_halfwords_per_word_with_half_rate_completion_delay() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         bus.cycles = 100;
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
         bus.spu.write16(crate::spu::SPUCNT, 2 << 4);
         bus.dma.dpcr = 1 << (4 * 4 + 3);
 
-        for i in 0..32u16 {
+        // 64 distinct source halfwords -- a 32-word DMA must move ALL of
+        // them (each 32-bit word is two SPU halfwords). The earlier bug
+        // moved only 32, leaving the upper half of every sample bank zero.
+        for i in 0..64u16 {
             write_ram_u16(&mut bus.ram[..], 0x100 + u32::from(i) * 2, 0x2000 + i);
         }
 
+        // BCR = block_size 8 * block_count 4 = 32 words = 64 halfwords.
         bus.dma.channels[4].base = 0x100;
         bus.dma.channels[4].block_control = (4 << 16) | 8;
         bus.dma.channels[4].channel_control = 0x0100_0201;
         bus.run_dma_channel(4);
 
+        // Completion delay scales with the word count (32 / 2 = 16).
         assert_eq!(bus.scheduler.target(EventSlot::SpuDma), Some(116));
 
+        // All 64 halfwords landed in SPU RAM (the bug stopped at 32).
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
-        let mut copied = [0u16; 32];
+        let mut copied = [0u16; 64];
         bus.spu.dma_read(&mut copied);
         assert_eq!(copied[0], 0x2000);
         assert_eq!(copied[31], 0x201F);
+        assert_eq!(copied[63], 0x203F);
     }
 
     #[test]
