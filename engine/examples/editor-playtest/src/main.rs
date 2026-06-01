@@ -4957,7 +4957,8 @@ impl Playtest {
                 active.collision_room,
                 active.offset_x,
                 active.offset_z,
-            );
+            )
+            .with_offset_y(active.offset_y);
             collected_rooms[count] = active.index;
             count += 1;
         }
@@ -5027,7 +5028,8 @@ impl Playtest {
                 room,
                 room_origin_x(record).saturating_sub(room_origin_x(current_record)),
                 room_origin_z(record).saturating_sub(room_origin_z(current_record)),
-            );
+            )
+            .with_offset_y(record.origin_y.saturating_sub(current_record.origin_y));
             collected_rooms[count] = index;
             count += 1;
         }
@@ -5073,7 +5075,8 @@ impl Playtest {
                 RuntimeCollisionRoom::Compact(room),
                 room_origin_x(record).saturating_sub(room_origin_x(current_record)),
                 room_origin_z(record).saturating_sub(room_origin_z(current_record)),
-            );
+            )
+            .with_offset_y(record.origin_y.saturating_sub(current_record.origin_y));
             collected_rooms[count] = chunk.room;
             count += 1;
         }
