@@ -63,6 +63,10 @@ pub(crate) struct BurnState {
     initialized: bool,
     last_signature: String,
     next_scan: Instant,
+    /// In-flight background burner scan. `drutil` subprocess calls block
+    /// ~200ms, so the periodic hot-plug scan runs on a worker thread and
+    /// its result is applied here without stalling the render loop.
+    scan_rx: Option<std::sync::mpsc::Receiver<Result<Vec<CdBurner>, String>>>,
 }
 
 impl Default for BurnState {
@@ -82,6 +86,7 @@ impl Default for BurnState {
             initialized: false,
             last_signature: String::new(),
             next_scan: Instant::now(),
+            scan_rx: None,
         }
     }
 }
@@ -98,6 +103,10 @@ impl BurnState {
         self.next_scan = Instant::now();
     }
 
+    /// Synchronous burner scan, for explicit/user-initiated rescans
+    /// (opening the burn panel, the manual Rescan button). The periodic
+    /// hot-plug `tick` uses [`start_async_scan`] instead so it never
+    /// blocks the render loop on `drutil`.
     pub(crate) fn scan_now(&mut self) -> Result<Option<String>, String> {
         self.next_scan = Instant::now() + BURNER_SCAN_INTERVAL;
         if !burn_backend_supported() {
@@ -106,6 +115,33 @@ impl BurnState {
             return Ok(None);
         }
         let burners = scan_burners()?;
+        Ok(self.apply_scan_result(burners))
+    }
+
+    /// Kick a background burner scan on a worker thread (if one isn't
+    /// already running) and arm the next interval. `drutil` subprocess
+    /// calls take ~200ms; running them off-thread keeps the periodic
+    /// hot-plug poll from stalling the frame loop.
+    fn start_async_scan(&mut self) {
+        self.next_scan = Instant::now() + BURNER_SCAN_INTERVAL;
+        if !burn_backend_supported() {
+            self.initialized = true;
+            self.status = "Disc burning is available on macOS only".to_string();
+            return;
+        }
+        if self.scan_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(scan_burners());
+        });
+        self.scan_rx = Some(rx);
+    }
+
+    /// Fold a completed burner scan into UI state. Returns a hot-plug
+    /// notice when the connected-drive signature changed.
+    fn apply_scan_result(&mut self, burners: Vec<CdBurner>) -> Option<String> {
         let signature = burner_signature(&burners);
         let notice = self.notice_for_signature(&burners, &signature);
         self.burners = burners;
@@ -148,7 +184,7 @@ impl BurnState {
         } else {
             format!("{usable} burnable drive(s) detected")
         };
-        Ok(notice)
+        notice
     }
 
     pub(crate) fn tick(&mut self) -> Result<Option<String>, String> {
@@ -158,10 +194,29 @@ impl BurnState {
         if self.child.is_some() {
             return Ok(None);
         }
+        // Fold in a completed background scan without blocking.
+        if let Some(rx) = self.scan_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(burners)) => {
+                    self.scan_rx = None;
+                    return Ok(self.apply_scan_result(burners));
+                }
+                Ok(Err(error)) => {
+                    self.scan_rx = None;
+                    self.status = format!("Burner scan failed: {error}");
+                    return Ok(None);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(None),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.scan_rx = None;
+                }
+            }
+        }
         if Instant::now() < self.next_scan {
             return Ok(None);
         }
-        self.scan_now()
+        self.start_async_scan();
+        Ok(None)
     }
 
     pub(crate) fn start_burn(&mut self) -> Result<String, String> {
