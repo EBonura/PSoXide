@@ -1941,6 +1941,7 @@ struct RuntimeCharacter {
     visual_offset: [i16; 3],
     visual_yaw: i16,
     visual_scale_q8: u16,
+    weight_q8: u16,
     /// Coarse collision cylinder radius. Engine units.
     radius: i32,
     /// Coarse collision cylinder height. Engine units.
@@ -1985,6 +1986,7 @@ impl RuntimeCharacter {
             visual_offset: c.visual_offset,
             visual_yaw: c.visual_yaw,
             visual_scale_q8: c.visual_scale_q8,
+            weight_q8: c.weight_q8,
             radius: c.radius as i32,
             height: c.height as i32,
             walk_speed: scaled_player_speed(c.walk_speed),
@@ -2103,6 +2105,7 @@ impl RuntimeCharacter {
             self.run_speed,
             self.yaw_step,
         );
+        config.weight_q8 = self.weight_q8;
         config.stamina_max_q12 = self.stamina_max_q12;
         config.sprint_min_q12 = self.sprint_min_q12;
         config.sprint_drain_q12 = self.sprint_drain_q12;
@@ -4818,7 +4821,7 @@ impl Playtest {
     }
 
     fn motor_config(&self) -> CharacterMotorConfig {
-        match self.character {
+        let mut config = match self.character {
             Some(c) => c.motor_config(),
             None => CharacterMotorConfig::character(
                 0,
@@ -4826,7 +4829,11 @@ impl Playtest {
                 scaled_player_speed(FALLBACK_PLAYER_SPEED),
                 FALLBACK_PLAYER_YAW_STEP,
             ),
+        };
+        if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
+            config.gravity_per_tick = room.gravity_per_tick;
         }
+        config
     }
 
     fn is_box_prop_broken(&self, index: usize) -> bool {

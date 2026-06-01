@@ -74,6 +74,13 @@ const MENU_FOCUS_NONE: u16 = u16::MAX;
 /// at its cooked default (read-only, never adjusted). Menus tune a
 /// handful of options in practice, so the cap is generous.
 const MAX_OPTIONS: usize = 32;
+const CDDA_RETRY_TICKS: u32 = 60;
+const CDDA_STATUS_TICKS: u32 = 30;
+const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
+#[cfg(target_arch = "mips")]
+const CDDA_STATUS_PLAYING: u8 = 1 << 7;
+#[cfg(target_arch = "mips")]
+const CDDA_COMMAND_SPINS: u32 = 16_384;
 
 /// The implicit single-state flow every plain [`App::run`] call uses.
 ///
@@ -98,6 +105,215 @@ enum StateTag {
         scene: u16,
     },
 }
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CddaStartStep {
+    SetMode,
+    Demute,
+    Play,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct MusicCue {
+    track: u8,
+    volume_percent: u8,
+    loop_track: bool,
+}
+
+impl MusicCue {
+    const SILENT: Self = Self {
+        track: 0,
+        volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
+        loop_track: false,
+    };
+
+    const fn normalized(self) -> Self {
+        Self {
+            track: if self.track > 99 { 0 } else { self.track },
+            volume_percent: if self.volume_percent > 100 {
+                100
+            } else {
+                self.volume_percent
+            },
+            loop_track: self.loop_track,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct CddaPlayer {
+    requested: MusicCue,
+    current_track: u8,
+    current_volume_percent: u8,
+    step: CddaStartStep,
+    next_retry_tick: u32,
+    next_status_tick: u32,
+    routed: bool,
+}
+
+impl CddaPlayer {
+    const fn new() -> Self {
+        Self {
+            requested: MusicCue::SILENT,
+            current_track: 0,
+            current_volume_percent: CDDA_DEFAULT_VOLUME_PERCENT,
+            step: CddaStartStep::SetMode,
+            next_retry_tick: 0,
+            next_status_tick: 0,
+            routed: false,
+        }
+    }
+
+    fn request(&mut self, cue: MusicCue, tick: u32) {
+        let cue = cue.normalized();
+        if self.requested == cue {
+            return;
+        }
+
+        let track_changed = self.requested.track != cue.track;
+        self.requested = cue;
+
+        if cue.track == 0 {
+            self.current_track = 0;
+            self.step = CddaStartStep::SetMode;
+            self.next_retry_tick = tick;
+            cdda_try_stop();
+            return;
+        }
+
+        if self.routed && self.current_volume_percent != cue.volume_percent {
+            cdda_set_volume(cue.volume_percent);
+            self.current_volume_percent = cue.volume_percent;
+        }
+
+        if track_changed || self.current_track != cue.track {
+            self.current_track = 0;
+            self.step = CddaStartStep::SetMode;
+            self.next_retry_tick = tick;
+            self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
+        }
+    }
+
+    fn update(&mut self, tick: u32) {
+        if self.requested.track == 0 {
+            return;
+        }
+        if self.current_track == self.requested.track {
+            self.maybe_loop(tick);
+            return;
+        }
+        if tick < self.next_retry_tick {
+            return;
+        }
+        if !self.routed {
+            cdda_route_audio(self.requested.volume_percent);
+            self.current_volume_percent = self.requested.volume_percent;
+            self.routed = true;
+        }
+        if cdda_issue_step(self.step, self.requested.track) {
+            match self.step {
+                CddaStartStep::SetMode => {
+                    self.step = CddaStartStep::Demute;
+                    self.next_retry_tick = tick.saturating_add(2);
+                }
+                CddaStartStep::Demute => {
+                    self.step = CddaStartStep::Play;
+                    self.next_retry_tick = tick.saturating_add(2);
+                }
+                CddaStartStep::Play => {
+                    self.current_track = self.requested.track;
+                    self.step = CddaStartStep::SetMode;
+                    self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
+                }
+            }
+        } else {
+            self.next_retry_tick = tick.saturating_add(CDDA_RETRY_TICKS);
+        }
+    }
+
+    fn maybe_loop(&mut self, tick: u32) {
+        if !self.requested.loop_track || tick < self.next_status_tick {
+            return;
+        }
+        self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
+        if !cdda_is_playing() {
+            self.current_track = 0;
+            self.step = CddaStartStep::SetMode;
+            self.next_retry_tick = tick;
+        }
+    }
+}
+
+fn music_cue_from_node(node: &LevelUiNodeRecord) -> MusicCue {
+    MusicCue {
+        track: node.option as u8,
+        volume_percent: music_volume_percent(node.value),
+        loop_track: node.flags & psx_level::ui_node_flags::MUSIC_LOOP != 0,
+    }
+    .normalized()
+}
+
+fn music_volume_percent(value: LevelUiValueBinding) -> u8 {
+    match value {
+        LevelUiValueBinding::ConstantQ12(value) => value.clamp(0, 100) as u8,
+        _ => CDDA_DEFAULT_VOLUME_PERCENT,
+    }
+}
+
+#[cfg(target_arch = "mips")]
+fn cdda_route_audio(volume_percent: u8) {
+    psx_spu::init();
+    cdda_set_volume(volume_percent);
+    psx_spu::enable_cd_audio(true);
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn cdda_route_audio(_volume_percent: u8) {}
+
+#[cfg(target_arch = "mips")]
+fn cdda_set_volume(volume_percent: u8) {
+    let volume = psx_spu::CdVolume::linear(volume_percent.min(100) as u16, 100);
+    psx_spu::set_cd_volume(volume, volume);
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn cdda_set_volume(_volume_percent: u8) {}
+
+#[cfg(target_arch = "mips")]
+fn cdda_issue_step(step: CddaStartStep, track: u8) -> bool {
+    match step {
+        CddaStartStep::SetMode => {
+            psx_io::cdrom::try_set_mode(psx_io::cdrom::MODE_CDDA, CDDA_COMMAND_SPINS).is_some()
+        }
+        CddaStartStep::Demute => psx_io::cdrom::try_demute(CDDA_COMMAND_SPINS).is_some(),
+        CddaStartStep::Play => psx_io::cdrom::try_play_track(track, CDDA_COMMAND_SPINS).is_some(),
+    }
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn cdda_issue_step(_step: CddaStartStep, _track: u8) -> bool {
+    true
+}
+
+#[cfg(target_arch = "mips")]
+fn cdda_is_playing() -> bool {
+    psx_io::cdrom::try_get_stat(CDDA_COMMAND_SPINS)
+        .and_then(|response| response.bytes().first().copied())
+        .is_some_and(|status| status & CDDA_STATUS_PLAYING != 0)
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn cdda_is_playing() -> bool {
+    true
+}
+
+#[cfg(target_arch = "mips")]
+fn cdda_try_stop() {
+    let _ = psx_io::cdrom::try_stop(CDDA_COMMAND_SPINS);
+}
+
+#[cfg(not(target_arch = "mips"))]
+fn cdda_try_stop() {}
 
 /// Cursor + small scratch tracking where in the [`GameFlow`] the
 /// runtime currently sits.
@@ -186,6 +402,8 @@ pub struct GameApp<'a, S: Scene> {
     /// Number of populated [`Self::option_values`] slots (`min(options.len(),
     /// MAX_OPTIONS)`).
     option_len: usize,
+    /// Nonblocking CD-DA menu music driver.
+    cdda: CddaPlayer,
 }
 
 impl<'a, S: Scene> GameApp<'a, S> {
@@ -216,6 +434,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             cursor: FlowCursor::new(flow.entry),
             option_values,
             option_len,
+            cdda: CddaPlayer::new(),
         }
     }
 
@@ -286,6 +505,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// off to gameplay later. Idempotent init keeps a flow that bounces
     /// between menu and gameplay from re-initialising the world.
     fn enter_gameplay(&mut self, index: u16, ctx: &mut Ctx) {
+        self.cdda.request(MusicCue::SILENT, ctx.sim_tick.as_u32());
         self.cursor.current = index;
         if !self.cursor.gameplay_inited {
             self.gameplay.init(ctx);
@@ -309,6 +529,21 @@ impl<'a, S: Scene> GameApp<'a, S> {
             Some(scene) => (scene.node_first as usize, scene.node_count as usize),
             None => (0, 0),
         }
+    }
+
+    fn scene_music_cue(&self, scene_id: u16) -> MusicCue {
+        let (first, count) = self.scene_node_range(scene_id);
+        let end = first.saturating_add(count).min(self.nodes.len());
+        self.nodes[first..end]
+            .iter()
+            .find(|node| {
+                matches!(node.kind, LevelUiNodeKind::Music)
+                    && node.option != UI_OPTION_NONE
+                    && node.option <= 99
+                    && node.option != 0
+            })
+            .map(music_cue_from_node)
+            .unwrap_or(MusicCue::SILENT)
     }
 
     /// Index into [`GameFlow::states`] of the first `UiScene` state
@@ -561,6 +796,10 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         match self.current_tag() {
             StateTag::Gameplay => self.gameplay.update(ctx),
             StateTag::UiScene { scene } => {
+                let music_cue = self.scene_music_cue(scene);
+                self.cdda.request(music_cue, ctx.sim_tick.as_u32());
+                self.cdda.update(ctx.sim_tick.as_u32());
+
                 // Resolve the scene's block in the shared pool once.
                 // Focus geometry walks the whole pool (parents are
                 // pool-relative), so the helpers take the range, not a

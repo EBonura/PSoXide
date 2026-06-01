@@ -20,6 +20,10 @@ pub const MANIFEST_FILENAME: &str = "level_manifest.rs";
 /// Ignored cooked Rust-source manifest written by editor Play /
 /// `make cook-playtest`.
 pub const COOKED_MANIFEST_FILENAME: &str = "level_manifest.cooked.rs";
+/// Generated project-relative/absolute WAV list for CD-DA tracks. The
+/// editor-playtest disc builder converts these sources into mixed-mode audio
+/// tracks in list order (`track 2`, `track 3`, ...).
+pub const CDDA_TRACKS_FILENAME: &str = "cdda_tracks.txt";
 
 /// Cooked WORLD.PAK room ordering hint consumed by disc builders.
 pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
@@ -108,6 +112,9 @@ pub struct PlaytestRoom {
     pub resident_chunk_limit: u8,
     /// Runtime room visible/drawable budget inherited from the World node.
     pub visible_chunk_limit: u8,
+    /// Downward acceleration inherited from the World node, in engine units
+    /// per fixed 60 Hz tick squared.
+    pub gravity_per_tick: i32,
     /// First index into [`PlaytestPackage::materials`] for this
     /// room's slice.
     pub material_first: u16,
@@ -739,6 +746,16 @@ pub struct PlaytestUiScene {
     pub node_count: u16,
 }
 
+/// One WAV source assigned to a cooked CD-DA track number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestCddaTrack {
+    /// 1-based disc track number. Track 1 is the data track, so CD-DA starts
+    /// at track 2.
+    pub track: u8,
+    /// Source WAV path. Generated track-list files use this path verbatim.
+    pub wav_path: String,
+}
+
 /// One cooked project option, ready for manifest emission. Mirrors
 /// [`psx_level::LevelOptionDef`]: the authored [`crate::OptionKind`] is
 /// flattened to a bounded integer triple at cook time (an enum becomes
@@ -983,6 +1000,8 @@ pub struct PlaytestCharacter {
     pub visual_yaw: i16,
     /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
     pub visual_scale_q8: u16,
+    /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
+    pub weight_q8: u16,
     /// Capsule radius in engine units.
     pub radius: u16,
     /// Capsule height in engine units.
@@ -1142,6 +1161,8 @@ pub struct PlaytestPackage {
     /// Cooked project options, flattened to bounded integer ranges.
     /// Sliders and `SetOption` actions reference these by id.
     pub options: Vec<PlaytestOption>,
+    /// WAV sources baked as CD-DA tracks in the playtest/export disc image.
+    pub cdda_tracks: Vec<PlaytestCddaTrack>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.

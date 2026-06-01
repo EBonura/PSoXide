@@ -347,6 +347,8 @@ pub mod ui_node_flags {
     pub const TEXT_WRAP: u16 = 1 << 6;
     /// Button background is transparent: skip the fill and draw only the label.
     pub const BUTTON_TRANSPARENT: u16 = 1 << 7;
+    /// Music node restarts its CD-DA track when playback ends.
+    pub const MUSIC_LOOP: u16 = 1 << 8;
 }
 
 typed_index! {
@@ -644,6 +646,8 @@ pub struct LevelRoomRecord {
     pub resident_chunk_limit: u8,
     /// Maximum cooked rooms selected for drawing/collision for this world.
     pub visible_chunk_limit: u8,
+    /// Downward acceleration in engine units per fixed 60 Hz tick squared.
+    pub gravity_per_tick: i32,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.
     pub material_first: MaterialIndex,
@@ -1520,6 +1524,11 @@ pub enum LevelUiNodeKind {
     /// lives in [`LevelUiNodeRecord::option`]. Value changes are a
     /// later step.
     Slider,
+    /// Non-visual CD-DA music cue for the containing UI scene. The
+    /// cooked track number lives in [`LevelUiNodeRecord::option`],
+    /// volume percentage in [`LevelUiNodeRecord::value`], and loop state
+    /// in [`ui_node_flags::MUSIC_LOOP`].
+    Music,
 }
 
 /// Runtime value source for data-bound UI elements.
@@ -2024,6 +2033,8 @@ pub struct LevelCharacterRecord {
     pub visual_yaw: i16,
     /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
     pub visual_scale_q8: u16,
+    /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
+    pub weight_q8: u16,
     /// Capsule radius in engine units. Used by collision +
     /// any future debug draw.
     pub radius: u16,
@@ -2400,9 +2411,24 @@ mod tests {
 
     // A vertical column of three same-width buttons, evenly spaced.
     const COLUMN: [NavRect; 3] = [
-        NavRect { x: 100, y: 10, w: 80, h: 20 },
-        NavRect { x: 100, y: 40, w: 80, h: 20 },
-        NavRect { x: 100, y: 70, w: 80, h: 20 },
+        NavRect {
+            x: 100,
+            y: 10,
+            w: 80,
+            h: 20,
+        },
+        NavRect {
+            x: 100,
+            y: 40,
+            w: 80,
+            h: 20,
+        },
+        NavRect {
+            x: 100,
+            y: 70,
+            w: 80,
+            h: 20,
+        },
     ];
 
     #[test]
@@ -2411,9 +2437,24 @@ mod tests {
         // top-right, then the top-left. first_focus must still pick the
         // geometric top-left (index 2), not authoring order.
         let rects = [
-            NavRect { x: 10, y: 90, w: 20, h: 20 },
-            NavRect { x: 90, y: 10, w: 20, h: 20 },
-            NavRect { x: 10, y: 10, w: 20, h: 20 },
+            NavRect {
+                x: 10,
+                y: 90,
+                w: 20,
+                h: 20,
+            },
+            NavRect {
+                x: 90,
+                y: 10,
+                w: 20,
+                h: 20,
+            },
+            NavRect {
+                x: 10,
+                y: 10,
+                w: 20,
+                h: 20,
+            },
         ];
         assert_eq!(first_focus(&rects), Some(2));
         assert_eq!(first_focus(&[]), None);
@@ -2446,9 +2487,24 @@ mod tests {
         // shoved far to the right. The secondary penalty must steer the
         // move to the aligned one.
         let rects = [
-            NavRect { x: 100, y: 10, w: 20, h: 20 },
-            NavRect { x: 100, y: 50, w: 20, h: 20 },
-            NavRect { x: 260, y: 50, w: 20, h: 20 },
+            NavRect {
+                x: 100,
+                y: 10,
+                w: 20,
+                h: 20,
+            },
+            NavRect {
+                x: 100,
+                y: 50,
+                w: 20,
+                h: 20,
+            },
+            NavRect {
+                x: 260,
+                y: 50,
+                w: 20,
+                h: 20,
+            },
         ];
         assert_eq!(next_focus(&rects, 0, NavDir::Down), Some(1));
     }
@@ -2456,9 +2512,24 @@ mod tests {
     #[test]
     fn next_focus_moves_horizontally_in_a_row() {
         let row = [
-            NavRect { x: 10, y: 50, w: 40, h: 20 },
-            NavRect { x: 70, y: 50, w: 40, h: 20 },
-            NavRect { x: 130, y: 50, w: 40, h: 20 },
+            NavRect {
+                x: 10,
+                y: 50,
+                w: 40,
+                h: 20,
+            },
+            NavRect {
+                x: 70,
+                y: 50,
+                w: 40,
+                h: 20,
+            },
+            NavRect {
+                x: 130,
+                y: 50,
+                w: 40,
+                h: 20,
+            },
         ];
         assert_eq!(next_focus(&row, 0, NavDir::Right), Some(1));
         assert_eq!(next_focus(&row, 1, NavDir::Right), Some(2));

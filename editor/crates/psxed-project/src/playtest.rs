@@ -48,10 +48,10 @@ use crate::world_cook::{
 };
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
-    NodeKind, OptionId, OptionKind, ParticleEmitterSettings, ProjectDocument, PsxBlendMode,
-    ResourceData, ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiTextAlign,
-    UiValueBinding, WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT,
-    MAX_ROOM_BYTES,
+    NodeKind, OptionId, OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument,
+    PsxBlendMode, ResourceData, ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind,
+    UiTextAlign, UiValueBinding, WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT,
+    MAX_ROOM_BYTES, PHYSICS_WEIGHT_ONE_Q8,
 };
 
 mod assets;
@@ -82,6 +82,7 @@ struct PlayerSpawnCandidate<'a> {
     position: [i32; 3],
     character: Option<ResourceId>,
     controller_settings: Option<CharacterControllerSettings>,
+    weight_q8: u16,
     renderer: Option<ModelRendererComponent>,
     animator: Option<AnimatorComponent<'a>>,
 }
@@ -240,6 +241,10 @@ pub fn build_package(
             let room_origin_y = room_origin_y_base + (grid.elevation - base_elevation);
             let streaming = scene
                 .world_streaming_for_node(room_node.id)
+                .unwrap_or_default()
+                .normalized();
+            let resolved_physics = scene
+                .world_physics_for_node(room_node.id)
                 .unwrap_or_default()
                 .normalized();
             let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
@@ -507,6 +512,7 @@ pub fn build_package(
                     visibility_radius: resolved_culling.visibility_radius,
                     resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
                     visible_chunk_limit: streaming.visible_chunk_limit,
+                    gravity_per_tick: resolved_physics.gravity_per_tick,
                     material_first,
                     material_count,
                     portal_first: if portal_room.portal_count == 0 {
@@ -683,6 +689,7 @@ pub fn build_package(
             NodeKind::Entity => {
                 let pos = floor_pos;
                 let character_controller = component_character_controller(scene, node);
+                let weight_q8 = physics_body_weight_q8(scene, node);
                 let is_player_controlled =
                     character_controller.is_some_and(|controller| controller.player);
                 if !is_player_controlled {
@@ -737,6 +744,7 @@ pub fn build_package(
                             position: pos,
                             character: controller.character,
                             controller_settings: Some(controller.settings),
+                            weight_q8,
                             renderer: component_model_renderer(scene, node),
                             animator: component_animator(scene, node),
                         });
@@ -826,6 +834,7 @@ pub fn build_package(
                     position: pos,
                     character: *character,
                     controller_settings: None,
+                    weight_q8: PHYSICS_WEIGHT_ONE_Q8,
                     renderer: None,
                     animator: None,
                 });
@@ -1020,7 +1029,8 @@ pub fn build_package(
             | NodeKind::CharacterController { .. }
             | NodeKind::AiController { .. }
             | NodeKind::Combat { .. }
-            | NodeKind::Equipment { .. } => {}
+            | NodeKind::Equipment { .. }
+            | NodeKind::PhysicsBody { .. } => {}
         }
     }
 
@@ -1141,6 +1151,7 @@ pub fn build_package(
                     .map(|animator| animator.action_clips)
                     .unwrap_or(&[]),
                 candidate.controller_settings,
+                candidate.weight_q8,
                 &mut assets,
                 &mut models,
                 &mut model_clips,
@@ -1239,7 +1250,7 @@ pub fn build_package(
     // never scans them). Regroup the whole table by source_room and
     // rebuild every room's range so both kinds are reachable.
     regroup_room_portals(&mut rooms, &mut room_portals);
-    let (ui_nodes, ui_scenes, game_flow) = cook_ui_nodes(
+    let (ui_nodes, ui_scenes, game_flow, cdda_tracks) = cook_ui_nodes(
         project,
         project_root,
         &mut texture_asset_for_resource,
@@ -1286,6 +1297,7 @@ pub fn build_package(
             ui_scenes,
             game_flow,
             options,
+            cdda_tracks,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -1333,9 +1345,16 @@ fn cook_ui_nodes(
     texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
-) -> (Vec<PlaytestUiNode>, Vec<PlaytestUiScene>, PlaytestGameFlow) {
+) -> (
+    Vec<PlaytestUiNode>,
+    Vec<PlaytestUiScene>,
+    PlaytestGameFlow,
+    Vec<PlaytestCddaTrack>,
+) {
     let mut ui_nodes: Vec<PlaytestUiNode> = Vec::new();
     let mut ui_scenes: Vec<PlaytestUiScene> = Vec::new();
+    let mut cdda_tracks: Vec<PlaytestCddaTrack> = Vec::new();
+    let mut cdda_track_for_wav: HashMap<String, u8> = HashMap::new();
 
     for scene in &project.ui_scenes {
         let node_first = ui_nodes.len().min(u16::MAX as usize) as u16;
@@ -1347,6 +1366,8 @@ fn cook_ui_nodes(
             texture_asset_for_resource,
             assets,
             report,
+            &mut cdda_tracks,
+            &mut cdda_track_for_wav,
             &mut ui_nodes,
         );
         let node_count = (ui_nodes.len() - node_first as usize).min(u16::MAX as usize) as u16;
@@ -1383,7 +1404,7 @@ fn cook_ui_nodes(
         PlaytestGameFlow { states, entry }
     };
 
-    (ui_nodes, ui_scenes, game_flow)
+    (ui_nodes, ui_scenes, game_flow, cdda_tracks)
 }
 
 /// Flatten one scene's nodes into the shared `out` pool. `node_first`
@@ -1398,6 +1419,8 @@ fn cook_ui_scene_nodes(
     texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
+    cdda_tracks: &mut Vec<PlaytestCddaTrack>,
+    cdda_track_for_wav: &mut HashMap<String, u8>,
     out: &mut Vec<PlaytestUiNode>,
 ) {
     let ordered_ids = scene.hierarchy_node_ids();
@@ -1616,6 +1639,37 @@ fn cook_ui_scene_nodes(
                     cook_option_id(*option),
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
+                UiNodeKind::Music {
+                    wav_path,
+                    volume,
+                    loop_track,
+                } => (
+                    0,
+                    0,
+                    1,
+                    1,
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    UiValueBinding::ConstantQ12(i32::from((*volume).min(100))),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    String::new(),
+                    String::new(),
+                    PlaytestUiAction::default(),
+                    cook_cdda_track_number(
+                        wav_path,
+                        project_root,
+                        cdda_tracks,
+                        cdda_track_for_wav,
+                        report,
+                    ),
+                    if *loop_track {
+                        psx_level::ui_node_flags::MUSIC_LOOP
+                    } else {
+                        0
+                    },
+                ),
             };
             PlaytestUiNode {
                 parent,
@@ -1639,6 +1693,53 @@ fn cook_ui_scene_nodes(
         })
         .collect::<Vec<_>>();
     out.extend(cooked);
+}
+
+fn cook_cdda_track_number(
+    wav_path: &str,
+    project_root: &Path,
+    cdda_tracks: &mut Vec<PlaytestCddaTrack>,
+    cdda_track_for_wav: &mut HashMap<String, u8>,
+    report: &mut PlaytestValidationReport,
+) -> u16 {
+    let trimmed = wav_path.trim();
+    if trimmed.is_empty() {
+        return psx_level::UI_OPTION_NONE;
+    }
+    if !trimmed
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+    {
+        report.warn(format!(
+            "CD-DA music source '{trimmed}' is not a .wav file and was skipped"
+        ));
+        return psx_level::UI_OPTION_NONE;
+    }
+    let abs = resolve_path(trimmed, project_root);
+    if !abs.is_file() {
+        report.warn(format!(
+            "CD-DA music source '{}' does not exist and was skipped",
+            abs.display()
+        ));
+        return psx_level::UI_OPTION_NONE;
+    }
+    let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
+    let key = abs.to_string_lossy().into_owned();
+    if let Some(track) = cdda_track_for_wav.get(&key) {
+        return u16::from(*track);
+    }
+    if cdda_tracks.len() >= 98 {
+        report.warn("CD-DA music track limit reached; extra music sources were skipped");
+        return psx_level::UI_OPTION_NONE;
+    }
+    let track = (cdda_tracks.len() + 2) as u8;
+    cdda_tracks.push(PlaytestCddaTrack {
+        track,
+        wav_path: key.clone(),
+    });
+    cdda_track_for_wav.insert(key, track);
+    u16::from(track)
 }
 
 fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
@@ -2052,6 +2153,7 @@ fn cook_player_character(
     visual_scale_q8: u16,
     action_overrides: &[crate::CharacterActionClip],
     controller_settings: Option<CharacterControllerSettings>,
+    weight_q8: u16,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
@@ -2341,6 +2443,7 @@ fn cook_player_character(
         visual_offset,
         visual_yaw,
         visual_scale_q8,
+        weight_q8,
         radius: settings.radius,
         height: settings.height,
         walk_speed: settings.walk_speed,
@@ -3410,6 +3513,11 @@ struct CharacterControllerComponent {
     player: bool,
 }
 
+#[derive(Clone, Copy)]
+struct PhysicsBodyComponent {
+    settings: PhysicsBodySettings,
+}
+
 struct EquipmentComponent<'a> {
     weapon: Option<ResourceId>,
     character_socket: &'a str,
@@ -3467,6 +3575,21 @@ fn component_character_controller(
         }),
         _ => None,
     })
+}
+
+fn component_physics_body(scene: &crate::Scene, host: &SceneNode) -> Option<PhysicsBodyComponent> {
+    component_children(scene, host).find_map(|node| match &node.kind {
+        NodeKind::PhysicsBody { settings } => Some(PhysicsBodyComponent {
+            settings: settings.normalized(),
+        }),
+        _ => None,
+    })
+}
+
+fn physics_body_weight_q8(scene: &crate::Scene, host: &SceneNode) -> u16 {
+    component_physics_body(scene, host)
+        .map(|component| component.settings.weight_q8)
+        .unwrap_or(PHYSICS_WEIGHT_ONE_Q8)
 }
 
 fn component_equipment<'a>(
@@ -5606,6 +5729,7 @@ mod tests {
                     visibility_radius: room.visibility_radius,
                     resident_chunk_limit: room.resident_chunk_limit,
                     visible_chunk_limit: room.visible_chunk_limit,
+                    gravity_per_tick: room.gravity_per_tick,
                     material_first: psx_level::MaterialIndex(room.material_first),
                     material_count: room.material_count,
                     portal_first: room.portal_first,
@@ -7725,7 +7849,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, scenes, flow) = cook_ui_nodes(
+        let (nodes, scenes, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -7775,9 +7899,10 @@ mod tests {
         // Two UI scenes; choose the SECOND as the boot target and confirm the
         // cooked flow enters that scene's state (not index 0, not gameplay).
         let mut project = ProjectDocument::new("boot");
-        project
-            .ui_scenes
-            .push(crate::UiScene::empty_canvas("Menu", crate::UiSceneId::UNASSIGNED));
+        project.ui_scenes.push(crate::UiScene::empty_canvas(
+            "Menu",
+            crate::UiSceneId::UNASSIGNED,
+        ));
         project.normalize_loaded(); // hands out stable scene ids
         let menu_id = project.ui_scenes[1].id;
         project.boot = crate::BootTarget::UiScene(menu_id);
@@ -7785,7 +7910,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (_nodes, scenes, flow) = cook_ui_nodes(
+        let (_nodes, scenes, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -7817,7 +7942,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (_nodes, _scenes, flow) = cook_ui_nodes(
+        let (_nodes, _scenes, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -7867,7 +7992,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, _scenes, _flow) = cook_ui_nodes(
+        let (nodes, _scenes, _flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -7936,7 +8061,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, _scenes, _flow) = cook_ui_nodes(
+        let (nodes, _scenes, _flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -8748,6 +8873,42 @@ mod tests {
         assert_eq!(character.turn_speed_degrees_per_second, 270);
         assert_eq!(character.stamina_max_q12, 2048);
         assert_eq!(character.roll_speed, 144);
+    }
+
+    #[test]
+    fn world_physics_and_physics_body_drive_cooked_gravity() {
+        let mut project = project_with_one_room();
+        let world_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::World { .. }))
+            .expect("starter has world")
+            .id;
+        if let Some(world) = project.active_scene_mut().node_mut(world_id) {
+            let NodeKind::World { physics, .. } = &mut world.kind else {
+                panic!("expected world");
+            };
+            physics.gravity_per_tick = 123;
+        }
+
+        let player = player_spawn_node_id(&project);
+        project.active_scene_mut().add_node(
+            player,
+            "Physics Body",
+            NodeKind::PhysicsBody {
+                settings: crate::PhysicsBodySettings { weight_q8: 384 },
+            },
+        );
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("package returned on ok report");
+        assert!(package
+            .rooms
+            .iter()
+            .all(|room| room.gravity_per_tick == 123));
+        assert_eq!(package.characters[0].weight_q8, 384);
     }
 
     #[test]

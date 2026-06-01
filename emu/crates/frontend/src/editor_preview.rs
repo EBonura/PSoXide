@@ -4117,6 +4117,7 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         | NodeKind::AiController { .. }
         | NodeKind::Combat { .. }
         | NodeKind::Equipment { .. }
+        | NodeKind::PhysicsBody { .. }
         | NodeKind::Room { .. }
         | NodeKind::World { .. }
         | NodeKind::Node

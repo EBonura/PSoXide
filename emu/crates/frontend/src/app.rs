@@ -2087,7 +2087,9 @@ fn repo_root_dir() -> PathBuf {
 /// File the editor-playtest build's stdout+stderr is captured to, so a failed
 /// Play surfaces the real compiler error instead of just an exit code.
 fn editor_playtest_build_log_path() -> PathBuf {
-    repo_root_dir().join("logs").join("editor-playtest-build.log")
+    repo_root_dir()
+        .join("logs")
+        .join("editor-playtest-build.log")
 }
 
 /// Build a one-line failure detail from the captured build log: the first
@@ -2151,7 +2153,9 @@ pub(crate) fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
     let exe_path = editor_playtest_exe_path();
     let exe_bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
     let world_pack = embedded_world_pack_payload()?;
-    let image = embedded_playtest_disc_image(exe_bytes, world_pack)?;
+    let mut image = embedded_playtest_disc_image(exe_bytes, world_pack)?;
+    let cdda_sources = embedded_cdda_track_sources()?;
+    let cdda_tracks = append_cdda_tracks_to_image(&mut image, &cdda_sources)?;
 
     let cue_path = editor_playtest_disc_path();
     let bin_path = cue_path.with_extension("bin");
@@ -2160,19 +2164,79 @@ pub(crate) fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
         .ok_or_else(|| format!("invalid playtest disc path: {}", cue_path.display()))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     std::fs::write(&bin_path, image).map_err(|e| format!("write {}: {e}", bin_path.display()))?;
-    write_single_data_track_cue(&cue_path, &bin_path)?;
+    write_cue(&cue_path, &bin_path, &cdda_tracks)?;
     Ok(cue_path)
 }
 
 fn write_single_data_track_cue(cue_path: &Path, bin_path: &Path) -> Result<(), String> {
+    write_cue(cue_path, bin_path, &[])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CddaCueTrack {
+    number: u8,
+    index0_sector: u32,
+    index1_sector: u32,
+}
+
+fn write_cue(cue_path: &Path, bin_path: &Path, cdda_tracks: &[CddaCueTrack]) -> Result<(), String> {
     let file_name = bin_path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid BIN path for CUE: {}", bin_path.display()))?
         .replace('"', "'");
-    let cue =
+    let mut cue =
         format!("FILE \"{file_name}\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+    for track in cdda_tracks {
+        cue.push_str(&format!(
+            "  TRACK {:02} AUDIO\n    INDEX 00 {}\n    INDEX 01 {}\n",
+            track.number,
+            cue_msf(track.index0_sector),
+            cue_msf(track.index1_sector)
+        ));
+    }
     std::fs::write(cue_path, cue).map_err(|e| format!("write {}: {e}", cue_path.display()))
+}
+
+fn cue_msf(frames: u32) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        frames / (60 * 75),
+        (frames / 75) % 60,
+        frames % 75
+    )
+}
+
+fn append_cdda_tracks_to_image(
+    image: &mut Vec<u8>,
+    sources: &[PathBuf],
+) -> Result<Vec<CddaCueTrack>, String> {
+    const CDDA_PREGAP_SECTORS: usize = 150;
+    let mut cue_tracks = Vec::with_capacity(sources.len());
+    for (index, source) in sources.iter().enumerate() {
+        if index >= 98 {
+            return Err("CUE sheets can only address tracks 01 through 99".to_string());
+        }
+        let wav = std::fs::read(source).map_err(|e| format!("read {}: {e}", source.display()))?;
+        let cdda = psxed_audio::cook_cdda_track_from_wav(&wav)
+            .map_err(|e| format!("cook CD-DA {}: {e}", source.display()))?;
+        if cdda.is_empty() || cdda.len() % SECTOR_BYTES != 0 {
+            return Err(format!(
+                "{} did not cook to a non-empty whole number of 2352-byte CD-DA sectors",
+                source.display()
+            ));
+        }
+        let index0_sector = (image.len() / SECTOR_BYTES) as u32;
+        image.resize(image.len() + CDDA_PREGAP_SECTORS * SECTOR_BYTES, 0);
+        let index1_sector = (image.len() / SECTOR_BYTES) as u32;
+        image.extend_from_slice(&cdda);
+        cue_tracks.push(CddaCueTrack {
+            number: (index + 2) as u8,
+            index0_sector,
+            index1_sector,
+        });
+    }
+    Ok(cue_tracks)
 }
 
 fn embedded_playtest_disc_image(
@@ -2193,12 +2257,35 @@ fn embedded_playtest_disc_image(
     Ok(builder.build_bin())
 }
 
-fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
-    let generated_dir = repo_root_dir()
+fn editor_playtest_generated_dir() -> PathBuf {
+    repo_root_dir()
         .join("engine")
         .join("examples")
         .join("editor-playtest")
-        .join("generated");
+        .join("generated")
+}
+
+fn embedded_cdda_track_sources() -> Result<Vec<PathBuf>, String> {
+    let tracks_file =
+        editor_playtest_generated_dir().join(psxed_project::playtest::CDDA_TRACKS_FILENAME);
+    if !tracks_file.is_file() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&tracks_file)
+        .map_err(|e| format!("read {}: {e}", tracks_file.display()))?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        out.push(PathBuf::from(trimmed));
+    }
+    Ok(out)
+}
+
+fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
+    let generated_dir = editor_playtest_generated_dir();
     let chunks_dir = generated_dir.join(psxed_project::playtest::STREAM_CHUNKS_DIRNAME);
     if !chunks_dir.is_dir() {
         return Ok(None);
@@ -2371,11 +2458,41 @@ pub(crate) fn copy_project_disc(
             dest_bin_path.display()
         )
     })?;
-    write_single_data_track_cue(dest_cue_path, &dest_bin_path)?;
+    rewrite_cue_for_copied_bin(source_cue_path, dest_cue_path, &dest_bin_path)?;
     let cue_bytes = std::fs::metadata(dest_cue_path)
         .map_err(|error| format!("stat {}: {error}", dest_cue_path.display()))?
         .len();
     Ok(bin_bytes + cue_bytes)
+}
+
+fn rewrite_cue_for_copied_bin(
+    source_cue_path: &Path,
+    dest_cue_path: &Path,
+    dest_bin_path: &Path,
+) -> Result<(), String> {
+    let source = std::fs::read_to_string(source_cue_path)
+        .map_err(|error| format!("read {}: {error}", source_cue_path.display()))?;
+    let dest_name = dest_bin_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid BIN path for CUE: {}", dest_bin_path.display()))?
+        .replace('"', "'");
+    let mut replaced_file = false;
+    let mut out = String::with_capacity(source.len() + dest_name.len());
+    for line in source.lines() {
+        if !replaced_file && line.trim_start().to_ascii_uppercase().starts_with("FILE ") {
+            out.push_str(&format!("FILE \"{dest_name}\" BINARY\n"));
+            replaced_file = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !replaced_file {
+        return write_single_data_track_cue(dest_cue_path, dest_bin_path);
+    }
+    std::fs::write(dest_cue_path, out)
+        .map_err(|error| format!("write {}: {error}", dest_cue_path.display()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
