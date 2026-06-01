@@ -2718,9 +2718,9 @@ mod tests {
         };
 
         let src = render_manifest_source(&package);
-        assert!(src.contains(
-            "LevelUiScene { id: 7, name: \"Pause\", node_first: 0, node_count: 1 },"
-        ));
+        assert!(
+            src.contains("LevelUiScene { id: 7, name: \"Pause\", node_first: 0, node_count: 1 },")
+        );
         assert!(src.contains("FlowState::UiScene { scene: 7 },"));
         assert!(src.contains("FlowState::Gameplay,"));
         assert!(src.contains("entry: 0,"));
