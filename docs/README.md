@@ -11,7 +11,6 @@ the [root README](../README.md) and the per-area READMEs
 | Doc | Topic |
 |-----|-------|
 | [editor-architecture.md](editor-architecture.md) | Editor internals. |
-| [engine-rearchitecture.md](engine-rearchitecture.md) | Engine design direction. |
 | [frontend.md](frontend.md) | Emulator frontend architecture. |
 | [world-grid-architecture.md](world-grid-architecture.md) | Room/sector grid model. |
 | [level-residency.md](level-residency.md) | Streamed-room residency runtime. |
