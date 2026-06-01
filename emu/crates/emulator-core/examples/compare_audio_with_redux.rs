@@ -158,6 +158,9 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         let disc_bytes = fs::read(disc_path).expect("disc");
         bus.cdrom.insert_disc(Some(Disc::from_bin(disc_bytes)));
     }
+    if std::env::var("PSOXIDE_DUMP_VRAM").is_ok() {
+        bus.cdrom.enable_command_log(256);
+    }
 
     let mut cpu = Cpu::new();
     let mut audio_cycle_accum = 0u64;
@@ -168,7 +171,10 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         ..OurTimeline::default()
     };
 
-    for _ in 0..steps {
+    use std::collections::HashMap;
+    let mut pc_hist: HashMap<u32, u32> = HashMap::new();
+    let pc_window_start = steps.saturating_sub(256_000);
+    for step_idx in 0..steps {
         // Match Redux's debugger-facing step semantics: one oracle
         // "step" stops at the next user instruction, letting IRQ
         // handlers run through inside the same user-side step.
@@ -190,6 +196,112 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
                     &mut timeline,
                 );
             }
+        }
+        if step_idx >= pc_window_start {
+            *pc_hist.entry(cpu.pc()).or_insert(0) += 1;
+        }
+    }
+
+    // Optional VRAM dump (PSOXIDE_DUMP_VRAM=path) -- boot a disc, step N,
+    // and write the full 1024x512 framebuffer as a PPM. Lets us inspect a
+    // game's on-screen state through emulator-core without the frontend.
+    if let Ok(path) = std::env::var("PSOXIDE_DUMP_VRAM") {
+        let vram = bus.gpu.vram.words();
+        let (w, h) = (1024usize, 512usize);
+        let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for &px in vram.iter().take(w * h) {
+            out.push(((px & 0x1F) << 3) as u8);
+            out.push((((px >> 5) & 0x1F) << 3) as u8);
+            out.push((((px >> 10) & 0x1F) << 3) as u8);
+        }
+        std::fs::write(&path, &out).expect("write vram ppm");
+        eprintln!("[ours] VRAM -> {path} ({w}x{h}) after {steps} steps");
+
+        // Also dump the on-screen display sub-rect (15bpp) for a clean view.
+        let da = bus.gpu.display_area();
+        let (dx, dy) = (da.x as usize, da.y as usize);
+        let (dw, dh) = ((da.width as usize).max(1), (da.height as usize).max(1));
+        let dpath = format!("{path}.display.ppm");
+        let mut dout = format!("P6\n{dw} {dh}\n255\n").into_bytes();
+        let byte = |off: usize| -> u8 {
+            let hw = vram.get(off / 2).copied().unwrap_or(0);
+            if off & 1 == 0 { (hw & 0xFF) as u8 } else { (hw >> 8) as u8 }
+        };
+        for row in 0..dh {
+            let vy = dy + row;
+            for col in 0..dw {
+                if da.bpp24 {
+                    // 24bpp FMV: 3 bytes/pixel packed across VRAM halfwords.
+                    let base = (vy * w + dx) * 2 + col * 3;
+                    dout.push(byte(base));
+                    dout.push(byte(base + 1));
+                    dout.push(byte(base + 2));
+                } else {
+                    let vx = dx + col;
+                    let px = if vx < w && vy < h { vram[vy * w + vx] } else { 0 };
+                    dout.push(((px & 0x1F) << 3) as u8);
+                    dout.push((((px >> 5) & 0x1F) << 3) as u8);
+                    dout.push((((px >> 10) & 0x1F) << 3) as u8);
+                }
+            }
+        }
+        std::fs::write(&dpath, &dout).expect("write display ppm");
+        eprintln!("[ours] display {dw}x{dh} @({dx},{dy}) bpp24={} -> {dpath}", da.bpp24);
+
+        // Hang diagnostic: where is the CPU spinning, and what is the CD doing?
+        let mut pcs: Vec<(u32, u32)> = pc_hist.iter().map(|(&p, &c)| (p, c)).collect();
+        pcs.sort_by(|a, b| b.1.cmp(&a.1));
+        eprintln!("[ours] top spin PCs (last {} steps):", steps.min(256_000));
+        for (pc, count) in pcs.iter().take(8) {
+            eprintln!("    0x{pc:08x} : {count}");
+        }
+        let hist = bus.cdrom.command_histogram();
+        let cmds: Vec<String> = hist
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c > 0)
+            .map(|(i, c)| format!("{i:02x}:{c}"))
+            .collect();
+        eprintln!(
+            "[ours] cdrom: cmds={} irq_flag={:02x} irq_mask={:02x} pending={} last_lba={} cmd_hist=[{}]",
+            bus.cdrom.commands_dispatched(),
+            bus.cdrom.irq_flag(),
+            bus.cdrom.irq_mask_value(),
+            bus.cdrom.pending_queue_len(),
+            bus.cdrom.debug_read_lba(),
+            cmds.join(" "),
+        );
+        let istat = bus.irq_mut().stat();
+        let imask = bus.irq_mut().mask();
+        eprintln!("[ours] global IRQ: I_STAT={istat:08x} I_MASK={imask:08x} (active={:08x})", istat & imask);
+        eprintln!(
+            "[ours] regs: v0={:08x} v1={:08x} a0={:08x} a1={:08x} a2={:08x} a3={:08x} sp={:08x} ra={:08x}",
+            cpu.gpr(2), cpu.gpr(3), cpu.gpr(4), cpu.gpr(5), cpu.gpr(6), cpu.gpr(7), cpu.gpr(29), cpu.gpr(31),
+        );
+        if let Some(&(top_pc, _)) = pcs.first() {
+            let base = top_pc & !0x1F;
+            eprintln!("[ours] spin-loop words @0x{base:08x}:");
+            for off in 0..16u32 {
+                let addr = base + off * 4;
+                if let Some(word) = bus.peek_instruction(addr) {
+                    eprintln!("    0x{addr:08x}: {word:08x}");
+                }
+            }
+        }
+        // Dump the polled table: 24 entries, halfword at +0xC of each, using
+        // the entry pointer in $v1 as the current scan position.
+        let tbl = cpu.gpr(7); // $a3 = table base
+        eprintln!("[ours] table @0x{tbl:08x} (+0xC halfwords, guessed strides):");
+        for stride in [0x10u32, 0x14, 0x18, 0x1C, 0x20] {
+            let vals: Vec<String> = (0..8u32)
+                .map(|i| {
+                    let a = tbl.wrapping_add(i * stride + 0xC);
+                    bus.peek_instruction(a & !3)
+                        .map(|w| format!("{:04x}", (w >> ((a & 2) * 8)) & 0xFFFF))
+                        .unwrap_or_else(|| "----".into())
+                })
+                .collect();
+            eprintln!("    stride 0x{stride:02x}: {}", vals.join(" "));
         }
     }
 
