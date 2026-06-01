@@ -46,17 +46,16 @@ use psxed_project::{
     GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
     GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
     MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId, OptionKind,
-    ParticleEmitterSettings, ProjectDocument, PsxBlendMode, Resource, ResourceData,
-    ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene,
-    SceneNode, SkyMode, SkySettings, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiNodeRow, UiRect,
-    UiScene, UiSceneId, UiTextAlign, UiValueBinding,
-    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldGridBudget, WorldStreamingSettings,
-    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
-    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE,
-    MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE,
-    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
-    MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
+    ParticleEmitterSettings, ProjectDocument, PsxBlendMode, Resource, ResourceData, ResourceId,
+    RuntimeDepthSortMode, RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode,
+    SkyMode, SkySettings, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene,
+    UiSceneId, UiTextAlign, UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid,
+    WorldGridBudget, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES,
+    MAX_ROOM_WIDTH, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
+    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_SECTOR_SIZE, MAX_WORLD_STREAMING_RESIDENT_CHUNKS,
+    MAX_WORLD_STREAMING_VISIBLE_CHUNKS, MAX_WORLD_VISIBILITY_RADIUS, MIN_WORLD_CAMERA_DISTANCE,
     MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE, MIN_WORLD_SECTOR_SIZE,
     MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
     MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN,
@@ -331,6 +330,12 @@ pub struct EditorWorkspace {
     /// editor edits the selected scene rather than always `ui_scenes[0]`.
     /// Clamped against `ui_scenes.len()` after deletions and undo/redo.
     active_ui_scene_index: usize,
+    /// Active floor being authored in the Room workspace. Floor 0 is the
+    /// base grid; floor `i` reads/writes `grid.floors_above[i - 1]` via
+    /// [`WorldGrid::floor`] / [`WorldGrid::floor_mut`]. Clamped per-room
+    /// against `grid.floor_count()` at every access. View state, like
+    /// `active_ui_scene_index`; not serialized with the project.
+    active_floor: usize,
     /// When on, the UI canvas runs an in-editor navigation preview: arrow
     /// keys move focus through the scene's focusable controls via the shared
     /// `psx_level::next_focus` (the same resolver the runtime uses), Enter
@@ -2686,6 +2691,7 @@ impl EditorWorkspace {
             renaming: None,
             pending_rename_focus: false,
             active_ui_scene_index: 0,
+            active_floor: 0,
             ui_nav_preview: false,
             ui_nav_focus: None,
             ui_scene_renaming: None,
@@ -6252,12 +6258,8 @@ impl EditorWorkspace {
                 (entry.room, entry.vertex.clone(), new_y)
             })
             .collect();
-        let scene = self.project.active_scene_mut();
         for (room, vertex, new_y) in updates {
-            let Some(node) = scene.node_mut(room) else {
-                continue;
-            };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let Some(grid) = self.room_floor_grid_mut(room) else {
                 continue;
             };
             apply_vertex_height(grid, &vertex, new_y);
@@ -6420,8 +6422,9 @@ impl EditorWorkspace {
             return;
         }
 
-        remove_primitive_faces_from_project(&mut self.project, &drag.targets);
+        remove_primitive_faces_from_project(&mut self.project, &drag.targets, self.active_floor);
         let mut selected_primitives = Vec::new();
+        let active_floor = self.active_floor;
         {
             let scene = self.project.active_scene_mut();
             let Some(node) = scene.node(drag.room) else {
@@ -6440,6 +6443,7 @@ impl EditorWorkspace {
                     drag.room,
                     drag.source_origin[0] + drag.current_delta[0] + cell.offset[0],
                     drag.source_origin[1] + drag.current_delta[1] + cell.offset[1],
+                    active_floor,
                 );
             }
             let Some(node) = scene.node_mut(drag.room) else {
@@ -6452,6 +6456,10 @@ impl EditorWorkspace {
                 self.status = "Move target is not a Room".to_string();
                 return;
             };
+            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let grid = grid
+                .floor_mut(floor_idx)
+                .expect("floor index clamped to range");
             for cell in drag.cells {
                 let wcx = drag.source_origin[0] + drag.current_delta[0] + cell.offset[0];
                 let wcz = drag.source_origin[1] + drag.current_delta[1] + cell.offset[1];
@@ -7207,12 +7215,8 @@ impl EditorWorkspace {
                 )
             })
             .collect();
-        let scene = self.project.active_scene_mut();
         for (room, vertex, new_y) in updates {
-            let Some(node) = scene.node_mut(room) else {
-                continue;
-            };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let Some(grid) = self.room_floor_grid_mut(room) else {
                 continue;
             };
             apply_vertex_height(grid, &vertex, new_y);
@@ -7236,8 +7240,13 @@ impl EditorWorkspace {
             return;
         }
 
-        remove_primitive_faces_from_project(&mut self.project, &grid_drag.targets);
+        remove_primitive_faces_from_project(
+            &mut self.project,
+            &grid_drag.targets,
+            self.active_floor,
+        );
         let mut selected_primitives = Vec::new();
+        let active_floor = self.active_floor;
         {
             let scene = self.project.active_scene_mut();
             let Some(node) = scene.node(grid_drag.room) else {
@@ -7256,6 +7265,7 @@ impl EditorWorkspace {
                     grid_drag.room,
                     grid_drag.source_origin[0] + grid_drag.current_delta[0] + cell.offset[0],
                     grid_drag.source_origin[1] + grid_drag.current_delta[1] + cell.offset[1],
+                    active_floor,
                 );
             }
             let Some(node) = scene.node_mut(grid_drag.room) else {
@@ -7268,6 +7278,10 @@ impl EditorWorkspace {
                 self.status = "Move target is not a Room".to_string();
                 return;
             };
+            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let grid = grid
+                .floor_mut(floor_idx)
+                .expect("floor index clamped to range");
             for cell in grid_drag.cells {
                 let wcx = grid_drag.source_origin[0] + grid_drag.current_delta[0] + cell.offset[0];
                 let wcz = grid_drag.source_origin[1] + grid_drag.current_delta[1] + cell.offset[1];
@@ -7917,11 +7931,7 @@ impl EditorWorkspace {
         min_z: u16,
         max_z: u16,
     ) -> Vec<Selection> {
-        let scene = self.project.active_scene();
-        let Some(node) = scene.node(room) else {
-            return Vec::new();
-        };
-        let NodeKind::Room { grid } = &node.kind else {
+        let Some(grid) = self.room_grid_view(room) else {
             return Vec::new();
         };
         let mut selections = Vec::new();
@@ -7963,11 +7973,7 @@ impl EditorWorkspace {
         min_z: u16,
         max_z: u16,
     ) -> Vec<Selection> {
-        let scene = self.project.active_scene();
-        let Some(node) = scene.node(room) else {
-            return Vec::new();
-        };
-        let NodeKind::Room { grid } = &node.kind else {
+        let Some(grid) = self.room_grid_view(room) else {
             return Vec::new();
         };
         let mut selections = Vec::new();
@@ -8407,10 +8413,14 @@ impl EditorWorkspace {
         hit_world: [f32; 3],
     ) -> NodeId {
         let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+        let active_floor = self.active_floor;
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
             node.transform.translation = translation;
+            // Record the placed floor (0 = ground) so the cook binds the
+            // entity to the right runtime room; Y can't select the floor.
+            node.floor = active_floor;
         }
         scene.add_node(
             entity,
@@ -8445,10 +8455,14 @@ impl EditorWorkspace {
         hit_world: [f32; 3],
     ) -> NodeId {
         let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+        let active_floor = self.active_floor;
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
             node.transform.translation = translation;
+            // Record the placed floor (0 = ground) so the cook binds the
+            // entity to the right runtime room; Y can't select the floor.
+            node.floor = active_floor;
         }
         if let Some(model_id) = model_id {
             scene.add_node(
@@ -8487,10 +8501,14 @@ impl EditorWorkspace {
         hit_world: [f32; 3],
     ) -> NodeId {
         let translation = self.placement_translation_for_room_hit(room_id, hit_world);
+        let active_floor = self.active_floor;
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
             node.transform.translation = translation;
+            // Record the placed floor (0 = ground) so the cook binds the
+            // entity to the right runtime room; Y can't select the floor.
+            node.floor = active_floor;
         }
         if let Some(model_id) = model_id {
             scene.add_node(
@@ -8758,11 +8776,7 @@ impl EditorWorkspace {
         if let Some(cell) = self.world_to_sector(room_id, world) {
             return Some(cell);
         }
-        let scene = self.project.active_scene();
-        let room = scene.node(room_id)?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(room_id)?;
         // `world` here is already in editor-cell units (sector-units,
         // room-centre-relative -- the 2D viewport's native space).
         // Route through the canonical helper so this stays exactly
@@ -8787,13 +8801,20 @@ impl EditorWorkspace {
             return None;
         }
         self.push_undo();
+        let active_floor = self.active_floor;
         let scene = self.project.active_scene_mut();
-        let cell =
-            extend_room_grid_to_include_preserving_child_positions(scene, room_id, wcx, wcz)?;
+        let cell = extend_room_grid_to_include_preserving_child_positions(
+            scene,
+            room_id,
+            wcx,
+            wcz,
+            active_floor,
+        )?;
         let node = scene.node(room_id)?;
         let NodeKind::Room { grid } = &node.kind else {
             return None;
         };
+        let grid = grid.floor(active_floor).unwrap_or(grid);
         self.status = format!(
             "Grew grid to {}×{} (origin {},{})",
             grid.width, grid.depth, grid.origin[0], grid.origin[1]
@@ -8828,8 +8849,98 @@ impl EditorWorkspace {
     fn room_grid_view(&self, room_id: NodeId) -> Option<&WorldGrid> {
         let node = self.project.active_scene().node(room_id)?;
         match &node.kind {
+            NodeKind::Room { grid } => {
+                // Route every editor read (render overlays, hit-test,
+                // selection, paint preview) to the active floor so the
+                // Room workspace edits the floor the user is on. Floor 0
+                // is the base grid; clamp keeps a room with fewer floors
+                // (or a stale index after switching rooms) valid.
+                let floor = self.active_floor.min(grid.floor_count().saturating_sub(1));
+                grid.floor(floor)
+            }
+            _ => None,
+        }
+    }
+
+    /// Active floor index the Room workspace is authoring (0 = base).
+    pub fn active_floor(&self) -> usize {
+        self.active_floor
+    }
+
+    /// The room the floor stepper targets: the active room, else the
+    /// first room in the scene.
+    fn floors_target_room(&self) -> Option<NodeId> {
+        self.active_room_id().or_else(|| {
+            self.project
+                .active_scene()
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+                .map(|node| node.id)
+        })
+    }
+
+    /// Base (floor 0) grid for a room, unrouted by `active_floor`. Use
+    /// this for whole-room queries like the floor count; use
+    /// [`Self::room_grid_view`] for active-floor reads.
+    fn room_base_grid(&self, room_id: NodeId) -> Option<&WorldGrid> {
+        match &self.project.active_scene().node(room_id)?.kind {
             NodeKind::Room { grid } => Some(grid),
             _ => None,
+        }
+    }
+
+    /// Active floor's grid for a room, mutable. Routes every floor-aware
+    /// edit (paint, height drag, material, vertex, erase, resize, grow)
+    /// to the floor the user is on. Floor 0 is the base grid; the index
+    /// is clamped against the room's floor count so a stale value after
+    /// switching rooms can't go out of range.
+    fn room_floor_grid_mut(&mut self, room: NodeId) -> Option<&mut WorldGrid> {
+        let active_floor = self.active_floor;
+        match &mut self.project.active_scene_mut().node_mut(room)?.kind {
+            NodeKind::Room { grid } => {
+                let idx = active_floor.min(grid.floor_count().saturating_sub(1));
+                grid.floor_mut(idx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Step up one floor, adding a new empty floor above the top when
+    /// already on the highest floor.
+    fn floor_up(&mut self) {
+        let Some(room_id) = self.floors_target_room() else {
+            return;
+        };
+        let active_floor = self.active_floor;
+        let pushed = {
+            let Some(node) = self.project.active_scene_mut().node_mut(room_id) else {
+                return;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                return;
+            };
+            if active_floor + 1 >= grid.floor_count() {
+                grid.push_floor();
+                true
+            } else {
+                false
+            }
+        };
+        self.active_floor = active_floor + 1;
+        if pushed {
+            self.mark_dirty();
+            self.status = format!("Added floor {} (paint to build it)", self.active_floor + 1);
+        } else {
+            self.status = format!("Floor {}", self.active_floor + 1);
+        }
+    }
+
+    /// Step down one floor (no-op on the base floor).
+    fn floor_down(&mut self) {
+        if self.active_floor > 0 {
+            self.active_floor -= 1;
+            self.status = format!("Floor {}", self.active_floor + 1);
         }
     }
 
@@ -9052,12 +9163,17 @@ impl EditorWorkspace {
                 PlaceKind::Portal => return,
             };
             self.push_undo();
+            let active_floor = self.active_floor;
             let id = self
                 .project
                 .active_scene_mut()
                 .add_node(room_id, default_name, node_kind);
             if let Some(node) = self.project.active_scene_mut().node_mut(id) {
                 node.transform.translation = translation;
+                // Record the floor this was placed on (0 = ground). The
+                // cook binds the node to this floor's runtime room; Y is
+                // a placement default and can't select the floor.
+                node.floor = active_floor;
             }
             self.replace_node_selection(id);
             self.clear_resource_selection_state();
@@ -9093,6 +9209,7 @@ impl EditorWorkspace {
         // shares the same snapshot point.
         self.push_undo();
         let wall_paint_shape = self.wall_paint_shape;
+        let active_floor = self.active_floor;
         let scene = self.project.active_scene_mut();
         let Some(room) = scene.node_mut(room_id) else {
             return;
@@ -9100,6 +9217,12 @@ impl EditorWorkspace {
         let NodeKind::Room { grid } = &mut room.kind else {
             return;
         };
+        // Paint into the active floor's grid (floor 0 = base). Clamp so a
+        // stale index can't panic; the index is always in range here.
+        let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+        let grid = grid
+            .floor_mut(floor_idx)
+            .expect("floor index clamped to range");
         let status = match tool {
             ViewTool::PaintFloor => {
                 grid.set_floor_aligned_to_neighbors(sx, sz, 0, floor_mat);
@@ -9262,11 +9385,7 @@ impl EditorWorkspace {
     /// Material id currently applied to `face`, or `None` if the
     /// face is unassigned / its referent went away.
     fn face_material(&self, face: FaceRef) -> Option<ResourceId> {
-        let scene = self.project.active_scene();
-        let node = scene.node(face.room)?;
-        let NodeKind::Room { grid } = &node.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(face.room)?;
         let sector = grid.sector(face.sx, face.sz)?;
         match face.kind {
             FaceKind::Floor => sector.floor.as_ref().and_then(|f| f.material),
@@ -9281,11 +9400,7 @@ impl EditorWorkspace {
 
     fn triangle_material(&self, triangle: HorizontalTriangleRef) -> Option<ResourceId> {
         let face = triangle.parent_face();
-        let scene = self.project.active_scene();
-        let node = scene.node(face.room)?;
-        let NodeKind::Room { grid } = &node.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(face.room)?;
         let sector = grid.sector(face.sx, face.sz)?;
         let index = triangle.index.idx();
         match triangle.surface {
@@ -9560,11 +9675,7 @@ impl EditorWorkspace {
         let FaceKind::Wall { dir, stack } = face.kind else {
             return None;
         };
-        let scene = self.project.active_scene_mut();
-        let node = scene.node_mut(face.room)?;
-        let NodeKind::Room { grid } = &mut node.kind else {
-            return None;
-        };
+        let grid = self.room_floor_grid_mut(face.room)?;
         let sector_size = grid.sector_size;
         let sector = grid.sector_mut(face.sx, face.sz)?;
         let wall = sector.walls.get_mut(dir).get_mut(stack as usize)?;
@@ -9581,11 +9692,7 @@ impl EditorWorkspace {
         if self.face_material(face) == material {
             return false;
         }
-        let scene = self.project.active_scene_mut();
-        let Some(node) = scene.node_mut(face.room) else {
-            return false;
-        };
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let Some(grid) = self.room_floor_grid_mut(face.room) else {
             return false;
         };
         let Some(sector) = grid.sector_mut(face.sx, face.sz) else {
@@ -9632,11 +9739,7 @@ impl EditorWorkspace {
         if self.triangle_material(triangle) == material {
             return false;
         }
-        let scene = self.project.active_scene_mut();
-        let Some(node) = scene.node_mut(triangle.room) else {
-            return false;
-        };
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let Some(grid) = self.room_floor_grid_mut(triangle.room) else {
             return false;
         };
         let Some(sector) = grid.sector_mut(triangle.sx, triangle.sz) else {
@@ -9808,11 +9911,7 @@ impl EditorWorkspace {
         hit: [f32; 3],
     ) -> Option<HorizontalTriangleRef> {
         let (split, dropped) = self.horizontal_face_split_and_drop(face)?;
-        let scene = self.project.active_scene();
-        let room = scene.node(face.room)?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(face.room)?;
         let bounds = grid.cell_bounds_world(face.sx, face.sz);
         let local_x = hit[0] - bounds.x0 as f32;
         let local_z = hit[2] - bounds.z0 as f32;
@@ -9867,11 +9966,7 @@ impl EditorWorkspace {
     }
 
     fn horizontal_face_split_and_drop(&self, face: FaceRef) -> Option<(GridSplit, Option<Corner>)> {
-        let scene = self.project.active_scene();
-        let room = scene.node(face.room)?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(face.room)?;
         let sector = grid.sector(face.sx, face.sz)?;
         match face.kind {
             FaceKind::Floor => sector.floor.as_ref().map(|f| (f.split, f.dropped_corner)),
@@ -9997,11 +10092,7 @@ impl EditorWorkspace {
     }
 
     fn triangle_world_corners(&self, triangle: HorizontalTriangleRef) -> Option<[[f32; 3]; 3]> {
-        let scene = self.project.active_scene();
-        let room = scene.node(triangle.room)?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(triangle.room)?;
         if triangle.sx >= grid.width || triangle.sz >= grid.depth {
             return None;
         }
@@ -10023,11 +10114,7 @@ impl EditorWorkspace {
     /// `[BL, BR, TR, TL]` for walls. Returns `None` if the face
     /// no longer exists (cell out of bounds, geometry missing).
     fn face_world_corners(&self, face: FaceRef) -> Option<[[f32; 3]; 4]> {
-        let scene = self.project.active_scene();
-        let room = scene.node(face.room)?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(face.room)?;
         if face.sx >= grid.width || face.sz >= grid.depth {
             return None;
         }
@@ -10069,10 +10156,11 @@ impl EditorWorkspace {
             matches!(node.kind, NodeKind::Room { .. })
                 && !self.scene_node_effectively_hidden(node.id)
         })?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
         let room_id = room.id;
+        // Read the active floor's grid, not the floor 0 destructure, so a
+        // ray pick on an upper floor tests that floor's faces (the render
+        // shows the active floor in place, so the ray must match it).
+        let grid = self.room_grid_view(room_id)?;
         let mut best: Option<(FaceRef, f32)> = None;
         let mut consider = |face: FaceRef, t: f32| {
             if !t.is_finite() || t <= 0.0 {
@@ -12125,7 +12213,9 @@ impl EditorWorkspace {
                     self.duplicate_ui_scene_action(active);
                 }
                 if ui
-                    .add(egui::Button::new(icons::text(icons::FILE_PLUS, 14.0)).min_size(action_btn))
+                    .add(
+                        egui::Button::new(icons::text(icons::FILE_PLUS, 14.0)).min_size(action_btn),
+                    )
                     .on_hover_text("Create a new UI scene")
                     .clicked()
                 {
@@ -12757,6 +12847,7 @@ impl EditorWorkspace {
                                         selected,
                                         new_w,
                                         new_d,
+                                        self.active_floor,
                                     ) {
                                         changed = true;
                                     }
@@ -12825,6 +12916,7 @@ impl EditorWorkspace {
                                             room_id,
                                             sx,
                                             sz,
+                                            self.active_floor,
                                             &material_options,
                                             &mut nav_target,
                                         ) {
@@ -13009,13 +13101,8 @@ impl EditorWorkspace {
 
         let mut changed = false;
         {
-            let scene = self.project.active_scene_mut();
-            let Some(room) = scene.node_mut(triangle.room) else {
+            let Some(grid) = self.room_floor_grid_mut(triangle.room) else {
                 ui.weak("Selected triangle's Room is gone");
-                return;
-            };
-            let NodeKind::Room { grid } = &mut room.kind else {
-                ui.weak("Selected triangle's Room kind changed");
                 return;
             };
             let Some(sector) = grid.sector_mut(triangle.sx, triangle.sz) else {
@@ -13164,11 +13251,7 @@ impl EditorWorkspace {
         &self,
         triangle: HorizontalTriangleRef,
     ) -> Option<(Option<ResourceId>, GridUvTransform, bool)> {
-        let scene = self.project.active_scene();
-        let room = scene.node(triangle.room)?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(triangle.room)?;
         let sector = grid.sector(triangle.sx, triangle.sz)?;
         match triangle.surface {
             HorizontalSurfaceKind::Floor => {
@@ -13252,11 +13335,7 @@ impl EditorWorkspace {
         let new_b = snap_height(new_b);
         endpoint_a.world[1] = new_a;
         endpoint_b.world[1] = new_b;
-        let scene = self.project.active_scene_mut();
-        let Some(node) = scene.node_mut(edge.room) else {
-            return;
-        };
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let Some(grid) = self.room_floor_grid_mut(edge.room) else {
             return;
         };
         if changed_a {
@@ -13336,16 +13415,18 @@ impl EditorWorkspace {
             self.push_undo();
             let new_y = snap_height(new_y);
             physical.world[1] = new_y;
-            let scene = self.project.active_scene_mut();
-            if let Some(node) = scene.node_mut(vertex.room) {
-                if let NodeKind::Room { grid } = &mut node.kind {
-                    apply_vertex_height(grid, &physical, new_y);
-                    self.status = format!(
-                        "Moved vertex ({} face-corners follow)",
-                        physical.members.len()
-                    );
-                    self.mark_dirty();
-                }
+            let moved = if let Some(grid) = self.room_floor_grid_mut(vertex.room) {
+                apply_vertex_height(grid, &physical, new_y);
+                true
+            } else {
+                false
+            };
+            if moved {
+                self.status = format!(
+                    "Moved vertex ({} face-corners follow)",
+                    physical.members.len()
+                );
+                self.mark_dirty();
             }
         } else if break_clicked {
             self.push_undo();
@@ -13353,13 +13434,15 @@ impl EditorWorkspace {
             // Apply only to the seed -- the rest of the group
             // stays put, so they cease being coincident.
             let seed = vertex.anchor.as_face_corner();
-            let scene = self.project.active_scene_mut();
-            if let Some(node) = scene.node_mut(vertex.room) {
-                if let NodeKind::Room { grid } = &mut node.kind {
-                    write_face_corner_height(grid, seed, new_y);
-                    self.status = "Broke vertex; seed corner moved by one quantum".to_string();
-                    self.mark_dirty();
-                }
+            let broke = if let Some(grid) = self.room_floor_grid_mut(vertex.room) {
+                write_face_corner_height(grid, seed, new_y);
+                true
+            } else {
+                false
+            };
+            if broke {
+                self.status = "Broke vertex; seed corner moved by one quantum".to_string();
+                self.mark_dirty();
             }
         }
     }
@@ -13412,13 +13495,8 @@ impl EditorWorkspace {
         ui.separator();
         draw_psxt_preview_block(ui, preview_thumb);
 
-        let scene = self.project.active_scene_mut();
-        let Some(room) = scene.node_mut(face.room) else {
+        let Some(grid) = self.room_floor_grid_mut(face.room) else {
             ui.weak("Selected face's Room is gone");
-            return;
-        };
-        let NodeKind::Room { grid } = &mut room.kind else {
-            ui.weak("Selected face's Room kind changed");
             return;
         };
         if face.sx >= grid.width || face.sz >= grid.depth {
@@ -15024,6 +15102,36 @@ impl EditorWorkspace {
             self.view_dimension_group_label(),
             |ui| self.draw_view_dimension_group_menu(ui),
         );
+
+        // Floor stepper: author multiple stacked floors per room. Shown
+        // only in the Room workspace with a room in context. Floor 0 is
+        // the base grid; "Up" past the top floor adds a new one.
+        if matches!(self.active_workspace, WorkspaceView::Room) {
+            if let Some(room_id) = self.floors_target_room() {
+                let floor_count = self
+                    .room_base_grid(room_id)
+                    .map(|grid| grid.floor_count())
+                    .unwrap_or(1);
+                let active = self.active_floor.min(floor_count.saturating_sub(1));
+                ui.separator();
+                ui.label("Floor");
+                if ui
+                    .add_enabled(active > 0, egui::Button::new("Down"))
+                    .on_hover_text("Edit the floor below")
+                    .clicked()
+                {
+                    self.floor_down();
+                }
+                ui.label(format!("{} / {}", active + 1, floor_count));
+                if ui
+                    .button("Up")
+                    .on_hover_text("Edit the floor above (adds one above the top floor)")
+                    .clicked()
+                {
+                    self.floor_up();
+                }
+            }
+        }
     }
 
     fn draw_workspace_group_menu(&mut self, ui: &mut egui::Ui) {
@@ -15722,12 +15830,9 @@ impl EditorWorkspace {
     /// the conversion via the canonical helper, keeping 2D and 3D
     /// picks consistent after a negative-side grow.
     fn world_to_sector(&self, room_id: NodeId, world: [f32; 2]) -> Option<(u16, u16)> {
-        let scene = self.project.active_scene();
-        let room = scene.node(room_id)?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
+        let room = self.project.active_scene().node(room_id)?;
         let center = node_world(room);
+        let grid = self.room_grid_view(room_id)?;
         let editor = [world[0] - center[0], world[1] - center[1]];
         grid.editor_cells_to_array(editor)
     }
@@ -15993,11 +16098,7 @@ impl EditorWorkspace {
     }
 
     fn all_faces_in_room(&self, room: NodeId) -> Vec<FaceRef> {
-        let scene = self.project.active_scene();
-        let Some(node) = scene.node(room) else {
-            return Vec::new();
-        };
-        let NodeKind::Room { grid } = &node.kind else {
+        let Some(grid) = self.room_grid_view(room) else {
             return Vec::new();
         };
 
@@ -16818,6 +16919,7 @@ impl EditorWorkspace {
         additive: bool,
         base_sectors: &HashSet<SectorSelection>,
     ) {
+        let active_floor = self.active_floor;
         let scene = self.project.active_scene();
         let mut selected = if additive {
             base_sectors.clone()
@@ -16832,6 +16934,10 @@ impl EditorWorkspace {
                 continue;
             }
             let NodeKind::Room { grid } = &node.kind else {
+                continue;
+            };
+            let idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let Some(grid) = grid.floor(idx) else {
                 continue;
             };
             let node_center = node_world(node);
@@ -16947,14 +17053,13 @@ impl EditorWorkspace {
         // paint flow can chew on. `editor_to_room_local` is
         // origin-aware, so this stays correct after a -X / -Z grow.
         let (hit_world, picked_face) = {
-            let scene = self.project.active_scene();
-            let Some(room) = scene.node(room_id) else {
-                return;
-            };
-            let NodeKind::Room { grid } = &room.kind else {
+            let Some(room) = self.project.active_scene().node(room_id) else {
                 return;
             };
             let room_center = node_world(room);
+            let Some(grid) = self.room_grid_view(room_id) else {
+                return;
+            };
             let editor = [world[0] - room_center[0], world[1] - room_center[1]];
             let hit = grid.editor_to_room_local(editor);
 
@@ -17330,6 +17435,7 @@ impl EditorWorkspace {
         );
         let mut selected_cells = Vec::new();
         let mut selected_primitives = Vec::new();
+        let active_floor = self.active_floor;
         {
             let scene = self.project.active_scene_mut();
             let Some(node) = scene.node(preview.room) else {
@@ -17348,6 +17454,7 @@ impl EditorWorkspace {
                     preview.room,
                     preview.origin[0] + offset[0],
                     preview.origin[1] + offset[1],
+                    active_floor,
                 );
             }
             let Some(node) = scene.node_mut(preview.room) else {
@@ -17360,6 +17467,10 @@ impl EditorWorkspace {
                 self.status = "Duplicate target is not a Room".to_string();
                 return;
             };
+            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let grid = grid
+                .floor_mut(floor_idx)
+                .expect("floor index clamped to range");
             for (offset, sector) in cells {
                 let wcx = preview.origin[0] + offset[0];
                 let wcz = preview.origin[1] + offset[1];
@@ -17499,6 +17610,7 @@ impl EditorWorkspace {
             .collect();
 
         self.push_undo();
+        let active_floor = self.active_floor;
         let mut selected = Vec::new();
         {
             let scene = self.project.active_scene_mut();
@@ -17513,7 +17625,11 @@ impl EditorWorkspace {
 
             for (world, _) in &rotated {
                 let _ = extend_room_grid_to_include_preserving_child_positions(
-                    scene, room, world[0], world[1],
+                    scene,
+                    room,
+                    world[0],
+                    world[1],
+                    active_floor,
                 );
             }
             let Some(node) = scene.node_mut(room) else {
@@ -17524,6 +17640,10 @@ impl EditorWorkspace {
                 self.status = "Selected target is not a Room".to_string();
                 return;
             };
+            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let grid = grid
+                .floor_mut(floor_idx)
+                .expect("floor index clamped to range");
             for (world, _) in &staged {
                 if let Some((sx, sz)) = grid.world_cell_to_array(world[0], world[1]) {
                     if let Some(index) = grid.sector_index(sx, sz) {
@@ -17834,8 +17954,20 @@ impl EditorWorkspace {
                             draw_inline_icon(ui, node_lucide_icon(kind, false), STUDIO_TEXT_WEAK);
                             ui.label(name);
                             ui.label(RichText::new(*kind).color(STUDIO_TEXT_WEAK).small());
-                            if let Some(player_controlled) = player_controlled {
-                                let mut player = *player_controlled;
+                            if ui
+                                .small_button(icons::text(icons::POINTER, 14.0))
+                                .on_hover_text("Select this component")
+                                .clicked()
+                            {
+                                select_component = Some(*id);
+                            }
+                        });
+                        // Component-specific toggles go on their own line so they
+                        // don't overflow the name/kind/select row.
+                        if let Some(player_controlled) = player_controlled {
+                            let mut player = *player_controlled;
+                            ui.horizontal(|ui| {
+                                ui.add_space(24.0);
                                 if ui
                                     .checkbox(
                                         &mut player,
@@ -17845,11 +17977,8 @@ impl EditorWorkspace {
                                 {
                                     set_player_controlled = Some((*id, player));
                                 }
-                            }
-                            if ui.small_button("Select").clicked() {
-                                select_component = Some(*id);
-                            }
-                        });
+                            });
+                        }
                     }
                 }
 
@@ -17970,10 +18099,7 @@ impl EditorWorkspace {
         self.push_undo();
         let mut removed = 0usize;
         for (room, sx, sz) in targets {
-            let Some(node) = self.project.active_scene_mut().node_mut(room) else {
-                continue;
-            };
-            let NodeKind::Room { grid } = &mut node.kind else {
+            let Some(grid) = self.room_floor_grid_mut(room) else {
                 continue;
             };
             let Some(index) = grid.sector_index(sx, sz) else {
@@ -18061,11 +18187,7 @@ impl EditorWorkspace {
     }
 
     fn remove_triangle_no_undo(&mut self, triangle: HorizontalTriangleRef) -> DeleteOutcome {
-        let scene = self.project.active_scene_mut();
-        let Some(node) = scene.node_mut(triangle.room) else {
-            return DeleteOutcome::Missing;
-        };
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let Some(grid) = self.room_floor_grid_mut(triangle.room) else {
             return DeleteOutcome::Missing;
         };
         let Some(sector) = grid.sector_mut(triangle.sx, triangle.sz) else {
@@ -18106,11 +18228,7 @@ impl EditorWorkspace {
     /// `Vec`. Returns `Removed` on success so the caller can update
     /// status / clear the selection.
     fn remove_face_no_undo(&mut self, face: FaceRef) -> DeleteOutcome {
-        let scene = self.project.active_scene_mut();
-        let Some(node) = scene.node_mut(face.room) else {
-            return DeleteOutcome::Missing;
-        };
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let Some(grid) = self.room_floor_grid_mut(face.room) else {
             return DeleteOutcome::Missing;
         };
         let Some(sector) = grid.sector_mut(face.sx, face.sz) else {
@@ -18140,11 +18258,7 @@ impl EditorWorkspace {
     /// gain a `dropped_corner` and have their split forced to the
     /// surviving diagonal. Walls do the same with `WallCorner`.
     fn drop_vertex_no_undo(&mut self, vertex: VertexRef) -> DeleteOutcome {
-        let scene = self.project.active_scene_mut();
-        let Some(node) = scene.node_mut(vertex.room) else {
-            return DeleteOutcome::Missing;
-        };
-        let NodeKind::Room { grid } = &mut node.kind else {
+        let Some(grid) = self.room_floor_grid_mut(vertex.room) else {
             return DeleteOutcome::Missing;
         };
         let (sx, sz) = match vertex.anchor {
@@ -18519,11 +18633,7 @@ impl EditorWorkspace {
     }
 
     fn selection_bounds_3d(&self, selection: Selection) -> Option<([f32; 3], [f32; 3])> {
-        let scene = self.project.active_scene();
-        let room = scene.node(selection.room())?;
-        let NodeKind::Room { grid } = &room.kind else {
-            return None;
-        };
+        let grid = self.room_grid_view(selection.room())?;
         let mut bounds: Option<(f32, f32, f32, f32, f32, f32)> = None;
         for seed in drag_corner_seeds(selection)? {
             let world = face_corner_world(grid, seed)?;
@@ -18583,15 +18693,12 @@ impl EditorWorkspace {
     }
 
     fn sector_bounds_2d(&self, room: NodeId, sx: u16, sz: u16) -> Option<([f32; 2], [f32; 2])> {
-        let scene = self.project.active_scene();
-        let node = scene.node(room)?;
-        let NodeKind::Room { grid } = &node.kind else {
-            return None;
-        };
+        let node = self.project.active_scene().node(room)?;
+        let center = node_world(node);
+        let grid = self.room_grid_view(room)?;
         if sx >= grid.width || sz >= grid.depth {
             return None;
         }
-        let center = node_world(node);
         let local = grid_cell_editor_center(grid, sx, sz);
         Some(([center[0] + local[0], center[1] + local[1]], [0.5, 0.5]))
     }
@@ -25087,12 +25194,7 @@ fn draw_ui_action_editor(
 ) -> bool {
     let mut changed = false;
     let variants = [
-        UiAction::GotoScene(
-            scene_options
-                .first()
-                .map(|(id, _)| *id)
-                .unwrap_or_default(),
-        ),
+        UiAction::GotoScene(scene_options.first().map(|(id, _)| *id).unwrap_or_default()),
         UiAction::StartGameplay,
         UiAction::Back,
         UiAction::SetOption {
@@ -28524,8 +28626,7 @@ fn draw_ui_scene_preview(
                         Color32::from_rgb(color[0], color[1], color[2]),
                     );
                 }
-                let label_color =
-                    Color32::from_rgb(text_color[0], text_color[1], text_color[2]);
+                let label_color = Color32::from_rgb(text_color[0], text_color[1], text_color[2]);
                 let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
                 draw_ui_preview_text(
                     painter,
@@ -28554,7 +28655,11 @@ fn draw_ui_scene_preview(
                 if fill_w > 0.0 {
                     let fill_rect =
                         Rect::from_min_size(screen.min, Vec2::new(fill_w, screen.height()));
-                    painter.rect_filled(fill_rect, 0.0, Color32::from_rgb(fill[0], fill[1], fill[2]));
+                    painter.rect_filled(
+                        fill_rect,
+                        0.0,
+                        Color32::from_rgb(fill[0], fill[1], fill[2]),
+                    );
                 }
                 let knob_w = (screen.height() + 2.0).clamp(3.0, screen.width().max(3.0));
                 let edge = screen.min.x + fill_w;
@@ -31157,6 +31262,7 @@ fn extend_room_grid_to_include_preserving_child_positions(
     room: NodeId,
     wcx: i32,
     wcz: i32,
+    active_floor: usize,
 ) -> Option<(u16, u16)> {
     let old_center = room_grid_center_cells(scene, room)?;
     let cell = {
@@ -31164,7 +31270,8 @@ fn extend_room_grid_to_include_preserving_child_positions(
         let NodeKind::Room { grid } = &mut node.kind else {
             return None;
         };
-        grid.extend_to_include(wcx, wcz)
+        let idx = active_floor.min(grid.floor_count().saturating_sub(1));
+        grid.floor_mut(idx)?.extend_to_include(wcx, wcz)
     };
     recenter_room_spatial_descendants(scene, room, old_center);
     Some(cell)
@@ -31175,6 +31282,7 @@ fn resize_room_grid_preserving_child_positions(
     room: NodeId,
     width: u16,
     depth: u16,
+    active_floor: usize,
 ) -> bool {
     let Some(old_center) = room_grid_center_cells(scene, room) else {
         return false;
@@ -31184,6 +31292,10 @@ fn resize_room_grid_preserving_child_positions(
             return false;
         };
         let NodeKind::Room { grid } = &mut node.kind else {
+            return false;
+        };
+        let idx = active_floor.min(grid.floor_count().saturating_sub(1));
+        let Some(grid) = grid.floor_mut(idx) else {
             return false;
         };
         if grid.width == width && grid.depth == depth {
@@ -33015,7 +33127,11 @@ fn merge_primitive_fragment(
     }
 }
 
-fn remove_primitive_faces_from_project(project: &mut ProjectDocument, targets: &[Selection]) {
+fn remove_primitive_faces_from_project(
+    project: &mut ProjectDocument,
+    targets: &[Selection],
+    active_floor: usize,
+) {
     let mut faces = Vec::new();
     for &target in targets {
         let Some(face) = selection_copy_face(target) else {
@@ -33031,6 +33147,10 @@ fn remove_primitive_faces_from_project(project: &mut ProjectDocument, targets: &
             continue;
         };
         let NodeKind::Room { grid } = &mut node.kind else {
+            continue;
+        };
+        let idx = active_floor.min(grid.floor_count().saturating_sub(1));
+        let Some(grid) = grid.floor_mut(idx) else {
             continue;
         };
         remove_face_from_grid(grid, face);
@@ -35461,7 +35581,7 @@ fn component_count_summary(resource_use: &SceneResourceUse) -> String {
 fn draw_budget_row(ui: &mut egui::Ui, key: &str, val: String, hot: bool) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(key).color(STUDIO_TEXT_WEAK));
-        let txt = RichText::new(val).monospace();
+        let txt = RichText::new(val);
         ui.label(if hot {
             txt.color(Color32::from_rgb(0xE0, 0x60, 0x60))
         } else {
@@ -35537,6 +35657,7 @@ fn draw_sector_inspector(
     room_id: NodeId,
     sx: u16,
     sz: u16,
+    active_floor: usize,
     material_options: &[(ResourceId, String)],
     nav_target: &mut Option<ResourceId>,
 ) -> bool {
@@ -35545,6 +35666,10 @@ fn draw_sector_inspector(
         return false;
     };
     let NodeKind::Room { grid } = &mut room.kind else {
+        return false;
+    };
+    let idx = active_floor.min(grid.floor_count().saturating_sub(1));
+    let Some(grid) = grid.floor_mut(idx) else {
         return false;
     };
     if sx >= grid.width || sz >= grid.depth {
@@ -36153,7 +36278,11 @@ mod tests {
         fn room_center(&self) -> [f32; 3] {
             let grid = self.workspace.room_grid_view(self.room).unwrap();
             let s = grid.sector_size as f32;
-            [grid.width as f32 * 0.5 * s, 0.0, grid.depth as f32 * 0.5 * s]
+            [
+                grid.width as f32 * 0.5 * s,
+                0.0,
+                grid.depth as f32 * 0.5 * s,
+            ]
         }
 
         /// Add a point light at the room centre, lifted `lift_sectors`
@@ -36224,7 +36353,8 @@ mod tests {
 
         /// The node-gizmo handle a click at `pointer` would grab, if any.
         fn gizmo_handle_at(&self, pointer: Pos2) -> Option<NodeGizmoHandle> {
-            self.resolve(pointer).and_then(|target| target.node_handle())
+            self.resolve(pointer)
+                .and_then(|target| target.node_handle())
         }
 
         /// On-screen quad corners of a move-plane handle, or `None` if
@@ -36286,6 +36416,70 @@ mod tests {
                 None => '.',
             }
         }
+    }
+
+    /// Floor-aware selection: with floor 1 active, geometry reads must
+    /// address floor 1, not the floor 0 grid sitting underneath it. The
+    /// two floors carry DISTINCT geometry (floor 0 has a floor face at
+    /// (0,0); floor 1 has a north wall there and no floor), so reading
+    /// the wrong floor is observable. Before the fix, `face_world_corners`
+    /// destructured `NodeKind::Room { grid }` directly (always floor 0);
+    /// now it routes through `room_grid_view`, which honours `active_floor`.
+    #[test]
+    fn face_corner_reads_address_the_active_floor() {
+        let mut project = ProjectDocument::new("active-floor-pick");
+        let mut grid = WorldGrid::empty(2, 2, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.push_floor();
+        let floor1 = grid.floor_mut(1).expect("floor 1");
+        floor1.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+        let room =
+            project
+                .active_scene_mut()
+                .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("active-floor-pick"), project);
+
+        let floor_face = FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Floor,
+        };
+        let wall_face = FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Wall {
+                dir: GridDirection::North,
+                stack: 0,
+            },
+        };
+
+        // Base floor active: floor face present, wall absent.
+        workspace.active_floor = 0;
+        assert!(workspace.face_world_corners(floor_face).is_some());
+        assert!(workspace.face_world_corners(wall_face).is_none());
+
+        // Floor 1 active: the reads must follow the active floor.
+        workspace.active_floor = 1;
+        assert!(
+            workspace.face_world_corners(wall_face).is_some(),
+            "floor 1's wall should be addressable when floor 1 is active"
+        );
+        assert!(
+            workspace.face_world_corners(floor_face).is_none(),
+            "floor 0's floor face must not leak through when floor 1 is active"
+        );
+
+        // Selection-set readers route too: select-all enumerates the
+        // active floor's faces, so on floor 1 it returns the wall, not
+        // floor 0's floor face.
+        let faces = workspace.all_faces_in_room(room);
+        assert!(
+            faces.contains(&wall_face) && !faces.contains(&floor_face),
+            "all_faces_in_room must enumerate the active floor: {faces:?}"
+        );
     }
 
     /// Diagnostic (not a strict assertion): print an ASCII map of what a
@@ -36430,7 +36624,10 @@ mod tests {
                 }
             }
         }
-        assert!(checked >= 50, "footprint sweep covered too few points ({checked})");
+        assert!(
+            checked >= 50,
+            "footprint sweep covered too few points ({checked})"
+        );
     }
 
     #[test]
@@ -36540,10 +36737,12 @@ mod tests {
                 .filter_map(|plane| harness.plane_quad(plane))
                 .collect();
 
-            let min_x = xz.iter().map(|c| c.x).fold(f32::INFINITY, f32::min) - GIZMO_PLANE_PICK_RADIUS;
+            let min_x =
+                xz.iter().map(|c| c.x).fold(f32::INFINITY, f32::min) - GIZMO_PLANE_PICK_RADIUS;
             let max_x =
                 xz.iter().map(|c| c.x).fold(f32::NEG_INFINITY, f32::max) + GIZMO_PLANE_PICK_RADIUS;
-            let min_y = xz.iter().map(|c| c.y).fold(f32::INFINITY, f32::min) - GIZMO_PLANE_PICK_RADIUS;
+            let min_y =
+                xz.iter().map(|c| c.y).fold(f32::INFINITY, f32::min) - GIZMO_PLANE_PICK_RADIUS;
             let max_y =
                 xz.iter().map(|c| c.y).fold(f32::NEG_INFINITY, f32::max) + GIZMO_PLANE_PICK_RADIUS;
 
@@ -36559,8 +36758,7 @@ mod tests {
                         && other_quads
                             .iter()
                             .all(|quad| !point_in_polygon_2d(probe, quad));
-                    let beyond_axes =
-                        harness.nearest_axis_distance(probe) > GIZMO_AXIS_PICK_RADIUS;
+                    let beyond_axes = harness.nearest_axis_distance(probe) > GIZMO_AXIS_PICK_RADIUS;
                     let within_xz_tolerance =
                         distance_to_polygon_edges_2d(probe, &xz) <= GIZMO_PLANE_PICK_RADIUS;
                     if !(outside_all_quads && beyond_axes && within_xz_tolerance) {
@@ -36655,6 +36853,7 @@ mod tests {
                 room,
                 2,
                 0,
+                0,
             ),
             Some((2, 0))
         );
@@ -36665,6 +36864,7 @@ mod tests {
                 project.active_scene_mut(),
                 room,
                 -1,
+                0,
                 0,
             ),
             Some((0, 0))
@@ -42307,8 +42507,7 @@ mod tests {
     fn ui_scene_create_switch_edit_isolated_delete_clamps() {
         let mut project = ProjectDocument::new("ui-scene-crud");
         project.normalize_loaded();
-        let mut workspace =
-            EditorWorkspace::with_project(test_temp_dir("ui-scene-crud"), project);
+        let mut workspace = EditorWorkspace::with_project(test_temp_dir("ui-scene-crud"), project);
 
         // One default scene to start; index points at it.
         assert_eq!(workspace.project.ui_scenes.len(), 1);
@@ -42335,11 +42534,7 @@ mod tests {
             "Probe",
         );
         let added = workspace.selection.selected_ui_node;
-        assert!(workspace
-            .current_ui_scene()
-            .unwrap()
-            .node(added)
-            .is_some());
+        assert!(workspace.current_ui_scene().unwrap().node(added).is_some());
         let second_node_count = workspace.current_ui_scene().unwrap().nodes().len();
 
         // Switch back to scene 0: its structure is untouched, and the
@@ -42357,15 +42552,11 @@ mod tests {
             "edit must not change the other scene's node count"
         );
         assert!(
-            first_scene
-                .nodes()
-                .iter()
-                .all(|node| node.name != "Probe"),
+            first_scene.nodes().iter().all(|node| node.name != "Probe"),
             "edit must not leak into the other scene"
         );
         assert_eq!(
-            workspace.selection.selected_ui_node,
-            first_scene.root,
+            workspace.selection.selected_ui_node, first_scene.root,
             "selection resets on scene switch"
         );
 
@@ -42403,17 +42594,15 @@ mod tests {
         // Both new interactive kinds appear in the add-node menu.
         let addable = default_addable_ui_kinds();
         assert!(
-            addable
-                .iter()
-                .any(|(label, kind)| *label == "Button"
-                    && matches!(kind, UiNodeKind::Button { .. })),
+            addable.iter().any(
+                |(label, kind)| *label == "Button" && matches!(kind, UiNodeKind::Button { .. })
+            ),
             "Button must be addable"
         );
         assert!(
-            addable
-                .iter()
-                .any(|(label, kind)| *label == "Slider"
-                    && matches!(kind, UiNodeKind::Slider { .. })),
+            addable.iter().any(
+                |(label, kind)| *label == "Slider" && matches!(kind, UiNodeKind::Slider { .. })
+            ),
             "Slider must be addable"
         );
 
