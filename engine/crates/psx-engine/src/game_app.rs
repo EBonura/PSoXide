@@ -235,7 +235,20 @@ impl<'a, S: Scene> GameApp<'a, S> {
         };
         let option = self.options[index];
         let next = self.option_values[index].saturating_add(delta);
-        self.option_values[index] = next.clamp(option.min, option.max);
+        let next = next.clamp(option.min, option.max);
+        if self.option_values[index] != next {
+            self.option_values[index] = next;
+            self.apply_current_options();
+        }
+    }
+
+    /// Publish the live option store through the project hook. UI scenes call
+    /// this after front-end edits so global presentation options (screen
+    /// position, gamma, etc.) can preview immediately, and gameplay entry calls
+    /// it so the same values are active for play.
+    fn apply_current_options(&mut self) {
+        self.gameplay
+            .apply_options(self.options, &self.option_values[..self.option_len]);
     }
 
     /// Resolve a flow-state index to its `Copy` [`StateTag`]. An
@@ -281,8 +294,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // Hand the current option values to gameplay on every entry (not just
         // first init), so a setting changed in a front-end menu before Play
         // takes effect this session.
-        self.gameplay
-            .apply_options(self.options, &self.option_values[..self.option_len]);
+        self.apply_current_options();
     }
 
     /// Resolve a UI scene id to its `[first, count)` block in the shared
@@ -537,6 +549,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             }
             StateTag::UiScene { .. } => {
                 // Cursor already at the UI entry from FlowCursor::new.
+                // Apply defaults once so global presentation options preview
+                // correctly even before the player starts gameplay.
+                self.apply_current_options();
                 // TODO(p5): run any per-scene enter hook here.
             }
         }
@@ -662,6 +677,8 @@ mod tests {
         inits: u32,
         updates: u32,
         renders: u32,
+        option_applications: u32,
+        last_option_value: i32,
     }
 
     impl Scene for CountingScene {
@@ -673,6 +690,14 @@ mod tests {
         }
         fn render(&mut self, _ctx: &mut Ctx) {
             self.renders += 1;
+        }
+        fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32]) {
+            self.option_applications += 1;
+            self.last_option_value = options
+                .iter()
+                .position(|option| option.id == OPT_ID)
+                .and_then(|index| values.get(index).copied())
+                .unwrap_or(0);
         }
     }
 
@@ -1161,6 +1186,43 @@ mod tests {
         press(&mut ctx, button::LEFT);
         app.update(&mut ctx);
         assert_eq!(value_of(&app, OPT_ID), 0, "LEFT at min clamps");
+    }
+
+    #[test]
+    fn front_end_option_edits_apply_options_for_preview() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(&OPT_FLOW_SLIDER, OPT_SCENES, OPT_NODES, OPTIONS, &mut scene);
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        assert_eq!(
+            app.gameplay.option_applications, 1,
+            "UI entry applies defaults so menu previews start from the live value"
+        );
+        assert_eq!(app.gameplay.last_option_value, 4);
+
+        idle_tick(&mut app, &mut ctx); // seed focus onto the slider
+        press(&mut ctx, button::RIGHT);
+        app.update(&mut ctx);
+        assert_eq!(value_of(&app, OPT_ID), 6);
+        assert_eq!(app.gameplay.option_applications, 2);
+        assert_eq!(
+            app.gameplay.last_option_value, 6,
+            "scrubbing a front-end slider publishes the new value immediately"
+        );
+
+        // Clamp at max and do not republish when another press leaves the value
+        // unchanged.
+        for expected in [8, 10] {
+            press(&mut ctx, button::RIGHT);
+            app.update(&mut ctx);
+            assert_eq!(value_of(&app, OPT_ID), expected);
+        }
+        assert_eq!(app.gameplay.option_applications, 4);
+        press(&mut ctx, button::RIGHT);
+        app.update(&mut ctx);
+        assert_eq!(value_of(&app, OPT_ID), 10);
+        assert_eq!(app.gameplay.option_applications, 4);
     }
 
     #[test]
