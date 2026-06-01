@@ -648,6 +648,19 @@ pub enum UiNodeKind {
         #[serde(default = "default_ui_slider_knob")]
         knob: [u8; 3],
     },
+    /// Non-visual CD-DA music cue for the containing UI scene.
+    Music {
+        /// Project-relative source WAV. The playtest/export disc builder
+        /// converts it to a sector-aligned CD-DA track automatically.
+        #[serde(default)]
+        wav_path: String,
+        /// CD-DA playback volume as a percentage of the hardware maximum.
+        #[serde(default = "default_ui_music_volume")]
+        volume: u8,
+        /// Restart the track when the CD-ROM reports playback has ended.
+        #[serde(default)]
+        loop_track: bool,
+    },
 }
 
 impl UiNodeKind {
@@ -662,6 +675,7 @@ impl UiNodeKind {
             Self::Bar { .. } => "Bar",
             Self::Button { .. } => "Button",
             Self::Slider { .. } => "Slider",
+            Self::Music { .. } => "Music",
         }
     }
 
@@ -676,6 +690,7 @@ impl UiNodeKind {
             | Self::Bar { rect, .. }
             | Self::Button { rect, .. }
             | Self::Slider { rect, .. } => Some(rect),
+            Self::Music { .. } => None,
         }
     }
 
@@ -690,6 +705,7 @@ impl UiNodeKind {
             | Self::Bar { rect, .. }
             | Self::Button { rect, .. }
             | Self::Slider { rect, .. } => Some(*rect),
+            Self::Music { .. } => None,
         }
     }
 }
@@ -716,6 +732,10 @@ fn default_ui_slider_fill() -> [u8; 3] {
 
 fn default_ui_slider_knob() -> [u8; 3] {
     [210, 218, 232]
+}
+
+fn default_ui_music_volume() -> u8 {
+    25
 }
 
 /// One node in an authored UI scene tree.
@@ -1069,6 +1089,9 @@ impl UiScene {
         let valid_ids: HashSet<UiNodeId> = self.nodes.iter().map(|node| node.id).collect();
         for node in &mut self.nodes {
             max_id = max_id.max(node.id.raw());
+            if let UiNodeKind::Music { volume, .. } = &mut node.kind {
+                *volume = (*volume).min(100);
+            }
             node.children
                 .retain(|child| *child != node.id && valid_ids.contains(child));
             if node.id != self.root
@@ -5239,6 +5262,16 @@ pub const MIN_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 2;
 pub const DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS;
 /// Largest portal-room visible-window budget supported by the current runtime.
 pub const MAX_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 32;
+/// Minimum authored gravity, in engine units per 60 Hz tick squared.
+pub const MIN_WORLD_GRAVITY_PER_TICK: i32 = 0;
+/// Maximum authored gravity, in engine units per 60 Hz tick squared.
+pub const MAX_WORLD_GRAVITY_PER_TICK: i32 = 2_048;
+/// Q8 identity weight (`256 = 1.0x`) for entity physics bodies.
+pub const PHYSICS_WEIGHT_ONE_Q8: u16 = 256;
+/// Smallest authored entity weight multiplier.
+pub const MIN_PHYSICS_WEIGHT_Q8: u16 = 1;
+/// Largest authored entity weight multiplier.
+pub const MAX_PHYSICS_WEIGHT_Q8: u16 = 4_096;
 
 const fn default_world_draw_distance() -> i32 {
     25_000
@@ -5258,6 +5291,14 @@ const fn default_world_streaming_resident_chunks() -> u8 {
 
 const fn default_world_streaming_visible_chunks() -> u8 {
     DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS
+}
+
+const fn default_world_gravity_per_tick() -> i32 {
+    96
+}
+
+const fn default_physics_weight_q8() -> u16 {
+    PHYSICS_WEIGHT_ONE_Q8
 }
 
 /// Runtime culling knobs inherited by descendant Rooms from their
@@ -5350,6 +5391,61 @@ impl Default for WorldStreamingSettings {
         Self {
             resident_chunk_limit: default_world_streaming_resident_chunks(),
             visible_chunk_limit: default_world_streaming_visible_chunks(),
+        }
+    }
+}
+
+/// World-level physics settings inherited by descendant rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldPhysicsSettings {
+    /// Downward acceleration applied by character/controller physics,
+    /// in engine units per fixed 60 Hz tick squared.
+    #[serde(default = "default_world_gravity_per_tick")]
+    pub gravity_per_tick: i32,
+}
+
+impl WorldPhysicsSettings {
+    /// Clamp authored values to runtime-safe integer ranges.
+    pub fn normalized(self) -> Self {
+        Self {
+            gravity_per_tick: self
+                .gravity_per_tick
+                .clamp(MIN_WORLD_GRAVITY_PER_TICK, MAX_WORLD_GRAVITY_PER_TICK),
+        }
+    }
+}
+
+impl Default for WorldPhysicsSettings {
+    fn default() -> Self {
+        Self {
+            gravity_per_tick: default_world_gravity_per_tick(),
+        }
+    }
+}
+
+/// Per-entity physics body settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicsBodySettings {
+    /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
+    #[serde(default = "default_physics_weight_q8")]
+    pub weight_q8: u16,
+}
+
+impl PhysicsBodySettings {
+    /// Clamp authored values to runtime-safe integer ranges.
+    pub fn normalized(self) -> Self {
+        Self {
+            weight_q8: self
+                .weight_q8
+                .clamp(MIN_PHYSICS_WEIGHT_Q8, MAX_PHYSICS_WEIGHT_Q8),
+        }
+    }
+}
+
+impl Default for PhysicsBodySettings {
+    fn default() -> Self {
+        Self {
+            weight_q8: default_physics_weight_q8(),
         }
     }
 }
@@ -8310,6 +8406,9 @@ pub enum NodeKind {
         /// Cook-time streaming controls inherited by descendant rooms.
         #[serde(default)]
         streaming: WorldStreamingSettings,
+        /// Runtime physics controls inherited by descendant rooms.
+        #[serde(default)]
+        physics: WorldPhysicsSettings,
     },
     /// One authored adaptive-style room: a sector grid plus its
     /// child entities and portal links.
@@ -8491,6 +8590,12 @@ pub enum NodeKind {
         #[serde(default = "default_weapon_grip")]
         weapon_grip: String,
     },
+    /// Physics body component for movable entities.
+    PhysicsBody {
+        /// Per-entity physics tuning.
+        #[serde(default)]
+        settings: PhysicsBodySettings,
+    },
     /// Static point light.
     PointLight {
         /// RGB light colour.
@@ -8558,6 +8663,7 @@ impl NodeKind {
             camera: WorldCameraSettings::default(),
             culling: WorldCullingSettings::default(),
             streaming: WorldStreamingSettings::default(),
+            physics: WorldPhysicsSettings::default(),
         }
     }
 
@@ -8580,6 +8686,7 @@ impl NodeKind {
             Self::AiController { .. } => "AI Controller",
             Self::Combat { .. } => "Combat",
             Self::Equipment { .. } => "Equipment",
+            Self::PhysicsBody { .. } => "Physics Body",
             Self::PointLight { .. } => "Point Light",
             Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
@@ -8603,6 +8710,7 @@ impl NodeKind {
                 | Self::AiController { .. }
                 | Self::Combat { .. }
                 | Self::Equipment { .. }
+                | Self::PhysicsBody { .. }
         )
     }
 }
@@ -9002,6 +9110,19 @@ impl Scene {
             let node = self.node(node_id)?;
             if let NodeKind::World { streaming, .. } = &node.kind {
                 return Some(streaming.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Physics settings inherited by `id` from the nearest World ancestor.
+    pub fn world_physics_for_node(&self, id: NodeId) -> Option<WorldPhysicsSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { physics, .. } = &node.kind {
+                return Some(physics.normalized());
             }
             current = node.parent;
         }
@@ -9922,6 +10043,7 @@ impl ProjectDocument {
                         camera,
                         culling,
                         streaming,
+                        physics,
                     } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
@@ -9952,6 +10074,10 @@ impl ProjectDocument {
                         *camera = camera.normalized();
                         *culling = culling.normalized();
                         *streaming = streaming.normalized();
+                        *physics = physics.normalized();
+                    }
+                    NodeKind::PhysicsBody { settings } => {
+                        *settings = settings.normalized();
                     }
                     _ => {}
                 }
@@ -10154,6 +10280,7 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
         | NodeKind::Interactable { .. }
         | NodeKind::AiController { .. }
         | NodeKind::Combat { .. }
+        | NodeKind::PhysicsBody { .. }
         | NodeKind::PointLight { .. }
         | NodeKind::Trigger { .. }
         | NodeKind::Portal { .. } => 0,
@@ -10208,6 +10335,7 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
         | NodeKind::Interactable { .. }
         | NodeKind::AiController { .. }
         | NodeKind::Combat { .. }
+        | NodeKind::PhysicsBody { .. }
         | NodeKind::PointLight { .. }
         | NodeKind::Trigger { .. }
         | NodeKind::Portal { .. } => 0,
@@ -11095,6 +11223,7 @@ mod tests {
                 camera: WorldCameraSettings::default(),
                 culling: WorldCullingSettings::default(),
                 streaming: WorldStreamingSettings::default(),
+                physics: WorldPhysicsSettings::default(),
             },
         );
         let mut grid = WorldGrid::empty(1, 1, 1024);

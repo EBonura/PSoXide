@@ -12,6 +12,9 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 const SPU_SAMPLE_RATE_HZ: u32 = 44_100;
+const CDDA_SAMPLE_RATE_HZ: u32 = 44_100;
+const CDDA_CHANNELS: usize = 2;
+const CDDA_SECTOR_BYTES: usize = 2352;
 const ADPCM_BLOCK_BYTES: usize = 16;
 const ADPCM_SAMPLES_PER_BLOCK: usize = 28;
 const ADPCM_FILTERS: [(i32, i32); 5] = [(0, 0), (60, 0), (115, -52), (98, -55), (122, -60)];
@@ -305,6 +308,27 @@ pub fn import_pack(
     Ok(report)
 }
 
+/// Convert a source WAV into a raw CD-DA track payload.
+///
+/// Output is 44.1 kHz stereo signed 16-bit little-endian PCM with no
+/// container header, padded to a whole number of 2352-byte CD-DA sectors.
+pub fn cook_cdda_track_from_wav(src: &[u8]) -> Result<Vec<u8>, Error> {
+    let wav = parse_wav_pcm16(src)?;
+    let mut stereo = wav_to_stereo_interleaved(&wav);
+    if stereo.is_empty() {
+        return Err(Error::EmptyAudio);
+    }
+    stereo = resample_stereo_linear(&stereo, wav.sample_rate_hz, CDDA_SAMPLE_RATE_HZ);
+
+    let mut out = Vec::with_capacity(stereo.len() * 2);
+    for sample in stereo {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    let pad = (CDDA_SECTOR_BYTES - (out.len() % CDDA_SECTOR_BYTES)) % CDDA_SECTOR_BYTES;
+    out.resize(out.len() + pad, 0);
+    Ok(out)
+}
+
 fn validate_manifest(manifest: &PackManifest) -> Result<(), Error> {
     if manifest.sounds.is_empty() {
         return Err(Error::InvalidManifest(
@@ -434,6 +458,18 @@ fn downmix_to_mono(samples: &[i16], channels: u16) -> Vec<i16> {
         .collect()
 }
 
+fn wav_to_stereo_interleaved(wav: &WavPcm16) -> Vec<i16> {
+    let channels = wav.channels as usize;
+    wav.samples
+        .chunks_exact(channels)
+        .flat_map(|frame| {
+            let left = frame[0];
+            let right = if channels > 1 { frame[1] } else { left };
+            [left, right]
+        })
+        .collect()
+}
+
 fn resample_linear(samples: &[i16], source_rate: u32, target_rate: u32) -> Vec<i16> {
     if source_rate == target_rate || samples.len() < 2 {
         return samples.to_vec();
@@ -455,6 +491,34 @@ fn resample_linear(samples: &[i16], source_rate: u32, target_rate: u32) -> Vec<i
                 .round()
                 .clamp(i16::MIN as f64, i16::MAX as f64) as i16,
         );
+    }
+    out
+}
+
+fn resample_stereo_linear(samples: &[i16], source_rate: u32, target_rate: u32) -> Vec<i16> {
+    let frames = samples.len() / CDDA_CHANNELS;
+    if source_rate == target_rate || frames < 2 {
+        return samples.to_vec();
+    }
+    let out_frames =
+        ((frames as u64 * target_rate as u64) + (source_rate as u64 / 2)) / source_rate as u64;
+    let out_frames = out_frames.max(1) as usize;
+    let mut out = Vec::with_capacity(out_frames * CDDA_CHANNELS);
+
+    for i in 0..out_frames {
+        let pos = (i as f64) * (source_rate as f64) / (target_rate as f64);
+        let lo = pos.floor() as usize;
+        let hi = (lo + 1).min(frames - 1);
+        let t = pos - lo as f64;
+        for ch in 0..CDDA_CHANNELS {
+            let a = samples[lo * CDDA_CHANNELS + ch] as f64;
+            let b = samples[hi * CDDA_CHANNELS + ch] as f64;
+            out.push(
+                (a + (b - a) * t)
+                    .round()
+                    .clamp(i16::MIN as f64, i16::MAX as f64) as i16,
+            );
+        }
     }
     out
 }
@@ -800,6 +864,25 @@ mod tests {
         assert_eq!(cooked.psau[12], CODEC_SPU_ADPCM);
         assert_eq!(cooked.psau[13], 1);
         assert_eq!(cooked.decoded_preview.len(), samples.len());
+    }
+
+    #[test]
+    fn cook_cdda_from_wav_emits_sector_padded_stereo_pcm() {
+        let samples = [100i16, -100, 200, -200];
+        let wav = write_wav_mono_i16(44_100, &samples);
+        let cooked = cook_cdda_track_from_wav(&wav).unwrap();
+
+        assert_eq!(cooked.len() % CDDA_SECTOR_BYTES, 0);
+        assert!(cooked.len() >= CDDA_SECTOR_BYTES);
+        for (i, sample) in samples.iter().enumerate() {
+            let off = i * 4;
+            assert_eq!(i16::from_le_bytes([cooked[off], cooked[off + 1]]), *sample);
+            assert_eq!(
+                i16::from_le_bytes([cooked[off + 2], cooked[off + 3]]),
+                *sample
+            );
+        }
+        assert!(cooked[samples.len() * 4..].iter().all(|&byte| byte == 0));
     }
 
     #[test]

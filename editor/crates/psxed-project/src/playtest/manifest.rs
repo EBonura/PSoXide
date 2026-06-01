@@ -59,6 +59,10 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         generated_dir.join(WORLD_PACK_ORDER_FILENAME),
         render_world_pack_order(package),
     )?;
+    std::fs::write(
+        generated_dir.join(CDDA_TRACKS_FILENAME),
+        render_cdda_tracks(package),
+    )?;
     Ok(())
 }
 
@@ -307,7 +311,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -319,6 +323,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.visibility_radius,
             room.resident_chunk_limit,
             room.visible_chunk_limit,
+            room.gravity_per_tick,
             room.material_first,
             room.material_count,
             room.portal_first,
@@ -1125,7 +1130,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
@@ -1134,6 +1139,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             character.visual_offset[2],
             character.visual_yaw,
             character.visual_scale_q8,
+            character.weight_q8,
             character.radius,
             character.height,
             character.walk_speed,
@@ -1201,6 +1207,17 @@ fn render_world_pack_order(package: &PlaytestPackage) -> String {
     );
     for room in world_pack_order(package) {
         let _ = writeln!(out, "{room}");
+    }
+    out
+}
+
+fn render_cdda_tracks(package: &PlaytestPackage) -> String {
+    let mut out = String::from(
+        "# PSoXide CD-DA WAV sources\n\
+         # One WAV path per line. Track 2 is the first line, track 3 the second, etc.\n",
+    );
+    for track in &package.cdda_tracks {
+        let _ = writeln!(out, "{}", track.wav_path);
     }
     out
 }
@@ -2177,6 +2194,7 @@ fn render_ui_node_kind(kind: &UiNodeKind) -> &'static str {
         UiNodeKind::Bar { .. } => "LevelUiNodeKind::Bar",
         UiNodeKind::Button { .. } => "LevelUiNodeKind::Button",
         UiNodeKind::Slider { .. } => "LevelUiNodeKind::Slider",
+        UiNodeKind::Music { .. } => "LevelUiNodeKind::Music",
     }
 }
 
@@ -3089,6 +3107,7 @@ mod tests {
             visibility_radius: 32,
             resident_chunk_limit: 10,
             visible_chunk_limit: 10,
+            gravity_per_tick: 96,
             material_first: 0,
             material_count: 0,
             portal_first: 0,
