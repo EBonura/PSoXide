@@ -1362,13 +1362,25 @@ fn cook_ui_nodes(
         // No authored UI: start straight in gameplay.
         PlaytestGameFlow::default()
     } else {
-        // One state per scene, gameplay last, entering the first scene.
+        // One state per scene, gameplay last. The entry state comes from the
+        // project's boot target: a UI scene by id (its position in the list),
+        // or gameplay (the final state). An unknown/removed boot scene falls
+        // back to the gameplay state so a stale selection cannot wedge boot.
         let mut states: Vec<PlaytestFlowState> = ui_scenes
             .iter()
             .map(|scene| PlaytestFlowState::UiScene { scene: scene.id })
             .collect();
+        let gameplay_index = states.len() as u16;
         states.push(PlaytestFlowState::Gameplay);
-        PlaytestGameFlow { states, entry: 0 }
+        let entry = match project.boot {
+            crate::BootTarget::Gameplay => gameplay_index,
+            crate::BootTarget::UiScene(scene_id) => ui_scenes
+                .iter()
+                .position(|scene| u64::from(scene.id) == scene_id.raw())
+                .map(|index| index as u16)
+                .unwrap_or(gameplay_index),
+        };
+        PlaytestGameFlow { states, entry }
     };
 
     (ui_nodes, ui_scenes, game_flow)
@@ -7730,7 +7742,14 @@ mod tests {
             })
         );
         assert_eq!(flow.states.last(), Some(&PlaytestFlowState::Gameplay));
-        assert_eq!(flow.entry, 0);
+        // With the default boot target (Gameplay), entry points at the gameplay
+        // state (the last one), not the first UI scene. Authoring a UI boot
+        // target via `project.boot` is what moves entry onto a menu scene.
+        assert_eq!(flow.entry as usize, flow.states.len() - 1);
+        assert_eq!(
+            flow.states.get(flow.entry as usize),
+            Some(&PlaytestFlowState::Gameplay)
+        );
         let group_index = nodes
             .iter()
             .position(|node| {
@@ -7749,6 +7768,66 @@ mod tests {
         assert_eq!(nodes[label_index].parent, Some(group_index as u16));
         assert_eq!((nodes[label_index].x, nodes[label_index].y), (8, 6));
         assert_eq!(nodes[label_index].tag, "prompt");
+    }
+
+    #[test]
+    fn boot_target_sets_game_flow_entry_to_the_chosen_scene() {
+        // Two UI scenes; choose the SECOND as the boot target and confirm the
+        // cooked flow enters that scene's state (not index 0, not gameplay).
+        let mut project = ProjectDocument::new("boot");
+        project
+            .ui_scenes
+            .push(crate::UiScene::empty_canvas("Menu", crate::UiSceneId::UNASSIGNED));
+        project.normalize_loaded(); // hands out stable scene ids
+        let menu_id = project.ui_scenes[1].id;
+        project.boot = crate::BootTarget::UiScene(menu_id);
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (_nodes, scenes, flow) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+
+        let menu_pos = scenes
+            .iter()
+            .position(|scene| u64::from(scene.id) == menu_id.raw())
+            .expect("menu scene cooked");
+        assert_eq!(flow.entry as usize, menu_pos);
+        assert_eq!(
+            flow.states.get(flow.entry as usize),
+            Some(&PlaytestFlowState::UiScene {
+                scene: scenes[menu_pos].id
+            })
+        );
+    }
+
+    #[test]
+    fn boot_target_falls_back_to_gameplay_when_scene_missing() {
+        // A boot target pointing at a non-existent scene must not wedge boot:
+        // entry falls back to the gameplay state.
+        let mut project = ProjectDocument::new("boot-missing");
+        project.normalize_loaded();
+        project.boot = crate::BootTarget::UiScene(crate::UiSceneId(9999));
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (_nodes, _scenes, flow) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+        assert_eq!(
+            flow.states.get(flow.entry as usize),
+            Some(&PlaytestFlowState::Gameplay)
+        );
     }
 
     #[test]
