@@ -893,6 +893,7 @@ impl ApplicationHandler for Shell {
                     let editor_selected_sector_faces = state.editor.selected_sector_faces();
                     let editor_paint_preview = state.editor.paint_target_preview();
                     let editor_active_room = state.editor.active_room_id();
+                    let editor_active_floor = state.editor.active_floor();
                     let editor_entity_bounds =
                         state.editor.collect_entity_bounds(editor_active_room);
                     let editor_hovered_entity = state.editor.hovered_entity_node();
@@ -908,6 +909,7 @@ impl ApplicationHandler for Shell {
                         editor_show_lights,
                         editor_hidden_scene_nodes,
                         editor_active_room,
+                        editor_active_floor,
                         editor_selected,
                         editor_hover,
                         editor_selection,

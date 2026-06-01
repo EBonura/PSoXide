@@ -295,6 +295,7 @@ pub fn build_phase1_frame(
     show_lights: bool,
     hidden_scene_nodes: &HashSet<NodeId>,
     active_room: Option<psxed_project::NodeId>,
+    active_floor: usize,
     selected: psxed_project::NodeId,
     hovered_primitive: Option<psxed_ui::Selection>,
     selected_primitive: Option<psxed_ui::Selection>,
@@ -312,6 +313,7 @@ pub fn build_phase1_frame(
         project,
         hidden_scene_nodes,
         active_room,
+        active_floor,
         selected,
         selected_primitive,
         selected_primitives,
@@ -372,6 +374,27 @@ pub fn build_phase1_frame(
             hidden_scene_nodes,
             &mut scratch,
         );
+        // Ghost the floor directly below the active floor (dropped a
+        // storey) so holes / stairs line up while authoring the floor
+        // above. Active room only; `grid` here is already the active
+        // floor, so its elevation gives the drop distance.
+        if Some(room_id) == active_room {
+            if let Some(base) =
+                project
+                    .active_scene()
+                    .node(room_id)
+                    .and_then(|node| match &node.kind {
+                        NodeKind::Room { grid } => Some(grid),
+                        _ => None,
+                    })
+            {
+                let active = active_floor.min(base.floor_count().saturating_sub(1));
+                if let Some(below) = active.checked_sub(1).and_then(|i| base.floor(i)) {
+                    let dy = below.elevation - grid.elevation;
+                    walk_room_ghost(below, dy, world_camera, &mut scratch);
+                }
+            }
+        }
         walk_image_props(
             project,
             room_id,
@@ -553,6 +576,7 @@ fn preview_room_grids<'a>(
     project: &'a ProjectDocument,
     hidden_scene_nodes: &HashSet<NodeId>,
     active_room: Option<NodeId>,
+    active_floor: usize,
     selected: NodeId,
     selected_primitive: Option<psxed_ui::Selection>,
     selected_primitives: &[psxed_ui::Selection],
@@ -613,6 +637,16 @@ fn preview_room_grids<'a>(
             _ => None,
         }) else {
             continue;
+        };
+        // Render the active room at its active floor (in place) so the
+        // viewport shows the floor being authored; other rooms render
+        // their base floor. Floor 0 == the base grid, so the common
+        // single-floor case is unchanged.
+        let grid = if Some(room) == active_room {
+            let floor = active_floor.min(grid.floor_count().saturating_sub(1));
+            grid.floor(floor).unwrap_or(grid)
+        } else {
+            grid
         };
         result.push((room, grid));
         if result.len() >= EDITOR_PREVIEW_MAX_ROOMS || depth >= EDITOR_PREVIEW_PORTAL_DEPTH {
@@ -979,6 +1013,85 @@ fn walk_room(
                 }
             }
 
+            if scratch.used >= TRI_CAP || scratch.tex_used >= TRI_CAP {
+                return;
+            }
+        }
+    }
+}
+
+/// Flat dim shade for a ghosted floor-below. Distinct from any authored
+/// material so the active floor reads as the one in focus.
+const GHOST_FLOOR_SHADE: FaceShade = FaceShade::Flat {
+    rgb: (70, 78, 108),
+    sidedness: psxed_project::MaterialFaceSidedness::Both,
+};
+
+/// Render `grid` as a dim, non-interactive ghost dropped `y_offset`
+/// engine units in Y. Shows the floor below the one being authored so
+/// holes / stairs can be lined up. Floors + walls only (no ceiling),
+/// flat-shaded so it never competes with the active floor's lit,
+/// textured surfaces. Reuses the normal emitters with locally offset
+/// heights, so depth sorts against the active floor under one camera.
+fn walk_room_ghost(
+    grid: &WorldGrid,
+    y_offset: i32,
+    camera: psx_engine::WorldCamera,
+    scratch: &mut PreviewScratch,
+) {
+    let s = grid.sector_size;
+    let off3 = |h: [i32; 3]| [h[0] + y_offset, h[1] + y_offset, h[2] + y_offset];
+    let off4 = |h: [i32; 4]| {
+        [
+            h[0] + y_offset,
+            h[1] + y_offset,
+            h[2] + y_offset,
+            h[3] + y_offset,
+        ]
+    };
+    for x in 0..grid.width {
+        for z in 0..grid.depth {
+            let Some(sector) = grid.sector(x, z) else {
+                continue;
+            };
+            let x0 = grid.cell_world_x(x);
+            let x1 = x0 + s;
+            let z0 = grid.cell_world_z(z);
+            let z1 = z0 + s;
+            if let Some(floor) = sector.floor.as_ref() {
+                push_horizontal_face(
+                    scratch,
+                    camera,
+                    [x0, x1, z0, z1],
+                    [
+                        off3(floor.triangle_heights(0)),
+                        off3(floor.triangle_heights(1)),
+                    ],
+                    floor.split,
+                    floor.dropped_corner,
+                    floor.triangle_uv(0),
+                    GHOST_FLOOR_SHADE,
+                    floor.triangle_uv(1),
+                    GHOST_FLOOR_SHADE,
+                    /* flip_winding */ false,
+                );
+            }
+            for direction in GridDirection::ALL {
+                let edge = WallEdge::from_direction(direction);
+                for face in sector.walls.get(direction).iter() {
+                    push_wall_face(
+                        scratch,
+                        camera,
+                        [x0, x1, z0, z1],
+                        edge,
+                        off4(face.heights),
+                        face.dropped_corner,
+                        face.uv,
+                        GHOST_FLOOR_SHADE,
+                        [camera.position.x, camera.position.y, camera.position.z],
+                    );
+                }
+            }
             if scratch.used >= TRI_CAP || scratch.tex_used >= TRI_CAP {
                 return;
             }
@@ -5853,6 +5966,7 @@ mod tests {
             true,
             &empty_hidden,
             None,
+            0,
             NodeId::ROOT,
             None,
             None,
@@ -6160,6 +6274,7 @@ mod tests {
             &project,
             &hidden,
             Some(room_a),
+            0,
             NodeId::ROOT,
             None,
             &[],

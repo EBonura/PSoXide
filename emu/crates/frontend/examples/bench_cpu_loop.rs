@@ -54,9 +54,10 @@ struct Args {
 fn parse_args() -> Args {
     let mut a = Args {
         bios: PathBuf::from("bios/SCPH1001.BIN"),
-        disc: PathBuf::from(std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-            "<rom-path>".into()
-        })),
+        disc: PathBuf::from(
+            std::env::var("PSOXIDE_DISC")
+                .unwrap_or_else(|_| "<rom-path>".into()),
+        ),
         cycles_per_frame: 558_000,
         frames: 600,
         warmup: 50_000_000,
