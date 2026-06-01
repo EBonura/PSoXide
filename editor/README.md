@@ -1,4 +1,4 @@
-# `editor/` — editor & content pipeline
+# `editor/` (editor & content pipeline)
 
 The host-side authoring stack: the project model, the asset cookers that
 turn source content (OBJ/glTF meshes, PNG/JPG textures, WAV audio) into
@@ -31,6 +31,6 @@ editor crates here are the **producers**, and the SDK's
 
 ## See also
 
-- [Root README](../README.md#6-open-the-editor) — launching the editor.
-- [`docs/editor-architecture.md`](../docs/editor-architecture.md) — editor internals.
-- [`docs/editor-model-authoring.md`](../docs/editor-model-authoring.md), [`docs/editor-lighting.md`](../docs/editor-lighting.md), [`docs/editor-runtime-coordinates.md`](../docs/editor-runtime-coordinates.md) — authoring workflows.
+- [Root README](../README.md#6-open-the-editor). Launching the editor.
+- [`docs/editor-architecture.md`](../docs/editor-architecture.md). Editor internals.
+- [`docs/editor-model-authoring.md`](../docs/editor-model-authoring.md), [`docs/editor-lighting.md`](../docs/editor-lighting.md), [`docs/editor-runtime-coordinates.md`](../docs/editor-runtime-coordinates.md). Authoring workflows.
