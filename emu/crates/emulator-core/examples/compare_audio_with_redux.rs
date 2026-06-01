@@ -274,6 +274,17 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         let istat = bus.irq_mut().stat();
         let imask = bus.irq_mut().mask();
         eprintln!("[ours] global IRQ: I_STAT={istat:08x} I_MASK={imask:08x} (active={:08x})", istat & imask);
+        let t2 = &bus.timers().timers[2];
+        eprintln!(
+            "[ours] timer2: counter={} mode={:04x} target={} fires={} (irq_on_tgt={} repeat={} reset_at_tgt={} src={})",
+            t2.counter, t2.mode, t2.target, bus.timers().dbg_timer2_fires,
+            (t2.mode >> 4) & 1, (t2.mode >> 6) & 1, (t2.mode >> 3) & 1, (t2.mode >> 8) & 3,
+        );
+        if let Ok(addr_s) = std::env::var("PSOXIDE_PEEK") {
+            if let Ok(addr) = u32::from_str_radix(addr_s.trim_start_matches("0x"), 16) {
+                eprintln!("[ours] peek 0x{addr:08x} = {:08x}", bus.peek_instruction(addr).unwrap_or(0));
+            }
+        }
         eprintln!(
             "[ours] regs: v0={:08x} v1={:08x} a0={:08x} a1={:08x} a2={:08x} a3={:08x} sp={:08x} ra={:08x}",
             cpu.gpr(2), cpu.gpr(3), cpu.gpr(4), cpu.gpr(5), cpu.gpr(6), cpu.gpr(7), cpu.gpr(29), cpu.gpr(31),
@@ -281,7 +292,7 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         if let Some(&(top_pc, _)) = pcs.first() {
             let base = top_pc & !0x1F;
             eprintln!("[ours] spin-loop words @0x{base:08x}:");
-            for off in 0..16u32 {
+            for off in 0..32u32 {
                 let addr = base + off * 4;
                 if let Some(word) = bus.peek_instruction(addr) {
                     eprintln!("    0x{addr:08x}: {word:08x}");

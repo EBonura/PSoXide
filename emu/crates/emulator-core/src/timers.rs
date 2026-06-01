@@ -76,6 +76,8 @@ pub struct Timers {
     /// `cycleStart` and the live count is `(cycle - cycleStart) /
     /// rate` evaluated lazily.
     last_advance_cycle: u64,
+    /// Diagnostic: count of Timer 2 IRQ fires since reset.
+    pub dbg_timer2_fires: u64,
 }
 
 impl Timers {
@@ -344,6 +346,9 @@ impl Timers {
         }
 
         t.counter = new_val as u32;
+        if idx == 2 && fired {
+            self.dbg_timer2_fires += 1;
+        }
         fired
     }
 }
