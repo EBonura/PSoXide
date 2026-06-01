@@ -79,7 +79,7 @@ use psx_gpu::{
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::{QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
-    VideoMode,
+    set_draw_offset, VideoMode,
 };
 use psx_level::portal_visibility::{
     build_portal_visibility_with_room_bounds, debug_portal_clip, PortalClipDebug,
@@ -410,6 +410,17 @@ fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
 fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
     DepthRange::new(NEAR_Z, room_draw_distance(record))
 }
+
+/// Project-option id (cooked from the demo10 "Screen Offset" option) that
+/// horizontally shifts the whole rendered scene. Set once at gameplay entry
+/// via [`Scene::apply_options`].
+const SCREEN_OFFSET_OPTION_ID: u16 = 1;
+
+/// Horizontal screen offset in pixels. Applied as a GPU draw offset at the
+/// start of each gameplay frame so the whole image (rooms, models, HUD) shifts
+/// uniformly -- the classic CRT TV-position setting. Written by
+/// `Playtest::apply_options` from the bound project option.
+static mut SCREEN_OFFSET_X: i16 = 0;
 
 fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
     WorldSurfaceOptions::new(WORLD_BAND, room_depth_range(record))
@@ -3518,6 +3529,16 @@ impl Scene for Playtest {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
     }
 
+    /// Apply front-end settings chosen before Play. Currently the "Screen
+    /// Offset" option, which horizontally shifts the whole rendered scene.
+    fn apply_options(&mut self, options: &[psx_level::LevelOptionDef], values: &[i32]) {
+        for (option, value) in options.iter().zip(values) {
+            if option.id == SCREEN_OFFSET_OPTION_ID {
+                unsafe { SCREEN_OFFSET_X = (*value).clamp(-128, 127) as i16 };
+            }
+        }
+    }
+
     fn init(&mut self, _ctx: &mut Ctx) {
         self.shadow_material = upload_shadow_texture();
         self.particle_material = Some(upload_particle_texture());
@@ -3793,6 +3814,11 @@ impl Scene for Playtest {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
+        // Apply the front-end "Screen Offset" setting: shift all gameplay
+        // drawing horizontally via the GPU draw offset (one call covers rooms,
+        // models, and the HUD uniformly).
+        set_draw_offset(unsafe { SCREEN_OFFSET_X }, 0);
+
         if !ctx.pad.is_analog() {
             if let Some(font) = self.font.as_ref() {
                 draw_analog_required_prompt(font);
