@@ -654,31 +654,48 @@ pub fn build_portal_visibility_with_room_bounds<
                 out.stats.reject_backface = out.stats.reject_backface.saturating_add(1);
                 continue;
             }
-            let Some(child_clip) = clipped_portal_clip(portal, camera, frustum) else {
-                out.stats.reject_frustum = out.stats.reject_frustum.saturating_add(1);
-                out.stats
-                    .reject_frustum_room_mask
-                    .insert_room(portal.destination_room);
-                out.stats.reject_frustum_portal_mask |= portal_mask;
-                continue;
+            // Vertical (kind=1) floor/ceiling portals are horizontal
+            // quads: viewed from a level camera they collapse edge-on, so
+            // the normal frustum clip rejects them even though the hole is
+            // right under/over you. These portals are emitted ONLY where a
+            // real gap exists (open floor + open ceiling), and the
+            // front-face test already gates by which room you're in, so an
+            // edge-on vertical portal is admitted by INHERITING the parent
+            // frustum (the linked room is an implicit neighbour through the
+            // hole). When the camera does look through the hole at an angle
+            // the quad has area and we use the tighter clipped frustum.
+            let is_vertical = portal.kind == 1;
+            let child_clip = clipped_portal_clip(portal, camera, frustum);
+            let usable_clip = match child_clip {
+                Some(clip) if !portal_clip_is_tiny(clip, camera.min_portal_width_q12.max(0)) => {
+                    Some(clip)
+                }
+                _ => None,
             };
-            let child_clip = if portal_clip_is_tiny(child_clip, camera.min_portal_width_q12.max(0))
-            {
-                out.stats.reject_tiny = out.stats.reject_tiny.saturating_add(1);
+            if usable_clip.is_none() && !is_vertical {
+                if child_clip.is_none() {
+                    out.stats.reject_frustum = out.stats.reject_frustum.saturating_add(1);
+                    out.stats
+                        .reject_frustum_room_mask
+                        .insert_room(portal.destination_room);
+                    out.stats.reject_frustum_portal_mask |= portal_mask;
+                } else {
+                    out.stats.reject_tiny = out.stats.reject_tiny.saturating_add(1);
+                }
                 continue;
-            } else {
-                child_clip
-            };
+            }
             let child_depth = frustum.depth.saturating_add(1);
+            // Edge-on vertical portal: inherit the parent frustum so the
+            // hole-linked room stays visible. Otherwise use the clip.
             let child = PortalFrustum {
                 room: portal.destination_room,
                 source_room: portal.source_room,
                 source_portal: current_portal_index.min(u16::MAX as usize) as u16,
                 depth: child_depth,
-                left_tan_q12: child_clip.left_tan_q12,
-                right_tan_q12: child_clip.right_tan_q12,
-                min_y_tan_q12: child_clip.min_y_tan_q12,
-                max_y_tan_q12: child_clip.max_y_tan_q12,
+                left_tan_q12: usable_clip.map_or(frustum.left_tan_q12, |c| c.left_tan_q12),
+                right_tan_q12: usable_clip.map_or(frustum.right_tan_q12, |c| c.right_tan_q12),
+                min_y_tan_q12: usable_clip.map_or(frustum.min_y_tan_q12, |c| c.min_y_tan_q12),
+                max_y_tan_q12: usable_clip.map_or(frustum.max_y_tan_q12, |c| c.max_y_tan_q12),
             };
             if out.contains_redundant_frustum(child) {
                 continue;
@@ -1587,6 +1604,79 @@ mod tests {
         assert_eq!(out.room_count, 1);
         assert_eq!(out.stats.reject_frustum, 1);
         assert_eq!(out.stats.reject_frustum_room_mask, 0b10);
+    }
+
+    /// A vertical (kind=1) floor/ceiling portal is a horizontal quad.
+    /// Viewed from a level camera it is edge-on, so a wall portal in the
+    /// same pose would be frustum-rejected. The vertical-portal bypass
+    /// admits the destination room (the hole-linked floor above/below) by
+    /// inheriting the parent frustum, so a stacked room stays visible when
+    /// you stand under/over an open hole.
+    #[test]
+    fn vertical_portal_admits_room_when_edge_on() {
+        let rooms = [room(0, 0, 1), room(1, 1, 0)];
+        // Horizontal up-portal at y=2048 over the cell in front of the
+        // camera; normal points down (-Y) toward the lower room.
+        let up = LevelRoomPortalRecord {
+            source_room: RoomIndex(0),
+            destination_room: RoomIndex(1),
+            kind: 1,
+            normal_x: 0,
+            normal_y: -1,
+            normal_z: 0,
+            vertex_x: [-1024, 1024, 1024, -1024],
+            vertex_y: [2048, 2048, 2048, 2048],
+            vertex_z: [1024, 1024, 3072, 3072],
+        };
+        let portals = [up];
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+
+        // Level forward camera in the lower room (below the portal plane),
+        // so the quad is edge-on. A wall portal here would be rejected.
+        build_portal_visibility(
+            &rooms,
+            &portals,
+            RoomIndex(0),
+            forward_camera(0),
+            4,
+            &mut out,
+        );
+
+        assert_eq!(out.visible_room_mask(), 0b11, "upper room must be visible");
+        assert_eq!(out.stats.portals_accepted, 1);
+        assert_eq!(out.stats.reject_frustum, 0);
+        assert_eq!(out.stats.reject_tiny, 0);
+    }
+
+    /// The bypass is gated by the front-face test, not blanket admission:
+    /// an up-portal viewed from ABOVE (camera in the upper room) back-faces
+    /// and is rejected, so you don't see a floor below you that you're
+    /// standing on through a solid slab.
+    #[test]
+    fn vertical_portal_backface_still_rejected() {
+        let rooms = [room(0, 0, 1), room(1, 1, 0)];
+        let up = LevelRoomPortalRecord {
+            source_room: RoomIndex(0),
+            destination_room: RoomIndex(1),
+            kind: 1,
+            normal_x: 0,
+            normal_y: -1,
+            normal_z: 0,
+            vertex_x: [-1024, 1024, 1024, -1024],
+            vertex_y: [2048, 2048, 2048, 2048],
+            vertex_z: [1024, 1024, 3072, 3072],
+        };
+        let portals = [up];
+        let mut out = PortalVisibilityResult::<8, 16, 8>::EMPTY;
+        // Camera ABOVE the portal plane (y=4096 > 2048): up-portal
+        // back-faces, so it is not admitted.
+        let camera =
+            PortalVisibilityCamera::new(0, 4096, 0, 0, 4096, 0, 4096, 64, 16_384, 4096, 3072, 4);
+
+        build_portal_visibility(&rooms, &portals, RoomIndex(0), camera, 4, &mut out);
+
+        assert_eq!(out.visible_room_mask(), 0b01, "only the current room");
+        assert_eq!(out.stats.reject_backface, 1);
     }
 
     #[test]
