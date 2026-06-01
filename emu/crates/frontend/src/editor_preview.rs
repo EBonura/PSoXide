@@ -34,6 +34,7 @@ use psx_gpu::prim::TriTextured;
 use psx_gte::math::{Mat3I16, Vec3I16, Vec3I32};
 use psx_gte::scene as gte_scene;
 
+use psxed_project::floor_view;
 use psxed_project::portal_rooms::{
     plan_portal_rooms, portal_seam_edges_for_edge, portal_seam_edges_for_node, PortalEdge,
     PortalRoomConfig,
@@ -670,24 +671,18 @@ fn preview_room_grids<'a>(
             continue;
         };
         // Sims-style floor view for the active room: the ACTIVE floor is
-        // the working plane, drawn at Y=0; floors BELOW it are drawn
-        // descending underneath for context; floors ABOVE are hidden so
-        // they don't occlude the one you're editing. Anchoring the active
-        // floor at Y=0 (not its real elevation) is what keeps the ray
-        // pick / selection / paint -- which test the active floor's
-        // floor-local faces -- aligned with what's drawn. Lower floors
-        // get a negative offset relative to the active floor's elevation.
+        // the working plane drawn at Y=0; floors BELOW descend for
+        // context; floors ABOVE are hidden. Resolution comes from the
+        // shared `floor_view` source of truth so render and pick agree.
         if Some(room) == active_room {
-            let active = active_floor.min(base.floor_count().saturating_sub(1));
-            let active_elev = base.floor(active).map(|g| g.elevation).unwrap_or(0);
-            for i in 0..=active {
-                if let Some(grid) = base.floor(i) {
+            for resolved in floor_view::active_room_floors(scene, room, active_floor) {
+                if let Some(grid) = base.floor(resolved.floor_index) {
                     result.push(PreviewFloor {
                         room,
                         grid,
-                        floor_index: i,
-                        y_offset: grid.elevation - active_elev,
-                        active: i == active,
+                        floor_index: resolved.floor_index,
+                        y_offset: resolved.y_offset,
+                        active: resolved.active,
                     });
                 }
             }
@@ -1634,17 +1629,10 @@ fn host_renders_as_preview_model(
 /// how the cook binds a node to its floor, so the editor draws each
 /// entity once, on the floor it cooks to.
 fn node_enclosing_floor(scene: &psxed_project::Scene, node_id: psxed_project::NodeId) -> usize {
-    let mut current = Some(node_id);
-    let mut floor = 0usize;
-    while let Some(id) = current {
-        let Some(node) = scene.node(id) else { break };
-        floor = floor.max(node.floor);
-        if matches!(node.kind, NodeKind::Room { .. }) {
-            break;
-        }
-        current = node.parent;
-    }
-    floor
+    // Single source of truth lives in psxed-project so the render pass
+    // (here) and the selection/pick pass (psxed-ui) resolve a node's
+    // floor identically.
+    psxed_project::floor_view::node_floor(scene, node_id)
 }
 
 fn is_descendant_of_room(
