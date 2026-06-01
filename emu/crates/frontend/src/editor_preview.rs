@@ -319,12 +319,13 @@ pub fn build_phase1_frame(
         selected_primitives,
         validation_issue_primitives,
     );
-    let Some(&(first_room_id, first_grid)) = visible_rooms.first() else {
+    let Some(first) = visible_rooms.first() else {
         return EditorPreviewFrame {
             cmd_log: Vec::new(),
             overlay_lines: Vec::new(),
         };
     };
+    let (first_room_id, first_grid) = (first.room, first.grid);
 
     let mut scratch = preview_scratch()
         .lock()
@@ -358,15 +359,19 @@ pub fn build_phase1_frame(
         textures,
     );
     let preview_tick = preview_elapsed_vblanks();
-    for &(room_id, grid) in &visible_rooms {
+    for floor_entry in &visible_rooms {
         if scratch.geometry_full() {
             break;
         }
+        let room_id = floor_entry.room;
+        let grid = floor_entry.grid;
+        let y_offset = floor_entry.y_offset;
         let fog = PreviewFog::from_grid(grid, preview_fog);
         walk_room(
             project,
             room_id,
             grid,
+            y_offset,
             textures,
             world_camera,
             fog,
@@ -374,27 +379,6 @@ pub fn build_phase1_frame(
             hidden_scene_nodes,
             &mut scratch,
         );
-        // Ghost the floor directly below the active floor (dropped a
-        // storey) so holes / stairs line up while authoring the floor
-        // above. Active room only; `grid` here is already the active
-        // floor, so its elevation gives the drop distance.
-        if Some(room_id) == active_room {
-            if let Some(base) =
-                project
-                    .active_scene()
-                    .node(room_id)
-                    .and_then(|node| match &node.kind {
-                        NodeKind::Room { grid } => Some(grid),
-                        _ => None,
-                    })
-            {
-                let active = active_floor.min(base.floor_count().saturating_sub(1));
-                if let Some(below) = active.checked_sub(1).and_then(|i| base.floor(i)) {
-                    let dy = below.elevation - grid.elevation;
-                    walk_room_ghost(below, dy, world_camera, &mut scratch);
-                }
-            }
-        }
         walk_image_props(
             project,
             room_id,
@@ -462,35 +446,50 @@ pub fn build_phase1_frame(
         // overwriting per-joint GTE state. We re-install the
         // camera state after each room before drawing more editor
         // geometry.
-        if selected_primitives.is_empty() {
-            if let Some(selection) =
-                selected_primitive.filter(|selection| selection.room() == room_id)
-            {
-                push_selection_outline(grid, selection, OutlineRole::Selected, &mut scratch);
-            }
-        } else {
-            for selection in selected_primitives {
-                if selection.room() == room_id {
-                    push_selection_outline(grid, *selection, OutlineRole::Selected, &mut scratch);
+        //
+        // Only the active floor draws edit overlays: selection / hover /
+        // paint all target the floor being authored, and the overlay
+        // helpers project against floor-local face heights, so drawing
+        // them on a stacked floor (offset in Y) would detach the outline
+        // from its geometry. For non-floored rooms `active` is false on
+        // the single base entry, so gate on "active OR no offset".
+        let edit_overlays = floor_entry.active || y_offset == 0;
+        if edit_overlays {
+            if selected_primitives.is_empty() {
+                if let Some(selection) =
+                    selected_primitive.filter(|selection| selection.room() == room_id)
+                {
+                    push_selection_outline(grid, selection, OutlineRole::Selected, &mut scratch);
+                }
+            } else {
+                for selection in selected_primitives {
+                    if selection.room() == room_id {
+                        push_selection_outline(
+                            grid,
+                            *selection,
+                            OutlineRole::Selected,
+                            &mut scratch,
+                        );
+                    }
                 }
             }
-        }
-        for face in selected_sector_faces {
-            if face.room == room_id {
-                push_face_outline(grid, *face, FACE_OUTLINE_SELECTED, &mut scratch);
+            for face in selected_sector_faces {
+                if face.room == room_id {
+                    push_face_outline(grid, *face, FACE_OUTLINE_SELECTED, &mut scratch);
+                }
             }
-        }
-        if let Some(selection) = hovered_primitive {
-            if selection.room() == room_id
-                && Some(selection) != selected_primitive
-                && !selected_primitives.contains(&selection)
-            {
-                push_selection_outline(grid, selection, OutlineRole::Hover, &mut scratch);
+            if let Some(selection) = hovered_primitive {
+                if selection.room() == room_id
+                    && Some(selection) != selected_primitive
+                    && !selected_primitives.contains(&selection)
+                {
+                    push_selection_outline(grid, selection, OutlineRole::Hover, &mut scratch);
+                }
             }
-        }
-        if room_id == first_room_id {
-            if let Some(preview) = paint_target_preview {
-                push_paint_preview(grid, preview, &mut scratch);
+            if room_id == first_room_id {
+                if let Some(preview) = paint_target_preview {
+                    push_paint_preview(grid, preview, &mut scratch);
+                }
             }
         }
 
@@ -524,9 +523,14 @@ pub fn build_phase1_frame(
         }
     }
     for selection in validation_issue_primitives {
-        for &(room_id, grid) in &visible_rooms {
-            if selection.room() == room_id {
-                push_selection_outline(grid, *selection, OutlineRole::Error, &mut scratch);
+        for floor_entry in &visible_rooms {
+            if selection.room() == floor_entry.room {
+                push_selection_outline(
+                    floor_entry.grid,
+                    *selection,
+                    OutlineRole::Error,
+                    &mut scratch,
+                );
                 break;
             }
         }
@@ -564,6 +568,17 @@ fn visible_room_grids<'a>(
         .collect()
 }
 
+/// One floor of one room to render, with its world-space Y offset.
+struct PreviewFloor<'a> {
+    room: NodeId,
+    grid: &'a WorldGrid,
+    /// Engine-unit Y offset for this floor's geometry/entities, so
+    /// stacked floors render at their real elevation.
+    y_offset: i32,
+    /// True for the floor currently being authored (the edit target).
+    active: bool,
+}
+
 /// Rooms considered by the editable 3D preview.
 ///
 /// Coastal Ruins imports as a real TR room graph, not a toy single-map
@@ -581,7 +596,7 @@ fn preview_room_grids<'a>(
     selected_primitive: Option<psxed_ui::Selection>,
     selected_primitives: &[psxed_ui::Selection],
     validation_issue_primitives: &[psxed_ui::Selection],
-) -> Vec<(NodeId, &'a WorldGrid)> {
+) -> Vec<PreviewFloor<'a>> {
     let scene = project.active_scene();
     let mut seeds = Vec::new();
     push_preview_room_seed(scene, hidden_scene_nodes, active_room, &mut seeds);
@@ -632,23 +647,41 @@ fn preview_room_grids<'a>(
         if scene_node_hidden(scene, hidden_scene_nodes, room) {
             continue;
         }
-        let Some(grid) = scene.node(room).and_then(|node| match &node.kind {
+        let Some(base) = scene.node(room).and_then(|node| match &node.kind {
             NodeKind::Room { grid } => Some(grid),
             _ => None,
         }) else {
             continue;
         };
-        // Render the active room at its active floor (in place) so the
-        // viewport shows the floor being authored; other rooms render
-        // their base floor. Floor 0 == the base grid, so the common
-        // single-floor case is unchanged.
-        let grid = if Some(room) == active_room {
-            let floor = active_floor.min(grid.floor_count().saturating_sub(1));
-            grid.floor(floor).unwrap_or(grid)
+        // Render every floor of the active room at its REAL elevation
+        // (stacked), with the active floor flagged as the edit target.
+        // Each floor's grid stores faces floor-relative, so the Y offset
+        // is `floor.elevation - base.elevation`. Rendering the whole
+        // stack (not just the active floor in place) keeps geometry,
+        // entities, and the camera consistent: switching the active floor
+        // no longer makes the world appear to shift. Other rooms render
+        // only their base floor (offset 0); single-floor rooms are
+        // unchanged.
+        if Some(room) == active_room {
+            let active = active_floor.min(base.floor_count().saturating_sub(1));
+            for i in 0..base.floor_count() {
+                if let Some(grid) = base.floor(i) {
+                    result.push(PreviewFloor {
+                        room,
+                        grid,
+                        y_offset: grid.elevation - base.elevation,
+                        active: i == active,
+                    });
+                }
+            }
         } else {
-            grid
-        };
-        result.push((room, grid));
+            result.push(PreviewFloor {
+                room,
+                grid: base,
+                y_offset: 0,
+                active: false,
+            });
+        }
         if result.len() >= EDITOR_PREVIEW_MAX_ROOMS || depth >= EDITOR_PREVIEW_PORTAL_DEPTH {
             continue;
         }
@@ -846,6 +879,7 @@ fn walk_room(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,
     grid: &WorldGrid,
+    y_offset: i32,
     textures: &EditorTextures,
     camera: psx_engine::WorldCamera,
     fog: PreviewFog,
@@ -856,6 +890,18 @@ fn walk_room(
     let s = grid.sector_size;
     let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
     let ambient = grid.ambient_color;
+    // Stacked-floor render: shift this floor's faces to its real
+    // elevation. Faces are stored floor-relative, so add the offset to
+    // every height. Floor 0 / single-floor rooms pass 0 (unchanged).
+    let off3 = |h: [i32; 3]| [h[0] + y_offset, h[1] + y_offset, h[2] + y_offset];
+    let off4 = |h: [i32; 4]| {
+        [
+            h[0] + y_offset,
+            h[1] + y_offset,
+            h[2] + y_offset,
+            h[3] + y_offset,
+        ]
+    };
     for x in 0..grid.width {
         for z in 0..grid.depth {
             let Some(sector) = grid.sector(x, z) else {
@@ -871,7 +917,7 @@ fn walk_room(
             let z1 = z0 + s;
 
             if let Some(floor) = sector.floor.as_ref() {
-                let center = horizontal_face_center([x0, x1, z0, z1], floor.heights);
+                let center = horizontal_face_center([x0, x1, z0, z1], off4(floor.heights));
                 let shade_a = light_face(
                     face_shade(
                         project,
@@ -906,7 +952,10 @@ fn walk_room(
                     scratch,
                     camera,
                     [x0, x1, z0, z1],
-                    [floor.triangle_heights(0), floor.triangle_heights(1)],
+                    [
+                        off3(floor.triangle_heights(0)),
+                        off3(floor.triangle_heights(1)),
+                    ],
                     floor.split,
                     floor.dropped_corner,
                     floor.triangle_uv(0),
@@ -921,7 +970,7 @@ fn walk_room(
                 }
             }
             if let Some(ceiling) = sector.ceiling.as_ref() {
-                let center = horizontal_face_center([x0, x1, z0, z1], ceiling.heights);
+                let center = horizontal_face_center([x0, x1, z0, z1], off4(ceiling.heights));
                 let shade_a = light_face(
                     face_shade(
                         project,
@@ -956,7 +1005,10 @@ fn walk_room(
                     scratch,
                     camera,
                     [x0, x1, z0, z1],
-                    [ceiling.triangle_heights(0), ceiling.triangle_heights(1)],
+                    [
+                        off3(ceiling.triangle_heights(0)),
+                        off3(ceiling.triangle_heights(1)),
+                    ],
                     ceiling.split,
                     ceiling.dropped_corner,
                     ceiling.triangle_uv(0),
@@ -977,7 +1029,7 @@ fn walk_room(
             for direction in GridDirection::ALL {
                 let edge = WallEdge::from_direction(direction);
                 for (stack_idx, face) in sector.walls.get(direction).iter().enumerate() {
-                    let center = wall_face_center([x0, x1, z0, z1], edge, face.heights);
+                    let center = wall_face_center([x0, x1, z0, z1], edge, off4(face.heights));
                     let shade = light_face(
                         face_shade(project, face.material, FALLBACK_WALL, textures),
                         center,
@@ -999,7 +1051,7 @@ fn walk_room(
                         camera,
                         [x0, x1, z0, z1],
                         edge,
-                        face.heights,
+                        off4(face.heights),
                         face.dropped_corner,
                         face.uv,
                         shade,
@@ -1013,85 +1065,6 @@ fn walk_room(
                 }
             }
 
-            if scratch.used >= TRI_CAP || scratch.tex_used >= TRI_CAP {
-                return;
-            }
-        }
-    }
-}
-
-/// Flat dim shade for a ghosted floor-below. Distinct from any authored
-/// material so the active floor reads as the one in focus.
-const GHOST_FLOOR_SHADE: FaceShade = FaceShade::Flat {
-    rgb: (70, 78, 108),
-    sidedness: psxed_project::MaterialFaceSidedness::Both,
-};
-
-/// Render `grid` as a dim, non-interactive ghost dropped `y_offset`
-/// engine units in Y. Shows the floor below the one being authored so
-/// holes / stairs can be lined up. Floors + walls only (no ceiling),
-/// flat-shaded so it never competes with the active floor's lit,
-/// textured surfaces. Reuses the normal emitters with locally offset
-/// heights, so depth sorts against the active floor under one camera.
-fn walk_room_ghost(
-    grid: &WorldGrid,
-    y_offset: i32,
-    camera: psx_engine::WorldCamera,
-    scratch: &mut PreviewScratch,
-) {
-    let s = grid.sector_size;
-    let off3 = |h: [i32; 3]| [h[0] + y_offset, h[1] + y_offset, h[2] + y_offset];
-    let off4 = |h: [i32; 4]| {
-        [
-            h[0] + y_offset,
-            h[1] + y_offset,
-            h[2] + y_offset,
-            h[3] + y_offset,
-        ]
-    };
-    for x in 0..grid.width {
-        for z in 0..grid.depth {
-            let Some(sector) = grid.sector(x, z) else {
-                continue;
-            };
-            let x0 = grid.cell_world_x(x);
-            let x1 = x0 + s;
-            let z0 = grid.cell_world_z(z);
-            let z1 = z0 + s;
-            if let Some(floor) = sector.floor.as_ref() {
-                push_horizontal_face(
-                    scratch,
-                    camera,
-                    [x0, x1, z0, z1],
-                    [
-                        off3(floor.triangle_heights(0)),
-                        off3(floor.triangle_heights(1)),
-                    ],
-                    floor.split,
-                    floor.dropped_corner,
-                    floor.triangle_uv(0),
-                    GHOST_FLOOR_SHADE,
-                    floor.triangle_uv(1),
-                    GHOST_FLOOR_SHADE,
-                    /* flip_winding */ false,
-                );
-            }
-            for direction in GridDirection::ALL {
-                let edge = WallEdge::from_direction(direction);
-                for face in sector.walls.get(direction).iter() {
-                    push_wall_face(
-                        scratch,
-                        camera,
-                        [x0, x1, z0, z1],
-                        edge,
-                        off4(face.heights),
-                        face.dropped_corner,
-                        face.uv,
-                        GHOST_FLOOR_SHADE,
-                        [camera.position.x, camera.position.y, camera.position.z],
-                    );
-                }
-            }
             if scratch.used >= TRI_CAP || scratch.tex_used >= TRI_CAP {
                 return;
             }
@@ -2117,7 +2090,13 @@ fn walk_entities(
         if host_renders_as_preview_model(project, scene, node) {
             continue;
         }
-        let entity_world = node_room_local_origin(grid, &node.transform);
+        // Anchor the marker to the floor surface, matching how the real
+        // model renders (`walk_model_instances` uses the floor-anchored
+        // origin) and how the cook places the entity. The raw
+        // `translation.y` is a placement default (e.g. the 2.89-sector
+        // standing height) and would float the marker far above the
+        // floor, disagreeing with the model on top of it.
+        let entity_world = floor_anchored_node_room_local_origin(grid, &node.transform);
         if let NodeKind::ParticleEmitter { settings } = &node.kind {
             push_particle_emitter_preview(
                 settings,
@@ -6281,7 +6260,7 @@ mod tests {
             &[],
         )
         .into_iter()
-        .map(|(id, _)| id)
+        .map(|entry| entry.room)
         .collect::<Vec<_>>();
 
         assert_eq!(visible, vec![room_a, room_b, room_c, room_d]);
