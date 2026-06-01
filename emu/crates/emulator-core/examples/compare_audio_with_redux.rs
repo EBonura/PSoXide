@@ -225,6 +225,10 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         (pmon >> 10) & 1,
         (noise_on >> 10) & 1
     );
+    eprintln!(
+        "[ours] dma ch4 (SPU) CHCR start-triggers (kicks): {}",
+        bus.dma_start_triggers()[4]
+    );
 
     let trace = bus.spu.voice_trace();
     let tlen = trace.iter().map(|t| t.len()).max().unwrap_or(0);
