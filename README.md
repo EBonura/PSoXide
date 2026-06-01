@@ -422,6 +422,18 @@ disc, `make run-<name>` where supported).
 └── Makefile                top-level quality and example commands
 ```
 
+Each area has its own README with a per-crate breakdown:
+
+| Area | What's inside |
+|------|---------------|
+| [`crates/`](crates/README.md) | Shared `no_std` PSX primitives (hardware model, disc parsing, traces). |
+| [`sdk/`](sdk/README.md) | Bare-metal PSX SDK crates + `hello-*` examples. |
+| [`engine/`](engine/README.md) | Scene/App runtime engine, level schema, and the example games. |
+| [`editor/`](editor/README.md) | Project model, asset cookers, and editor UI. |
+| [`emu/`](emu/README.md) | Emulator core, desktop frontend, renderer, parity oracle. |
+| [`tools/`](tools/README.md) | Disc-mastering and EXE utilities. |
+| [`docs/`](docs/README.md) | Architecture, hardware reference, and planning notes. |
+
 Generated contract:
 
 - `engine/examples/editor-playtest/generated/level_manifest.rs` is a
