@@ -812,8 +812,6 @@ pub struct Spu {
     /// any voice ever pitch-modulated or noise-mode, not just the end state.
     dbg_pmon_ever: u32,
     dbg_noise_ever: u32,
-    dbg_v10_log: u32,
-    dbg_ram_log: u32,
     /// Voice pitch-modulation enable bitmap. Bit N means voice N takes
     /// its pitch from voice N-1's output sample.
     pmon: u32,
@@ -928,8 +926,6 @@ impl Spu {
             dbg_wet_energy: 0,
             dbg_pmon_ever: 0,
             dbg_noise_ever: 0,
-            dbg_v10_log: 0,
-            dbg_ram_log: 0,
             pmon: 0,
             noise_on: 0,
             reverb_on: 0,
@@ -1108,6 +1104,11 @@ impl Spu {
         // SPUCNT bits 5..4 = 2 (DMA write) or 3 (DMA read) means RAM
         // transfer is DMA-driven.
         matches!((self.spucnt >> 4) & 3, 2 | 3)
+    }
+
+    /// Diagnostic: current SPU-RAM transfer (write/read) cursor.
+    pub fn transfer_addr(&self) -> u32 {
+        self.transfer_addr
     }
 
     // ============================================================
@@ -1393,13 +1394,6 @@ impl Spu {
         // post-increments by 2 bytes each write.
         let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
         self.ram[idx] = value;
-        if (0x4a200..0x4a280).contains(&self.transfer_addr) && self.dbg_ram_log < 60 {
-            self.dbg_ram_log += 1;
-            eprintln!(
-                "[ram FIFO] 0x{:05x} = {:04x} @s{}",
-                self.transfer_addr, value, self.dbg_sample_idx
-            );
-        }
         // Check IRQ address match.
         self.check_irq_on_transfer();
         self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
@@ -1443,13 +1437,6 @@ impl Spu {
         for &w in words {
             let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
             self.ram[idx] = w;
-            if (0x4a200..0x4a280).contains(&self.transfer_addr) && self.dbg_ram_log < 60 {
-                self.dbg_ram_log += 1;
-                eprintln!(
-                    "[ram DMA ] 0x{:05x} = {:04x} @s{}",
-                    self.transfer_addr, w, self.dbg_sample_idx
-                );
-            }
             self.check_irq_on_transfer();
             self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
         }
@@ -1979,15 +1966,6 @@ impl Spu {
         let predictor = predictor.min(ADPCM_FILTER_TABLE.len() - 1);
         let shift = (block[0] & 0x0F).min(12) as u32;
         let flags = block[1];
-
-        if v == 10 && self.dbg_v10_log < 14 {
-            self.dbg_v10_log += 1;
-            eprintln!(
-                "[v10 dec#{:2}] addr=0x{:05x} hdr={:02x} flags={:02x} pred={} shift={} data={:02x}{:02x}{:02x}{:02x} @s{}",
-                self.dbg_v10_log, current, block[0], flags, predictor, shift,
-                block[2], block[3], block[4], block[5], self.dbg_sample_idx
-            );
-        }
 
         // Decode 28 samples (4-bit nibbles, little-endian within bytes:
         // byte[n] low nibble → sample 2n, high nibble → sample 2n+1).
