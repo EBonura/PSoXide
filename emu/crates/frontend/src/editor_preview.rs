@@ -3054,6 +3054,8 @@ fn walk_model_instances(
         project,
         room_id,
         grid,
+        floor_index,
+        y_offset,
         textures,
         hidden_scene_nodes,
         selected,
@@ -3133,6 +3135,8 @@ fn walk_player_spawn_preview(
     project: &ProjectDocument,
     room_id: psxed_project::NodeId,
     grid: &WorldGrid,
+    floor_index: usize,
+    y_offset: i32,
     textures: &EditorTextures,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
@@ -3144,6 +3148,12 @@ fn walk_player_spawn_preview(
             break;
         }
         if !is_descendant_of_room(scene, node.id, room_id) {
+            continue;
+        }
+        // Player model belongs to one floor like any other entity, draw
+        // it only on its own floor entry (this path is separate from
+        // `walk_model_instances`, which skips player-controlled entities).
+        if node_enclosing_floor(scene, node.id) != floor_index {
             continue;
         }
         let Some(reference) = preview_player_reference(scene, node) else {
@@ -3203,7 +3213,8 @@ fn walk_player_spawn_preview(
             continue;
         }
 
-        let origin = floor_anchored_node_room_local_origin(grid, &node.transform);
+        let mut origin = floor_anchored_node_room_local_origin(grid, &node.transform);
+        origin.y += y_offset;
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
         let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
 
