@@ -5721,7 +5721,6 @@ fn should_insert_world_before(a: WorldTriCommand, b: WorldTriCommand) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RoomPoint;
     use psx_gpu::material::BlendMode;
     use psx_gpu::ot::OrderingTable;
 
