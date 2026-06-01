@@ -81,8 +81,12 @@ pub struct UiTextureSlot {
 /// [`psx_level::LevelUiScene`]; pass `first = 0`, `count = nodes.len()`
 /// to draw a single-scene pool whole (the HUD overlay does this).
 ///
-/// `font` supplies glyph metrics and the draw path for
-/// [`LevelUiNodeKind::Label`] nodes; when `None`, labels are skipped.
+/// `fonts` is the font table indexed by each node's
+/// [`LevelUiNodeRecord::font`] selector: a `Label` / `Button` draws with
+/// `fonts[node.font]`, falling back to `fonts[0]` when its selector is out of
+/// range. An empty table skips all text (the slice is the multi-font
+/// replacement for the old single `Option<&FontAtlas>`; pass one atlas as a
+/// one-element slice for the common single-font case).
 ///
 /// `focused` is the *pool* index of the currently focused node, if any,
 /// so a focused [`LevelUiNodeKind::Button`] / [`LevelUiNodeKind::Slider`]
@@ -114,7 +118,7 @@ pub fn draw_scene(
     nodes: &[LevelUiNodeRecord],
     first: usize,
     count: usize,
-    font: Option<&FontAtlas>,
+    fonts: &[&FontAtlas],
     focused: Option<usize>,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
     value: &impl Fn(LevelUiValueBinding) -> i32,
@@ -132,7 +136,7 @@ pub fn draw_scene(
                 draw_rect(x, y, width as i16, height as i16, rgb(node.color));
             }
             LevelUiNodeKind::Label => {
-                if let Some(font) = font {
+                if let Some(font) = node_font(fonts, node.font) {
                     draw_label(font, node, x, y, width);
                 }
             }
@@ -154,7 +158,7 @@ pub fn draw_scene(
                 );
             }
             LevelUiNodeKind::Button => {
-                draw_button(font, node, x, y, width, height);
+                draw_button(node_font(fonts, node.font), node, x, y, width, height);
                 if is_focused {
                     draw_focus_ring(x, y, width as i16, height as i16);
                 }
@@ -230,6 +234,54 @@ fn slider_fill(
     }
     let num = option_value(option_id) - option.min;
     (num, den)
+}
+
+/// Resolve a node's [`LevelUiNodeRecord::font`] selector against the font
+/// table. Returns `fonts[selector]`, falling back to `fonts[0]` when the
+/// selector is out of range, or `None` when the table is empty (text is then
+/// skipped). One indirection, no allocation.
+fn node_font<'f>(fonts: &[&'f FontAtlas], selector: u8) -> Option<&'f FontAtlas> {
+    font_index(fonts.len(), selector).map(|index| fonts[index])
+}
+
+/// Pure index-selection rule behind [`node_font`], split out so it is testable
+/// without constructing a real (GPU-backed) [`FontAtlas`]. Given a font-table
+/// length and a node's selector, returns the index to draw with: the selector
+/// itself when in range, else `0` (fallback to the default font), else `None`
+/// for an empty table.
+fn font_index(table_len: usize, selector: u8) -> Option<usize> {
+    if table_len == 0 {
+        None
+    } else if (selector as usize) < table_len {
+        Some(selector as usize)
+    } else {
+        Some(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::font_index;
+
+    #[test]
+    fn font_index_picks_selector_when_in_range() {
+        assert_eq!(font_index(3, 0), Some(0));
+        assert_eq!(font_index(3, 1), Some(1));
+        assert_eq!(font_index(3, 2), Some(2));
+    }
+
+    #[test]
+    fn font_index_falls_back_to_zero_when_out_of_range() {
+        // A node asks for font 5 but the table only has 2: use the default.
+        assert_eq!(font_index(2, 5), Some(0));
+    }
+
+    #[test]
+    fn font_index_is_none_for_empty_table() {
+        // No fonts uploaded: text is skipped entirely.
+        assert_eq!(font_index(0, 0), None);
+        assert_eq!(font_index(0, 7), None);
+    }
 }
 
 /// Resolve a node's absolute on-screen rectangle, applying the
