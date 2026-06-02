@@ -25,6 +25,7 @@ pub(crate) fn draw_player_hud(
     hud_first: usize,
     hud_count: usize,
     fonts: &[Option<&FontAtlas>],
+    frame: u16,
     stamina_q12: i32,
     stamina_max_q12: i32,
 ) {
@@ -70,8 +71,10 @@ pub(crate) fn draw_player_hud(
         nodes,
         hud_first,
         hud_count,
+        &[],
         fonts,
         None,
+        frame,
         &mut resolve_texture,
         &resolve_value,
         &[],

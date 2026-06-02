@@ -234,6 +234,31 @@ impl Default for UiSceneId {
     }
 }
 
+/// Stable identifier for an authored composed screen state. A screen
+/// state is the arranger-level object: it can run a world layer, draw a
+/// UI scene on top, and define who owns input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SceneStateId(pub u64);
+
+impl SceneStateId {
+    /// Load-time sentinel for legacy or hand-authored states without ids.
+    pub const UNASSIGNED: Self = Self(0);
+
+    /// First id handed out to an authored screen state.
+    pub const FIRST: Self = Self(1);
+
+    /// Return the raw integer value for compact UI/debug display.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for SceneStateId {
+    fn default() -> Self {
+        Self::UNASSIGNED
+    }
+}
+
 /// Anchor point used to resolve a UI rectangle against its parent
 /// rectangle or the root canvas.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,6 +453,15 @@ pub struct UiRect {
     /// Parent/canvas anchor used to resolve `x` and `y`.
     #[serde(default)]
     pub anchor: UiAnchor,
+    /// Clockwise visual rotation around this rectangle's centre, in degrees.
+    #[serde(default)]
+    pub rotation_degrees: i16,
+    /// Mirror the rectangle's local X axis before rotation.
+    #[serde(default)]
+    pub flip_x: bool,
+    /// Mirror the rectangle's local Y axis before rotation.
+    #[serde(default)]
+    pub flip_y: bool,
 }
 
 impl UiRect {
@@ -439,12 +473,28 @@ impl UiRect {
             width,
             height,
             anchor: UiAnchor::TopLeft,
+            rotation_degrees: 0,
+            flip_x: false,
+            flip_y: false,
         }
     }
 
     /// Return a copy using a different anchor.
     pub const fn with_anchor(mut self, anchor: UiAnchor) -> Self {
         self.anchor = anchor;
+        self
+    }
+
+    /// Return a copy using visual rotation around its centre.
+    pub const fn with_rotation(mut self, rotation_degrees: i16) -> Self {
+        self.rotation_degrees = rotation_degrees;
+        self
+    }
+
+    /// Return a copy using visual mirror flags.
+    pub const fn with_flips(mut self, flip_x: bool, flip_y: bool) -> Self {
+        self.flip_x = flip_x;
+        self.flip_y = flip_y;
         self
     }
 }
@@ -491,6 +541,8 @@ impl UiValueBinding {
 /// cook can lower it to a [`psx_level::LevelUiAction`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiAction {
+    /// Switch to a composed screen state by stable id.
+    GotoState(SceneStateId),
     /// Switch to another authored UI scene by stable id.
     GotoScene(UiSceneId),
     /// Enter the gameplay/level simulation.
@@ -518,6 +570,7 @@ impl UiAction {
     /// Editor-facing label for the action variant.
     pub const fn label(&self) -> &'static str {
         match self {
+            Self::GotoState(_) => "Go To State",
             Self::GotoScene(_) => "Go To Scene",
             Self::StartGameplay => "Start Gameplay",
             Self::Back => "Back",
@@ -979,6 +1032,44 @@ where
     serializer.serialize_f32(ui_font_scale_q8_to_f32(*scale_q8))
 }
 
+/// Animated vertex-colour effect for a screen-space image node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiImageEffect {
+    /// Static image tint.
+    #[default]
+    None,
+    /// Broad highlight moving left-to-right.
+    Shimmer,
+    /// Faster, stronger left-to-right shimmer.
+    FastShimmer,
+    /// Highlight moving diagonally across the image.
+    DiagonalSweep,
+    /// Whole-image brightness pulse.
+    SoftPulse,
+}
+
+impl UiImageEffect {
+    /// Stable list used by editor controls.
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Shimmer,
+        Self::FastShimmer,
+        Self::DiagonalSweep,
+        Self::SoftPulse,
+    ];
+
+    /// Compact display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Shimmer => "Shimmer",
+            Self::FastShimmer => "Fast Shimmer",
+            Self::DiagonalSweep => "Diagonal Sweep",
+            Self::SoftPulse => "Soft Pulse",
+        }
+    }
+}
+
 /// Authored 2D UI node type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiNodeKind {
@@ -1048,6 +1139,9 @@ pub enum UiNodeKind {
         /// Texture tint.
         #[serde(default = "default_ui_image_tint")]
         tint: [u8; 3],
+        /// Optional animated vertex-colour preset.
+        #[serde(default)]
+        effect: UiImageEffect,
     },
     /// Horizontal status bar backed by a runtime value binding.
     Bar {
@@ -1636,12 +1730,10 @@ impl UiScene {
                 let (anchor_x, anchor_y) = local.anchor.factors();
                 let x = parent.x as i32 + (parent.width as i32 * anchor_x) / 2 + local.x as i32;
                 let y = parent.y as i32 + (parent.height as i32 * anchor_y) / 2 + local.y as i32;
-                Some(UiRect::new(
-                    clamp_ui_rect_coord(x),
-                    clamp_ui_rect_coord(y),
-                    local.width,
-                    local.height,
-                ))
+                let mut rect = local;
+                rect.x = clamp_ui_rect_coord(x);
+                rect.y = clamp_ui_rect_coord(y);
+                Some(rect)
             }
         }
     }
@@ -1817,6 +1909,102 @@ fn clamp_ui_rect_coord(value: i32) -> i16 {
 
 fn default_ui_scenes() -> Vec<UiScene> {
     vec![UiScene::default_hud()]
+}
+
+/// World layer attached to an authored screen state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneWorldLayer {
+    /// No 3D/gameplay layer; the state is UI-only.
+    #[default]
+    None,
+    /// Run the gameplay/level world layer.
+    Gameplay,
+}
+
+impl SceneWorldLayer {
+    /// Human-readable label for editor controls.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Gameplay => "Gameplay",
+        }
+    }
+}
+
+/// One authored screen/game state. This is the scene-arranger object:
+/// it references a world layer and an optional UI scene overlay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSceneState {
+    /// Stable state id. Assigned during normalization for legacy data.
+    #[serde(default)]
+    pub id: SceneStateId,
+    /// Display name.
+    pub name: String,
+    /// Optional 3D/gameplay layer.
+    #[serde(default)]
+    pub world: SceneWorldLayer,
+    /// Optional UI scene drawn over the world.
+    #[serde(default)]
+    pub ui_scene: Option<UiSceneId>,
+    /// Whether UI navigation/buttons capture input while this state is active.
+    #[serde(default = "default_true")]
+    pub ui_input: bool,
+    /// Whether the world layer is paused while the UI overlay is active.
+    #[serde(default)]
+    pub pause_world: bool,
+}
+
+impl ProjectSceneState {
+    /// UI-only state backed by one authored UI scene.
+    pub fn ui_only(name: impl Into<String>, ui_scene: UiSceneId) -> Self {
+        Self {
+            id: SceneStateId::UNASSIGNED,
+            name: name.into(),
+            world: SceneWorldLayer::None,
+            ui_scene: Some(ui_scene),
+            ui_input: true,
+            pause_world: false,
+        }
+    }
+
+    /// Gameplay/world state with an optional UI overlay.
+    pub fn gameplay(name: impl Into<String>, ui_scene: Option<UiSceneId>) -> Self {
+        Self {
+            id: SceneStateId::UNASSIGNED,
+            name: name.into(),
+            world: SceneWorldLayer::Gameplay,
+            ui_scene,
+            ui_input: false,
+            pause_world: false,
+        }
+    }
+}
+
+fn default_scene_states_for_ui_scenes(ui_scenes: &[UiScene]) -> Vec<ProjectSceneState> {
+    let mut states: Vec<ProjectSceneState> = ui_scenes
+        .iter()
+        .map(|scene| ProjectSceneState::ui_only(scene.name.clone(), scene.id))
+        .collect();
+    states.push(ProjectSceneState::gameplay("Gameplay", None));
+    assign_scene_state_ids_for_slice(&mut states);
+    states
+}
+
+fn assign_scene_state_ids_for_slice(states: &mut [ProjectSceneState]) {
+    let mut next = SceneStateId::FIRST.raw();
+    for state in states.iter() {
+        if state.id != SceneStateId::UNASSIGNED {
+            next = next.max(state.id.raw().saturating_add(1));
+        }
+    }
+    let mut seen: HashSet<SceneStateId> = HashSet::new();
+    for state in states {
+        if state.id == SceneStateId::UNASSIGNED || !seen.insert(state.id) {
+            state.id = SceneStateId(next);
+            seen.insert(state.id);
+            next = next.saturating_add(1);
+        }
+    }
 }
 
 /// Explicit material assignment for one floor/ceiling triangle.
@@ -9166,6 +9354,25 @@ pub enum NodeKind {
         #[serde(default)]
         settings: PhysicsBodySettings,
     },
+    /// Gameplay interaction component. Attach this to an Entity
+    /// alongside render/collision components to make the placed object
+    /// readable, synchronizable, or otherwise activatable at runtime.
+    Interactable {
+        /// What happens when the player presses the interaction button.
+        #[serde(default)]
+        kind: InteractableKind,
+        /// Short prompt shown while the player is inside the radius.
+        #[serde(default = "default_interactable_prompt")]
+        prompt: String,
+        /// Interaction radius in engine/editor units, measured in XZ
+        /// from the parent Entity origin.
+        #[serde(default = "default_interactable_radius")]
+        radius: u16,
+        /// Disabled interactables remain authored but are not emitted as
+        /// active runtime records.
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
     /// Static point light.
     PointLight {
         /// RGB light colour.
@@ -9242,6 +9449,7 @@ impl NodeKind {
             Self::CharacterController { .. } => "Character Controller",
             Self::Equipment { .. } => "Equipment",
             Self::PhysicsBody { .. } => "Physics Body",
+            Self::Interactable { .. } => "Interactable",
             Self::PointLight { .. } => "Point Light",
             Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
@@ -9261,8 +9469,66 @@ impl NodeKind {
                 | Self::CharacterController { .. }
                 | Self::Equipment { .. }
                 | Self::PhysicsBody { .. }
+                | Self::Interactable { .. }
         )
     }
+}
+
+/// Authored interaction payload for an [`NodeKind::Interactable`]
+/// component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InteractableKind {
+    /// Show a diegetic text message.
+    Message {
+        /// Message title/header.
+        #[serde(default = "default_interactable_message_title")]
+        title: String,
+        /// Message body.
+        #[serde(default)]
+        body: String,
+    },
+    /// Update the in-memory checkpoint/sync point and optionally show
+    /// a confirmation message.
+    Checkpoint {
+        /// Stable authored id for future save/flag systems.
+        #[serde(default)]
+        checkpoint_id: String,
+        /// Confirmation title/header.
+        #[serde(default = "default_interactable_checkpoint_title")]
+        title: String,
+        /// Confirmation body.
+        #[serde(default = "default_interactable_checkpoint_body")]
+        body: String,
+    },
+}
+
+impl Default for InteractableKind {
+    fn default() -> Self {
+        Self::Message {
+            title: default_interactable_message_title(),
+            body: String::new(),
+        }
+    }
+}
+
+fn default_interactable_prompt() -> String {
+    "READ ECHO".to_string()
+}
+
+const fn default_interactable_radius() -> u16 {
+    96
+}
+
+fn default_interactable_message_title() -> String {
+    "ECHO REMNANT".to_string()
+}
+
+fn default_interactable_checkpoint_title() -> String {
+    "SYNC RELAY".to_string()
+}
+
+fn default_interactable_checkpoint_body() -> String {
+    "Relay synchronized.".to_string()
 }
 
 /// Authored collision shape for component-node entities.
@@ -9834,6 +10100,28 @@ impl Default for EditorVisibilityState {
     }
 }
 
+/// Last editor workspace shown for this project.
+///
+/// This is editor-only UI state; cooked runtime output must not depend on it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EditorWorkspaceView {
+    /// Room/level workspace.
+    #[default]
+    Room,
+    /// 2D UI workspace.
+    Ui,
+    /// Model/animation preview workspace.
+    Animation,
+}
+
+/// Editor-only workspace preferences persisted with a project.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorWorkspaceState {
+    /// Last active top-level editor workspace.
+    #[serde(default)]
+    pub active: EditorWorkspaceView,
+}
+
 /// Runtime depth sorting policy for cooked cached room geometry.
 ///
 /// This affects embedded play and generated runtime manifests. The editor
@@ -10008,6 +10296,9 @@ pub struct ProjectDocument {
     /// Editor-only overlay visibility preferences.
     #[serde(default)]
     pub editor_visibility: EditorVisibilityState,
+    /// Editor-only workspace preferences.
+    #[serde(default)]
+    pub editor_workspace: EditorWorkspaceState,
     /// Cooked playtest cached-room depth sorting mode.
     #[serde(default)]
     pub runtime_depth_sort_mode: RuntimeDepthSortMode,
@@ -10025,6 +10316,10 @@ pub struct ProjectDocument {
     /// Authored screen-space UI scenes. The first scene is the HUD for now.
     #[serde(default = "default_ui_scenes")]
     pub ui_scenes: Vec<UiScene>,
+    /// Authored runtime screen states. Each state can combine a world layer
+    /// with an optional UI scene overlay.
+    #[serde(default)]
+    pub scene_states: Vec<ProjectSceneState>,
     /// Project-level tunable options sliders and `SetOption` button
     /// actions bind to. Defaults to empty for legacy projects.
     #[serde(default)]
@@ -10046,6 +10341,8 @@ pub enum BootTarget {
     /// Boot straight into the gameplay/level simulation (skip any menus).
     #[default]
     Gameplay,
+    /// Boot into a composed screen state.
+    SceneState(SceneStateId),
     /// Boot into the authored UI scene with this stable id (a title/menu).
     UiScene(UiSceneId),
 }
@@ -10053,16 +10350,20 @@ pub enum BootTarget {
 impl ProjectDocument {
     /// Create an empty project with one scene.
     pub fn new(name: impl Into<String>) -> Self {
+        let ui_scenes = default_ui_scenes();
+        let scene_states = default_scene_states_for_ui_scenes(&ui_scenes);
         Self {
             name: name.into(),
             editor_camera: EditorCameraState::default(),
             editor_visibility: EditorVisibilityState::default(),
+            editor_workspace: EditorWorkspaceState::default(),
             runtime_depth_sort_mode: RuntimeDepthSortMode::default(),
             runtime_texture_split_mode: RuntimeTextureSplitMode::default(),
             runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode::default(),
             runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
-            ui_scenes: default_ui_scenes(),
+            ui_scenes,
+            scene_states,
             options: Vec::new(),
             boot: BootTarget::default(),
             resources: Vec::new(),
@@ -10145,6 +10446,70 @@ impl ProjectDocument {
         }
     }
 
+    /// Assign a stable id to every screen state and de-duplicate any
+    /// colliding ids from hand-authored data.
+    fn assign_scene_state_ids(&mut self) {
+        assign_scene_state_ids_for_slice(&mut self.scene_states);
+    }
+
+    /// Normalize authored screen states after load or UI-scene edits.
+    fn normalize_scene_states(&mut self) {
+        if self.scene_states.is_empty() {
+            self.scene_states = default_scene_states_for_ui_scenes(&self.ui_scenes);
+        }
+        self.assign_scene_state_ids();
+        let valid_ui_scenes: HashSet<UiSceneId> =
+            self.ui_scenes.iter().map(|scene| scene.id).collect();
+        let mut has_gameplay = false;
+        for state in &mut self.scene_states {
+            if state.name.trim().is_empty() {
+                state.name = format!("State {}", state.id.raw());
+            }
+            if state
+                .ui_scene
+                .is_some_and(|scene| !valid_ui_scenes.contains(&scene))
+            {
+                state.ui_scene = None;
+            }
+            if state.world == SceneWorldLayer::Gameplay {
+                has_gameplay = true;
+            }
+            if state.ui_scene.is_none() && state.world == SceneWorldLayer::None {
+                state.ui_input = false;
+            }
+        }
+        self.scene_states
+            .retain(|state| state.world != SceneWorldLayer::None || state.ui_scene.is_some());
+        for scene in &self.ui_scenes {
+            if !self
+                .scene_states
+                .iter()
+                .any(|state| state.ui_scene == Some(scene.id))
+            {
+                self.scene_states
+                    .push(ProjectSceneState::ui_only(scene.name.clone(), scene.id));
+            }
+        }
+        if !has_gameplay {
+            self.scene_states
+                .push(ProjectSceneState::gameplay("Gameplay", None));
+        }
+        self.assign_scene_state_ids();
+        match self.boot {
+            BootTarget::SceneState(id) => {
+                if !self.scene_states.iter().any(|state| state.id == id) {
+                    self.boot = BootTarget::Gameplay;
+                }
+            }
+            BootTarget::UiScene(id) => {
+                if !valid_ui_scenes.contains(&id) {
+                    self.boot = BootTarget::Gameplay;
+                }
+            }
+            BootTarget::Gameplay => {}
+        }
+    }
+
     /// Append a fresh UI scene named `name`, seeded with an empty root
     /// Canvas at the PSX 320x240 authoring resolution, and return its
     /// freshly assigned stable id. The id is handed out by the shared
@@ -10154,10 +10519,62 @@ impl ProjectDocument {
         self.ui_scenes
             .push(UiScene::empty_canvas(name, UiSceneId::UNASSIGNED));
         self.assign_ui_scene_ids();
+        self.normalize_scene_states();
         self.ui_scenes
             .last()
             .map(|scene| scene.id)
             .unwrap_or(UiSceneId::UNASSIGNED)
+    }
+
+    /// Screen state by stable id.
+    pub fn scene_state(&self, id: SceneStateId) -> Option<&ProjectSceneState> {
+        self.scene_states.iter().find(|state| state.id == id)
+    }
+
+    /// Screen state by stable id, mutable.
+    pub fn scene_state_mut(&mut self, id: SceneStateId) -> Option<&mut ProjectSceneState> {
+        self.scene_states.iter_mut().find(|state| state.id == id)
+    }
+
+    /// Screen state by list position.
+    pub fn scene_state_at(&self, index: usize) -> Option<&ProjectSceneState> {
+        self.scene_states.get(index)
+    }
+
+    /// Screen state by list position, mutable.
+    pub fn scene_state_at_mut(&mut self, index: usize) -> Option<&mut ProjectSceneState> {
+        self.scene_states.get_mut(index)
+    }
+
+    /// Append a fresh screen state and return its assigned id.
+    pub fn add_scene_state(&mut self, name: impl Into<String>) -> SceneStateId {
+        self.scene_states.push(ProjectSceneState {
+            id: SceneStateId::UNASSIGNED,
+            name: name.into(),
+            world: SceneWorldLayer::None,
+            ui_scene: self.ui_scenes.first().map(|scene| scene.id),
+            ui_input: true,
+            pause_world: false,
+        });
+        self.assign_scene_state_ids();
+        self.scene_states
+            .last()
+            .map(|state| state.id)
+            .unwrap_or(SceneStateId::UNASSIGNED)
+    }
+
+    /// Remove a screen state at `index`. The project always keeps at
+    /// least one gameplay-capable state after normalization.
+    pub fn remove_scene_state(&mut self, index: usize) -> bool {
+        if index >= self.scene_states.len() {
+            return false;
+        }
+        let removed = self.scene_states.remove(index);
+        if self.boot == BootTarget::SceneState(removed.id) {
+            self.boot = BootTarget::Gameplay;
+        }
+        self.normalize_scene_states();
+        true
     }
 
     /// Deep-copy the UI scene at `index`, insert the copy directly after
@@ -10170,6 +10587,7 @@ impl ProjectDocument {
         copy.name = format!("{} Copy", source.name);
         self.ui_scenes.insert(index + 1, copy);
         self.assign_ui_scene_ids();
+        self.normalize_scene_states();
         self.ui_scenes.get(index + 1).map(|scene| scene.id)
     }
 
@@ -10185,6 +10603,7 @@ impl ProjectDocument {
             self.ui_scenes = default_ui_scenes();
             self.assign_ui_scene_ids();
         }
+        self.normalize_scene_states();
         true
     }
 
@@ -10578,6 +10997,7 @@ impl ProjectDocument {
             scene.normalize();
         }
         self.assign_ui_scene_ids();
+        self.normalize_scene_states();
         for scene in &mut self.scenes {
             scene.normalize_world_root();
             for node in &mut scene.nodes {
@@ -10823,6 +11243,7 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::PhysicsBody { .. }
+        | NodeKind::Interactable { .. }
         | NodeKind::PointLight { .. }
         | NodeKind::Portal { .. } => 0,
     }
@@ -10873,6 +11294,7 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::PhysicsBody { .. }
+        | NodeKind::Interactable { .. }
         | NodeKind::PointLight { .. }
         | NodeKind::Portal { .. } => 0,
     }
@@ -12848,8 +13270,42 @@ mod tests {
     fn normalize_loaded_restores_missing_ui_scenes() {
         let mut project = ProjectDocument::new("legacy");
         project.ui_scenes.clear();
+        project.scene_states.clear();
         project.normalize_loaded();
         assert_eq!(project.active_ui_scene().unwrap().name, "HUD");
+        assert!(project
+            .scene_states
+            .iter()
+            .any(|state| state.world == SceneWorldLayer::Gameplay));
+    }
+
+    #[test]
+    fn normalize_loaded_creates_screen_states_for_ui_scenes() {
+        let mut project = ProjectDocument::new("states");
+        project.add_ui_scene("Menu");
+        for state in &mut project.scene_states {
+            state.id = SceneStateId::UNASSIGNED;
+        }
+        project.normalize_loaded();
+
+        for scene in &project.ui_scenes {
+            assert!(
+                project
+                    .scene_states
+                    .iter()
+                    .any(|state| state.ui_scene == Some(scene.id)),
+                "missing state for UI scene {}",
+                scene.name
+            );
+        }
+        assert!(project
+            .scene_states
+            .iter()
+            .any(|state| state.world == SceneWorldLayer::Gameplay));
+        let ids: HashSet<SceneStateId> =
+            project.scene_states.iter().map(|state| state.id).collect();
+        assert_eq!(ids.len(), project.scene_states.len());
+        assert!(ids.iter().all(|id| *id != SceneStateId::UNASSIGNED));
     }
 
     #[test]
@@ -12908,6 +13364,10 @@ mod tests {
 
         let scene = project.ui_scene(id).unwrap();
         assert_eq!(scene.name, "Pause");
+        assert!(project
+            .scene_states
+            .iter()
+            .any(|state| state.ui_scene == Some(id)));
         // Empty root canvas at PSX resolution: exactly one node, a Canvas.
         assert_eq!(scene.nodes().len(), 1);
         assert_eq!(scene.root, UiNodeId::ROOT);
@@ -13055,6 +13515,37 @@ mod tests {
     }
 
     #[test]
+    fn ui_scene_absolute_rect_preserves_visual_transform() {
+        let mut scene = UiScene::default_hud();
+        let rect = UiRect::new(8, 6, 48, 12)
+            .with_rotation(30)
+            .with_flips(true, false);
+        let label = scene.add_node(
+            scene.root,
+            "Prompt",
+            UiNodeKind::Label {
+                rect,
+                text: "Open".to_string(),
+                tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
+                color: [220, 226, 240],
+                gradient: None,
+            },
+        );
+
+        let absolute = scene.absolute_rect(label).expect("absolute rect");
+        assert_eq!(absolute.x, 8);
+        assert_eq!(absolute.y, 6);
+        assert_eq!(absolute.rotation_degrees, 30);
+        assert!(absolute.flip_x);
+        assert!(!absolute.flip_y);
+    }
+
+    #[test]
     fn ui_scene_move_node_reparents_and_rejects_cycles() {
         let mut scene = UiScene::default_hud();
         let a = scene.add_node(
@@ -13176,6 +13667,18 @@ mod tests {
         let ron = project.to_ron_string().unwrap();
 
         assert!(ron.contains("editor_visibility"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn editor_workspace_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("workspace");
+        project.editor_workspace = EditorWorkspaceState {
+            active: EditorWorkspaceView::Ui,
+        };
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("editor_workspace"));
         assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
     }
 
