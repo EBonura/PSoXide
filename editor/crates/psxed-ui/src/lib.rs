@@ -45,17 +45,19 @@ use psxed_project::{
     default_model_collision_radius_for_height, default_ui_font_scale, default_ui_letter_spacing,
     snap_height, ui_font_scale_f32_to_q8, ui_font_scale_q8_to_f32, BootTarget,
     CharacterControllerSettings, ColliderShape, EditorCameraMode, EditorCameraState,
-    EditorVisibilityState, FarVistaSettings, GridCellBounds, GridDirection, GridHorizontalFace,
-    GridSector, GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform,
-    GridVerticalFace, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId,
+    EditorVisibilityState, EditorWorkspaceState, EditorWorkspaceView, FarVistaSettings,
+    GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
+    GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
+    InteractableKind, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId,
     OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode,
     Resource, ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
-    RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings, UiAction, UiAnchor,
-    UiFontChoice, UiGradient, UiGradientDirection, UiNode, UiNodeId, UiNodeKind, UiNodeRow, UiRect,
-    UiScene, UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings,
-    WorldCullingSettings, WorldGrid, WorldPhysicsSettings, WorldStreamingSettings,
-    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,
-    MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    RuntimeTextureSplitMode, Scene, SceneNode, SceneStateId, SceneWorldLayer, SkyMode, SkySettings,
+    UiAction, UiAnchor, UiFontChoice, UiGradient, UiGradientDirection, UiImageEffect, UiNode,
+    UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiSfxBindings, UiSfxCue,
+    UiTextAlign, UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid,
+    WorldPhysicsSettings, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE,
+    MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
     MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
     MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
     MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -293,6 +295,8 @@ pub struct EditorWorkspace {
     /// viewport. Move keeps the existing axis handles; Rotate edits
     /// yaw; Scale edits size data for node kinds that support it.
     transform_gizmo_mode: TransformGizmoMode,
+    /// Transform mode for pointer drags in the 2D UI canvas.
+    ui_transform_mode: UiTransformMode,
     /// Whether floor/ceiling face picks address the authored quad
     /// or one triangle half of the current split.
     horizontal_edit_mode: HorizontalEditMode,
@@ -340,6 +344,9 @@ pub struct EditorWorkspace {
     /// editor edits the selected scene rather than always `ui_scenes[0]`.
     /// Clamped against `ui_scenes.len()` after deletions and undo/redo.
     active_ui_scene_index: usize,
+    /// List position of the screen state currently selected in the scene
+    /// arranger embedded in the UI workspace.
+    active_scene_state_index: usize,
     /// Active floor being authored in the Room workspace. Floor 0 is the
     /// base grid; floor `i` reads/writes `grid.floors_above[i - 1]` via
     /// [`WorldGrid::floor`] / [`WorldGrid::floor_mut`]. Clamped per-room
@@ -1440,6 +1447,29 @@ impl TransformGizmoMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum UiTransformMode {
+    #[default]
+    Move,
+    Rotate,
+}
+
+impl UiTransformMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Move => "Move",
+            Self::Rotate => "Rotate",
+        }
+    }
+
+    const fn icon(self) -> char {
+        match self {
+            Self::Move => icons::MOVE,
+            Self::Rotate => icons::ROTATE_3D,
+        }
+    }
+}
+
 /// Floor/ceiling edit granularity for Select mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum HorizontalEditMode {
@@ -1813,6 +1843,7 @@ impl UiResizeHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiCanvasDragMode {
     Move,
+    Rotate,
     Resize(UiResizeHandle),
 }
 
@@ -2542,6 +2573,22 @@ impl WorkspaceView {
             Self::Animation => icons::PLAY,
         }
     }
+
+    const fn from_project(value: EditorWorkspaceView) -> Self {
+        match value {
+            EditorWorkspaceView::Room => Self::Room,
+            EditorWorkspaceView::Ui => Self::Ui,
+            EditorWorkspaceView::Animation => Self::Animation,
+        }
+    }
+
+    const fn to_project(self) -> EditorWorkspaceView {
+        match self {
+            Self::Room => EditorWorkspaceView::Room,
+            Self::Ui => EditorWorkspaceView::Ui,
+            Self::Animation => EditorWorkspaceView::Animation,
+        }
+    }
 }
 
 impl ResourceFilter {
@@ -2675,6 +2722,7 @@ impl EditorWorkspace {
         let saved_project_name = project.name.clone();
         let editor_camera = project.editor_camera;
         let editor_visibility = project.editor_visibility;
+        let editor_workspace = project.editor_workspace;
         let camera_mode = match editor_camera.mode {
             EditorCameraMode::Orbit => ViewportCameraMode::Orbit,
             EditorCameraMode::Free => ViewportCameraMode::Free,
@@ -2721,6 +2769,7 @@ impl EditorWorkspace {
             interaction: Interaction::Idle,
             selection_mode: SelectionMode::default(),
             transform_gizmo_mode: TransformGizmoMode::Move,
+            ui_transform_mode: UiTransformMode::Move,
             horizontal_edit_mode: HorizontalEditMode::default(),
             vertex_connectivity: VertexConnectivity::default(),
             validation_issue_primitives: Vec::new(),
@@ -2732,6 +2781,7 @@ impl EditorWorkspace {
             renaming: None,
             pending_rename_focus: false,
             active_ui_scene_index: 0,
+            active_scene_state_index: 0,
             active_floor: 0,
             ui_nav_preview: false,
             ui_center_snap: true,
@@ -2773,11 +2823,11 @@ impl EditorWorkspace {
             play_frame_last_sample_serial: None,
             play_debug_terminal_lines: VecDeque::with_capacity(PLAY_DEBUG_TERMINAL_LINE_CAP),
             shortcut_group_flash: None,
-            // Default to the 3D preview so the bit-faithful HwRenderer
-            // is the first thing the user sees on opening the editor.
-            // The 2D top-down view stays one toolbar click away.
+            // The Room workspace still uses the bit-faithful 3D preview by
+            // default, but the top-level workspace itself is restored from
+            // the project so UI/Animation authoring reopens where it left off.
             view_2d: false,
-            active_workspace: WorkspaceView::Room,
+            active_workspace: WorkspaceView::from_project(editor_workspace.active),
             left_dock_open: true,
             inspector_open: true,
             resources_open: true,
@@ -2901,6 +2951,24 @@ impl EditorWorkspace {
         self.show_play_debug_map = editor_visibility.show_play_debug_map;
     }
 
+    fn current_editor_workspace_state(&self) -> EditorWorkspaceState {
+        EditorWorkspaceState {
+            active: self.active_workspace.to_project(),
+        }
+    }
+
+    fn persist_editor_workspace_state(&mut self) {
+        let editor_workspace = self.current_editor_workspace_state();
+        if self.project.editor_workspace != editor_workspace {
+            self.project.editor_workspace = editor_workspace;
+            self.dirty = true;
+        }
+    }
+
+    fn apply_project_editor_workspace(&mut self) {
+        self.active_workspace = WorkspaceView::from_project(self.project.editor_workspace.active);
+    }
+
     /// Current project document.
     pub fn project(&self) -> &ProjectDocument {
         &self.project
@@ -2928,6 +2996,7 @@ impl EditorWorkspace {
     pub fn save(&mut self) -> Result<(), String> {
         self.persist_editor_camera_state();
         self.persist_editor_visibility_state();
+        self.persist_editor_workspace_state();
         if self.floating_geometry.is_some() {
             return Err("Place or cancel the duplicate preview before saving".to_string());
         }
@@ -2980,6 +3049,7 @@ impl EditorWorkspace {
     pub fn save_if_dirty(&mut self) -> Result<bool, String> {
         self.persist_editor_camera_state();
         self.persist_editor_visibility_state();
+        self.persist_editor_workspace_state();
         if !self.dirty {
             return Ok(false);
         }
@@ -3022,6 +3092,7 @@ impl EditorWorkspace {
                 self.select_first_room();
                 self.apply_project_editor_camera();
                 self.apply_project_editor_visibility();
+                self.apply_project_editor_workspace();
             }
             Err(error) => {
                 self.status = format!("Reload failed: {error}");
@@ -4709,6 +4780,43 @@ impl EditorWorkspace {
         self.project.ui_scene_at_mut(index)
     }
 
+    /// List position of the screen state currently selected in the arranger.
+    fn current_scene_state_index(&self) -> usize {
+        let count = self.project.scene_states.len();
+        if count == 0 {
+            0
+        } else {
+            self.active_scene_state_index.min(count - 1)
+        }
+    }
+
+    fn switch_scene_state(&mut self, index: usize) {
+        let count = self.project.scene_states.len();
+        if count == 0 {
+            return;
+        }
+        let clamped = index.min(count - 1);
+        self.active_scene_state_index = clamped;
+        if let Some(ui_scene) = self
+            .project
+            .scene_state_at(clamped)
+            .and_then(|state| state.ui_scene)
+            .and_then(|id| {
+                self.project
+                    .ui_scenes
+                    .iter()
+                    .position(|scene| scene.id == id)
+            })
+        {
+            self.switch_ui_scene(ui_scene);
+        }
+        self.status = self
+            .project
+            .scene_state_at(clamped)
+            .map(|state| format!("Screen state: {}", state.name))
+            .unwrap_or_else(|| "Screen state".to_string());
+    }
+
     /// Switch the editor to author the UI scene at `index`. Clamps the
     /// index, resets the UI-node selection so a stale node id from the
     /// previous scene is never carried over, and cancels any in-flight
@@ -4792,28 +4900,40 @@ impl EditorWorkspace {
 
         if response.drag_started_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
-                let resize_target = ui_scene_resize_handle_target(
-                    &scene,
-                    &hidden_ui_nodes,
-                    self.selection.selected_ui_node,
-                    canvas_rect,
-                    canvas_size,
-                    pos,
-                );
-                if let Some((node, handle)) = resize_target {
-                    self.begin_ui_canvas_drag(
-                        node,
-                        UiCanvasDragMode::Resize(handle),
+                if self.ui_transform_mode == UiTransformMode::Move {
+                    let resize_target = ui_scene_resize_handle_target(
+                        &scene,
+                        &hidden_ui_nodes,
+                        self.selection.selected_ui_node,
                         canvas_rect,
                         canvas_size,
                         pos,
                     );
+                    if let Some((node, handle)) = resize_target {
+                        self.begin_ui_canvas_drag(
+                            node,
+                            UiCanvasDragMode::Resize(handle),
+                            canvas_rect,
+                            canvas_size,
+                            pos,
+                        );
+                    } else if let Some(id) =
+                        ui_scene_hit_test(&scene, &hidden_ui_nodes, canvas_rect, canvas_size, pos)
+                    {
+                        self.begin_ui_canvas_drag(
+                            id,
+                            UiCanvasDragMode::Move,
+                            canvas_rect,
+                            canvas_size,
+                            pos,
+                        );
+                    }
                 } else if let Some(id) =
                     ui_scene_hit_test(&scene, &hidden_ui_nodes, canvas_rect, canvas_size, pos)
                 {
                     self.begin_ui_canvas_drag(
                         id,
-                        UiCanvasDragMode::Move,
+                        UiCanvasDragMode::Rotate,
                         canvas_rect,
                         canvas_size,
                         pos,
@@ -4867,6 +4987,11 @@ impl EditorWorkspace {
             ),
             0.0,
         ));
+        let ui_preview_frame = ui.input(|input| ((input.time * 60.0) as u64 & 0xffff) as u16);
+        if ui_scene_has_animated_image_effect(&preview_scene, &hidden_ui_nodes) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
+        }
         let scene_painter = ui.painter_at(canvas_rect);
         draw_ui_scene_preview(
             &scene_painter,
@@ -4881,6 +5006,7 @@ impl EditorWorkspace {
             hovered_resize_target.and_then(|(node, handle)| {
                 (node == self.selection.selected_ui_node).then_some(handle)
             }),
+            ui_preview_frame,
         );
         draw_ui_center_snap_guides(
             &scene_painter,
@@ -4974,13 +5100,13 @@ impl EditorWorkspace {
                         self.switch_ui_scene(idx);
                     }
                 }
-                if let Some(r) = preview_scene.absolute_rect(focus_id) {
-                    let screen = ui_rect_to_screen(r, canvas_rect, canvas_size);
-                    painter.rect_stroke(
-                        screen.expand(1.5),
-                        0.0,
+                if let Some(preview) =
+                    ui_scene_preview_node(&preview_scene, focus_id, display_canvas, canvas_size)
+                {
+                    draw_ui_preview_quad_stroke(
+                        &painter,
+                        preview.quad,
                         Stroke::new(2.0, Color32::from_rgb(248, 224, 96)),
-                        StrokeKind::Inside,
                     );
                 }
             }
@@ -5041,6 +5167,7 @@ impl EditorWorkspace {
         });
         self.status = match mode {
             UiCanvasDragMode::Move => "Move UI node".to_string(),
+            UiCanvasDragMode::Rotate => "Rotate UI node".to_string(),
             UiCanvasDragMode::Resize(handle) => format!("Resize UI node from {}", handle.label()),
         };
     }
@@ -5073,6 +5200,21 @@ impl EditorWorkspace {
                 }
             }
             UiCanvasDragMode::Resize(handle) => resize_ui_rect(drag.start_rect, handle, delta),
+            UiCanvasDragMode::Rotate => {
+                let center_x =
+                    drag.start_absolute_rect.x as f32 + drag.start_absolute_rect.width as f32 * 0.5;
+                let center_y = drag.start_absolute_rect.y as f32
+                    + drag.start_absolute_rect.height as f32 * 0.5;
+                let start_angle = (drag.start_pointer_canvas[1] - center_y)
+                    .atan2(drag.start_pointer_canvas[0] - center_x);
+                let current_angle =
+                    (pointer_canvas[1] - center_y).atan2(pointer_canvas[0] - center_x);
+                let delta_degrees = (current_angle - start_angle).to_degrees().round() as i32;
+                let mut next = drag.start_rect;
+                next.rotation_degrees =
+                    normalize_ui_rotation_degrees(i32::from(next.rotation_degrees) + delta_degrees);
+                next
+            }
         };
         if let Some(active) = self.interaction.ui_canvas_drag_mut() {
             active.snap_center_x = snap_center_x;
@@ -5228,10 +5370,13 @@ impl EditorWorkspace {
             self.status = "No copied UI node".to_string();
             return false;
         };
-        let Some(parent) = self
-            .current_ui_scene()
-            .map(|scene| if scene.node(parent).is_some() { parent } else { scene.root })
-        else {
+        let Some(parent) = self.current_ui_scene().map(|scene| {
+            if scene.node(parent).is_some() {
+                parent
+            } else {
+                scene.root
+            }
+        }) else {
             self.status = "No UI scene available".to_string();
             return false;
         };
@@ -10694,6 +10839,9 @@ impl EditorWorkspace {
             self.cycle_workspace_group(reverse);
         }
         if self.active_workspace == WorkspaceView::Ui {
+            if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num2) {
+                self.cycle_ui_transform_group(reverse);
+            }
             return;
         }
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num2) {
@@ -10807,6 +10955,13 @@ impl EditorWorkspace {
             TransformGizmoMode::Scale,
         ];
         self.set_transform_gizmo_mode(cycle_value(VALUES, self.transform_gizmo_mode, reverse));
+    }
+
+    fn cycle_ui_transform_group(&mut self, reverse: bool) {
+        const VALUES: &[UiTransformMode] = &[UiTransformMode::Move, UiTransformMode::Rotate];
+        self.ui_transform_mode = cycle_value(VALUES, self.ui_transform_mode, reverse);
+        self.status = format!("UI transform: {}", self.ui_transform_mode.label());
+        self.mark_shortcut_group_changed(ShortcutGroup::Transform);
     }
 
     fn set_transform_gizmo_mode(&mut self, mode: TransformGizmoMode) {
@@ -11292,6 +11447,13 @@ impl EditorWorkspace {
     fn boot_target_label(&self) -> String {
         match self.project.boot {
             BootTarget::Gameplay => "Gameplay".to_string(),
+            BootTarget::SceneState(state_id) => self
+                .project
+                .scene_states
+                .iter()
+                .find(|state| state.id == state_id)
+                .map(|state| state.name.clone())
+                .unwrap_or_else(|| "Gameplay".to_string()),
             BootTarget::UiScene(scene_id) => self
                 .project
                 .ui_scenes
@@ -11638,6 +11800,20 @@ impl EditorWorkspace {
                     set_boot = Some(BootTarget::Gameplay);
                     ui.close_menu();
                 }
+                ui.separator();
+                ui.label(RichText::new("Screen States").color(STUDIO_TEXT_WEAK).small());
+                for state in &self.project.scene_states {
+                    let target = BootTarget::SceneState(state.id);
+                    if ui
+                        .selectable_label(current_boot == target, &state.name)
+                        .clicked()
+                    {
+                        set_boot = Some(target);
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                ui.label(RichText::new("UI Scenes").color(STUDIO_TEXT_WEAK).small());
                 for scene in &self.project.ui_scenes {
                     let target = BootTarget::UiScene(scene.id);
                     if ui
@@ -12398,6 +12574,8 @@ impl EditorWorkspace {
     }
 
     fn draw_ui_tree_panel_body(&mut self, ui: &mut egui::Ui) {
+        self.draw_scene_state_arranger(ui);
+        ui.separator();
         self.draw_ui_scene_strip(ui);
         ui.separator();
         let Some(scene) = self.current_ui_scene() else {
@@ -12510,6 +12688,214 @@ impl EditorWorkspace {
             });
         if let Some(index) = remove_index {
             self.project.remove_option(index);
+            changed = true;
+        }
+        if changed {
+            self.mark_dirty();
+        }
+    }
+
+    fn draw_scene_state_arranger(&mut self, ui: &mut egui::Ui) {
+        let state_count = self.project.scene_states.len();
+        let mut switch_to: Option<usize> = None;
+        let mut add_state = false;
+        let mut delete_state = false;
+
+        ui.horizontal(|ui| {
+            ui.label(icons::text(icons::LAYERS, 14.0).color(STUDIO_ACCENT));
+            ui.label(
+                RichText::new(format!("Screen States ({state_count})"))
+                    .color(STUDIO_TEXT_WEAK)
+                    .small(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let action_btn = egui::Vec2::new(26.0, 22.0);
+                if ui
+                    .add(
+                        egui::Button::new(icons::text(icons::FILE_PLUS, 14.0)).min_size(action_btn),
+                    )
+                    .on_hover_text("Create a new screen state")
+                    .clicked()
+                {
+                    add_state = true;
+                }
+                if ui
+                    .add_enabled(
+                        state_count > 1,
+                        egui::Button::new(icons::text(icons::TRASH, 14.0)).min_size(action_btn),
+                    )
+                    .on_hover_text("Delete selected screen state")
+                    .clicked()
+                {
+                    delete_state = true;
+                }
+            });
+        });
+
+        let active = self.current_scene_state_index();
+        let list_height = (ui.available_height() * 0.22).clamp(42.0, 96.0);
+        egui::ScrollArea::vertical()
+            .id_salt("psxed_scene_state_arranger")
+            .auto_shrink([false, false])
+            .max_height(list_height)
+            .show(ui, |ui| {
+                for (index, state) in self.project.scene_states.iter().enumerate() {
+                    let layer = match (state.world, state.ui_scene) {
+                        (SceneWorldLayer::Gameplay, Some(_)) => "3D+2D",
+                        (SceneWorldLayer::Gameplay, None) => "3D",
+                        (SceneWorldLayer::None, Some(_)) => "2D",
+                        (SceneWorldLayer::None, None) => "Empty",
+                    };
+                    let selected = index == active;
+                    let label = format!("{}  {}", compact_middle(&state.name, 22), layer);
+                    if ui
+                        .selectable_label(selected, icons::label(icons::LAYERS, &label))
+                        .clicked()
+                    {
+                        switch_to = Some(index);
+                    }
+                }
+            });
+
+        if add_state {
+            self.push_undo();
+            let name = self.unique_scene_state_name("Screen State");
+            self.project.add_scene_state(name);
+            self.active_scene_state_index = self.project.scene_states.len().saturating_sub(1);
+            if let Some(ui_scene) = self
+                .project
+                .scene_state_at(self.active_scene_state_index)
+                .and_then(|state| state.ui_scene)
+                .and_then(|id| {
+                    self.project
+                        .ui_scenes
+                        .iter()
+                        .position(|scene| scene.id == id)
+                })
+            {
+                self.switch_ui_scene(ui_scene);
+            }
+            self.status = "Added screen state".to_string();
+            self.mark_dirty();
+        }
+        if delete_state {
+            self.push_undo();
+            let removed = self.project.remove_scene_state(active);
+            if removed {
+                let count = self.project.scene_states.len();
+                self.active_scene_state_index =
+                    self.active_scene_state_index.min(count.saturating_sub(1));
+                self.status = "Deleted screen state".to_string();
+                self.mark_dirty();
+            }
+        }
+        if let Some(index) = switch_to {
+            self.switch_scene_state(index);
+        }
+
+        let active = self.current_scene_state_index();
+        let ui_scene_options: Vec<(UiSceneId, String)> = self
+            .project
+            .ui_scenes
+            .iter()
+            .map(|scene| (scene.id, scene.name.clone()))
+            .collect();
+        let boot_state = self
+            .project
+            .scene_state_at(active)
+            .map(|state| matches!(self.project.boot, BootTarget::SceneState(id) if id == state.id))
+            .unwrap_or(false);
+        let mut set_boot: Option<SceneStateId> = None;
+        let mut overlay_to_switch: Option<UiSceneId> = None;
+        let mut changed = false;
+
+        if let Some(state) = self.project.scene_state_at_mut(active) {
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                changed |= ui.text_edit_singleline(&mut state.name).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("World");
+                egui::ComboBox::from_id_salt(ui.id().with("scene_state_world"))
+                    .selected_text(state.world.label())
+                    .show_ui(ui, |ui| {
+                        for world in [SceneWorldLayer::None, SceneWorldLayer::Gameplay] {
+                            if ui
+                                .selectable_label(state.world == world, world.label())
+                                .clicked()
+                                && state.world != world
+                            {
+                                state.world = world;
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("2D Overlay");
+                let preview = state
+                    .ui_scene
+                    .and_then(|id| {
+                        ui_scene_options
+                            .iter()
+                            .find(|(scene_id, _)| *scene_id == id)
+                            .map(|(_, name)| name.as_str())
+                    })
+                    .unwrap_or("None");
+                egui::ComboBox::from_id_salt(ui.id().with("scene_state_ui_overlay"))
+                    .selected_text(preview)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(state.ui_scene.is_none(), "None")
+                            .clicked()
+                            && state.ui_scene.is_some()
+                        {
+                            state.ui_scene = None;
+                            changed = true;
+                        }
+                        for (scene_id, name) in &ui_scene_options {
+                            if ui
+                                .selectable_label(state.ui_scene == Some(*scene_id), name)
+                                .clicked()
+                                && state.ui_scene != Some(*scene_id)
+                            {
+                                state.ui_scene = Some(*scene_id);
+                                overlay_to_switch = Some(*scene_id);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            changed |= ui
+                .checkbox(&mut state.ui_input, "UI captures input")
+                .changed();
+            changed |= ui.checkbox(&mut state.pause_world, "Pause world").changed();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!boot_state, egui::Button::new("Boot Here"))
+                    .clicked()
+                {
+                    set_boot = Some(state.id);
+                }
+                if boot_state {
+                    ui.label(RichText::new("Boot").color(STUDIO_ACCENT).small());
+                }
+            });
+        }
+
+        if let Some(scene_id) = overlay_to_switch {
+            if let Some(index) = self
+                .project
+                .ui_scenes
+                .iter()
+                .position(|scene| scene.id == scene_id)
+            {
+                self.switch_ui_scene(index);
+            }
+        }
+        if let Some(state_id) = set_boot {
+            self.project.boot = BootTarget::SceneState(state_id);
+            self.status = "Boot target set to screen state".to_string();
             changed = true;
         }
         if changed {
@@ -12788,6 +13174,26 @@ impl EditorWorkspace {
         }
     }
 
+    fn unique_scene_state_name(&self, base: &str) -> String {
+        let taken: HashSet<&str> = self
+            .project
+            .scene_states
+            .iter()
+            .map(|state| state.name.as_str())
+            .collect();
+        if !taken.contains(base) {
+            return base.to_string();
+        }
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{base} {suffix}");
+            if !taken.contains(candidate.as_str()) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
     fn draw_filesystem_panel(&mut self, ui: &mut egui::Ui) {
         tool_panel_frame().show(ui, |ui| {
             ui.set_min_height(ui.available_height());
@@ -12901,6 +13307,12 @@ impl EditorWorkspace {
             .iter()
             .map(|scene| (scene.id, scene.name.clone()))
             .collect();
+        let state_options: Vec<(SceneStateId, String)> = self
+            .project
+            .scene_states
+            .iter()
+            .map(|state| (state.id, state.name.clone()))
+            .collect();
         let option_choices: Vec<(OptionId, String)> = self
             .project
             .options
@@ -13010,10 +13422,12 @@ impl EditorWorkspace {
                 rect,
                 texture,
                 tint,
+                effect,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 changed |= ui_texture_resource_picker(ui, "Texture", texture, &texture_options);
                 changed |= color_editor(ui, "Tint", tint);
+                changed |= draw_ui_image_effect_picker(ui, effect);
                 ui.horizontal(|ui| {
                     if ui.small_button("Dim").clicked() {
                         *tint = [96, 96, 96];
@@ -13082,7 +13496,13 @@ impl EditorWorkspace {
                 changed |=
                     draw_ui_gradient_editor(ui, "Background Gradient", color, background_gradient);
                 changed |= draw_ui_gradient_editor(ui, "Text Gradient", text_color, text_gradient);
-                changed |= draw_ui_action_editor(ui, action, &scene_options, &option_choices);
+                changed |= draw_ui_action_editor(
+                    ui,
+                    action,
+                    &state_options,
+                    &scene_options,
+                    &option_choices,
+                );
                 changed |= draw_button_sfx_editor(
                     ui,
                     sfx,
@@ -15179,9 +15599,6 @@ impl EditorWorkspace {
         viewport_3d: EditorViewport3dPresentation,
         playtest_status: EditorPlaytestStatus,
     ) {
-        if viewport_3d.mode == EditorViewport3dMode::Play {
-            self.active_workspace = WorkspaceView::Room;
-        }
         egui::CentralPanel::default()
             .frame(viewport_frame())
             .show(ctx, |ui| {
@@ -15189,6 +15606,11 @@ impl EditorWorkspace {
                     ui.expand_to_include_rect(ui.max_rect());
                     self.draw_viewport_header_toolbar(ui);
                     tool_panel_body(ui, |ui| {
+                        if viewport_3d.mode == EditorViewport3dMode::Play {
+                            self.draw_viewport_3d_play_body(ui, viewport_3d, playtest_status);
+                            return;
+                        }
+
                         if self.active_workspace == WorkspaceView::Animation {
                             let action = model_animation_viewer::draw_model_animation_viewer(
                                 ui,
@@ -15205,11 +15627,6 @@ impl EditorWorkspace {
 
                         if self.active_workspace == WorkspaceView::Ui {
                             self.draw_ui_workspace_body(ui);
-                            return;
-                        }
-
-                        if viewport_3d.mode == EditorViewport3dMode::Play {
-                            self.draw_viewport_3d_play_body(ui, viewport_3d, playtest_status);
                             return;
                         }
 
@@ -15582,6 +15999,29 @@ impl EditorWorkspace {
         );
 
         ui.separator();
+        toolbar_group_menu(
+            ui,
+            2,
+            self.shortcut_group_glow(ShortcutGroup::Transform),
+            self.ui_transform_mode.icon(),
+            "Transform",
+            self.ui_transform_mode.label(),
+            |ui| {
+                ui.set_min_width(160.0);
+                for mode in [UiTransformMode::Move, UiTransformMode::Rotate] {
+                    if toolbar_menu_choice(
+                        ui,
+                        icons::label(mode.icon(), mode.label()),
+                        self.ui_transform_mode == mode,
+                    ) {
+                        self.ui_transform_mode = mode;
+                        self.status = format!("UI transform: {}", mode.label());
+                        self.mark_shortcut_group_changed(ShortcutGroup::Transform);
+                    }
+                }
+            },
+        );
+
         toolbar_option_menu(ui, icons::PLUS, "Add UI Node", "Add", false, |ui| {
             ui.set_min_width(160.0);
             for (label, kind) in default_addable_ui_kinds() {
@@ -17245,6 +17685,12 @@ impl EditorWorkspace {
             .is_some_and(|index| index >= ui_scene_count)
         {
             self.ui_scene_delete_confirm = None;
+        }
+        let scene_state_count = self.project.scene_states.len();
+        if scene_state_count == 0 {
+            self.active_scene_state_index = 0;
+        } else if self.active_scene_state_index >= scene_state_count {
+            self.active_scene_state_index = scene_state_count - 1;
         }
         self.retain_hidden_ui_nodes_for_project();
         // The selected UI node belongs to whatever scene is now active;
@@ -19865,7 +20311,8 @@ fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspector {
         | NodeKind::Collider { .. }
         | NodeKind::CharacterController { .. }
         | NodeKind::Equipment { .. }
-        | NodeKind::PhysicsBody { .. } => NodeTransformInspector::Hidden,
+        | NodeKind::PhysicsBody { .. }
+        | NodeKind::Interactable { .. } => NodeTransformInspector::Hidden,
         NodeKind::Entity
         | NodeKind::MeshInstance { .. }
         | NodeKind::SpawnPoint { .. }
@@ -21892,6 +22339,109 @@ fn draw_node_kind_editor(
                     changed = true;
                 }
             });
+        }
+        NodeKind::Interactable {
+            kind: interactable_kind,
+            prompt,
+            radius,
+            enabled,
+        } => {
+            ui.weak("Component: lets the player press CROSS near this Entity to read a message or synchronize a checkpoint.");
+            changed |= ui.checkbox(enabled, "Enabled").changed();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Kind").color(STUDIO_TEXT_WEAK));
+                let current = match interactable_kind {
+                    InteractableKind::Message { .. } => "Message",
+                    InteractableKind::Checkpoint { .. } => "Checkpoint",
+                };
+                egui::ComboBox::from_id_salt("interactable-kind")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        let is_message =
+                            matches!(interactable_kind, InteractableKind::Message { .. });
+                        if ui.selectable_label(is_message, "Message").clicked() {
+                            if !is_message {
+                                *interactable_kind = InteractableKind::Message {
+                                    title: "ECHO REMNANT".to_string(),
+                                    body: String::new(),
+                                };
+                                if prompt.trim().is_empty() || prompt == "SYNCHRONIZE" {
+                                    *prompt = "READ ECHO".to_string();
+                                }
+                                changed = true;
+                            }
+                        }
+                        let is_checkpoint =
+                            matches!(interactable_kind, InteractableKind::Checkpoint { .. });
+                        if ui.selectable_label(is_checkpoint, "Checkpoint").clicked() {
+                            if !is_checkpoint {
+                                *interactable_kind = InteractableKind::Checkpoint {
+                                    checkpoint_id: String::new(),
+                                    title: "SYNC RELAY".to_string(),
+                                    body: "Relay synchronized.".to_string(),
+                                };
+                                if prompt.trim().is_empty() || prompt == "READ ECHO" {
+                                    *prompt = "SYNCHRONIZE".to_string();
+                                }
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Prompt").color(STUDIO_TEXT_WEAK));
+                changed |= ui.text_edit_singleline(prompt).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Radius").color(STUDIO_TEXT_WEAK));
+                let mut r = i32::from(*radius);
+                if ui
+                    .add(egui::DragValue::new(&mut r).speed(4.0).range(1..=4096))
+                    .changed()
+                {
+                    *radius = r.clamp(1, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+            });
+            ui.separator();
+            match interactable_kind {
+                InteractableKind::Message { title, body } => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Title").color(STUDIO_TEXT_WEAK));
+                        changed |= ui.text_edit_singleline(title).changed();
+                    });
+                    ui.label(RichText::new("Body").color(STUDIO_TEXT_WEAK));
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::multiline(body)
+                                .desired_rows(4)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .changed();
+                }
+                InteractableKind::Checkpoint {
+                    checkpoint_id,
+                    title,
+                    body,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Checkpoint ID").color(STUDIO_TEXT_WEAK));
+                        changed |= ui.text_edit_singleline(checkpoint_id).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Title").color(STUDIO_TEXT_WEAK));
+                        changed |= ui.text_edit_singleline(title).changed();
+                    });
+                    ui.label(RichText::new("Body").color(STUDIO_TEXT_WEAK));
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::multiline(body)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .changed();
+                }
+            }
         }
         NodeKind::PointLight {
             color,
@@ -25732,6 +26282,13 @@ fn draw_ui_rect_editor(ui: &mut egui::Ui, rect: &mut UiRect) -> bool {
             changed |= drag_u16(ui, "W", &mut rect.width, 1, 4096);
             changed |= drag_u16(ui, "H", &mut rect.height, 1, 4096);
             ui.end_row();
+            changed |= drag_i16(ui, "Rotate", &mut rect.rotation_degrees, -359, 359);
+            ui.horizontal(|ui| {
+                ui.label("Flip");
+                changed |= ui.checkbox(&mut rect.flip_x, "X").changed();
+                changed |= ui.checkbox(&mut rect.flip_y, "Y").changed();
+            });
+            ui.end_row();
         });
     changed |= draw_ui_anchor_editor(ui, &mut rect.anchor);
     changed
@@ -25775,6 +26332,25 @@ fn draw_ui_text_align_editor(ui: &mut egui::Ui, align: &mut UiTextAlign) -> bool
                     && *align != candidate
                 {
                     *align = candidate;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+fn draw_ui_image_effect_picker(ui: &mut egui::Ui, effect: &mut UiImageEffect) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_label("Effect")
+        .selected_text(effect.label())
+        .show_ui(ui, |ui| {
+            for candidate in UiImageEffect::ALL {
+                if ui
+                    .selectable_label(*effect == candidate, candidate.label())
+                    .clicked()
+                    && *effect != candidate
+                {
+                    *effect = candidate;
                     changed = true;
                 }
             }
@@ -25995,7 +26571,8 @@ fn ui_value_binding_same_variant(a: UiValueBinding, b: UiValueBinding) -> bool {
 fn ui_action_same_variant(a: &UiAction, b: &UiAction) -> bool {
     matches!(
         (a, b),
-        (UiAction::GotoScene(_), UiAction::GotoScene(_))
+        (UiAction::GotoState(_), UiAction::GotoState(_))
+            | (UiAction::GotoScene(_), UiAction::GotoScene(_))
             | (UiAction::StartGameplay, UiAction::StartGameplay)
             | (UiAction::Back, UiAction::Back)
             | (UiAction::SetOption { .. }, UiAction::SetOption { .. })
@@ -26009,11 +26586,13 @@ fn ui_action_same_variant(a: &UiAction, b: &UiAction) -> bool {
 fn draw_ui_action_editor(
     ui: &mut egui::Ui,
     action: &mut UiAction,
+    state_options: &[(SceneStateId, String)],
     scene_options: &[(UiSceneId, String)],
     option_choices: &[(OptionId, String)],
 ) -> bool {
     let mut changed = false;
     let variants = [
+        UiAction::GotoState(state_options.first().map(|(id, _)| *id).unwrap_or_default()),
         UiAction::GotoScene(scene_options.first().map(|(id, _)| *id).unwrap_or_default()),
         UiAction::StartGameplay,
         UiAction::Back,
@@ -26041,6 +26620,9 @@ fn draw_ui_action_editor(
             }
         });
     match action {
+        UiAction::GotoState(state) => {
+            changed |= draw_scene_state_picker(ui, "Target", state, state_options);
+        }
         UiAction::GotoScene(scene) => {
             changed |= draw_ui_scene_picker(ui, "Target", scene, scene_options);
         }
@@ -26057,6 +26639,35 @@ fn draw_ui_action_editor(
         }
         UiAction::StartGameplay | UiAction::Back => {}
     }
+    changed
+}
+
+/// Dropdown that picks a [`SceneStateId`] from the project's screen states.
+fn draw_scene_state_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: &mut SceneStateId,
+    options: &[(SceneStateId, String)],
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let preview = options
+            .iter()
+            .find(|(id, _)| id == current)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("(none)");
+        egui::ComboBox::from_id_salt(ui.id().with(label))
+            .selected_text(preview)
+            .show_ui(ui, |ui| {
+                for (id, name) in options {
+                    if ui.selectable_label(current == id, name).clicked() && current != id {
+                        *current = *id;
+                        changed = true;
+                    }
+                }
+            });
+    });
     changed
 }
 
@@ -29007,9 +29618,7 @@ fn draw_ui_node_row(
     }
 
     response.context_menu(|ui| {
-        if row.id != UiNodeId::ROOT
-            && ui.button(icons::label(icons::COPY, "Copy")).clicked()
-        {
+        if row.id != UiNodeId::ROOT && ui.button(icons::label(icons::COPY, "Copy")).clicked() {
             actions.push(UiTreeAction::Copy(row.id));
             ui.close_menu();
         }
@@ -29733,6 +30342,7 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 rect: UiRect::new(24, 24, 64, 64),
                 texture: None,
                 tint: [128, 128, 128],
+                effect: UiImageEffect::None,
             },
         ),
         (
@@ -29816,6 +30426,209 @@ fn ui_scene_canvas_size(scene: &psxed_project::UiScene) -> (u16, u16) {
         .unwrap_or((320, 240))
 }
 
+fn ui_scene_has_animated_image_effect(
+    scene: &psxed_project::UiScene,
+    hidden_ui_nodes: &HashSet<(UiSceneId, UiNodeId)>,
+) -> bool {
+    scene.hierarchy_node_ids().into_iter().any(|id| {
+        !ui_node_hidden(scene, hidden_ui_nodes, id)
+            && scene.node(id).is_some_and(|node| {
+                matches!(
+                    &node.kind,
+                    UiNodeKind::Image {
+                        effect,
+                        ..
+                    } if *effect != UiImageEffect::None
+                )
+            })
+    })
+}
+
+#[derive(Clone, Copy)]
+struct UiPreviewAffine {
+    m00: f32,
+    m01: f32,
+    m10: f32,
+    m11: f32,
+    tx: f32,
+    ty: f32,
+}
+
+impl UiPreviewAffine {
+    fn canvas(canvas: Rect, canvas_size: [u16; 2]) -> Self {
+        Self {
+            m00: canvas.width() / canvas_size[0].max(1) as f32,
+            m01: 0.0,
+            m10: 0.0,
+            m11: canvas.height() / canvas_size[1].max(1) as f32,
+            tx: canvas.left(),
+            ty: canvas.top(),
+        }
+    }
+
+    fn from_rect(x: f32, y: f32, rect: UiRect) -> Self {
+        let radians = f32::from(rect.rotation_degrees).to_radians();
+        let (sin, cos) = radians.sin_cos();
+        let fx = if rect.flip_x { -1.0 } else { 1.0 };
+        let fy = if rect.flip_y { -1.0 } else { 1.0 };
+        let m00 = cos * fx;
+        let m01 = -sin * fy;
+        let m10 = sin * fx;
+        let m11 = cos * fy;
+        let hw = rect.width.max(1) as f32 * 0.5;
+        let hh = rect.height.max(1) as f32 * 0.5;
+        let cx = x + hw;
+        let cy = y + hh;
+        Self {
+            m00,
+            m01,
+            m10,
+            m11,
+            tx: cx - (m00 * hw + m01 * hh),
+            ty: cy - (m10 * hw + m11 * hh),
+        }
+    }
+
+    fn compose(self, child: Self) -> Self {
+        Self {
+            m00: self.m00 * child.m00 + self.m01 * child.m10,
+            m01: self.m00 * child.m01 + self.m01 * child.m11,
+            m10: self.m10 * child.m00 + self.m11 * child.m10,
+            m11: self.m10 * child.m01 + self.m11 * child.m11,
+            tx: self.m00 * child.tx + self.m01 * child.ty + self.tx,
+            ty: self.m10 * child.tx + self.m11 * child.ty + self.ty,
+        }
+    }
+
+    fn point(self, x: f32, y: f32) -> Pos2 {
+        Pos2::new(
+            self.m00 * x + self.m01 * y + self.tx,
+            self.m10 * x + self.m11 * y + self.ty,
+        )
+    }
+
+    fn subrect(self, x: f32, y: f32, width: f32, height: f32) -> [Pos2; 4] {
+        [
+            self.point(x, y),
+            self.point(x + width, y),
+            self.point(x, y + height),
+            self.point(x + width, y + height),
+        ]
+    }
+
+    fn y_scale(self) -> f32 {
+        (self.m10 * self.m10 + self.m11 * self.m11).sqrt().max(0.01)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UiPreviewNode {
+    width: f32,
+    height: f32,
+    transform: UiPreviewAffine,
+    quad: [Pos2; 4],
+}
+
+impl UiPreviewNode {
+    fn subrect(self, x: f32, y: f32, width: f32, height: f32) -> [Pos2; 4] {
+        self.transform.subrect(x, y, width, height)
+    }
+
+    fn bounds(self) -> Rect {
+        quad_bounds_egui(self.quad)
+    }
+}
+
+fn ui_scene_preview_node(
+    scene: &psxed_project::UiScene,
+    id: UiNodeId,
+    canvas: Rect,
+    canvas_size: [u16; 2],
+) -> Option<UiPreviewNode> {
+    ui_scene_preview_node_inner(scene, id, canvas, canvas_size, 0)
+}
+
+fn ui_scene_preview_node_inner(
+    scene: &psxed_project::UiScene,
+    id: UiNodeId,
+    canvas: Rect,
+    canvas_size: [u16; 2],
+    depth: usize,
+) -> Option<UiPreviewNode> {
+    if depth > scene.nodes().len() {
+        return None;
+    }
+    let node = scene.node(id)?;
+    if let UiNodeKind::Canvas { width, height } = node.kind {
+        let transform = UiPreviewAffine::canvas(canvas, canvas_size);
+        let width = width.max(1) as f32;
+        let height = height.max(1) as f32;
+        return Some(UiPreviewNode {
+            width,
+            height,
+            transform,
+            quad: transform.subrect(0.0, 0.0, width, height),
+        });
+    }
+    let local = node.kind.rect()?;
+    let parent = node
+        .parent
+        .and_then(|parent| {
+            ui_scene_preview_node_inner(scene, parent, canvas, canvas_size, depth + 1)
+        })
+        .unwrap_or_else(|| {
+            let transform = UiPreviewAffine::canvas(canvas, canvas_size);
+            let width = canvas_size[0].max(1) as f32;
+            let height = canvas_size[1].max(1) as f32;
+            UiPreviewNode {
+                width,
+                height,
+                transform,
+                quad: transform.subrect(0.0, 0.0, width, height),
+            }
+        });
+    let (anchor_x, anchor_y) = ui_anchor_factors(local.anchor);
+    let x = parent.width * anchor_x as f32 * 0.5 + f32::from(local.x);
+    let y = parent.height * anchor_y as f32 * 0.5 + f32::from(local.y);
+    let transform = parent
+        .transform
+        .compose(UiPreviewAffine::from_rect(x, y, local));
+    let width = local.width.max(1) as f32;
+    let height = local.height.max(1) as f32;
+    Some(UiPreviewNode {
+        width,
+        height,
+        transform,
+        quad: transform.subrect(0.0, 0.0, width, height),
+    })
+}
+
+fn quad_bounds_egui(points: [Pos2; 4]) -> Rect {
+    let mut min = points[0];
+    let mut max = points[0];
+    for point in points.iter().skip(1) {
+        min.x = min.x.min(point.x);
+        min.y = min.y.min(point.y);
+        max.x = max.x.max(point.x);
+        max.y = max.y.max(point.y);
+    }
+    Rect::from_min_max(min, max)
+}
+
+fn ui_anchor_factors(anchor: UiAnchor) -> (i32, i32) {
+    match anchor {
+        UiAnchor::TopLeft => (0, 0),
+        UiAnchor::Top => (1, 0),
+        UiAnchor::TopRight => (2, 0),
+        UiAnchor::Left => (0, 1),
+        UiAnchor::Center => (1, 1),
+        UiAnchor::Right => (2, 1),
+        UiAnchor::BottomLeft => (0, 2),
+        UiAnchor::Bottom => (1, 2),
+        UiAnchor::BottomRight => (2, 2),
+    }
+}
+
 fn draw_ui_scene_preview(
     painter: &egui::Painter,
     project: &ProjectDocument,
@@ -29827,6 +30640,7 @@ fn draw_ui_scene_preview(
     hidden_ui_nodes: &HashSet<(UiSceneId, UiNodeId)>,
     selected: UiNodeId,
     hovered_handle: Option<UiResizeHandle>,
+    frame: u16,
 ) {
     for id in scene.hierarchy_node_ids() {
         if ui_node_hidden(scene, hidden_ui_nodes, id) {
@@ -29838,27 +30652,27 @@ fn draw_ui_scene_preview(
         match &node.kind {
             UiNodeKind::Canvas { .. } => {}
             UiNodeKind::Music { .. } => {}
-            UiNodeKind::Group { rect } => {
-                let rect = scene.absolute_rect(node.id).unwrap_or(*rect);
-                let screen = ui_rect_to_screen(rect, canvas, canvas_size);
-                painter.rect_stroke(
-                    screen,
-                    0.0,
-                    Stroke::new(1.0, Color32::from_rgb(74, 83, 102)),
-                    StrokeKind::Inside,
-                );
+            UiNodeKind::Group { .. } => {
+                if let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size) {
+                    draw_ui_preview_quad_stroke(
+                        painter,
+                        preview.quad,
+                        Stroke::new(1.0, Color32::from_rgb(74, 83, 102)),
+                    );
+                }
             }
             UiNodeKind::Rect {
-                rect,
-                color,
-                gradient,
+                color, gradient, ..
             } => {
-                let rect = scene.absolute_rect(node.id).unwrap_or(*rect);
-                let screen = ui_rect_to_screen(rect, canvas, canvas_size);
-                draw_ui_preview_rect(painter, screen, ui_preview_paint(*color, *gradient));
+                if let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size) {
+                    draw_ui_preview_quad_paint(
+                        painter,
+                        preview.quad,
+                        ui_preview_paint(*color, *gradient),
+                    );
+                }
             }
             UiNodeKind::Label {
-                rect,
                 text,
                 color,
                 gradient,
@@ -29869,15 +30683,17 @@ fn draw_ui_scene_preview(
                 letter_spacing,
                 ..
             } => {
-                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
-                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
-                let base_scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
+                let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size)
+                else {
+                    continue;
+                };
+                let base_scale = preview.transform.y_scale().clamp(1.0, 8.0);
                 let scale = base_scale * ui_font_scale_q8_to_f32(*font_scale);
                 let texture = ui_preview_font_texture(font_textures, *font);
                 draw_ui_preview_text(
                     painter,
                     texture,
-                    screen,
+                    preview,
                     text,
                     *font,
                     *align,
@@ -29893,60 +30709,83 @@ fn draw_ui_scene_preview(
                 rect,
                 texture,
                 tint,
+                effect,
             } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
-                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
+                let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size)
+                else {
+                    continue;
+                };
                 if let Some(thumb) = texture
                     .and_then(|id| project.resource(id).map(|resource| resource.id))
                     .and_then(|id| texture_thumbs.get(&id))
                 {
-                    painter.image(
+                    draw_ui_preview_image(
+                        painter,
                         thumb.handle.id(),
-                        screen,
+                        preview.quad,
                         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        ui_psx_tint_to_egui(*tint),
+                        *tint,
+                        *effect,
+                        frame,
+                        absolute,
+                    );
+                } else if *effect == UiImageEffect::None {
+                    draw_ui_preview_quad_mesh(
+                        painter,
+                        egui::TextureId::default(),
+                        preview.quad,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::ZERO),
+                        [ui_psx_tint_to_egui(*tint); 4],
                     );
                 } else {
-                    painter.rect_filled(screen, 0.0, ui_psx_tint_to_egui(*tint));
+                    draw_ui_preview_image(
+                        painter,
+                        egui::TextureId::default(),
+                        preview.quad,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::ZERO),
+                        *tint,
+                        *effect,
+                        frame,
+                        absolute,
+                    );
                 }
-                painter.rect_stroke(
-                    screen,
-                    0.0,
+                draw_ui_preview_quad_stroke(
+                    painter,
+                    preview.quad,
                     Stroke::new(1.0, Color32::from_rgb(180, 190, 210)),
-                    StrokeKind::Inside,
                 );
             }
             UiNodeKind::Bar {
-                rect,
                 value,
                 max,
                 fill,
                 fill_gradient,
                 background,
                 background_gradient,
+                ..
             } => {
-                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
-                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
-                draw_ui_preview_rect(
+                let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size)
+                else {
+                    continue;
+                };
+                draw_ui_preview_quad_paint(
                     painter,
-                    screen,
+                    preview.quad,
                     ui_preview_paint(*background, *background_gradient),
                 );
                 let max_q12 = ui_binding_preview_q12(*max).max(1);
                 let value_q12 = ui_binding_preview_q12(*value).clamp(0, max_q12);
-                let fill_w = screen.width() * (value_q12 as f32 / max_q12 as f32);
+                let fill_w = preview.width * (value_q12 as f32 / max_q12 as f32);
                 if fill_w > 0.0 {
-                    let fill_rect =
-                        Rect::from_min_size(screen.min, Vec2::new(fill_w, screen.height()));
-                    draw_ui_preview_rect(
+                    draw_ui_preview_quad_paint(
                         painter,
-                        fill_rect,
+                        preview.subrect(0.0, 0.0, fill_w, preview.height),
                         ui_preview_paint(*fill, *fill_gradient),
                     );
                 }
             }
             UiNodeKind::Button {
-                rect,
                 label,
                 align,
                 font,
@@ -29959,22 +30798,24 @@ fn draw_ui_scene_preview(
                 transparent,
                 ..
             } => {
-                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
-                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
+                let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size)
+                else {
+                    continue;
+                };
                 if !*transparent {
-                    draw_ui_preview_rect(
+                    draw_ui_preview_quad_paint(
                         painter,
-                        screen,
+                        preview.quad,
                         ui_preview_paint(*color, *background_gradient),
                     );
                 }
-                let base_scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
+                let base_scale = preview.transform.y_scale().clamp(1.0, 8.0);
                 let scale = base_scale * ui_font_scale_q8_to_f32(*font_scale);
                 let texture = ui_preview_font_texture(font_textures, *font);
                 draw_ui_preview_text(
                     painter,
                     texture,
-                    screen,
+                    preview,
                     label,
                     *font,
                     *align,
@@ -29987,7 +30828,6 @@ fn draw_ui_scene_preview(
                 );
             }
             UiNodeKind::Slider {
-                rect,
                 track,
                 track_gradient,
                 fill,
@@ -29996,52 +30836,56 @@ fn draw_ui_scene_preview(
                 knob_gradient,
                 ..
             } => {
-                let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
-                let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
-                draw_ui_preview_rect(painter, screen, ui_preview_paint(*track, *track_gradient));
+                let Some(preview) = ui_scene_preview_node(scene, node.id, canvas, canvas_size)
+                else {
+                    continue;
+                };
+                draw_ui_preview_quad_paint(
+                    painter,
+                    preview.quad,
+                    ui_preview_paint(*track, *track_gradient),
+                );
                 // Half-way preview fill until the runtime option store
                 // drives the value (matches the engine renderer).
-                let fill_w = screen.width() * 0.5;
+                let fill_w = preview.width * 0.5;
                 if fill_w > 0.0 {
-                    let fill_rect =
-                        Rect::from_min_size(screen.min, Vec2::new(fill_w, screen.height()));
-                    draw_ui_preview_rect(
+                    draw_ui_preview_quad_paint(
                         painter,
-                        fill_rect,
+                        preview.subrect(0.0, 0.0, fill_w, preview.height),
                         ui_preview_paint(*fill, *fill_gradient),
                     );
                 }
-                let knob_w = (screen.height() + 2.0).clamp(3.0, screen.width().max(3.0));
-                let edge = screen.min.x + fill_w;
-                let knob_x = (edge - knob_w / 2.0)
-                    .clamp(screen.min.x, (screen.max.x - knob_w).max(screen.min.x));
-                let knob_rect = Rect::from_min_size(
-                    Pos2::new(knob_x, screen.min.y - 1.0),
-                    Vec2::new(knob_w, screen.height() + 2.0),
+                let knob_w = (preview.height + 2.0).clamp(3.0, preview.width.max(3.0));
+                let edge = fill_w;
+                let knob_x = (edge - knob_w / 2.0).clamp(0.0, (preview.width - knob_w).max(0.0));
+                draw_ui_preview_quad_paint(
+                    painter,
+                    preview.subrect(knob_x, -1.0, knob_w, preview.height + 2.0),
+                    ui_preview_paint(*knob, *knob_gradient),
                 );
-                draw_ui_preview_rect(painter, knob_rect, ui_preview_paint(*knob, *knob_gradient));
             }
         }
     }
 
     if !ui_node_hidden(scene, hidden_ui_nodes, selected) {
         if let Some(selected_node) = scene.node(selected) {
-            let selected_rect = match &selected_node.kind {
-                UiNodeKind::Canvas { .. } => Some(canvas),
-                _ => scene
-                    .absolute_rect(selected_node.id)
-                    .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size)),
+            let selected_preview = match &selected_node.kind {
+                UiNodeKind::Canvas { .. } => None,
+                _ => ui_scene_preview_node(scene, selected_node.id, canvas, canvas_size),
             };
-            if let Some(rect) = selected_rect {
+            if let Some(preview) = selected_preview {
+                draw_ui_preview_quad_stroke(painter, preview.quad, Stroke::new(2.0, STUDIO_ACCENT));
+                let bounds = preview.bounds();
+                if !matches!(selected_node.kind, UiNodeKind::Canvas { .. }) {
+                    draw_ui_resize_handles(painter, bounds, hovered_handle);
+                }
+            } else if matches!(selected_node.kind, UiNodeKind::Canvas { .. }) {
                 painter.rect_stroke(
-                    rect.expand(2.0),
+                    canvas.expand(2.0),
                     0.0,
                     Stroke::new(2.0, STUDIO_ACCENT),
                     StrokeKind::Outside,
                 );
-                if !matches!(selected_node.kind, UiNodeKind::Canvas { .. }) {
-                    draw_ui_resize_handles(painter, rect, hovered_handle);
-                }
             }
         }
     }
@@ -30069,10 +30913,16 @@ fn ui_preview_paint(color: [u8; 3], gradient: Option<UiGradient>) -> UiPreviewPa
     }
 }
 
-fn draw_ui_preview_rect(painter: &egui::Painter, rect: Rect, paint: UiPreviewPaint) {
+fn draw_ui_preview_quad_paint(painter: &egui::Painter, points: [Pos2; 4], paint: UiPreviewPaint) {
     match paint {
         UiPreviewPaint::Solid(color) => {
-            painter.rect_filled(rect, 0.0, color);
+            draw_ui_preview_quad_mesh(
+                painter,
+                egui::TextureId::default(),
+                points,
+                Rect::from_min_max(Pos2::ZERO, Pos2::ZERO),
+                [color; 4],
+            );
         }
         UiPreviewPaint::Gradient {
             from,
@@ -30081,23 +30931,23 @@ fn draw_ui_preview_rect(painter: &egui::Painter, rect: Rect, paint: UiPreviewPai
         } => draw_ui_preview_quad_mesh(
             painter,
             egui::TextureId::default(),
-            rect,
+            points,
             Rect::from_min_max(Pos2::ZERO, Pos2::ZERO),
             preview_gradient_vertex_colors(from, to, direction),
         ),
     }
 }
 
-fn draw_ui_preview_textured_rect(
+fn draw_ui_preview_textured_quad(
     painter: &egui::Painter,
     texture_id: egui::TextureId,
-    rect: Rect,
+    points: [Pos2; 4],
     uv: Rect,
     paint: UiPreviewPaint,
 ) {
     match paint {
         UiPreviewPaint::Solid(color) => {
-            painter.image(texture_id, rect, uv, color);
+            draw_ui_preview_quad_mesh(painter, texture_id, points, uv, [color; 4]);
         }
         UiPreviewPaint::Gradient {
             from,
@@ -30106,44 +30956,87 @@ fn draw_ui_preview_textured_rect(
         } => draw_ui_preview_quad_mesh(
             painter,
             texture_id,
-            rect,
+            points,
             uv,
             preview_gradient_vertex_colors(from, to, direction),
         ),
     }
 }
 
+fn draw_ui_preview_image(
+    painter: &egui::Painter,
+    texture_id: egui::TextureId,
+    points: [Pos2; 4],
+    uv: Rect,
+    tint: [u8; 3],
+    effect: UiImageEffect,
+    frame: u16,
+    logical_rect: UiRect,
+) {
+    if effect == UiImageEffect::None {
+        draw_ui_preview_quad_mesh(
+            painter,
+            texture_id,
+            points,
+            uv,
+            [ui_psx_tint_to_egui(tint); 4],
+        );
+        return;
+    }
+    draw_ui_preview_quad_mesh(
+        painter,
+        texture_id,
+        points,
+        uv,
+        [ui_psx_tint_to_egui(tint); 4],
+    );
+    draw_ui_preview_quad_mesh(
+        painter,
+        texture_id,
+        points,
+        uv,
+        ui_preview_image_effect_overlay_colors(effect, frame, logical_rect),
+    );
+}
+
 fn draw_ui_preview_quad_mesh(
     painter: &egui::Painter,
     texture_id: egui::TextureId,
-    rect: Rect,
+    points: [Pos2; 4],
     uv: Rect,
     colors: [Color32; 4],
 ) {
     let mut mesh = egui::Mesh::with_texture(texture_id);
     mesh.vertices.push(egui::epaint::Vertex {
-        pos: rect.left_top(),
+        pos: points[0],
         uv: uv.left_top(),
         color: colors[0],
     });
     mesh.vertices.push(egui::epaint::Vertex {
-        pos: rect.right_top(),
+        pos: points[1],
         uv: uv.right_top(),
         color: colors[1],
     });
     mesh.vertices.push(egui::epaint::Vertex {
-        pos: rect.left_bottom(),
+        pos: points[2],
         uv: uv.left_bottom(),
         color: colors[2],
     });
     mesh.vertices.push(egui::epaint::Vertex {
-        pos: rect.right_bottom(),
+        pos: points[3],
         uv: uv.right_bottom(),
         color: colors[3],
     });
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(1, 2, 3);
     painter.add(egui::Shape::mesh(mesh));
+}
+
+fn draw_ui_preview_quad_stroke(painter: &egui::Painter, points: [Pos2; 4], stroke: Stroke) {
+    painter.line_segment([points[0], points[1]], stroke);
+    painter.line_segment([points[1], points[3]], stroke);
+    painter.line_segment([points[3], points[2]], stroke);
+    painter.line_segment([points[2], points[0]], stroke);
 }
 
 fn preview_gradient_vertex_colors(
@@ -30157,11 +31050,88 @@ fn preview_gradient_vertex_colors(
     }
 }
 
+fn ui_preview_image_effect_overlay_colors(
+    effect: UiImageEffect,
+    frame: u16,
+    rect: UiRect,
+) -> [Color32; 4] {
+    let left = rect.x;
+    let right = rect
+        .x
+        .saturating_add(rect.width.min(i16::MAX as u16) as i16);
+    let top = rect.y;
+    let bottom = rect
+        .y
+        .saturating_add(rect.height.min(i16::MAX as u16) as i16);
+    let lift = match effect {
+        UiImageEffect::None => [0; 4],
+        UiImageEffect::Shimmer => preview_sweep_lifts(frame, 3, 88, [left, right, left, right]),
+        UiImageEffect::FastShimmer => {
+            preview_sweep_lifts(frame, 7, 112, [left, right, left, right])
+        }
+        UiImageEffect::DiagonalSweep => preview_sweep_lifts(
+            frame,
+            4,
+            96,
+            [
+                left.saturating_add(top / 2),
+                right.saturating_add(top / 2),
+                left.saturating_add(bottom / 2),
+                right.saturating_add(bottom / 2),
+            ],
+        ),
+        UiImageEffect::SoftPulse => {
+            let lift =
+                10 + (u16::from(preview_triangle_wave_u8(frame.wrapping_mul(3))) * 44 / 255) as u8;
+            [lift; 4]
+        }
+    };
+    [
+        ui_preview_light_overlay(lift[0]),
+        ui_preview_light_overlay(lift[1]),
+        ui_preview_light_overlay(lift[2]),
+        ui_preview_light_overlay(lift[3]),
+    ]
+}
+
+fn preview_sweep_lifts(frame: u16, speed: u16, intensity: u8, positions: [i16; 4]) -> [u8; 4] {
+    let phase = ((frame.wrapping_mul(speed) & 0x01ff) as i16) - 128;
+    [
+        preview_sweep_lift(positions[0], phase, intensity),
+        preview_sweep_lift(positions[1], phase, intensity),
+        preview_sweep_lift(positions[2], phase, intensity),
+        preview_sweep_lift(positions[3], phase, intensity),
+    ]
+}
+
+fn preview_sweep_lift(position: i16, phase: i16, intensity: u8) -> u8 {
+    let distance = (i32::from(position) - i32::from(phase)).unsigned_abs();
+    let falloff = (distance / 2).min(u32::from(u8::MAX)) as u8;
+    intensity.saturating_sub(falloff)
+}
+
+fn preview_triangle_wave_u8(value: u16) -> u8 {
+    let phase = value & 0x01ff;
+    if phase < 256 {
+        phase as u8
+    } else {
+        (511 - phase) as u8
+    }
+}
+
+fn ui_preview_light_overlay(lift: u8) -> Color32 {
+    Color32::from_white_alpha(lift.saturating_mul(2))
+}
+
 fn ui_psx_tint_to_egui(tint: [u8; 3]) -> Color32 {
+    ui_psx_rgb_to_egui((tint[0], tint[1], tint[2]))
+}
+
+fn ui_psx_rgb_to_egui(color: (u8, u8, u8)) -> Color32 {
     Color32::from_rgb(
-        tint[0].saturating_mul(2),
-        tint[1].saturating_mul(2),
-        tint[2].saturating_mul(2),
+        color.0.saturating_mul(2),
+        color.1.saturating_mul(2),
+        color.2.saturating_mul(2),
     )
 }
 
@@ -30321,7 +31291,7 @@ fn ui_preview_text_width(
 fn draw_ui_preview_text(
     painter: &egui::Painter,
     font_texture: &egui::TextureHandle,
-    rect: Rect,
+    preview: UiPreviewNode,
     text: &str,
     font: UiFontChoice,
     align: UiTextAlign,
@@ -30333,45 +31303,39 @@ fn draw_ui_preview_text(
     paint: UiPreviewPaint,
 ) {
     let spec = ui_preview_font_spec(font);
-    let line_height = (spec.line_height as f32 * scale).max(1.0);
+    let local_scale = (scale / canvas_scale.max(0.01)).max(0.01);
+    let line_height = (spec.line_height as f32 * local_scale).max(1.0);
     let glyph_size = Vec2::new(
-        (spec.glyph_w as f32 * scale).max(1.0),
-        (spec.glyph_h as f32 * scale).max(1.0),
+        (spec.glyph_w as f32 * local_scale).max(1.0),
+        (spec.glyph_h as f32 * local_scale).max(1.0),
     );
     let lines: Vec<&str> = if wrap {
-        wrap_preview_text_lines(
-            text,
-            font,
-            rect.width(),
-            scale,
-            letter_spacing,
-            canvas_scale,
-        )
+        wrap_preview_text_lines(text, font, preview.width, local_scale, letter_spacing, 1.0)
     } else {
         text.lines().collect()
     };
     let total_h = lines.len().max(1) as f32 * line_height;
     let mut y = if vcenter {
-        rect.top() + (rect.height() - total_h).max(0.0) / 2.0
+        (preview.height - total_h).max(0.0) / 2.0
     } else {
-        rect.top()
+        0.0
     };
     for line in lines {
-        if y > rect.bottom() {
+        if y > preview.height {
             break;
         }
         draw_ui_preview_text_line(
             painter,
             font_texture,
-            rect,
+            preview,
             y,
             line,
             font,
             align,
             glyph_size,
-            scale,
+            local_scale,
             letter_spacing,
-            canvas_scale,
+            1.0,
             paint,
         );
         y += line_height;
@@ -30382,7 +31346,7 @@ fn draw_ui_preview_text(
 fn draw_ui_preview_text_line(
     painter: &egui::Painter,
     font_texture: &egui::TextureHandle,
-    rect: Rect,
+    preview: UiPreviewNode,
     y: f32,
     line: &str,
     font: UiFontChoice,
@@ -30395,24 +31359,23 @@ fn draw_ui_preview_text_line(
 ) {
     let line_w = ui_preview_text_width(font, line, scale, letter_spacing, canvas_scale);
     let start_x = match align {
-        UiTextAlign::Left => rect.left(),
-        UiTextAlign::Center => rect.center().x - line_w / 2.0,
-        UiTextAlign::Right => rect.right() - line_w,
+        UiTextAlign::Left => 0.0,
+        UiTextAlign::Center => preview.width * 0.5 - line_w / 2.0,
+        UiTextAlign::Right => preview.width - line_w,
     };
     let mut x = start_x;
     let mut chars = line.chars().peekable();
     while let Some(ch) = chars.next() {
-        if x > rect.right() + 0.5 {
+        if x > preview.width + 0.5 {
             break;
         }
         // Only the 128-glyph ASCII range is in the atlas; others draw the
         // missing-glyph cell (index 0), matching the runtime's fallback.
         let code = if (ch as u32) < 128 { ch as u8 } else { 0 };
-        let glyph_rect = Rect::from_min_size(Pos2::new(x, y), glyph_size);
-        draw_ui_preview_textured_rect(
+        draw_ui_preview_textured_quad(
             painter,
             font_texture.id(),
-            glyph_rect,
+            preview.subrect(x, y, glyph_size.x, glyph_size.y),
             ui_font_glyph_uv(font, code),
             paint,
         );
@@ -30550,9 +31513,7 @@ fn ui_scene_node_resize_handle_hit(
     }
     let node = scene.node(id)?;
     node.kind.rect()?;
-    let rect = scene
-        .absolute_rect(id)
-        .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size))?;
+    let rect = ui_scene_preview_node(scene, id, canvas, canvas_size)?.bounds();
     ui_resize_handle_hit_rects(rect)
         .into_iter()
         .find_map(|(handle, handle_rect)| handle_rect.contains(pos).then_some(handle))
@@ -30597,11 +31558,28 @@ fn ui_scene_hit_test(
         }
         let node = scene.node(id)?;
         node.kind.rect()?;
-        let rect = scene.absolute_rect(id)?;
-        ui_node_hit_rect(ui_rect_to_screen(rect, canvas, canvas_size))
-            .contains(pos)
+        let preview = ui_scene_preview_node(scene, id, canvas, canvas_size)?;
+        (point_in_quad(pos, preview.quad) || ui_node_hit_rect(preview.bounds()).contains(pos))
             .then_some(id)
     })
+}
+
+fn point_in_quad(point: Pos2, quad: [Pos2; 4]) -> bool {
+    point_in_triangle(point, quad[0], quad[1], quad[2])
+        || point_in_triangle(point, quad[1], quad[3], quad[2])
+}
+
+fn point_in_triangle(point: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
+    let d1 = signed_triangle_area(point, a, b);
+    let d2 = signed_triangle_area(point, b, c);
+    let d3 = signed_triangle_area(point, c, a);
+    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(has_neg && has_pos)
+}
+
+fn signed_triangle_area(a: Pos2, b: Pos2, c: Pos2) -> f32 {
+    (a.x - c.x) * (b.y - c.y) - (b.x - c.x) * (a.y - c.y)
 }
 
 fn ui_node_hit_rect(rect: Rect) -> Rect {
@@ -30618,18 +31596,6 @@ fn ui_screen_to_canvas(pos: Pos2, canvas: Rect, canvas_size: [u16; 2]) -> Option
         (pos.x - canvas.left()) * canvas_size[0].max(1) as f32 / canvas.width(),
         (pos.y - canvas.top()) * canvas_size[1].max(1) as f32 / canvas.height(),
     ])
-}
-
-fn ui_rect_to_screen(rect: UiRect, canvas: Rect, canvas_size: [u16; 2]) -> Rect {
-    let scale_x = canvas.width() / canvas_size[0].max(1) as f32;
-    let scale_y = canvas.height() / canvas_size[1].max(1) as f32;
-    Rect::from_min_size(
-        Pos2::new(
-            canvas.left() + rect.x as f32 * scale_x,
-            canvas.top() + rect.y as f32 * scale_y,
-        ),
-        Vec2::new(rect.width as f32 * scale_x, rect.height as f32 * scale_y),
-    )
 }
 
 fn draw_ui_center_snap_guides(painter: &egui::Painter, canvas: Rect, drag: Option<&UiCanvasDrag>) {
@@ -30723,7 +31689,7 @@ fn move_ui_rect(rect: UiRect, delta: [i32; 2]) -> UiRect {
         y: clamp_ui_coord(rect.y as i32 + delta[1]) as i16,
         width: rect.width.min(UI_NODE_SIZE_MAX as u16).max(1),
         height: rect.height.min(UI_NODE_SIZE_MAX as u16).max(1),
-        anchor: rect.anchor,
+        ..rect
     }
 }
 
@@ -30784,12 +31750,22 @@ fn resize_ui_rect(rect: UiRect, handle: UiResizeHandle, delta: [i32; 2]) -> UiRe
         y: y as i16,
         width,
         height,
-        anchor: rect.anchor,
+        ..rect
     }
 }
 
 fn clamp_ui_coord(value: i32) -> i32 {
     value.clamp(UI_NODE_COORD_MIN, UI_NODE_COORD_MAX)
+}
+
+fn normalize_ui_rotation_degrees(value: i32) -> i16 {
+    let mut value = value % 360;
+    if value > 359 {
+        value -= 360;
+    } else if value < -359 {
+        value += 360;
+    }
+    value as i16
 }
 
 fn ui_binding_preview_q12(binding: UiValueBinding) -> i32 {
@@ -30870,6 +31846,15 @@ fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'static str, Node
                 settings: PhysicsBodySettings::default(),
             },
         ),
+        (
+            "Interactable",
+            NodeKind::Interactable {
+                kind: InteractableKind::default(),
+                prompt: "READ ECHO".to_string(),
+                radius: 96,
+                enabled: true,
+            },
+        ),
     ]
 }
 
@@ -30925,6 +31910,7 @@ const fn component_slot(kind: &NodeKind) -> Option<&'static str> {
         NodeKind::CharacterController { .. } => Some("CharacterController"),
         NodeKind::Equipment { .. } => Some("Equipment"),
         NodeKind::PhysicsBody { .. } => Some("PhysicsBody"),
+        NodeKind::Interactable { .. } => Some("Interactable"),
         _ => None,
     }
 }
@@ -35862,7 +36848,8 @@ fn entity_bound_kind_and_size(
         | NodeKind::Collider { .. }
         | NodeKind::CharacterController { .. }
         | NodeKind::Equipment { .. }
-        | NodeKind::PhysicsBody { .. } => None,
+        | NodeKind::PhysicsBody { .. }
+        | NodeKind::Interactable { .. } => None,
         NodeKind::Entity => {
             if let Some(model) = entity_model_resource(workspace, node) {
                 let h = (model.world_height as f32).max(256.0);
@@ -37423,6 +38410,30 @@ mod tests {
     }
 
     #[test]
+    fn ui_preview_image_effect_colors_animate_and_keep_split_edge_continuous() {
+        let left = UiRect::new(0, 0, 160, 100);
+        let right = UiRect::new(160, 0, 160, 100);
+
+        assert_eq!(
+            ui_preview_image_effect_overlay_colors(UiImageEffect::None, 0, left),
+            [Color32::TRANSPARENT; 4]
+        );
+        assert_ne!(
+            ui_preview_image_effect_overlay_colors(UiImageEffect::Shimmer, 0, left),
+            ui_preview_image_effect_overlay_colors(UiImageEffect::Shimmer, 64, left)
+        );
+
+        let left_colors = ui_preview_image_effect_overlay_colors(UiImageEffect::Shimmer, 48, left);
+        let right_colors =
+            ui_preview_image_effect_overlay_colors(UiImageEffect::Shimmer, 48, right);
+        assert_eq!(left_colors[1], right_colors[0]);
+        assert_eq!(left_colors[3], right_colors[2]);
+
+        let pulse = ui_preview_image_effect_overlay_colors(UiImageEffect::SoftPulse, 12, left);
+        assert_eq!(pulse[0], pulse[3]);
+    }
+
+    #[test]
     fn preview_wrap_hard_split_counts_spacing_between_included_glyphs_only() {
         assert_eq!(
             preview_wrap_hard_split("ABC", UiFontChoice::Basic, 18.0, 1.0, 2, 1.0),
@@ -38236,6 +39247,7 @@ mod tests {
                 rect: UiRect::new(0, 0, 64, 64),
                 texture: None,
                 tint: [128, 128, 128],
+                effect: UiImageEffect::None,
             },
         );
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 240.0));
@@ -38535,6 +39547,21 @@ mod tests {
         assert!(!reopened.preview_bounds_enabled());
         assert!(!reopened.show_play_debug_overlays);
         assert!(reopened.show_play_debug_map);
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn editor_workspace_saves_with_project_and_restores_on_open() {
+        let project_dir = test_temp_dir("editor-workspace");
+        let mut workspace =
+            EditorWorkspace::with_project(project_dir.clone(), ProjectDocument::new("workspace"));
+        workspace.active_workspace = WorkspaceView::Ui;
+
+        workspace.save().unwrap();
+
+        let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
+        assert_eq!(reopened.active_workspace, WorkspaceView::Ui);
 
         let _ = std::fs::remove_dir_all(project_dir);
     }
@@ -40142,16 +41169,13 @@ mod tests {
             },
         );
         let second_scene_id = project.add_ui_scene("Settings");
-        let second_group = project
-            .ui_scene_mut(second_scene_id)
-            .unwrap()
-            .add_node(
-                UiNodeId::ROOT,
-                "Panel",
-                UiNodeKind::Group {
-                    rect: UiRect::new(0, 0, 96, 64),
-                },
-            );
+        let second_group = project.ui_scene_mut(second_scene_id).unwrap().add_node(
+            UiNodeId::ROOT,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(0, 0, 96, 64),
+            },
+        );
         assert_eq!(group.raw(), second_group.raw());
 
         let mut workspace =
@@ -40160,8 +41184,16 @@ mod tests {
 
         let first_scene = workspace.current_ui_scene().unwrap();
         assert!(workspace.hidden_ui_nodes.contains(&(first_scene_id, group)));
-        assert!(ui_node_hidden(first_scene, &workspace.hidden_ui_nodes, group));
-        assert!(ui_node_hidden(first_scene, &workspace.hidden_ui_nodes, label));
+        assert!(ui_node_hidden(
+            first_scene,
+            &workspace.hidden_ui_nodes,
+            group
+        ));
+        assert!(ui_node_hidden(
+            first_scene,
+            &workspace.hidden_ui_nodes,
+            label
+        ));
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 240.0));
         assert_eq!(
             ui_scene_hit_test(
@@ -40213,16 +41245,13 @@ mod tests {
         );
         let target_scene_id = project.add_ui_scene("Settings");
         let target_root = project.ui_scene(target_scene_id).unwrap().root;
-        let target_parent = project
-            .ui_scene_mut(target_scene_id)
-            .unwrap()
-            .add_node(
-                target_root,
-                "Destination",
-                UiNodeKind::Group {
-                    rect: UiRect::new(20, 30, 100, 50),
-                },
-            );
+        let target_parent = project.ui_scene_mut(target_scene_id).unwrap().add_node(
+            target_root,
+            "Destination",
+            UiNodeKind::Group {
+                rect: UiRect::new(20, 30, 100, 50),
+            },
+        );
 
         let mut workspace =
             EditorWorkspace::with_project(test_temp_dir("ui-node-clipboard"), project);
@@ -43632,7 +44661,10 @@ mod tests {
             .any(|(_, kind)| matches!(kind, NodeKind::Equipment { .. })));
         assert!(entity_options
             .iter()
-            .all(|(label, _)| !matches!(*label, "AI Controller" | "Combat" | "Interactable")));
+            .any(|(_, kind)| matches!(kind, NodeKind::Interactable { .. })));
+        assert!(entity_options
+            .iter()
+            .all(|(label, _)| !matches!(*label, "AI Controller" | "Combat")));
         assert!(!entity_options
             .iter()
             .any(|(_, kind)| matches!(kind, NodeKind::Collider { .. })));

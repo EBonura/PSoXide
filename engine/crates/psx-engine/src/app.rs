@@ -38,10 +38,10 @@
 use psx_gpu::framebuf::FrameBuffer;
 use psx_gpu::{self as gpu, Resolution, VideoMode};
 use psx_level::{
-    GameFlow, LevelOptionDef, LevelUiNodeRecord, LevelUiScene, LevelUiSfxCueRecord,
-    LevelUiSfxSampleRecord,
+    GameFlow, LevelOptionDef, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene,
+    LevelUiSfxCueRecord, LevelUiSfxSampleRecord,
 };
-use psx_pad::{poll_port1, PadState};
+use psx_pad::poll_port1;
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
 use crate::scene::{Ctx, Scene};
@@ -192,7 +192,7 @@ impl App {
         // the scene every tick -- the old one-init-then-loop shape,
         // plus one already-taken `match` branch. No UI scenes, no
         // nodes, no options: the front-end arms are dead code on this path.
-        Self::run_with_flow(config, &GAMEPLAY_ONLY, &[], &[], &[], &[], &[], scene)
+        Self::run_with_flow(config, &GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], scene)
     }
 
     /// Run `scene` as the gameplay state of a cooked [`GameFlow`].
@@ -211,6 +211,7 @@ impl App {
         flow: &'static GameFlow,
         scenes: &'static [LevelUiScene],
         nodes: &'static [LevelUiNodeRecord],
+        paints: &'static [LevelUiPaintRecord],
         options: &'static [LevelOptionDef],
         ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
         ui_sfx_cues: &'static [LevelUiSfxCueRecord],
@@ -219,7 +220,7 @@ impl App {
         boot_trace("psx-engine: run");
         gpu::init(config.video_mode, config.resolution);
         boot_trace("psx-engine: gpu ok");
-        let clock = EngineClock::new();
+        let mut clock = EngineClock::new();
         boot_trace("psx-engine: clock ok");
         let fb = FrameBuffer::new(config.screen_w, config.screen_h);
         gpu::set_draw_area(
@@ -239,14 +240,14 @@ impl App {
         // both seeded to the current state, an input must actually transition
         // (release then press) to count as a press.
         let initial_pad = poll_port1();
-        let mut ctx = Ctx {
-            sim_tick: SimTick::ZERO,
-            visual_frame: VisualFrame::ZERO,
-            video_hz: config.video_hz(),
-            pad: initial_pad,
-            pad_prev: initial_pad,
+        let mut ctx = Ctx::new(
+            SimTick::ZERO,
+            VisualFrame::ZERO,
+            config.video_hz(),
+            initial_pad,
+            initial_pad,
             fb,
-        };
+        );
 
         // The wrapper is the Scene the scheduled loop drives: its
         // init/update/render dispatch to the borrowed gameplay scene
@@ -255,6 +256,7 @@ impl App {
             flow,
             scenes,
             nodes,
+            paints,
             options,
             ui_sfx_samples,
             ui_sfx_cues,
@@ -264,6 +266,7 @@ impl App {
         boot_trace("psx-engine: scene init");
         app.init(&mut ctx);
         boot_trace("psx-engine: scene init ok");
+        clock.reset_origin();
 
         let visual_interval = config.visual_pacing.interval_vblanks();
         boot_trace("psx-engine: loop");
@@ -322,6 +325,9 @@ impl App {
                     }
 
                     let outcome = scheduler.complete_fixed_update();
+                    if ctx.take_timing_realign_request() {
+                        clock.align_origin_to_sim_tick(scheduler.next_fixed_tick().as_u32());
+                    }
                     if outcome.visual_intervals_due == 0 {
                         telemetry::counter(telemetry::counter::VISUAL_SKIPPED_VBLANKS, 1);
                     }

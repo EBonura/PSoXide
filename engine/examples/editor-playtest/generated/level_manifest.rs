@@ -3,16 +3,16 @@
 // builds overwrite this file with cooked asset records.
 
 use psx_level::{
-    EntityRecord, EquipmentRecord, FlowState, GameFlow, LevelAssetRecord, LevelBoxPropRecord,
-    LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
-    LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord,
-    LevelImagePropRecord, LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
+    EntityRecord, EquipmentRecord, FlowState, GameFlow, InteractableMessageRecord,
+    InteractableRecord, LevelAssetRecord, LevelBoxPropRecord, LevelCachedRoomCellRecord,
+    LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord, LevelCameraRecord,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
+    LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
     LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelOptionDef, LevelRoomPortalRecord, LevelRoomRecord,
-    LevelRoomSurfaceCacheRecord,
-    LevelRoomVisibilityRecord, LevelSkyRecord, LevelUiNodeRecord, LevelUiScene,
-    LevelUiSfxCueRecord, LevelUiSfxSampleRecord, LevelVisibilityCellRecord,
-    LevelVisibilityPvsRecord, LevelWeaponRecord,
+    LevelRoomSurfaceCacheRecord, LevelRoomVisibilityRecord, LevelSceneState, LevelSkyRecord,
+    LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene, LevelUiSfxCueRecord,
+    LevelUiSfxSampleRecord, LevelVisibilityCellRecord, LevelVisibilityPvsRecord, LevelWeaponRecord,
     LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
     PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
 };
@@ -61,12 +61,15 @@ pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
 pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
 pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
 pub static UI_FONTS: &[&psx_font::BitmapFont] = &[&psx_font::fonts::BASIC];
+pub static UI_PAINTS: &[LevelUiPaintRecord] = &[];
 pub static UI_NODES: &[LevelUiNodeRecord] = &[];
 pub static UI_SFX_SAMPLES: &[LevelUiSfxSampleRecord] = &[];
 pub static UI_SFX_CUES: &[LevelUiSfxCueRecord] = &[];
 pub static UI_SCENES: &[LevelUiScene] = &[];
+pub static SCENE_STATES: &[LevelSceneState] = &[];
 pub static GAME_FLOW: GameFlow = GameFlow {
     states: &[FlowState::Gameplay],
+    scene_states: SCENE_STATES,
     entry: 0,
 };
 pub static OPTIONS: &[LevelOptionDef] = &[];
@@ -75,6 +78,8 @@ pub static WEAPONS: &[LevelWeaponRecord] = &[];
 pub static EQUIPMENT: &[EquipmentRecord] = &[];
 pub static LIGHTS: &[PointLightRecord] = &[];
 pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[];
+pub static INTERACTABLE_MESSAGES: &[InteractableMessageRecord] = &[];
+pub static INTERACTABLES: &[InteractableRecord] = &[];
 pub static CHARACTERS: &[LevelCharacterRecord] = &[];
 pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;
 pub static ENTITIES: &[EntityRecord] = &[];
