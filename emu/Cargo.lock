@@ -3110,6 +3110,7 @@ dependencies = [
  "psx-engine",
  "psx-iso",
  "psx-level",
+ "psxed-audio",
  "psxed-format",
  "psxed-gltf",
  "psxed-tex",

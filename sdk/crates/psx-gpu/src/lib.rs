@@ -103,6 +103,17 @@ const H_CLOCKS_PER_PIXEL: u32 = 8;
 /// Default left edge (GP1 06h X1) of the horizontal display window, in GPU
 /// clocks from start-of-line -- the standard centred NTSC picture.
 const H_DISPLAY_WINDOW_START: u32 = 0x260;
+/// Default top edge (GP1 07h Y1) of the NTSC vertical display window.
+const NTSC_V_DISPLAY_WINDOW_START: u32 = 0x10;
+/// Default top edge (GP1 07h Y1) of the PAL vertical display window.
+const PAL_V_DISPLAY_WINDOW_START: u32 = 0x23;
+
+const fn v_display_window_start(mode: VideoMode) -> u32 {
+    match mode {
+        VideoMode::Ntsc => NTSC_V_DISPLAY_WINDOW_START,
+        VideoMode::Pal => PAL_V_DISPLAY_WINDOW_START,
+    }
+}
 
 /// Initialise the GPU: reset, set display mode, set display ranges,
 /// configure DMA direction, enable display output.
@@ -128,10 +139,8 @@ pub fn init(mode: VideoMode, res: Resolution) {
     let h_end = h_start + (res.width as u32) * H_CLOCKS_PER_PIXEL;
     write_gp1(gp1::h_display_range(h_start, h_end));
 
-    let (v_start, v_end) = match mode {
-        VideoMode::Ntsc => (0x10, 0x10 + res.height as u32),
-        VideoMode::Pal => (0x23, 0x23 + res.height as u32),
-    };
+    let v_start = v_display_window_start(mode);
+    let v_end = v_start + res.height as u32;
     write_gp1(gp1::v_display_range(v_start, v_end));
 
     write_gp1(gp1::dma_direction(2)); // CPU → GP0
@@ -203,11 +212,21 @@ pub fn set_draw_offset(x: i16, y: i16) {
 /// so the front-end preview is visible; other emulators may crop to the active
 /// display region and hide the shift.
 pub fn set_screen_h_offset(offset_px: i16, res: Resolution) {
-    let start = (H_DISPLAY_WINDOW_START as i32
-        + offset_px as i32 * H_CLOCKS_PER_PIXEL as i32)
+    let start = (H_DISPLAY_WINDOW_START as i32 + offset_px as i32 * H_CLOCKS_PER_PIXEL as i32)
         .max(0) as u32;
     let end = start + res.width as u32 * H_CLOCKS_PER_PIXEL;
     write_gp1(gp1::h_display_range(start, end));
+}
+
+/// Shift the displayed picture vertically on the TV by `offset_px` scanlines
+/// (positive = down) via the authentic GP1(07h) vertical display range. This
+/// is the vertical counterpart to [`set_screen_h_offset`]: it slides the video
+/// window inside overscan without changing VRAM layout or the GPU draw offset.
+/// `mode` and `res` must match the values handed to [`init`].
+pub fn set_screen_v_offset(offset_px: i16, mode: VideoMode, res: Resolution) {
+    let start = (v_display_window_start(mode) as i32 + offset_px as i32).max(0) as u32;
+    let end = start + res.height as u32;
+    write_gp1(gp1::v_display_range(start, end));
 }
 
 /// Fill a VRAM rectangle with a solid color. Ignores draw area / offset.
