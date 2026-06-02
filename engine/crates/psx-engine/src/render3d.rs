@@ -2940,6 +2940,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let near_z = camera.projection.near_z;
         let mut all_projected_vertices_in_front = true;
         let mut all_projected_vertices_inside_hw_bounds = project_count == model_vertex_count;
+        let mut projected_min_x = i16::MAX;
+        let mut projected_max_x = i16::MIN;
+        let mut projected_min_y = i16::MAX;
+        let mut projected_max_y = i16::MIN;
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         let parts = &geometry.parts[..model_part_count as usize];
         let vertices = &geometry.vertices[..model_vertex_count];
@@ -2976,6 +2980,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         projected_model_vertex_in_front(projected, near_z);
                     all_projected_vertices_inside_hw_bounds &=
                         projected_model_vertex_inside_hw_bounds(projected);
+                    track_projected_model_bounds(
+                        projected,
+                        &mut projected_min_x,
+                        &mut projected_max_x,
+                        &mut projected_min_y,
+                        &mut projected_max_y,
+                    );
                     projected_vertices[global_index] = projected;
                     global_index += 1;
                     continue;
@@ -3008,6 +3019,27 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         projected_model_vertex_inside_hw_bounds(a)
                             && projected_model_vertex_inside_hw_bounds(b)
                             && projected_model_vertex_inside_hw_bounds(c);
+                    track_projected_model_bounds(
+                        a,
+                        &mut projected_min_x,
+                        &mut projected_max_x,
+                        &mut projected_min_y,
+                        &mut projected_max_y,
+                    );
+                    track_projected_model_bounds(
+                        b,
+                        &mut projected_min_x,
+                        &mut projected_max_x,
+                        &mut projected_min_y,
+                        &mut projected_max_y,
+                    );
+                    track_projected_model_bounds(
+                        c,
+                        &mut projected_min_x,
+                        &mut projected_max_x,
+                        &mut projected_min_y,
+                        &mut projected_max_y,
+                    );
                     projected_vertices[global_index] = a;
                     projected_vertices[global_index + 1] = b;
                     projected_vertices[global_index + 2] = c;
@@ -3019,6 +3051,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                             projected_model_vertex_in_front(projected, near_z);
                         all_projected_vertices_inside_hw_bounds &=
                             projected_model_vertex_inside_hw_bounds(projected);
+                        track_projected_model_bounds(
+                            projected,
+                            &mut projected_min_x,
+                            &mut projected_max_x,
+                            &mut projected_min_y,
+                            &mut projected_max_y,
+                        );
                         projected_vertices[global_index + batch_index] = projected;
                         batch_index += 1;
                     }
@@ -3041,19 +3080,39 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             packed_back_in_front_faces && options.depth_policy == DepthPolicy::Average;
         let packed_back_average_unclamped_faces =
             packed_back_average_in_front_faces && all_projected_vertices_inside_hw_bounds;
+        let packed_back_average_unclamped_extent_safe_faces = packed_back_average_unclamped_faces
+            && projected_model_bounds_hw_extent_safe(
+                projected_min_x,
+                projected_max_x,
+                projected_min_y,
+                projected_max_y,
+            );
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_FACES);
         if packed_back_average_unclamped_faces {
             let projected_vertices = &projected_vertices[..project_count];
-            if self.submit_predecoded_model_faces_packed_back_average_unclamped_batch(
-                triangles,
-                projected_vertices,
-                faces,
-                packet_material,
-                material,
-                options,
-                &mut stats,
-                &mut faces_considered,
-            ) {
+            let overflow = if packed_back_average_unclamped_extent_safe_faces {
+                self.submit_predecoded_model_faces_packed_back_average_unclamped_extent_safe_batch(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    options,
+                    &mut stats,
+                    &mut faces_considered,
+                )
+            } else {
+                self.submit_predecoded_model_faces_packed_back_average_unclamped_batch(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    material,
+                    options,
+                    &mut stats,
+                    &mut faces_considered,
+                )
+            };
+            if overflow {
                 crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
                 emit_textured_model_detail_counters(
                     joint_count,
@@ -3159,6 +3218,115 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         );
 
         stats
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn submit_predecoded_model_faces_packed_back_average_unclamped_extent_safe_batch(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) -> bool {
+        let mut skipped_triangles = 0u16;
+        let mut packed_face_calls = 0u16;
+        let mut packed_unclamped_face_calls = 0u16;
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0u16;
+        let mut fast_submitted_triangles = 0u16;
+
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            *faces_considered = faces_considered.wrapping_add(1);
+            let face = faces[face_index];
+            let ia = face.vertex_indices[0] as usize;
+            let ib = face.vertex_indices[1] as usize;
+            let ic = face.vertex_indices[2] as usize;
+            if ia >= projected_vertices.len()
+                || ib >= projected_vertices.len()
+                || ic >= projected_vertices.len()
+            {
+                skipped_triangles = skipped_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+
+            packed_face_calls = packed_face_calls.wrapping_add(1);
+            packed_unclamped_face_calls = packed_unclamped_face_calls.wrapping_add(1);
+            let projected = unsafe {
+                // SAFETY: each index was checked against `projected_vertices.len()`
+                // immediately above. The slice is pretrimmed to `project_count`.
+                [
+                    *projected_vertices.get_unchecked(ia),
+                    *projected_vertices.get_unchecked(ib),
+                    *projected_vertices.get_unchecked(ic),
+                ]
+            };
+
+            if projected_back_facing(projected) {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+
+            match self.submit_projected_model_triangle_preclamped_packed_average_untracked(
+                triangles,
+                projected,
+                face.uv_words,
+                packet_material,
+                options,
+            ) {
+                ModelTrianglePacketResult::Submitted => {
+                    submitted_triangles = submitted_triangles.wrapping_add(1);
+                    fast_submitted_triangles = fast_submitted_triangles.wrapping_add(1);
+                }
+                ModelTrianglePacketResult::CommandOverflow => {
+                    flush_packed_unclamped_model_batch_stats(
+                        stats,
+                        skipped_triangles,
+                        packed_face_calls,
+                        packed_unclamped_face_calls,
+                        culled_triangles,
+                        submitted_triangles,
+                        fast_submitted_triangles,
+                        0,
+                    );
+                    stats.command_overflow = true;
+                    return true;
+                }
+                ModelTrianglePacketResult::PrimitiveOverflow => {
+                    flush_packed_unclamped_model_batch_stats(
+                        stats,
+                        skipped_triangles,
+                        packed_face_calls,
+                        packed_unclamped_face_calls,
+                        culled_triangles,
+                        submitted_triangles,
+                        fast_submitted_triangles,
+                        0,
+                    );
+                    stats.primitive_overflow = true;
+                    return true;
+                }
+            }
+            face_index += 1;
+        }
+
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            skipped_triangles,
+            packed_face_calls,
+            packed_unclamped_face_calls,
+            culled_triangles,
+            submitted_triangles,
+            fast_submitted_triangles,
+            0,
+        );
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5214,6 +5382,28 @@ fn projected_model_vertex_inside_hw_bounds(vertex: ProjectedVertex) -> bool {
 }
 
 #[inline]
+fn track_projected_model_bounds(
+    vertex: ProjectedVertex,
+    min_x: &mut i16,
+    max_x: &mut i16,
+    min_y: &mut i16,
+    max_y: &mut i16,
+) {
+    *min_x = (*min_x).min(vertex.sx);
+    *max_x = (*max_x).max(vertex.sx);
+    *min_y = (*min_y).min(vertex.sy);
+    *max_y = (*max_y).max(vertex.sy);
+}
+
+#[inline]
+fn projected_model_bounds_hw_extent_safe(min_x: i16, max_x: i16, min_y: i16, max_y: i16) -> bool {
+    min_x <= max_x
+        && min_y <= max_y
+        && ((max_x as i32) - (min_x as i32)) <= PSX_TRI_MAX_DX
+        && ((max_y as i32) - (min_y as i32)) <= PSX_TRI_MAX_DY
+}
+
+#[inline]
 fn projected_model_face_crosses_near(verts: [ProjectedVertex; 3], near_z: i32) -> bool {
     verts[0].sz < near_z || verts[1].sz < near_z || verts[2].sz < near_z
 }
@@ -6130,6 +6320,14 @@ mod tests {
         assert_eq!(model_uv_max(128), 127);
         assert_eq!(model_uv_max(256), 255);
         assert_eq!(model_uv_max(512), 255);
+    }
+
+    #[test]
+    fn projected_model_bounds_hw_extent_safe_obeys_ps1_triangle_limits() {
+        assert!(projected_model_bounds_hw_extent_safe(0, 1023, 0, 511));
+        assert!(!projected_model_bounds_hw_extent_safe(0, 1024, 0, 511));
+        assert!(!projected_model_bounds_hw_extent_safe(0, 1023, 0, 512));
+        assert!(!projected_model_bounds_hw_extent_safe(10, 9, 0, 0));
     }
 
     #[test]
